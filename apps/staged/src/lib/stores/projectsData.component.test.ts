@@ -1,3 +1,8 @@
+// Runs in the "component" vitest project for its svelte plugin, not for a
+// DOM: the store's $state and $derived fields have to compile for the client,
+// as in the app, or liveProjects ($derived.by) would never follow a delete.
+// jsdom is what gets the client build (a node environment compiles for the
+// server, where a $derived recomputes on every read and effects never run).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   Branch,
@@ -8,6 +13,8 @@ import type {
   SessionStatusPayload,
 } from '../types';
 import type { SwrResult } from '../cache';
+import { flushSync } from 'svelte';
+import { readReactively } from './testStubs/readReactively.svelte';
 
 // ── Fixtures ──
 
@@ -146,9 +153,10 @@ async function importStore() {
 
 beforeEach(() => {
   vi.resetModules();
-  // The store's runes compile away in the app build; under vitest they stay
-  // plain global calls, so stub $state as identity (agent.test.ts precedent).
-  vi.stubGlobal('$state', (initial: unknown) => initial);
+  // The store batches its flushes on requestAnimationFrame where there is one,
+  // and jsdom has one; the tests' ticks wait on the setTimeout it falls back
+  // to without.
+  vi.stubGlobal('requestAnimationFrame', undefined);
   windowTarget = new EventTarget();
   vi.stubGlobal('window', windowTarget);
 
@@ -1267,6 +1275,56 @@ describe('event listeners', () => {
 });
 
 describe('project-delete lifecycle', () => {
+  it('hides only deleting projects from liveProjects, keeping list order', async () => {
+    listProjects.mockResolvedValue(
+      swr([project(), project({ id: 'p2', name: 'Beta' }), project({ id: 'p3', name: 'Gamma' })])
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    // Nothing deleting: the same list, so consumers deriving from it see no
+    // change of identity.
+    expect(store.liveProjects).toBe(store.projects);
+
+    store.projectDeleteStarted('p2', 'Beta');
+    expect(store.liveProjects.map((p) => p.id)).toEqual(['p1', 'p3']);
+    expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2', 'p3']);
+
+    store.projectDeleteFailed('p2');
+    expect(store.liveProjects.map((p) => p.id)).toEqual(['p1', 'p2', 'p3']);
+  });
+
+  it('filters once per change while a delete is in flight, not once per read', async () => {
+    listProjects.mockResolvedValue(
+      swr([project(), project({ id: 'p2', name: 'Beta' }), project({ id: 'p3', name: 'Gamma' })])
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+    // Read it the way the grid and the sidebar do, from an effect.
+    const stop = readReactively(() => store.liveProjects);
+    try {
+      store.projectDeleteStarted('p2', 'Beta');
+      flushSync();
+      const live = store.liveProjects;
+      expect(live.map((p) => p.id)).toEqual(['p1', 'p3']);
+      // Every list reading it in the same pass gets the same array...
+      expect(store.liveProjects).toBe(live);
+
+      // ...and so does one re-run by state it doesn't read.
+      store.setBranchesByProject(new Map());
+      flushSync();
+      expect(store.liveProjects).toBe(live);
+
+      // A change it does read is a new list.
+      store.projectDeleteStarted('p3', 'Gamma');
+      flushSync();
+      expect(store.liveProjects).not.toBe(live);
+      expect(store.liveProjects.map((p) => p.id)).toEqual(['p1']);
+    } finally {
+      stop();
+    }
+  });
+
   it('tracks the deleting project until the post-delete refetch prunes it', async () => {
     const store = await importStore();
     store.startListeners();
@@ -1275,15 +1333,20 @@ describe('project-delete lifecycle', () => {
     store.projectDeleteStarted('p1', 'Alpha');
     expect(store.isProjectDeleting('p1')).toBe(true);
     expect(store.deletingProjectNames.get('p1')).toBe('Alpha');
+    // The card goes on confirm, without waiting for the backend teardown; the
+    // full list keeps the project for guards and list positions.
+    expect(store.liveProjects).toEqual([]);
+    expect(store.projects.map((p) => p.id)).toEqual(['p1']);
 
     // The backend delete publishes project-changed; the refetch removes the
-    // project and its "Deleting…" marker in one apply.
+    // project and its deleting marker in one apply.
     listProjects.mockResolvedValue(swr([]));
     emit('project-changed', { projectId: 'p1' });
 
     await vi.waitFor(() => {
       expect(store.projects).toHaveLength(0);
     });
+    expect(store.liveProjects).toEqual([]);
     expect(store.isProjectDeleting('p1')).toBe(false);
     expect(store.branchesByProject.has('p1')).toBe(false);
     expect(store.reposByProject.has('p1')).toBe(false);
@@ -1298,6 +1361,7 @@ describe('project-delete lifecycle', () => {
     listBranchesForProject.mockClear();
 
     store.projectDeleteStarted('p1', 'Alpha');
+    expect(store.liveProjects).toEqual([]);
 
     // The cascade's per-branch events are dropped while the delete is in
     // flight — refetching a doomed list N times would be pure churn.
@@ -1311,8 +1375,10 @@ describe('project-delete lifecycle', () => {
     listBranchesForProject.mockResolvedValue(swr([branch()]));
     store.projectDeleteFailed('p1');
 
+    // Clearing the marker is what brings the hidden card back.
     expect(store.isProjectDeleting('p1')).toBe(false);
     expect(store.projects).toHaveLength(1);
+    expect(store.liveProjects.map((p) => p.id)).toEqual(['p1']);
     expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
     await vi.waitFor(() => {
       expect(store.branchesByProject.get('p1')!.map((b) => b.id)).toEqual(['b1']);
@@ -1356,13 +1422,15 @@ describe('project-delete lifecycle', () => {
 
     store.projectDeleteStarted('p1', 'Alpha');
     // A reload that read the list before the backend delete committed: the
-    // project stays, but so does its marker — the card must not flash back
-    // to a live project mid-delete.
+    // project stays, but so does its marker — the hidden card must not come
+    // back mid-delete.
     await store.ensureLoaded(); // kicks a background revalidation
     await tick();
 
+    expect(listProjects).toHaveBeenCalledTimes(2);
     expect(store.projects).toHaveLength(1);
     expect(store.isProjectDeleting('p1')).toBe(true);
+    expect(store.liveProjects).toEqual([]);
   });
 
   it('discards an SWR revalidation that resolves after the post-delete refetch', async () => {
@@ -1381,6 +1449,7 @@ describe('project-delete lifecycle', () => {
     await store.ensureLoaded();
 
     store.projectDeleteStarted('p2', 'Beta');
+    expect(store.liveProjects.map((p) => p.id)).toEqual(['p1']);
     listProjects.mockResolvedValue(swr([project()]));
     emit('project-changed', { projectId: 'p2' });
     await vi.waitFor(() => {
@@ -1393,6 +1462,7 @@ describe('project-delete lifecycle', () => {
     await tick();
 
     expect(store.projects.map((p) => p.id)).toEqual(['p1']);
+    expect(store.liveProjects.map((p) => p.id)).toEqual(['p1']);
     expect(store.branchesByProject.has('p2')).toBe(false);
     expect(store.isProjectDeleting('p2')).toBe(false);
   });

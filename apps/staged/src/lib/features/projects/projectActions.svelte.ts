@@ -13,6 +13,7 @@
  * identically on every route instead of each view carrying its own copy.
  */
 
+import { tick } from 'svelte';
 import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
 import type { Project } from '../../types';
@@ -26,11 +27,17 @@ import {
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
+import { focusIfDropped, type FocusAfterRemove } from './focusAfterRemove';
 import { workspaceLifecycle } from './workspaceLifecycle.svelte';
 
 class ProjectActionsController {
   /** Project awaiting the user's answer in the shared confirmation dialog. */
   private _pendingDelete = $state<Project | null>(null);
+  /** Where focus goes if the pending delete is confirmed, from its list. */
+  private pendingFocusAfterRemove: FocusAfterRemove | null = null;
+  /** The confirmed delete's, bound to what it opened instead, until the
+   *  dialog's close takes it. */
+  private confirmedFocusAfterRemove: (() => HTMLElement | null) | null = null;
 
   /** Each project's queue tail resolves to its last successfully persisted status. */
   private readonly statusOverrideWrites = new Map<
@@ -93,8 +100,11 @@ class ProjectActionsController {
    * Remove a project: immediately when every branch is merged with nothing
    * unpushed, otherwise via the shared confirmation dialog. Resolves once the
    * delete finished or the dialog is up.
+   *
+   * A list passes `focusAfterRemove` when the remove comes from its card or
+   * row, which the delete unmounts along with the focus it would return to.
    */
-  async requestRemoveProject(project: Project): Promise<void> {
+  async requestRemoveProject(project: Project, focusAfterRemove?: FocusAfterRemove): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
 
     // Rows render as soon as the project *list* lands, so branches and repos
@@ -123,36 +133,61 @@ class ProjectActionsController {
       }));
 
     if (safeToDelete) {
-      await this.deleteProject(project);
+      await this.deleteProject(project, focusAfterRemove);
     } else {
       this._pendingDelete = project;
+      this.pendingFocusAfterRemove = focusAfterRemove ?? null;
+      this.confirmedFocusAfterRemove = null;
     }
   }
 
   /** Confirm the pending delete (dialog "Remove" button). */
   async confirmPendingDelete(): Promise<void> {
     const project = this._pendingDelete;
+    const focusAfterRemove = this.pendingFocusAfterRemove;
     this._pendingDelete = null;
-    if (project) {
-      await this.deleteProject(project);
-    }
+    this.pendingFocusAfterRemove = null;
+    if (project) await this.deleteProject(project, focusAfterRemove ?? undefined, true);
   }
 
   /** Dismiss the confirmation dialog without deleting. */
   cancelPendingDelete(): void {
     this._pendingDelete = null;
+    this.pendingFocusAfterRemove = null;
   }
 
-  private async deleteProject(project: Project): Promise<void> {
+  /**
+   * For the confirmation dialog's close-focus handler: the element to focus
+   * after a confirmed remove, or null to leave focus to the dialog, as after
+   * a cancel. Taken once. Focus stays in the dialog when the project is
+   * hidden (see deleteProject), so the dialog hands it over itself rather
+   * than wait for it to drop.
+   */
+  takeFocusAfterRemove(): HTMLElement | null {
+    const resolve = this.confirmedFocusAfterRemove;
+    this.confirmedFocusAfterRemove = null;
+    return resolve ? resolve() : null;
+  }
+
+  /** `fromDialog`: confirmed in the dialog, whose close hands focus over. */
+  private async deleteProject(
+    project: Project,
+    focusAfterRemove?: FocusAfterRemove,
+    fromDialog = false
+  ): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
 
     const id = project.id;
+    const name = projectDisplayName(project);
     const branchesToClear = projectsDataStore.branchesByProject.get(id) || [];
-    projectsDataStore.projectDeleteStarted(id, projectDisplayName(project));
+    // Marks the project deleting, which also hides it from the grid, the
+    // sidebar and the pickers (projectsDataStore.liveProjects) right away.
+    projectsDataStore.projectDeleteStarted(id, name);
 
     // When the project on screen is being deleted, navigate away immediately
     // so the user doesn't have to wait for backend deletion. Deleting any
     // other project (sidebar/landing-grid context menu) keeps the current view.
+    let openedInstead: string | null = null;
     if (navigation.selectedProjectId === id) {
       const projects = projectsDataStore.projects;
       const currentIndex = projects.findIndex((p) => p.id === id);
@@ -164,6 +199,7 @@ class ProjectActionsController {
         const next =
           alive.find((p) => projects.indexOf(p) > currentIndex) ?? alive[alive.length - 1];
         selectProject(next.id);
+        openedInstead = next.id;
       } else {
         goHome();
       }
@@ -178,10 +214,29 @@ class ProjectActionsController {
     // selectProject(next) the layer already names `next`, so it is a no-op.
     releaseProjectLayer(id);
 
+    // Its card or row, and its context menu with it, unmounts in the next
+    // flush, and focus that was in either drops to <body>. focusIfDropped
+    // picks it up once that flush has run.
+    //
+    // A confirmed dialog's Remove button unmounts in the same flush, as the
+    // dialog's footer only renders while a delete is pending. Focus doesn't
+    // drop then: bits-ui's FocusScope sees the button it last focused go and
+    // focuses the dialog's content, from a mutation-observer microtask that
+    // runs before this check. focusIfDropped leaves that alone, and the
+    // dialog's close hands focus over instead (takeFocusAfterRemove). Were
+    // that order to flip, focusIfDropped would focus the pick first, the
+    // still-open dialog's trap would pull focus back, and the close would
+    // land it on the same pick, as both resolve it the same way.
+    if (focusAfterRemove) {
+      const resolveFocus = () => focusAfterRemove(openedInstead);
+      if (fromDialog) this.confirmedFocusAfterRemove = resolveFocus;
+      void tick().then(() => focusIfDropped(resolveFocus));
+    }
+
     try {
       await commands.deleteProject(id);
       // The delete's project-changed event prunes the project and its
-      // "Deleting…" marker from projectsDataStore, and each branch's
+      // deleting marker from projectsDataStore, and each branch's
       // branch-changed invalidates its timeline caches. In web mode an echo
       // lost to a WebSocket gap is recovered by the reconnect revalidation in
       // transport.ts, so the marker can't outlive the socket outage.
@@ -189,10 +244,14 @@ class ProjectActionsController {
       for (const branch of branchesToClear) {
         workspaceLifecycle.clearBranchState(branch.id);
       }
+      // The card left at confirm without a word; this is what says the
+      // remove went through, to a screen reader as much as on screen.
+      toast.success(`Removed "${name}"`);
     } catch (e) {
       console.error('Failed to delete project:', e);
       const message = e instanceof Error ? e.message : String(e);
       toast.error('Unable to delete project', { description: message });
+      // Clearing the marker brings the hidden card back next to the toast.
       projectsDataStore.projectDeleteFailed(id);
     }
   }

@@ -75,6 +75,7 @@ let markAsRead: ReturnType<typeof vi.fn>;
 let markAsUnread: ReturnType<typeof vi.fn>;
 let clearBranchState: ReturnType<typeof vi.fn>;
 let toastError: ReturnType<typeof vi.fn>;
+let toastSuccess: ReturnType<typeof vi.fn>;
 let selectProject: ReturnType<typeof vi.fn>;
 let goHome: ReturnType<typeof vi.fn>;
 let releaseProjectLayer: ReturnType<typeof vi.fn>;
@@ -112,10 +113,15 @@ function deferredWrite() {
   return { promise, resolve, reject };
 }
 
+/** Let the delete's post-flush focus check run. */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 beforeEach(() => {
   vi.resetModules();
   // Runes compile away in the app build; under vitest they stay plain global
-  // calls, so stub $state as identity (projectsData.test.ts precedent).
+  // calls, so stub $state as identity (agent.test.ts precedent).
   vi.stubGlobal('$state', (initial: unknown) => initial);
 
   deleteProject = vi.fn().mockResolvedValue(undefined);
@@ -124,6 +130,7 @@ beforeEach(() => {
   markAsUnread = vi.fn();
   clearBranchState = vi.fn();
   toastError = vi.fn();
+  toastSuccess = vi.fn();
   selectProject = vi.fn();
   goHome = vi.fn();
   releaseProjectLayer = vi.fn();
@@ -195,7 +202,7 @@ beforeEach(() => {
     projectDisplayName: (p: Project) => p.name ?? p.githubRepo ?? p.id,
   }));
   vi.doMock('svelte-sonner', () => ({
-    toast: { error: toastError },
+    toast: { error: toastError, success: toastSuccess },
   }));
 });
 
@@ -480,6 +487,8 @@ describe('requestRemoveProject', () => {
     // refetch prunes the project and the marker together.
     expect(projectDeleteFailed).not.toHaveBeenCalled();
     expect(clearBranchState).toHaveBeenCalledWith('b1');
+    // The card left without a word at confirm; the toast says it went through.
+    expect(toastSuccess).toHaveBeenCalledWith('Removed "Alpha"');
   });
 
   it('asks for confirmation when a branch has unpushed work', async () => {
@@ -515,6 +524,128 @@ describe('requestRemoveProject', () => {
     expect(projectDeleteFailed).toHaveBeenCalledWith('p1');
     expect(markAsRead).not.toHaveBeenCalled();
     expect(clearBranchState).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe('focus after remove', () => {
+  // The node environment has no DOM: just enough document for
+  // focusIfDropped to read where focus is.
+  const body = { tagName: 'BODY' };
+  let documentState: { activeElement: unknown; body: unknown };
+  let neighbour: { focus: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    documentState = { activeElement: body, body };
+    vi.stubGlobal('document', documentState);
+    neighbour = { focus: vi.fn() };
+  });
+
+  const focusAfterRemove = () => neighbour as unknown as HTMLElement;
+
+  it("moves focus the hidden card dropped on to the list's pick", async () => {
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project(), focusAfterRemove);
+    await tick();
+
+    expect(neighbour.focus).toHaveBeenCalledWith({ preventScroll: true });
+  });
+
+  it('leaves focus the user has put somewhere else', async () => {
+    documentState.activeElement = { tagName: 'INPUT' };
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project(), focusAfterRemove);
+    await tick();
+
+    expect(neighbour.focus).not.toHaveBeenCalled();
+  });
+
+  it("hands a confirmed remove's pick to the dialog's close, once", async () => {
+    hasUnpushedCommits.mockResolvedValue(true);
+    const actions = await importActions();
+    await actions.requestRemoveProject(project(), focusAfterRemove);
+    // The Remove button unmounts with the dialog's footer in the flush that
+    // hides the card. bits-ui's FocusScope then focuses the dialog's content,
+    // before the delete's own focus check runs.
+    documentState.activeElement = { tagName: 'DIV' };
+
+    await actions.confirmPendingDelete();
+    await tick();
+
+    expect(neighbour.focus).not.toHaveBeenCalled();
+    expect(actions.takeFocusAfterRemove()).toBe(neighbour);
+    expect(actions.takeFocusAfterRemove()).toBeNull();
+  });
+
+  describe('when the removed project is the one open', () => {
+    // The sidebar's repo filter shows [A1, A2, A3] over [A1, B1, A2, B2, A3]
+    // with A2 open. Removing A2 opens B2, the next live project in the
+    // unfiltered list, and the sidebar appends B2's row as the selected one.
+    // Focus has to land there, on the row the sidebar highlights, rather
+    // than on A3, the filtered list's neighbour.
+    async function removeOpenProjectFromFilteredSidebar() {
+      storeState.projects = ['A1', 'B1', 'A2', 'B2', 'A3'].map((id) => project({ id, name: id }));
+      storeState.branchesByProject = new Map([['A2', [mergedBranch({ projectId: 'A2' })]]]);
+      storeState.reposByProject = new Map([['A2', [projectRepo({ projectId: 'A2' })]]]);
+      navigationState.selectedProjectId = 'A2';
+      type Row = { isConnected: boolean; focus: ReturnType<typeof vi.fn> };
+      const row = (): Row => ({ isConnected: true, focus: vi.fn() });
+      const rows = new Map<string, Row>([
+        ['A1', row()],
+        ['A3', row()],
+      ]);
+      selectProject.mockImplementation((projectId: string) => rows.set(projectId, row()));
+      const { neighbourAfterRemove } = await import('./focusAfterRemove');
+      const focusAfterRemove = neighbourAfterRemove(
+        ['A1', 'A2', 'A3'],
+        'A2',
+        (projectId) => rows.get(projectId) as unknown as HTMLElement | undefined
+      );
+      return { rows, removed: storeState.projects[2], focusAfterRemove };
+    }
+
+    it('focuses the row of the project the delete opened instead', async () => {
+      const { rows, removed, focusAfterRemove } = await removeOpenProjectFromFilteredSidebar();
+      const actions = await importActions();
+
+      await actions.requestRemoveProject(removed, focusAfterRemove);
+      await tick();
+
+      expect(selectProject).toHaveBeenCalledWith('B2');
+      expect(rows.get('B2')!.focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(rows.get('A3')!.focus).not.toHaveBeenCalled();
+    });
+
+    it("hands the dialog's close the same row", async () => {
+      hasUnpushedCommits.mockResolvedValue(true);
+      const { rows, removed, focusAfterRemove } = await removeOpenProjectFromFilteredSidebar();
+      const actions = await importActions();
+      await actions.requestRemoveProject(removed, focusAfterRemove);
+      // As above: the dialog's FocusScope has focused its content.
+      documentState.activeElement = { tagName: 'DIV' };
+
+      await actions.confirmPendingDelete();
+      await tick();
+
+      expect(selectProject).toHaveBeenCalledWith('B2');
+      expect(actions.takeFocusAfterRemove()).toBe(rows.get('B2'));
+    });
+  });
+
+  it('leaves a cancelled dialog to return focus itself', async () => {
+    hasUnpushedCommits.mockResolvedValue(true);
+    const actions = await importActions();
+    await actions.requestRemoveProject(project(), focusAfterRemove);
+
+    actions.cancelPendingDelete();
+
+    expect(actions.takeFocusAfterRemove()).toBeNull();
+    // A later confirm of another remove doesn't inherit the cancelled pick.
+    await actions.requestRemoveProject(project({ id: 'p2', name: 'Beta' }));
+    await actions.confirmPendingDelete();
+    expect(actions.takeFocusAfterRemove()).toBeNull();
   });
 });
 

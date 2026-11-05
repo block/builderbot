@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
   import { navigation } from './navigation.svelte';
-  import { createWorkspaceLayerState, setWorkspaceLayer } from './workspaceLayer';
+  import { activeLayerHost, createWorkspaceLayerState, setWorkspaceLayer } from './workspaceLayer';
   import { tabDirection } from '../../shared/tabDirection';
   import { firstTabbableAfter, lastTabbableBefore } from '../../shared/tabbable';
 
@@ -39,13 +39,6 @@
       activations: () => activations,
     })
   );
-
-  // The host of the layer the base route shows. Layers don't carry aria-hidden
-  // for the parked state (the workspace above them does), so this resolves
-  // under settings / diff too.
-  function activeLayerHost(): HTMLElement | null {
-    return document.querySelector<HTMLElement>('.workspace-layer:not([aria-hidden])');
-  }
 
   // An inactive layer is covered or clipped, not inert: `inert` restyles the
   // whole subtree on WebKit (~55 ms on a 4k-node tree), and the views in here

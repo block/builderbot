@@ -499,20 +499,21 @@ function isModalOpen(): boolean {
   return currentRoute().kind === 'diff' || !!document.querySelector('[role="dialog"]');
 }
 
-/** Navigate to the previous project in the list. */
+/** Navigate to the previous project in the list, skipping any being deleted
+ *  (they are already gone from the sidebar and the grid). */
 export function selectPreviousProject(): void {
   if (currentRoute().kind !== 'project' || !navigation.selectedProjectId || isModalOpen()) return;
-  const projects = projectsDataStore.projects;
+  const projects = projectsDataStore.liveProjects;
   const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
   if (currentIndex > 0) {
     selectProject(projects[currentIndex - 1].id);
   }
 }
 
-/** Navigate to the next project in the list. */
+/** Navigate to the next project in the list, skipping any being deleted. */
 export function selectNextProject(): void {
   if (currentRoute().kind !== 'project' || !navigation.selectedProjectId || isModalOpen()) return;
-  const projects = projectsDataStore.projects;
+  const projects = projectsDataStore.liveProjects;
   const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
   if (currentIndex >= 0 && currentIndex < projects.length - 1) {
     selectProject(projects[currentIndex + 1].id);

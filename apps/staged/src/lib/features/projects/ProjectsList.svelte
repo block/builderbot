@@ -30,6 +30,7 @@
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
   import { projectActions } from './projectActions.svelte';
+  import { neighbourAfterRemove } from './focusAfterRemove';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
@@ -59,8 +60,9 @@
   // background. Filters live in the shared projectFiltersStore and the
   // search query in projectsListViewState, so the sidebar sees the same
   // selection and query; scroll restore is view-local but persists across
-  // visits via that same state; modal state stays in the component.
-  let projects = $derived(projectsDataStore.projects);
+  // visits via that same state; modal state stays in the component. A project
+  // being deleted is already off liveProjects, so its card goes on confirm.
+  let projects = $derived(projectsDataStore.liveProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
@@ -224,8 +226,8 @@
     const targetProjectId = projectsListViewState.returnTargetProjectId;
     // Wait for the return-target card's final height, but only while the
     // target is still a project: a delete lands you back here via goHome()
-    // with the deleted id as the target, and applyProjectList has already
-    // pruned it from the hydrated set, so it would otherwise never satisfy.
+    // with the deleted id as the target, whose card never renders again
+    // (hidden while deleting, then pruned along with its hydrated entry).
     const targetHydrated =
       !targetProjectId ||
       !projects.some((p) => p.id === targetProjectId) ||
@@ -312,6 +314,20 @@
 
   function isProjectDeleting(projectId: string): boolean {
     return projectsDataStore.isProjectDeleting(projectId);
+  }
+
+  // The card goes as soon as the remove is confirmed, taking focus with it, so
+  // focus moves on to the card that takes its place.
+  function removeProject(project: Project) {
+    const focusAfterRemove = neighbourAfterRemove(
+      filteredProjects.map((p) => p.id),
+      project.id,
+      (projectId) =>
+        shownProjectIds.has(projectId)
+          ? projectCardElements.get(projectId)?.querySelector<HTMLElement>('.project-card')
+          : null
+    );
+    void projectActions.requestRemoveProject(project, focusAfterRemove);
   }
 
   function openProject(projectId: string) {
@@ -504,14 +520,8 @@
               use:trackProjectCard={project.id}
             >
               <ContextMenu.Root>
-                <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
-                  <button
-                    class="project-card"
-                    class:deleting={status.kind === 'deleting'}
-                    onclick={() => openProject(project.id)}
-                    disabled={status.kind === 'deleting'}
-                    title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
-                  >
+                <ContextMenu.Trigger class="contents">
+                  <button class="project-card" onclick={() => openProject(project.id)}>
                     {#if viewport.showShortcutHints && isCommandKeyHeld && shortcut !== undefined}
                       <div class="keyboard-shortcut-overlay">
                         <span class="command-icon">⌘</span>
@@ -567,9 +577,6 @@
                       <div class="card-activity">
                         {activity}
                       </div>
-                    {/if}
-                    {#if status.kind === 'deleting'}
-                      <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
                     {/if}
                     <div class="card-footer">
                       {#if project.location === 'remote'}
@@ -639,19 +646,12 @@
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">
-                  <ContextMenu.Item
-                    disabled={status.kind === 'deleting'}
-                    onSelect={() => projectActions.markProjectUnread(project)}
-                  >
+                  <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
                     <Mail size={14} /> Mark as Unread
                   </ContextMenu.Item>
-                  <ProjectStatusSubmenu {project} disabled={status.kind === 'deleting'} />
+                  <ProjectStatusSubmenu {project} />
                   <ContextMenu.Separator />
-                  <ContextMenu.Item
-                    variant="destructive"
-                    disabled={status.kind === 'deleting'}
-                    onSelect={() => projectActions.requestRemoveProject(project)}
-                  >
+                  <ContextMenu.Item variant="destructive" onSelect={() => removeProject(project)}>
                     <Trash2 size={14} /> Remove Project
                   </ContextMenu.Item>
                 </ContextMenu.Content>
@@ -821,18 +821,6 @@
     background-color: var(--bg-hover);
   }
 
-  .project-card:disabled {
-    cursor: not-allowed;
-  }
-
-  .project-card.deleting {
-    opacity: 0.75;
-  }
-
-  .project-card.deleting:hover {
-    background: var(--bg-primary);
-  }
-
   .card-header {
     display: flex;
     align-items: center;
@@ -902,17 +890,6 @@
 
   .repo-badge-label :global(.repo-label-emphasis) {
     color: inherit;
-  }
-
-  .deleting-pill {
-    width: fit-content;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border-muted);
-    background-color: var(--bg-elevated);
-    color: var(--text-primary);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 600;
   }
 
   .keyboard-shortcut-overlay {

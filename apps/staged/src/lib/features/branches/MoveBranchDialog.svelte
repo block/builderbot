@@ -68,7 +68,10 @@
   );
   let branchRepo = $derived(branchRepoIdentity(repoLabel, sourceProject));
 
-  let candidates = $derived(projectsDataStore.projects.filter((p) => p.id !== branch.projectId));
+  // Live projects only: one being deleted is no destination.
+  let candidates = $derived(
+    projectsDataStore.liveProjects.filter((p) => p.id !== branch.projectId)
+  );
   let filtered = $derived(filterMoveTargets(candidates, projectsDataStore.reposByProject, query));
   let selected = $derived(filtered.find((p) => p.id === selectedId) ?? null);
   // Derived, not tracked: a stale cursor could outlive the row it named — the

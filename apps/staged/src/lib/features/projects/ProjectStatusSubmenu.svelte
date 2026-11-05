@@ -28,10 +28,9 @@
 
   interface Props {
     project: Project;
-    disabled?: boolean;
   }
 
-  let { project, disabled = false }: Props = $props();
+  let { project }: Props = $props();
 
   let options = $derived(preferences.projectStatusOptions);
   let override = $derived(findProjectStatusOverride(project, options));
@@ -50,7 +49,7 @@
 </script>
 
 <ContextMenu.Sub>
-  <ContextMenu.SubTrigger {disabled}>
+  <ContextMenu.SubTrigger>
     <Flag size={14} /> Set Status
   </ContextMenu.SubTrigger>
   <ContextMenu.SubContent class="min-w-[200px]">

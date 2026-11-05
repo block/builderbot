@@ -7,7 +7,7 @@ const { sq, store, prefs, setNewProjectLocation, createProject, detectDefaultBra
     const prefs = { newProjectLocation: 'local' as ProjectLocation };
     return {
       sq: { loaded: true, available: true },
-      store: { projects: [] as Project[] },
+      store: { projects: [] as Project[], deleting: new Set<string>() },
       prefs,
       setNewProjectLocation: vi.fn((location: ProjectLocation) => {
         prefs.newProjectLocation = location;
@@ -31,6 +31,9 @@ vi.mock('../../stores/projectsData.svelte', () => ({
   projectsDataStore: {
     get projects() {
       return store.projects;
+    },
+    get liveProjects() {
+      return store.projects.filter((p) => !store.deleting.has(p.id));
     },
     reposByProject: new Map(),
     ensureProjectsHydrated: async () => {},
@@ -168,6 +171,7 @@ describe('NoteTransferDialog new project location', () => {
     store.projects = [];
     prefs.newProjectLocation = 'local';
     setNewProjectLocation.mockClear();
+    store.deleting = new Set();
     createProject.mockReset().mockResolvedValue(created);
     detectDefaultBranch.mockReset().mockResolvedValue('main');
   });
@@ -363,6 +367,27 @@ describe('NoteTransferDialog new project location', () => {
     expect(target.querySelector('[aria-label="Project location"]')).toBeNull();
   });
 
+  it('offers no "Create project" under the name of a project still being deleted', async () => {
+    store.projects = [
+      { id: 'widgets', name: 'Widgets' } as Project,
+      { id: 'gadgets', name: 'Gadgets' } as Project,
+    ];
+    store.deleting = new Set(['gadgets']);
+    const { target } = await open(branchRepo);
+    // Off the destinations as soon as its delete started...
+    expect(target.querySelectorAll('.project-row:not(.create-row)')).toHaveLength(1);
+
+    // ...but its row, and so its unique name, lasts until the teardown ends:
+    // creating "Gadgets" now would only fail.
+    type(target, 'Gadgets');
+    expect(target.querySelector('.create-row')).toBeNull();
+    expect(target.querySelector('.project-row')).toBeNull();
+    expect(confirmButton(target).disabled).toBe(true);
+
+    type(target, 'Gadgets 2');
+    expect(target.querySelector('.create-row')).not.toBeNull();
+  });
+
   it('acts on nothing until something is picked or typed, even with one project on offer', async () => {
     store.projects = [{ id: 'widgets', name: 'Widgets' } as Project];
     const { target, onConfirm } = await open(branchRepo);
@@ -466,6 +491,7 @@ describe("NoteTransferDialog note's repo", () => {
     store.projects = [];
     prefs.newProjectLocation = 'local';
     setNewProjectLocation.mockClear();
+    store.deleting = new Set();
     createProject.mockReset().mockResolvedValue(created);
     detectDefaultBranch.mockReset().mockResolvedValue('main');
   });
@@ -613,6 +639,7 @@ describe('NoteTransferDialog pre-transfer checks', () => {
     store.projects = [];
     prefs.newProjectLocation = 'local';
     setNewProjectLocation.mockClear();
+    store.deleting = new Set();
     createProject.mockReset().mockResolvedValue(created);
     detectDefaultBranch.mockReset().mockResolvedValue('main');
   });

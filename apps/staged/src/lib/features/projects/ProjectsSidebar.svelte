@@ -7,6 +7,7 @@
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Mail from '@lucide/svelte/icons/mail';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import type { Project } from '../../types';
   import {
     followWhileVisible,
     goHome,
@@ -46,14 +47,18 @@
   } from './sidebarSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
+  import { neighbourAfterRemove } from './focusAfterRemove';
+  import { createScrollIfActive } from './activeRowScroll';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
   // All rendered data comes from the shared projectsData store; UI state
   // (width, scroll) lives here or in projectsSidebarState, and the search
-  // query in projectsListViewState so the landing-page grid shares it.
-  let projects = $derived(projectsDataStore.projects);
+  // query in projectsListViewState so the landing-page grid shares it. Rows
+  // come from liveProjects (here and through projectFiltersStore), so a
+  // project's row goes as soon as its delete is confirmed.
+  let projects = $derived(projectsDataStore.liveProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
@@ -143,6 +148,26 @@
     selectProject(projectId);
   }
 
+  // The row goes as soon as the remove is confirmed, taking focus with it, so
+  // focus moves on to the row that takes its place. Removing the open
+  // project opens the next one in the unfiltered list, and its row is the
+  // one focus takes, even when the filter or search shows a different
+  // neighbour. The list keeps that row as the selected one when the filter
+  // rules it out, so highlight and focus agree.
+  function removeProject(project: Project) {
+    const shownIds = sidebarProjects
+      .filter((p) => matchingProjects === null || matchingProjects.has(p.id))
+      .map((p) => p.id);
+    const focusAfterRemove = neighbourAfterRemove(shownIds, project.id, (projectId) =>
+      matchingProjects === null || matchingProjects.has(projectId)
+        ? [...(sidebarBodyEl?.querySelectorAll<HTMLElement>('.project-row') ?? [])].find(
+            (row) => row.dataset.projectId === projectId
+          )
+        : null
+    );
+    void projectActions.requestRemoveProject(project, focusAfterRemove);
+  }
+
   function openAllProjects() {
     goHome();
   }
@@ -151,31 +176,13 @@
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
-  function scrollIfActive(node: HTMLElement, active: boolean) {
-    let currentActive = active;
-    if (active) {
+  const scrollIfActive = createScrollIfActive({
+    activeRow: () => activeProjectRowEl,
+    setActiveRow: (node) => {
       activeProjectRowEl = node;
-    }
-    return {
-      update(nextActive: boolean) {
-        if (currentActive === nextActive) return;
-        currentActive = nextActive;
-        if (nextActive) {
-          activeProjectRowEl = node;
-          if (sidebarScrollRestored) {
-            node.scrollIntoView({ block: 'nearest' });
-          }
-        } else if (activeProjectRowEl === node) {
-          activeProjectRowEl = null;
-        }
-      },
-      destroy() {
-        if (activeProjectRowEl === node) {
-          activeProjectRowEl = null;
-        }
-      },
-    };
-  }
+    },
+    scrollRestored: () => sidebarScrollRestored,
+  });
 
   function handleSidebarScroll() {
     if (!sidebarBodyEl) return;
@@ -486,17 +493,14 @@
                      element superlinearly (100 rows ~550 ms vs ~27 ms). -->
                 <ContextMenu.Trigger
                   class="contents"
-                  disabled={status.kind === 'deleting'}
                   hidden={matchingProjects !== null && !matchingProjects.has(project.id)}
                 >
                   <button
                     class="project-row project-item"
+                    data-project-id={project.id}
                     use:scrollIfActive={layerProjectId === project.id}
                     class:active={layerProjectId === project.id}
-                    class:deleting={status.kind === 'deleting'}
                     onclick={() => openProject(project.id)}
-                    disabled={status.kind === 'deleting'}
-                    title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
                   >
                     <ProjectRowContent {project} />
                     <div class="row-status">
@@ -534,30 +538,17 @@
                           in:fade={{ duration: 300, delay: 150 }}
                           out:fade={{ duration: 150 }}
                         ></span>
-                      {:else if status.kind === 'deleting'}
-                        <span
-                          class="status-deleting"
-                          in:fade={{ duration: 300, delay: 150 }}
-                          out:fade={{ duration: 150 }}>Deleting…</span
-                        >
                       {/if}
                     </div>
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">
-                  <ContextMenu.Item
-                    disabled={status.kind === 'deleting'}
-                    onSelect={() => projectActions.markProjectUnread(project)}
-                  >
+                  <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
                     <Mail size={14} /> Mark as Unread
                   </ContextMenu.Item>
-                  <ProjectStatusSubmenu {project} disabled={status.kind === 'deleting'} />
+                  <ProjectStatusSubmenu {project} />
                   <ContextMenu.Separator />
-                  <ContextMenu.Item
-                    variant="destructive"
-                    disabled={status.kind === 'deleting'}
-                    onSelect={() => projectActions.requestRemoveProject(project)}
-                  >
+                  <ContextMenu.Item variant="destructive" onSelect={() => removeProject(project)}>
                     <Trash2 size={14} /> Remove Project
                   </ContextMenu.Item>
                 </ContextMenu.Content>
@@ -743,16 +734,6 @@
     stroke: var(--text-primary);
   }
 
-  .project-row.deleting {
-    opacity: 0.7;
-    cursor: not-allowed;
-  }
-
-  .project-row:disabled:hover {
-    color: var(--text-muted);
-    background-color: transparent;
-  }
-
   .project-row.project-item {
     min-height: 52px;
   }
@@ -778,12 +759,6 @@
     height: 8px;
     border-radius: 50%;
     background-color: var(--ui-accent);
-  }
-
-  .status-deleting {
-    font-size: calc(var(--size-xs) - 1px);
-    color: var(--text-faint);
-    font-weight: 600;
   }
 
   .all-repos-link {

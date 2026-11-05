@@ -164,6 +164,9 @@ class ProjectFiltersStore {
   // the landing grid, the sidebar's project list and the sidebar row's match
   // count, and each pass would otherwise call getProjectStatus for every
   // project when `running` is active. The counts are read twice per chip.
+  //
+  // All of them read liveProjects, so a project being deleted drops out of
+  // the chips' counts and repo filters as its card leaves the list.
 
   get activeFilters(): Set<string> {
     return this._activeFilters;
@@ -172,7 +175,7 @@ class ProjectFiltersStore {
   hasActiveFilters = $derived(this._activeFilters.size > 0);
 
   repoFilters: RepoFilter[] = $derived.by(() =>
-    computeRepoFilters(projectsDataStore.projects, projectsDataStore.reposByProject)
+    computeRepoFilters(projectsDataStore.liveProjects, projectsDataStore.reposByProject)
   );
 
   /** The active repo filters, parsed from their keys. Kept independent of
@@ -182,16 +185,16 @@ class ProjectFiltersStore {
   );
 
   unreadCount = $derived.by(
-    () => projectsDataStore.projects.filter((p) => projectStateStore.isUnread(p.id)).length
+    () => projectsDataStore.liveProjects.filter((p) => projectStateStore.isUnread(p.id)).length
   );
 
   runningCount = $derived.by(
-    () => projectsDataStore.projects.filter((p) => this.isProjectRunning(p.id)).length
+    () => projectsDataStore.liveProjects.filter((p) => this.isProjectRunning(p.id)).length
   );
 
   filteredProjects: Project[] = $derived.by(() =>
     filterProjects(
-      projectsDataStore.projects,
+      projectsDataStore.liveProjects,
       this._activeFilters,
       projectsDataStore.reposByProject,
       (projectId) => projectStateStore.isUnread(projectId),

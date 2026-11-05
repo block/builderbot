@@ -39,6 +39,81 @@ pub fn run_lite(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     run_with_env(repo, args, EnvSource::Lite)
 }
 
+/// [`run_lite`], falling back to the captured env only when the lite env's
+/// git can't do anything in the repository: there is no `git` on its `PATH`
+/// ([`GitError::GitNotFound`]), or the one there fails before running the
+/// command ([`is_unusable_git_error`]). On macOS the lite `PATH` always
+/// finds `/usr/bin/git`, the xcrun shim, which stops working when the
+/// Command Line Tools break or the Xcode license is unaccepted. It may also
+/// be an older git than the shell's that can't read the repository's format.
+///
+/// This is for commands that don't need the login shell's env but still
+/// have to work where the only usable git is the one the login shell puts
+/// on `PATH`: the worktree teardown's `worktree list|remove|prune` and
+/// `branch -D`. None of them runs a smudge/clean filter or a credential
+/// helper. Any other failure is git's verdict on the repository (a worktree
+/// or branch that is already gone is routine in a teardown), so it is
+/// returned unchanged: a captured env can't change it, and a retry would
+/// wait on a shell-env capture for nothing. Unlike [`run_smart`], there is
+/// no warm-up either, so the success path never spawns a capture.
+///
+/// These commands do run hooks: `branch -D` fires the
+/// `reference-transaction` hook, which can abort the delete. If a hook
+/// needs a tool that only the login shell's `PATH` provides, it fails under
+/// the lite env, and that failure is not retried.
+pub fn run_lite_or_captured(repo: &Path, args: &[&str]) -> Result<String, GitError> {
+    match run_with_env(repo, args, EnvSource::Lite) {
+        Err(e) if is_unusable_git(&e) => {
+            log::info!(
+                "[git::cli::run_lite_or_captured] lite-env git unusable for {}; retrying with captured env: {e}",
+                repo.display()
+            );
+            run_with_env(repo, args, EnvSource::Captured)
+        }
+        result => result,
+    }
+}
+
+/// Whether a lite-env failure means the git that ran (or failed to) can't be
+/// used at all, rather than that git ran and refused the command. See
+/// [`run_lite_or_captured`].
+fn is_unusable_git(err: &GitError) -> bool {
+    match err {
+        GitError::GitNotFound => true,
+        GitError::CommandFailed(stderr) => is_unusable_git_error(stderr),
+        GitError::NotARepo(_) | GitError::InvalidUtf8 | GitError::InvalidPath(_) => false,
+    }
+}
+
+/// Stderr shapes from a git that fails before running the command, so
+/// another git (the login shell's) may succeed where it didn't:
+///
+/// - `xcrun: …` / `xcode-select: …` lines come from macOS's `/usr/bin/git`
+///   shim, not git, when the Command Line Tools are missing or invalidated
+///   by an OS upgrade ("invalid active developer path").
+/// - "xcodebuild -license" is the shim refusing to run until the Xcode
+///   license is accepted.
+/// - "unknown repository extension" and "Expected git repo version" are an
+///   older git refusing a repository that a newer one set up, e.g. with
+///   `extensions.relativeWorktrees` from `worktree.useRelativePaths`.
+///
+/// Matched against the `LC_ALL=C` wording [`apply_env`] pins. The shim
+/// prefixes only count at the start of a line, where git's own messages
+/// start with `fatal:`, `error:` or similar, so a path that happens to
+/// contain one doesn't match.
+fn is_unusable_git_error(stderr: &str) -> bool {
+    const SHIM_LINE_PREFIXES: &[&str] = &["xcrun:", "xcode-select:"];
+    const UNUSABLE_GIT_PATTERNS: &[&str] = &[
+        "xcodebuild -license",          // unaccepted Xcode license
+        "unknown repository extension", // repo extension newer than this git
+        "Expected git repo version",    // repo format newer than this git
+    ];
+    stderr.lines().any(|line| {
+        let line = line.trim_start();
+        SHIM_LINE_PREFIXES.iter().any(|p| line.starts_with(p))
+    }) || UNUSABLE_GIT_PATTERNS.iter().any(|p| stderr.contains(p))
+}
+
 /// What a git run that got as far as exiting left behind, for callers that
 /// read meaning into a particular non-zero exit (`git config --get-regexp`
 /// exits 1 when nothing matches, which is an answer, not a failure).
@@ -380,6 +455,94 @@ mod tests {
     fn retry_predicate_retries_unrecognized_command_failed() {
         let err = GitError::CommandFailed("fatal: unable to access something\n".into());
         assert!(should_retry_with_captured(&err));
+    }
+
+    /// A git that can't run the command at all sends `run_lite_or_captured`
+    /// to the captured env: no binary, macOS's xcrun shim with broken
+    /// Command Line Tools or an unaccepted license, or a git too old for the
+    /// repository.
+    #[test]
+    fn unusable_git_predicate_matches_broken_git_signatures() {
+        assert!(is_unusable_git(&GitError::GitNotFound));
+        for stderr in [
+            "xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools), \
+             missing xcrun at: /Library/Developer/CommandLineTools/usr/bin/xcrun\n",
+            "xcode-select: note: No developer tools were found, requesting install.\n",
+            "You have not agreed to the Xcode license agreements. Please run \
+             'sudo xcodebuild -license' from within a Terminal window to review and agree \
+             to the Xcode and Apple SDKs license.\n",
+            "Agreeing to the Xcode/iOS license requires admin privileges, please run \
+             \u{201c}sudo xcodebuild -license\u{201d} and then retry this command.\n",
+            "fatal: unknown repository extension found:\n\trelativeworktrees\n",
+            "fatal: unknown repository extensions found:\n\trefstorage\n\tobjectformat\n",
+            "fatal: Expected git repo version <= 1, found 2\n",
+        ] {
+            assert!(
+                is_unusable_git(&GitError::CommandFailed(stderr.into())),
+                "{stderr:?}"
+            );
+        }
+    }
+
+    /// Routine teardown failures are git's answer about the repository, so
+    /// they must not wait on a shell-env capture. Nor may a path that only
+    /// mentions a shim name mid-line.
+    #[test]
+    fn unusable_git_predicate_skips_routine_teardown_failures() {
+        for stderr in [
+            "fatal: '/tmp/worktrees/feature' is not a working tree\n",
+            "error: branch 'feature' not found\n",
+            "error: Cannot delete branch 'feature' checked out at '/tmp/worktrees/feature'\n",
+            "fatal: Unable to create '/repo/.git/worktrees/feature/index.lock': File exists.\n",
+            "fatal: '/Users/me/xcrun: tools/feature' is not a working tree\n",
+            "error: hook 'reference-transaction' exited with status 1\n",
+        ] {
+            assert!(
+                !is_unusable_git(&GitError::CommandFailed(stderr.into())),
+                "{stderr:?}"
+            );
+        }
+        assert!(!is_unusable_git(&GitError::NotARepo("/repo".into())));
+        assert!(!is_unusable_git(&GitError::InvalidUtf8));
+        assert!(!is_unusable_git(&GitError::InvalidPath("/repo".into())));
+    }
+
+    /// The patterns match what git actually prints: an unknown repository
+    /// extension or format version does, a missing worktree or branch
+    /// doesn't.
+    #[test]
+    fn unusable_git_predicate_matches_real_git_stderr() {
+        let stderr_of = |result: Result<String, GitError>| match result {
+            Err(GitError::CommandFailed(stderr)) => stderr,
+            other => panic!("expected CommandFailed, got {other:?}"),
+        };
+
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "hello\n");
+        repo.commit("init");
+        let missing_worktree = repo.path().join("no-such-worktree");
+        for args in [
+            vec!["branch", "-D", "no-such-branch"],
+            vec![
+                "worktree",
+                "remove",
+                missing_worktree.to_str().unwrap(),
+                "--force",
+            ],
+        ] {
+            let stderr = stderr_of(run_lite_or_captured(repo.path(), &args));
+            assert!(!is_unusable_git_error(&stderr), "{args:?}: {stderr:?}");
+        }
+
+        repo.run_git(&["config", "core.repositoryformatversion", "1"]);
+        repo.run_git(&["config", "extensions.stagedNoSuchExtension", "true"]);
+        let stderr = stderr_of(run_lite(repo.path(), &["worktree", "list"]));
+        assert!(is_unusable_git_error(&stderr), "{stderr:?}");
+
+        let repo = TempGitRepo::new();
+        repo.run_git(&["config", "core.repositoryformatversion", "99"]);
+        let stderr = stderr_of(run_lite(repo.path(), &["branch", "-D", "feature"]));
+        assert!(is_unusable_git_error(&stderr), "{stderr:?}");
     }
 
     /// Happy-path smoke test: `run_smart` on a real repo should return stdout

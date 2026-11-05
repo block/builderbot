@@ -13,22 +13,21 @@
  * `visibleProjects` is the cards left on screen, not the ones mounted.
  */
 
-import type { Branch, Project, ProjectRepo } from '../../types';
+import type { Branch, Project, ProjectRepo, ProjectSearchItemKind } from '../../types';
 import { isNumberTerm, queryTerms } from '../../shared/textSearch';
 import { projectDisplayName } from '../../shared/utils';
 
-/** Kinds of titled item the backend search index carries. */
-export type ProjectSearchIndexKind = 'note' | 'projectNote' | 'review';
-
 /** One titled item of a project in the search index: titles only, no bodies. */
 export interface ProjectSearchIndexItem {
-  kind: ProjectSearchIndexKind;
+  kind: ProjectSearchItemKind;
   id: string;
   title: string;
+  /** The title lower-cased, once when the index loads, not per keystroke. */
+  text: string;
   updatedAt: number;
 }
 
-/** The search index's items, grouped by project id. */
+/** The search index's items, grouped by project id (projectSearchIndex). */
 export type ProjectSearchIndex = ReadonlyMap<string, readonly ProjectSearchIndexItem[]>;
 
 /**
@@ -45,7 +44,7 @@ export interface SearchContext {
   index?: ProjectSearchIndex | null;
 }
 
-export type MatchReasonKind = 'branch' | 'pr' | ProjectSearchIndexKind;
+export type MatchReasonKind = 'branch' | 'pr' | ProjectSearchItemKind;
 
 /**
  * Why a project matched when its name and repos alone don't explain it: the
@@ -149,7 +148,7 @@ function projectItems(projectId: string, ctx: SearchContext): SearchItem[] {
     items.push({
       kind: item.kind,
       label: item.title,
-      text: [item.title.toLowerCase()],
+      text: [item.text],
       prNumber: null,
       updatedAt: item.updatedAt,
     });

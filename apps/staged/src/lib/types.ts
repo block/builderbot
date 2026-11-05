@@ -425,6 +425,24 @@ export interface ProjectSessionResponse {
 }
 
 // =============================================================================
+// Project search
+// =============================================================================
+
+export type ProjectSearchItemKind = 'note' | 'projectNote' | 'review';
+
+/** One titled item of a project in the search index: titles only, no bodies. */
+export interface ProjectSearchItem {
+  /** For branch notes and reviews, the branch's current project. */
+  projectId: string;
+  /** The branch a note or review is on; null for project notes. */
+  branchId: string | null;
+  kind: ProjectSearchItemKind;
+  id: string;
+  title: string;
+  updatedAt: number;
+}
+
+// =============================================================================
 // Sessions
 // =============================================================================
 

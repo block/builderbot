@@ -27,6 +27,8 @@
     /** Accessible name for the input; defaults to the placeholder. */
     label?: string;
     clearable?: boolean;
+    /** The input took focus; hosts prefetch what a query will search. */
+    onfocus?: () => void;
   }
 
   let {
@@ -35,6 +37,7 @@
     placeholder,
     label = placeholder,
     clearable = false,
+    onfocus,
   }: Props = $props();
 
   let showClear = $derived(clearable && value.trim().length > 0);
@@ -56,6 +59,7 @@
     autocomplete="off"
     autocorrect="off"
     spellcheck="false"
+    {onfocus}
     class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm"
   />
   {#if showClear}

@@ -37,6 +37,7 @@ pub mod pr_poll_scheduler;
 mod preference_events;
 pub mod project_commands;
 pub mod project_mcp;
+pub mod project_search;
 pub mod prs;
 pub mod review_commands;
 pub mod session_commands;
@@ -2217,6 +2218,8 @@ pub fn run() {
             note_commands::get_project_note_by_session,
             note_commands::get_branch_note_by_session,
             note_commands::delete_project_note,
+            // Project search
+            project_search::get_project_search_index,
             note_transfer::get_note_repo,
             note_transfer::move_note_to_project,
             note_transfer::copy_note_to_project,

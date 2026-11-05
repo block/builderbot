@@ -2689,6 +2689,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(notes).unwrap())
         }
+        "get_project_search_index" => {
+            let store = get_store(store_mutex)?;
+            let items = store
+                .list_project_search_items()
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(items).unwrap())
+        }
         "get_project_note" => {
             let store = get_store(store_mutex)?;
             let project_note_id: String = arg(&args, "projectNoteId")?;

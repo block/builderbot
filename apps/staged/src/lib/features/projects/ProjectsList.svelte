@@ -56,6 +56,7 @@
     withStickyProject,
   } from './projectSearch';
   import { projectSearchContext } from './projectSearchContext';
+  import { projectSearchIndex } from './projectSearchIndex.svelte';
   import ProjectMatchReason from './ProjectMatchReason.svelte';
   import { queryTerms } from '../../shared/textSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
@@ -315,6 +316,13 @@
     untrack(() => void projectsDataStore.ensureProjectsHydrated());
   });
 
+  // Titles (notes, project notes, reviews) come from the lazily loaded search
+  // index: fetch it once a query starts, if focusing the field didn't already.
+  $effect(() => {
+    if (!searchActive) return;
+    untrack(() => projectSearchIndex.ensureLoaded());
+  });
+
   // Keep run-action state hydrated for the status badges; the store call
   // dedupes branches it has already queried.
   $effect(() => {
@@ -488,8 +496,9 @@
           <SearchField
             bind:ref={searchInputEl}
             bind:value={projectsListViewState.searchQuery}
-            placeholder="Search projects, branches, PRs"
+            placeholder="Search projects, branches, PRs, notes"
             clearable
+            onfocus={() => projectSearchIndex.ensureLoaded()}
           />
         </div>
 

@@ -131,8 +131,11 @@ function projectRepo(overrides: Partial<ProjectRepo> = {}): ProjectRepo {
   };
 }
 
-function indexItem(overrides: Partial<ProjectSearchIndexItem> = {}): ProjectSearchIndexItem {
-  return { kind: 'note', id: 'n1', title: 'A note', updatedAt: 0, ...overrides };
+function indexItem(
+  overrides: Partial<Omit<ProjectSearchIndexItem, 'text'>> = {}
+): ProjectSearchIndexItem {
+  const item = { kind: 'note' as const, id: 'n1', title: 'A note', updatedAt: 0, ...overrides };
+  return { ...item, text: item.title.toLowerCase() };
 }
 
 function context(

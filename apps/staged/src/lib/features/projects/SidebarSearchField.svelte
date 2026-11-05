@@ -13,9 +13,11 @@
   interface Props {
     value?: string;
     placeholder?: string;
+    /** The input took focus; the owner prefetches what a query will search. */
+    onfocus?: () => void;
   }
 
-  let { value = $bindable(''), placeholder = 'Search repos & projects' }: Props = $props();
+  let { value = $bindable(''), placeholder = 'Search repos & projects', onfocus }: Props = $props();
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && value) {
@@ -35,6 +37,7 @@
     autocomplete="off"
     spellcheck="false"
     onkeydown={handleKeydown}
+    {onfocus}
   />
   {#if value}
     <button type="button" class="clear" aria-label="Clear search" onclick={() => (value = '')}>

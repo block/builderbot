@@ -47,6 +47,7 @@
   } from './sidebarSearch';
   import { projectMatchReasons } from './projectSearch';
   import { projectSearchContext } from './projectSearchContext';
+  import { projectSearchIndex } from './projectSearchIndex.svelte';
   import { queryTerms } from '../../shared/textSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
@@ -151,6 +152,13 @@
     if (!searching || !projectsDataStore.loaded) return;
     void projectsDataStore.projects;
     untrack(() => void projectsDataStore.ensureProjectsHydrated());
+  });
+
+  // Titles (notes, project notes, reviews) come from the lazily loaded search
+  // index: fetch it once a query starts, if focusing the field didn't already.
+  $effect(() => {
+    if (!searching) return;
+    untrack(() => projectSearchIndex.ensureLoaded());
   });
 
   // Keep run-action state hydrated for the row status dots and the Running
@@ -422,7 +430,10 @@
         <Plus size={14} strokeWidth={2.4} />
         <span class="new-project-label">New project</span>
       </button>
-      <SidebarSearchField bind:value={projectsListViewState.searchQuery} />
+      <SidebarSearchField
+        bind:value={projectsListViewState.searchQuery}
+        onfocus={() => projectSearchIndex.ensureLoaded()}
+      />
     </div>
 
     <div class="sidebar-body" use:trackSidebarBody onscroll={handleSidebarScroll}>

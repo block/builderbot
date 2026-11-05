@@ -27,18 +27,56 @@ impl Store {
     /// its file. No note ownership columns or reconciliation state are needed.
     pub(crate) fn media_is_referenced(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::referenced_by_notes(&conn, id, None)
+    }
+
+    pub(crate) fn image_has_chat_references(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        Self::referenced_by_chat(&conn, id)
+    }
+
+    /// Whether `note_id` (a branch or project note) is the only thing using
+    /// media `id`: no other note embeds it and no chat message attaches it.
+    /// Such a row can follow the note to another scope without breaking
+    /// anything else.
+    pub(crate) fn media_is_exclusive_to(
+        &self,
+        id: &str,
+        note_id: &str,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        Self::media_exclusive_to(&conn, id, note_id)
+    }
+
+    /// [`Self::media_is_exclusive_to`] on an open connection, so a
+    /// transaction can confirm it under its own snapshot.
+    pub(super) fn media_exclusive_to(
+        conn: &rusqlite::Connection,
+        id: &str,
+        note_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(!Self::referenced_by_notes(conn, id, Some(note_id))?
+            && !Self::referenced_by_chat(conn, id)?)
+    }
+
+    /// Whether any note other than `except_note_id` embeds media `id`. Note
+    /// ids are UUIDs, so one id names at most one row across both tables.
+    fn referenced_by_notes(
+        conn: &rusqlite::Connection,
+        id: &str,
+        except_note_id: Option<&str>,
+    ) -> Result<bool, StoreError> {
         let needle = format!("staged-media://{id}.");
         conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM notes WHERE instr(content, ?1) > 0
-             UNION ALL SELECT 1 FROM project_notes WHERE instr(content, ?1) > 0)",
-            params![needle],
+            "SELECT EXISTS(SELECT 1 FROM notes WHERE instr(content, ?1) > 0 AND id IS NOT ?2
+             UNION ALL SELECT 1 FROM project_notes WHERE instr(content, ?1) > 0 AND id IS NOT ?2)",
+            params![needle, except_note_id],
             |row| row.get(0),
         )
         .map_err(Into::into)
     }
 
-    pub(crate) fn image_has_chat_references(&self, id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+    fn referenced_by_chat(conn: &rusqlite::Connection, id: &str) -> Result<bool, StoreError> {
         // Image IDs are UUIDs; quote the exact JSON string to avoid substrings.
         let needle = format!("\"{id}\"");
         conn.query_row(

@@ -3311,7 +3311,7 @@ async fn run_pipeline(
 /// `.zshrc`-driven PATH (e.g. Hermit) costs seconds on a dev machine with nvm
 /// and Hermit hooks (about 9 s measured, more with several at once); this
 /// amortises it to once per worktree per TTL window. Being the only cache,
-/// its capture limit is the process-wide one: at most two shells at once,
+/// its capture limit is the process-wide one: at most four shells at once,
 /// with `$HOME` let through ahead of the queue.
 pub fn shell_env_cache() -> &'static Arc<ShellEnvCache> {
     static CACHE: OnceLock<Arc<ShellEnvCache>> = OnceLock::new();

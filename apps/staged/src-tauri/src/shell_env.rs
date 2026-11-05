@@ -15,7 +15,7 @@
 //!
 //! Concurrent first-callers for the same root are coalesced through one
 //! `InFlight` entry, so only one shell is spawned per (root, miss). At most
-//! two shells (`CAPTURE_LIMIT`) run at once across all roots; the rest queue,
+//! four shells (`CAPTURE_LIMIT`) run at once across all roots; the rest queue,
 //! captures a caller is blocked on ahead of prewarms and bounded reads (see
 //! `capture_slots.rs`). `$HOME`'s capture skips the queue, and startup begins
 //! it before anything else ([`prewarm_home_env`]), so worktree captures can

@@ -138,37 +138,41 @@ fn in_flight_promise(cache: &ShellEnvCache, key: &Path) -> Arc<InFlightPromise> 
     }
 }
 
-/// L1: Six cold directories asked for through every path at once — inline
+/// L1: Cold directories asked for through every path at once — inline
 /// `get_blocking`, async `get`, a bounded read and a prewarm — never have
-/// more than two shells running, and do use both slots.
+/// more than [`CAPTURE_LIMIT`] shells running, and do use every slot. There
+/// are four more directories than slots, so some always queue, and each
+/// path gets at least one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn captures_never_exceed_the_limit_across_paths() {
     let log = tempfile::tempdir().expect("tempdir");
     let scratch = tempfile::tempdir().expect("tempdir");
     let (cache, _shell) = tracking_cache(log.path(), scratch.path());
-    let dirs: Vec<PathBuf> = (0..6)
-        .map(|i| dir_with_delay(scratch.path(), &format!("wt{i}"), "0.6"))
+    // Long enough that, on a loaded machine, every slot's shell has started
+    // before the first of them finishes.
+    let dirs: Vec<PathBuf> = (0..CAPTURE_LIMIT + 4)
+        .map(|i| dir_with_delay(scratch.path(), &format!("wt{i}"), "1.5"))
         .collect();
 
+    // Deal the directories out to the four paths in turn.
     let mut sync_tasks = Vec::new();
-    for dir in &dirs[0..2] {
-        let (cache, dir) = (cache.clone(), dir.clone());
-        sync_tasks.push(tokio::task::spawn_blocking(move || {
-            cache.get_blocking(&dir).map(|_| ())
-        }));
-    }
     let mut async_tasks = Vec::new();
-    for dir in &dirs[2..4] {
+    let mut bounded_tasks = Vec::new();
+    for (i, dir) in dirs.iter().enumerate() {
         let (cache, dir) = (cache.clone(), dir.clone());
-        async_tasks.push(tokio::spawn(
-            async move { cache.get(&dir).await.map(|_| ()) },
-        ));
+        match i % 4 {
+            0 => sync_tasks.push(tokio::task::spawn_blocking(move || {
+                cache.get_blocking(&dir).map(|_| ())
+            })),
+            1 => async_tasks.push(tokio::spawn(
+                async move { cache.get(&dir).await.map(|_| ()) },
+            )),
+            2 => bounded_tasks.push(tokio::task::spawn_blocking(move || {
+                cache.get_blocking_within(&dir, Duration::ZERO).map(|_| ())
+            })),
+            _ => cache.prewarm(&dir),
+        }
     }
-    let bounded = tokio::task::spawn_blocking({
-        let (cache, dir) = (cache.clone(), dirs[4].clone());
-        move || cache.get_blocking_within(&dir, Duration::ZERO).map(|_| ())
-    });
-    cache.prewarm(&dirs[5]);
 
     for task in sync_tasks {
         task.await.expect("sync task").expect("capture");
@@ -176,7 +180,9 @@ async fn captures_never_exceed_the_limit_across_paths() {
     for task in async_tasks {
         task.await.expect("async task").expect("capture");
     }
-    bounded.await.expect("bounded task").expect("bounded read");
+    for task in bounded_tasks {
+        task.await.expect("bounded task").expect("bounded read");
+    }
     tokio::task::spawn_blocking({
         let (cache, dirs) = (cache.clone(), dirs.clone());
         move || {
@@ -188,7 +194,11 @@ async fn captures_never_exceed_the_limit_across_paths() {
     .await
     .expect("wait task");
 
-    assert_eq!(launch_dirs(log.path()).len(), 6, "one shell per directory");
+    assert_eq!(
+        launch_dirs(log.path()).len(),
+        dirs.len(),
+        "one shell per directory"
+    );
     assert_eq!(
         peak(log.path()),
         CAPTURE_LIMIT,
@@ -199,7 +209,7 @@ async fn captures_never_exceed_the_limit_across_paths() {
     assert_eq!(cache.slots.queued(), 0);
 }
 
-/// L2: With two worktree captures holding both slots and a third queued,
+/// L2: With worktree captures holding every slot and one more queued,
 /// home's capture starts at once and finishes while they are still going.
 /// The worktrees sit under home, where the env-root walk stops, so each is
 /// its own key whatever checkout `TMPDIR` sits in.
@@ -209,20 +219,19 @@ fn home_capture_skips_the_queue() {
     let scratch = tempfile::tempdir().expect("tempdir");
     let home = dir_with_delay(scratch.path(), "home", "0");
     let (cache, _shell) = tracking_cache(log.path(), &home);
-    let busy = [
-        dir_with_delay(&home, "wt-a", "3"),
-        dir_with_delay(&home, "wt-b", "3"),
-    ];
-    let queued = dir_with_delay(&home, "wt-c", "0");
+    let busy: Vec<PathBuf> = (0..CAPTURE_LIMIT)
+        .map(|i| dir_with_delay(&home, &format!("wt-busy{i}"), "3"))
+        .collect();
+    let queued = dir_with_delay(&home, "wt-queued", "0");
 
     for dir in &busy {
         cache.prewarm(dir);
     }
-    wait_until("both worktree shells to start", || {
-        launch_dirs(log.path()).len() == 2
+    wait_until("a worktree shell in every slot to start", || {
+        launch_dirs(log.path()).len() == CAPTURE_LIMIT
     });
     cache.prewarm(&queued);
-    wait_until("the third worktree to queue", || cache.slots.queued() == 1);
+    wait_until("one more worktree to queue", || cache.slots.queued() == 1);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -245,7 +254,7 @@ fn home_capture_skips_the_queue() {
             dir.display()
         );
     }
-    assert_eq!(cache.slots.in_use(), 2, "home took no slot");
+    assert_eq!(cache.slots.in_use(), CAPTURE_LIMIT, "home took no slot");
     assert_eq!(
         cache.slots.queued(),
         1,
@@ -258,10 +267,14 @@ fn home_capture_skips_the_queue() {
             .all(|dir| entry_is_ready(&cache, dir))
     });
     let launched = launch_dirs(log.path());
-    assert_eq!(launched.len(), 4);
-    assert_eq!(launched[2], canonical(&home), "launch order: {launched:?}");
+    assert_eq!(launched.len(), CAPTURE_LIMIT + 2);
     assert_eq!(
-        launched[3],
+        launched[CAPTURE_LIMIT],
+        canonical(&home),
+        "launch order: {launched:?}"
+    );
+    assert_eq!(
+        launched[CAPTURE_LIMIT + 1],
         canonical(&queued),
         "launch order: {launched:?}"
     );
@@ -318,7 +331,7 @@ fn bounded_read_falls_back_at_the_bound_while_queued() {
     let dir = dir_with_delay(scratch.path(), "wt", "0");
     let (cache, _shell) = tracking_cache(log.path(), scratch.path());
 
-    // Two captures elsewhere hold both slots.
+    // Captures elsewhere hold every slot.
     let storm = hold_every_slot(&cache);
 
     let bound = Duration::from_millis(300);
@@ -436,7 +449,7 @@ fn hung_shell_is_killed_at_the_capture_timeout() {
         waited >= timeouts.shell && waited < timeouts.shell * 3,
         "each capture should end at its timeout: {waited:?}"
     );
-    assert_eq!(cache.slots.in_use(), 0, "both slots are free again");
+    assert_eq!(cache.slots.in_use(), 0, "every slot is free again");
     for dir in [&inline_dir, &async_dir] {
         assert!(
             matches!(
@@ -598,7 +611,7 @@ fn later_phases_of_a_state_build_dont_wait_again() {
     assert_eq!(launch_dirs(log.path()), vec![canonical(&worktree)]);
 }
 
-/// L8: With both slots held and two prewarms queued, a capture with a caller
+/// L8: With every slot held and two prewarms queued, a capture with a caller
 /// waiting on it without a bound goes ahead of them: one prewarm that an
 /// async caller then joins, and a sync caller's capture queued after both.
 /// The other prewarm goes last.
@@ -854,7 +867,7 @@ fn timed_out_mark_expires() {
 }
 
 /// L13: `after_capture` neither waits on a capture nor moves it up the
-/// queue. With both slots held and two prewarms queued, a callback on the
+/// queue. With every slot held and two prewarms queued, a callback on the
 /// second leaves it behind the first and isn't counted as a waiter. The
 /// callback runs once, after the snapshot is cached. On a root with a fresh
 /// snapshot it runs at once, and with nothing cached or capturing it is

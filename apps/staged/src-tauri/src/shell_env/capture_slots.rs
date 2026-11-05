@@ -32,10 +32,18 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-/// Shell captures allowed to run at once. Three concurrent shells measured
-/// about 12 s against 9 s for one, so two keeps each close to standalone
-/// while letting a second worktree make progress.
-pub(super) const CAPTURE_LIMIT: usize = 2;
+/// Shell captures allowed to run at once, with home's on top (see the module
+/// docs).
+///
+/// A cap keeps a launch with many worktrees from starting dozens of
+/// interactive shells at once: the perf audit saw that contention stretch
+/// captures to 8–31 s. Four lets a typical launch with four worktrees land
+/// every env in one round on a modern multi-core laptop. With two, the third
+/// and fourth worktrees waited for a second round, which doubled the time
+/// until every worktree had its env. There was headroom for more: with three
+/// shells running at once (home and two worktrees) each capture still took
+/// 2.6–2.9 s, about what one takes alone.
+pub(super) const CAPTURE_LIMIT: usize = 4;
 
 /// Whether a capture has a caller waiting on it without a bound, which puts
 /// it in the front tier.

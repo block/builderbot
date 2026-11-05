@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub use blox_cli::{
-    BloxError, CommandType, FileRoute, WorkspaceCommand, WorkspaceCommandStatus, WorkspaceInfo,
-    WorkspaceListEntry, WsExecOutput,
+    BloxError, CommandType, ExecMode, FileRoute, WorkspaceCommand, WorkspaceCommandStatus,
+    WorkspaceInfo, WorkspaceListEntry, WsExecOutput,
 };
 
 static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -86,31 +86,35 @@ pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
 
 /// Execute a command inside a Blox workspace.
 ///
-/// Runs: `sq blox ws exec <name> -- <args…>`
+/// Runs: `sq blox ws exec [--transient] <name> -- <args…>`
 ///
 /// Returns the command's stdout on success.
-pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
+pub fn ws_exec(name: &str, mode: ExecMode, args: &[&str]) -> Result<String, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    reachable_on_success(name, blox_cli::ws_exec(name, args))
+    reachable_on_success(name, blox_cli::ws_exec(name, mode, args))
 }
 
 /// Execute a command inside a Blox workspace, returning raw bytes.
 ///
 /// Like `ws_exec` but returns the raw stdout bytes without UTF-8 validation.
 /// Use this when the command may produce binary output (e.g. `git show` on image files).
-pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
+pub fn ws_exec_bytes(name: &str, mode: ExecMode, args: &[&str]) -> Result<Vec<u8>, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    reachable_on_success(name, blox_cli::ws_exec_bytes(name, args))
+    reachable_on_success(name, blox_cli::ws_exec_bytes(name, mode, args))
 }
 
 /// Execute a command inside a Blox workspace, returning full output regardless
 /// of exit code. Infrastructure errors still return `Err`.
-pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
+pub fn ws_exec_output(
+    name: &str,
+    mode: ExecMode,
+    args: &[&str],
+) -> Result<WsExecOutput, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    reachable_on_success(name, blox_cli::ws_exec_output(name, args))
+    reachable_on_success(name, blox_cli::ws_exec_output(name, mode, args))
 }
 
 /// A call that reached the workstation proves it reachable: `disconnected`
@@ -127,10 +131,21 @@ fn reachable_on_success<T>(name: &str, result: Result<T, BloxError>) -> Result<T
 /// it may run for [`blox_cli::exec_timeout`] of them rather than 300 s.
 pub fn ws_exec_output_sized(
     name: &str,
+    mode: ExecMode,
     args: &[&str],
     payload_bytes: u64,
 ) -> Result<WsExecOutput, BloxError> {
-    blox_cli::ws_exec_output_with_timeout(name, args, blox_cli::exec_timeout(payload_bytes))
+    #[cfg(test)]
+    record_ws_exec(name);
+    reachable_on_success(
+        name,
+        blox_cli::ws_exec_output_with_timeout(
+            name,
+            mode,
+            args,
+            blox_cli::exec_timeout(payload_bytes),
+        ),
+    )
 }
 
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.
@@ -172,3 +187,7 @@ pub fn ws_get_file(
 ) -> Result<FileRoute, BloxError> {
     blox_cli::ws_get_file(name, remote_path, local, size)
 }
+
+#[cfg(test)]
+#[path = "blox/tracked_exec_guard_tests.rs"]
+mod tracked_exec_guard_tests;

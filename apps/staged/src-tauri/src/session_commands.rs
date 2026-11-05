@@ -6791,9 +6791,11 @@ fn build_remote_branch_context(
     // commits are included, even after a rebase or when the base ref has
     // moved forward.
     let base_ref = git::origin_ref_for_branch(base_branch);
-    let range = if let Ok(mb_output) =
-        blox::ws_exec(workspace_name, &["git", "merge-base", &base_ref, "HEAD"])
-    {
+    let range = if let Ok(mb_output) = blox::ws_exec(
+        workspace_name,
+        blox::ExecMode::Transient,
+        &["git", "merge-base", &base_ref, "HEAD"],
+    ) {
         let mb = mb_output.trim().to_string();
         format!("{mb}..HEAD")
     } else {
@@ -6801,6 +6803,7 @@ fn build_remote_branch_context(
     };
     match blox::ws_exec(
         workspace_name,
+        blox::ExecMode::Transient,
         &[
             "git",
             "log",
@@ -7341,7 +7344,10 @@ pub(crate) fn write_bytes_to_remote(
     remote_path: &str,
 ) -> Result<(), String> {
     write_bytes_to_remote_with(
-        &|args| blox::ws_exec(workspace_name, args).map_err(|e| e.to_string()),
+        &|args| {
+            blox::ws_exec(workspace_name, blox::ExecMode::Transient, args)
+                .map_err(|e| e.to_string())
+        },
         bytes,
         remote_path,
     )

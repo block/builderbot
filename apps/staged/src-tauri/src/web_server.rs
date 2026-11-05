@@ -2256,9 +2256,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             ws_name,
                             ws_start_started_at.elapsed().as_millis()
                         );
+                        // Tracked: a transient fetch killed at 60 s would read
+                        // as "no remote branch" and silently branch from base.
                         let has_remote_branch = crate::branches::run_workspace_git_async(
                             ws_name,
                             repo_subpath.as_deref(),
+                            crate::blox::ExecMode::Tracked,
                             &["fetch", "origin", &branch.branch_name],
                         )
                         .await
@@ -2269,6 +2272,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             crate::branches::run_workspace_git_async(
                                 ws_name,
                                 repo_subpath.as_deref(),
+                                crate::blox::ExecMode::Transient,
                                 &["checkout", "-B", &branch.branch_name, &remote_ref],
                             )
                             .await
@@ -2276,6 +2280,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             crate::branches::run_workspace_git_async(
                                 ws_name,
                                 repo_subpath.as_deref(),
+                                crate::blox::ExecMode::Transient,
                                 &["checkout", "-b", &branch.branch_name],
                             )
                             .await

@@ -1,7 +1,7 @@
 //! Agent-facing paths for durable note references.
 
 use super::{files, refs};
-use crate::blox::WsExecOutput;
+use crate::blox::{ExecMode, WsExecOutput};
 use crate::store::Store;
 use std::collections::HashMap;
 
@@ -44,11 +44,12 @@ pub(crate) struct BloxRemote;
 
 impl RemoteMedia for BloxRemote {
     fn exec(&self, workspace: &str, args: &[&str]) -> Result<String, String> {
-        crate::blox::ws_exec(workspace, args).map_err(|e| e.to_string())
+        crate::blox::ws_exec(workspace, ExecMode::Transient, args).map_err(|e| e.to_string())
     }
 
     fn exec_output(&self, workspace: &str, args: &[&str]) -> Result<WsExecOutput, String> {
-        crate::blox::ws_exec_output(workspace, args).map_err(|e| e.to_string())
+        // Media bytes are binary; `blox-cli` base64-encodes transient output.
+        crate::blox::ws_exec_output(workspace, ExecMode::Transient, args).map_err(|e| e.to_string())
     }
 }
 

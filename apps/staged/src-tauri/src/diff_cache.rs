@@ -610,8 +610,12 @@ pub fn collect_branch_diff(
     // Execute the collection script in a single remote call.
     let script = build_collect_script(repo_subpath, &base_ref, head_sha, commit_shas);
     let t_exec = std::time::Instant::now();
-    let output = crate::blox::ws_exec(workspace_name, &["bash", "-c", &script])
-        .map_err(|e| anyhow::anyhow!("remote diff collection script failed: {e}"))?;
+    let output = crate::blox::ws_exec(
+        workspace_name,
+        crate::blox::ExecMode::Transient,
+        &["bash", "-c", &script],
+    )
+    .map_err(|e| anyhow::anyhow!("remote diff collection script failed: {e}"))?;
     log::info!(
         "collect_branch_diff: remote exec done in {:?}, output size={} bytes",
         t_exec.elapsed(),

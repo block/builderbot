@@ -1671,6 +1671,13 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
+            // Start capturing home's shell env before anything can ask for a
+            // worktree's: the ACP tools reconciler started below, doctor and
+            // session starts all need it, and a cold `$SHELL -ils` takes
+            // 10–25 s. It skips the capture queue, so the worktree captures
+            // the first timelines start can't hold it up.
+            shell_env::prewarm_home_env(session_runner::shell_env_cache());
+
             // Register the primary ACP bridge tools dir before any command
             // runs so binary resolution (session spawn, provider discovery)
             // prefers the managed bridge shims (or the STAGED_ACP_TOOLS_DIR

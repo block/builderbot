@@ -175,7 +175,7 @@ pub fn run_lite_output(repo: &Path, args: &[&str]) -> Result<GitOutput, GitError
 /// pull, discard) using `run` finds a `Ready` snapshot and doesn't pay the
 /// capture cost itself.
 pub fn run_smart(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    warm_shell_env_async(repo);
+    warm_shell_env(repo);
 
     match run_with_env(repo, args, EnvSource::Lite) {
         Ok(out) => Ok(out),
@@ -195,7 +195,7 @@ pub fn run_smart(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 /// Use this when a caller has already resolved the directory a future
 /// captured-env operation will need, but has no git read to run there yet.
 pub(crate) fn prewarm_shell_env(repo: &Path) {
-    warm_shell_env_async(repo);
+    warm_shell_env(repo);
 }
 
 /// Which environment to pass to the spawned git process.
@@ -338,25 +338,19 @@ fn is_missing_ref_error(stderr: &str) -> bool {
         .any(|p| stderr.contains(p))
 }
 
-/// Fire-and-forget warm-up of the captured shell env for `repo`. Coalesces
-/// with any in-flight capture (sync or async) via the [`ShellEnvCache`]
-/// `InFlightHandle`, so multiple concurrent warmers for the same repo cost
-/// one capture, not N.
+/// Fire-and-forget warm-up of the captured shell env for `repo`: starts the
+/// capture on a capture thread unless one is cached or in flight, and
+/// returns at once. Concurrent warmers for the same env root cost one
+/// capture, not N, and nobody waits on it until a captured-env op needs it.
 ///
-/// No-op if there's no Tokio runtime available (e.g. unit tests). In that
-/// case the retry path falls back to `get_blocking`, which captures inline.
+/// A no-op under unit tests, which must not launch the user's real shell.
 #[cfg(not(test))]
-fn warm_shell_env_async(repo: &Path) {
-    let repo = repo.to_path_buf();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            let _ = crate::session_runner::shell_env_cache().get(&repo).await;
-        });
-    }
+fn warm_shell_env(repo: &Path) {
+    crate::session_runner::shell_env_cache().prewarm(repo);
 }
 
 #[cfg(test)]
-fn warm_shell_env_async(_repo: &Path) {}
+fn warm_shell_env(_repo: &Path) {}
 
 #[cfg(not(test))]
 fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) -> AppliedEnv {
@@ -397,9 +391,11 @@ fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) -> Applied
 /// and bound explicitly so tests can drive it with a hermetic shell.
 ///
 /// When the bound runs out the inherited env is used and the capture is left
-/// running. Only the first caller to give up on a given capture warns; the
+/// running. Only the first caller to give up on a given capture logs it; the
 /// rest of a refresh's reads, and other branches waiting on the same
-/// directory, would otherwise repeat the line once each.
+/// directory, would otherwise repeat the line once each. The warning is the
+/// capture's own summary line when it finishes, which counts every caller
+/// that gave up (`gave_up=`).
 fn apply_captured_env_within(
     command: &mut Command,
     repo: &Path,
@@ -413,7 +409,7 @@ fn apply_captured_env_within(
         }
         Ok(BoundedEnv::StillCapturing { first }) => {
             if first {
-                log::warn!(
+                log::info!(
                     "Shell env capture for {} still running after {bound:?}; read-only git \
                      there uses the inherited env until it finishes",
                     repo.display()

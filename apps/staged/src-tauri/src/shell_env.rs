@@ -13,31 +13,56 @@
 //! [`ShellEnvCache::env_key`]). Subdirectories of one worktree share its
 //! snapshot, with `PWD` set to the caller's directory.
 //!
-//! Concurrent first-callers for the same root are coalesced through a
-//! `watch` channel so only one shell is spawned per (root, miss).
+//! Concurrent first-callers for the same root are coalesced through one
+//! `InFlight` entry, so only one shell is spawned per (root, miss). At most
+//! two shells (`CAPTURE_LIMIT`) run at once across all roots; the rest queue
+//! in arrival order (see `capture_slots.rs`). `$HOME`'s capture skips the
+//! queue, and startup begins it before anything else
+//! ([`prewarm_home_env`]), so worktree captures can never hold it up.
+//!
+//! A capture never belongs to a caller's future. Async callers, bounded
+//! reads and prewarms run it on a `shell-env-capture` thread; a sync caller
+//! runs it on its own thread. A caller that stops waiting, by timeout or by
+//! being dropped, leaves the capture running to fill the cache for everyone
+//! else.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::watch;
 
+mod capture_slots;
 mod env_root;
 
+#[cfg(all(test, unix))]
+mod capture_limit_tests;
+
+use capture_slots::{CaptureSlots, CAPTURE_LIMIT};
 use env_root::resolve_env_root;
 
 /// Default cache TTL — long enough that pipeline runs amortise the capture
 /// cost, short enough that edits to `~/.zshrc` or `bin/activate-hermit` are
 /// picked up within an hour without an explicit invalidation.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
-const HOME_ENV_CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a home-env caller waits before going on with the fallback env.
+/// A cold first shell measured 23 s, so this covers it with room to spare.
+/// Running out doesn't stop the capture; it lands in the cache for the next
+/// caller.
+const HOME_ENV_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A capture that kept any caller waiting this long gets a warning.
+const SLOW_CAPTURE_WAIT: Duration = Duration::from_secs(1);
+
+/// A capture that took this long from start to finish, queue included, gets
+/// a warning even if nobody waited on it.
+const SLOW_CAPTURE: Duration = Duration::from_secs(5);
 
 /// Captured environment from a single interactive login shell invocation,
 /// as seen from the directory it was requested for.
@@ -140,6 +165,17 @@ pub async fn capture_home_interactive_env(cache: &ShellEnvCache) -> HashMap<Stri
     capture_home_interactive_env_for_dir(cache, &home, HOME_ENV_CAPTURE_TIMEOUT).await
 }
 
+/// Start capturing `$HOME`'s env without waiting for it.
+///
+/// App setup calls this before anything that captures a worktree's env, and
+/// before the ACP tools reconciler and doctor ask for home's env, so they
+/// join a capture that is already under way.
+pub fn prewarm_home_env(cache: &ShellEnvCache) {
+    if let Some(home) = home_dir_from_env() {
+        cache.prewarm(&home);
+    }
+}
+
 fn home_dir_from_env() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
@@ -147,6 +183,9 @@ fn home_dir_from_env() -> Option<PathBuf> {
         .or_else(dirs::home_dir)
 }
 
+/// Home's env, waiting at most `timeout_duration`. On timeout the caller
+/// gets an empty map (callers fall back to the process env), and the capture
+/// carries on to fill the cache.
 async fn capture_home_interactive_env_for_dir(
     cache: &ShellEnvCache,
     home: &Path,
@@ -163,7 +202,8 @@ async fn capture_home_interactive_env_for_dir(
         }
         Err(_) => {
             log::warn!(
-                "Timed out after {:?} capturing home shell env for {}",
+                "Timed out after {:?} capturing home shell env for {}; using the fallback env \
+                 while the capture finishes in the background",
                 timeout_duration,
                 home.display()
             );
@@ -337,6 +377,8 @@ struct InFlightPromise {
     cv: Condvar,
     /// Set by the first bounded waiter whose bound ran out on this capture.
     bound_expired: AtomicBool,
+    /// Who waited on this capture, for its one summary line.
+    waits: Mutex<WaitStats>,
 }
 
 enum InFlightState {
@@ -344,8 +386,8 @@ enum InFlightState {
     /// Capturer published a result (success or capture-time failure). Waiters
     /// take this clone and return it directly.
     Done(Result<ShellEnv, String>),
-    /// Capturer dropped without publishing (panic/cancellation). Waiters fall
-    /// through to retry the outer cache lookup.
+    /// Capturer dropped without publishing (panic, or its thread couldn't
+    /// start). Waiters fall through to retry the outer cache lookup.
     Cancelled,
 }
 
@@ -356,12 +398,68 @@ enum Waited {
     TimedOut,
 }
 
+/// Callers waiting on one capture. The capture reports them in a single
+/// line when it finishes, instead of each waiter logging its own wait.
+#[derive(Default)]
+struct WaitStats {
+    /// Everyone who waited, including those who stopped early.
+    waiters: usize,
+    /// Waiters that stopped before the capture finished: a bounded read whose
+    /// bound ran out, or an async caller that timed out or was dropped.
+    gave_up: usize,
+    longest_gave_up: Duration,
+    /// When each waiter still waiting started.
+    waiting_since: Vec<Instant>,
+}
+
+/// [`WaitStats`] as of the moment a capture finished.
+#[derive(Debug, PartialEq)]
+struct WaitSummary {
+    waiters: usize,
+    gave_up: usize,
+    longest: Duration,
+}
+
+/// One caller's wait on an [`InFlightPromise`], from
+/// [`InFlightPromise::register_waiter`]. Dropped while the capture is still
+/// pending, it counts the caller as having given up.
+struct Waiter {
+    promise: Arc<InFlightPromise>,
+    since: Instant,
+}
+
+impl Drop for Waiter {
+    fn drop(&mut self) {
+        // Holding `state` keeps the capture from finishing, and summarising
+        // the waits, while this one is moved to `gave_up`.
+        let state = self
+            .promise
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !matches!(*state, InFlightState::Pending) {
+            return;
+        }
+        let mut waits = self
+            .promise
+            .waits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = waits.waiting_since.iter().position(|s| *s == self.since) {
+            waits.waiting_since.swap_remove(i);
+        }
+        waits.gave_up += 1;
+        waits.longest_gave_up = waits.longest_gave_up.max(self.since.elapsed());
+    }
+}
+
 impl InFlightPromise {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(InFlightState::Pending),
             cv: Condvar::new(),
             bound_expired: AtomicBool::new(false),
+            waits: Mutex::new(WaitStats::default()),
         })
     }
 
@@ -375,7 +473,7 @@ impl InFlightPromise {
 
     fn set_cancelled(&self) {
         {
-            let mut g = self.state.lock().unwrap();
+            let mut g = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             // No-op if a result was already published — preserves Done(Err).
             if matches!(*g, InFlightState::Pending) {
                 *g = InFlightState::Cancelled;
@@ -421,6 +519,36 @@ impl InFlightPromise {
     fn first_bound_expiry(&self) -> bool {
         !self.bound_expired.swap(true, Ordering::Relaxed)
     }
+
+    /// Count a caller as waiting on this capture until the returned
+    /// [`Waiter`] drops.
+    fn register_waiter(self: &Arc<Self>) -> Waiter {
+        let since = Instant::now();
+        let mut waits = self.waits.lock().unwrap();
+        waits.waiters += 1;
+        waits.waiting_since.push(since);
+        Waiter {
+            promise: Arc::clone(self),
+            since,
+        }
+    }
+
+    /// Who waited, and the longest wait, for a capture that finished at
+    /// `finished`. Waiters still registered then waited until `finished`.
+    fn wait_summary(&self, finished: Instant) -> WaitSummary {
+        let waits = self.waits.lock().unwrap_or_else(PoisonError::into_inner);
+        let longest_still_waiting = waits
+            .waiting_since
+            .iter()
+            .map(|since| finished.saturating_duration_since(*since))
+            .max()
+            .unwrap_or_default();
+        WaitSummary {
+            waiters: waits.waiters,
+            gave_up: waits.gave_up,
+            longest: waits.longest_gave_up.max(longest_still_waiting),
+        }
+    }
 }
 
 /// Result of [`ShellEnvCache::get_blocking_within`].
@@ -428,57 +556,195 @@ impl InFlightPromise {
 pub enum BoundedEnv {
     /// A fresh snapshot, cached or captured inside the bound.
     Ready(ShellEnv),
-    /// The capture was still running when the bound ran out. It keeps running
-    /// and fills the cache for later callers. `first` is true for exactly one
-    /// caller per capture, so a slow capture is reported once rather than once
-    /// per waiter.
+    /// The capture was still running, or still queued for a slot, when the
+    /// bound ran out. It keeps going and fills the cache for later callers.
+    /// `first` is true for exactly one caller per capture, so a slow capture
+    /// is reported once rather than once per waiter.
     StillCapturing { first: bool },
 }
 
 /// Cache of [`ShellEnv`] snapshots keyed by environment root (see
 /// [`ShellEnvCache::env_key`]).
 pub struct ShellEnvCache {
-    inner: Mutex<HashMap<PathBuf, CachedEntry>>,
+    inner: Arc<Mutex<HashMap<PathBuf, CachedEntry>>>,
+    /// Limits this cache's captures to [`CAPTURE_LIMIT`] at a time. The app
+    /// has a single cache (`session_runner::shell_env_cache`), so this is the
+    /// process-wide limit; caches built for tests each get their own.
+    slots: Arc<CaptureSlots>,
     /// Working dir → (env root, when resolved), so the walk runs once per
     /// directory per TTL rather than once per git op.
     env_keys: Mutex<HashMap<PathBuf, (PathBuf, Instant)>>,
-    /// Where the env-root walk stops; see [`ShellEnvCache::env_key`].
+    /// Where the env-root walk stops (see [`ShellEnvCache::env_key`]), and the
+    /// one key whose capture skips the slot queue.
     home: Option<PathBuf>,
     ttl: Duration,
     shell: PathBuf,
     temp_root: PathBuf,
 }
 
-/// Removes an `InFlight` entry from the cache if its capture is dropped
-/// (cancellation or panic) before publishing a result, and wakes any
-/// waiters so they can retry rather than block forever.
-///
-/// Without this, a cancelled capture would leave a stale `InFlight` entry in
-/// the map whose async sender is gone (causing async waiters to spin on a
-/// dead receiver) and whose promise is stuck `Pending` (causing sync waiters
-/// to park on the condvar forever).
-struct InFlightGuard<'a> {
-    cache: &'a ShellEnvCache,
-    key: &'a Path,
-    promise: Arc<InFlightPromise>,
-    promoted: bool,
+/// What [`ShellEnvCache::lookup_or_start`] found for an env root.
+enum Lookup {
+    Ready(ShellEnv),
+    InFlight(InFlightHandle),
+    /// Nothing usable was cached, so this caller now owns a new `InFlight`
+    /// entry and must run or spawn its capture.
+    Start(CaptureJob),
 }
 
-impl Drop for InFlightGuard<'_> {
+/// Where a capture ran, for its summary line.
+#[derive(Clone, Copy)]
+enum CaptureMode {
+    /// On the thread of the sync caller that needed it.
+    Inline,
+    /// On a dedicated `shell-env-capture` thread.
+    Background,
+}
+
+impl CaptureMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Background => "background",
+        }
+    }
+}
+
+/// A capture that owns its env root's `InFlight` entry. Run it on the
+/// caller's thread with [`CaptureJob::run_inline`], or hand it to a capture
+/// thread with [`CaptureJob::spawn`].
+///
+/// Dropped without publishing a result (its thread couldn't start, or the
+/// capture panicked), it evicts its entry and wakes every waiter so they
+/// retry instead of waiting forever. `Drop::drop` runs before the fields
+/// drop, so sync waiters are woken and the entry is gone before `tx` drops
+/// and wakes async waiters.
+struct CaptureJob {
+    entries: Arc<Mutex<HashMap<PathBuf, CachedEntry>>>,
+    slots: Arc<CaptureSlots>,
+    key: PathBuf,
+    shell: PathBuf,
+    temp_root: PathBuf,
+    /// `$HOME`'s capture runs without waiting for a slot.
+    priority: bool,
+    handle: InFlightHandle,
+    tx: watch::Sender<Option<Result<ShellEnv, String>>>,
+    /// When the `InFlight` entry was published; queue time counts from here.
+    created: Instant,
+    published: bool,
+}
+
+impl CaptureJob {
+    /// Run the capture on a new `shell-env-capture` thread and return the
+    /// handle to wait on. If the thread can't start, the job is dropped,
+    /// which evicts the entry and releases anyone who already joined it.
+    fn spawn(self) -> io::Result<InFlightHandle> {
+        let handle = self.handle.clone();
+        std::thread::Builder::new()
+            .name("shell-env-capture".to_string())
+            .spawn(move || {
+                let _ = self.run(CaptureMode::Background);
+            })?;
+        Ok(handle)
+    }
+
+    /// Run the capture on this thread, counting this caller as a waiter.
+    fn run_inline(self) -> io::Result<ShellEnv> {
+        let _waiter = self.handle.promise.register_waiter();
+        self.run(CaptureMode::Inline)
+    }
+
+    fn run(mut self, mode: CaptureMode) -> io::Result<ShellEnv> {
+        // The slot is taken before the shell is spawned, and given back as
+        // soon as it exits.
+        let slot = (!self.priority).then(|| self.slots.acquire());
+        let started = Instant::now();
+        let outcome = capture_shell_env(&self.key, &self.shell, &self.temp_root);
+        let finished = Instant::now();
+        drop(slot);
+
+        let result = outcome.map(ShellEnv::captured);
+        {
+            let mut map = self.entries.lock().unwrap();
+            match &result {
+                Ok(env) => {
+                    map.insert(self.key.clone(), CachedEntry::Ready(env.clone()));
+                }
+                // No negative caching: the next caller starts afresh.
+                Err(_) => self.remove_own_entry(&mut map),
+            }
+        }
+        let published = result.as_ref().cloned().map_err(ToString::to_string);
+        self.published = true;
+        self.handle.promise.set_done(published.clone());
+        let _ = self.tx.send(Some(published));
+
+        log_capture(
+            &self.key,
+            mode,
+            self.priority,
+            started - self.created,
+            finished - started,
+            self.handle.promise.wait_summary(finished),
+            result.as_ref().err(),
+        );
+        result
+    }
+
+    /// Remove this job's `InFlight` entry, leaving any newer entry for the
+    /// key (started after an `invalidate`) alone.
+    fn remove_own_entry(&self, map: &mut HashMap<PathBuf, CachedEntry>) {
+        if matches!(
+            map.get(&self.key),
+            Some(CachedEntry::InFlight(handle)) if Arc::ptr_eq(&handle.promise, &self.handle.promise)
+        ) {
+            map.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for CaptureJob {
     fn drop(&mut self) {
-        if self.promoted {
+        if self.published {
             return;
         }
         {
-            let mut map = self.cache.inner.lock().unwrap();
-            if matches!(map.get(self.key), Some(CachedEntry::InFlight(_))) {
-                map.remove(self.key);
-            }
+            let mut map = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+            self.remove_own_entry(&mut map);
         }
-        // Wake sync waiters; async waiters wake when the capturer's `tx`
-        // drops after this guard. `set_cancelled` is a no-op if a `Done`
-        // result was already published (capture-time failure path).
-        self.promise.set_cancelled();
+        self.handle.promise.set_cancelled();
+    }
+}
+
+/// One line per finished capture, in place of a line per waiter. It warns
+/// when the capture kept someone waiting [`SLOW_CAPTURE_WAIT`] or longer,
+/// took [`SLOW_CAPTURE`] or longer, or failed.
+fn log_capture(
+    key: &Path,
+    mode: CaptureMode,
+    priority: bool,
+    queued: Duration,
+    capture: Duration,
+    waits: WaitSummary,
+    error: Option<&io::Error>,
+) {
+    let line = format!(
+        "shell-env-capture dir={} mode={} slot={} queued={}ms capture={}ms waiters={} \
+         gave_up={} longest_wait={}ms",
+        key.display(),
+        mode.as_str(),
+        if priority { "home" } else { "queue" },
+        queued.as_millis(),
+        capture.as_millis(),
+        waits.waiters,
+        waits.gave_up,
+        waits.longest.as_millis(),
+    );
+    if let Some(error) = error {
+        log::warn!("{line} failed: {error}");
+    } else if waits.longest >= SLOW_CAPTURE_WAIT || queued + capture >= SLOW_CAPTURE {
+        log::warn!("{line} (slow)");
+    } else {
+        log::debug!("{line}");
     }
 }
 
@@ -510,13 +776,22 @@ impl ShellEnvCache {
     /// [`with_shell_and_ttl`]: ShellEnvCache::with_shell_and_ttl
     pub fn with_shell_ttl_and_temp_root(shell: PathBuf, ttl: Duration, temp_root: PathBuf) -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            slots: Arc::new(CaptureSlots::new(CAPTURE_LIMIT)),
             env_keys: Mutex::new(HashMap::new()),
             home: home_dir_from_env(),
             ttl,
             shell,
             temp_root,
         }
+    }
+
+    /// Treat `home` as `$HOME`: its capture skips the slot queue and the
+    /// env-root walk stops there.
+    #[cfg(test)]
+    fn with_home(mut self, home: &Path) -> Self {
+        self.home = Some(home.to_path_buf());
+        self
     }
 
     /// The directory `working_dir`'s snapshot is captured in and cached
@@ -544,9 +819,56 @@ impl ShellEnvCache {
         key
     }
 
+    /// A fresh snapshot for `key`, the capture already running for it, or a
+    /// new `InFlight` entry for the caller to capture into.
+    fn lookup_or_start(&self, key: &Path) -> Lookup {
+        let mut map = self.inner.lock().unwrap();
+        match map.get(key) {
+            Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
+                return Lookup::Ready(env.clone());
+            }
+            Some(CachedEntry::InFlight(handle)) => return Lookup::InFlight(handle.clone()),
+            _ => {}
+        }
+        let (tx, async_rx) = watch::channel(None);
+        let handle = InFlightHandle {
+            promise: InFlightPromise::new(),
+            async_rx,
+        };
+        map.insert(key.to_path_buf(), CachedEntry::InFlight(handle.clone()));
+        Lookup::Start(CaptureJob {
+            entries: Arc::clone(&self.inner),
+            slots: Arc::clone(&self.slots),
+            key: key.to_path_buf(),
+            shell: self.shell.clone(),
+            temp_root: self.temp_root.clone(),
+            priority: self.home.as_deref() == Some(key),
+            handle,
+            tx,
+            created: Instant::now(),
+            published: false,
+        })
+    }
+
+    /// Start capturing `working_dir`'s env on a capture thread, unless it is
+    /// cached or already being captured, without waiting for it.
+    pub fn prewarm(&self, working_dir: &Path) {
+        let key = self.env_key(working_dir);
+        if let Lookup::Start(job) = self.lookup_or_start(&key) {
+            if let Err(error) = job.spawn() {
+                log::warn!(
+                    "Failed to start a shell env capture for {}: {error}",
+                    key.display()
+                );
+            }
+        }
+    }
+
     /// Return a fresh-or-recent snapshot for `working_dir`, captured at its
-    /// [`env_key`]. Spawns a shell on miss/expiry; concurrent misses for
-    /// directories with the same key share one capture.
+    /// [`env_key`]. Starts a capture on a capture thread on miss/expiry;
+    /// concurrent misses for directories with the same key share one
+    /// capture. Dropping the future, or timing it out, stops only this
+    /// caller's wait: the capture runs on and fills the cache.
     ///
     /// [`env_key`]: ShellEnvCache::env_key
     pub async fn get(&self, working_dir: &Path) -> io::Result<ShellEnv> {
@@ -557,92 +879,32 @@ impl ShellEnvCache {
 
     async fn get_at_root(&self, key: &Path) -> io::Result<ShellEnv> {
         loop {
-            enum Action {
-                Wait(InFlightHandle),
-                Capture {
-                    promise: Arc<InFlightPromise>,
-                    tx: watch::Sender<Option<Result<ShellEnv, String>>>,
-                },
-            }
-
-            let action = {
-                let mut map = self.inner.lock().unwrap();
-                match map.get(key) {
-                    Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
-                        return Ok(env.clone());
-                    }
-                    Some(CachedEntry::InFlight(handle)) => Action::Wait(handle.clone()),
-                    _ => {
-                        let promise = InFlightPromise::new();
-                        let (tx, rx) = watch::channel(None);
-                        map.insert(
-                            key.to_path_buf(),
-                            CachedEntry::InFlight(InFlightHandle {
-                                promise: promise.clone(),
-                                async_rx: rx,
-                            }),
-                        );
-                        Action::Capture { promise, tx }
-                    }
-                }
+            let handle = match self.lookup_or_start(key) {
+                Lookup::Ready(env) => return Ok(env),
+                Lookup::InFlight(handle) => handle,
+                Lookup::Start(job) => job.spawn()?,
             };
-
-            match action {
-                Action::Wait(handle) => {
-                    let mut rx = handle.async_rx;
-                    while rx.borrow().is_none() {
-                        if rx.changed().await.is_err() {
-                            // Sender dropped without delivering — re-check.
-                            break;
-                        }
-                    }
-                    let final_value = rx.borrow().clone();
-                    if let Some(result) = final_value {
-                        return result.map_err(io::Error::other);
-                    }
-                    // Fall through to retry.
-                }
-                Action::Capture { promise, tx } => {
-                    // Declared after `tx`/`promise` (match bindings) so it drops
-                    // first on cancellation/panic: evict the InFlight entry and
-                    // wake sync waiters before `tx` drops and signals async
-                    // waiters Err. Waiters then retry, find no entry, and
-                    // become the next Capturer.
-                    let mut guard = InFlightGuard {
-                        cache: self,
-                        key,
-                        promise: promise.clone(),
-                        promoted: false,
-                    };
-                    let outcome = capture_shell_env(key, &self.shell, &self.temp_root).await;
-                    match outcome {
-                        Ok(vars) => {
-                            let env = ShellEnv::captured(vars);
-                            self.inner
-                                .lock()
-                                .unwrap()
-                                .insert(key.to_path_buf(), CachedEntry::Ready(env.clone()));
-                            guard.promoted = true;
-                            promise.set_done(Ok(env.clone()));
-                            let _ = tx.send(Some(Ok(env.clone())));
-                            return Ok(env);
-                        }
-                        Err(err) => {
-                            let msg = err.to_string();
-                            promise.set_done(Err(msg.clone()));
-                            let _ = tx.send(Some(Err(msg)));
-                            return Err(err);
-                        }
-                    }
+            let _waiter = handle.promise.register_waiter();
+            let mut rx = handle.async_rx;
+            while rx.borrow().is_none() {
+                if rx.changed().await.is_err() {
+                    // Sender dropped without delivering — re-check.
+                    break;
                 }
             }
+            let final_value = rx.borrow().clone();
+            if let Some(result) = final_value {
+                return result.map_err(io::Error::other);
+            }
+            // The capture died without publishing — retry.
         }
     }
 
     /// Synchronous variant of [`get`] for sync callers like `git/cli.rs::run`.
     ///
     /// Returns a `Ready` snapshot if one is present and fresh; otherwise
-    /// spawns a *blocking* `$SHELL -ils` capture and stores the result.
+    /// runs a capture on this thread, waiting for a slot first, and stores
+    /// the result.
     ///
     /// Coordinates with both sync and async in-flight captures via the shared
     /// `InFlight` entry: a sync caller arriving while another (sync or async)
@@ -658,45 +920,16 @@ impl ShellEnvCache {
 
     fn get_blocking_at_root(&self, key: &Path) -> io::Result<ShellEnv> {
         loop {
-            enum Action {
-                Wait(Arc<InFlightPromise>),
-                Capture {
-                    promise: Arc<InFlightPromise>,
-                    tx: watch::Sender<Option<Result<ShellEnv, String>>>,
-                },
-            }
-
-            let action = {
-                let mut map = self.inner.lock().unwrap();
-                match map.get(key) {
-                    Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
-                        return Ok(env.clone());
-                    }
-                    Some(CachedEntry::InFlight(handle)) => Action::Wait(handle.promise.clone()),
-                    _ => {
-                        let promise = InFlightPromise::new();
-                        let (tx, rx) = watch::channel(None);
-                        map.insert(
-                            key.to_path_buf(),
-                            CachedEntry::InFlight(InFlightHandle {
-                                promise: promise.clone(),
-                                async_rx: rx,
-                            }),
-                        );
-                        Action::Capture { promise, tx }
-                    }
-                }
+            let promise = match self.lookup_or_start(key) {
+                Lookup::Ready(env) => return Ok(env),
+                Lookup::InFlight(handle) => handle.promise,
+                Lookup::Start(job) => return job.run_inline(),
             };
-
-            match action {
-                Action::Wait(promise) => match promise.wait_blocking() {
-                    Some(Ok(env)) => return Ok(env),
-                    Some(Err(msg)) => return Err(io::Error::other(msg)),
-                    None => continue, // Capturer cancelled — retry.
-                },
-                Action::Capture { promise, tx } => {
-                    return self.capture_blocking_as_owner(key, promise, tx);
-                }
+            let _waiter = promise.register_waiter();
+            match promise.wait_blocking() {
+                Some(Ok(env)) => return Ok(env),
+                Some(Err(msg)) => return Err(io::Error::other(msg)),
+                None => continue, // Capturer cancelled — retry.
             }
         }
     }
@@ -705,13 +938,14 @@ impl ShellEnvCache {
     ///
     /// A fresh snapshot comes back at once. Otherwise the caller waits on the
     /// env root's in-flight capture, joining one that is already running or
-    /// starting one on a background thread. If the bound runs out first, the
+    /// starting one on a capture thread. Time the capture spends queued for
+    /// a slot counts against the bound. If the bound runs out first, the
     /// capture is left alone: it keeps running, caches its result and wakes
     /// every other waiter as usual. Only this caller goes without it.
     ///
     /// [`get_blocking`]: ShellEnvCache::get_blocking
     pub fn get_blocking_within(
-        self: &Arc<Self>,
+        &self,
         working_dir: &Path,
         bound: Duration,
     ) -> io::Result<BoundedEnv> {
@@ -722,98 +956,27 @@ impl ShellEnvCache {
         })
     }
 
-    fn get_blocking_within_at_root(
-        self: &Arc<Self>,
-        key: &Path,
-        bound: Duration,
-    ) -> io::Result<BoundedEnv> {
+    fn get_blocking_within_at_root(&self, key: &Path, bound: Duration) -> io::Result<BoundedEnv> {
         let deadline = Instant::now() + bound;
 
         loop {
-            let promise = {
-                let mut map = self.inner.lock().unwrap();
-                match map.get(key) {
-                    Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
-                        return Ok(BoundedEnv::Ready(env.clone()));
-                    }
-                    Some(CachedEntry::InFlight(handle)) => handle.promise.clone(),
-                    _ => {
-                        let promise = InFlightPromise::new();
-                        let (tx, rx) = watch::channel(None);
-                        // The capture has to outlive this caller's wait, so it
-                        // gets its own thread. The thread starts before the
-                        // entry is published, so if it can't be spawned nobody
-                        // has seen the promise and there is nothing to unwind.
-                        let cache = Arc::clone(self);
-                        let capture_key = key.to_path_buf();
-                        let capture_promise = promise.clone();
-                        std::thread::Builder::new()
-                            .name("shell-env-capture".to_string())
-                            .spawn(move || {
-                                let _ = cache.capture_blocking_as_owner(
-                                    &capture_key,
-                                    capture_promise,
-                                    tx,
-                                );
-                            })?;
-                        map.insert(
-                            key.to_path_buf(),
-                            CachedEntry::InFlight(InFlightHandle {
-                                promise: promise.clone(),
-                                async_rx: rx,
-                            }),
-                        );
-                        promise
-                    }
-                }
+            let promise = match self.lookup_or_start(key) {
+                Lookup::Ready(env) => return Ok(BoundedEnv::Ready(env)),
+                Lookup::InFlight(handle) => handle.promise,
+                // The capture has to outlive this caller's wait.
+                Lookup::Start(job) => job.spawn()?.promise,
             };
-
+            let waiter = promise.register_waiter();
             match promise.wait_blocking_until(deadline) {
                 Waited::Done(Ok(env)) => return Ok(BoundedEnv::Ready(env)),
                 Waited::Done(Err(msg)) => return Err(io::Error::other(msg)),
                 Waited::Cancelled => continue, // Capturer cancelled — retry.
                 Waited::TimedOut => {
+                    drop(waiter);
                     return Ok(BoundedEnv::StillCapturing {
                         first: promise.first_bound_expiry(),
                     });
                 }
-            }
-        }
-    }
-
-    /// Run a blocking capture for `key` as the owner of its `InFlight` entry,
-    /// then cache the result and wake every waiter.
-    fn capture_blocking_as_owner(
-        &self,
-        key: &Path,
-        promise: Arc<InFlightPromise>,
-        tx: watch::Sender<Option<Result<ShellEnv, String>>>,
-    ) -> io::Result<ShellEnv> {
-        // Locals drop before parameters, so on panic the guard evicts the
-        // entry and wakes sync waiters before `tx` drops, as in `get`.
-        let mut guard = InFlightGuard {
-            cache: self,
-            key,
-            promise: promise.clone(),
-            promoted: false,
-        };
-        match capture_shell_env_blocking(key, &self.shell, &self.temp_root) {
-            Ok(vars) => {
-                let env = ShellEnv::captured(vars);
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .insert(key.to_path_buf(), CachedEntry::Ready(env.clone()));
-                guard.promoted = true;
-                promise.set_done(Ok(env.clone()));
-                let _ = tx.send(Some(Ok(env.clone())));
-                Ok(env)
-            }
-            Err(err) => {
-                let msg = err.to_string();
-                promise.set_done(Err(msg.clone()));
-                let _ = tx.send(Some(Err(msg)));
-                Err(err)
             }
         }
     }
@@ -886,79 +1049,10 @@ fn parse_env_dump(bytes: &[u8]) -> Vec<(String, String)> {
     vars
 }
 
-async fn capture_shell_env(
-    working_dir: &Path,
-    shell: &Path,
-    temp_root: &Path,
-) -> io::Result<Vec<(String, String)>> {
-    let dump_path = dump_path(temp_root);
-    let script = dump_script(&dump_path);
-
-    let mut cmd = Command::new(shell);
-    cmd.current_dir(working_dir)
-        .env_clear()
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("USER", std::env::var("USER").unwrap_or_default())
-        .env("SHELL", shell)
-        .arg("-i")
-        .arg("-l")
-        .arg("-s")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-
-    // Detach from the parent's controlling TTY so an interactive `$SHELL -ils`
-    // can't `tcsetpgrp` onto the user's terminal or mutate its modes via
-    // rcfiles. Without this, the spawned shell inherits the staged binary's
-    // ctty (the user's real /dev/tty up the chain), and on exit leaves the
-    // user's TTY foreground-PG pointing at a dead PGID — the outer zsh later
-    // dies with EIO on read.
-    #[cfg(unix)]
-    unsafe {
-        // SAFETY: `setsid()` is async-signal-safe.
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-
-    let mut child = cmd.spawn()?;
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("Failed to open shell stdin for env capture"))?;
-        stdin.write_all(script.as_bytes()).await?;
-        stdin.flush().await?;
-        // Drop stdin → shell sees EOF after `exit` and terminates cleanly.
-    }
-
-    let status = child.wait().await?;
-    if !status.success() {
-        let _ = tokio::fs::remove_file(&dump_path).await;
-        return Err(io::Error::other(format!(
-            "Shell env capture exited with status {status}"
-        )));
-    }
-
-    let bytes = match tokio::fs::read(&dump_path).await {
-        Ok(b) => b,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&dump_path).await;
-            return Err(e);
-        }
-    };
-    let _ = tokio::fs::remove_file(&dump_path).await;
-
-    Ok(parse_env_dump(&bytes))
-}
-
-/// Synchronous counterpart to [`capture_shell_env`].
-///
-/// Blocks the current thread on the shell's startup. Suitable for sync
-/// callers (`git/cli.rs::run`); async callers should use [`capture_shell_env`].
-fn capture_shell_env_blocking(
+/// Run `$SHELL -ils` in `working_dir` and return the environment it ends up
+/// with. Blocks the current thread on the shell's startup; callers run it on
+/// a thread of its own (see [`CaptureJob`]).
+fn capture_shell_env(
     working_dir: &Path,
     shell: &Path,
     temp_root: &Path,
@@ -981,7 +1075,12 @@ fn capture_shell_env_blocking(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    // See `capture_shell_env` for why this is required.
+    // Detach from the parent's controlling TTY so an interactive `$SHELL -ils`
+    // can't `tcsetpgrp` onto the user's terminal or mutate its modes via
+    // rcfiles. Without this, the spawned shell inherits the staged binary's
+    // ctty (the user's real /dev/tty up the chain), and on exit leaves the
+    // user's TTY foreground-PG pointing at a dead PGID — the outer zsh later
+    // dies with EIO on read.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -1298,39 +1397,49 @@ mod tests {
         );
     }
 
+    /// Dropping the async caller that started a capture stops only its wait:
+    /// the `InFlight` entry stays, the capture lands in the cache, and the
+    /// next caller gets it without a second shell.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn cancelled_capture_evicts_stale_inflight() {
-        let cache = Arc::new(ShellEnvCache::new());
-        let dir = std::env::temp_dir();
+    async fn dropped_async_caller_leaves_the_capture_running() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let counter = scratch.path().join("launches");
+        let shell = counting_shell(&counter, "0.5");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
 
-        // Drive a Capturer just long enough to insert InFlight, then abort it.
-        // On a current_thread runtime, yield_now hands control to the spawned
-        // task; it inserts InFlight before its first internal `.await`, then
-        // parks somewhere inside `capture_shell_env`.
         let first = tokio::spawn({
             let cache = cache.clone();
-            let dir = dir.clone();
+            let dir = dir_path.clone();
             async move { cache.get(&dir).await }
         });
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
         first.abort();
         let _ = first.await;
 
-        // The guard's Drop must have evicted the InFlight entry — otherwise
-        // subsequent callers would clone a dead receiver and spin.
-        {
-            let map = cache.inner.lock().unwrap();
-            assert!(
-                !matches!(map.get(&dir), Some(CachedEntry::InFlight(_))),
-                "InFlight entry leaked after capture future was cancelled"
-            );
-        }
+        assert!(
+            matches!(
+                cache.inner.lock().unwrap().get(&dir_path),
+                Some(CachedEntry::InFlight(_))
+            ),
+            "the capture must outlive the caller that started it"
+        );
 
-        // And a subsequent caller must complete (not spin) within a sane bound.
-        let second = tokio::time::timeout(Duration::from_secs(30), cache.get(&dir))
+        let second = tokio::time::timeout(Duration::from_secs(30), cache.get(&dir_path))
             .await
-            .expect("second caller must not spin");
-        assert!(second.is_ok());
+            .expect("second caller must not spin")
+            .expect("capture");
+        assert!(second.vars().iter().any(|(k, _)| k == "PATH"));
+        assert_eq!(
+            launches(&counter),
+            1,
+            "the dropped caller's capture is reused"
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -1609,22 +1718,14 @@ mod tests {
         );
     }
 
-    /// B6: When the active Capturer is aborted, a parallel Waiter must wake
-    /// (either becoming the next Capturer and succeeding, or seeing a
-    /// recapture-then-Ok) within a bounded timeout — no spin-loop.
-    ///
-    /// Uses the fake-shell seam so the post-cancellation recapture is fast
-    /// and deterministic. The 3s budget is tight enough to catch
-    /// slower-but-not-infinite regressions (~600ms is the expected path:
-    /// abort → guard evicts InFlight → waiter retries → new capture's
-    /// `sleep 0.5` + parse), not just the hard hang from the original
-    /// cancellation bug.
+    /// B6: An async waiter joined to a capture whose starter is aborted still
+    /// gets that capture's snapshot, from the one shell, within a bound.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn waiter_wakes_when_capturer_cancels() {
-        let shell = write_fake_shell(
-            "#!/bin/sh\nsleep 0.5\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
-        );
+    async fn waiter_gets_the_capture_after_its_starter_is_dropped() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let counter = scratch.path().join("launches");
+        let shell = counting_shell(&counter, "0.5");
         let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
             shell.to_path_buf(),
             Duration::from_secs(3600),
@@ -1632,36 +1733,30 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_path = dir.path().to_path_buf();
 
-        // First task becomes the Capturer; it inserts InFlight before its
-        // first internal `.await` inside `capture_shell_env`.
-        let capturer = tokio::spawn({
+        let starter = tokio::spawn({
             let cache = cache.clone();
             let dir = dir_path.clone();
             async move { cache.get(&dir).await }
         });
-        // Give the capturer a chance to insert InFlight.
-        tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Second task should arrive as a Waiter on the same InFlight rx.
         let waiter = tokio::spawn({
             let cache = cache.clone();
             let dir = dir_path.clone();
-            async move { tokio::time::timeout(Duration::from_secs(3), cache.get(&dir)).await }
+            async move { tokio::time::timeout(Duration::from_secs(10), cache.get(&dir)).await }
         });
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        capturer.abort();
-        let _ = capturer.await;
+        starter.abort();
+        let _ = starter.await;
 
-        // Waiter must complete within a bounded time (not spin), and ultimately
-        // succeed because the cancellation evicts InFlight so it can recapture.
-        let waiter_result = waiter.await.expect("waiter task");
-        let inner = waiter_result.expect("waiter must not spin past timeout");
-        assert!(
-            inner.is_ok(),
-            "waiter should ultimately succeed after capturer cancellation: {inner:?}"
-        );
+        let env = waiter
+            .await
+            .expect("waiter task")
+            .expect("waiter must not spin past timeout")
+            .expect("capture");
+        assert!(env.vars().iter().any(|(k, _)| k == "PATH"));
+        assert_eq!(launches(&counter), 1);
     }
 
     /// B7: A failing capture propagates `Err` to all concurrent waiters AND is
@@ -1874,15 +1969,14 @@ mod tests {
         );
     }
 
-    /// B11: A sync `get_blocking` caller waiting on the promise wakes and
-    /// retries (rather than blocking forever) when the async capturer is
-    /// cancelled mid-capture.
+    /// B11: A sync `get_blocking` caller parked on a capture whose async
+    /// starter is aborted wakes with that capture's snapshot.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn sync_waiter_wakes_when_async_capturer_cancels() {
-        let shell = write_fake_shell(
-            "#!/bin/sh\nsleep 0.5\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
-        );
+    async fn sync_waiter_gets_the_capture_after_its_async_starter_is_dropped() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let counter = scratch.path().join("launches");
+        let shell = counting_shell(&counter, "0.5");
         let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
             shell.to_path_buf(),
             Duration::from_secs(3600),
@@ -1890,12 +1984,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_path = dir.path().to_path_buf();
 
-        let capturer = tokio::spawn({
+        let starter = tokio::spawn({
             let cache = cache.clone();
             let dir = dir_path.clone();
             async move { cache.get(&dir).await }
         });
-        tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let waiter = tokio::task::spawn_blocking({
@@ -1905,18 +1998,74 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        capturer.abort();
-        let _ = capturer.await;
+        starter.abort();
+        let _ = starter.await;
 
-        let result = tokio::time::timeout(Duration::from_secs(5), waiter)
+        let result = tokio::time::timeout(Duration::from_secs(10), waiter)
             .await
             .expect("sync waiter must not park forever")
             .expect("waiter task")
-            .expect("recapture must ultimately succeed");
+            .expect("capture");
         assert!(
             result.vars().iter().any(|(k, _)| k == "PATH"),
-            "post-cancellation recapture should produce a valid snapshot"
+            "the starter's capture should produce a valid snapshot"
         );
+        assert_eq!(launches(&counter), 1);
+    }
+
+    /// B12: A capture dropped before it publishes anything (its thread
+    /// couldn't start, or it panicked) evicts its entry and wakes its sync and
+    /// async waiters, which retry and capture afresh instead of parking.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unpublished_capture_evicts_its_entry_and_wakes_waiters() {
+        let shell =
+            write_fake_shell("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
+
+        let Lookup::Start(job) = cache.lookup_or_start(&dir_path) else {
+            panic!("a cold dir should start a capture");
+        };
+        let sync_waiter = tokio::task::spawn_blocking({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            move || cache.get_blocking(&dir)
+        });
+        let async_waiter = tokio::spawn({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            async move { cache.get(&dir).await }
+        });
+        let promise = job.handle.promise.clone();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while promise.waits.lock().unwrap().waiters < 2 {
+            assert!(Instant::now() < deadline, "both waiters should join");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        drop(job);
+
+        let within = Duration::from_secs(10);
+        let sync_env = tokio::time::timeout(within, sync_waiter)
+            .await
+            .expect("sync waiter must not park forever")
+            .expect("sync task")
+            .expect("recapture");
+        let async_env = tokio::time::timeout(within, async_waiter)
+            .await
+            .expect("async waiter must not wait forever")
+            .expect("async task")
+            .expect("recapture");
+        assert!(matches!(
+            *promise.state.lock().unwrap(),
+            InFlightState::Cancelled
+        ));
+        assert_eq!(sync_env.captured_at(), async_env.captured_at());
     }
 
     /// C9: Values containing newlines round-trip through the NUL-delimited

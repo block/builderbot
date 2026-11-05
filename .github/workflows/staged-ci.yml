@@ -32,6 +32,8 @@ env:
   # No debuginfo: smaller target dirs, so smaller rust-cache entries and faster
   # links. rust-cache hashes CARGO_* vars into its key, so this keys the cache.
   CARGO_PROFILE_DEV_DEBUG: "0"
+  # System libraries Tauri builds against on Linux. Both Rust jobs install them.
+  TAURI_APT_PACKAGES: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
 # Each job runs one `ci-*` recipe from apps/staged/justfile; together they cover
 # everything `just ci` runs.
@@ -107,8 +109,12 @@ jobs:
           shared-key: staged-rust-lint
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-      # Applies when the apt cache below misses and installs from the mirror.
-      - name: Configure apt
+      # cache-apt-pkgs-action never runs `apt-get update` on GitHub-hosted
+      # runners, so it picks versions from the runner image's package index.
+      # Once Ubuntu supersedes one of them, the mirror deletes that .deb and
+      # the install 404s. So refresh the index first. The options also apply
+      # to installs on a cache miss.
+      - name: Configure apt and refresh the package index
         run: |
           sudo tee /etc/apt/apt.conf.d/99-staged-ci > /dev/null <<'EOF'
           APT::Install-Recommends "false";
@@ -117,15 +123,30 @@ jobs:
           Acquire::https::Timeout "30";
           DPkg::Lock::Timeout "120";
           EOF
+          sudo apt-get update
 
       # Install system dependencies for Tauri (Linux). A cache hit restores
-      # the files without touching the Ubuntu mirror. Bump `version` to
-      # force a fresh install.
+      # the files without downloading the packages. Bump `version` to force a
+      # fresh install.
       - name: Install Tauri dependencies (Linux)
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
-          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-          version: "1"
+          packages: ${{ env.TAURI_APT_PACKAGES }}
+          version: "2"
+
+      # The action reports success even when its install fails, and it still
+      # caches the empty result, so later runs restore nothing
+      # (awalsh128/cache-apt-pkgs-action#221). If the libraries are missing,
+      # install them from the mirror.
+      - name: Check Tauri dependencies
+        run: |
+          if pkg-config --exists webkit2gtk-4.1 appindicator3-0.1 librsvg-2.0 \
+            && command -v patchelf > /dev/null; then
+            exit 0
+          fi
+          echo "::warning::The apt cache did not provide the Tauri dependencies; installing them from the mirror. If this repeats, bump the cache-apt-pkgs-action version input."
+          # shellcheck disable=SC2086 # word-split the package list
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $TAURI_APT_PACKAGES
 
       - name: Install dependencies
         working-directory: apps/staged/src-tauri
@@ -154,8 +175,8 @@ jobs:
           shared-key: staged-rust-test
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-      # Applies when the apt cache below misses and installs from the mirror.
-      - name: Configure apt
+      # See rust-lint for why the index is refreshed first.
+      - name: Configure apt and refresh the package index
         run: |
           sudo tee /etc/apt/apt.conf.d/99-staged-ci > /dev/null <<'EOF'
           APT::Install-Recommends "false";
@@ -164,13 +185,25 @@ jobs:
           Acquire::https::Timeout "30";
           DPkg::Lock::Timeout "120";
           EOF
+          sudo apt-get update
 
       # Install system dependencies for Tauri (Linux); see rust-lint.
       - name: Install Tauri dependencies (Linux)
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
-          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-          version: "1"
+          packages: ${{ env.TAURI_APT_PACKAGES }}
+          version: "2"
+
+      # Recovers from a failed or empty apt cache; see rust-lint.
+      - name: Check Tauri dependencies
+        run: |
+          if pkg-config --exists webkit2gtk-4.1 appindicator3-0.1 librsvg-2.0 \
+            && command -v patchelf > /dev/null; then
+            exit 0
+          fi
+          echo "::warning::The apt cache did not provide the Tauri dependencies; installing them from the mirror. If this repeats, bump the cache-apt-pkgs-action version input."
+          # shellcheck disable=SC2086 # word-split the package list
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $TAURI_APT_PACKAGES
 
       - name: Install dependencies
         working-directory: apps/staged/src-tauri

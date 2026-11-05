@@ -39,6 +39,29 @@ pub fn run_lite(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     run_with_env(repo, args, EnvSource::Lite)
 }
 
+/// [`run_lite`], falling back to the captured env only when the parent env
+/// can't find `git` at all ([`GitError::GitNotFound`]).
+///
+/// For env-independent commands that still have to work on a machine whose
+/// only git is the one the login shell puts on `PATH` — the worktree
+/// teardown's `worktree list|remove|prune` and `branch -D`, which only touch
+/// `.git` admin files and the filesystem. Unlike [`run_smart`] there is no
+/// warm-up and no retry on `CommandFailed`: these commands run no filters,
+/// hooks or credential helpers, so a failure is git's answer rather than an
+/// env problem, and the success path never spawns a shell-env capture.
+pub fn run_lite_or_captured(repo: &Path, args: &[&str]) -> Result<String, GitError> {
+    match run_with_env(repo, args, EnvSource::Lite) {
+        Err(GitError::GitNotFound) => {
+            log::info!(
+                "[git::cli::run_lite_or_captured] git not on the lite PATH for {}; retrying with captured env",
+                repo.display()
+            );
+            run_with_env(repo, args, EnvSource::Captured)
+        }
+        result => result,
+    }
+}
+
 /// What a git run that got as far as exiting left behind, for callers that
 /// read meaning into a particular non-zero exit (`git config --get-regexp`
 /// exits 1 when nothing matches, which is an answer, not a failure).

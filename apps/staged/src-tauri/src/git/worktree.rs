@@ -217,6 +217,11 @@ pub fn move_worktree(repo: &Path, from: &Path, to: &Path) -> Result<(), GitError
 ///
 /// The branch_name parameter is optional - if provided, the local branch will be deleted.
 /// This is important for allowing the branch to be recreated later.
+///
+/// Every git call here goes through `cli::run_lite_or_captured`: they only
+/// touch `.git` admin files and the filesystem, so waiting on the clone's
+/// shell-env capture (which nothing else may have warmed) would only delay
+/// the teardown.
 pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError> {
     // First, get the branch name from the worktree before removing it
     let branch_name = get_worktree_branch(repo, worktree_path);
@@ -228,7 +233,8 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
             .ok_or_else(|| GitError::InvalidPath(worktree_path.display().to_string()))?;
 
         // Try: git worktree remove <path> --force
-        let result = cli::run(repo, &["worktree", "remove", worktree_str, "--force"]);
+        let result =
+            cli::run_lite_or_captured(repo, &["worktree", "remove", worktree_str, "--force"]);
 
         if let Err(e) = result {
             let error_msg = e.to_string();
@@ -245,21 +251,21 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
                     ))
                 })?;
                 // Prune any remaining stale references
-                cli::run(repo, &["worktree", "prune"])?;
+                cli::run_lite_or_captured(repo, &["worktree", "prune"])?;
             } else {
                 return Err(e);
             }
         }
     } else {
         // Worktree was already deleted from disk - prune stale references
-        cli::run(repo, &["worktree", "prune"])?;
+        cli::run_lite_or_captured(repo, &["worktree", "prune"])?;
     }
 
     // Delete the local branch if we found one
     // Use -D (force delete) since the branch may not be fully merged
     if let Some(branch) = branch_name {
         // Ignore errors - branch may already be deleted or may be checked out elsewhere
-        let _ = cli::run(repo, &["branch", "-D", &branch]);
+        let _ = cli::run_lite_or_captured(repo, &["branch", "-D", &branch]);
     }
 
     Ok(())
@@ -268,14 +274,25 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
 /// Get the branch name associated with a worktree.
 /// Returns None if the worktree doesn't exist or has no branch (detached HEAD).
 fn get_worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
-    let output = cli::run(repo, &["worktree", "list", "--porcelain"]).ok()?;
+    let output = cli::run_lite_or_captured(repo, &["worktree", "list", "--porcelain"]).ok()?;
+    find_worktree_branch(&output, worktree_path)
+}
 
-    let worktree_str = worktree_path.to_str()?;
+/// Find `worktree_path`'s branch in `git worktree list --porcelain` output.
+///
+/// git lists each worktree by its real path, so a worktree recorded as
+/// `/tmp/…` is listed as `/private/tmp/…` on macOS. Both sides are compared
+/// with symlinks resolved, and only as far as they exist on disk: git keeps
+/// listing a worktree whose directory is already gone, and its branch still
+/// needs deleting.
+fn find_worktree_branch(porcelain: &str, worktree_path: &Path) -> Option<String> {
+    let target = resolve_existing_prefix(worktree_path);
     let mut in_target_worktree = false;
 
-    for line in output.lines() {
+    for line in porcelain.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
-            in_target_worktree = path == worktree_str;
+            let path = Path::new(path);
+            in_target_worktree = path == worktree_path || resolve_existing_prefix(path) == target;
         } else if in_target_worktree {
             if let Some(branch) = line.strip_prefix("branch refs/heads/") {
                 return Some(branch.to_string());
@@ -284,6 +301,26 @@ fn get_worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
     }
 
     None
+}
+
+/// `path` with symlinks resolved over the longest prefix that exists, and the
+/// missing remainder appended unchanged. Falls back to `path` as given when no
+/// prefix resolves.
+fn resolve_existing_prefix(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut prefix = path;
+    loop {
+        if let Ok(real) = prefix.canonicalize() {
+            return missing.iter().rev().fold(real, |acc, name| acc.join(name));
+        }
+        match (prefix.parent(), prefix.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                prefix = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// List all worktrees for a repository.
@@ -1127,6 +1164,81 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&to);
+    }
+
+    fn local_branches(repo: &crate::test_utils::TempGitRepo) -> String {
+        repo.run_git(&["branch", "--list", "--format=%(refname:short)"])
+    }
+
+    #[test]
+    fn remove_worktree_deletes_the_worktree_and_its_branch() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["branch", "feature"]);
+
+        let root = crate::test_utils::TempDir::new("remove-worktree");
+        let worktree = root.path().join("wt");
+        create_worktree_for_existing_branch_at_path(repo.path(), "feature", &worktree).unwrap();
+        std::fs::write(worktree.join("untracked.txt"), "scratch\n").unwrap();
+
+        remove_worktree(repo.path(), &worktree).unwrap();
+
+        assert!(!worktree.exists());
+        assert_eq!(local_branches(&repo).trim(), "main");
+    }
+
+    /// git records a worktree by its real path, so a worktree created through
+    /// a symlinked directory (`/tmp` on macOS) is listed under a different
+    /// string than the one stored for it. The branch must still be found and
+    /// deleted, or it blocks recreating a branch of the same name.
+    #[cfg(unix)]
+    #[test]
+    fn remove_worktree_deletes_the_branch_of_a_worktree_recorded_through_a_symlink() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["branch", "feature"]);
+
+        let root = crate::test_utils::TempDir::new("remove-worktree-symlink");
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join("link")).unwrap();
+        let worktree = root.path().join("link").join("wt");
+        create_worktree_for_existing_branch_at_path(repo.path(), "feature", &worktree).unwrap();
+
+        remove_worktree(repo.path(), &worktree).unwrap();
+
+        assert!(!root.path().join("real").join("wt").exists());
+        assert_eq!(local_branches(&repo).trim(), "main");
+    }
+
+    /// git keeps listing a worktree whose directory is gone, under the real
+    /// path it recorded. Resolving only the part of the stored path that still
+    /// exists has to land on that same path.
+    #[cfg(unix)]
+    #[test]
+    fn remove_worktree_deletes_the_branch_of_an_already_deleted_worktree_behind_a_symlink() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["branch", "feature"]);
+
+        let root = crate::test_utils::TempDir::new("remove-worktree-gone");
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join("link")).unwrap();
+        let worktree = root.path().join("link").join("wt");
+        create_worktree_for_existing_branch_at_path(repo.path(), "feature", &worktree).unwrap();
+        std::fs::remove_dir_all(root.path().join("real").join("wt")).unwrap();
+
+        remove_worktree(repo.path(), &worktree).unwrap();
+
+        assert_eq!(local_branches(&repo).trim(), "main");
+        assert_eq!(
+            repo.run_git(&["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            1
+        );
     }
 
     #[test]

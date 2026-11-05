@@ -56,6 +56,7 @@
   import * as commands from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import ImageViewerModal from '../timeline/ImageViewerModal.svelte';
+  import { resumeSessionFromRow } from '../timeline/resumeSessionFromRow';
   import { countUserComments, shouldWarnBeforeDeletingReview } from '../timeline/reviewState';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
@@ -65,6 +66,9 @@
   import { attachBasename, formatAttachErrors } from '../sessions/attachErrors';
   import { fileToBase64 } from '../sessions/attachmentData';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import ConfirmDeleteDialog, {
+    type ConfirmDeleteRequest,
+  } from '../../shared/ConfirmDeleteDialog.svelte';
   import { Button } from '$lib/components/ui/button';
   import {
     classifyPolledSession,
@@ -611,12 +615,7 @@
   }
 
   // Confirm delete dialog
-  let confirmDelete = $state<{
-    title: string;
-    message: string;
-    confirmLabel?: string;
-    onConfirm: () => void;
-  } | null>(null);
+  let confirmDelete = $state<ConfirmDeleteRequest | null>(null);
 
   // =========================================================================
   // Session manager (reactive .svelte.ts module)
@@ -2127,18 +2126,9 @@
                 }
               }}
               onResumeClick={(sid) => {
-                commands
-                  .resumeSession(sid, 'Continue where you left off.', undefined, branch.id)
-                  .then(() => loadTimeline())
-                  .catch((e) => {
-                    console.error('Failed to resume session:', e);
-                    toast.error('Resume failed', {
-                      description:
-                        e instanceof Error
-                          ? e.message
-                          : 'Could not resume the session. Please try again.',
-                    });
-                  });
+                // The Resume button stays up until this reload lands, so the
+                // reload runs inside the resume's in-flight guard.
+                void resumeSessionFromRow(sid, branch.id, () => loadTimeline());
               }}
               onCommitClick={handleCommitClick}
               onNoteClick={handleNoteClick}
@@ -2434,22 +2424,7 @@
   </AlertDialog.Root>
 {/if}
 
-{#if confirmDelete}
-  <AlertDialog.Root open={true} onOpenChange={(v) => !v && (confirmDelete = null)}>
-    <AlertDialog.Content>
-      <AlertDialog.Header>
-        <AlertDialog.Title>{confirmDelete.title}</AlertDialog.Title>
-        <AlertDialog.Description>{confirmDelete.message}</AlertDialog.Description>
-      </AlertDialog.Header>
-      <AlertDialog.Footer>
-        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-        <AlertDialog.Action variant="destructive" onclick={confirmDelete.onConfirm}>
-          {confirmDelete.confirmLabel ?? 'Delete'}
-        </AlertDialog.Action>
-      </AlertDialog.Footer>
-    </AlertDialog.Content>
-  </AlertDialog.Root>
-{/if}
+<ConfirmDeleteDialog request={confirmDelete} onCancel={() => (confirmDelete = null)} />
 
 <style>
   .branch-card {

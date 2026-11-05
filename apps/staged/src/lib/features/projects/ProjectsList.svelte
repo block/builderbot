@@ -160,10 +160,12 @@
   // field nor a held query re-runs anything when branches update.
   const searchSnapshot = projectSearchSnapshots();
   let searchData = $derived(searchActive ? searchSnapshot() : null);
-  // The cards left on screen, in grid order, and why each matched when its
-  // name and repos don't say, from one pass. See visibleProjects for the
-  // composition. The query only hides cards: the order never changes as you
-  // type.
+  // The cards left on screen, best match first, and why each matched when
+  // its name and repos don't say, from one pass. See visibleProjects for the
+  // composition. The query doesn't re-render the grid in that order: it hides
+  // the cards it rules out and moves the rest with CSS `order` (search.rank),
+  // so the {#each} keeps its unsearched order and nothing is re-keyed per
+  // keystroke.
   let search = $derived(
     visibleProjects(
       projects,
@@ -175,11 +177,12 @@
   );
   // What ⌘1–9, the scroll restore and the empty state go by.
   let filteredProjects = $derived(search.projects);
-  let shownProjectIds = $derived(new Set(filteredProjects.map((p) => p.id)));
+  // Null while the query is blank: every card shows, unordered.
+  let searchRank = $derived(search.rank);
   let searchTerms = $derived(queryTerms(gridQuery.current));
   let matchReasons = $derived(search.reasons);
-  // Hidden cards keep their {#each} slot, so the overlay numbers come from
-  // the position on screen instead.
+  // Cards keep their {#each} slot whether hidden or moved, so the overlay
+  // numbers come from the position on screen (rank order) instead.
   let shortcutNumbers = $derived(projectShortcutNumbers(filteredProjects));
 
   // Decides the empty-state copy: blame the query only when the grid would
@@ -351,7 +354,7 @@
       filteredProjects.map((p) => p.id),
       project.id,
       (projectId) =>
-        shownProjectIds.has(projectId)
+        searchRank === null || searchRank.has(projectId)
           ? projectCardElements.get(projectId)?.querySelector<HTMLElement>('.project-card')
           : null
     );
@@ -546,7 +549,8 @@
             {@const matchReason = matchReasons.get(project.id)}
             <div
               class="project-card-wrapper"
-              hidden={!shownProjectIds.has(project.id)}
+              hidden={searchRank !== null && !searchRank.has(project.id)}
+              style:order={searchRank?.get(project.id)}
               use:trackProjectCard={project.id}
             >
               <ContextMenu.Root>
@@ -798,6 +802,9 @@
     margin-bottom: 14px;
   }
 
+  /* A grid, not just for the columns: while searching, each shown card's
+     inline `order` lays the cards out by rank without moving them in the
+     DOM. */
   .projects-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));

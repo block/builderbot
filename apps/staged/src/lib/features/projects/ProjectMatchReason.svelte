@@ -1,9 +1,9 @@
 <!--
   ProjectMatchReason.svelte — the one line a search result shows when the
-  project matched through something other than its name or repos: the
-  matching item's icon and label with the query's terms highlighted, and how
-  many other items matched besides (see searchProjects and matchEntry in
-  projectSearch.ts).
+  project matched through something other than its name or repos: the best
+  contributing item's icon and label with the query's terms highlighted, and
+  how many other items contributed besides (see searchProjects and
+  matchEntry in projectSearch.ts).
 
   Shared by the landing-grid cards and the sidebar rows. Single line,
   ellipsised; the parent sets the font size and colour. A long label starts

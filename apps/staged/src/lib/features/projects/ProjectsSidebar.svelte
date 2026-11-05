@@ -129,14 +129,17 @@
   });
   // Matched on branches, PRs, repo labels and titles too (projectSearch),
   // prepared once per data change and only while searching, like the grid;
-  // rows found that way say why on their meta line.
+  // rows found that way say why on their meta line. Ranked like the grid,
+  // too: the rows stay in their unsearched DOM order and move with CSS
+  // `order` (projectRank), so ranking never re-keys the {#each}.
   const searchSnapshot = projectSearchSnapshots();
   let searchData = $derived(searching ? searchSnapshot() : null);
   let projectMatches = $derived(
     sidebarProjectMatches(sidebarProjects, searchQuery.current, searchData)
   );
-  let matchingProjects = $derived(projectMatches.ids);
-  let visibleProjectCount = $derived(matchingProjects?.size ?? sidebarProjects.length);
+  // Null while the query is blank: every row shows, unordered.
+  let projectRank = $derived(projectMatches.rank);
+  let visibleProjectCount = $derived(projectRank?.size ?? sidebarProjects.length);
   let searchTerms = $derived(queryTerms(searchQuery.current));
   let matchReasons = $derived(projectMatches.reasons);
 
@@ -187,12 +190,15 @@
   // one focus takes, even when the filter or search shows a different
   // neighbour. The list keeps that row as the selected one when the filter
   // rules it out, so highlight and focus agree.
+  // While searching, the screen order is the rank's, not sidebarProjects'.
   function removeProject(project: Project) {
-    const shownIds = sidebarProjects
-      .filter((p) => matchingProjects === null || matchingProjects.has(p.id))
-      .map((p) => p.id);
+    const rank = projectRank;
+    const shownIds =
+      rank === null
+        ? sidebarProjects.map((p) => p.id)
+        : [...rank].sort(([, a], [, b]) => a - b).map(([id]) => id);
     const focusAfterRemove = neighbourAfterRemove(shownIds, project.id, (projectId) =>
-      matchingProjects === null || matchingProjects.has(projectId)
+      projectRank === null || projectRank.has(projectId)
         ? [...(sidebarBodyEl?.querySelectorAll<HTMLElement>('.project-row') ?? [])].find(
             (row) => row.dataset.projectId === projectId
           )
@@ -513,87 +519,94 @@
                 {/if}
               </div>
             {/if}
-            {#each sidebarProjects as project (project.id)}
-              {@const status = getProjectStatus(
-                project.id,
-                deletingProjectNames,
-                projectBranches.get(project.id) || [],
-                workspaceLifecycle.getWorktreeErrors()
-              )}
-              {@const busy = status.kind === 'running' || status.kind === 'backgroundHold'}
-              {@const busyTitle =
-                status.kind === 'backgroundHold' ? 'Waiting on background work' : undefined}
-              <ContextMenu.Root>
-                <!-- Hidden here, on the display: contents wrapper, not on the
-                     row inside it: WebKit re-shows children of a contents
-                     element superlinearly (100 rows ~550 ms vs ~27 ms). -->
-                <ContextMenu.Trigger
-                  class="contents"
-                  hidden={matchingProjects !== null && !matchingProjects.has(project.id)}
-                >
-                  <button
-                    class="project-row project-item"
-                    data-project-id={project.id}
-                    use:scrollIfActive={layerProjectId === project.id}
-                    class:active={layerProjectId === project.id}
-                    onclick={() => openProject(project.id)}
+            <!-- The rows' own flex column, so the search's `order` ranks them
+                 among themselves and never past the section headers. -->
+            <div class="project-rows">
+              {#each sidebarProjects as project (project.id)}
+                {@const status = getProjectStatus(
+                  project.id,
+                  deletingProjectNames,
+                  projectBranches.get(project.id) || [],
+                  workspaceLifecycle.getWorktreeErrors()
+                )}
+                {@const busy = status.kind === 'running' || status.kind === 'backgroundHold'}
+                {@const busyTitle =
+                  status.kind === 'backgroundHold' ? 'Waiting on background work' : undefined}
+                <ContextMenu.Root>
+                  <!-- Hidden here, on the display: contents wrapper, not on the
+                       row inside it: WebKit re-shows children of a contents
+                       element superlinearly (100 rows ~550 ms vs ~27 ms). -->
+                  <ContextMenu.Trigger
+                    class="contents"
+                    hidden={projectRank !== null && !projectRank.has(project.id)}
                   >
-                    <ProjectRowContent
-                      {project}
-                      matchReason={matchReasons.get(project.id)}
-                      matchTerms={searchTerms}
-                    />
-                    <div class="row-status">
-                      {#if status.runActionPhase === 'running' && busy}
-                        <span
-                          class="status-running"
-                          title={busyTitle}
-                          in:fade={{ duration: 300, delay: 150 }}
-                          out:fade={{ duration: 150 }}
-                        >
-                          <SineWave size={12} />
-                          <Spinner size={12} />
-                        </span>
-                      {:else if status.runActionPhase === 'running'}
-                        <span
-                          class="status-running"
-                          in:fade={{ duration: 300, delay: 150 }}
-                          out:fade={{ duration: 150 }}
-                        >
-                          <SineWave size={12} />
-                        </span>
-                      {:else if status.kind === 'runAction' || busy}
-                        <span
-                          class="status-running"
-                          title={busyTitle}
-                          in:fade={{ duration: 300, delay: 150 }}
-                          out:fade={{ duration: 150 }}
-                        >
-                          <Spinner size={12} />
-                        </span>
-                      {:else if status.kind === 'unread'}
-                        <span
-                          class="status-unread-dot"
-                          aria-label="Unread updates"
-                          in:fade={{ duration: 300, delay: 150 }}
-                          out:fade={{ duration: 150 }}
-                        ></span>
-                      {/if}
-                    </div>
-                  </button>
-                </ContextMenu.Trigger>
-                <ContextMenu.Content class="min-w-[172px]">
-                  <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
-                    <Mail size={14} /> Mark as Unread
-                  </ContextMenu.Item>
-                  <ProjectStatusSubmenu {project} />
-                  <ContextMenu.Separator />
-                  <ContextMenu.Item variant="destructive" onSelect={() => removeProject(project)}>
-                    <Trash2 size={14} /> Remove Project
-                  </ContextMenu.Item>
-                </ContextMenu.Content>
-              </ContextMenu.Root>
-            {/each}
+                    <!-- The flex item, the trigger being display: contents, so
+                         the rank's `order` goes here. -->
+                    <button
+                      class="project-row project-item"
+                      style:order={projectRank?.get(project.id)}
+                      data-project-id={project.id}
+                      use:scrollIfActive={layerProjectId === project.id}
+                      class:active={layerProjectId === project.id}
+                      onclick={() => openProject(project.id)}
+                    >
+                      <ProjectRowContent
+                        {project}
+                        matchReason={matchReasons.get(project.id)}
+                        matchTerms={searchTerms}
+                      />
+                      <div class="row-status">
+                        {#if status.runActionPhase === 'running' && busy}
+                          <span
+                            class="status-running"
+                            title={busyTitle}
+                            in:fade={{ duration: 300, delay: 150 }}
+                            out:fade={{ duration: 150 }}
+                          >
+                            <SineWave size={12} />
+                            <Spinner size={12} />
+                          </span>
+                        {:else if status.runActionPhase === 'running'}
+                          <span
+                            class="status-running"
+                            in:fade={{ duration: 300, delay: 150 }}
+                            out:fade={{ duration: 150 }}
+                          >
+                            <SineWave size={12} />
+                          </span>
+                        {:else if status.kind === 'runAction' || busy}
+                          <span
+                            class="status-running"
+                            title={busyTitle}
+                            in:fade={{ duration: 300, delay: 150 }}
+                            out:fade={{ duration: 150 }}
+                          >
+                            <Spinner size={12} />
+                          </span>
+                        {:else if status.kind === 'unread'}
+                          <span
+                            class="status-unread-dot"
+                            aria-label="Unread updates"
+                            in:fade={{ duration: 300, delay: 150 }}
+                            out:fade={{ duration: 150 }}
+                          ></span>
+                        {/if}
+                      </div>
+                    </button>
+                  </ContextMenu.Trigger>
+                  <ContextMenu.Content class="min-w-[172px]">
+                    <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
+                      <Mail size={14} /> Mark as Unread
+                    </ContextMenu.Item>
+                    <ProjectStatusSubmenu {project} />
+                    <ContextMenu.Separator />
+                    <ContextMenu.Item variant="destructive" onSelect={() => removeProject(project)}>
+                      <Trash2 size={14} /> Remove Project
+                    </ContextMenu.Item>
+                  </ContextMenu.Content>
+                </ContextMenu.Root>
+              {/each}
+            </div>
           {/if}
         </div>
       {/if}
@@ -728,6 +741,12 @@
     flex-direction: column;
     gap: 4px;
     padding: 10px var(--project-row-bleed);
+  }
+
+  .project-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
   /* The search hides project rows by their `display: contents` context-menu

@@ -145,15 +145,17 @@ describe('sidebarProjectMatches', () => {
   const alpha = project({ id: 'p1', name: 'Alpha Service' });
   const beta = project({ id: 'p2', name: 'beta-tools' });
   const projects = [alpha, beta];
-  const ids = (query: string, snapshot?: SearchSnapshot) =>
-    sidebarProjectMatches(projects, query, snapshot).ids;
+  const ids = (query: string, snapshot?: SearchSnapshot) => {
+    const rank = sidebarProjectMatches(projects, query, snapshot).rank;
+    return rank && new Set(rank.keys());
+  };
 
   it('is null for an empty or whitespace query, so every row shows', () => {
     expect(ids('')).toBeNull();
     expect(ids('  ')).toBeNull();
   });
 
-  it('holds the ids searchProjects keeps', () => {
+  it('ranks the ids searchProjects keeps', () => {
     expect(ids('ALPHA')).toEqual(new Set(['p1']));
     expect(ids('a')).toEqual(new Set(['p1', 'p2']));
   });
@@ -186,6 +188,46 @@ describe('sidebarProjectMatches', () => {
       new Map([['p2', { kind: 'branch', label: 'fix-login', more: 0, itemTerms: ['login'] }]])
     );
     expect(sidebarProjectMatches(projects, 'beta', snapshot).reasons.size).toBe(0);
+  });
+
+  it('matches terms spread across branches', () => {
+    const snapshot = buildSearchSnapshot(projects, {
+      branchesByProject: new Map([
+        [
+          'p1',
+          [
+            { branchName: 'fix-login', prNumber: null, updatedAt: 0 } as Branch,
+            { branchName: 'tidy-typos', prNumber: null, updatedAt: 1 } as Branch,
+          ],
+        ],
+      ]),
+      reposByProject: new Map(),
+    });
+    expect(ids('login typos', snapshot)).toEqual(new Set(['p1']));
+  });
+
+  it('ranks rows best first, ties in row order, for the rows’ CSS order', () => {
+    const gamma = project({ id: 'p3', name: 'Gamma' });
+    const rows = [alpha, beta, gamma];
+    const snapshot = buildSearchSnapshot(rows, {
+      branchesByProject: new Map([
+        ['p1', [{ branchName: 'tools-upgrade', prNumber: null, updatedAt: 0 } as Branch]],
+        ['p3', [{ branchName: 'tools-cleanup', prNumber: null, updatedAt: 0 } as Branch]],
+      ]),
+      reposByProject: new Map(),
+    });
+    // beta has "tools" in its name; alpha and gamma only in a branch.
+    expect(sidebarProjectMatches(rows, 'tools', snapshot).rank).toEqual(
+      new Map([
+        ['p2', 0],
+        ['p1', 1],
+        ['p3', 2],
+      ])
+    );
+  });
+
+  it('has no rank for a blank query, so rows keep their own order', () => {
+    expect(sidebarProjectMatches(projects, '').rank).toBeNull();
   });
 });
 

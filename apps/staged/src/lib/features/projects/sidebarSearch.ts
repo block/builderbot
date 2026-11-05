@@ -15,7 +15,9 @@
  * filters out and rebuilds it on the next backspace, and a row is costly to
  * build — a context menu per project, and per repo card an actions IPC wave
  * plus three backend event subscriptions. Hiding turns a keystroke into a
- * `hidden` flip on rows that already exist.
+ * `hidden` flip on rows that already exist, and the project rows' ranking
+ * into a CSS `order` on each (SidebarProjectMatches.rank). Repo cards keep
+ * their pin order.
  */
 
 import type { Project, RepoHomeItem } from '../../types';
@@ -60,22 +62,22 @@ export function matchingRepoKeys(repos: RepoHomeItem[], query: string): Set<stri
 }
 
 export interface SidebarProjectMatches {
-  /** Ids of the projects the query keeps, or null when the query is blank
-   *  and every row shows. */
-  ids: Set<string> | null;
+  /** Each kept project row's place on screen, by id (searchProjects' rank):
+   *  rows it doesn't hold are hidden, the rest laid out in this order. Null
+   *  when the query is blank and every row shows in its own order. */
+  rank: ReadonlyMap<string, number> | null;
   /** Why each kept project matched, when its name and repos don't say. */
   reasons: ReadonlyMap<string, MatchReason>;
 }
 
-/** The project rows the query keeps (searchProjects' rule), and why. */
+/** The project rows the query keeps (searchProjects' rule), their rank, and why. */
 export function sidebarProjectMatches(
   projects: Project[],
   query: string,
   snapshot?: SearchSnapshot | null
 ): SidebarProjectMatches {
-  const { projects: kept, reasons } = searchProjects(projects, query, snapshot);
-  const ids = queryTerms(query).length === 0 ? null : new Set(kept.map((p) => p.id));
-  return { ids, reasons };
+  const { rank, reasons } = searchProjects(projects, query, snapshot);
+  return { rank, reasons };
 }
 
 /** "1 result" / "n results" — the count a section header shows while searching. */

@@ -34,8 +34,9 @@ const gamma = project({ id: 'p3', name: 'Gamma  Web' });
 const all = [alpha, beta, gamma];
 
 describe('searchProjects', () => {
-  it('returns the same array for an empty query', () => {
+  it('returns the same array, with no rank, for an empty query', () => {
     expect(searchProjects(all, '').projects).toBe(all);
+    expect(searchProjects(all, '').rank).toBeNull();
   });
 
   it('treats a whitespace-only query as empty', () => {
@@ -79,8 +80,20 @@ describe('searchProjects', () => {
     expect(searchProjects(all, 'org/').projects).toEqual([]);
   });
 
-  it('preserves input order', () => {
+  it('keeps input order among equal scores', () => {
     expect(searchProjects([gamma, alpha, beta], 'a').projects).toEqual([gamma, alpha, beta]);
+  });
+
+  it("ranks each kept project by its place in the result, for the surfaces' CSS order", () => {
+    expect(searchProjects([gamma, alpha, beta], 'a').rank).toEqual(
+      new Map([
+        [gamma.id, 0],
+        [alpha.id, 1],
+        [beta.id, 2],
+      ])
+    );
+    expect(searchProjects(all, 'tool').rank).toEqual(new Map([[beta.id, 0]]));
+    expect(searchProjects(all, 'zeta').rank).toEqual(new Map());
   });
 });
 
@@ -245,12 +258,22 @@ describe('the matching rule', () => {
       expect(match(app, '456', ctx).reason?.itemTerms).toEqual(['456']);
     });
 
-    it('requires every term not in the identity to land in one branch', () => {
+    it('lets the terms spread across branches', () => {
       expect(match(app, 'login 123', ctx).matched).toBe(true);
-      // "login" is one branch, "typos" another.
-      expect(match(app, 'login typos', ctx).matched).toBe(false);
-      // PR 123 is fix-login-redirect's, not tidy-typos'.
-      expect(match(app, 'typos #123', ctx).matched).toBe(false);
+      // "login" is one branch, "typos" another: both contributed, and the
+      // more recent shows.
+      expect(match(app, 'login typos', ctx)).toEqual({
+        matched: true,
+        reason: { kind: 'branch', label: 'tidy-typos', more: 1, itemTerms: ['typos'] },
+      });
+      // PR 123 is fix-login-redirect's, "typos" tidy-typos': the PR outranks
+      // the branch name.
+      expect(match(app, 'typos #123', ctx)).toEqual({
+        matched: true,
+        reason: { kind: 'pr', label: 'PR #123 · fix-login-redirect', more: 1, itemTerms: [] },
+      });
+      // Every term still has to land somewhere.
+      expect(match(app, 'login nope', ctx).matched).toBe(false);
     });
 
     it('pairs the identity with one branch', () => {
@@ -315,8 +338,15 @@ describe('the matching rule', () => {
         itemTerms: [],
       });
       expect(match(app, 'pr login', ctx).reason?.label).toBe('PR #123 · fix-login-redirect');
-      // tidy-typos has no PR, and `pr` can't pair with another branch's.
-      expect(match(app, 'pr typos', ctx).matched).toBe(false);
+    });
+
+    it('lets `pr` land on one branch and the other terms on another', () => {
+      // tidy-typos has no PR; the project's PRs meet `pr`. Every PR would,
+      // so they don't count as contributing next to a term of the item's own.
+      expect(match(app, 'pr typos', ctx)).toEqual({
+        matched: true,
+        reason: { kind: 'branch', label: 'tidy-typos', more: 0, itemTerms: ['typos'] },
+      });
     });
 
     it('cannot match `pr` on a project without a PR', () => {
@@ -370,8 +400,18 @@ describe('the matching rule', () => {
       });
     });
 
-    it('labels by the title even when the branch name or number matched', () => {
-      expect(match(app, 'auth-fix', ctx).reason?.label).toBe('PR #123 · Fix login redirect');
+    it('labels by the branch name when only it holds the terms, so the match shows', () => {
+      expect(match(app, 'auth-fix', ctx).reason).toEqual({
+        kind: 'pr',
+        label: 'PR #123 · mt/auth-fix',
+        more: 0,
+        itemTerms: ['auth-fix'],
+      });
+      // The title holds one of the terms: the title wins.
+      expect(match(app, 'auth-fix login', ctx).reason?.label).toBe('PR #123 · Fix login redirect');
+    });
+
+    it('labels by the title when only the number matched', () => {
       expect(match(app, '#123', ctx).reason?.label).toBe('PR #123 · Fix login redirect');
     });
 
@@ -407,11 +447,13 @@ describe('the matching rule', () => {
       expect(shown).toBe('…and winding [redirect] handling for the login page');
     });
 
-    it("treats the title as part of its branch's item", () => {
-      // Title, branch name and PR number of one branch pair up...
-      expect(match(app, 'login auth-fix #123', ctx).matched).toBe(true);
-      // ...but not with another branch's name.
-      expect(match(app, 'login typos', ctx).matched).toBe(false);
+    it('pairs the title with another branch, the PR showing', () => {
+      expect(match(app, 'login typos', ctx).reason).toEqual({
+        kind: 'pr',
+        label: 'PR #123 · Fix login redirect',
+        more: 1,
+        itemTerms: ['login'],
+      });
     });
 
     it('ignores a title left on a branch without a PR', () => {
@@ -443,30 +485,66 @@ describe('the matching rule', () => {
       },
     });
 
-    it('ranks branches over notes over project notes over reviews', () => {
+    it('shows the best field that contributed: branches, project notes, notes, reviews', () => {
+      // The branch holds "login" at a branch name's weight; the titles that
+      // also say it don't contribute, so they aren't counted.
       expect(match(app, 'login', ctx).reason).toEqual({
         kind: 'branch',
         label: 'login-page',
-        more: 5,
+        more: 0,
         itemTerms: ['login'],
       });
       expect(match(app, 'plan', ctx).reason?.kind).toBe('projectNote');
       expect(match(app, 'flow', ctx).reason?.kind).toBe('review');
     });
 
-    it('breaks ties within a kind by the most recent', () => {
-      // Only the notes "Login notes" and "Login research" hold both terms.
-      expect(match(app, 'login es', ctx).reason).toEqual({
+    it('ranks project notes over notes over reviews', () => {
+      const titles = (items: ProjectSearchIndexItem[]) => context({ index: { p1: items } });
+      const review = indexItem({ kind: 'review', id: 'v1', title: 'Review login', updatedAt: 9 });
+      const note = indexItem({ kind: 'note', id: 'n1', title: 'Login notes', updatedAt: 5 });
+      const plan = indexItem({ kind: 'projectNote', id: 'pn1', title: 'Login plan' });
+      expect(match(app, 'login', titles([review, note, plan])).reason?.label).toBe('Login plan');
+      expect(match(app, 'login', titles([review, note])).reason?.label).toBe('Login notes');
+      expect(match(app, 'login', titles([review])).reason?.label).toBe('Review login');
+    });
+
+    it('counts every item that contributed at the best weight', () => {
+      const notes = context({
+        index: {
+          p1: [
+            indexItem({ id: 'n1', title: 'Login notes', updatedAt: 2 }),
+            indexItem({ id: 'n2', title: 'Login research', updatedAt: 3 }),
+            indexItem({ kind: 'review', id: 'v1', title: 'Review login' }),
+          ],
+        },
+      });
+      // Both notes; the review is outranked.
+      expect(match(app, 'login', notes).reason).toEqual({
         kind: 'note',
         label: 'Login research',
         more: 1,
+        itemTerms: ['login'],
+      });
+    });
+
+    it('prefers an item holding every term, then the most recent', () => {
+      // "login" contributes through the branch, "es" through the notes "Login
+      // notes" and "Login research", which hold both terms and earn the
+      // one-item bonus: the more recent of the two shows.
+      expect(match(app, 'login es', ctx).reason).toEqual({
+        kind: 'note',
+        label: 'Login research',
+        more: 2,
         itemTerms: ['login', 'es'],
       });
     });
 
-    it('does not pair terms from two different items', () => {
-      // "redirect" is in n3, "plan" in pn1.
-      expect(match(app, 'redirect plan', ctx).matched).toBe(false);
+    it('pairs terms from two different items', () => {
+      // "redirect" is in n3, "plan" in pn1; the project note outranks the note.
+      expect(match(app, 'redirect plan', ctx)).toEqual({
+        matched: true,
+        reason: { kind: 'projectNote', label: 'Login plan', more: 1, itemTerms: ['plan'] },
+      });
     });
 
     it('matches a number term against titles as text', () => {
@@ -486,7 +564,7 @@ describe('searchProjects with a snapshot', () => {
     })
   );
 
-  it('keeps the input order whatever each project matched on', () => {
+  it('keeps the input order for equal scores, whatever each project matched on', () => {
     expect(searchProjects([gamma, beta, alpha], 'metrics', snapshot).projects).toEqual([
       gamma,
       alpha,
@@ -543,6 +621,152 @@ describe('searchProjects reasons', () => {
     const blank = searchProjects(all, '  ', snapshot).reasons;
     expect(blank.size).toBe(0);
     expect(searchProjects(all, '').reasons).toBe(blank);
+  });
+});
+
+// ── Ranking ──
+
+describe('searchProjects ranking', () => {
+  /** The ids searchProjects keeps, best first. */
+  const ranked = (list: Project[], query: string, ctx: SearchContext) =>
+    searchProjects(list, query, buildSearchSnapshot(list, ctx)).projects.map((p) => p.id);
+
+  // One project per field, each holding "zz" only there.
+  const inName = project({ id: 'name', name: 'Has zz' });
+  const inPr = project({ id: 'pr', name: 'P pr' });
+  const inBranch = project({ id: 'branch', name: 'P branch' });
+  const inRepo = project({ id: 'repo', name: 'P repo', githubRepo: 'org/zz-repo' });
+  const inProjectNote = project({ id: 'projectNote', name: 'P project note' });
+  const inNote = project({ id: 'note', name: 'P note' });
+  const inReview = project({ id: 'review', name: 'P review' });
+  const tiers = context({
+    branches: {
+      pr: [branch({ projectId: 'pr', branchName: 'b-pr', prNumber: 5, prTitle: 'Add zz' })],
+      branch: [branch({ projectId: 'branch', branchName: 'zz-branch' })],
+    },
+    index: {
+      projectNote: [indexItem({ kind: 'projectNote', id: 'pn', title: 'zz plan' })],
+      note: [indexItem({ kind: 'note', id: 'n', title: 'zz notes' })],
+      review: [indexItem({ kind: 'review', id: 'v', title: 'zz review' })],
+    },
+  });
+  const tierOrder = ['name', 'pr', 'branch', 'repo', 'projectNote', 'note', 'review'];
+
+  it('orders by the best field a term hit: name, PR, branch, repo, project note, note, review', () => {
+    const shuffled = [inReview, inRepo, inNote, inName, inProjectNote, inBranch, inPr];
+    expect(ranked(shuffled, 'zz', tiers)).toEqual(tierOrder);
+    expect(ranked([...shuffled].reverse(), 'zz', tiers)).toEqual(tierOrder);
+  });
+
+  it('ranks a PR number with PR titles, above branch names', () => {
+    const byNumber = project({ id: 'number', name: 'By number' });
+    const byBranch = project({ id: 'branch', name: 'By branch' });
+    const ctx = context({
+      branches: {
+        number: [branch({ projectId: 'number', branchName: 'tidy', prNumber: 77 })],
+        branch: [branch({ projectId: 'branch', branchName: 'issue-77' })],
+      },
+    });
+    expect(ranked([byBranch, byNumber], '77', ctx)).toEqual(['number', 'branch']);
+    expect(ranked([byBranch, byNumber], '#77', ctx)).toEqual(['number']);
+  });
+
+  it('sums the terms, each at the best field it was found in', () => {
+    // Name + note (64 + 2) beats PR + PR on two branches (32 + 32).
+    const nameAndNote = project({ id: 'a', name: 'Fix stuff' });
+    const twoPrs = project({ id: 'b', name: 'Other' });
+    const ctx = context({
+      branches: {
+        b: [
+          branch({ id: 'b1', projectId: 'b', prNumber: 1, prTitle: 'Fix flaky test' }),
+          branch({ id: 'b2', projectId: 'b', prNumber: 2, prTitle: 'Login form' }),
+        ],
+      },
+      index: { a: [indexItem({ title: 'Login research' })] },
+    });
+    expect(ranked([twoPrs, nameAndNote], 'fix login', ctx)).toEqual(['a', 'b']);
+  });
+
+  it('puts every term in the name above the same terms split with an item', () => {
+    // "fix" in the name and "login fix" in a PR title score 64 + 32 + the
+    // one-item bonus, which only the all-in-name bonus outranks.
+    const allInName = project({ id: 'a', name: 'Fix login' });
+    const split = project({ id: 'b', name: 'Fix stuff' });
+    const ctx = context({
+      branches: { b: [branch({ projectId: 'b', prNumber: 1, prTitle: 'Login fix' })] },
+    });
+    expect(ranked([split, allInName], 'fix login', ctx)).toEqual(['a', 'b']);
+  });
+
+  it('puts every term in one item above the same terms split across items', () => {
+    // One note saying both beats a PR with one and a note with the other.
+    const oneNote = project({ id: 'a', name: 'One' });
+    const split = project({ id: 'b', name: 'Two' });
+    const ctx = context({
+      branches: { b: [branch({ projectId: 'b', prNumber: 1, prTitle: 'Fix flaky test' })] },
+      index: {
+        a: [indexItem({ title: 'Fix login redirect' })],
+        b: [indexItem({ title: 'Login research' })],
+      },
+    });
+    expect(ranked([split, oneNote], 'fix login', ctx)).toEqual(['a', 'b']);
+  });
+
+  it("counts a branch's name, PR number and PR title as one item", () => {
+    const oneBranch = project({ id: 'a', name: 'One' });
+    const twoBranches = project({ id: 'b', name: 'Two' });
+    const ctx = context({
+      branches: {
+        a: [branch({ projectId: 'a', branchName: 'mt/auth', prNumber: 9, prTitle: 'Login' })],
+        b: [
+          branch({ id: 'b1', projectId: 'b', branchName: 'mt/auth' }),
+          branch({ id: 'b2', projectId: 'b', branchName: 'x', prNumber: 8, prTitle: 'Login' }),
+        ],
+      },
+    });
+    expect(ranked([twoBranches, oneBranch], 'auth login', ctx)).toEqual(['a', 'b']);
+  });
+
+  it('gives a one-word query no one-item bonus, so it orders by field alone', () => {
+    // Were the bonus given, the note would outrank the repo label.
+    expect(ranked([inNote, inRepo], 'zz', tiers)).toEqual(['repo', 'note']);
+  });
+
+  it('keeps the unsearched order among equal scores', () => {
+    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((id) => project({ id, name: id.toUpperCase() }));
+    const ctx = context({
+      branches: {
+        a: [branch({ projectId: 'a', branchName: 'x-metrics' })],
+        b: [branch({ projectId: 'b', branchName: 'y-metrics' })],
+        d: [branch({ projectId: 'd', branchName: 'z-metrics' })],
+      },
+      index: { c: [indexItem({ title: 'Metrics plan' })] },
+    });
+    expect(ranked([d, c, b, a], 'metrics', ctx)).toEqual(['d', 'b', 'a', 'c']);
+    expect(ranked([a, b, c, d], 'metrics', ctx)).toEqual(['a', 'b', 'd', 'c']);
+  });
+
+  it('ranks the reasons the same pass gives', () => {
+    const list = [inReview, inName, inPr];
+    const result = searchProjects(list, 'zz', buildSearchSnapshot(list, tiers));
+    expect(result.rank).toEqual(
+      new Map([
+        ['name', 0],
+        ['pr', 1],
+        ['review', 2],
+      ])
+    );
+    expect(result.reasons.has('name')).toBe(false);
+    expect(result.reasons.get('pr')?.label).toBe('PR #5 · Add zz');
+    expect(result.reasons.get('review')?.label).toBe('zz review');
+  });
+
+  it('leaves an empty query exactly as it was', () => {
+    const list = [inReview, inName, inPr];
+    const result = searchProjects(list, ' ', buildSearchSnapshot(list, tiers));
+    expect(result.projects).toBe(list);
+    expect(result.rank).toBeNull();
+    expect(result.reasons.size).toBe(0);
   });
 });
 
@@ -704,6 +928,28 @@ describe('visibleProjects', () => {
       expect(visibleProjects(all, chipsWithoutBeta, 'gone', '').projects).toEqual(chipsWithoutBeta);
     });
   });
+
+  describe('ranking with a sticky card', () => {
+    const snapshot = buildSearchSnapshot(
+      all,
+      context({
+        branches: { p1: [branch({ branchName: 'tools-upgrade' })] },
+        index: { p2: [indexItem({ title: 'Service migration' })] },
+      })
+    );
+
+    it('ranks the sticky card like any other, not pinned first', () => {
+      // beta (sticky) matches "service" through a note; alpha by its name.
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'service', snapshot).projects).toEqual(
+        [alpha, beta]
+      );
+      // beta matches "tools" by its name; alpha through a branch.
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'tools', snapshot).projects).toEqual([
+        beta,
+        alpha,
+      ]);
+    });
+  });
 });
 
 // The ⌘1–9 overlay numbers: the grid renders hidden cards too, so they count
@@ -727,6 +973,22 @@ describe('projectShortcutNumbers', () => {
       new Map([
         [beta.id, 1],
         [gamma.id, 2],
+      ])
+    );
+  });
+
+  it('follows the ranked order while searching, not the rendered one', () => {
+    const snapshot = buildSearchSnapshot(
+      all,
+      context({ index: { p1: [indexItem({ title: 'Web notes' })] } })
+    );
+    // alpha renders first but only a note holds "web"; gamma has it in its name.
+    const shown = visibleProjects(all, all, null, 'web', snapshot).projects;
+    expect(shown).toEqual([gamma, alpha]);
+    expect(projectShortcutNumbers(shown)).toEqual(
+      new Map([
+        [gamma.id, 1],
+        [alpha.id, 2],
       ])
     );
   });

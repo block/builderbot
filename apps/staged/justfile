@@ -153,9 +153,15 @@ fmt:
     cd src-tauri && cargo fmt
     pnpm exec prettier --write "src/**/*.{ts,svelte,css,html}"
 
-# Verify formatting without modifying files (used by CI/hooks)
-fmt-check:
+# Verify formatting without modifying files
+fmt-check: fmt-check-rust fmt-check-frontend
+
+# Verify Rust formatting
+fmt-check-rust:
     cd src-tauri && cargo fmt --check
+
+# Verify frontend formatting
+fmt-check-frontend:
     pnpm exec prettier --check "src/**/*.{ts,svelte,css,html}"
 
 # Lint Rust code with clippy
@@ -177,8 +183,91 @@ typecheck:
 # Format, then verify everything passes — run before pushing
 check-all: fmt lint typecheck test test-frontend
 
-# Verify everything without modifying files — for CI
-ci: fmt-check lint typecheck test test-frontend
+# ============================================================================
+# CI
+# ============================================================================
+# Each Staged CI job (.github/workflows/staged-ci.yml) runs one ci-* group,
+# and `ci` runs all of them, so CI and local runs cover the same checks.
+
+# Frontend checks: prettier, svelte-check + tsc, vitest (CI "Frontend" job)
+ci-frontend: fmt-check-frontend typecheck test-frontend
+
+# Rust lint: cargo fmt + clippy (CI "Rust lint" job)
+ci-rust-lint: fmt-check-rust lint
+
+# Rust tests (CI "Rust test" job)
+ci-rust-test: test
+
+# Verify everything without modifying files, one check at a time
+ci: ci-frontend ci-rust-lint ci-rust-test
+
+# Pre-push hook: `ci` with frontend and Rust run concurrently; skips Rust when no Rust-affecting file changed
+ci-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Keep in sync with the `rust` paths filter in .github/workflows/staged-ci.yml.
+    rust_paths='^(apps/staged/src-tauri/|apps/staged/src/lib/shared/prompts/|apps/staged/node-runtime\.lock\.json$|apps/staged/justfile$|crates/|Cargo\.[^/]*$|rust-toolchain\.toml$|bin/|\.github/workflows/staged-ci\.yml$)'
+
+    # Compare the working tree, including uncommitted and untracked files,
+    # with the point where this branch forked from origin's default branch,
+    # which is the diff its PR shows. Without a merge-base, run everything.
+    run_rust=true
+    default_ref=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || echo origin/main)
+    if base=$(git merge-base HEAD "$default_ref" 2>/dev/null); then
+        top=$(git rev-parse --show-toplevel)
+        changed=$(
+            git -C "$top" diff --name-only --no-renames "$base" --
+            git -C "$top" ls-files --others --exclude-standard
+        )
+        if ! grep -qE "$rust_paths" <<< "$changed"; then
+            run_rust=false
+            echo "ci-local: no Rust-affecting changes since $(git rev-parse --short "$base") ($default_ref); skipping the Rust checks. Run \`just ci\` for everything."
+        fi
+    else
+        echo "ci-local: no merge-base with $default_ref; running every check."
+    fi
+
+    # Prefix each group's output so the concurrent logs stay readable.
+    run_group() {
+        local label=$1
+        shift
+        "{{ just_executable() }}" -f "{{ justfile() }}" "$@" 2>&1 \
+            | awk -v prefix="[$label] " '{ print prefix $0; fflush() }'
+    }
+
+    # Job control gives each group its own process group, so an interrupt can
+    # stop the whole tree. (Without it, background jobs ignore SIGINT.)
+    set -m
+    pids=()
+    labels=()
+    run_group frontend ci-frontend < /dev/null &
+    pids+=("$!")
+    labels+=(frontend)
+    if [[ $run_rust == true ]]; then
+        # Lint, then test: clippy and the test build share cargo's build
+        # directory lock, so running them concurrently gains nothing.
+        run_group rust ci-rust-lint ci-rust-test < /dev/null &
+        pids+=("$!")
+        labels+=(rust)
+    fi
+    stop_groups() {
+        for pid in "${pids[@]}"; do
+            kill -TERM -- "-$pid" 2> /dev/null || true
+        done
+        exit 130
+    }
+    trap stop_groups INT TERM
+
+    failed=()
+    for i in "${!pids[@]}"; do
+        wait "${pids[$i]}" || failed+=("${labels[$i]}")
+    done
+    if (( ${#failed[@]} )); then
+        echo "ci-local: failed: ${failed[*]}" >&2
+        exit 1
+    fi
+    echo "ci-local: passed: ${labels[*]}"
 
 # ============================================================================
 # Maintenance

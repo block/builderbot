@@ -29,49 +29,204 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # No debuginfo: smaller target dirs, so smaller rust-cache entries and faster
+  # links. rust-cache hashes CARGO_* vars into its key, so this keys the cache.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  # System libraries Tauri builds against on Linux. Both Rust jobs install them.
+  TAURI_APT_PACKAGES: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+# Each job runs one `ci-*` recipe from apps/staged/justfile; together they cover
+# everything `just ci` runs.
 jobs:
-  check:
-    name: Check
+  # Pull requests skip the Rust jobs when they touch no file the Rust build
+  # reads. Pushes to main and manual runs always run everything.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
+    steps:
+      # For pull requests paths-filter lists the changed files through the API,
+      # so no checkout is needed.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          # Keep in sync with `rust_paths` in the `ci-local` recipe.
+          filters: |
+            rust:
+              - "apps/staged/src-tauri/**"
+              # Read by the Rust build through include_str!
+              - "apps/staged/src/lib/shared/prompts/**"
+              - "apps/staged/node-runtime.lock.json"
+              # Defines the recipes the Rust jobs run
+              - "apps/staged/justfile"
+              - "crates/**"
+              - "Cargo.*"
+              - "rust-toolchain.toml"
+              - "bin/**"
+              - ".github/workflows/staged-ci.yml"
+
+  frontend:
+    name: Frontend
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # Install hermit (manages node, pnpm, rust, just)
+      # Install hermit (manages node, pnpm, just). Hermit fetches the Rust
+      # toolchain lazily, and nothing here invokes it.
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1.1.5
 
-      # Cache Cargo dependencies
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check frontend (prettier, svelte-check, tsc, vitest)
+        run: just -f apps/staged/justfile ci-frontend
+
+  rust-lint:
+    name: Rust lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Install hermit (manages rust, just)
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1.1.5
+
+      # Cache Cargo dependencies. Clippy and the test build produce different
+      # artifacts, so each job has its own key. Only main saves; PRs restore
+      # main's cache.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/staged/src-tauri
+          shared-key: staged-rust-lint
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-      # Install system dependencies for Tauri (Linux)
+      # cache-apt-pkgs-action never runs `apt-get update` on GitHub-hosted
+      # runners, so it picks versions from the runner image's package index.
+      # Once Ubuntu supersedes one of them, the mirror deletes that .deb and
+      # the install 404s. So refresh the index first. The options also apply
+      # to installs on a cache miss.
+      - name: Configure apt and refresh the package index
+        run: |
+          sudo tee /etc/apt/apt.conf.d/99-staged-ci > /dev/null <<'EOF'
+          APT::Install-Recommends "false";
+          Acquire::Retries "3";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          DPkg::Lock::Timeout "120";
+          EOF
+          sudo apt-get update
+
+      # Install system dependencies for Tauri (Linux). A cache hit restores
+      # the files without downloading the packages. Bump `version` to force a
+      # fresh install.
       - name: Install Tauri dependencies (Linux)
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get update \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30
-          sudo apt-get install -y --no-install-recommends \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            -o DPkg::Lock::Timeout=120 \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: ${{ env.TAURI_APT_PACKAGES }}
+          version: "2"
 
-      # Install dependencies
+      # The action reports success even when its install fails, and it still
+      # caches the empty result, so later runs restore nothing
+      # (awalsh128/cache-apt-pkgs-action#221). If the libraries are missing,
+      # install them from the mirror.
+      - name: Check Tauri dependencies
+        run: |
+          if pkg-config --exists webkit2gtk-4.1 appindicator3-0.1 librsvg-2.0 \
+            && command -v patchelf > /dev/null; then
+            exit 0
+          fi
+          echo "::warning::The apt cache did not provide the Tauri dependencies; installing them from the mirror. If this repeats, bump the cache-apt-pkgs-action version input."
+          # shellcheck disable=SC2086 # word-split the package list
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $TAURI_APT_PACKAGES
+
       - name: Install dependencies
-        run: |
-          pnpm install --frozen-lockfile
-          cd apps/staged/src-tauri && cargo fetch
+        working-directory: apps/staged/src-tauri
+        run: cargo fetch
 
-      # Run all checks via the app justfile
-      - name: Check all (fmt, lint, typecheck)
-        run: just -f apps/staged/justfile ci
+      - name: Lint (cargo fmt, clippy)
+        run: just -f apps/staged/justfile ci-rust-lint
+
+  rust-test:
+    name: Rust test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Install hermit (manages rust, just)
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1.1.5
+
+      # Cache Cargo dependencies (see rust-lint)
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: apps/staged/src-tauri
+          shared-key: staged-rust-test
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # See rust-lint for why the index is refreshed first.
+      - name: Configure apt and refresh the package index
+        run: |
+          sudo tee /etc/apt/apt.conf.d/99-staged-ci > /dev/null <<'EOF'
+          APT::Install-Recommends "false";
+          Acquire::Retries "3";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          DPkg::Lock::Timeout "120";
+          EOF
+          sudo apt-get update
+
+      # Install system dependencies for Tauri (Linux); see rust-lint.
+      - name: Install Tauri dependencies (Linux)
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: ${{ env.TAURI_APT_PACKAGES }}
+          version: "2"
+
+      # Recovers from a failed or empty apt cache; see rust-lint.
+      - name: Check Tauri dependencies
+        run: |
+          if pkg-config --exists webkit2gtk-4.1 appindicator3-0.1 librsvg-2.0 \
+            && command -v patchelf > /dev/null; then
+            exit 0
+          fi
+          echo "::warning::The apt cache did not provide the Tauri dependencies; installing them from the mirror. If this repeats, bump the cache-apt-pkgs-action version input."
+          # shellcheck disable=SC2086 # word-split the package list
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $TAURI_APT_PACKAGES
+
+      - name: Install dependencies
+        working-directory: apps/staged/src-tauri
+        run: cargo fetch
+
+      - name: Test (cargo test)
+        run: just -f apps/staged/justfile ci-rust-test
+
+  # The one check to require in branch protection. Fails if any job failed or
+  # was cancelled. Rust jobs skipped by the path filter count as passing.
+  ci:
+    name: Staged CI
+    if: always()
+    needs: [changes, frontend, rust-lint, rust-test]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          if jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' <<< "$NEEDS" > /dev/null; then
+            echo "::error::A Staged CI job failed or was cancelled."
+            exit 1
+          fi

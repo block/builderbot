@@ -71,6 +71,9 @@ export type PolledSessionDisposition = 'gone' | 'waiting' | 'active' | 'finished
  * than reporting a failure the user cannot act on. Without this the tick is a no-op
  * and the poller runs forever behind a badge for a session that does not exist.
  *
+ * `disconnected` (a Blox session that lost its proxy connection mid-turn) is `waiting`:
+ * the remote turn may still be running, so it is neither a completion nor a failure.
+ *
  * Callers must skip the `'__pending__'` sentinel before polling: it is not a real id,
  * so it classifies as `gone` while the launch command is still in flight.
  */
@@ -78,7 +81,7 @@ export function classifyPolledSession(
   session: { status: string } | null | undefined
 ): PolledSessionDisposition {
   if (!session) return 'gone';
-  if (session.status === 'queued') return 'waiting';
+  if (session.status === 'queued' || session.status === 'disconnected') return 'waiting';
   if (session.status === 'running') return 'active';
   return 'finished';
 }

@@ -138,7 +138,7 @@ describe('nextBackgroundHold', () => {
     // The event that arrives once the agent has torn down is stale: adopting
     // it would resurface the wait if the session later flips back to running
     // (a resume, a queued send), showing the old wait instead of "Thinking…".
-    for (const status of ['completed', 'error', 'cancelled'] as const) {
+    for (const status of ['completed', 'error', 'cancelled', 'disconnected'] as const) {
       expect(nextBackgroundHold(holding, status)).toBeNull();
     }
   });

@@ -19,6 +19,17 @@ describe('isEmptyFailedReview', () => {
     ).toBe(false);
   });
 
+  it('does not treat a disconnected review as failed while it may still be running', () => {
+    expect(
+      isEmptyFailedReview({
+        sessionStatus: 'disconnected',
+        sessionId: 'session-1',
+        title: null,
+        totalCount: 0,
+      })
+    ).toBe(false);
+  });
+
   it('treats a review with no title and no comments as failed', () => {
     expect(
       isEmptyFailedReview({

@@ -105,7 +105,11 @@
   } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import ComposerError from './ComposerError.svelte';
-  import { composerSendControl, composerSessionBlock } from './composerSendControl';
+  import {
+    COMPOSER_DISCONNECTED_TITLE,
+    composerSendControl,
+    composerSessionBlock,
+  } from './composerSendControl';
   import {
     LIVE_DELIVERY_UNKNOWN,
     liveDeliveryKnowledge,
@@ -1396,7 +1400,13 @@
    * settled without one), or `null`. The submit control is disabled while
    * set, with a title saying which.
    */
-  let composerBlock = $derived(composerSessionBlock({ loading, hasSession: session !== null }));
+  let composerBlock = $derived(
+    composerSessionBlock({
+      loading,
+      hasSession: session !== null,
+      disconnected: session?.status === 'disconnected',
+    })
+  );
 
   async function handleSend() {
     // Without a row there is nothing to send to; the control is disabled, and
@@ -1629,6 +1639,8 @@
 
   async function handleSendQueuedMessage(id: string) {
     if (isLive || sending || queueActionIds.has(id)) return;
+    // The backend doesn't claim queued follow-ups while disconnected.
+    if (session?.status === 'disconnected') return;
     queueActionIds = new Set(queueActionIds).add(id);
     beginComposerAction();
     try {
@@ -3051,6 +3063,23 @@
         {/if}
       </Alert.Root>
       <AgentLoginPrompt checkId={login.checkId} />
+    {:else if session?.status === 'disconnected'}
+      <!-- Not live, so the thinking row's Stop is gone; without this the row
+           would hold its branch busy with no way to end it. -->
+      <Alert.Root class="mt-3">
+        <Info class="text-[var(--ui-warning)]" />
+        <Alert.Description>{COMPOSER_DISCONNECTED_TITLE}</Alert.Description>
+        <Alert.Action>
+          <Button variant="outline" size="xs" onclick={handleCancel} disabled={cancelling}>
+            {#if cancelling}
+              <Spinner size={14} />
+            {:else}
+              <CircleStop size={14} />
+            {/if}
+            Stop
+          </Button>
+        </Alert.Action>
+      </Alert.Root>
     {:else if session && session.status !== 'running' && session.status !== 'queued'}
       {#if isResumableReason(session.completionReason)}
         {@const isWarning =
@@ -3127,7 +3156,7 @@
                   <span class="queue-item-error">{msg.lastError}</span>
                 {/if}
               </div>
-              {#if !isLive}
+              {#if !isLive && session?.status !== 'disconnected'}
                 <Button
                   variant="accent"
                   size="xs"

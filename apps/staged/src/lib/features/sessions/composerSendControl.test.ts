@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COMPOSER_DISCONNECTED_TITLE,
   COMPOSER_LOADING_TITLE,
   COMPOSER_SEND_MODE_OPTIONS,
   COMPOSER_UNAVAILABLE_TITLE,
@@ -74,6 +75,18 @@ describe('composerSessionBlock', () => {
   it('reports no block once the row is in', () => {
     expect(composerSessionBlock({ loading: false, hasSession: true })).toBeNull();
   });
+
+  it('blocks a disconnected session, behind loading and a missing row', () => {
+    expect(composerSessionBlock({ loading: false, hasSession: true, disconnected: true })).toBe(
+      'disconnected'
+    );
+    expect(composerSessionBlock({ loading: true, hasSession: true, disconnected: true })).toBe(
+      'loading'
+    );
+    expect(composerSessionBlock({ loading: false, hasSession: false, disconnected: true })).toBe(
+      'unavailable'
+    );
+  });
 });
 
 describe('composerSubmitBlock', () => {
@@ -116,6 +129,8 @@ describe('composerSubmitBlockTitle', () => {
   it('titles the session blocks differently so a settled failure reads as such', () => {
     expect(composerSubmitBlockTitle('loading')).toBe(COMPOSER_LOADING_TITLE);
     expect(composerSubmitBlockTitle('unavailable')).toBe(COMPOSER_UNAVAILABLE_TITLE);
+    expect(composerSubmitBlockTitle('disconnected')).toBe(COMPOSER_DISCONNECTED_TITLE);
+    expect(COMPOSER_DISCONNECTED_TITLE).toContain('Stop it to send a follow-up');
     expect(COMPOSER_LOADING_TITLE).not.toBe(COMPOSER_UNAVAILABLE_TITLE);
   });
 

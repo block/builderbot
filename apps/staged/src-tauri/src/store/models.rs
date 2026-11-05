@@ -432,6 +432,15 @@ impl Workdir {
 pub enum SessionStatus {
     Queued,
     Running,
+    /// A Blox session whose remote turn may still be running on the
+    /// workstation, but which no Staged process is connected to — the proxy
+    /// transport was lost mid-turn, or Staged quit and detached it.
+    ///
+    /// Not terminal: no completion hooks or side effects have run, and the
+    /// branch queue treats it as busy, the same as `Running`. Unlike
+    /// `Running` it has no owner (`owner_pid` is NULL), so no process's
+    /// orphan recovery will claim it.
+    Disconnected,
     Completed,
     Error,
     Cancelled,
@@ -442,6 +451,7 @@ impl SessionStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Disconnected => "disconnected",
             Self::Completed => "completed",
             Self::Error => "error",
             Self::Cancelled => "cancelled",
@@ -452,6 +462,7 @@ impl SessionStatus {
         match s {
             "queued" => Some(Self::Queued),
             "running" => Some(Self::Running),
+            "disconnected" => Some(Self::Disconnected),
             "completed" => Some(Self::Completed),
             "error" | "failed" => Some(Self::Error),
             "cancelled" => Some(Self::Cancelled),
@@ -605,6 +616,17 @@ pub struct Session {
     /// project detail view show a running project session's in-flight children.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// HEAD of the session's worktree when its run started — the base the
+    /// branch's new commits are found against. Persisted so a session that
+    /// outlives its runner (a `Disconnected` Blox session) can still find
+    /// the commits its remote turn made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_head_sha: Option<String>,
+    /// Blox `ws` command id of the remote agent process serving this
+    /// session, when known. Reserved for reconnecting a `Disconnected`
+    /// session; not yet populated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blox_command_id: Option<String>,
 }
 
 /// Persistent follow-up message waiting to be sent to an existing session.
@@ -698,6 +720,8 @@ impl Session {
             branch_id: None,
             completion_effects_at: None,
             parent_session_id: None,
+            pre_head_sha: None,
+            blox_command_id: None,
         }
     }
 
@@ -724,6 +748,8 @@ impl Session {
             branch_id: None,
             completion_effects_at: None,
             parent_session_id: None,
+            pre_head_sha: None,
+            blox_command_id: None,
         }
     }
 

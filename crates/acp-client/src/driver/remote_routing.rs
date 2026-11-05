@@ -122,6 +122,10 @@ struct RouterState {
     foreign_prompt_watches: Vec<ForeignPromptWatch>,
     /// When a `session/cancel` was last queued for the agent.
     last_cancel_at: Option<Instant>,
+    /// Clients let go of on purpose with their turns left running on the
+    /// agent (see [`RemoteSessionRouter::keep`]): detaching them cancels
+    /// nothing.
+    kept: HashSet<RemoteClientId>,
 }
 
 /// Answers `ended` with the stop reason once a response ending a prompt
@@ -247,11 +251,27 @@ impl RemoteSessionRouter {
     pub(super) fn detach(&self, client: RemoteClientId) -> Vec<String> {
         let mut state = self.state();
         state.clients.remove(&client);
+        let kept = state.kept.remove(&client);
         let abandoned = state.forget(client);
         if !state.session_new_pending() {
             state.drop_early_frames();
         }
-        abandoned
+        if kept {
+            Vec::new()
+        } else {
+            abandoned
+        }
+    }
+
+    /// Let `client` go while leaving its turns running on the agent: its
+    /// stream ends now, so its connection sees end-of-stream, and once that
+    /// connection stops writing [`Self::detach`] cancels nothing for it. How
+    /// a Blox session whose turn should outlive its connection lets go (see
+    /// [`super::DetachHandle`]).
+    pub(super) fn keep(&self, client: RemoteClientId) {
+        let mut state = self.state();
+        state.kept.insert(client);
+        state.clients.remove(&client);
     }
 
     /// Why `client` was cut off for falling behind the agent's output, if it
@@ -820,6 +840,11 @@ impl RemoteTransport {
         stop_reason: Option<&'static str>,
     ) -> oneshot::Receiver<String> {
         self.router.watch_foreign_prompts(owner_pid, stop_reason)
+    }
+
+    /// See [`RemoteSessionRouter::keep`].
+    pub(super) fn keep_client(&self, client: RemoteClientId) {
+        self.router.keep(client);
     }
 
     /// Ask the agent to cancel `session_id`'s turn, whoever prompted it.

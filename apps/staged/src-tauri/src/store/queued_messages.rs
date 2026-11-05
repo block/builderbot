@@ -141,6 +141,9 @@ impl Store {
         Ok(true)
     }
 
+    /// Claim a queued follow-up for sending. Only a session that is not
+    /// running can take one — and a `disconnected` session counts as running,
+    /// since its remote turn may still be going and a resume would race it.
     pub fn claim_queued_session_message(
         &self,
         id: &str,
@@ -161,7 +164,7 @@ impl Store {
                AND EXISTS (
                    SELECT 1 FROM sessions s
                    WHERE s.id = queued_session_messages.session_id
-                     AND s.status != 'running'
+                     AND s.status NOT IN ('running', 'disconnected')
                )",
             params![now, std::process::id(), id],
         )?;
@@ -189,7 +192,7 @@ impl Store {
                  WHERE q.session_id = ?1
                    AND q.status = 'queued'
                    AND q.sent_message_id IS NULL
-                   AND s.status != 'running'
+                   AND s.status NOT IN ('running', 'disconnected')
                  ORDER BY q.created_at ASC, q.id ASC
                  LIMIT 1",
                 params![session_id],

@@ -47,6 +47,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { isSessionInFlight } from '../../shared/sessionStatus';
   import {
     formatNoteTimestamp,
     noteLastWrittenAt,
@@ -356,13 +357,13 @@
   /** True when there is at least one non-queued active session (running in timeline or pending-but-not-queued). */
   let hasActiveSession = $derived.by(() => {
     for (const commit of timeline.commits) {
-      if (commit.sessionStatus === 'running') return true;
+      if (isSessionInFlight(commit.sessionStatus)) return true;
     }
     for (const note of timeline.notes) {
-      if (note.sessionStatus === 'running') return true;
+      if (isSessionInFlight(note.sessionStatus)) return true;
     }
     for (const review of timeline.reviews) {
-      if (review.sessionStatus === 'running') return true;
+      if (isSessionInFlight(review.sessionStatus)) return true;
     }
     for (const item of pendingItems) {
       if (item.sessionId && !item.type.startsWith('queued-')) return true;
@@ -389,7 +390,7 @@
    */
   let hasActiveCommitSession = $derived.by(() => {
     for (const commit of timeline.commits) {
-      if (commit.sessionStatus === 'running') return true;
+      if (isSessionInFlight(commit.sessionStatus)) return true;
     }
     for (const item of pendingItems) {
       if (item.type === 'pending-commit' && item.sessionId) return true;
@@ -690,7 +691,7 @@
 
     for (const commit of timeline.commits) {
       const isPending = !commit.sha;
-      const isRunning = commit.sessionStatus === 'running';
+      const isRunning = isSessionInFlight(commit.sessionStatus);
       const isQueued = commit.sessionStatus === 'queued';
       const isFailed = isPending && !isRunning && !isQueued && !!commit.sessionId;
       const isDeleting =
@@ -807,7 +808,7 @@
 
     for (const review of timeline.reviews) {
       const totalCount = review.commentCount + review.annotationCount;
-      const isRunning = review.sessionStatus === 'running';
+      const isRunning = isSessionInFlight(review.sessionStatus);
       const isQueued = review.sessionStatus === 'queued';
       const isFailed = isEmptyFailedReview({
         sessionStatus: review.sessionStatus,

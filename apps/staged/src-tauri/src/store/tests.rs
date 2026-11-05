@@ -6140,3 +6140,84 @@ fn session_list_queries_read_rows_like_get_session() {
         &[&running],
     );
 }
+
+/// A `disconnected` Blox session may still be working on its workstation:
+/// it has no owner, holds its branch like a running one, and neither a resume
+/// nor a queued follow-up may start a second turn beside it.
+#[test]
+fn test_disconnected_session_is_unowned_busy_and_not_resumable() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let session = Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&session).unwrap();
+    store
+        .add_queued_session_message(&session.id, "queued", &[], None)
+        .unwrap();
+
+    assert!(store
+        .transition_from_running(&session.id, SessionStatus::Disconnected, None, None)
+        .unwrap());
+    let row = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(row.status, SessionStatus::Disconnected);
+    assert_eq!(row.owner_pid, None);
+    assert_eq!(row.completion_reason, None);
+
+    assert!(store.has_running_session_for_branch(&branch.id).unwrap());
+    let busy = store.get_busy_sessions_for_branch(&branch.id).unwrap();
+    assert_eq!(busy.len(), 1);
+    assert_eq!(busy[0].id, session.id);
+    assert!(store
+        .get_running_sessions_for_branch(&branch.id)
+        .unwrap()
+        .is_empty());
+    // The dead-owner and stranded sweeps read only `running` rows.
+    assert!(store.get_running_sessions().unwrap().is_empty());
+
+    assert!(!store.transition_to_running(&session.id).unwrap());
+    assert!(store
+        .claim_oldest_queued_session_message(&session.id)
+        .unwrap()
+        .is_none());
+
+    // Once stopped, the session is an ordinary finished one again.
+    store
+        .update_session_status(&session.id, SessionStatus::Cancelled, None, None)
+        .unwrap();
+    assert!(!store.has_running_session_for_branch(&branch.id).unwrap());
+    assert_eq!(
+        store
+            .claim_oldest_queued_session_message(&session.id)
+            .unwrap()
+            .unwrap()
+            .content,
+        "queued"
+    );
+}
+
+#[test]
+fn test_session_pre_head_and_blox_command_round_trip() {
+    let store = Store::in_memory().unwrap();
+    let mut session = Session::new_running("work", Path::new("/tmp"));
+    session.blox_command_id = Some("cmd-1".to_string());
+    store.create_session(&session).unwrap();
+
+    let row = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(row.pre_head_sha, None);
+    assert_eq!(row.blox_command_id.as_deref(), Some("cmd-1"));
+
+    // Bookkeeping, not a lifecycle change: the stranded sweep's CAS on
+    // `updated_at` must not lose to it.
+    store
+        .set_session_pre_head_sha(&session.id, Some("abc123"))
+        .unwrap();
+    let after = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(after.pre_head_sha.as_deref(), Some("abc123"));
+    assert_eq!(after.updated_at, row.updated_at);
+
+    store.set_session_pre_head_sha(&session.id, None).unwrap();
+    let cleared = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(cleared.pre_head_sha, None);
+}

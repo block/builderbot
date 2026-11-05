@@ -456,7 +456,8 @@ export interface ProjectSearchItem {
 // Sessions
 // =============================================================================
 
-export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
+export type SessionStatus =
+  'queued' | 'running' | 'disconnected' | 'completed' | 'error' | 'cancelled';
 
 export type CompletionReason =
   | 'turn_complete'
@@ -834,8 +835,11 @@ export interface ChildSessionInfo {
   sessionId: string;
   /** One of `'commit'`, `'note'`, `'review'`. */
   sessionType: string;
-  /** The only two statuses the query returns. */
-  status: 'queued' | 'running';
+  /**
+   * The only statuses the query returns. `disconnected` is a Blox child that
+   * lost its connection and may still be running remotely.
+   */
+  status: 'queued' | 'running' | 'disconnected';
   /**
    * The child's title as the branch timeline would show it, resolved by the
    * backend with the branch timeline's own rules: a commit's ACP title else

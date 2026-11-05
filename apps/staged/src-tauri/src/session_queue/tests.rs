@@ -785,7 +785,7 @@ fn the_sweep_ends_only_the_running_incarnation_it_observed() {
     assert!(store.transition_to_running(&row.id).unwrap());
 
     assert!(
-        !end_observed_row(&store, &observed),
+        !end_observed_row(&store, &observed, false),
         "the resumed turn is not the row the sweep observed"
     );
     let resumed = store.get_session(&row.id).unwrap().unwrap();
@@ -793,7 +793,7 @@ fn the_sweep_ends_only_the_running_incarnation_it_observed() {
     assert_eq!(resumed.error_message, None);
 
     // Read again and unchanged since: that is a stranded row, and it is ended.
-    assert!(end_observed_row(&store, &resumed));
+    assert!(end_observed_row(&store, &resumed, false));
     let ended = store.get_session(&row.id).unwrap().unwrap();
     assert_eq!(ended.status, SessionStatus::Error);
     assert_eq!(
@@ -932,4 +932,135 @@ fn a_branch_delete_cascades_to_its_running_session_rows() {
 
     store.delete_branch(&branch.id).unwrap();
     assert_eq!(status_of(&store, &running.id), None);
+}
+
+// ---------------------------------------------------------------------------
+// Disconnected Blox sessions
+// ---------------------------------------------------------------------------
+
+/// A disconnected session's remote turn may still be working in the branch's
+/// checkout, so it holds the branch exactly as a running one does: the note
+/// queued behind it waits until the session is stopped.
+#[tokio::test]
+async fn a_disconnected_session_keeps_its_branch_busy_until_stopped() {
+    let (store, branch) = store_with_branch();
+    let (commit, _) = commit_session(&store, &branch.id, SessionStatus::Running);
+    store
+        .transition_from_running(&commit.id, SessionStatus::Disconnected, None, None)
+        .unwrap();
+    let note = note_session(&store, &branch.id, SessionStatus::Queued);
+
+    let kicker = claiming_kicker(&store);
+    let app = app_with_kicker(&kicker);
+    kicker.kick(&branch.id, KickSource::Startup);
+    kicker.wait_until_idle().await;
+    assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Queued));
+
+    // No runner owns the row, so Stop takes the store-write fallback, which
+    // ends it and moves the branch on.
+    let registry = SessionRegistry::new();
+    let slot = Mutex::new(Some(Arc::clone(&store)));
+    crate::session_commands::cancel_session_impl(&registry, &slot, app.handle(), &commit.id)
+        .unwrap();
+    kicker.wait_until_idle().await;
+    assert_eq!(
+        status_of(&store, &commit.id),
+        Some(SessionStatus::Cancelled)
+    );
+    assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Running));
+}
+
+/// Running rows on a Blox branch and a local one: one mid-turn on the
+/// workstation (it has an agent session), one that never got that far, and a
+/// local one. Every row is `running` under `owner_pid`.
+fn blox_and_local_rows(owner_pid: Option<u32>) -> (Arc<Store>, [Session; 3]) {
+    let (store, local) = store_with_branch();
+    let remote = store::Branch::new_remote(&local.project_id, "remote", "main", "ws-1");
+    store.create_branch(&remote).unwrap();
+    let row = |branch: &store::Branch, prompt: &str, agent_id: Option<&str>| {
+        let mut row = session(&branch.id, prompt, SessionStatus::Running);
+        row.agent_id = agent_id.map(str::to_string);
+        row.owner_pid = owner_pid;
+        store.create_session(&row).unwrap();
+        row
+    };
+    let mid_turn = row(&remote, "mid-turn", Some("acp-1"));
+    let never_prompted = row(&remote, "never-prompted", None);
+    let local_turn = row(&local, "local", Some("acp-2"));
+    (store, [mid_turn, never_prompted, local_turn])
+}
+
+/// The row is left `disconnected`, unowned and unfinished; the others end as
+/// `expected`. Only the ended rows kick their branch — a disconnected row
+/// still holds its own.
+fn assert_only_the_blox_turn_disconnected(
+    store: &Store,
+    rows: &[Session; 3],
+    kicker: &BranchQueueKicker,
+    expected: SessionStatus,
+) {
+    let [mid_turn, never_prompted, local_turn] = rows;
+    let row = store.get_session(&mid_turn.id).unwrap().unwrap();
+    assert_eq!(row.status, SessionStatus::Disconnected);
+    assert_eq!(row.owner_pid, None);
+    assert_eq!(row.error_message, None);
+    assert_eq!(row.completion_reason, None);
+    for id in [&never_prompted.id, &local_turn.id] {
+        assert_eq!(status_of(store, id), Some(expected.clone()), "{id}");
+    }
+    let mut kicked: Vec<String> = kicker
+        .kicked()
+        .into_iter()
+        .map(|(branch_id, _)| branch_id)
+        .collect();
+    kicked.sort();
+    let mut expected_kicks = vec![
+        never_prompted.branch_id.clone().unwrap(),
+        local_turn.branch_id.clone().unwrap(),
+    ];
+    expected_kicks.sort();
+    assert_eq!(kicked, expected_kicks);
+}
+
+#[test]
+fn the_stranded_sweep_leaves_a_blox_turn_disconnected() {
+    let (store, rows) = blox_and_local_rows(Some(std::process::id()));
+    let kicker = Arc::new(BranchQueueKicker::recording());
+    let app = app_with_kicker(&kicker);
+    let registry = SessionRegistry::new();
+
+    let mut swept = reconcile_stranded_running_sessions(&store, &registry, app.handle());
+    swept.sort();
+    let mut all: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+    all.sort();
+    assert_eq!(swept, all);
+    assert_only_the_blox_turn_disconnected(&store, &rows, &kicker, SessionStatus::Error);
+}
+
+#[test]
+fn dead_owner_recovery_leaves_a_blox_turn_disconnected() {
+    // No owner reads as a dead one.
+    let (store, rows) = blox_and_local_rows(None);
+    let kicker = Arc::new(BranchQueueKicker::recording());
+    let app = app_with_kicker(&kicker);
+
+    // None of these rows has an answered prompt, so none is reattached to
+    // in place (a row that is takes `reattach_dead_owner_session`'s path).
+    crate::session_runner::recover_dead_sessions_with(
+        Arc::clone(&store),
+        app.handle().clone(),
+        |store, session, _| {
+            assert!(!crate::session_runner::dead_owner_reattaches(
+                store, session
+            ));
+            false
+        },
+    );
+
+    assert_only_the_blox_turn_disconnected(&store, &rows, &kicker, SessionStatus::Error);
+    let ended = store.get_session(&rows[2].id).unwrap().unwrap();
+    assert_eq!(
+        ended.completion_reason,
+        Some(store::CompletionReason::AppQuit)
+    );
 }

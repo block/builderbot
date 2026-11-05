@@ -301,6 +301,10 @@ describe('classifyPolledSession', () => {
     expect(classifyPolledSession({ status: 'queued' })).toBe('waiting');
   });
 
+  it('keeps waiting on a disconnected session, which is neither finished nor failed', () => {
+    expect(classifyPolledSession({ status: 'disconnected' })).toBe('waiting');
+  });
+
   it('reports a drained session as active', () => {
     expect(classifyPolledSession({ status: 'running' })).toBe('active');
   });

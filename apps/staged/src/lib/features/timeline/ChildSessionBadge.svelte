@@ -19,7 +19,7 @@
 
   interface Props {
     sessionType: SessionRowKind;
-    status: 'queued' | 'running';
+    status: 'queued' | 'running' | 'disconnected';
     /** The clipped label. */
     label: string;
     /** The whole title, shown in the tooltip. */
@@ -38,7 +38,7 @@
   let tooltip = $derived(
     `${KIND_LABEL[sessionType]}${status === 'queued' ? ' (queued)' : ''}: ${title}`
   );
-  let clickable = $derived(status === 'running' && !!onclick);
+  let clickable = $derived(status !== 'queued' && !!onclick);
 
   function handleClick(e: MouseEvent) {
     e.stopPropagation();

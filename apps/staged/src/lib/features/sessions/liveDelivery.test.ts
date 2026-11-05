@@ -33,6 +33,10 @@ describe('liveDelivery', () => {
     expect(shouldAskLiveDelivery('running', knowledge)).toBe(true);
   });
 
+  it('never asks for a disconnected session: it has no live handle to deliver to', () => {
+    expect(shouldAskLiveDelivery('disconnected', LIVE_DELIVERY_UNKNOWN)).toBe(false);
+  });
+
   it('stops asking after a non-retryable no (another instance owns the session)', () => {
     const knowledge = liveDeliveryKnowledge({
       supported: false,

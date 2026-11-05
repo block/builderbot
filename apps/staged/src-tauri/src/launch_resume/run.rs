@@ -227,12 +227,15 @@ where
 }
 
 /// Whether a phase-1 session has settled: `running` and owned by something in
-/// this process, `queued` (the drain owns it from here), terminal, or gone.
+/// this process, `queued` (the drain owns it from here), `disconnected` (its
+/// turn runs on its workstation with no local owner to wait for), terminal,
+/// or gone.
 pub(crate) fn is_settled(store: &Store, registry: &SessionRegistry, session_id: &str) -> bool {
     match store.get_session(session_id) {
         Ok(Some(session)) => match session.status {
             SessionStatus::Running => registry.is_live(session_id),
             SessionStatus::Queued
+            | SessionStatus::Disconnected
             | SessionStatus::Completed
             | SessionStatus::Error
             | SessionStatus::Cancelled => true,

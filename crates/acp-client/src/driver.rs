@@ -54,6 +54,15 @@ mod remote_liveness;
 mod remote_process;
 mod remote_routing;
 mod response_completion;
+mod transport_loss;
+
+use transport_loss::{
+    formatted_error_is_transport_closed, ProxyStop, TransportMonitor, TransportSignal,
+    TRANSPORT_LOSS_REPLY_GRACE,
+};
+pub use transport_loss::{
+    is_transport_loss_error, DetachHandle, TransportLoss, TransportLossPhase,
+};
 
 use remote_routing::RemoteLoss;
 
@@ -953,6 +962,11 @@ pub enum SessionSettleReason {
     Cancelled,
     /// The connection failed (protocol error, or the agent process exited).
     Failed,
+    /// The caller detached ([`DetachHandle`]) with a prompt in flight: the
+    /// proxy was SIGKILLed without a `session/cancel`, so the turn may still be
+    /// running remotely. The outcome is an error, and
+    /// [`SessionSettled::transport_loss`] is a [`TransportLossPhase::Turn`].
+    Detached,
 }
 
 /// Event emitted exactly once by the connection task when the session
@@ -969,6 +983,10 @@ pub struct SessionSettled {
     /// it with a per-turn result.
     pub outcome: Result<AgentRunOutcome, String>,
     pub reason: SessionSettleReason,
+    /// Set when the connection ended because its transport went away rather
+    /// than because the agent said so (see [`TransportLoss`]). A remote
+    /// session lost with its turn in flight may still be running.
+    pub transport_loss: Option<TransportLoss>,
 }
 
 impl SessionSettled {
@@ -1979,6 +1997,8 @@ pub struct SessionConnection {
     /// Receiver for the connection's one settled event; handed out (once) via
     /// [`SessionConnection::take_settled_receiver`].
     settled_rx: Option<oneshot::Receiver<SessionSettled>>,
+    /// The connection's transport-loss evidence (see [`DetachHandle`]).
+    transport: Arc<TransportMonitor>,
 }
 
 impl SessionConnection {
@@ -2021,6 +2041,13 @@ impl SessionConnection {
             turn_control_tx: self.turn_control_tx.clone(),
             connection_alive: Arc::clone(&self.connection_alive),
         }
+    }
+
+    /// A cloneable, thread-safe handle that abandons this connection while
+    /// leaving a remote turn running on the workstation (see
+    /// [`DetachHandle`]).
+    pub fn detach_handle(&self) -> DetachHandle {
+        DetachHandle::new(Arc::clone(&self.transport))
     }
 
     /// Take the receiver for the connection's [`SessionSettled`] event.
@@ -2141,6 +2168,33 @@ impl AcpDriver {
         cancel_token: &CancellationToken,
         turn: &ReattachTurn,
     ) -> Result<AgentRunOutcome, String> {
+        self.reattach_detachable(
+            session_id,
+            working_dir,
+            store,
+            writer,
+            cancel_token,
+            turn,
+            &|_| {},
+        )
+        .await
+    }
+
+    /// [`Self::reattach`], handing the connection's [`DetachHandle`] to
+    /// `on_detach_handle` once it is up, so the caller can let go of the turn
+    /// without cancelling it. A detach ends the reattach with an error and
+    /// leaves the turn running on the agent.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reattach_detachable(
+        &self,
+        session_id: &str,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        cancel_token: &CancellationToken,
+        turn: &ReattachTurn,
+        on_detach_handle: &dyn Fn(DetachHandle),
+    ) -> Result<AgentRunOutcome, String> {
         if !self.is_remote {
             return Err("Only a remote session's turn can be reattached to".to_string());
         }
@@ -2157,6 +2211,7 @@ impl AcpDriver {
                 Some(turn),
             )
             .await?;
+        on_detach_handle(connection.detach_handle());
         let Some(settled) = connection.take_settled_receiver() else {
             return Err("The reattached connection has no settled event".to_string());
         };
@@ -2311,6 +2366,14 @@ impl AcpDriver {
             )
         };
 
+        // Structural transport-loss evidence for this connection, and how a
+        // `DetachHandle` lets go of it. Both stdout readers below record the
+        // EOF as soon as they see it: the SDK sees it on this same thread only
+        // after that task yields, so the signal is always in before any
+        // request fails over it.
+        let transport = TransportMonitor::new();
+        let stdout_transport = Arc::clone(&transport);
+
         // `child_exited` fires when the agent process is observed to be gone
         // (stderr EOF). The post-turn holding wait keys its involuntary-exit
         // trigger off this: a dead bridge otherwise looks identical to a quiet
@@ -2330,11 +2393,18 @@ impl AcpDriver {
                 .await
                 .map_err(spawn_error)?;
             let exited = lease.exited().clone();
+            // A detach lets go of this session's lease without cancelling its
+            // turn, and stops the proxy without SIGINT if nobody else holds it.
+            transport.arm_lease(lease.detacher());
+            // The routed stream ending is this connection's stdout EOF.
+            let incoming = relay_routed_stream(streams.incoming, move || {
+                stdout_transport.signal(TransportSignal::StdoutClosed)
+            });
             (
                 AgentProcess::Remote(lease),
                 exited,
                 Box::new(streams.outgoing),
-                Box::new(streams.incoming),
+                Box::new(incoming),
             )
         } else {
             let mut child = cmd.spawn().map_err(spawn_error)?;
@@ -2409,6 +2479,7 @@ impl AcpDriver {
                 {
                     log::error!("local ACP stdout normalization failed: {error}");
                 }
+                stdout_transport.signal(TransportSignal::StdoutClosed);
             });
             (
                 AgentProcess::Local(child),
@@ -2454,9 +2525,10 @@ impl AcpDriver {
                     .as_ref()
                     .map(|hold| hold.out_of_turn_permissions)
                     .unwrap_or_default(),
-            ),
+            )
+            .with_transport_monitor(Arc::clone(&transport)),
         );
-        let transport = ByteStreams::new(stdin_compat, stdout_compat);
+        let byte_streams = ByteStreams::new(stdin_compat, stdout_compat);
 
         let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<QueuedSessionTurn>();
         let (hold_control_tx, mut hold_control_rx) =
@@ -2485,8 +2557,14 @@ impl AcpDriver {
         let unattended_session_mode = self.unattended_session_mode.clone();
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
+        let connection_transport = Arc::clone(&transport);
 
         let connection_task = tokio::task::spawn_local(async move {
+            let transport = connection_transport;
+            // Whether `run_acp_session` returned on its own, as opposed to
+            // the SDK ending the connection under it (see
+            // [`TransportMonitor::verdict`]).
+            let session_returned = std::cell::Cell::new(false);
             // Reply sender for the turn in flight, stashed by the session
             // loop. The outcome is delivered only after finalize() +
             // release() below, so `SessionConnection::prompt` resumes
@@ -2508,6 +2586,18 @@ impl AcpDriver {
                         // answer — until someone clicks.
                         let handler = Arc::clone(&permission_handler);
                         connection.spawn(async move {
+                            // A shared bridge relays every session's requests
+                            // down every connection. Another session's request
+                            // is left unanswered here (dropping the responder
+                            // sends nothing), so the client it belongs to — or
+                            // a later reattach — is the one that decides it.
+                            if !handler.owns_session(args.session_id.0.as_ref()).await {
+                                log::debug!(
+                                    "Ignoring a permission request for another ACP session ({})",
+                                    args.session_id.0.as_ref()
+                                );
+                                return Ok(());
+                            }
                             let response = handler.request_permission(args).await?;
                             responder.respond(response)
                         })
@@ -2565,8 +2655,8 @@ impl AcpDriver {
                     },
                     agent_client_protocol::on_receive_notification!(),
                 )
-                .connect_with(transport, async |connection| {
-                    run_acp_session(
+                .connect_with(byte_streams, async |connection| {
+                    let result = run_acp_session(
                         &connection,
                         &acp_working_dir,
                         &store,
@@ -2590,8 +2680,9 @@ impl AcpDriver {
                         &pending_reply,
                         reattached_turn,
                     )
-                    .await
-                    .map_err(agent_client_protocol::util::internal_error)
+                    .await;
+                    session_returned.set(true);
+                    result.map_err(agent_client_protocol::util::internal_error)
                 })
                 .await
                 .map_err(|e| format!("ACP protocol failed: {e:?}"));
@@ -2642,8 +2733,15 @@ impl AcpDriver {
             reject_queued_turn_control_requests(&mut turn_control_rx, "the ACP connection closed");
 
             writer.finalize().await;
-            agent_process.release().await;
+            // Disarms the detach handle before the agent can be let go of. A
+            // detached connection's proxy is stopped without SIGINT, so its
+            // remote turn keeps running.
+            agent_process.release(transport.begin_teardown()).await;
 
+            let transport_loss = transport.verdict(
+                session_returned.get(),
+                protocol_result.as_ref().err().map(String::as_str),
+            );
             let (result, settle_reason) = match protocol_result {
                 Ok((outcome, reason)) => (Ok(outcome), reason),
                 Err(e) if cancel_token.is_cancelled() => {
@@ -2652,6 +2750,25 @@ impl AcpDriver {
                         Ok(AgentRunOutcome::Cancelled),
                         SessionSettleReason::Cancelled,
                     )
+                }
+                // Detached on purpose: only a prompt in flight leaves anything
+                // running remotely. Before one, the session simply stopped.
+                Err(e) if transport.detach_requested() => {
+                    if transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Turn) {
+                        log::info!(
+                            "Session {our_session_id} detached with its turn in flight: {e}"
+                        );
+                        (
+                            Err(format!("Detached with the turn still in flight ({e})")),
+                            SessionSettleReason::Detached,
+                        )
+                    } else {
+                        log::info!("Session {our_session_id} detached before its turn: {e}");
+                        (
+                            Ok(AgentRunOutcome::Cancelled),
+                            SessionSettleReason::Cancelled,
+                        )
+                    }
                 }
                 Err(e) => (Err(e), SessionSettleReason::Failed),
             };
@@ -2662,6 +2779,7 @@ impl AcpDriver {
             let _ = settled_tx.send(SessionSettled {
                 outcome: result.clone(),
                 reason: settle_reason,
+                transport_loss,
             });
 
             if let Some(reply) = pending_reply.borrow_mut().take() {
@@ -2684,6 +2802,7 @@ impl AcpDriver {
             connection_task: Some(connection_task),
             exit_result: None,
             settled_rx: Some(settled_rx),
+            transport,
         })
     }
 }
@@ -2760,13 +2879,54 @@ impl AgentProcess {
     }
 
     /// Stop a local agent; detach from a remote one, which stops only once no
-    /// other session is attached.
-    async fn release(self) {
+    /// other session is attached. With [`ProxyStop::KillOnly`] a remote
+    /// session's turn is left running: its connection is let go of without
+    /// a `session/cancel`, and the proxy is never sent SIGINT, which would
+    /// stop a process `sq` started along with every turn on it.
+    async fn release(self, stop: ProxyStop) {
         match self {
             Self::Local(mut child) => graceful_stop(&mut child, false).await,
-            Self::Remote(lease) => lease.release().await,
+            Self::Remote(lease) => {
+                if stop == ProxyStop::KillOnly {
+                    lease.keep_agent_running();
+                }
+                lease.release().await
+            }
         }
     }
+}
+
+/// Copy a routed client stream into a pipe for the connection, calling
+/// `on_eof` once the routed stream ends (or fails to read) — the remote
+/// equivalent of the proxy's stdout closing. The connection going away first
+/// (a failed write) is a normal end, not a lost transport, so it calls
+/// nothing.
+fn relay_routed_stream<R>(mut routed: R, on_eof: impl FnOnce() + 'static) -> tokio::io::DuplexStream
+where
+    R: tokio::io::AsyncRead + Unpin + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let (mut relay_writer, relay_reader) = tokio::io::duplex(64 * 1024);
+    tokio::task::spawn_local(async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let read = match routed.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => {
+                    log::warn!("Failed to read the routed remote ACP stream: {error}");
+                    break;
+                }
+            };
+            if relay_writer.write_all(&buf[..read]).await.is_err() {
+                return;
+            }
+        }
+        on_eof();
+        // Dropping the writer now hands the EOF on to the connection.
+        drop(relay_writer);
+    });
+    relay_reader
 }
 
 /// How long a remote proxy's `sq` wrapper gets to exit after SIGINT before
@@ -4182,6 +4342,10 @@ struct AcpNotificationHandler {
     pending_permissions: Mutex<HashSet<String>>,
     /// How to resolve permission requests that arrive out-of-turn.
     out_of_turn_permissions: OutOfTurnPermissionPolicy,
+    /// The connection's transport-loss evidence. Naming the session and
+    /// starting a turn or a hold move its phase; the session loop's waits
+    /// watch its `lost` token.
+    transport: Arc<TransportMonitor>,
 }
 
 impl AcpNotificationHandler {
@@ -4220,7 +4384,21 @@ impl AcpNotificationHandler {
             tool_call_announced: tokio::sync::Notify::new(),
             pending_permissions: Mutex::new(HashSet::new()),
             out_of_turn_permissions: OutOfTurnPermissionPolicy::default(),
+            transport: TransportMonitor::new(),
         }
+    }
+
+    /// Share the connection's transport monitor (see [`TransportMonitor`]).
+    fn with_transport_monitor(mut self, transport: Arc<TransportMonitor>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Whether `session_id` is the session this connection serves. `false`
+    /// before the session is named: nothing of this session's can be asked
+    /// for a decision until a prompt goes out.
+    async fn owns_session(&self, session_id: &str) -> bool {
+        matches!(&*self.session_gate.lock().await, SessionGate::Named(own) if own == session_id)
     }
 
     /// Set the policy for permission requests arriving during a background
@@ -4256,6 +4434,7 @@ impl AcpNotificationHandler {
             }
         };
         *gate = SessionGate::Named(session_id.to_string());
+        self.transport.session_named();
         // Still holding the gate, so a frame arriving meanwhile waits behind
         // the held ones and arrival order is kept.
         for (frame_session_id, frame) in held {
@@ -5758,6 +5937,9 @@ enum HoldOutcome {
     Cancelled,
     /// The agent process exited (stderr EOF) while holding.
     ChildExited,
+    /// The transport went away while holding (see [`TransportMonitor`]),
+    /// including a detach.
+    TransportLost,
 }
 
 // Hand-written so the queued turn (which carries a reply channel, not a
@@ -5771,6 +5953,7 @@ impl std::fmt::Debug for HoldOutcome {
             HoldOutcome::NewTurn(_) => "NewTurn",
             HoldOutcome::Cancelled => "Cancelled",
             HoldOutcome::ChildExited => "ChildExited",
+            HoldOutcome::TransportLost => "TransportLost",
         })
     }
 }
@@ -6086,6 +6269,7 @@ async fn hold_for_background_quiescence(
         tokio::select! {
             _ = cancel_token.cancelled() => break HoldOutcome::Cancelled,
             _ = child_exited.cancelled() => break HoldOutcome::ChildExited,
+            _ = handler.transport.lost().cancelled() => break HoldOutcome::TransportLost,
             turn = prompt_rx.recv(), if prompts_open => match turn {
                 Some(turn) => break HoldOutcome::NewTurn(turn),
                 // All connection handles dropped: no further prompts can
@@ -6215,21 +6399,39 @@ async fn run_acp_session(
             unattended_session_mode,
         }),
     );
-    let mut setup = tokio::select! {
+    let transport = &handler.transport;
+    tokio::pin!(setup_task);
+    let setup_result = tokio::select! {
         _ = cancel_token.cancelled() => {
             handler.cancel_pending_permissions();
             return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
         }
-        result = setup_task => {
-            result
-                .map_err(|_| {
-                    format!(
-                        "Timed out waiting for ACP protocol startup after {}s",
-                        ACP_SETUP_TIMEOUT.as_secs()
-                    )
-                })??
+        result = &mut setup_task => result,
+        // A proxy that lost its remote process keeps stdout open, so the
+        // request in flight would otherwise sit out the whole setup timeout.
+        // A reply already on its way still wins.
+        _ = transport.lost().cancelled() => {
+            match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut setup_task).await {
+                Ok(result) => result,
+                Err(_) => {
+                    transport.confirm(TransportLossPhase::Setup);
+                    return Err(transport.lost_error("during session setup"));
+                }
+            }
         }
     };
+    let mut setup = setup_result
+        .map_err(|_| {
+            format!(
+                "Timed out waiting for ACP protocol startup after {}s",
+                ACP_SETUP_TIMEOUT.as_secs()
+            )
+        })?
+        .inspect_err(|error| {
+            if formatted_error_is_transport_closed(error) {
+                transport.confirm(TransportLossPhase::Setup);
+            }
+        })?;
     if steering_disabled && setup.steering_supported {
         log::info!(
             "ACP session {our_session_id}: steering disabled by the driver; steers will be refused"
@@ -6253,6 +6455,10 @@ async fn run_acp_session(
                 }
                 _ = handler.replay_done.notified() => {
                     break;
+                }
+                _ = transport.lost().cancelled() => {
+                    transport.confirm(TransportLossPhase::Setup);
+                    return Err(transport.lost_error("while the session replayed"));
                 }
                 _ = tokio::time::sleep_until(absolute_deadline) => {
                     log::warn!("Replay-wait absolute timeout reached (10s) — proceeding");
@@ -6308,6 +6514,10 @@ async fn run_acp_session(
                     _ = cancel_token.cancelled() => {
                         handler.cancel_pending_permissions();
                         return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
+                    }
+                    _ = transport.lost().cancelled() => {
+                        transport.confirm(TransportLossPhase::Setup);
+                        return Err(transport.lost_error("before the prompt was sent"));
                     }
                     turn = prompt_rx.recv() => match turn {
                         Some(turn) => break turn,
@@ -6477,6 +6687,7 @@ async fn run_acp_session(
         // an attributed continuation on its own message boundary, never folded
         // into the turn that just finished (or the one that may follow).
         handler.transition_to_background_holding().await;
+        transport.begin_hold();
 
         match hold_for_background_quiescence(
             hold_config,
@@ -6559,6 +6770,27 @@ async fn run_acp_session(
                 transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Failed);
                 return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
             }
+            HoldOutcome::TransportLost => {
+                // Like `ChildExited`: the turn completed before the transport
+                // went, so it stands with its wait truncated. A detach lands
+                // here on purpose, leaving any background work running
+                // remotely.
+                transport.confirm(TransportLossPhase::Hold);
+                if transport.detach_requested() {
+                    log::info!(
+                        "ACP session {our_session_id}: detached while holding for background \
+                         tasks — settling the completed turn with its wait truncated"
+                    );
+                } else {
+                    log::warn!(
+                        "ACP session {our_session_id}: {} — settling the completed turn with \
+                         its wait truncated",
+                        transport.lost_error("while holding for background tasks")
+                    );
+                }
+                transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Failed);
+                return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
+            }
         }
     }
 }
@@ -6581,22 +6813,42 @@ async fn observe_reattached_turn(
         .await
         .start_prompt(setup.agent_session_id.to_string());
     let stop = turn.stopper();
-    tokio::select! {
-        _ = cancel_token.cancelled() => {
-            handler.cancel_pending_permissions();
-            // Nothing here waits for the agent to answer the cancel, so it
-            // goes straight onto the proxy (see `ReattachedTurnStop::cancel`)
-            // rather than through this connection, which is about to close.
-            stop.cancel();
-            Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled))
-        }
-        ended = turn.ended() => match ended {
-            Ok(()) => {
-                log::info!("Session {our_session_id}: the reattached turn has ended");
-                Ok((AgentRunOutcome::Completed, SessionSettleReason::ResponseComplete))
+    // The turn is in flight on the agent: losing this connection, or letting
+    // go of it on purpose, leaves it running there.
+    let transport = &handler.transport;
+    let ended = if transport.begin_turn() {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                handler.cancel_pending_permissions();
+                // Nothing here waits for the agent to answer the cancel, so it
+                // goes straight onto the proxy (see `ReattachedTurnStop::cancel`)
+                // rather than through this connection, which is about to close.
+                stop.cancel();
+                return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
             }
-            Err(error) => Err(error),
-        },
+            _ = transport.lost().cancelled() => {
+                Err(transport.lost_error("with the reattached turn in flight"))
+            }
+            ended = turn.ended() => ended,
+        }
+    } else {
+        Err(transport.lost_error("with the reattached turn in flight"))
+    };
+    match ended {
+        Ok(()) => {
+            log::info!("Session {our_session_id}: the reattached turn has ended");
+            Ok((
+                AgentRunOutcome::Completed,
+                SessionSettleReason::ResponseComplete,
+            ))
+        }
+        Err(error) => {
+            if transport.first_signal().is_some() {
+                transport.confirm(TransportLossPhase::Turn);
+            }
+            Err(error)
+        }
     }
 }
 
@@ -6629,6 +6881,22 @@ async fn run_prompt_turn(
     let content_blocks = build_prompt_content_blocks(prompt, images, supports_images);
     let prompt_request = PromptRequest::new(setup.agent_session_id.clone(), content_blocks);
 
+    // The prompt would go to a transport already known dead: nothing is
+    // running remotely for it, so the loss is the session's, not a turn's.
+    let transport = &handler.transport;
+    if !transport.begin_turn() {
+        transport.confirm(TransportLossPhase::Setup);
+        return Err(transport.lost_error("before the prompt was sent"));
+    }
+    // A failure the SDK made because the transport closed is the structural
+    // verdict a remote session's `disconnected` status rests on.
+    let prompt_failed = |error: agent_client_protocol::Error| {
+        if agent_client_protocol::is_incoming_transport_closed(&error) {
+            transport.confirm(TransportLossPhase::Turn);
+        }
+        describe_prompt_error(error, &setup.auth_methods)
+    };
+
     handler.begin_turn_permissions();
     handler.transition_to_live().await;
     handler
@@ -6645,7 +6913,19 @@ async fn run_prompt_turn(
     let prompt_response = loop {
         tokio::select! {
             result = &mut prompt_task => {
-                break result.map_err(|error| describe_prompt_error(error, &setup.auth_methods))?;
+                break result.map_err(prompt_failed)?;
+            }
+            // A proxy that lost its remote process keeps stdout open, so no
+            // reply (and no transport-closed failure) would ever come. A
+            // reply already on its way still wins.
+            _ = transport.lost().cancelled() => {
+                match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut prompt_task).await {
+                    Ok(result) => break result.map_err(prompt_failed)?,
+                    Err(_) => {
+                        transport.confirm(TransportLossPhase::Turn);
+                        return Err(transport.lost_error("with the turn in flight"));
+                    }
+                }
             }
             _ = cancel_token.cancelled() => {
                 handler.cancel_pending_permissions();
@@ -6734,6 +7014,9 @@ async fn run_prompt_turn(
                             }));
                         }
                         Some(Ok(Err(e))) => {
+                            if agent_client_protocol::is_incoming_transport_closed(&e) {
+                                transport.confirm(TransportLossPhase::Turn);
+                            }
                             let message = format!("Prompt failed after interrupt: {e:?}");
                             let _ = reply.send(Err(message.clone()));
                             return Err(message);
@@ -6924,6 +7207,13 @@ pub fn is_remote_agent_detached_error(error: &str) -> bool {
 /// the session's connection was let go, and any turn it had in flight
 /// cancelled there, so the session fails as an ordinary crash.
 const REMOTE_SESSION_CUT_OFF_PREFIX: &str = "Remote session cut off: ";
+
+/// Whether a session error means it was cut off from its remote agent for
+/// falling behind its output: its turn was cancelled on the workstation, so
+/// unlike a lost transport there is nothing left running to come back for.
+pub fn is_remote_session_cut_off_error(error: &str) -> bool {
+    error.contains(REMOTE_SESSION_CUT_OFF_PREFIX)
+}
 
 /// The turn [`AcpDriver::reattach`] picks back up.
 #[derive(Clone, Debug)]
@@ -8058,6 +8348,7 @@ mod tests {
     mod response_completion;
     mod session_isolation;
     mod settlement;
+    mod transport_loss;
     mod turn_control;
 
     use std::collections::BTreeSet;
@@ -12284,8 +12575,11 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
     #[test]
     fn settled_outcome_overrides_a_completed_turn_but_never_a_failed_one() {
-        let settled =
-            |outcome: Result<AgentRunOutcome, String>, reason| SessionSettled { outcome, reason };
+        let settled = |outcome: Result<AgentRunOutcome, String>, reason| SessionSettled {
+            outcome,
+            reason,
+            transport_loss: None,
+        };
 
         // A hold that was cancelled or failed after the turn completed is the
         // session's real outcome — the completed turn does not mask it.

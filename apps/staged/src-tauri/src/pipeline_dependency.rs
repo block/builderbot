@@ -67,9 +67,9 @@ fn status_gate(dependency: Option<&store::Session>) -> Option<DependencyGate> {
     };
     let noun = dependency_noun(dependency);
     match dependency.status {
-        SessionStatus::Queued | SessionStatus::Running => Some(DependencyGate::Waiting(format!(
-            "This waits for the {noun} to finish first."
-        ))),
+        SessionStatus::Queued | SessionStatus::Running | SessionStatus::Disconnected => Some(
+            DependencyGate::Waiting(format!("This waits for the {noun} to finish first.")),
+        ),
         SessionStatus::Error => Some(DependencyGate::Unmet(format!(
             "Skipped because the {noun} failed."
         ))),

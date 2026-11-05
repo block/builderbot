@@ -17,6 +17,7 @@ import type {
 } from '../../types';
 import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
 import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
+import { isSessionActive } from '../../shared/sessionStatus';
 import { shouldQueueBranchSession } from './branchSessionQueue';
 import {
   getPendingSessionItems,
@@ -75,9 +76,7 @@ export default class BranchCardSessionManager {
       return true;
     }
     const tl = this.getTimeline();
-    return (
-      !!tl && tl.commits.some((c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued')
-    );
+    return !!tl && tl.commits.some((c) => isSessionActive(c.sessionStatus));
   });
 
   constructor(opts: {

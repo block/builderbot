@@ -183,6 +183,22 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     return;
   }
 
+  if (status === 'disconnected') {
+    // A Blox session whose local proxy connection was lost mid-turn: the
+    // remote turn may still be running, but nothing here is connected to it.
+    // Not terminal, so no completion handling (handleSessionEnd, PR/push/pull
+    // outcomes, unread marking) — only drop the live busy state, and keep a
+    // snapshot fetched before this event from re-registering it as running.
+    if (hydrationFetchesInFlight > 0) {
+      terminalWhileFetching.set(sessionId, Date.now());
+    }
+    if (eventBranchId) {
+      invalidateBranchTimeline(eventBranchId);
+    }
+    sessionRegistry.cleanupSession(sessionId);
+    return;
+  }
+
   if (status === 'completed' || status === 'error' || status === 'cancelled') {
     if (hydrationFetchesInFlight > 0) {
       terminalWhileFetching.set(sessionId, Date.now());
@@ -429,6 +445,9 @@ async function reconcileSweptWorkflowSession({
   // The backend resumed it between the snapshot and this lookup — leave the
   // chip alone; its running event re-registers the session.
   if (status === 'running' || status === 'queued') return;
+  // Not terminal: the remote turn may still be running, so the chip stays in
+  // progress until the session ends or is stopped.
+  if (status === 'disconnected') return;
 
   if (kind === 'pr') {
     if (status === 'completed') {

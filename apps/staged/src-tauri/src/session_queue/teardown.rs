@@ -66,7 +66,8 @@ pub(crate) async fn stop_branch_sessions<R: tauri::Runtime>(
 ///   the `register` to apply, and the hold is waited out either way.
 /// - A running row nothing here owns (another process's, or one the sweep has
 ///   not reached yet) is written `cancelled` directly, as `cancel_session_impl`'s
-///   fallback does, so the client sees it end.
+///   fallback does, so the client sees it end. A `disconnected` row is never
+///   owned, so it always takes this path.
 pub(crate) fn signal_branch_sessions<R: tauri::Runtime>(
     store: &Store,
     registry: &SessionRegistry,
@@ -94,7 +95,7 @@ pub(crate) fn signal_branch_sessions<R: tauri::Runtime>(
         }
 
         let running = store
-            .get_running_sessions_for_branch(&branch.id)
+            .get_busy_sessions_for_branch(&branch.id)
             .map_err(|e| e.to_string())?;
         for session in running {
             if registry.cancel_with_completion_reason(&session.id, CompletionReason::Interrupted) {

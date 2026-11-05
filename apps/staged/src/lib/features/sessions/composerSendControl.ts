@@ -91,13 +91,20 @@ export type ComposerSessionBlock =
   /** The row is still being fetched. */
   | 'loading'
   /** The fetch settled without a row: it failed, or the session is gone. */
-  | 'unavailable';
+  | 'unavailable'
+  /**
+   * A Blox session that lost its connection mid-turn and may still be running
+   * on its workstation. The backend refuses follow-ups until it is stopped.
+   */
+  | 'disconnected';
 
 export interface ComposerSessionBlockInput {
   /** The pane's load is in flight. */
   loading: boolean;
   /** The pane holds a session row. */
   hasSession: boolean;
+  /** The session row's status is `disconnected`. */
+  disconnected?: boolean;
 }
 
 /**
@@ -108,9 +115,11 @@ export interface ComposerSessionBlockInput {
 export function composerSessionBlock({
   loading,
   hasSession,
+  disconnected = false,
 }: ComposerSessionBlockInput): ComposerSessionBlock | null {
   if (loading) return 'loading';
   if (!hasSession) return 'unavailable';
+  if (disconnected) return 'disconnected';
   return null;
 }
 
@@ -152,6 +161,10 @@ export const COMPOSER_LOADING_TITLE = 'Loading session…';
 /** Hover title for the submit control once the load settled without a row. */
 export const COMPOSER_UNAVAILABLE_TITLE = 'Session unavailable';
 
+/** Hover title for the submit control while the session is disconnected. */
+export const COMPOSER_DISCONNECTED_TITLE =
+  'This Blox session lost its connection and may still be running on its workstation. Stop it to send a follow-up.';
+
 /**
  * The hover title a submit block earns on its own, or `null` when the
  * control's regular title (Send / Queue) should stand.
@@ -162,6 +175,8 @@ export function composerSubmitBlockTitle(block: ComposerSubmitBlock | null): str
       return COMPOSER_LOADING_TITLE;
     case 'unavailable':
       return COMPOSER_UNAVAILABLE_TITLE;
+    case 'disconnected':
+      return COMPOSER_DISCONNECTED_TITLE;
     default:
       return null;
   }

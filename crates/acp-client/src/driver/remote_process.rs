@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -124,6 +124,11 @@ struct SharedProcess {
     /// Per app instance, held while one of its quiet reattached turns waits
     /// for the answer to its cancel (see [`ReattachedTurn::cancel_quiet_turn`]).
     cancel_windows: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
+    /// Set once a session let go of the proxy leaving its turn running on
+    /// the agent (see [`LeaseDetacher`]): from then on the proxy is never
+    /// sent SIGINT, which would stop a process `sq` started — and that turn
+    /// with it — but only SIGKILLed.
+    keep_agent: AtomicBool,
     /// Cancelled to interrupt the proxy.
     stop: CancellationToken,
     /// Cancelled once the proxy is observed to be gone.
@@ -259,6 +264,24 @@ impl RemoteProcessLease {
         })
     }
 
+    /// Lets go of this session's lease on purpose, leaving its turn running
+    /// on the agent (see [`super::DetachHandle`]).
+    pub(super) fn detacher(&self) -> LeaseDetacher {
+        LeaseDetacher {
+            key: self.key.clone(),
+            process: Arc::clone(&self.process),
+            client: self.client,
+        }
+    }
+
+    /// Before [`Self::release`]: leave this session's turn running on the
+    /// agent rather than cancelling it once its connection is gone, and
+    /// never send the proxy SIGINT (see [`SharedProcess::keep_agent`]).
+    pub(super) fn keep_agent_running(&self) {
+        self.process.keep_agent.store(true, Ordering::Relaxed);
+        self.process.transport.keep_client(self.client);
+    }
+
     /// Detach this session. When it was the last one attached, wait for the
     /// proxy to stop, like stopping a session's own agent process would.
     pub(super) async fn release(mut self) {
@@ -325,6 +348,60 @@ impl RemoteProcessLease {
 impl Drop for RemoteProcessLease {
     fn drop(&mut self) {
         self.detach();
+    }
+}
+
+/// Lets go of one session's lease on a shared proxy at once, from any
+/// thread, leaving the session's turn running on the agent: what a
+/// [`super::DetachHandle`] does to a remote session.
+#[derive(Clone)]
+pub(super) struct LeaseDetacher {
+    key: ProxyKey,
+    process: Arc<SharedProcess>,
+    client: RemoteClientId,
+}
+
+impl LeaseDetacher {
+    /// End the session's stream without cancelling its turn, and mark the
+    /// proxy as one never to send SIGINT. When no other session holds it,
+    /// SIGKILL its process group now rather than waiting for the session's
+    /// teardown, so a quit that exits right after cannot leave `sq` behind
+    /// to stop the agent on its way out.
+    pub(super) fn detach_keeping_agent(&self) {
+        self.process.keep_agent.store(true, Ordering::Relaxed);
+        self.process.transport.keep_client(self.client);
+        let mut registry = registry();
+        let sole_lease = matches!(
+            registry.get(&self.key),
+            Some(Entry::Live { process, leases })
+                if process.generation == self.process.generation && *leases == 1
+        );
+        if !sole_lease {
+            log::info!(
+                "{}: a session detached leaving its turn running; others still use the proxy",
+                self.process.describe()
+            );
+            return;
+        }
+        log::info!(
+            "{}: the last session detached leaving its turn running; killing the proxy \
+             without interrupting its agent",
+            self.process.describe()
+        );
+        // While the entry is live the proxy's thread has not retired it, so
+        // the child is not reaped and its pgid cannot have been reused.
+        if let Some(pid) = self.process.pid.and_then(|pid| i32::try_from(pid).ok()) {
+            super::transport_loss::kill_process_group(pid);
+        }
+        registry.insert(
+            self.key.clone(),
+            Entry::Stopping {
+                generation: self.process.generation,
+                stopped: self.process.stopped.clone(),
+            },
+        );
+        drop(registry);
+        self.process.stop.cancel();
     }
 }
 
@@ -778,6 +855,7 @@ async fn run_proxy(
         report: Mutex::new(ProxyReport::default()),
         stream_ended: CancellationToken::new(),
         cancel_windows: Mutex::default(),
+        keep_agent: AtomicBool::new(false),
         stop: CancellationToken::new(),
         exited: CancellationToken::new(),
         stopped: CancellationToken::new(),
@@ -833,7 +911,11 @@ async fn run_proxy(
         .transport
         .deliver_queued_frames(Duration::from_secs(2))
         .await;
-    super::graceful_stop(&mut child, true).await;
+    if process.keep_agent.load(Ordering::Relaxed) {
+        super::transport_loss::kill_without_interrupt(&mut child, true).await;
+    } else {
+        super::graceful_stop(&mut child, true).await;
+    }
     process.transport.close();
     process.exited.cancel();
     process.unregister(&key);

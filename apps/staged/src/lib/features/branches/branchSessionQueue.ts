@@ -1,3 +1,4 @@
+import { isSessionInFlight } from '../../shared/sessionStatus';
 import type { BranchSessionType } from '../../types';
 
 type TimelineSessionItem = {
@@ -22,7 +23,9 @@ function isQueued(status: string | null | undefined): boolean {
 }
 
 function isRunning(status: string | null | undefined): boolean {
-  return status === 'running';
+  // A `disconnected` session may still be running remotely, so it keeps the
+  // branch busy exactly like `running`.
+  return isSessionInFlight(status);
 }
 
 export function hasQueuedBranchSession(timeline: BranchSessionQueueTimeline): boolean {

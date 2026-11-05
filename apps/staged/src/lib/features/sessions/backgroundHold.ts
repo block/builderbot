@@ -22,8 +22,12 @@ import type { SessionBackgroundHoldPayload, SessionStatus } from '../../types';
 export type SessionBackgroundHold = Pick<SessionBackgroundHoldPayload, 'holding' | 'liveTasks'> &
   Partial<Pick<SessionBackgroundHoldPayload, 'tasks'>>;
 
-/** Statuses a session never holds in: its agent has already been torn down. */
+/**
+ * Statuses a session never holds in: its agent has already been torn down, or
+ * (`disconnected`) it has no live connection in this process to hold through.
+ */
 const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
+  'disconnected',
   'completed',
   'error',
   'cancelled',

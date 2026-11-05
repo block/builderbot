@@ -342,6 +342,7 @@ impl ProjectToolsHandler {
         match status {
             SessionStatus::Queued => "queued",
             SessionStatus::Running => "running",
+            SessionStatus::Disconnected => "disconnected",
             SessionStatus::Completed => "completed",
             SessionStatus::Cancelled => "cancelled",
             SessionStatus::Error => "failed",
@@ -822,7 +823,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running. A `failed` session reports `completion_reason` and `error_message`; `remote_agent_lost` means its remote workspace agent died under it (the message names why, such as the workstation restarting), so work it left may be uncommitted on the workspace."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running, or disconnected (a remote session Staged lost its connection to; it may still be working). A `failed` session reports `completion_reason` and `error_message`; `remote_agent_lost` means its remote workspace agent died under it (the message names why, such as the workstation restarting), so work it left may be uncommitted on the workspace."
     )]
     async fn wait_for_repo_session(
         &self,

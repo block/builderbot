@@ -46,6 +46,35 @@ describe('shouldQueueBranchSession', () => {
     ).toBe(true);
   });
 
+  it('treats a disconnected session as busy, exactly like a running one', () => {
+    for (const disconnectedMode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {
+      expect(
+        shouldQueueBranchSession({
+          mode: 'review',
+          timeline: timeline({ [disconnectedMode]: 'disconnected' }),
+        })
+      ).toBe(disconnectedMode !== 'note');
+      expect(
+        shouldQueueBranchSession({
+          mode: 'commit',
+          timeline: timeline({ [disconnectedMode]: 'disconnected' }),
+        })
+      ).toBe(true);
+    }
+    expect(
+      shouldQueueBranchSession({
+        mode: 'note',
+        timeline: timeline({ commit: 'disconnected' }),
+      })
+    ).toBe(true);
+    expect(
+      shouldQueueBranchSession({
+        mode: 'note',
+        timeline: timeline({ note: 'disconnected' }),
+      })
+    ).toBe(false);
+  });
+
   it('queues new work behind any queued user session', () => {
     for (const queuedMode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {
       for (const mode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {

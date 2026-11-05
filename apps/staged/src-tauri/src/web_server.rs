@@ -3921,7 +3921,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
             store
-                .update_branch_pr_number(&branch_id, pr_number)
+                .update_branch_pr_number(&branch_id, pr_number, None)
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
@@ -4007,6 +4007,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             None,
                             None,
                             pr_status.head_sha.clone(),
+                            pr_status.title.clone(),
                         ) {
                             log::warn!(
                                 "Failed to update PR status for branch {}: {}",

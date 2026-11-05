@@ -62,6 +62,8 @@ pub struct PrStatus {
     pub head_sha: Option<String>,
     /// Failed checks from the most recent GitHub status rollup.
     pub failed_checks: Vec<FailedCheck>,
+    /// The PR's title
+    pub title: Option<String>,
 }
 
 /// Summary of CI/status checks for a PR
@@ -742,6 +744,7 @@ pub struct HeadBranchPr {
     pub head_repo: Option<String>,
     pub draft: bool,
     pub author: String,
+    pub title: String,
 }
 
 /// Response from `gh pr list --head … --state all --json`
@@ -757,6 +760,7 @@ struct GhHeadBranchPrItem {
     head_repository: Option<GhRepository>,
     #[serde(rename = "isDraft")]
     is_draft: bool,
+    title: String,
 }
 
 impl From<GhHeadBranchPrItem> for HeadBranchPr {
@@ -769,6 +773,7 @@ impl From<GhHeadBranchPrItem> for HeadBranchPr {
             head_repo: item.head_repository.map(|r| r.name_with_owner),
             draft: item.is_draft,
             author: item.author.login,
+            title: item.title,
         }
     }
 }
@@ -815,7 +820,7 @@ pub fn list_prs_for_head_branch(
         branch_name,
         state_arg,
         limit_arg,
-        "--json=number,url,state,author,baseRefName,headRepository,isDraft",
+        "--json=number,url,state,author,baseRefName,headRepository,isDraft,title",
     ])?;
 
     let items: Vec<GhHeadBranchPrItem> =
@@ -2586,7 +2591,35 @@ struct GhPrStatusItem {
     status_check_rollup: Vec<GhStatusCheck>,
     #[serde(rename = "headRefOid")]
     head_ref_oid: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
+
+impl From<GhPrStatusItem> for PrStatus {
+    fn from(item: GhPrStatusItem) -> Self {
+        let checks = analyze_status_check_rollup(&item.status_check_rollup);
+        PrStatus {
+            state: item.state.to_uppercase(),
+            is_draft: item.is_draft,
+            mergeable: item.mergeable.to_uppercase(),
+            review_decision: item.review_decision,
+            checks_summary: ChecksSummary {
+                total: checks.total,
+                passed: checks.passed,
+                failed: checks.failed,
+                pending: checks.pending,
+                state: checks.state,
+            },
+            head_sha: item.head_ref_oid,
+            failed_checks: checks.failed_checks,
+            title: item.title,
+        }
+    }
+}
+
+/// The `gh pr view --json` fields [`GhPrStatusItem`] reads.
+const PR_STATUS_JSON_FIELDS: &str =
+    "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid,title";
 
 #[derive(Debug, Deserialize)]
 struct GhStatusCheck {
@@ -2699,34 +2732,13 @@ fn analyze_status_check_rollup(checks: &[GhStatusCheck]) -> CheckRollupAnalysis 
 pub fn fetch_pr_status(repo: &Path, pr_number: u64) -> Result<PrStatus, GitError> {
     let output = run_gh(
         repo,
-        &[
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
-        ],
+        &["pr", "view", &pr_number.to_string(), PR_STATUS_JSON_FIELDS],
     )?;
 
     let item: GhPrStatusItem =
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
 
-    let checks = analyze_status_check_rollup(&item.status_check_rollup);
-
-    Ok(PrStatus {
-        state: item.state.to_uppercase(),
-        is_draft: item.is_draft,
-        mergeable: item.mergeable.to_uppercase(),
-        review_decision: item.review_decision,
-        checks_summary: ChecksSummary {
-            total: checks.total,
-            passed: checks.passed,
-            failed: checks.failed,
-            pending: checks.pending,
-            state: checks.state,
-        },
-        head_sha: item.head_ref_oid,
-        failed_checks: checks.failed_checks,
-    })
+    Ok(item.into())
 }
 
 /// Fetch PR status using repo slug format (owner/repo) instead of local path.
@@ -2738,7 +2750,7 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
         &pr_number.to_string(),
         "-R",
         github_repo,
-        "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
+        PR_STATUS_JSON_FIELDS,
     ];
     let output = match run_gh_global(gh_args) {
         Ok(output) => output,
@@ -2767,23 +2779,7 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
         }
     };
 
-    let checks = analyze_status_check_rollup(&item.status_check_rollup);
-
-    Ok(PrStatus {
-        state: item.state.to_uppercase(),
-        is_draft: item.is_draft,
-        mergeable: item.mergeable.to_uppercase(),
-        review_decision: item.review_decision,
-        checks_summary: ChecksSummary {
-            total: checks.total,
-            passed: checks.passed,
-            failed: checks.failed,
-            pending: checks.pending,
-            state: checks.state,
-        },
-        head_sha: item.head_ref_oid,
-        failed_checks: checks.failed_checks,
-    })
+    Ok(item.into())
 }
 
 /// Fetch the canonical GitHub URL for a pull request.
@@ -3830,6 +3826,71 @@ mod tests {
              error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly\n\
              fatal: early EOF\n"
         );
+    }
+
+    /// `gh pr view` output, trimmed to what [`GhPrStatusItem`] reads: the
+    /// title rides along with the status every poll already fetches.
+    #[test]
+    fn pr_status_parse_reads_the_title() {
+        let output = r#"{
+            "state": "open",
+            "isDraft": false,
+            "mergeable": "mergeable",
+            "reviewDecision": "APPROVED",
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+            "headRefOid": "abc123",
+            "title": "Fix login redirect"
+        }"#;
+        let item: GhPrStatusItem = serde_json::from_str(output).unwrap();
+        let status = PrStatus::from(item);
+
+        assert_eq!(status.title.as_deref(), Some("Fix login redirect"));
+        assert_eq!(status.state, "OPEN");
+        assert_eq!(status.mergeable, "MERGEABLE");
+        assert_eq!(status.head_sha.as_deref(), Some("abc123"));
+        assert_eq!(status.checks_summary.state, "SUCCESS");
+        assert!(PR_STATUS_JSON_FIELDS.split(',').any(|f| f == "title"));
+    }
+
+    #[test]
+    fn pr_status_parse_tolerates_a_missing_title() {
+        let output = r#"{
+            "state": "MERGED",
+            "isDraft": false,
+            "mergeable": "UNKNOWN",
+            "reviewDecision": null,
+            "statusCheckRollup": [],
+            "headRefOid": null
+        }"#;
+        let item: GhPrStatusItem = serde_json::from_str(output).unwrap();
+
+        assert_eq!(PrStatus::from(item).title, None);
+    }
+
+    /// `gh pr list --head` output: detection and linking read the title from
+    /// the list they already fetch, so a linked branch has it before any poll.
+    #[test]
+    fn head_branch_pr_parse_reads_the_title() {
+        let output = r#"[{
+            "number": 123,
+            "url": "https://github.com/acme/widgets/pull/123",
+            "state": "OPEN",
+            "author": {"login": "octocat"},
+            "baseRefName": "main",
+            "headRepository": {"nameWithOwner": "acme/widgets"},
+            "isDraft": true,
+            "title": "Fix login redirect"
+        }]"#;
+        let items: Vec<GhHeadBranchPrItem> = serde_json::from_str(output).unwrap();
+        let prs: Vec<HeadBranchPr> = items.into_iter().map(Into::into).collect();
+
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 123);
+        assert_eq!(prs[0].title, "Fix login redirect");
+        assert_eq!(prs[0].head_repo.as_deref(), Some("acme/widgets"));
+        assert!(prs[0].draft);
     }
 
     /// The error text is bounded to the last lines, which hold git's verdict,

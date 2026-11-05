@@ -145,7 +145,7 @@ pub fn run_completion_side_effects(
             // number. A failed write is logged but doesn't suppress the event:
             // the PR exists on GitHub, and `recover_branch_pr` re-derives the
             // number later.
-            if let Err(e) = store.update_branch_pr_number(&branch_id, Some(pr_number)) {
+            if let Err(e) = store.update_branch_pr_number(&branch_id, Some(pr_number), None) {
                 log::error!(
                     "Failed to persist PR #{pr_number} for branch {branch_id} after session {session_id}: {e}"
                 );

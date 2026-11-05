@@ -117,6 +117,7 @@ pub(crate) fn to_branch_with_workdir(
         pr_updated_at: branch.pr_updated_at,
         pr_fetched_at: branch.pr_fetched_at,
         pr_head_sha: branch.pr_head_sha,
+        pr_title: branch.pr_title,
         setup_complete: branch.setup_complete,
         worktree_path: workdir_path,
         created_at: branch.created_at,

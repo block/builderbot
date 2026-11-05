@@ -128,18 +128,31 @@ function identityFields(project: Project, ctx: SearchContext | undefined): strin
 }
 
 /**
- * The project's items: one per branch (its name and PR number together, so
- * a query can't pair one branch's name with another's PR), then whatever the
- * index holds for it.
+ * The project's items: one per branch (its name, PR number and PR title
+ * together, so a query can't pair one branch's name with another's PR), then
+ * whatever the index holds for it. A branch with a PR is labelled by the PR —
+ * `PR #123 · <title>`, or the branch name until the first poll brings the
+ * title.
  */
 function projectItems(projectId: string, ctx: SearchContext): SearchItem[] {
   const items: SearchItem[] = [];
   for (const b of ctx.branchesByProject.get(projectId) ?? []) {
-    const hasPr = b.prNumber !== null;
+    const text = [b.branchName.toLowerCase()];
+    if (b.prNumber === null) {
+      items.push({
+        kind: 'branch',
+        label: b.branchName,
+        text,
+        prNumber: null,
+        updatedAt: b.updatedAt,
+      });
+      continue;
+    }
+    if (b.prTitle) text.push(b.prTitle.toLowerCase());
     items.push({
-      kind: hasPr ? 'pr' : 'branch',
-      label: hasPr ? `#${b.prNumber} · ${b.branchName}` : b.branchName,
-      text: [b.branchName.toLowerCase()],
+      kind: 'pr',
+      label: `PR #${b.prNumber} · ${b.prTitle || b.branchName}`,
+      text,
       prNumber: b.prNumber,
       updatedAt: b.updatedAt,
     });

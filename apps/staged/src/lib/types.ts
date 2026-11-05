@@ -85,6 +85,8 @@ export interface Branch {
   prUpdatedAt: number | null;
   prFetchedAt: number | null;
   prHeadSha: string | null;
+  /** The PR's title on GitHub as of the last fetch; null until the first one. */
+  prTitle: string | null;
   /** Number of finalized commits on this branch (populated by list_branches_for_project). */
   commitCount?: number;
 }

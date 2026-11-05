@@ -286,6 +286,8 @@ pub struct Branch {
     pub pr_fetched_at: Option<i64>,
     /// The SHA of the PR's head commit on GitHub
     pub pr_head_sha: Option<String>,
+    /// The PR's title on GitHub, as of the last fetch
+    pub pr_title: Option<String>,
     /// Whether the branch has completed its initial setup (worktree created
     /// and prerun actions have had the opportunity to run).
     pub setup_complete: bool,
@@ -316,6 +318,7 @@ impl Branch {
             pr_updated_at: None,
             pr_fetched_at: None,
             pr_head_sha: None,
+            pr_title: None,
             setup_complete: false,
             created_at: now,
             updated_at: now,
@@ -349,6 +352,7 @@ impl Branch {
             pr_updated_at: None,
             pr_fetched_at: None,
             pr_head_sha: None,
+            pr_title: None,
             setup_complete: false,
             created_at: now,
             updated_at: now,

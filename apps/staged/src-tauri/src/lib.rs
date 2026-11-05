@@ -120,6 +120,7 @@ pub struct BranchWithWorkdir {
     pub pr_updated_at: Option<i64>,
     pub pr_fetched_at: Option<i64>,
     pub pr_head_sha: Option<String>,
+    pub pr_title: Option<String>,
     pub setup_complete: bool,
     pub worktree_path: Option<String>,
     pub created_at: i64,

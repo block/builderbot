@@ -5073,6 +5073,7 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
                 Some("https://github.com/test-owner/test-repo/pull/1".to_string()),
                 Some(1_700_000_000),
                 Some("abc123".to_string()),
+                Some("Fix login redirect".to_string()),
             )
             .unwrap();
     };
@@ -5093,13 +5094,17 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
 
     // The clear path (PR gone) nulls the fields — also a real change.
     store
-        .update_branch_pr_status(&branch.id, None, None, None, None, None, None, None, None)
+        .update_branch_pr_status(
+            &branch.id, None, None, None, None, None, None, None, None, None,
+        )
         .unwrap();
     assert_eq!(rx.try_recv().unwrap(), expected);
 
     // Clearing an already-cleared branch is a no-op poll echo.
     store
-        .update_branch_pr_status(&branch.id, None, None, None, None, None, None, None, None)
+        .update_branch_pr_status(
+            &branch.id, None, None, None, None, None, None, None, None, None,
+        )
         .unwrap();
     assert!(rx.try_recv().is_err());
 
@@ -5108,6 +5113,159 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
     while rx.try_recv().is_ok() {}
     poll("SUCCESS");
     assert!(rx.try_recv().is_err());
+}
+
+/// A PR status fetch with everything but the title held fixed.
+fn poll_pr_title(store: &Store, branch_id: &str, title: Option<&str>) {
+    store
+        .update_branch_pr_status(
+            branch_id,
+            Some("OPEN".to_string()),
+            Some("SUCCESS".to_string()),
+            None,
+            Some(true),
+            Some(false),
+            None,
+            None,
+            Some("abc123".to_string()),
+            title.map(str::to_string),
+        )
+        .unwrap();
+}
+
+fn stored_pr_title(store: &Store, branch_id: &str) -> Option<String> {
+    store.get_branch(branch_id).unwrap().unwrap().pr_title
+}
+
+#[test]
+fn change_feed_pr_title_change_publishes_and_a_repeat_poll_stays_silent() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main").with_pr(1);
+    store.create_branch(&branch).unwrap();
+    poll_pr_title(&store, &branch.id, Some("Fix login"));
+    assert_eq!(
+        stored_pr_title(&store, &branch.id).as_deref(),
+        Some("Fix login")
+    );
+    while rx.try_recv().is_ok() {}
+
+    let expected = super::StoreChange::Branch {
+        branch_id: branch.id.clone(),
+        project_id: Some(project.id.clone()),
+    };
+
+    // Only pr_fetched_at / updated_at move: silent.
+    poll_pr_title(&store, &branch.id, Some("Fix login"));
+    assert!(rx.try_recv().is_err());
+
+    // A title edit on GitHub is a domain change: the pr-status-changed event
+    // doesn't carry the title, so only this tells the frontend.
+    poll_pr_title(&store, &branch.id, Some("Fix login redirect"));
+    assert_eq!(rx.try_recv().unwrap(), expected);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        stored_pr_title(&store, &branch.id).as_deref(),
+        Some("Fix login redirect")
+    );
+
+    // No title in hand keeps the stored one, and that is no change.
+    poll_pr_title(&store, &branch.id, None);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        stored_pr_title(&store, &branch.id).as_deref(),
+        Some("Fix login redirect")
+    );
+}
+
+#[test]
+fn clearing_pr_status_after_a_push_keeps_the_pr_title() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main").with_pr(1);
+    store.create_branch(&branch).unwrap();
+    poll_pr_title(&store, &branch.id, Some("Fix login"));
+
+    store
+        .update_branch_pr_status(
+            &branch.id, None, None, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+
+    let cleared = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(cleared.pr_state, None);
+    assert_eq!(cleared.pr_head_sha, None);
+    assert_eq!(cleared.pr_title.as_deref(), Some("Fix login"));
+}
+
+#[test]
+fn update_branch_pr_number_sets_keeps_or_drops_the_pr_title() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Linking with the title from the PR list sets it straight away.
+    store
+        .update_branch_pr_number(&branch.id, Some(7), Some("Fix login"))
+        .unwrap();
+    assert_eq!(
+        stored_pr_title(&store, &branch.id).as_deref(),
+        Some("Fix login")
+    );
+
+    // Re-recording the same PR without a title keeps it.
+    store
+        .update_branch_pr_number(&branch.id, Some(7), None)
+        .unwrap();
+    assert_eq!(
+        stored_pr_title(&store, &branch.id).as_deref(),
+        Some("Fix login")
+    );
+
+    // A different PR without a title must not show PR 7's.
+    store
+        .update_branch_pr_number(&branch.id, Some(8), None)
+        .unwrap();
+    assert_eq!(stored_pr_title(&store, &branch.id), None);
+
+    // A title in hand wins even for the same PR.
+    store
+        .update_branch_pr_number(&branch.id, Some(8), Some("Add metrics"))
+        .unwrap();
+    assert_eq!(
+        stored_pr_title(&store, &branch.id).as_deref(),
+        Some("Add metrics")
+    );
+
+    // Unlinking drops it.
+    store
+        .update_branch_pr_number(&branch.id, None, None)
+        .unwrap();
+    let unlinked = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(unlinked.pr_number, None);
+    assert_eq!(unlinked.pr_title, None);
+}
+
+#[test]
+fn pr_title_round_trips_and_serializes_as_camel_case() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let mut branch = Branch::new(&project.id, "feature", "main").with_pr(3);
+    branch.pr_title = Some("Fix login".to_string());
+    store.create_branch(&branch).unwrap();
+
+    let listed = store.list_branches_for_project(&project.id).unwrap();
+    assert_eq!(listed[0].pr_title.as_deref(), Some("Fix login"));
+
+    let wire = serde_json::to_value(&listed[0]).unwrap();
+    assert_eq!(wire["prTitle"], "Fix login");
 }
 
 #[test]

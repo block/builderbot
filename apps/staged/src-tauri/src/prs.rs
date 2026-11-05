@@ -1771,7 +1771,7 @@ pub fn update_branch_pr(
     pr_number: Option<u64>,
 ) -> Result<(), String> {
     get_store(&store)?
-        .update_branch_pr_number(&branch_id, pr_number)
+        .update_branch_pr_number(&branch_id, pr_number, None)
         .map_err(|e| e.to_string())
 }
 
@@ -1843,6 +1843,7 @@ pub(crate) async fn refresh_pr_status_impl(
             None,
             None,
             pr_status.head_sha.clone(),
+            pr_status.title.clone(),
         )
         .map_err(|e| e.to_string())?;
 
@@ -1972,6 +1973,7 @@ pub(crate) async fn refresh_project_pr_statuses(
                         None,
                         None,
                         pr_status.head_sha.clone(),
+                        pr_status.title.clone(),
                     ) {
                         log::warn!("Failed to update PR status for branch {}: {}", branch_id, e);
                         return Ok::<bool, String>(false);
@@ -2085,7 +2087,9 @@ pub(crate) fn clear_branch_pr_status_impl(
     branch_id: &str,
 ) -> Result<(), String> {
     store
-        .update_branch_pr_status(branch_id, None, None, None, None, None, None, None, None)
+        .update_branch_pr_status(
+            branch_id, None, None, None, None, None, None, None, None, None,
+        )
         .map_err(|e| e.to_string())?;
 
     crate::web_server::emit_to_all(app_handle, "pr-status-cleared", branch_id);

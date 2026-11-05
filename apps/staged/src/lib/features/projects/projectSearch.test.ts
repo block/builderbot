@@ -111,6 +111,7 @@ function branch(overrides: Partial<Branch> = {}): Branch {
     prUpdatedAt: null,
     prFetchedAt: null,
     prHeadSha: null,
+    prTitle: null,
     ...overrides,
   };
 }
@@ -217,17 +218,17 @@ describe('matchProject', () => {
       });
     });
 
-    it('labels a branch with a PR by its number', () => {
+    it('labels a branch with a PR by its number and, before the title lands, its name', () => {
       expect(match(app, 'redirect', ctx).reason).toEqual({
         kind: 'pr',
-        label: '#123 · fix-login-redirect',
+        label: 'PR #123 · fix-login-redirect',
         more: 0,
       });
     });
 
     it('matches `#123` and `123` to PR 123 exactly', () => {
-      expect(match(app, '#123', ctx).reason?.label).toBe('#123 · fix-login-redirect');
-      expect(match(app, '123', ctx).reason?.label).toBe('#123 · fix-login-redirect');
+      expect(match(app, '#123', ctx).reason?.label).toBe('PR #123 · fix-login-redirect');
+      expect(match(app, '123', ctx).reason?.label).toBe('PR #123 · fix-login-redirect');
     });
 
     it('does not match a prefix of a PR number', () => {
@@ -268,6 +269,54 @@ describe('matchProject', () => {
 
     it('cannot match on branches that have not hydrated', () => {
       expect(match(app, 'typos', context()).matched).toBe(false);
+    });
+  });
+
+  describe('PR titles', () => {
+    const ctx = context({
+      branches: {
+        p1: [
+          branch({
+            id: 'b1',
+            branchName: 'mt/auth-fix',
+            prNumber: 123,
+            prTitle: 'Fix login redirect',
+            updatedAt: 1,
+          }),
+          branch({ id: 'b2', branchName: 'tidy-typos', updatedAt: 2 }),
+        ],
+      },
+    });
+
+    it('matches the title, labelled `PR #123 · <title>`', () => {
+      expect(match(app, 'redirect', ctx)).toEqual({
+        matched: true,
+        reason: { kind: 'pr', label: 'PR #123 · Fix login redirect', more: 0 },
+      });
+    });
+
+    it('labels by the title even when the branch name or number matched', () => {
+      expect(match(app, 'auth-fix', ctx).reason?.label).toBe('PR #123 · Fix login redirect');
+      expect(match(app, '#123', ctx).reason?.label).toBe('PR #123 · Fix login redirect');
+    });
+
+    it("treats the title as part of its branch's item", () => {
+      // Title, branch name and PR number of one branch pair up...
+      expect(match(app, 'login auth-fix #123', ctx).matched).toBe(true);
+      // ...but not with another branch's name.
+      expect(match(app, 'login typos', ctx).matched).toBe(false);
+    });
+
+    it('ignores a title left on a branch without a PR', () => {
+      const unlinked = context({
+        branches: { p1: [branch({ branchName: 'mt/auth-fix', prTitle: 'Fix login redirect' })] },
+      });
+      expect(match(app, 'redirect', unlinked).matched).toBe(false);
+      expect(match(app, 'auth', unlinked).reason).toEqual({
+        kind: 'branch',
+        label: 'mt/auth-fix',
+        more: 0,
+      });
     });
   });
 

@@ -38,9 +38,24 @@
 
   let status = $derived(disconnectedAlertStatus(reconcile, minuteNow.now(), checkRequested));
   let stopBusy = $derived(stopping || status.busy === 'stopping');
+
+  let root = $state<HTMLElement | null>(null);
+
+  // What the status line says, minus its "Next check in N min." countdown:
+  // that ticks every minute and must not pull a reader back down.
+  let statusKey = $derived(status.busy ?? (status.text ? (reconcile?.reason?.kind ?? '') : null));
+
+  // The alert lands at the end of the transcript, which can sit below the
+  // fold; bring it (and its Check now / Stop buttons) into view when it
+  // appears and whenever the status line changes. `nearest` is a no-op when
+  // it is already visible, and nothing here takes focus.
+  $effect(() => {
+    void statusKey;
+    root?.scrollIntoView?.({ block: 'nearest' });
+  });
 </script>
 
-<Alert.Root class="mt-3" data-testid="disconnected-session-alert">
+<Alert.Root bind:ref={root} class="mt-3" data-testid="disconnected-session-alert">
   <CloudOff class="text-[var(--ui-warning)]" />
   <Alert.Description>
     <div class="disconnected-body">

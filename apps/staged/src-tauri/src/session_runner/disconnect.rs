@@ -47,9 +47,16 @@ use crate::store::{CompletionReason, Session, Store};
 /// process it started running), or bloxlet couldn't be asked, which leaves
 /// the row for reconcile's backoff to settle. A detach on purpose wins over
 /// all of them.
+///
+/// A quit's cancel (`cancelled_for_quit`) is no Stop. A quit detaches remote
+/// runs to leave their turns running, and cancels one only when there was
+/// nothing to detach — a connection already tearing down, the moment before
+/// a run picks its turn back up — so a turn lost in flight stays
+/// `disconnected` for reconcile, as a detached one does.
 pub(crate) fn run_leaves_session_disconnected(
     is_remote: bool,
     cancel_requested: bool,
+    cancelled_for_quit: bool,
     error: Option<&str>,
     settle_reason: Option<SessionSettleReason>,
     transport_loss: Option<TransportLoss>,
@@ -63,7 +70,8 @@ pub(crate) fn run_leaves_session_disconnected(
     });
     let lost_holding_live_work = background_work_left
         && transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Hold);
-    is_remote && !cancel_requested && (lost_in_turn || lost_holding_live_work)
+    let stopped = cancel_requested && !cancelled_for_quit;
+    is_remote && !stopped && (lost_in_turn || lost_holding_live_work)
 }
 
 /// Whether a run whose connection ended with `error` picks its turn back up
@@ -119,15 +127,18 @@ pub(crate) fn held_work_needs_fresh_cancel(
 /// or never reached it — the transport went under with the turn in flight,
 /// before or while the Stop was sent. A Stop wins over that loss in
 /// [`run_leaves_session_disconnected`], so the row is not left `disconnected`
-/// for reconcile to settle; the cancel has to happen here.
+/// for reconcile to settle; the cancel has to happen here. Never for a quit's
+/// cancel (`cancelled_for_quit`), which leaves the turn running on purpose.
 pub(crate) fn stopped_turn_needs_fresh_cancel(
     is_remote: bool,
     cancelled: bool,
+    cancelled_for_quit: bool,
     cancel_unacknowledged: bool,
     transport_loss: Option<TransportLoss>,
 ) -> bool {
     is_remote
         && cancelled
+        && !cancelled_for_quit
         && (cancel_unacknowledged
             || transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Turn))
 }
@@ -175,6 +186,7 @@ mod tests {
         assert!(run_leaves_session_disconnected(
             true,
             false,
+            false,
             Some(LOST),
             Some(SessionSettleReason::Failed),
             TURN,
@@ -183,6 +195,7 @@ mod tests {
         // A quit's detach with the turn in flight.
         assert!(run_leaves_session_disconnected(
             true,
+            false,
             false,
             Some(LOST),
             Some(SessionSettleReason::Detached),
@@ -198,12 +211,14 @@ mod tests {
         assert!(!run_leaves_session_disconnected(
             false,
             false,
+            false,
             Some(LOST),
             Some(SessionSettleReason::Failed),
             TURN,
             false
         ));
         assert!(!run_leaves_session_disconnected(
+            false,
             false,
             false,
             Some(LOST),
@@ -251,6 +266,7 @@ mod tests {
         assert!(!run_leaves_session_disconnected(
             true,
             true,
+            false,
             Some(LOST),
             Some(SessionSettleReason::Failed),
             TURN,
@@ -267,6 +283,7 @@ mod tests {
                 !run_leaves_session_disconnected(
                     true,
                     false,
+                    false,
                     Some(LOST),
                     Some(SessionSettleReason::Failed),
                     loss(phase),
@@ -277,6 +294,7 @@ mod tests {
         }
         assert!(!run_leaves_session_disconnected(
             true,
+            false,
             false,
             None,
             Some(SessionSettleReason::HoldStopped),
@@ -294,6 +312,7 @@ mod tests {
         assert!(run_leaves_session_disconnected(
             true,
             false,
+            false,
             None,
             Some(SessionSettleReason::HoldStopped),
             hold,
@@ -303,12 +322,14 @@ mod tests {
         assert!(!run_leaves_session_disconnected(
             true,
             true,
+            false,
             None,
             Some(SessionSettleReason::HoldStopped),
             hold,
             true
         ));
         assert!(!run_leaves_session_disconnected(
+            false,
             false,
             false,
             None,
@@ -320,6 +341,7 @@ mod tests {
         // Stop's to finish (see `held_work_needs_fresh_cancel`).
         assert!(!run_leaves_session_disconnected(
             true,
+            false,
             false,
             None,
             Some(SessionSettleReason::HoldStopped),
@@ -336,6 +358,7 @@ mod tests {
         assert!(!run_leaves_session_disconnected(
             true,
             false,
+            false,
             Some(refused),
             Some(SessionSettleReason::Failed),
             None,
@@ -343,6 +366,7 @@ mod tests {
         ));
         assert!(!run_leaves_session_disconnected(
             true,
+            false,
             false,
             Some(refused),
             None,
@@ -364,6 +388,7 @@ mod tests {
                 !run_leaves_session_disconnected(
                     true,
                     false,
+                    false,
                     Some(error),
                     Some(SessionSettleReason::Failed),
                     TURN,
@@ -374,6 +399,7 @@ mod tests {
             assert!(
                 run_leaves_session_disconnected(
                     true,
+                    false,
                     false,
                     Some(error),
                     Some(SessionSettleReason::Detached),
@@ -398,6 +424,7 @@ mod tests {
                 run_leaves_session_disconnected(
                     true,
                     false,
+                    false,
                     Some(error),
                     Some(SessionSettleReason::Failed),
                     TURN,
@@ -410,6 +437,7 @@ mod tests {
         assert!(!run_leaves_session_disconnected(
             true,
             false,
+            false,
             Some("Remote agent lost: bloxlet lists no running agent process running `goose acp`"),
             Some(SessionSettleReason::Failed),
             TURN,
@@ -418,6 +446,7 @@ mod tests {
         // Lost while setting up: no prompt went out, so nothing runs.
         assert!(!run_leaves_session_disconnected(
             true,
+            false,
             false,
             Some("Remote agent detached: the `sq blox acp` proxy exited"),
             Some(SessionSettleReason::Failed),
@@ -428,22 +457,28 @@ mod tests {
 
     #[test]
     fn an_unanswered_stop_cancels_again_over_a_fresh_connection() {
-        assert!(stopped_turn_needs_fresh_cancel(true, true, true, None));
+        assert!(stopped_turn_needs_fresh_cancel(
+            true, true, false, true, None
+        ));
     }
 
     /// The Stop won over a transport that went under mid-turn, so its
     /// `session/cancel` may never have reached the workstation.
     #[test]
     fn a_stop_over_a_lost_turn_cancels_again_over_a_fresh_connection() {
-        assert!(stopped_turn_needs_fresh_cancel(true, true, false, TURN));
+        assert!(stopped_turn_needs_fresh_cancel(
+            true, true, false, false, TURN
+        ));
     }
 
     #[test]
     fn an_answered_stop_or_a_loss_outside_the_turn_needs_no_fresh_cancel() {
-        assert!(!stopped_turn_needs_fresh_cancel(true, true, false, None));
+        assert!(!stopped_turn_needs_fresh_cancel(
+            true, true, false, false, None
+        ));
         for phase in [TransportLossPhase::Setup, TransportLossPhase::Hold] {
             assert!(
-                !stopped_turn_needs_fresh_cancel(true, true, false, loss(phase)),
+                !stopped_turn_needs_fresh_cancel(true, true, false, false, loss(phase)),
                 "{phase:?}"
             );
         }
@@ -452,9 +487,57 @@ mod tests {
     #[test]
     fn only_a_cancelled_remote_run_cancels_again() {
         // Completed or failed: nothing was stopped.
-        assert!(!stopped_turn_needs_fresh_cancel(true, false, true, TURN));
+        assert!(!stopped_turn_needs_fresh_cancel(
+            true, false, false, true, TURN
+        ));
         // Local: the agent went down with the connection.
-        assert!(!stopped_turn_needs_fresh_cancel(false, true, true, TURN));
+        assert!(!stopped_turn_needs_fresh_cancel(
+            false, true, false, true, TURN
+        ));
+    }
+
+    /// A quit's cancel is no Stop: a run it reached with its turn lost in
+    /// flight — a connection already tearing down, or one about to pick its
+    /// turn back up — leaves the row `disconnected`, its turn running, and
+    /// never cancels that turn again.
+    #[test]
+    fn a_quit_s_cancel_leaves_a_lost_turn_disconnected_and_uncancelled() {
+        let detached = "Remote agent detached: the `sq blox acp` proxy exited, but bloxlet \
+                        still runs the agent process (command cmd-1)";
+        assert!(run_leaves_session_disconnected(
+            true,
+            true,
+            true,
+            Some(detached),
+            Some(SessionSettleReason::Failed),
+            TURN,
+            false
+        ));
+        assert!(run_leaves_session_disconnected(
+            true,
+            true,
+            true,
+            None,
+            Some(SessionSettleReason::HoldStopped),
+            loss(TransportLossPhase::Hold),
+            true
+        ));
+        // Nothing lost: the quit's cancel ended the turn, as any cancel does.
+        assert!(!run_leaves_session_disconnected(
+            true,
+            true,
+            true,
+            None,
+            Some(SessionSettleReason::Cancelled),
+            None,
+            false
+        ));
+        for (unacknowledged, loss) in [(true, None), (false, TURN), (true, TURN)] {
+            assert!(
+                !stopped_turn_needs_fresh_cancel(true, true, true, unacknowledged, loss),
+                "{unacknowledged} {loss:?}"
+            );
+        }
     }
 
     #[test]

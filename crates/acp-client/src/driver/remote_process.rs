@@ -451,10 +451,12 @@ impl ReattachedTurn {
     /// Wait for the turn to end: when the agent answers its prompt (see
     /// [`super::ReattachTurn::sole_turn_of_owner`]), or else when bloxlet
     /// reports its agent process idle. bloxlet tracks prompts per process, so
-    /// the latter also waits out prompts other sessions on it have in flight
-    /// — at most until the turn's session has heard nothing for
-    /// [`remote_liveness::REATTACHED_TURN_QUIET_CAP`], when the turn is
-    /// cancelled (see [`Self::cancel_quiet_turn`]).
+    /// on a process other sessions may share the latter also waits out
+    /// prompts they have in flight — at most until the turn's session has
+    /// heard nothing for [`remote_liveness::REATTACHED_TURN_QUIET_CAP`], when
+    /// the turn is cancelled (see [`Self::cancel_quiet_turn`]). A process
+    /// dedicated to the turn's session is waited on for as long as bloxlet
+    /// runs it.
     ///
     /// Fails with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the
     /// cause when the process that ran the turn is gone: `sq` found none to
@@ -474,18 +476,22 @@ impl ReattachedTurn {
             self.process.describe()
         );
         let watching_from = Instant::now();
+        let quiet_cap = (!self.target.dedicated_to_a_session())
+            .then_some(remote_liveness::REATTACHED_TURN_QUIET_CAP);
         let poll = async {
             loop {
                 match remote_liveness::check(&self.target, &command_id).await {
                     Ok(Liveness::Idle) => return Ok(()),
                     Ok(Liveness::Running) => {
-                        let heard_at = self
-                            .process
-                            .transport
-                            .last_heard(&self.agent_session_id)
-                            .map_or(watching_from, |at| at.max(watching_from));
-                        if heard_at.elapsed() >= remote_liveness::REATTACHED_TURN_QUIET_CAP {
-                            return self.cancel_quiet_turn(heard_at.elapsed()).await;
+                        if let Some(quiet_cap) = quiet_cap {
+                            let heard_at = self
+                                .process
+                                .transport
+                                .last_heard(&self.agent_session_id)
+                                .map_or(watching_from, |at| at.max(watching_from));
+                            if heard_at.elapsed() >= quiet_cap {
+                                return self.cancel_quiet_turn(heard_at.elapsed()).await;
+                            }
                         }
                     }
                     Ok(Liveness::Gone(cause)) => {
@@ -977,16 +983,25 @@ impl SharedProcess {
         })
         .await
         .unwrap_or_else(|_| Err("`sq blox ws commands` timed out".to_string()));
-        match verdict {
-            Ok(Liveness::Running | Liveness::Idle) => self.transport.detach_sessions(format!(
-                "{cause}, but bloxlet still runs the agent process ({process})"
-            )),
-            Ok(Liveness::Gone(gone)) => self.transport.lose(gone),
-            Err(error) => self.transport.detach_sessions(format!(
+        let detached = match verdict {
+            Ok(Liveness::Running | Liveness::Idle) => {
+                format!("{cause}, but bloxlet still runs the agent process ({process})")
+            }
+            Ok(Liveness::Gone(gone)) => {
+                self.transport.lose(gone);
+                return;
+            }
+            Err(error) => format!(
                 "{cause}, and whether the agent process ({process}) still runs is unknown: \
                  {error}"
-            )),
-        }
+            ),
+        };
+        // The sessions are detached for their turns to be reattached to, so
+        // the teardown must not stop the agent under them: an `sq` still
+        // alive (its output stream ended, or stdout closed before stderr)
+        // would take SIGINT as stopping a process it started.
+        self.keep_agent.store(true, Ordering::Relaxed);
+        self.transport.detach_sessions(detached);
     }
 }
 

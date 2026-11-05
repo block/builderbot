@@ -63,13 +63,6 @@ pub enum TurnResult {
     Failed { message: Option<String> },
 }
 
-/// The remote checkout an attach-cancel's catch-up loads the session in,
-/// still being resolved by the caller (see
-/// [`AcpDriver::attach_cancel_and_catch_up`]): awaited only once the
-/// cancel's outcome is known, so resolving it never holds the cancel up.
-pub type PendingCheckout<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<PathBuf, String>> + 'a>>;
-
 /// How an [`AcpDriver::attach_cancel`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelOutcome {
@@ -147,10 +140,6 @@ pub(super) struct CatchUpThrough<'a> {
     pub(super) store: &'a Arc<dyn Store>,
     pub(super) writer: &'a Arc<dyn MessageWriter>,
     pub(super) on_cancelled: Box<dyn FnOnce(&CancelOutcome) + 'a>,
-    /// The checkout to load the session in, when the caller is still
-    /// resolving it; `None` loads it in the driver's remote working
-    /// directory.
-    pub(super) checkout: Option<PendingCheckout<'a>>,
 }
 
 type ProxyStreams =
@@ -328,10 +317,6 @@ impl AcpDriver {
     /// needn't wait on it. It is not called when the cancel fails outright
     /// (an `Err`).
     ///
-    /// The session is loaded in `checkout` when given — the caller resolving
-    /// it alongside the cancel, which doesn't need it — else in the driver's
-    /// remote working directory.
-    ///
     /// Returns, with the outcome, whether the replay showed the agent
     /// receiving the newest prompt the transcript holds, as an attach's
     /// [`AttachOutcome::Ended`] does: [`LatestPrompt::Unknown`] when nothing
@@ -349,7 +334,6 @@ impl AcpDriver {
         writer: &Arc<dyn MessageWriter>,
         deadline: Duration,
         on_cancelled: impl FnOnce(&CancelOutcome),
-        checkout: Option<PendingCheckout<'_>>,
     ) -> Result<(CancelOutcome, LatestPrompt), String> {
         self.attach_cancel_with_timing(
             session_id,
@@ -360,7 +344,6 @@ impl AcpDriver {
                 store,
                 writer,
                 on_cancelled: Box::new(on_cancelled),
-                checkout,
             }),
             deadline,
             AttachTiming::default(),
@@ -387,9 +370,8 @@ impl AcpDriver {
                 store,
                 writer,
                 on_cancelled,
-                checkout,
             }) => {
-                let catch_up = match self.cancel_catch_up(session_id, store, writer, checkout) {
+                let catch_up = match self.cancel_catch_up(session_id, working_dir, store, writer) {
                     Ok(catch_up) => Some(catch_up),
                     Err(e) => {
                         log::warn!(
@@ -497,49 +479,34 @@ impl AcpDriver {
                 let initialized = initialized.borrow_mut().take();
                 let catch_up = catch_up.borrow_mut().take();
                 let mut latest_prompt = LatestPrompt::Unknown;
-                if let (Some(mut catch_up), Some((init_response, mode))) = (catch_up, initialized) {
+                if let (Some(catch_up), Some((init_response, mode))) = (catch_up, initialized) {
                     let over = matches!(
                         outcome,
                         CancelOutcome::Stopped | CancelOutcome::ProcessGone { .. }
                     );
                     if over && transport.first_signal().is_none() {
-                        match catch_up
-                            .checkout(working_dir, self.remote_working_dir.as_deref())
-                            .await
-                        {
-                            // Unless the transport went while it resolved.
-                            Ok(checkout) if transport.first_signal().is_none() => {
-                                let context = AcpSessionSetupContext {
-                                    connection: &connection,
-                                    working_dir: &checkout,
-                                    store: &catch_up.store,
-                                    handler: &handler,
-                                    our_session_id: session_id,
-                                    acp_session_id: Some(agent_session_id),
-                                    config_options: &[],
-                                    // As `initialize` was checked for: the
-                                    // connection only reads the transcript.
-                                    mcp_servers: &[],
-                                    agent_label: &self.agent_label,
-                                    auth_selection: None,
-                                    unattended_session_mode: self
-                                        .unattended_session_mode
-                                        .as_deref(),
-                                };
-                                latest_prompt = catch_up_after_cancel(
-                                    &context,
-                                    &init_response,
-                                    mode,
-                                    timing.cancel_catch_up,
-                                )
-                                .await;
-                            }
-                            Ok(_) => {}
-                            Err(e) => log::warn!(
-                                "ACP session {agent_session_id}: not catching session \
-                                 {session_id} up after the cancel: {e}"
-                            ),
-                        }
+                        let context = AcpSessionSetupContext {
+                            connection: &connection,
+                            working_dir: &catch_up.working_dir,
+                            store: &catch_up.store,
+                            handler: &handler,
+                            our_session_id: session_id,
+                            acp_session_id: Some(agent_session_id),
+                            config_options: &[],
+                            // As `initialize` was checked for: the
+                            // connection only reads the transcript.
+                            mcp_servers: &[],
+                            agent_label: &self.agent_label,
+                            auth_selection: None,
+                            unattended_session_mode: self.unattended_session_mode.as_deref(),
+                        };
+                        latest_prompt = catch_up_after_cancel(
+                            &context,
+                            &init_response,
+                            mode,
+                            timing.cancel_catch_up,
+                        )
+                        .await;
                     }
                 }
                 Ok((outcome, latest_prompt))
@@ -560,20 +527,24 @@ impl AcpDriver {
     }
 
     /// What [`AcpDriver::attach_cancel_and_catch_up`] needs before the proxy
-    /// spawns: the transcript stored for `session_id`. The remote checkout
-    /// to load the session in is resolved only for the load.
-    fn cancel_catch_up<'a>(
+    /// spawns: the transcript stored for `session_id`, and the remote
+    /// checkout to load the session in.
+    fn cancel_catch_up(
         &self,
         session_id: &str,
+        working_dir: &Path,
         store: &Arc<dyn Store>,
         writer: &Arc<dyn MessageWriter>,
-        checkout: Option<PendingCheckout<'a>>,
-    ) -> Result<CancelCatchUp<'a>, String> {
+    ) -> Result<CancelCatchUp, String> {
         Ok(CancelCatchUp {
             // Without what is stored, the whole replay would be recorded
             // again.
             stored: store.get_session_replay_boundaries(session_id)?,
-            pending_checkout: checkout,
+            working_dir: resolve_acp_working_dir(
+                working_dir,
+                true,
+                self.remote_working_dir.as_deref(),
+            )?,
             store: Arc::clone(store),
             writer: Arc::clone(writer),
         })
@@ -659,30 +630,11 @@ impl AcpDriver {
 }
 
 /// An attach-cancel's catch-up (see [`AcpDriver::attach_cancel_and_catch_up`]).
-struct CancelCatchUp<'a> {
+struct CancelCatchUp {
     stored: Vec<ReplayBoundary>,
-    /// The checkout the caller is still resolving, if it is.
-    pending_checkout: Option<PendingCheckout<'a>>,
+    working_dir: PathBuf,
     store: Arc<dyn Store>,
     writer: Arc<dyn MessageWriter>,
-}
-
-impl CancelCatchUp<'_> {
-    /// The checkout to load the session in: the caller's, once resolved,
-    /// else the driver's `remote_working_dir`.
-    async fn checkout(
-        &mut self,
-        working_dir: &Path,
-        remote_working_dir: Option<&Path>,
-    ) -> Result<PathBuf, String> {
-        match self.pending_checkout.take() {
-            Some(pending) => {
-                let checkout = pending.await?;
-                resolve_acp_working_dir(working_dir, true, Some(&checkout))
-            }
-            None => resolve_acp_working_dir(working_dir, true, remote_working_dir),
-        }
-    }
 }
 
 /// The `session/load` of an attach-cancel's catch-up, on the connection the

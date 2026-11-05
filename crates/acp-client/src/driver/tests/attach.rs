@@ -156,7 +156,7 @@ fn stored_transcript() -> Vec<ReplayBoundary> {
     ]
 }
 
-struct TranscriptStore(Vec<ReplayBoundary>);
+pub(super) struct TranscriptStore(pub(super) Vec<ReplayBoundary>);
 
 impl Store for TranscriptStore {
     fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
@@ -170,7 +170,7 @@ impl Store for TranscriptStore {
 
 /// Records what the attach persisted, in order.
 #[derive(Default)]
-struct TranscriptLog {
+pub(super) struct TranscriptLog {
     log: Mutex<Vec<String>>,
 }
 
@@ -179,7 +179,7 @@ impl TranscriptLog {
         self.log.lock().unwrap().push(entry);
     }
 
-    fn rows(&self) -> Vec<String> {
+    pub(super) fn rows(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
 }
@@ -424,18 +424,6 @@ async fn attach_cancel_with(
     deadline: Duration,
     stored: Option<Vec<ReplayBoundary>>,
 ) -> CaughtUp {
-    attach_cancel_loading_in(mode, probe, deadline, stored, None).await
-}
-
-/// [`attach_cancel_with`], loading the session in `checkout` once it
-/// resolves, as a caller still resolving it passes it.
-async fn attach_cancel_loading_in(
-    mode: &str,
-    probe: Arc<ScriptedProbe>,
-    deadline: Duration,
-    stored: Option<Vec<ReplayBoundary>>,
-    checkout: Option<Result<PathBuf, String>>,
-) -> CaughtUp {
     let log = log_path(mode);
     let transcript = Arc::new(TranscriptLog::default());
     let heard = std::cell::RefCell::new(None);
@@ -463,13 +451,6 @@ async fn attach_cancel_loading_in(
                                 std::fs::read_to_string(&log).unwrap_or_default(),
                             ));
                         }),
-                        checkout: checkout.map(|checkout| -> crate::PendingCheckout<'_> {
-                            Box::pin(async move {
-                                // Resolved after the cancel went out.
-                                tokio::time::sleep(Duration::from_millis(50)).await;
-                                checkout
-                            })
-                        }),
                     }),
                     deadline,
                     TIMING,
@@ -492,7 +473,7 @@ async fn attach_cancel_loading_in(
 /// [`stored_transcript`] with the tool call that was running when the
 /// connection went: `t1`, its first update (a shell command's description)
 /// stored as its result.
-fn stored_with_running_call() -> Vec<ReplayBoundary> {
+pub(super) fn stored_with_running_call() -> Vec<ReplayBoundary> {
     let mut stored = stored_transcript();
     stored.push(ReplayBoundary {
         role: "tool_call".to_string(),
@@ -909,47 +890,6 @@ async fn attach_cancel_records_a_live_only_settling_the_replay_lacks() {
     );
 }
 
-/// The catch-up loads the session in the checkout its caller resolved
-/// alongside the cancel; one that can't be resolved costs the catch-up,
-/// never the cancel.
-#[cfg(unix)]
-#[tokio::test(flavor = "current_thread")]
-async fn attach_cancel_loads_in_a_checkout_resolved_alongside_it() {
-    let caught_up = attach_cancel_loading_in(
-        "interrupt",
-        ScriptedProbe::running(),
-        Duration::from_secs(10),
-        Some(stored_with_running_call()),
-        Some(Ok(PathBuf::from("/home/bloxer/other-repo"))),
-    )
-    .await;
-    assert_eq!(caught_up.outcome, Ok(CancelOutcome::Stopped));
-    assert_eq!(caught_up.latest_prompt, Some(LatestPrompt::Replayed));
-    let load = caught_up
-        .log
-        .lines()
-        .find(|line| line.contains("\"method\":\"session/load\""))
-        .unwrap_or_else(|| panic!("no load: {}", caught_up.log));
-    assert!(
-        load.contains("\"cwd\":\"/home/bloxer/other-repo\""),
-        "{load}"
-    );
-    assert!(!caught_up.rows.is_empty());
-
-    let caught_up = attach_cancel_loading_in(
-        "interrupt",
-        ScriptedProbe::running(),
-        Duration::from_secs(10),
-        Some(stored_with_running_call()),
-        Some(Err("`ws exec` failed".to_string())),
-    )
-    .await;
-    assert_eq!(caught_up.outcome, Ok(CancelOutcome::Stopped));
-    assert_eq!(caught_up.latest_prompt, Some(LatestPrompt::Unknown));
-    assert!(!caught_up.log.contains("session/load"), "{}", caught_up.log);
-    assert!(caught_up.rows.is_empty(), "{:?}", caught_up.rows);
-}
-
 /// A replay that ends on the prompt before the newest stored one says the
 /// agent never received it, as an attach's does.
 #[cfg(unix)]
@@ -1056,7 +996,6 @@ async fn an_unreadable_transcript_cancels_without_catching_up() {
                         store: &store,
                         writer: &writer,
                         on_cancelled: Box::new(|_: &CancelOutcome| {}),
-                        checkout: None,
                     }),
                     Duration::from_secs(10),
                     TIMING,

@@ -34,7 +34,10 @@ const WAIT: Duration = Duration::from_secs(30);
 /// `linger` exists, when it keeps running until `release` does. With `silent`
 /// it logs neither starting nor reusing a process.
 ///
-/// A session it loads while reusing a process is one an earlier connection
+/// While `hold_load` exists it never answers `session/load`. A session it
+/// loads replays the frames in `replay` first, if that exists,
+/// with `@SID@` standing for the session id. A session it loads while
+/// reusing a process is one an earlier connection
 /// prompted: once `finish` exists, the agent streams the rest of that turn,
 /// then answers the earlier connection's prompt with `owner_response`, if
 /// that exists. A cancel with no held prompt, naming the session in
@@ -81,8 +84,10 @@ while IFS= read -r line; do
     *'"method":"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}' ;;
     *'"method":"session/new"'*) n=$((n+1)); result="{\"sessionId\":\"sess-$$-$n\"}" ;;
     *'"method":"session/load"'*)
+      [ -f "$dir/hold_load" ] && continue
+      sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+      [ -f "$dir/replay" ] && sed "s/@SID@/$sid/g" "$dir/replay"
       if [ -f "$dir/reuse" ]; then
-        sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
         (
           while [ ! -f "$dir/finish" ] && kill -0 $$ 2>/dev/null; do sleep 0.02; done
           printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Committed the fix."}}}}\n' "$sid"
@@ -248,6 +253,28 @@ impl FakeSq {
     /// permission request nobody answers.
     fn block_earlier_prompt(&self, session: &str, id: &str) {
         std::fs::write(self.dir.join("blocked_prompt"), format!("{session} {id}")).unwrap();
+    }
+
+    /// Have `session/load` replay these `session/update`s, each for the
+    /// loaded session, ahead of its answer.
+    fn replay(&self, updates: &[serde_json::Value]) {
+        let frames: String = updates
+            .iter()
+            .map(|update| {
+                let frame = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"sessionId": "@SID@", "update": update},
+                });
+                format!("{frame}\n")
+            })
+            .collect();
+        std::fs::write(self.dir.join("replay"), frames).unwrap();
+    }
+
+    /// Leave every `session/load` unanswered.
+    fn hold_load(&self) {
+        std::fs::write(self.dir.join("hold_load"), "").unwrap();
     }
 
     /// Fail the next `count` `sq blox ws commands` calls.
@@ -902,40 +929,74 @@ async fn the_orchestrator_ending_the_agent_stream_closes_the_proxy_to_new_sessio
 
 /// Should `sq` keep running once its stdin is closed, the proxy is stopped
 /// after a grace period; a session connecting meanwhile waits for that
-/// rather than joining it.
+/// rather than joining it. Returns whether the lingering proxy was sent
+/// SIGINT. `bloxlet` sets up what bloxlet says of the agent process (its
+/// command id passed in) once the agent has launched.
+async fn lingering_proxy_interrupted(label: &str, bloxlet: impl FnOnce(&FakeSq, &str)) -> bool {
+    let sq = FakeSq::new(label);
+    sq.linger();
+    let driver = sq.workspace_driver();
+    let mut first = Session::connect(&driver, &sq, "first").await;
+    let _second = Session::connect(&driver, &sq, "second").await;
+    let command = sq.command_id().await;
+    bloxlet(&sq, &command);
+
+    let outcome = first.prompt("orchestrator eof").await;
+    assert!(
+        matches!(outcome, Ok(AgentRunOutcome::Completed)),
+        "{label}: {outcome:?}"
+    );
+    wait_until("the proxy closes `sq`'s stdin", || sq.stdin_closed()).await;
+    let lingering = sq.launches()[0];
+
+    let mut third = Session::connect(&driver, &sq, "third").await;
+    assert!(
+        !alive(lingering),
+        "{label}: the lingering proxy is stopped before another starts"
+    );
+    // Read before the third session's prompt: its proxy is interrupted once
+    // that connection lets go.
+    let interrupted = sq.interrupted();
+    let outcome = third.prompt("three").await;
+    assert!(
+        matches!(outcome, Ok(AgentRunOutcome::Completed)),
+        "{label}: {outcome:?}"
+    );
+    assert_eq!(sq.launches().len(), 2, "{label}");
+    interrupted
+}
+
+/// The `sq` that started the agent lingers after its output stream ended
+/// while bloxlet still lists the agent — or can't be asked: the session still
+/// attached is detached, for its turn to be reattached to, so the proxy is
+/// killed without SIGINT, which `sq` would take as stopping the agent it
+/// started. Only an agent bloxlet reports gone leaves nothing for a SIGINT to
+/// stop.
 #[tokio::test(flavor = "current_thread")]
 async fn a_proxy_lingering_after_the_agent_stream_ended_is_stopped_and_not_joined() {
     LocalSet::new()
         .run_until(async {
-            let sq = FakeSq::new("orchestrator-eof-linger");
-            sq.linger();
-            let driver = sq.workspace_driver();
-            let mut first = Session::connect(&driver, &sq, "first").await;
-            let _second = Session::connect(&driver, &sq, "second").await;
-            let command = sq.command_id().await;
-            sq.set_commands(
-                &format!(r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_RUNNING"}}]"#),
-                "[]",
+            let running = lingering_proxy_interrupted("linger-running", |sq, command| {
+                sq.set_commands(
+                    &format!(r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_RUNNING"}}]"#),
+                    "[]",
+                );
+            })
+            .await;
+            assert!(
+                !running,
+                "an agent bloxlet still runs is not interrupted under its detached session"
             );
 
-            let outcome = first.prompt("orchestrator eof").await;
+            let unknown =
+                lingering_proxy_interrupted("linger-unknown", |sq, _| sq.fail_checks(1000)).await;
             assert!(
-                matches!(outcome, Ok(AgentRunOutcome::Completed)),
-                "{outcome:?}"
+                !unknown,
+                "an agent bloxlet can't say is gone is not interrupted either"
             );
-            wait_until("the proxy closes `sq`'s stdin", || sq.stdin_closed()).await;
 
-            let mut third = Session::connect(&driver, &sq, "third").await;
-            assert!(
-                sq.interrupted(),
-                "the lingering proxy is stopped before another starts"
-            );
-            let outcome = third.prompt("three").await;
-            assert!(
-                matches!(outcome, Ok(AgentRunOutcome::Completed)),
-                "{outcome:?}"
-            );
-            assert_eq!(sq.launches().len(), 2);
+            let gone = lingering_proxy_interrupted("linger-gone", |_, _| {}).await;
+            assert!(gone, "a proxy whose agent is gone is stopped as usual");
         })
         .await;
 }
@@ -1047,10 +1108,19 @@ impl Reattach {
         sq: &FakeSq,
         writer: Arc<BasicMessageWriter>,
     ) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
+        self.start_on(driver, sq, Arc::new(RecordingStore::default()), writer)
+    }
+
+    /// [`Self::start`] on a session whose transcript is `store`'s.
+    fn start_on(
+        self,
+        driver: AcpDriver,
+        sq: &FakeSq,
+        store: Arc<dyn Store>,
+        writer: Arc<dyn MessageWriter>,
+    ) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
         let dir = sq.dir.clone();
         tokio::task::spawn_local(async move {
-            let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
-            let writer: Arc<dyn MessageWriter> = writer;
             timeout(
                 WAIT,
                 driver.reattach(
@@ -1066,6 +1136,42 @@ impl Reattach {
                         owner_pid: self.owner_pid,
                         sole_turn_of_owner: self.sole_turn_of_owner,
                     },
+                ),
+            )
+            .await
+            .expect("the reattachment should end")
+        })
+    }
+}
+
+impl Reattach {
+    /// [`Self::start`] through [`AcpDriver::reattach_detachable`], for how
+    /// the connection settled.
+    fn settle(
+        self,
+        driver: AcpDriver,
+        sq: &FakeSq,
+    ) -> tokio::task::JoinHandle<Result<crate::driver::SessionSettled, String>> {
+        let dir = sq.dir.clone();
+        tokio::task::spawn_local(async move {
+            let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+            let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+            timeout(
+                WAIT,
+                driver.reattach_detachable(
+                    "staged-session",
+                    &dir,
+                    &store,
+                    &writer,
+                    &self.cancel,
+                    &ReattachTurn {
+                        agent_session_id: self.agent_session_id.to_string(),
+                        prompted_at: self.prompted_at,
+                        connected_at: self.connected_at,
+                        owner_pid: self.owner_pid,
+                        sole_turn_of_owner: self.sole_turn_of_owner,
+                    },
+                    &|_| {},
                 ),
             )
             .await
@@ -1562,6 +1668,120 @@ async fn two_quiet_reattached_turns_of_one_instance_are_told_apart() {
         .await;
 }
 
+/// A process dedicated to the turn's session has no co-tenants to hide the
+/// turn's end behind, and runs unattended, so asks no permission: a turn
+/// quiet there is busy in a long, silent tool. It is waited on past the
+/// quiet cap, until bloxlet reports the process idle, and never cancelled.
+#[tokio::test(flavor = "current_thread")]
+async fn a_quiet_reattached_turn_on_a_dedicated_process_is_not_capped() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-dedicated-quiet");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            let reattached = Reattach {
+                owner_pid: Some(424_242),
+                ..Reattach::default()
+            }
+            .start(
+                sq.blox_driver(Some("claude"), "staged-session"),
+                &sq,
+                Arc::new(BasicMessageWriter::new()),
+            );
+
+            // A cap's cancel would go out the moment it fired.
+            tokio::time::sleep(
+                crate::driver::remote_liveness::REATTACHED_TURN_QUIET_CAP + Duration::from_secs(1),
+            )
+            .await;
+            assert!(!reattached.is_finished(), "the quiet turn was given up on");
+            assert!(sq.received("session/cancel").is_empty());
+
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+                "[]",
+            );
+            let outcome = reattached.await.unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert!(
+                sq.received("session/cancel").is_empty(),
+                "a turn that ended is not cancelled"
+            );
+        })
+        .await;
+}
+
+/// The tool call running when the earlier connection went is stored
+/// `pending`, with its description as its result; the replay of the
+/// reattachment's `session/load` holds its completion. That completion
+/// lands on the stored call, as a live one would, and nothing the
+/// transcript holds is recorded again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stored_running_call_the_reattached_replay_finished_is_completed() {
+    use super::attach::{stored_with_running_call, TranscriptLog, TranscriptStore};
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-replay-settles");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            let text = |message_id: &str, text: &str| {
+                serde_json::json!({"sessionUpdate": "agent_message_chunk", "messageId": message_id,
+                    "content": {"type": "text", "text": text}})
+            };
+            let tool = |id: &str| {
+                serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": id, "title": "Run",
+                    "status": "pending"})
+            };
+            let completed = |id: &str, output: &str| {
+                serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": id,
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": output}}]})
+            };
+            sq.replay(&[
+                serde_json::json!({"sessionUpdate": "user_message_chunk", "messageId": "u1",
+                    "content": {"type": "text", "text": "hi"}}),
+                text("m0", "Earlier."),
+                tool("t0"),
+                completed("t0", "listed"),
+                text("m1", "Hello "),
+                tool("t1"),
+                completed("t1", "3 passed"),
+            ]);
+            let log = Arc::new(TranscriptLog::default());
+            let reattached = Reattach::default().start_on(
+                sq.workspace_driver(),
+                &sq,
+                Arc::new(TranscriptStore(stored_with_running_call())),
+                log.clone(),
+            );
+            wait_until("the turn is being watched", || sq.checks() > 0).await;
+
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+                "[]",
+            );
+            let outcome = reattached.await.unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                log.rows(),
+                ["status:t1:completed", "tool_result:t1:3 passed"]
+            );
+        })
+        .await;
+}
+
 /// Stopping a reattached turn cancels it on the agent, which `sq` leaves
 /// running, even though nothing waits for the answer and the session was the
 /// last one on the proxy, which is stopped right after.
@@ -1580,18 +1800,19 @@ async fn stopping_a_reattached_turn_cancels_it_before_the_proxy_stops() {
                 cancel: cancel.clone(),
                 ..Reattach::default()
             }
-            .start(
-                sq.workspace_driver(),
-                &sq,
-                Arc::new(BasicMessageWriter::new()),
-            );
+            .settle(sq.workspace_driver(), &sq);
             wait_until("the turn is being watched", || sq.checks() > 0).await;
 
             cancel.cancel();
-            let outcome = reattached.await.unwrap();
+            let settled = reattached.await.unwrap().expect("the connection settles");
             assert!(
-                matches!(outcome, Ok(AgentRunOutcome::Cancelled)),
-                "{outcome:?}"
+                matches!(settled.outcome, Ok(AgentRunOutcome::Cancelled)),
+                "{:?}",
+                settled.outcome
+            );
+            assert!(
+                !settled.cancel_unacknowledged,
+                "the cancel went out on a proxy still connected"
             );
             let received = sq.read("received");
             let cancelled_at = received
@@ -1608,6 +1829,43 @@ async fn stopping_a_reattached_turn_cancels_it_before_the_proxy_stops() {
             assert!(
                 cancelled_at < interrupted_at,
                 "the cancel reached the agent before the proxy stopped: {received}"
+            );
+        })
+        .await;
+}
+
+/// Stopped before its `session/load` answers, a reattachment sends the agent
+/// no `session/cancel`: the turn runs on, and the connection says so, for
+/// the caller to cancel it over a fresh one.
+#[tokio::test(flavor = "current_thread")]
+async fn stopping_a_reattachment_still_setting_up_leaves_its_cancel_unacknowledged() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-stop-setup");
+            sq.reuse("cmd-earlier");
+            sq.hold_load();
+            let cancel = CancellationToken::new();
+            let reattached = Reattach {
+                cancel: cancel.clone(),
+                ..Reattach::default()
+            }
+            .settle(sq.workspace_driver(), &sq);
+            wait_until("the session is being loaded", || {
+                !sq.received("session/load").is_empty()
+            })
+            .await;
+
+            cancel.cancel();
+            let settled = reattached.await.unwrap().expect("the connection settles");
+            assert!(
+                matches!(settled.outcome, Ok(AgentRunOutcome::Cancelled)),
+                "{:?}",
+                settled.outcome
+            );
+            assert!(settled.cancel_unacknowledged);
+            assert!(
+                sq.received("session/cancel").is_empty(),
+                "a connection still setting up sends no cancel"
             );
         })
         .await;

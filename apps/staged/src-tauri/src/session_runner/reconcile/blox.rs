@@ -6,8 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp_client::{
-    AttachOutcome, CancelOutcome, DetachHandle, LatestPrompt, PendingCheckout, RecordedTurn,
-    RemoteProcess,
+    AttachOutcome, CancelOutcome, DetachHandle, LatestPrompt, RecordedTurn, RemoteProcess,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -159,10 +158,6 @@ pub(crate) struct AttachControl {
     pub on_connected: Box<dyn Fn() + Send + Sync>,
 }
 
-/// The branch's checkout on the workstation, as a thread resolving it
-/// alongside a Stop's other Blox calls will send it.
-pub(crate) type CheckoutRx = tokio::sync::oneshot::Receiver<Result<PathBuf, String>>;
-
 /// What a cancel catches the transcript up through, and who hears the
 /// cancel's outcome before it does (see [`ReconcileBlox::cancel`]).
 pub(crate) struct Backfill<'a> {
@@ -170,10 +165,6 @@ pub(crate) struct Backfill<'a> {
     /// Told the cancel's outcome as soon as it is known, before the backfill
     /// starts; not called when the cancel fails outright.
     pub on_cancelled: Box<dyn FnOnce(&CancelOutcome) + Send + 'a>,
-    /// The checkout to load the session in, when it is still being resolved;
-    /// `None` loads it in `target.remote_working_dir`. Waited for only once
-    /// the cancel's outcome is known; the backfill is skipped when it fails.
-    pub checkout: Option<CheckoutRx>,
 }
 
 /// Blox, as reconcile uses it. Every method blocks.
@@ -365,7 +356,6 @@ impl ReconcileBlox for LiveBlox {
             let Some(Backfill {
                 store,
                 on_cancelled,
-                checkout,
             }) = backfill
             else {
                 return driver
@@ -379,13 +369,6 @@ impl ReconcileBlox for LiveBlox {
                     .await
                     .map(|outcome| (outcome, LatestPrompt::Unknown));
             };
-            let checkout = checkout.map(|checkout| -> PendingCheckout<'_> {
-                Box::pin(async move {
-                    checkout.await.unwrap_or_else(|_| {
-                        Err("resolving the checkout ended without an answer".to_string())
-                    })
-                })
-            });
             let store_trait: Arc<dyn acp_client::Store> = store.clone();
             let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::catching_up(
                 target.session_id.clone(),
@@ -401,7 +384,6 @@ impl ReconcileBlox for LiveBlox {
                     &writer,
                     deadline,
                     on_cancelled,
-                    checkout,
                 )
                 .await
         })?

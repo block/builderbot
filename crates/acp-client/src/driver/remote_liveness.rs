@@ -43,9 +43,12 @@ pub(super) const CHECK_AFTER_DISCONNECT_EVERY: Duration = Duration::from_secs(30
 pub(super) const CHECK_AFTER_DISCONNECT_EVERY: Duration = Duration::from_millis(100);
 
 /// How often a session reattached to a turn a previous app instance started
-/// asks whether that turn has ended.
+/// asks whether that turn has ended: as often as an attach reads the process
+/// status (`AttachTiming::poll`), since for agents whose answer to the turn's
+/// prompt can't be told apart (see `ReattachTurn::sole_turn_of_owner`) the
+/// process reading idle is the only sign the turn ended.
 #[cfg(not(test))]
-pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_secs(15);
+pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_secs(5);
 #[cfg(test)]
 pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_millis(50);
 
@@ -54,6 +57,11 @@ pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_millis(50);
 /// busy co-tenants can hide a turn's end; and a permission request the
 /// earlier connection never answered is not re-sent to a new one, so a turn
 /// blocked on one would otherwise run (and hold its branch's queue) forever.
+///
+/// Only on a process other sessions may share (see
+/// [`Target::dedicated_to_a_session`]): one dedicated to the turn's session
+/// has no co-tenants, and runs unattended, so it asks no permission, while
+/// a long, silent tool is just as likely there.
 #[cfg(not(test))]
 pub(super) const REATTACHED_TURN_QUIET_CAP: Duration = Duration::from_secs(30 * 60);
 #[cfg(test)]
@@ -125,6 +133,16 @@ impl Target {
             workspace: workspace.to_str()?.to_string(),
             requested,
         })
+    }
+
+    /// Whether the proxy asks `sq` for a process dedicated to one Staged
+    /// session: an argv naming it (see [`crate::types::names_a_staged_session`]).
+    /// A process pinned by `--command-id` is not known to be.
+    pub(super) fn dedicated_to_a_session(&self) -> bool {
+        match &self.requested {
+            Requested::Command(_) => false,
+            Requested::Argv(argv) => crate::types::names_a_staged_session(argv),
+        }
     }
 
     /// The agent process the proxy asks `sq` for, for a log line.

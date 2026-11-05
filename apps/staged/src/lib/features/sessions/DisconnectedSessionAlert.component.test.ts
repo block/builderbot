@@ -106,4 +106,49 @@ describe('DisconnectedSessionAlert', () => {
     expect(statusLine()?.title).toBe('sq: token expired');
     expect(button('Check now').disabled).toBe(false);
   });
+
+  it('scrolls itself into view when it appears and when its status line changes', () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      const { props } = render({ reconcile: reconcile('waiting') });
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'nearest' });
+      expect(scrollIntoView.mock.contexts[0]).toBe(
+        document.querySelector('[data-testid="disconnected-session-alert"]')
+      );
+
+      props.checkRequested = true;
+      flushSync();
+      expect(statusLine()?.textContent?.trim()).toBe('Catching up with the workstation…');
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+
+      // Same status text: no further scroll.
+      props.stopping = true;
+      flushSync();
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+
+      props.reconcile = reconcile('stopping');
+      flushSync();
+      expect(statusLine()?.textContent?.trim()).toBe('Stopping the turn on the workstation…');
+      expect(scrollIntoView).toHaveBeenCalledTimes(3);
+
+      // A new reason scrolls; only the next-check countdown ticking doesn't.
+      props.stopping = false;
+      props.checkRequested = false;
+      const reason = { kind: 'unreachable' as const, message: 'sq: timed out' };
+      props.reconcile = reconcile('waiting', { reason, nextAttemptAt: Date.now() + 10 * 60_000 });
+      flushSync();
+      const before = statusLine()?.textContent;
+      expect(before).toMatch(/Next check in \d+ min\./);
+      expect(scrollIntoView).toHaveBeenCalledTimes(4);
+      props.reconcile = reconcile('waiting', { reason, nextAttemptAt: Date.now() + 5 * 60_000 });
+      flushSync();
+      expect(statusLine()?.textContent).toMatch(/Next check in \d+ min\./);
+      expect(statusLine()?.textContent).not.toBe(before);
+      expect(scrollIntoView).toHaveBeenCalledTimes(4);
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
 });

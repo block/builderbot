@@ -282,9 +282,24 @@ pub(crate) fn blox_acp_command(agent_id: Option<&str>, staged_session_id: &str) 
     }
 }
 
+/// Whether `argv` is a [`BloxAcpCommand`] dedicated to one Staged session,
+/// in either of [`blox_acp_command`]'s forms: a trailing
+/// `--staged-session=<id>`, or Goose's `sh -c 'exec "$@"' staged-session-<id>`
+/// wrapper. Blox's shared default names no session.
+pub(crate) fn names_a_staged_session(argv: &[String]) -> bool {
+    match argv {
+        [sh, c, exec, tag, ..] if sh == "sh" && c == "-c" && exec == "exec \"$@\"" => {
+            tag.starts_with("staged-session-")
+        }
+        _ => argv
+            .last()
+            .is_some_and(|arg| arg.starts_with("--staged-session=")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{blox_acp_command, command_in_dir};
+    use super::{blox_acp_command, command_in_dir, names_a_staged_session};
     use std::fs;
     use std::path::Path;
 
@@ -398,5 +413,30 @@ mod tests {
     fn a_session_id_cannot_split_the_command_list() {
         let blox = blox_acp_command(Some("codex"), "a,b c");
         assert_eq!(blox.argv, ["codex-acp", "--staged-session=abc"]);
+    }
+
+    /// Every dedicated form names its session; Blox's shared default doesn't.
+    #[test]
+    fn dedicated_argv_names_its_staged_session() {
+        for agent in [
+            Some("claude"),
+            Some("codex"),
+            Some("goose"),
+            Some("pi"),
+            Some("amp"),
+        ] {
+            let blox = blox_acp_command(agent, "s1");
+            assert_eq!(
+                names_a_staged_session(&blox.argv),
+                blox.dedicated,
+                "{agent:?}"
+            );
+            assert!(blox.dedicated, "{agent:?}");
+        }
+        let shared = blox_acp_command(None, "s1");
+        assert!(!names_a_staged_session(&shared.argv));
+        assert!(!names_a_staged_session(&[]));
+        let goose_unwrapped: Vec<String> = ["goose", "acp"].map(String::from).to_vec();
+        assert!(!names_a_staged_session(&goose_unwrapped));
     }
 }

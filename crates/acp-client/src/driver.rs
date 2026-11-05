@@ -61,7 +61,7 @@ mod remote_routing;
 mod response_completion;
 mod transport_loss;
 
-pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, PendingCheckout, TurnResult};
+pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, TurnResult};
 pub(crate) use blox_process::BloxProcess;
 #[cfg(test)]
 pub(crate) use blox_process::RemoteProcessProbe;
@@ -2249,12 +2249,20 @@ impl AcpDriver {
             &|_| {},
         )
         .await
+        .and_then(|settled| settled.outcome)
     }
 
     /// [`Self::reattach`], handing the connection's [`DetachHandle`] to
     /// `on_detach_handle` once it is up, so the caller can let go of the turn
     /// without cancelling it. A detach ends the reattach with an error and
     /// leaves the turn running on the agent.
+    ///
+    /// Returns how the connection settled, its outcome included, so a caller
+    /// can tell a Stop the agent was sent from one it may never have had
+    /// ([`SessionSettled::cancel_unacknowledged`]): stopped while still
+    /// setting up, no `session/cancel` goes out, and one queued on a proxy
+    /// already losing its transport may never be delivered. `Err` when no
+    /// connection came up to settle.
     #[allow(clippy::too_many_arguments)]
     pub async fn reattach_detachable(
         &self,
@@ -2265,7 +2273,7 @@ impl AcpDriver {
         cancel_token: &CancellationToken,
         turn: &ReattachTurn,
         on_detach_handle: &dyn Fn(DetachHandle),
-    ) -> Result<AgentRunOutcome, String> {
+    ) -> Result<SessionSettled, String> {
         if !self.is_remote {
             return Err("Only a remote session's turn can be reattached to".to_string());
         }
@@ -2288,8 +2296,7 @@ impl AcpDriver {
         };
         settled
             .await
-            .map_err(|_| "The reattached connection ended without settling".to_string())?
-            .outcome
+            .map_err(|_| "The reattached connection ended without settling".to_string())
     }
 
     /// [`Self::connect`], or with `reattach` [`Self::reattach`]'s connection.
@@ -2553,31 +2560,46 @@ impl AcpDriver {
 
         let is_resuming = agent_session_id.is_some();
         let replay_boundaries = if is_resuming {
-            store
-                .get_session_replay_boundaries(session_id)
-                .unwrap_or_else(|e| {
-                    log::warn!("Failed to load session replay boundaries: {e}");
-                    vec![]
-                })
+            store.get_session_replay_boundaries(session_id)
         } else {
-            vec![]
+            Ok(vec![])
         };
-        let handler = Arc::new(
-            AcpNotificationHandler::new(
+        let handler = match (reattach, replay_boundaries) {
+            // A reattached turn went on while no connection was attached, so
+            // its replay can hold what the transcript lacks — a tool call that
+            // finished meanwhile included, whose ending nothing live re-sends.
+            // It catches up as an attach does (see `HandlerPhase::CatchingUp`):
+            // only what is new is recorded, and a stored call still running is
+            // settled from the replay. Unless the transcript can't be read,
+            // when that would record the whole replay again.
+            (Some(_), Ok(stored)) => AcpNotificationHandler::new(
                 Arc::clone(writer),
-                is_resuming,
-                replay_boundaries,
+                false,
+                Vec::new(),
                 cancel_token.clone(),
             )
-            // Only a held connection can be asked for permission out-of-turn;
-            // without a hold the policy is unreachable.
-            .with_out_of_turn_permissions(
-                self.background_hold
-                    .as_ref()
-                    .map(|hold| hold.out_of_turn_permissions)
-                    .unwrap_or_default(),
-            )
-            .with_transport_monitor(Arc::clone(&transport)),
+            .catching_up(&stored),
+            (_, replay_boundaries) => AcpNotificationHandler::new(
+                Arc::clone(writer),
+                is_resuming,
+                replay_boundaries.unwrap_or_else(|e| {
+                    log::warn!("Failed to load session replay boundaries: {e}");
+                    vec![]
+                }),
+                cancel_token.clone(),
+            ),
+        };
+        let handler = Arc::new(
+            handler
+                // Only a held connection can be asked for permission out-of-turn;
+                // without a hold the policy is unreachable.
+                .with_out_of_turn_permissions(
+                    self.background_hold
+                        .as_ref()
+                        .map(|hold| hold.out_of_turn_permissions)
+                        .unwrap_or_default(),
+                )
+                .with_transport_monitor(Arc::clone(&transport)),
         );
         let byte_streams = ByteStreams::new(stdin_compat, stdout_compat);
 
@@ -6512,6 +6534,11 @@ async fn run_acp_session(
     let setup_result = tokio::select! {
         _ = cancel_token.cancelled() => {
             handler.cancel_pending_permissions();
+            // No prompt of this connection's is in flight, but a reattached
+            // turn is, on the agent, and no `session/cancel` went out for it.
+            if reattached_turn.is_some() {
+                transport.note_cancel_unacknowledged();
+            }
             return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
         }
         result = &mut setup_task => result,
@@ -6559,6 +6586,11 @@ async fn run_acp_session(
                     if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
                         log::warn!("{e}");
                     }
+                    // Nothing waits for the answer, and the connection closes
+                    // right after: a reattached turn may run on.
+                    if reattached_turn.is_some() {
+                        transport.note_cancel_unacknowledged();
+                    }
                     return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
                 }
                 _ = handler.replay_done.notified() => {
@@ -6584,6 +6616,10 @@ async fn run_acp_session(
         handler.transition_to_waiting_for_prompt().await;
     }
     if let Some(turn) = reattached_turn {
+        // The replay is in: what follows is the turn's live stream, recorded
+        // whole, behind any text held from before the load that the replay
+        // never re-sent.
+        handler.finish_catch_up().await;
         return observe_reattached_turn(&setup, handler, our_session_id, cancel_token, turn).await;
     }
 
@@ -6947,6 +6983,12 @@ async fn observe_reattached_turn(
                 // goes straight onto the proxy (see `ReattachedTurnStop::cancel`)
                 // rather than through this connection, which is about to close.
                 stop.cancel();
+                // The proxy delivers what is queued before it stops — unless
+                // its transport is already going, when the cancel may never
+                // reach the agent.
+                if transport.first_signal().is_some() {
+                    transport.note_cancel_unacknowledged();
+                }
                 return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
             }
             _ = transport.lost().cancelled() => {

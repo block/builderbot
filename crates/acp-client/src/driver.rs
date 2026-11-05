@@ -8,7 +8,7 @@
 //! - Cancellation support
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,8 +28,9 @@ use agent_client_protocol::{
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
             SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
             SessionConfigOptionCategory, SessionConfigSelectOptions, SessionInfoUpdate,
-            SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-            StopReason, TextContent, ToolCallContent,
+            SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+            SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent,
+            ToolCallContent,
         },
         ProtocolVersion,
     },
@@ -1125,6 +1126,10 @@ pub struct AcpDriver {
     /// the interrupt-and-reprompt path. See
     /// [`AcpDriver::with_steering_disabled`].
     steering_disabled: bool,
+    /// Session mode to switch to right after `session/new` / `session/load`
+    /// when the agent advertises it; see
+    /// [`AcpDriver::with_unattended_session_mode`].
+    unattended_session_mode: Option<String>,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
@@ -1150,6 +1155,7 @@ impl AcpDriver {
                 background_hold: None,
                 background_hold_observer: None,
                 steering_disabled: false,
+                unattended_session_mode: None,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
     }
@@ -1170,6 +1176,7 @@ impl AcpDriver {
                 background_hold: None,
                 background_hold_observer: None,
                 steering_disabled: false,
+                unattended_session_mode: None,
             })
             .ok_or_else(|| {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
@@ -1191,19 +1198,39 @@ impl AcpDriver {
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
         }
     }
 
     /// Create a driver that proxies through `sq blox acp <workspace>`.
+    ///
+    /// Remote agents run unattended by construction — the laptop that answers
+    /// `session/request_permission` may disconnect mid-turn — so the driver
+    /// configures the provider to never wait on a permission prompt
+    /// ([`blox_acp_env_vars`], [`blox_unattended_session_mode`]).
     pub fn for_workspace(workspace_name: &str, agent_id: Option<&str>) -> Result<Self, String> {
         let binary_path = blox_cli::find_sq_binary().ok_or_else(|| {
             "Could not find `sq` binary. Install it and ensure it's on your PATH.".to_string()
         })?;
+        Ok(Self::for_workspace_with_binary(
+            binary_path,
+            workspace_name,
+            agent_id,
+        ))
+    }
 
+    /// [`AcpDriver::for_workspace`] with the `sq` binary already resolved, so
+    /// the argument and mode plumbing can be checked without `sq` installed.
+    pub(crate) fn for_workspace_with_binary(
+        binary_path: PathBuf,
+        workspace_name: &str,
+        agent_id: Option<&str>,
+    ) -> Self {
         let command = agent_id.and_then(blox_acp_command);
-        let args = blox_cli::acp_proxy_args(workspace_name, command.as_deref());
+        let env_vars = agent_id.map(blox_acp_env_vars).unwrap_or_default();
+        let args = blox_cli::acp_proxy_args(workspace_name, command.as_deref(), &env_vars);
 
-        Ok(Self {
+        Self {
             binary_path,
             acp_args: args,
             agent_label: "Blox".to_string(),
@@ -1216,7 +1243,10 @@ impl AcpDriver {
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
-        })
+            unattended_session_mode: agent_id
+                .and_then(blox_unattended_session_mode)
+                .map(str::to_string),
+        }
     }
 
     /// Set extra environment variables to pass to the agent process.
@@ -1308,6 +1338,44 @@ impl AcpDriver {
     pub fn with_steering_disabled(mut self, disabled: bool) -> Self {
         self.steering_disabled = disabled;
         self
+    }
+
+    /// Switch the agent to `mode_id` (an ACP session mode such as the Claude
+    /// bridge's `bypassPermissions`) right after `session/new` or
+    /// `session/load`, when the agent lists it among its available modes.
+    /// Best-effort: an agent without modes, or without this one, is left as
+    /// it is and the omission is logged. `None` clears the request.
+    pub fn with_unattended_session_mode(mut self, mode_id: Option<String>) -> Self {
+        self.unattended_session_mode = mode_id;
+        self
+    }
+
+    /// The session mode this driver switches to after session setup, if any.
+    pub fn unattended_session_mode(&self) -> Option<&str> {
+        self.unattended_session_mode.as_deref()
+    }
+}
+
+/// Environment for the remote ACP process so the provider never blocks on a
+/// permission prompt the laptop might not be connected to answer.
+///
+/// Goose reads `GOOSE_MODE`; `auto` approves every tool call itself. The
+/// other providers have no environment knob (Claude's bridge is switched via
+/// a session mode instead, see [`blox_unattended_session_mode`]).
+pub fn blox_acp_env_vars(agent_id: &str) -> Vec<(String, String)> {
+    match agent_id {
+        "goose" => vec![("GOOSE_MODE".to_string(), "auto".to_string())],
+        _ => Vec::new(),
+    }
+}
+
+/// The ACP session mode that makes a remote provider run without permission
+/// prompts, when it exposes one. The Claude bridge advertises
+/// `bypassPermissions` in `session/new`'s `modes`.
+pub fn blox_unattended_session_mode(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        "claude" => Some("bypassPermissions"),
+        _ => None,
     }
 }
 
@@ -2414,6 +2482,7 @@ impl AcpDriver {
         let mcp_servers = self.mcp_servers.clone();
         let agent_label = self.agent_label.clone();
         let steering_disabled = self.steering_disabled;
+        let unattended_session_mode = self.unattended_session_mode.clone();
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
 
@@ -2512,6 +2581,7 @@ impl AcpDriver {
                         background_hold.as_ref(),
                         background_hold_observer.as_ref(),
                         steering_disabled,
+                        unattended_session_mode.as_deref(),
                         &child_exited,
                         &mut prompt_rx,
                         &mut hold_control_rx,
@@ -2699,14 +2769,34 @@ impl AgentProcess {
     }
 }
 
+/// How long a remote proxy's `sq` wrapper gets to exit after SIGINT before
+/// its whole process group is SIGKILLed.
+const GRACEFUL_STOP_GRACE: Duration = Duration::from_secs(5);
+
 /// Gracefully stop the ACP child process.
 ///
 /// For remote proxies (spawned with `process_group(0)`), sends SIGINT to the
-/// process group so the proxy and its children can run cleanup. Falls back to
-/// SIGKILL after a 5-second timeout.
+/// process group so the proxy and its children can run cleanup, waits up to
+/// [`GRACEFUL_STOP_GRACE`] for the wrapper to exit, then SIGKILLs the *whole
+/// group* unconditionally. Killing only the wrapper pid is not enough, and
+/// neither is trusting the wrapper's exit: `sq blox acp` wraps a
+/// `blox.exoskeleton` child, and a child that cannot act on the SIGINT
+/// (frozen, or blocked on a dead socket) would otherwise be orphaned alive —
+/// a stopped orphan is even SIGCONTed by the kernel once its group loses its
+/// last running member — and could go on relaying whatever was queued for
+/// the workstation after Staged has finished with the session.
 ///
 /// For local agents (no separate process group), kills immediately.
 async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
+    graceful_stop_with_grace(child, is_remote, GRACEFUL_STOP_GRACE).await
+}
+
+/// [`graceful_stop`] with the SIGINT grace period as a parameter (tests).
+async fn graceful_stop_with_grace(
+    child: &mut tokio::process::Child,
+    is_remote: bool,
+    grace: Duration,
+) {
     #[cfg(unix)]
     if is_remote {
         let Some(pid) = child.id() else {
@@ -2716,14 +2806,20 @@ async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
             let _ = child.kill().await;
             return;
         };
-        // Send SIGINT to the process group (negative PID) so both `sq`
-        // and its child processes (the blox acp proxy) receive the signal.
-        if signal::kill(Pid::from_raw(-pid), Signal::SIGINT).is_ok() {
-            if let Ok(Ok(_status)) =
-                tokio::time::timeout(Duration::from_secs(5), child.wait()).await
-            {
-                return;
-            }
+        // Negative pid: the process group `sq` leads, so the blox proxy it
+        // spawned gets every signal too.
+        let group = Pid::from_raw(-pid);
+        if signal::kill(group, Signal::SIGINT).is_ok() {
+            let _ = tokio::time::timeout(grace, child.wait()).await;
+        }
+        // Always SIGKILL the group, even when the wrapper honoured the
+        // SIGINT and exited within the grace: `sq` exiting says nothing
+        // about its `blox.exoskeleton` child. SIGKILL reaches a stopped
+        // process too. An already-empty group answers ESRCH, which is the
+        // expected outcome and not worth more than a trace; the pgid cannot
+        // be reused while any member is alive.
+        if let Err(e) = signal::kill(group, Signal::SIGKILL) {
+            log::trace!("SIGKILL of remote proxy process group {pid}: {e}");
         }
     }
     let _ = child.kill().await;
@@ -3999,8 +4095,44 @@ struct LiveTaskSnapshot {
     tasks: Vec<BackgroundHoldTask>,
 }
 
+/// A session-stamped frame passing the own-session gate (see
+/// [`AcpNotificationHandler::admit`]).
+// Not boxed, like [`IncomingSessionUpdate`]: a frame is moved straight from
+// the notification handler through the gate, and boxing the common variant
+// would cost a heap allocation on every streamed session/update.
+#[allow(clippy::large_enum_variant)]
+enum GatedFrame {
+    Update(SessionNotification),
+    AsyncTask(AsyncTaskNotification),
+    /// The parsed params of a `_claude/sdkMessage` frame.
+    SdkMessage(serde_json::Value),
+}
+
+/// Whose frames a connection accepts.
+enum SessionGate {
+    /// Neither `session/new` nor `session/load` has named the connection's
+    /// session yet. Frames wait here, each with the session id it was stamped
+    /// with, until [`AcpNotificationHandler::name_session`] keeps this
+    /// session's and drops the rest.
+    Unnamed(VecDeque<(String, GatedFrame)>),
+    Named(String),
+}
+
+/// Most frames held at an unnamed gate. Past it the oldest is dropped: the
+/// only frames of the connection's own session that can arrive unnamed are
+/// the handful that race the `session/new` response, so they are the newest,
+/// and anything older belongs to another session's turn.
+const UNNAMED_GATE_FRAME_LIMIT: usize = 256;
+
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
+    /// The connection's own-session filter ([`Self::admit`]). A bridge shared
+    /// between connections (the Blox proxy reuses one long-lived workstation
+    /// `claude-agent-acp`) relays every session's frames down every open
+    /// connection, and another session's trailing turn must not be stored
+    /// under, or count as activity for, the session that happens to be
+    /// connected.
+    session_gate: Mutex<SessionGate>,
     /// Serializes response chunks and result boundaries through writer awaits,
     /// so acceptance cannot race the persistence of a final chunk.
     response: Mutex<response_completion::ResponseState>,
@@ -4072,6 +4204,7 @@ impl AcpNotificationHandler {
         let turn_permission_token = std::sync::Mutex::new(permission_cancel_token.child_token());
         Self {
             writer,
+            session_gate: Mutex::new(SessionGate::Unnamed(VecDeque::new())),
             response: Mutex::new(response_completion::ResponseState::default()),
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
@@ -4095,6 +4228,105 @@ impl AcpNotificationHandler {
     fn with_out_of_turn_permissions(mut self, policy: OutOfTurnPermissionPolicy) -> Self {
         self.out_of_turn_permissions = policy;
         self
+    }
+
+    /// A handler whose session is already named `session_id`, for tests that
+    /// drive notifications without running `session/new`.
+    #[cfg(test)]
+    fn named(mut self, session_id: &str) -> Self {
+        self.session_gate = Mutex::new(SessionGate::Named(session_id.to_string()));
+        self
+    }
+
+    /// Name the ACP session this connection serves, then release the frames
+    /// held for it, in arrival order, and drop the rest. Called once: before
+    /// `session/load` goes out (its replay streams ahead of the response), or
+    /// as soon as `session/new` answers. Frames stamped with the new session
+    /// can beat that answer through the dispatch task (the Claude bridge
+    /// sends `available_commands_update` right behind it), so the gate holds
+    /// them rather than dropping them.
+    async fn name_session(&self, session_id: &str) {
+        let mut gate = self.session_gate.lock().await;
+        let held = match &mut *gate {
+            SessionGate::Unnamed(held) => std::mem::take(held),
+            SessionGate::Named(own) => {
+                debug_assert!(false, "the ACP session is named once per connection");
+                log::warn!("ACP session {own}: ignoring a second name ({session_id})");
+                return;
+            }
+        };
+        *gate = SessionGate::Named(session_id.to_string());
+        // Still holding the gate, so a frame arriving meanwhile waits behind
+        // the held ones and arrival order is kept.
+        for (frame_session_id, frame) in held {
+            if frame_session_id != session_id {
+                log::debug!(
+                    "ACP session {session_id}: dropping a frame for another session \
+                     ({frame_session_id}) received before this session was named"
+                );
+                continue;
+            }
+            if let Err(e) = self.dispatch_admitted(frame).await {
+                log::warn!("ACP session {session_id}: a held frame failed on release: {e:?}");
+            }
+        }
+    }
+
+    /// Pass a frame stamped `session_id` through the own-session gate: hand
+    /// it back when it belongs to this connection's session, drop it (logged
+    /// at debug) when it names another, and hold it while the connection's
+    /// session is still unnamed.
+    async fn admit(&self, session_id: &str, frame: GatedFrame) -> Option<GatedFrame> {
+        let mut gate = self.session_gate.lock().await;
+        match &mut *gate {
+            SessionGate::Named(own) if own == session_id => Some(frame),
+            SessionGate::Named(own) => {
+                log::debug!(
+                    "ACP session {own}: dropping a frame for another session ({session_id}) \
+                     relayed over this connection"
+                );
+                None
+            }
+            SessionGate::Unnamed(held) => {
+                if held.len() >= UNNAMED_GATE_FRAME_LIMIT {
+                    if let Some((dropped_session_id, _)) = held.pop_front() {
+                        log::debug!(
+                            "dropping the oldest frame held before the session was named \
+                             (for {dropped_session_id})"
+                        );
+                    }
+                }
+                held.push_back((session_id.to_string(), frame));
+                None
+            }
+        }
+    }
+
+    /// Every gated entry point's first step: [`Self::admit`], then the
+    /// frame's handling if it was admitted.
+    async fn gate_and_dispatch(
+        &self,
+        session_id: &str,
+        frame: GatedFrame,
+    ) -> agent_client_protocol::Result<()> {
+        match self.admit(session_id, frame).await {
+            Some(frame) => self.dispatch_admitted(frame).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Handle a frame the own-session gate has let through, live or on
+    /// release from [`Self::name_session`].
+    async fn dispatch_admitted(&self, frame: GatedFrame) -> agent_client_protocol::Result<()> {
+        match frame {
+            GatedFrame::Update(notification) => {
+                let mut response = self.response.lock().await;
+                self.session_notification_inner(notification, &mut response)
+                    .await
+            }
+            GatedFrame::AsyncTask(notification) => self.apply_async_task_update(notification).await,
+            GatedFrame::SdkMessage(params) => self.apply_sdk_message(params).await,
+        }
     }
 
     /// Fix this connection's task-tracking mode, decided by the initialize
@@ -4471,6 +4703,25 @@ impl AcpNotificationHandler {
                 return Ok(());
             }
         };
+        match params
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        {
+            Some(session_id) => {
+                self.gate_and_dispatch(&session_id, GatedFrame::SdkMessage(params))
+                    .await
+            }
+            None => self.apply_sdk_message(params).await,
+        }
+    }
+
+    /// The body of [`Self::ext_notification`] for a `_claude/sdkMessage`
+    /// frame the own-session gate admitted (or one carrying no session id).
+    async fn apply_sdk_message(
+        &self,
+        params: serde_json::Value,
+    ) -> agent_client_protocol::Result<()> {
         let Some(message) = params.get("message") else {
             log::warn!("{CLAUDE_SDK_MESSAGE_METHOD} params carried no message field");
             return Ok(());
@@ -4541,6 +4792,17 @@ impl AcpNotificationHandler {
         &self,
         notification: AsyncTaskNotification,
     ) -> agent_client_protocol::Result<()> {
+        let session_id = notification.session_id.to_string();
+        self.gate_and_dispatch(&session_id, GatedFrame::AsyncTask(notification))
+            .await
+    }
+
+    /// The body of [`Self::async_task_update`] once the own-session gate has
+    /// admitted the update.
+    async fn apply_async_task_update(
+        &self,
+        notification: AsyncTaskNotification,
+    ) -> agent_client_protocol::Result<()> {
         if let AsyncTaskUpdate::Spawned {
             task_id,
             name,
@@ -4597,8 +4859,8 @@ impl AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        let mut response = self.response.lock().await;
-        self.session_notification_inner(notification, &mut response)
+        let session_id = notification.session_id.to_string();
+        self.gate_and_dispatch(&session_id, GatedFrame::Update(notification))
             .await
     }
 
@@ -5928,6 +6190,7 @@ async fn run_acp_session(
     background_hold: Option<&BackgroundHoldConfig>,
     background_hold_observer: Option<&BackgroundHoldObserver>,
     steering_disabled: bool,
+    unattended_session_mode: Option<&str>,
     child_exited: &CancellationToken,
     prompt_rx: &mut mpsc::UnboundedReceiver<QueuedSessionTurn>,
     hold_control_rx: &mut mpsc::UnboundedReceiver<StopAsyncTaskRequest>,
@@ -5949,6 +6212,7 @@ async fn run_acp_session(
             mcp_servers,
             agent_label,
             auth_selection,
+            unattended_session_mode,
         }),
     );
     let mut setup = tokio::select! {
@@ -7143,6 +7407,8 @@ struct AcpSessionSetupContext<'a> {
     mcp_servers: &'a [McpServer],
     agent_label: &'a str,
     auth_selection: Option<&'a AcpAuthenticationSelection>,
+    /// See [`AcpDriver::with_unattended_session_mode`].
+    unattended_session_mode: Option<&'a str>,
 }
 
 /// `_meta` for `session/new` and `session/load` asking the Claude bridge to
@@ -7205,17 +7471,11 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         mcp_servers,
         agent_label,
         auth_selection,
+        unattended_session_mode,
     } = context;
     let writer = &handler.writer;
 
-    let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
-    // Advertise the AIR asyncTasks capability. `_meta` is the spec's
-    // extension point — agents that don't recognize the namespace ignore it —
-    // and an agent that does support it mirrors the accepted list back in the
-    // initialize response's `_meta`, which selects typed tracking below.
-    let init_request = InitializeRequest::new(ProtocolVersion::V1)
-        .client_info(client_info)
-        .client_capabilities(ClientCapabilities::new().meta(air_client_capabilities_meta()));
+    let init_request = build_initialize_request();
 
     let init_response = connection
         .send_request(init_request)
@@ -7289,6 +7549,9 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             log::info!(
                 "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
             );
+            // Before the load goes out: its replay streams `session/update`s
+            // ahead of the response, and they must pass the own-session gate.
+            handler.name_session(existing_id).await;
 
             let load_request = || {
                 LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
@@ -7311,6 +7574,14 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             if let Some(ref modes) = load_response.modes {
                 writer.on_model_state_update(modes).await;
             }
+            apply_unattended_session_mode(
+                connection,
+                existing_id,
+                load_response.modes.as_ref(),
+                unattended_session_mode,
+                agent_label,
+            )
+            .await;
             apply_or_record_session_config_options(
                 connection,
                 existing_id,
@@ -7345,6 +7616,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             .await?;
 
             let new_id = session_response.session_id.to_string();
+            handler.name_session(&new_id).await;
             store
                 .set_agent_session_id(our_session_id, &new_id)
                 .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
@@ -7352,6 +7624,14 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             if let Some(ref modes) = session_response.modes {
                 writer.on_model_state_update(modes).await;
             }
+            apply_unattended_session_mode(
+                connection,
+                &new_id,
+                session_response.modes.as_ref(),
+                unattended_session_mode,
+                agent_label,
+            )
+            .await;
             apply_or_record_session_config_options(
                 connection,
                 &new_id,
@@ -7370,6 +7650,78 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 steering_supported,
             })
         }
+    }
+}
+
+/// The `initialize` request every connection opens with.
+///
+/// Advertises the AIR asyncTasks capability through `_meta` — the spec's
+/// extension point; agents that don't recognize the namespace ignore it, and
+/// one that does mirrors the accepted list back in the response's `_meta`,
+/// which selects typed tracking. It deliberately advertises *no* `fs/*` or
+/// `terminal/*` client capabilities: the agent works on its own machine
+/// (local or a Blox workstation), and a remote agent must never route file or
+/// terminal access through a laptop that may disconnect mid-turn.
+fn build_initialize_request() -> InitializeRequest {
+    let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
+    InitializeRequest::new(ProtocolVersion::V1)
+        .client_info(client_info)
+        .client_capabilities(ClientCapabilities::new().meta(air_client_capabilities_meta()))
+}
+
+/// Which mode, if any, [`apply_unattended_session_mode`] should switch to:
+/// the requested one when the agent lists it and isn't already in it.
+fn unattended_mode_switch(
+    modes: Option<&SessionModeState>,
+    wanted: Option<&str>,
+) -> Option<SessionModeId> {
+    let wanted = wanted?;
+    let modes = modes?;
+    let available = modes
+        .available_modes
+        .iter()
+        .find(|mode| mode.id.0.as_ref() == wanted)?;
+    (modes.current_mode_id != available.id).then(|| available.id.clone())
+}
+
+/// Best-effort `session/set_mode` to the driver's unattended mode (see
+/// [`AcpDriver::with_unattended_session_mode`]). Never fails the session:
+/// a provider that lacks the mode keeps answering permission requests through
+/// the client, which is the status quo.
+async fn apply_unattended_session_mode(
+    connection: &ConnectionTo<Agent>,
+    agent_session_id: &str,
+    modes: Option<&SessionModeState>,
+    wanted: Option<&str>,
+    agent_label: &str,
+) {
+    let Some(wanted) = wanted else {
+        return;
+    };
+    let Some(mode_id) = unattended_mode_switch(modes, Some(wanted)) else {
+        match modes {
+            Some(modes) if modes.current_mode_id.0.as_ref() == wanted => {
+                log::debug!("{agent_label}: session already in mode '{wanted}'");
+            }
+            _ => log::info!(
+                "{agent_label}: session mode '{wanted}' not offered; permission requests \
+                 stay routed through the client"
+            ),
+        }
+        return;
+    };
+    match connection
+        .send_request(SetSessionModeRequest::new(
+            agent_session_id.to_string(),
+            mode_id.clone(),
+        ))
+        .block_task()
+        .await
+    {
+        Ok(_) => log::info!("{agent_label}: switched session to mode '{mode_id}'"),
+        Err(e) => log::warn!(
+            "{agent_label}: failed to switch session to mode '{mode_id}' (continuing): {e:?}"
+        ),
     }
 }
 
@@ -7704,6 +8056,7 @@ mod tests {
     mod remote_process;
     mod remote_routing;
     mod response_completion;
+    mod session_isolation;
     mod settlement;
     mod turn_control;
 
@@ -7713,7 +8066,8 @@ mod tests {
         acp_spawn_command, agent_auth_required_detail, air_client_capabilities_meta,
         apply_or_record_session_config_options, async_task_stop_message, async_task_stop_outcome,
         autoapprove_permission_decision, background_continuation_origin,
-        background_task_tracking_meta, build_prompt_content_blocks, carry_config_value_hint,
+        background_task_tracking_meta, blox_acp_env_vars, blox_unattended_session_mode,
+        build_initialize_request, build_prompt_content_blocks, carry_config_value_hint,
         consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
         describe_prompt_error, hold_for_background_quiescence,
         is_config_selection_unavailable_error, is_missing_mcp_transport_error,
@@ -7724,9 +8078,9 @@ mod tests {
         sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
         sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
         setup_acp_session, shell_exec_line, shell_quote, task_tracking_mode_from_initialize,
-        AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
-        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
-        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        unattended_mode_switch, AcpAuthenticationMethodCategory, AcpAuthenticationRequired,
+        AcpAuthenticationSelection, AcpDriver, AcpEventMetadata, AcpNotificationHandler,
+        AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
         AcpSessionConfigOptionSelection, AcpSessionSetup, AcpSessionSetupContext,
         AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification, AsyncTaskState,
         AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
@@ -7877,12 +8231,15 @@ mod tests {
             ))],
             steering_supported: false,
         };
-        let handler = Arc::new(AcpNotificationHandler::new(
-            Arc::new(BasicMessageWriter::new()),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(
+                Arc::new(BasicMessageWriter::new()),
+                false,
+                vec![],
+                CancellationToken::new(),
+            )
+            .named("sess-1"),
+        );
 
         let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let outcome = agent_client_protocol::Client
@@ -8302,6 +8659,7 @@ mod tests {
                     mcp_servers: &[],
                     agent_label: "Codex",
                     auth_selection: None,
+                    unattended_session_mode: None,
                 })
                 .await
                 .map(|_| ())
@@ -8370,6 +8728,7 @@ mod tests {
                     mcp_servers: &[],
                     agent_label: "Claude",
                     auth_selection: None,
+                    unattended_session_mode: None,
                 })
                 .await
                 .map(|_| ())
@@ -9361,6 +9720,107 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     }
 
     #[test]
+    fn remote_goose_driver_runs_unattended_through_env() {
+        let driver = AcpDriver::for_workspace_with_binary(
+            PathBuf::from("/usr/local/bin/sq"),
+            "ws-1",
+            Some("goose"),
+        );
+
+        assert!(driver.is_remote);
+        assert!(driver
+            .acp_args
+            .iter()
+            .any(|arg| arg.starts_with("--command=goose,acp")));
+        assert!(
+            driver
+                .acp_args
+                .contains(&"--env-vars=GOOSE_MODE=auto".to_string()),
+            "goose must be told to approve its own tool calls: {:?}",
+            driver.acp_args
+        );
+        assert_eq!(driver.unattended_session_mode(), None);
+    }
+
+    #[test]
+    fn remote_claude_driver_runs_unattended_through_a_session_mode() {
+        let driver = AcpDriver::for_workspace_with_binary(
+            PathBuf::from("/usr/local/bin/sq"),
+            "ws-1",
+            Some("claude"),
+        );
+
+        assert!(driver
+            .acp_args
+            .contains(&"--command=claude-agent-acp".to_string()));
+        assert!(
+            !driver
+                .acp_args
+                .iter()
+                .any(|arg| arg.starts_with("--env-vars=")),
+            "claude has no env knob for permissions: {:?}",
+            driver.acp_args
+        );
+        assert_eq!(driver.unattended_session_mode(), Some("bypassPermissions"));
+    }
+
+    #[test]
+    fn remote_driver_without_a_known_provider_adds_nothing() {
+        let driver =
+            AcpDriver::for_workspace_with_binary(PathBuf::from("/usr/local/bin/sq"), "ws-1", None);
+        assert_eq!(driver.acp_args, vec!["blox", "acp", "ws-1"]);
+        assert_eq!(driver.unattended_session_mode(), None);
+        assert!(blox_acp_env_vars("codex").is_empty());
+        assert_eq!(blox_unattended_session_mode("codex"), None);
+    }
+
+    #[test]
+    fn unattended_mode_switch_only_fires_for_an_offered_different_mode() {
+        use agent_client_protocol::schema::v1::{SessionMode, SessionModeState};
+        let modes = SessionModeState::new(
+            "default",
+            vec![
+                SessionMode::new("default", "Default"),
+                SessionMode::new("bypassPermissions", "Bypass Permissions"),
+            ],
+        );
+
+        assert_eq!(unattended_mode_switch(Some(&modes), None), None);
+        assert_eq!(
+            unattended_mode_switch(None, Some("bypassPermissions")),
+            None
+        );
+        assert_eq!(unattended_mode_switch(Some(&modes), Some("yolo")), None);
+        assert_eq!(
+            unattended_mode_switch(Some(&modes), Some("bypassPermissions"))
+                .map(|id| id.0.to_string()),
+            Some("bypassPermissions".to_string())
+        );
+
+        let already = SessionModeState::new(
+            "bypassPermissions",
+            vec![SessionMode::new("bypassPermissions", "Bypass Permissions")],
+        );
+        assert_eq!(
+            unattended_mode_switch(Some(&already), Some("bypassPermissions")),
+            None
+        );
+    }
+
+    #[test]
+    fn initialize_request_advertises_no_fs_or_terminal_capabilities() {
+        let request = serde_json::to_value(build_initialize_request()).unwrap();
+        let caps = &request["clientCapabilities"];
+        assert_eq!(caps["fs"]["readTextFile"], serde_json::Value::Bool(false));
+        assert_eq!(caps["fs"]["writeTextFile"], serde_json::Value::Bool(false));
+        assert_eq!(caps["terminal"], serde_json::Value::Bool(false));
+        assert!(
+            caps["_meta"].is_object(),
+            "the AIR asyncTasks advertisement still rides along: {request}"
+        );
+    }
+
+    #[test]
     fn env_snapshot_is_ignored_for_remote_drivers() {
         let snapshot = vec![(String::from("PATH"), String::from("/snapshot/bin"))];
         let local = AcpDriver {
@@ -9376,6 +9836,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
         }
         .with_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -9391,6 +9852,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
         }
         .with_env_snapshot(snapshot);
 
@@ -9417,6 +9879,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
         }
         .with_interpreter_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -9432,6 +9895,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
         }
         .with_interpreter_env_snapshot(snapshot);
 
@@ -9827,7 +10291,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 "previous prompt".to_string(),
             )],
             CancellationToken::new(),
-        );
+        )
+        .named("session-1");
 
         assert!(handler.is_replay_complete().await);
     }
@@ -9843,7 +10308,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 "previous response".to_string(),
             )],
             CancellationToken::new(),
-        );
+        )
+        .named("session-1");
 
         handler
             .session_notification(SessionNotification::new(
@@ -10765,7 +11231,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
 
         let sdk_message = |message: serde_json::Value| {
             let params = serde_json::value::to_raw_value(&serde_json::json!({
@@ -10822,7 +11289,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         let mut activity_rx = handler.subscribe_background_activity();
         assert_eq!(
             *activity_rx.borrow_and_update(),
@@ -10932,7 +11400,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         // Raw until initialize resolves — and initialize precedes session/new,
         // so no session/update is ever dispatched against the default.
         assert_eq!(handler.task_tracking_mode(), TaskTrackingMode::Raw);
@@ -10965,7 +11434,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
         let mut activity_rx = handler.subscribe_background_activity();
 
@@ -11039,7 +11509,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
         let mut activity_rx = handler.subscribe_background_activity();
 
@@ -11879,12 +12350,15 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     /// Handler wired for holding-wait tests, plus a helper that feeds it raw
     /// SDK frames the way the bridge would.
     fn hold_test_handler() -> Arc<AcpNotificationHandler> {
-        Arc::new(AcpNotificationHandler::new(
-            Arc::new(BasicMessageWriter::new()),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ))
+        Arc::new(
+            AcpNotificationHandler::new(
+                Arc::new(BasicMessageWriter::new()),
+                false,
+                vec![],
+                CancellationToken::new(),
+            )
+            .named("sess-1"),
+        )
     }
 
     async fn feed_sdk_frame(handler: &Arc<AcpNotificationHandler>, message: serde_json::Value) {
@@ -12996,7 +13470,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn continuation_is_a_separate_record_attributed_to_its_autonomous_cycle() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "starting the build")).await;
         handler.transition_to_background_holding().await;
@@ -13042,7 +13516,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn continuation_without_a_usable_chunk_id_gets_a_synthesized_boundary() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "kicked off the tests")).await;
         handler.transition_to_background_holding().await;
@@ -13083,7 +13557,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_continuation_chunk_reusing_the_turns_message_id_is_still_split_off() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "waiting on the shell")).await;
         handler.transition_to_background_holding().await;
@@ -13103,7 +13577,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_new_prompt_during_the_hold_does_not_absorb_continuation_text() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "build running")).await;
         handler.transition_to_background_holding().await;
@@ -13139,7 +13613,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_second_autonomous_cycle_gets_its_own_continuation_record() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "two shells running")).await;
         handler.transition_to_background_holding().await;
@@ -13170,7 +13644,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_tool_call_mid_message_resumes_the_same_message() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.response.lock().await.start_prompt("sess-1".into());
 
         // A background subagent's tool call lands while the parent is still
@@ -13199,7 +13673,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     async fn text_after_a_tool_call_under_another_id_is_a_new_message() {
         for (before, after) in [(Some("msg-1"), Some("msg-2")), (None, None)] {
             let writer = Arc::new(TranscriptWriter::default());
-            let handler = Arc::new(transcript_handler(&writer));
+            let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
             handler.response.lock().await.start_prompt("sess-1".into());
 
             feed(&handler, agent_text(before, "running the tests")).await;
@@ -13216,7 +13690,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_settled_typed_task_names_the_continuation_it_wakes() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
 
         feed(&handler, agent_text(Some("msg-1"), "starting the tests")).await;
@@ -13263,7 +13737,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn an_unnamed_settle_does_not_inherit_an_earlier_tasks_name() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
 
         feed(&handler, agent_text(Some("msg-1"), "two tasks running")).await;
@@ -13315,7 +13789,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_new_hold_does_not_inherit_the_previous_wake_name() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
 
         feed(&handler, agent_text(Some("msg-1"), "first turn")).await;
@@ -13367,7 +13841,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn out_of_turn_tool_calls_are_attributed_to_the_continuation() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, tool_call_notification("tc-live")).await;
         handler.transition_to_background_holding().await;
@@ -13392,7 +13866,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn origin_evidence_does_not_leak_across_holds() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         handler.transition_to_background_holding().await;
         feed_sdk_frame(
@@ -13555,12 +14029,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
 
         // A live turn's request carries no attribution.
         feed(&handler, tool_call_notification("tc-live")).await;
@@ -13600,12 +14072,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         // The client can never resolve this one — exactly the #851 deadlock, if
         // the request were dispatched and awaited.
         let writer = PermissionWriter::new(PermissionWriterBehavior::Hang);
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         handler.transition_to_background_holding().await;
 
         let response = tokio::time::timeout(
@@ -13637,12 +14107,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         handler.transition_to_background_holding().await;
         feed(&handler, tool_call_notification("tc-announced")).await;
 
@@ -13672,12 +14140,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         handler.transition_to_background_holding().await;
 
         let announcing = {
@@ -13707,12 +14173,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_duplicate_permission_id_is_answered_defensively_while_the_first_is_pending() {
         let writer = PermissionWriter::new(PermissionWriterBehavior::Hang);
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         feed(&handler, tool_call_notification("tc-dup")).await;
 
         // The first request is outstanding (the client is still deciding)...
@@ -13784,6 +14248,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     vec![],
                     CancellationToken::new(),
                 )
+                .named("sess-1")
                 .with_out_of_turn_permissions(policy),
             );
             handler.transition_to_background_holding().await;
@@ -13812,12 +14277,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
 
         let response = tokio::time::timeout(
             PERMISSION_TIMEOUT,

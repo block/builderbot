@@ -142,12 +142,10 @@ async fn initial_response_requests_successful_finish_with_active_tasks() {
     for mode in [TaskTrackingMode::Raw, TaskTrackingMode::Typed] {
         let writer = Arc::new(ArtifactWriter::default());
         let cancel = CancellationToken::new();
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            cancel.clone(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], cancel.clone())
+                .named("sess-1"),
+        );
         start_task(&handler, mode).await;
         feed(&handler, agent_text(None, ARTIFACT)).await;
         // Streaming, and even an idle frame during the live turn, must not
@@ -173,12 +171,10 @@ async fn background_response_releases_wait_only_at_completion_and_clears_indicat
     for mode in [TaskTrackingMode::Raw, TaskTrackingMode::Typed] {
         let writer = Arc::new(ArtifactWriter::default());
         let cancel = CancellationToken::new();
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            cancel.clone(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], cancel.clone())
+                .named("sess-1"),
+        );
         start_task(&handler, mode).await;
         feed(&handler, agent_text(None, "initial response")).await;
         handler.finish_completed_response().await;
@@ -244,12 +240,9 @@ async fn background_response_releases_wait_only_at_completion_and_clears_indicat
 async fn idle_without_a_new_artifact_keeps_waiting() {
     let writer = Arc::new(ArtifactWriter::default());
     let cancel = CancellationToken::new();
-    let handler = Arc::new(AcpNotificationHandler::new(
-        writer.clone(),
-        false,
-        vec![],
-        cancel.clone(),
-    ));
+    let handler = Arc::new(
+        AcpNotificationHandler::new(writer.clone(), false, vec![], cancel.clone()).named("sess-1"),
+    );
     start_task(&handler, TaskTrackingMode::Raw).await;
     // A prior response must not satisfy an idle edge before continuation text.
     feed(&handler, agent_text(None, ARTIFACT)).await;
@@ -447,6 +440,7 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     if scenario == 7 { None } else { Some(&QUIESCENCE_PROBE) },
                     Some(&observer),
                     false,
+                    None,
                     &child_exited,
                     &mut prompt_rx,
                     &mut control_rx,
@@ -516,12 +510,10 @@ async fn unsuccessful_unrelated_and_historical_results_do_not_accept_notes() {
         "unrelated",
     ] {
         let writer = Arc::new(ArtifactWriter::default());
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer,
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer, false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         start_task(&handler, TaskTrackingMode::Raw).await;
         feed(&handler, agent_text(None, ARTIFACT)).await;
         let mut result = successful_result("bad", ARTIFACT);
@@ -542,12 +534,15 @@ async fn unsuccessful_unrelated_and_historical_results_do_not_accept_notes() {
             "{mutation}"
         );
     }
-    let handler = Arc::new(AcpNotificationHandler::new(
-        Arc::new(ArtifactWriter::default()),
-        false,
-        vec![],
-        CancellationToken::new(),
-    ));
+    let handler = Arc::new(
+        AcpNotificationHandler::new(
+            Arc::new(ArtifactWriter::default()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        )
+        .named("sess-1"),
+    );
     start_task(&handler, TaskTrackingMode::Raw).await;
     feed(&handler, agent_text(None, ARTIFACT)).await;
     handler.transition_to_background_holding().await;
@@ -563,12 +558,10 @@ async fn unsuccessful_unrelated_and_historical_results_do_not_accept_notes() {
 #[tokio::test]
 async fn subagent_tool_call_mid_message_does_not_split_result_certification() {
     let writer = Arc::new(ArtifactWriter::default());
-    let handler = Arc::new(AcpNotificationHandler::new(
-        writer.clone(),
-        false,
-        vec![],
-        CancellationToken::new(),
-    ));
+    let handler = Arc::new(
+        AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+            .named("sess-1"),
+    );
     start_task(&handler, TaskTrackingMode::Raw).await;
     feed(&handler, agent_text(Some("msg-1"), "complete artifact")).await;
     feed(&handler, tool_call_notification("subagent-grep")).await;
@@ -592,12 +585,10 @@ async fn subagent_tool_call_mid_message_does_not_split_result_certification() {
 }
 
 fn artifact_handler(writer: &Arc<ArtifactWriter>) -> Arc<AcpNotificationHandler> {
-    Arc::new(AcpNotificationHandler::new(
-        writer.clone(),
-        false,
-        vec![],
-        CancellationToken::new(),
-    ))
+    Arc::new(
+        AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+            .named("sess-1"),
+    )
 }
 
 fn finish_requested(handler: &AcpNotificationHandler) -> bool {
@@ -760,12 +751,10 @@ async fn mismatched_result_without_a_tool_call_certifies_nothing() {
 #[tokio::test]
 async fn result_only_fallback_and_duplicate_results_are_recorded_once() {
     let writer = Arc::new(ArtifactWriter::default());
-    let handler = Arc::new(AcpNotificationHandler::new(
-        writer.clone(),
-        false,
-        vec![],
-        CancellationToken::new(),
-    ));
+    let handler = Arc::new(
+        AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+            .named("sess-1"),
+    );
     start_task(&handler, TaskTrackingMode::Raw).await;
     handler.transition_to_background_holding().await;
     feed_sdk_frame(&handler, successful_result("only", ARTIFACT)).await;
@@ -806,12 +795,15 @@ async fn result_only_fallback_and_duplicate_results_are_recorded_once() {
 async fn replay_and_pre_prompt_results_cannot_finish_or_be_reused() {
     for replaying in [false, true] {
         let writer = Arc::new(ArtifactWriter::default());
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            replaying,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(
+                writer.clone(),
+                replaying,
+                vec![],
+                CancellationToken::new(),
+            )
+            .named("sess-1"),
+        );
         feed_sdk_frame(&handler, successful_result("historical", ARTIFACT)).await;
         assert!(
             !handler

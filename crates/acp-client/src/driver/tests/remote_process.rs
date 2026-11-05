@@ -162,7 +162,7 @@ impl FakeSq {
     /// A remote driver for workspace `test-ws`, as `AcpDriver::for_workspace`
     /// builds it, so its proxy can ask bloxlet about its agent.
     fn workspace_driver(&self) -> AcpDriver {
-        self.driver_with_args(blox_cli::acp_proxy_args("test-ws", None))
+        self.driver_with_args(blox_cli::acp_proxy_args("test-ws", None, &[]))
     }
 
     fn driver_with_args(&self, acp_args: Vec<String>) -> AcpDriver {
@@ -179,6 +179,7 @@ impl FakeSq {
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
         }
     }
 

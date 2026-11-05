@@ -135,7 +135,7 @@ impl FakeAgent {
             )
             .on_receive_request(
                 async |_request: NewSessionRequest, responder, _cx| {
-                    responder.respond(NewSessionResponse::new("session-1"))
+                    responder.respond(NewSessionResponse::new("sess-1"))
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -405,7 +405,9 @@ where
     Fut: Future<Output = ()>,
 {
     let writer = Arc::new(TranscriptWriter::default());
-    let handler = Arc::new(transcript_handler(&writer));
+    // `run_prompt_turn` is driven without `session/new`, which is what names
+    // the connection's session; the fake agent stamps `sess-1`.
+    let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
     let setup = steering_setup(steering_supported);
     let (turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
     let handle = turn_control_handle(&turn_control_tx, true);
@@ -728,6 +730,7 @@ where
                     background_hold,
                     None,
                     false,
+                    None,
                     &child_exited,
                     &mut prompt_rx,
                     &mut hold_control_rx,

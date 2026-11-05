@@ -209,8 +209,17 @@ pub fn is_sq_available() -> bool {
     find_sq_binary().is_some()
 }
 
-/// Build args for `sq blox acp <workspace_name> [--command=...]`.
-pub fn acp_proxy_args(workspace_name: &str, command: Option<&str>) -> Vec<String> {
+/// Build args for `sq blox acp <workspace_name> [--command=...] [--env-vars=...]`.
+///
+/// `env_vars` are set in the *remote* ACP process's environment, not the
+/// local proxy's: `sq blox acp` takes them as one `--env-vars=KEY=VALUE;...`
+/// flag. Names and values must not contain `;` (the flag's separator); a pair
+/// that does is skipped rather than silently splitting into two variables.
+pub fn acp_proxy_args(
+    workspace_name: &str,
+    command: Option<&str>,
+    env_vars: &[(String, String)],
+) -> Vec<String> {
     let mut args = vec![
         "blox".to_string(),
         "acp".to_string(),
@@ -219,6 +228,17 @@ pub fn acp_proxy_args(workspace_name: &str, command: Option<&str>) -> Vec<String
 
     if let Some(command) = command.map(str::trim).filter(|s| !s.is_empty()) {
         args.push(format!("--command={command}"));
+    }
+
+    let env_pairs: Vec<String> = env_vars
+        .iter()
+        .filter(|(name, value)| {
+            !name.is_empty() && !name.contains(';') && !name.contains('=') && !value.contains(';')
+        })
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    if !env_pairs.is_empty() {
+        args.push(format!("--env-vars={}", env_pairs.join(";")));
     }
 
     args
@@ -593,6 +613,50 @@ pub fn check_auth() -> Result<(), BloxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_proxy_args_without_command_or_env_is_bare() {
+        assert_eq!(
+            acp_proxy_args("ws-1", None, &[]),
+            vec!["blox", "acp", "ws-1"]
+        );
+        assert_eq!(
+            acp_proxy_args("ws-1", Some("  "), &[]),
+            vec!["blox", "acp", "ws-1"]
+        );
+    }
+
+    #[test]
+    fn acp_proxy_args_passes_command_and_env_vars_as_single_flags() {
+        let env = vec![
+            ("GOOSE_MODE".to_string(), "auto".to_string()),
+            ("STAGED_X".to_string(), "1".to_string()),
+        ];
+        assert_eq!(
+            acp_proxy_args("ws-1", Some("goose,acp"), &env),
+            vec![
+                "blox",
+                "acp",
+                "ws-1",
+                "--command=goose,acp",
+                "--env-vars=GOOSE_MODE=auto;STAGED_X=1",
+            ]
+        );
+    }
+
+    #[test]
+    fn acp_proxy_args_skips_env_vars_that_would_split_the_flag() {
+        let env = vec![
+            ("BAD;NAME".to_string(), "x".to_string()),
+            ("GOOD".to_string(), "a;b".to_string()),
+            ("".to_string(), "x".to_string()),
+            ("OK".to_string(), "fine".to_string()),
+        ];
+        assert_eq!(
+            acp_proxy_args("ws-1", None, &env),
+            vec!["blox", "acp", "ws-1", "--env-vars=OK=fine"]
+        );
+    }
 
     #[test]
     fn strip_ansi_plain_text_unchanged() {

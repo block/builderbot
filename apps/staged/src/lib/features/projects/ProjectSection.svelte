@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { toast } from 'svelte-sonner';
   import { listenToEvent } from '../../transport';
   import FileText from '@lucide/svelte/icons/file-text';
   import type {
@@ -26,6 +27,9 @@
   import BranchCard from '../branches/BranchCard.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
+  import ConfirmDeleteDialog, {
+    type ConfirmDeleteRequest,
+  } from '../../shared/ConfirmDeleteDialog.svelte';
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
@@ -41,6 +45,9 @@
   import { noteChatState } from '../sessions/noteFreshness';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
+  import { failedArtifactSubtitle } from '../timeline/sessionFailureCopy';
+  import { canResumeRow, noteRowPhase } from '../timeline/sessionRowState';
+  import { resumeSessionFromRow } from '../timeline/resumeSessionFromRow';
   import {
     buildChildSessionBadges,
     runningChildSessionIds,
@@ -409,12 +416,35 @@
   // ── Project notes ──────────────────────────────────────────────────────
   let projectNotes = $state<ProjectNote[]>([]);
   let deletingNoteIds = $state<Set<string>>(new Set());
+  /** Notes whose Resume is in flight, so a second click can't resume twice. */
+  let resumingNoteIds = $state<Set<string>>(new Set());
+  let confirmDelete = $state<ConfirmDeleteRequest | null>(null);
+  /** Latest per-session note refetch, so an older one landing late is dropped. */
+  const noteRefreshGenerations = new Map<string, number>();
 
   async function loadProjectNotes() {
     try {
       projectNotes = await commands.listProjectNotes(project.id);
     } catch (e) {
       console.error('[ProjectSection] Failed to load project notes:', e);
+    }
+  }
+
+  /** Surgically refetch the note a session writes instead of reloading them all. */
+  async function refreshNoteForSession(sessionId: string) {
+    const generation = (noteRefreshGenerations.get(sessionId) ?? 0) + 1;
+    noteRefreshGenerations.set(sessionId, generation);
+    const updatedNote = await commands.getProjectNoteBySession(sessionId);
+    // A refetch started after this one (the session's terminal event racing
+    // its running one, say) owns the row now.
+    if (noteRefreshGenerations.get(sessionId) !== generation) return;
+    noteRefreshGenerations.delete(sessionId);
+
+    if (updatedNote) {
+      projectNotes = projectNotes.map((n) => (n.id === updatedNote.id ? updatedNote : n));
+    } else {
+      // Note was filtered out (e.g. deleted) — remove from local list
+      projectNotes = projectNotes.filter((n) => n.sessionId !== sessionId);
     }
   }
 
@@ -425,22 +455,60 @@
     void loadProjectNotes();
   });
 
-  async function handleDeleteNote(noteId: string) {
+  /** Alt-click deletes straight away; otherwise the user confirms first. */
+  function handleDeleteNote(noteId: string, opts?: { altKey: boolean }) {
     const note = projectNotes.find((n) => n.id === noteId);
     const sessionId = note?.sessionId ?? undefined;
-    deletingNoteIds = new Set([...deletingNoteIds, noteId]);
+    const doDelete = async () => {
+      confirmDelete = null;
+      deletingNoteIds = new Set([...deletingNoteIds, noteId]);
+      try {
+        await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
+        // Optimistic removal; the delete's notes-changed event re-fetches every
+        // window's project-note surfaces (including this one) to confirm.
+        projectNotes = projectNotes.filter((n) => n.id !== noteId);
+        hashtagVersion++;
+      } catch (e) {
+        console.error('[ProjectSection] Failed to delete project note:', e);
+        toast.error('Failed to delete project note', {
+          description: e instanceof Error ? e.message : String(e),
+          duration: Infinity,
+        });
+      } finally {
+        const next = new Set(deletingNoteIds);
+        next.delete(noteId);
+        deletingNoteIds = next;
+      }
+    };
+    if (opts?.altKey) {
+      void doDelete();
+      return;
+    }
+    // Deleting a project note also deletes the notes its session created on
+    // branches, so the confirmation names them.
+    confirmDelete = {
+      title: 'Delete Project Note',
+      message: sessionId
+        ? 'Delete this project note? Its linked session and the notes it created on branches will also be deleted.'
+        : 'Delete this project note?',
+      onConfirm: doDelete,
+    };
+  }
+
+  async function handleResumeNote(note: ProjectNote) {
+    const sessionId = note.sessionId;
+    if (!sessionId || resumingNoteIds.has(note.id)) return;
+    resumingNoteIds = new Set([...resumingNoteIds, note.id]);
     try {
-      await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
-      // Optimistic removal; the delete's notes-changed event re-fetches every
-      // window's project-note surfaces (including this one) to confirm.
-      projectNotes = projectNotes.filter((n) => n.id !== noteId);
-      hashtagVersion++;
-    } catch (e) {
-      console.error('[ProjectSection] Failed to delete project note:', e);
+      if (!(await resumeSessionFromRow(sessionId, null))) return;
+      // Track it as running at once, as a fresh start does; the running
+      // event that does the same may land after the reload below.
+      activeSessionIds = nextActiveSessionIds(activeSessionIds, { sessionId, status: 'running' });
+      await loadProjectNotes();
     } finally {
-      const next = new Set(deletingNoteIds);
-      next.delete(noteId);
-      deletingNoteIds = next;
+      const next = new Set(resumingNoteIds);
+      next.delete(note.id);
+      resumingNoteIds = next;
     }
   }
 
@@ -463,7 +531,7 @@
       actions.push({
         key: projectNoteContextMenuKey(note),
         hashtagRef: isCompletedProjectNote(note) ? `#project-note:${note.id}` : undefined,
-        onDelete: deleting ? undefined : () => handleDeleteNote(note.id),
+        onDelete: deleting ? undefined : (opts) => handleDeleteNote(note.id, opts),
       });
     }
     return actions;
@@ -489,6 +557,7 @@
   // chat pane.
   onViewHidden(() => {
     showProjectSessionModal = false;
+    confirmDelete = null;
     if (openNote) {
       closeOpenNote();
       void loadProjectNotes();
@@ -536,9 +605,7 @@
   }
 
   function isCompletedProjectNote(note: ProjectNote): boolean {
-    const isRunning = isSessionActive(note.sessionStatus);
-    const isFailed = !isRunning && !!note.sessionId && !note.content.trim();
-    return !isRunning && !isFailed;
+    return noteRowPhase(note) === 'done';
   }
 
   function projectNoteContextMenuKey(note: ProjectNote): string {
@@ -741,6 +808,16 @@
         // behalf (`branchId` set); its id stays out of the set, but the
         // fresh-Set reassignment is what makes its badge appear.
         activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
+
+        // A listed note whose session starts running again was resumed — from
+        // the note's chat, a row's Resume, or another window. Its row still
+        // holds the finished status, so refetch it to show it running.
+        if (
+          !payload.branchId &&
+          projectNotes.some((n) => n.sessionId === sessionId && !isSessionActive(n.sessionStatus))
+        ) {
+          await refreshNoteForSession(sessionId);
+        }
         return;
       }
 
@@ -748,14 +825,7 @@
         // A finished child drops its badge; a finished parent drops the row.
         activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
 
-        // Surgically update just the affected note instead of reloading all
-        const updatedNote = await commands.getProjectNoteBySession(sessionId);
-        if (updatedNote) {
-          projectNotes = projectNotes.map((n) => (n.id === updatedNote.id ? updatedNote : n));
-        } else {
-          // Note was filtered out (e.g. deleted) — remove from local list
-          projectNotes = projectNotes.filter((n) => n.sessionId !== sessionId);
-        }
+        await refreshNoteForSession(sessionId);
 
         // Branch timelines were already invalidated by sessionStatusListener
         // for the session's own branch; just re-derive the hashtag items.
@@ -786,9 +856,18 @@
       >
         <div class="notes-timeline">
           {#each timelineNotes as note, index (note.id)}
-            {@const isRunning = isSessionActive(note.sessionStatus)}
-            {@const isFailed = !isRunning && !!note.sessionId && !note.content.trim()}
-            {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
+            {@const phase = noteRowPhase(note)}
+            {@const isRunning = phase === 'running'}
+            {@const isQueued = phase === 'queued'}
+            {@const isFailed = phase === 'failed'}
+            {@const isDeleting = deletingNoteIds.has(note.id)}
+            {@const noteType = isRunning
+              ? 'generating-note'
+              : isQueued
+                ? 'queued-note'
+                : isFailed
+                  ? 'failed-note'
+                  : 'note'}
             {@const liveHint =
               isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
             {@const liveTitle =
@@ -803,25 +882,37 @@
               title={isRunning
                 ? (liveTitle ?? 'Generating note…')
                 : isFailed
-                  ? 'Session finished — no note created'
+                  ? failedArtifactSubtitle(note.completionReason, 'note')
                   : note.title || 'Untitled note'}
-              secondaryMeta={isRunning
-                ? runningSecondaryMeta(childBadges, liveHint)
-                : isFailed
-                  ? undefined
-                  : formatNoteTimestamp(note, nowMs)}
+              secondaryMeta={isDeleting
+                ? 'Deleting...'
+                : isRunning
+                  ? runningSecondaryMeta(childBadges, liveHint)
+                  : isQueued
+                    ? 'Queued'
+                    : isFailed
+                      ? undefined
+                      : formatNoteTimestamp(note, nowMs)}
               childSessionBadges={childBadges}
               onChildSessionClick={openChildSessionChat}
-              deleting={deletingNoteIds.has(note.id)}
+              deleting={isDeleting}
               isLast={false}
               sessionId={note.sessionId ?? undefined}
               chatState={noteType === 'note' ? noteChatState(note) : 'none'}
-              onItemClick={isRunning || isFailed ? undefined : () => openProjectNote(note)}
+              onItemClick={noteType === 'note' ? () => openProjectNote(note) : undefined}
               onSessionClick={(sid) => {
                 openProjectNote({ ...note, sessionId: sid }, true);
               }}
-              deleteDisabledReason={deletingNoteIds.has(note.id) ? 'Deleting...' : undefined}
-              onDeleteClick={() => handleDeleteNote(note.id)}
+              deleteDisabledReason={isDeleting ? 'Deleting...' : undefined}
+              onDeleteClick={(opts) => handleDeleteNote(note.id, opts)}
+              onResumeClick={canResumeRow({
+                sessionId: note.sessionId,
+                completionReason: note.completionReason,
+                deleting: isDeleting,
+                phase,
+              }) && !resumingNoteIds.has(note.id)
+                ? () => handleResumeNote(note)
+                : undefined}
               contextMenuKey={projectNoteContextMenuKey(note)}
             />
           {/each}
@@ -899,6 +990,8 @@
     }}
   />
 {/if}
+
+<ConfirmDeleteDialog request={confirmDelete} onCancel={() => (confirmDelete = null)} />
 
 {#if openNote}
   <NoteModal

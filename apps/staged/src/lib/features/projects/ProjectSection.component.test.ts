@@ -2,7 +2,7 @@ import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, ProjectNote } from '../../types';
 
-const { writer, loadDraftMock } = vi.hoisted(() => ({
+const { writer, loadDraftMock, commandMocks, eventHandlers, toastError } = vi.hoisted(() => ({
   writer: {
     scheduleSave: vi.fn(),
     saveNow: vi.fn(async () => {}),
@@ -10,14 +10,40 @@ const { writer, loadDraftMock } = vi.hoisted(() => ({
     flush: vi.fn(async () => {}),
   },
   loadDraftMock: vi.fn(async (_key: string): Promise<string | null> => null),
+  commandMocks: {
+    listProjectNotes: vi.fn(async (_projectId: string): Promise<ProjectNote[]> => []),
+    getProjectNoteBySession: vi.fn(async (_sessionId: string): Promise<ProjectNote | null> => null),
+    resumeSession: vi.fn(
+      async (
+        _sessionId: string,
+        _prompt: string,
+        _imageIds?: string[],
+        _branchId?: string | null
+      ): Promise<void> => {}
+    ),
+    deleteProjectNote: vi.fn(async (_noteId: string): Promise<void> => {}),
+    cancelSession: vi.fn(async (_sessionId: string): Promise<void> => {}),
+    listChildSessions: vi.fn(async (_sessionId: string) => []),
+  },
+  /** The section's transport listeners, keyed by event name. */
+  eventHandlers: new Map<string, (payload: unknown) => unknown>(),
+  toastError: vi.fn(),
 }));
 
 // Heavy leaf components are stubbed out: the tests exercise the section's
-// project-session draft wiring, not the timeline/branch/note internals. The
-// real NewSessionModal is mounted (with its own leaves stubbed) so the open
-// paths drive its draft load exactly as in the app.
+// project-session draft wiring and the state it hands its note rows, not the
+// timeline/branch/note internals. The real NewSessionModal is mounted (with
+// its own leaves stubbed) so the open paths drive its draft load exactly as in
+// the app.
 vi.mock('../branches/BranchCard.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
-vi.mock('../timeline/TimelineRow.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
+vi.mock(
+  '../timeline/TimelineRow.svelte',
+  () => import('../sessions/testStubs/TimelineRowStub.svelte')
+);
+vi.mock(
+  '../../shared/ConfirmDeleteDialog.svelte',
+  () => import('../sessions/testStubs/ConfirmDeleteDialogStub.svelte')
+);
 vi.mock(
   '../timeline/TimelineContextMenu.svelte',
   () => import('../sessions/testStubs/TimelineContextMenuStub.svelte')
@@ -53,15 +79,21 @@ vi.mock('../sessions/hashtagItems', () => ({
 }));
 vi.mock('../../transport', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../transport')>()),
-  listenToEvent: () => () => {},
+  listenToEvent: (event: string, handler: (payload: unknown) => unknown) => {
+    eventHandlers.set(event, handler);
+    return () => eventHandlers.delete(event);
+  },
 }));
+vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 vi.mock('../../shared/draftCache', () => ({
   createDraftWriteScheduler: () => writer,
   loadDraft: (key: string) => loadDraftMock(key),
 }));
-vi.mock('../../api/commands', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../api/commands')>()),
-  listProjectNotes: async () => [completedNote],
+// The source module rather than `api/commands`, which only re-exports it:
+// `deleteSessionLinkedItem` cancels the note's session through it directly.
+vi.mock('../../commands', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../commands')>()),
+  ...commandMocks,
 }));
 
 import ProjectSection from './ProjectSection.svelte';
@@ -135,9 +167,76 @@ function savedPrompts(): string[] {
   );
 }
 
+function noteWith(overrides: Partial<ProjectNote>): ProjectNote {
+  return { ...completedNote, ...overrides };
+}
+
+/** A note whose session ended for `reason` before it wrote anything. */
+function failedNote(key: string, reason: string, sessionStatus = 'error'): ProjectNote {
+  return noteWith({
+    id: `note-${key}`,
+    sessionId: `session-${key}`,
+    title: '',
+    content: '',
+    sessionStatus,
+    completionReason: reason,
+  });
+}
+
+function listNotes(...notes: ProjectNote[]) {
+  commandMocks.listProjectNotes.mockImplementation(async () => notes);
+}
+
+function rowFor(sessionId: string): HTMLElement {
+  const row = document.querySelector<HTMLElement>(
+    `[data-testid="timeline-row"][data-session-id="${sessionId}"]`
+  );
+  if (!row) throw new Error(`no row for ${sessionId}`);
+  return row;
+}
+
+function resumeButton(sessionId: string): HTMLButtonElement | null {
+  return rowFor(sessionId).querySelector<HTMLButtonElement>('[data-testid="row-resume"]');
+}
+
+function clickDelete(sessionId: string, opts: { altKey?: boolean } = {}) {
+  const btn = rowFor(sessionId).querySelector<HTMLButtonElement>('[data-testid="row-delete"]');
+  if (!btn) throw new Error(`no delete button for ${sessionId}`);
+  btn.dispatchEvent(new MouseEvent('click', { bubbles: true, altKey: opts.altKey ?? false }));
+  flushSync();
+}
+
+function confirmDialog(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-testid="confirm-delete"]');
+}
+
+async function emitSessionStatus(payload: {
+  sessionId: string;
+  status: string;
+  projectId?: string;
+  branchId?: string | null;
+}) {
+  const handler = eventHandlers.get('session-status-changed');
+  if (!handler) throw new Error('session-status-changed listener not registered');
+  await handler(payload);
+  await settle();
+}
+
+beforeEach(() => {
+  document.body.innerHTML = '';
+  eventHandlers.clear();
+  toastError.mockReset();
+  for (const mock of Object.values(commandMocks)) mock.mockReset();
+  listNotes(completedNote);
+  commandMocks.getProjectNoteBySession.mockImplementation(async () => null);
+  commandMocks.resumeSession.mockImplementation(async () => {});
+  commandMocks.deleteProjectNote.mockImplementation(async () => {});
+  commandMocks.cancelSession.mockImplementation(async () => {});
+  commandMocks.listChildSessions.mockImplementation(async () => []);
+});
+
 describe('ProjectSection referring open', () => {
   beforeEach(() => {
-    document.body.innerHTML = '';
     writer.scheduleSave.mockClear();
     writer.saveNow.mockClear();
     writer.flush.mockClear();
@@ -187,6 +286,207 @@ describe('ProjectSection referring open', () => {
 
     expect(promptInput()).not.toBeNull();
     expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, `stored draft\n${REF}`);
+
+    unmount(section);
+  });
+});
+
+describe('ProjectSection note rows', () => {
+  it('offers Resume on a crashed note, resumes it with the plain prompt, and reloads it running', async () => {
+    const crashed = failedNote('crashed', 'crashed');
+    listNotes(crashed);
+    const section = mountSection();
+    await settle();
+
+    expect(rowFor('session-crashed').dataset.type).toBe('failed-note');
+    const resume = resumeButton('session-crashed');
+    expect(resume).not.toBeNull();
+
+    listNotes({ ...crashed, sessionStatus: 'running', completionReason: null });
+    resume!.click();
+    await settle();
+
+    expect(commandMocks.resumeSession).toHaveBeenCalledWith(
+      'session-crashed',
+      'Continue where you left off.',
+      undefined,
+      null
+    );
+    expect(commandMocks.listProjectNotes).toHaveBeenCalledTimes(2);
+    expect(rowFor('session-crashed').dataset.type).toBe('generating-note');
+    expect(resumeButton('session-crashed')).toBeNull();
+
+    unmount(section);
+  });
+
+  it('names each failure by its reason and offers Resume only for resumable ones', async () => {
+    listNotes(
+      failedNote('crashed', 'crashed'),
+      failedNote('stopped', 'interrupted', 'cancelled'),
+      failedNote('quit', 'app_quit'),
+      failedNote('empty', 'turn_complete', 'completed'),
+      noteWith({
+        id: 'note-held',
+        sessionId: 'session-held',
+        completionReason: 'hold_stopped',
+      })
+    );
+    const section = mountSection();
+    await settle();
+
+    const expected: [string, string, string, boolean][] = [
+      ['session-crashed', 'failed-note', 'Session crashed — no note created', true],
+      ['session-stopped', 'failed-note', 'Session stopped — no note created', true],
+      ['session-quit', 'failed-note', 'Session interrupted — no note created', true],
+      ['session-empty', 'failed-note', 'Session finished — no note created', false],
+      ['session-held', 'note', completedNote.title, true],
+    ];
+    for (const [sessionId, type, title, resumable] of expected) {
+      const row = rowFor(sessionId);
+      expect(row.dataset.type, sessionId).toBe(type);
+      expect(row.dataset.title, sessionId).toBe(title);
+      expect(!!resumeButton(sessionId), sessionId).toBe(resumable);
+    }
+
+    unmount(section);
+  });
+
+  it('withholds Resume while a resume is in flight, so a double click resumes once', async () => {
+    listNotes(failedNote('crashed', 'crashed'));
+    let finishResume!: () => void;
+    commandMocks.resumeSession.mockImplementation(
+      () => new Promise<void>((resolve) => (finishResume = resolve))
+    );
+    const section = mountSection();
+    await settle();
+
+    resumeButton('session-crashed')!.click();
+    flushSync();
+    expect(resumeButton('session-crashed')).toBeNull();
+
+    finishResume();
+    await settle();
+    expect(commandMocks.resumeSession).toHaveBeenCalledTimes(1);
+
+    unmount(section);
+  });
+
+  it('reports a failed resume with a toast and leaves the row resumable', async () => {
+    listNotes(failedNote('crashed', 'crashed'));
+    commandMocks.resumeSession.mockRejectedValue(new Error('agent unavailable'));
+    const section = mountSection();
+    await settle();
+
+    resumeButton('session-crashed')!.click();
+    await settle();
+
+    expect(toastError).toHaveBeenCalledWith('Resume failed', {
+      description: 'agent unavailable',
+    });
+    expect(commandMocks.listProjectNotes).toHaveBeenCalledTimes(1);
+    expect(resumeButton('session-crashed')).not.toBeNull();
+
+    unmount(section);
+  });
+
+  it('flips a listed note to running when its session is resumed elsewhere', async () => {
+    const crashed = failedNote('crashed', 'crashed');
+    listNotes(crashed);
+    commandMocks.getProjectNoteBySession.mockImplementation(async (sessionId) =>
+      sessionId === crashed.sessionId
+        ? { ...crashed, sessionStatus: 'running', completionReason: null }
+        : null
+    );
+    const section = mountSection();
+    await settle();
+
+    // A repo session on a branch, and a session no listed note owns, leave
+    // the rows alone.
+    await emitSessionStatus({
+      sessionId: 'session-crashed',
+      status: 'running',
+      projectId: project.id,
+      branchId: 'branch-1',
+    });
+    await emitSessionStatus({
+      sessionId: 'session-other',
+      status: 'running',
+      projectId: project.id,
+    });
+    expect(commandMocks.getProjectNoteBySession).not.toHaveBeenCalled();
+
+    await emitSessionStatus({
+      sessionId: 'session-crashed',
+      status: 'running',
+      projectId: project.id,
+      branchId: null,
+    });
+    expect(commandMocks.getProjectNoteBySession).toHaveBeenCalledWith('session-crashed');
+    expect(rowFor('session-crashed').dataset.type).toBe('generating-note');
+    expect(resumeButton('session-crashed')).toBeNull();
+
+    unmount(section);
+  });
+
+  it('asks before deleting a note, and shows it deleting once confirmed', async () => {
+    let finishDelete!: () => void;
+    commandMocks.deleteProjectNote.mockImplementation(
+      () => new Promise<void>((resolve) => (finishDelete = resolve))
+    );
+    const section = mountSection();
+    await settle();
+
+    clickDelete('session-1');
+    expect(commandMocks.deleteProjectNote).not.toHaveBeenCalled();
+    expect(confirmDialog()?.textContent).toContain(
+      'Its linked session and the notes it created on branches will also be deleted.'
+    );
+
+    document.querySelector<HTMLButtonElement>('[data-testid="confirm-delete-confirm"]')!.click();
+    await settle();
+    expect(confirmDialog()).toBeNull();
+    expect(commandMocks.cancelSession).toHaveBeenCalledWith('session-1');
+    expect(commandMocks.deleteProjectNote).toHaveBeenCalledWith(completedNote.id);
+    expect(rowFor('session-1').dataset.secondaryMeta).toBe('Deleting...');
+    expect(rowFor('session-1').dataset.deleting).toBe('true');
+
+    finishDelete();
+    await settle();
+    expect(document.querySelector('[data-testid="timeline-row"]')).toBeNull();
+
+    unmount(section);
+  });
+
+  it('keeps the note when the confirmation is cancelled', async () => {
+    const section = mountSection();
+    await settle();
+
+    clickDelete('session-1');
+    document.querySelector<HTMLButtonElement>('[data-testid="confirm-delete-cancel"]')!.click();
+    await settle();
+
+    expect(confirmDialog()).toBeNull();
+    expect(commandMocks.deleteProjectNote).not.toHaveBeenCalled();
+    expect(rowFor('session-1')).not.toBeNull();
+
+    unmount(section);
+  });
+
+  it('deletes at once on alt-click and reports a failure with a toast', async () => {
+    commandMocks.deleteProjectNote.mockRejectedValue(new Error('database is locked'));
+    const section = mountSection();
+    await settle();
+
+    clickDelete('session-1', { altKey: true });
+    expect(confirmDialog()).toBeNull();
+    await settle();
+
+    expect(commandMocks.deleteProjectNote).toHaveBeenCalledWith(completedNote.id);
+    expect(toastError).toHaveBeenCalledWith('Failed to delete project note', {
+      description: 'database is locked',
+      duration: Infinity,
+    });
+    expect(rowFor('session-1').dataset.deleting).toBe('false');
 
     unmount(section);
   });

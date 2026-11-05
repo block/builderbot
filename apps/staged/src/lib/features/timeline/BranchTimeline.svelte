@@ -17,7 +17,6 @@
   import MoreHorizontal from '@lucide/svelte/icons/more-horizontal';
   import PencilLine from '@lucide/svelte/icons/pencil-line';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
-  import { isResumableReason } from '../../types';
   import type {
     BranchGitState,
     BranchTimeline as BranchTimelineData,
@@ -53,6 +52,7 @@
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
+  import { canResumeRow, noteRowPhase, type SessionRowPhase } from './sessionRowState';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
   import { sessionRowTitle } from './sessionRowTitle';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
@@ -741,22 +741,20 @@
     }
 
     for (const note of timeline.notes) {
-      const isRunning = note.sessionStatus === 'running';
-      const isQueued = note.sessionStatus === 'queued';
-      const isFailed = !isRunning && !isQueued && !!note.sessionId && !note.content?.trim();
+      const phase = noteRowPhase(note);
       const isDeleting = deletingNoteIds.has(note.id);
       const liveHint = note.sessionId ? liveSessionHints[note.sessionId] : undefined;
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
 
-      if (isFailed) {
+      if (phase === 'failed') {
         type = 'failed-note';
         secondaryMeta = failedArtifactSubtitle(note.completionReason, 'note');
-      } else if (isQueued) {
+      } else if (phase === 'queued') {
         type = 'queued-note';
         secondaryMeta = 'Queued';
-      } else if (isRunning) {
+      } else if (phase === 'running') {
         type = 'generating-note';
         secondaryMeta = liveHint ?? 'Generating note';
       } else {
@@ -1017,8 +1015,21 @@
     }
   }
 
+  /** The session phase a row's type shows. */
+  function rowPhase(type: TimelineItemType): SessionRowPhase {
+    if (type.startsWith('queued-')) return 'queued';
+    if (type === 'pending-commit' || type.startsWith('generating-')) return 'running';
+    if (type.startsWith('failed-')) return 'failed';
+    return 'done';
+  }
+
   function isResumable(item: DisplayItem): boolean {
-    return !!item.sessionId && isResumableReason(item.completionReason) && !item.deleting;
+    return canResumeRow({
+      sessionId: item.sessionId,
+      completionReason: item.completionReason,
+      deleting: item.deleting,
+      phase: rowPhase(item.type),
+    });
   }
 
   /** The kind a queued row would start as, or null when the row isn't queued. */

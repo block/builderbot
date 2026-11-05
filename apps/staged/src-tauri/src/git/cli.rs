@@ -24,13 +24,17 @@ pub enum GitError {
     #[error("path contains invalid UTF-8: {0}")]
     InvalidPath(String),
 
-    /// A [`run_bounded`] read gave up waiting for the captured env, ran with
-    /// the inherited one, and failed in a way the captured env might have
-    /// avoided (see [`should_retry_with_captured`]): a `required` LFS clean
-    /// filter missing from the inherited PATH fails `git status`, for one.
-    /// So the failure says nothing about the repo yet. Holds the error the
-    /// read failed with.
-    #[error("{0} (ran with the inherited env while the shell env was still being captured)")]
+    /// A [`run_bounded`] read ran with the inherited env because the
+    /// captured one wasn't there yet, and failed in a way the captured env
+    /// might have avoided (see [`should_retry_with_captured`]): a `required`
+    /// LFS clean filter missing from the inherited PATH fails `git status`,
+    /// for one. So the failure says nothing about the repo yet. Holds the
+    /// error the read failed with.
+    ///
+    /// The captured env wasn't there because the bound ran out on a capture
+    /// still running, or because the root's last capture timed out recently
+    /// and will be tried again ([`crate::shell_env::is_recent_timeout`]).
+    #[error("{0} (ran with the inherited env before the shell env was captured)")]
     CapturedEnvPending(Box<GitError>),
 }
 
@@ -247,12 +251,14 @@ pub enum EnvSource {
 enum AppliedEnv {
     Lite,
     Captured,
-    /// Asked for the captured env, ran with the lite one: the bound ran out
-    /// while the capture was still going (`still_capturing`), or the capture
-    /// failed. Only the first is temporary; after a failure the lite env is
-    /// all a `Captured` run would get too.
+    /// Asked for the captured env, ran with the lite one. `capture_pending`
+    /// when the captured env is still to come: a bounded read whose bound
+    /// ran out while the capture was still going, or that found its root's
+    /// last capture timed out recently, so it will be tried again. Otherwise
+    /// the capture failed, and the lite env is all a `Captured` run would get
+    /// too.
     LiteFallback {
-        still_capturing: bool,
+        capture_pending: bool,
     },
 }
 
@@ -333,12 +339,12 @@ fn stdout_of(repo: &Path, output: std::process::Output) -> Result<String, GitErr
 }
 
 /// Wrap `error` in [`GitError::CapturedEnvPending`] when the run that failed
-/// with it used the lite env only because the capture was still going, and
-/// the captured env might have changed the outcome.
+/// with it used the lite env only because the captured env was still to
+/// come, and the captured env might have changed the outcome.
 fn flag_pending_capture(error: GitError, env: AppliedEnv) -> GitError {
     match env {
         AppliedEnv::LiteFallback {
-            still_capturing: true,
+            capture_pending: true,
         } if should_retry_with_captured(&error) => GitError::CapturedEnvPending(Box::new(error)),
         _ => error,
     }
@@ -393,10 +399,31 @@ pub(super) fn run_bounded_while_capturing(repo: &Path, args: &[&str]) -> Result<
         flag_pending_capture(
             error,
             AppliedEnv::LiteFallback {
-                still_capturing: true,
+                capture_pending: true,
             },
         )
     })
+}
+
+/// [`run_bounded`] as the app build runs it, but against `cache` and with
+/// `bound` in place of the app's cache and [`CAPTURED_ENV_READ_BOUND`], so
+/// tests can drive the bounded arm with a hermetic shell.
+#[cfg(test)]
+pub(super) fn run_bounded_with_cache(
+    cache: &Arc<ShellEnvCache>,
+    repo: &Path,
+    args: &[&str],
+    bound: Duration,
+) -> Result<String, GitError> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo).args(args);
+    let env = apply_captured_env_within(&mut command, repo, cache, bound);
+    pin_c_locale(&mut command);
+    force_non_interactive(&mut command);
+    let output = command
+        .output()
+        .map_err(|e| GitError::CommandFailed(e.to_string()))?;
+    stdout_of(repo, output).map_err(|e| flag_pending_capture(e, env))
 }
 
 /// Fire-and-forget warm-up of the captured shell env for `repo`: starts the
@@ -434,7 +461,7 @@ fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) -> AppliedEn
                 warn_capture_failed(repo, &e);
                 strip_git_env(command);
                 AppliedEnv::LiteFallback {
-                    still_capturing: false,
+                    capture_pending: false,
                 }
             }
         },
@@ -454,7 +481,8 @@ fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) -> Applied
 /// and bound explicitly so tests can drive it with a hermetic shell.
 ///
 /// When the bound runs out the inherited env is used and the capture is left
-/// running. Only the first caller to give up on a given capture logs it; the
+/// running. The same goes, without the wait, for a root whose last capture
+/// timed out recently. Only the first caller to give up on a given capture logs it; the
 /// rest of a refresh's reads, and other branches waiting on the same
 /// directory, would otherwise repeat the line once each. The warning is the
 /// capture's own summary line when it finishes, which counts every caller
@@ -480,14 +508,21 @@ fn apply_captured_env_within(
             }
             strip_git_env(command);
             AppliedEnv::LiteFallback {
-                still_capturing: true,
+                capture_pending: true,
             }
         }
         Err(e) => {
             warn_capture_failed(repo, &e);
             strip_git_env(command);
             AppliedEnv::LiteFallback {
-                still_capturing: false,
+                // A root that timed out recently is captured again once
+                // what its shell left running has finished, or after a few
+                // minutes, so its captured env is still to come, as for a
+                // capture still running. A failure the captured env might
+                // have avoided then makes a state build decline, and the
+                // card keeps its state, rather than reading a `git status`
+                // that couldn't run a filter as a clean tree.
+                capture_pending: crate::shell_env::is_recent_timeout(&e),
             }
         }
     }
@@ -867,7 +902,7 @@ mod tests {
         assert_eq!(
             applied,
             AppliedEnv::LiteFallback {
-                still_capturing: true
+                capture_pending: true
             }
         );
         assert!(
@@ -929,10 +964,10 @@ mod tests {
     #[test]
     fn only_env_sensitive_failures_while_capturing_are_flagged() {
         let capturing = AppliedEnv::LiteFallback {
-            still_capturing: true,
+            capture_pending: true,
         };
         let capture_failed = AppliedEnv::LiteFallback {
-            still_capturing: false,
+            capture_pending: false,
         };
         let filter_failed = || GitError::CommandFailed("fatal: clean filter 'lfs' failed".into());
 
@@ -986,7 +1021,7 @@ mod tests {
         assert_eq!(
             env,
             AppliedEnv::LiteFallback {
-                still_capturing: true
+                capture_pending: true
             }
         );
         let output = command.output().expect("git ran");

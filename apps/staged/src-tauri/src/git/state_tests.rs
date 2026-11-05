@@ -211,6 +211,62 @@ fn bounded_build_declines_a_status_that_failed_while_capturing() {
     assert_eq!(state.worktree.modified, 1);
 }
 
+/// While a root's timed-out mark is live, its bounded reads go without the
+/// captured env at once, and a `git status` that couldn't run the checkout's
+/// clean filter still declines the build rather than reading as a clean
+/// tree. The root will be captured again, so the failure says no more about
+/// the repo than one from a capture still running.
+#[cfg(unix)]
+#[test]
+fn bounded_build_declines_a_status_that_failed_after_a_capture_timed_out() {
+    use crate::shell_env::{is_recent_timeout, CaptureTimeouts, ShellEnvCache};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let repo = repo_with_unrunnable_clean_filter();
+    // The shell hangs, and once it is killed nothing it started is left, so
+    // the mark holds for `retry_after`.
+    let shell = crate::test_utils::write_fake_shell("#!/bin/sh\nexec sleep 30\n");
+    let cache = Arc::new(
+        ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+            .with_home(repo.path().parent().expect("repo parent"))
+            .with_capture_timeouts(CaptureTimeouts {
+                shell: Duration::from_secs(1),
+                group: Duration::from_secs(2),
+                retry_after: Duration::from_secs(600),
+            }),
+    );
+    let timed_out = cache
+        .get_blocking(repo.path())
+        .map(|_| ())
+        .expect_err("the capture times out");
+    assert_eq!(
+        timed_out.kind(),
+        std::io::ErrorKind::TimedOut,
+        "{timed_out}"
+    );
+    let lookup = cache
+        .get_blocking_within(repo.path(), Duration::ZERO)
+        .map(|_| ())
+        .expect_err("the mark is live");
+    assert!(is_recent_timeout(&lookup), "{lookup}");
+
+    let bound = Duration::from_secs(30);
+    let started = Instant::now();
+    let error = settled_state(repo.path(), |args| {
+        cli::run_bounded_with_cache(&cache, repo.path(), args, bound)
+    })
+    .expect_err("status failed only for want of the captured env");
+    assert!(
+        started.elapsed() < bound / 3,
+        "the reads waited on a root with nothing capturing"
+    );
+    assert!(
+        matches!(&error, GitError::CapturedEnvPending(inner) if inner.to_string().contains("clean filter")),
+        "{error:?}"
+    );
+}
+
 /// A pending failure in any read, not just `status`, declines the build,
 /// and reads that fail the same way with any env, such as a `merge-base`
 /// against a missing `origin/main`, don't.

@@ -21,9 +21,9 @@
 //! it before anything else ([`prewarm_home_env`]), so worktree captures can
 //! never hold it up. A shell still running after [`SHELL_CAPTURE_TIMEOUT`] is
 //! killed, so a hung rc file can't keep a slot, or its root's entry, forever.
-//! What the shell started gets until [`LEFTOVER_GROUP_TIMEOUT`] to finish, and
-//! its root's lookups fail at once for [`TIMED_OUT_RETRY_AFTER`] rather than
-//! each wait out another timeout.
+//! What the shell started gets until [`LEFTOVER_GROUP_TIMEOUT`] to finish.
+//! Until it has, or for [`TIMED_OUT_RETRY_AFTER`] if nothing was left, the
+//! root's lookups fail at once rather than each wait out another timeout.
 //!
 //! A capture never belongs to a caller's future. Async callers, bounded
 //! reads and prewarms run it on a `shell-env-capture` thread; a sync caller
@@ -45,7 +45,6 @@ use tokio::sync::watch;
 
 mod capture_slots;
 mod env_root;
-#[cfg(unix)]
 mod leftover_group;
 
 #[cfg(all(test, unix))]
@@ -53,6 +52,7 @@ mod capture_limit_tests;
 
 use capture_slots::{CaptureSlots, Urgency, CAPTURE_LIMIT};
 use env_root::resolve_env_root;
+use leftover_group::{LeftoverState, Leftovers};
 
 /// Default cache TTL — long enough that pipeline runs amortise the capture
 /// cost, short enough that edits to `~/.zshrc` or `bin/activate-hermit` are
@@ -74,34 +74,39 @@ const HOME_ENV_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Only the shell is killed. What it started keeps going until
 /// [`LEFTOVER_GROUP_TIMEOUT`], so a build or download can finish and fill
 /// its own cache for the next capture. Failing frees the capture's slot and
-/// replaces its entry with a timed-out mark (see [`TIMED_OUT_RETRY_AFTER`]),
-/// so nobody joins the dead capture.
+/// replaces its entry with a timed-out mark (see [`TimedOutMark`]), so
+/// nobody joins the dead capture.
 const SHELL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How long, from its shell's start, what a timed-out capture's shell
 /// started may keep running before its whole process group is killed. Long
 /// enough for a dev-shell build or a download to finish, short enough that
 /// a `security` keychain prompt nobody answers doesn't sit there for good.
+/// While it runs, the root's timed-out mark holds, so no second rc run
+/// starts beside it.
 const LEFTOVER_GROUP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// How long after a capture timed out its env root's lookups fail at once,
-/// so callers go on with the fallback env. Another shell started that soon
-/// would most likely time out too, and every caller joining it would wait
-/// the full [`SHELL_CAPTURE_TIMEOUT`] again. A capture after this has passed
-/// replaces the mark, as does [`ShellEnvCache::invalidate`].
+/// so callers go on with the fallback env, when the shell left nothing
+/// running. Another shell started that soon would most likely time out too,
+/// and every caller joining it would wait the full [`SHELL_CAPTURE_TIMEOUT`]
+/// again. What the shell did leave running decides the mark's lifetime
+/// instead (see [`TimedOutMark::recent_timeout`]). A capture after the mark
+/// lapses replaces it, as does [`ShellEnvCache::invalidate`].
 const TIMED_OUT_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 
 /// [`SHELL_CAPTURE_TIMEOUT`], [`LEFTOVER_GROUP_TIMEOUT`] and
 /// [`TIMED_OUT_RETRY_AFTER`] for one cache. Tests shorten them.
 #[derive(Clone, Copy, Debug)]
-struct CaptureTimeouts {
+pub(crate) struct CaptureTimeouts {
     /// Kill the shell if it is still running after this long.
-    shell: Duration,
+    pub(crate) shell: Duration,
     /// Kill what the killed shell started if it is still running this long
     /// after the shell started.
-    group: Duration,
-    /// Fail lookups at once for this long after a capture timed out.
-    retry_after: Duration,
+    pub(crate) group: Duration,
+    /// Fail lookups at once for this long after a capture timed out, unless
+    /// the shell left something running.
+    pub(crate) retry_after: Duration,
 }
 
 impl Default for CaptureTimeouts {
@@ -419,27 +424,83 @@ pub fn env_vars_with_extended_path(shell_env: &HashMap<String, String>) -> Vec<(
 enum CachedEntry {
     Ready(ShellEnv),
     InFlight(InFlightHandle),
-    /// When the root's last capture timed out. Lookups fail at once until
-    /// [`CaptureTimeouts::retry_after`] has passed, then start afresh.
-    TimedOut(Instant),
+    /// The root's last capture timed out. Lookups fail at once while the
+    /// mark is live, then start afresh.
+    TimedOut(TimedOutMark),
 }
 
-/// The error a lookup gets while its env root's last capture timed out less
-/// than [`CaptureTimeouts::retry_after`] ago. See [`is_recent_timeout`].
+/// What a capture that timed out leaves in its root's entry.
+#[derive(Clone)]
+struct TimedOutMark {
+    /// When the shell was killed.
+    at: Instant,
+    /// What the shell left running, kept up to date by its watchdog.
+    leftovers: Arc<Leftovers>,
+}
+
+impl TimedOutMark {
+    /// The error the root's lookups get while this mark is live, or `None`
+    /// once it has lapsed.
+    ///
+    /// - While what the killed shell started is still running, the mark
+    ///   holds, up to the group deadline. A second rc run beside it would
+    ///   repeat its work (a second `nvm install` into the same dir, a second
+    ///   nix-direnv evaluation) and most likely time out as well.
+    /// - Once all of that has exited on its own, the mark lapses at once.
+    ///   What the shell was waiting on is done, so the next capture will
+    ///   most likely finish.
+    /// - With nothing left running, or once the leftovers were killed at the
+    ///   deadline, it holds for `retry_after` from the kill.
+    fn recent_timeout(&self, retry_after: Duration) -> Option<RecentTimeout> {
+        let now = Instant::now();
+        let ago = now.saturating_duration_since(self.at);
+        let retry_in = retry_after.saturating_sub(ago);
+        match self.leftovers.state() {
+            LeftoverState::Finished => None,
+            LeftoverState::Running if now < self.leftovers.deadline() => Some(RecentTimeout {
+                ago,
+                retry_in: retry_in.max(self.leftovers.deadline() - now),
+                leftovers_running: true,
+            }),
+            _ if !retry_in.is_zero() => Some(RecentTimeout {
+                ago,
+                retry_in,
+                leftovers_running: false,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The error a lookup gets while its env root's timed-out mark is live. See
+/// [`is_recent_timeout`].
 #[derive(Debug)]
 struct RecentTimeout {
     ago: Duration,
+    /// The longest until the mark lapses.
     retry_in: Duration,
+    /// Whether what the shell started is still running. The mark lapses as
+    /// soon as it has all finished.
+    leftovers_running: bool,
 }
 
 impl fmt::Display for RecentTimeout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the last shell env capture here timed out {}s ago; not trying again for {}s",
-            self.ago.as_secs(),
-            self.retry_in.as_secs()
-        )
+        let (ago, retry_in) = (self.ago.as_secs(), self.retry_in.as_secs());
+        if self.leftovers_running {
+            write!(
+                f,
+                "the last shell env capture here timed out {ago}s ago, and what its shell \
+                 started is still running; not trying again until that has finished, or for at \
+                 most {retry_in}s"
+            )
+        } else {
+            write!(
+                f,
+                "the last shell env capture here timed out {ago}s ago; not trying again for \
+                 {retry_in}s"
+            )
+        }
     }
 }
 
@@ -835,7 +896,14 @@ impl CaptureJob {
         // soon as it exits or is killed.
         let slot = (!self.priority).then(|| self.slots.acquire(&self.handle.promise.urgency));
         let started = Instant::now();
-        let outcome = capture_shell_env(&self.key, &self.shell, &self.temp_root, self.timeouts);
+        let leftovers = Arc::new(Leftovers::new(started + self.timeouts.group));
+        let outcome = capture_shell_env(
+            &self.key,
+            &self.shell,
+            &self.temp_root,
+            self.timeouts,
+            &leftovers,
+        );
         let finished = Instant::now();
         drop(slot);
 
@@ -848,9 +916,17 @@ impl CaptureJob {
                         map.insert(self.key.clone(), CachedEntry::Ready(env.clone()));
                     }
                     // A shell that ran out the timeout would likely do so
-                    // again, so the root's lookups fail fast for a while.
+                    // again, so the root's lookups fail fast for a while:
+                    // until what it left running has finished, or for
+                    // `retry_after` if nothing was left.
                     Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                        map.insert(self.key.clone(), CachedEntry::TimedOut(finished));
+                        map.insert(
+                            self.key.clone(),
+                            CachedEntry::TimedOut(TimedOutMark {
+                                at: finished,
+                                leftovers,
+                            }),
+                        );
                     }
                     // A shell that failed quickly is worth trying again, so
                     // the next caller starts afresh.
@@ -990,7 +1066,7 @@ impl ShellEnvCache {
 
     /// Use `timeouts` in place of the defaults.
     #[cfg(test)]
-    fn with_capture_timeouts(mut self, timeouts: CaptureTimeouts) -> Self {
+    pub(crate) fn with_capture_timeouts(mut self, timeouts: CaptureTimeouts) -> Self {
         self.timeouts = timeouts;
         self
     }
@@ -1030,13 +1106,9 @@ impl ShellEnvCache {
                 return Lookup::Ready(env.clone());
             }
             Some(CachedEntry::InFlight(handle)) => return Lookup::InFlight(handle.clone()),
-            Some(CachedEntry::TimedOut(at)) => {
-                let ago = at.elapsed();
-                if ago < self.timeouts.retry_after {
-                    return Lookup::TimedOut(RecentTimeout {
-                        ago,
-                        retry_in: self.timeouts.retry_after - ago,
-                    });
+            Some(CachedEntry::TimedOut(mark)) => {
+                if let Some(timed_out) = mark.recent_timeout(self.timeouts.retry_after) {
+                    return Lookup::TimedOut(timed_out);
                 }
             }
             _ => {}
@@ -1108,8 +1180,10 @@ impl ShellEnvCache {
     /// capture. Dropping the future, or timing it out, stops only this
     /// caller's wait: the capture runs on and fills the cache.
     ///
-    /// For [`TIMED_OUT_RETRY_AFTER`] after the root's last capture timed out,
-    /// this and the other lookups fail at once ([`is_recent_timeout`]).
+    /// For a while after the root's last capture timed out, this and the
+    /// other lookups fail at once ([`is_recent_timeout`]): until what its
+    /// shell left running has finished, or for [`TIMED_OUT_RETRY_AFTER`] if
+    /// it left nothing (see [`TimedOutMark::recent_timeout`]).
     ///
     /// [`env_key`]: ShellEnvCache::env_key
     pub async fn get(&self, working_dir: &Path) -> io::Result<ShellEnv> {
@@ -1318,12 +1392,14 @@ fn parse_env_dump(bytes: &[u8]) -> Vec<(String, String)> {
 /// a thread of its own (see [`CaptureJob`]). A shell still running after
 /// `timeouts.shell` is killed, and the capture fails with
 /// [`io::ErrorKind::TimedOut`]. What the shell started may run until
-/// `timeouts.group` (see [`kill_capture_shell`]).
+/// `leftovers`' deadline, which reports how it ended (see
+/// [`kill_capture_shell`]).
 fn capture_shell_env(
     working_dir: &Path,
     shell: &Path,
     temp_root: &Path,
     timeouts: CaptureTimeouts,
+    leftovers: &Arc<Leftovers>,
 ) -> io::Result<Vec<(String, String)>> {
     use std::io::Write as _;
 
@@ -1360,7 +1436,6 @@ fn capture_shell_env(
     }
 
     let started = Instant::now();
-    let group_deadline = started + timeouts.group;
     let mut child = cmd.spawn()?;
     let written = child
         .stdin
@@ -1372,11 +1447,11 @@ fn capture_shell_env(
             // Drop stdin → shell sees EOF after `exit` and terminates cleanly.
         });
     if let Err(error) = written {
-        kill_capture_shell(&mut child, group_deadline);
+        kill_capture_shell(&mut child, leftovers);
         return Err(error);
     }
 
-    let Some(status) = wait_or_kill(&mut child, started + timeouts.shell, group_deadline)? else {
+    let Some(status) = wait_or_kill(&mut child, started + timeouts.shell, leftovers)? else {
         let _ = std::fs::remove_file(&dump_path);
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -1407,7 +1482,8 @@ fn capture_shell_env(
 }
 
 /// Wait for the capture shell to exit, or kill it at `deadline`. `None`
-/// means it was killed; what it started is left until `group_deadline`.
+/// means it was killed; what it started is left until `leftovers`'
+/// deadline.
 ///
 /// Polls rather than blocking in `wait`, backing off to
 /// [`CAPTURE_POLL_MAX`]: std has no wait with a timeout, and a watchdog
@@ -1417,7 +1493,7 @@ fn capture_shell_env(
 fn wait_or_kill(
     child: &mut std::process::Child,
     deadline: Instant,
-    group_deadline: Instant,
+    leftovers: &Arc<Leftovers>,
 ) -> io::Result<Option<std::process::ExitStatus>> {
     let mut pause = Duration::from_millis(5);
     loop {
@@ -1425,13 +1501,13 @@ fn wait_or_kill(
             Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) => {}
             Err(error) => {
-                kill_capture_shell(child, group_deadline);
+                kill_capture_shell(child, leftovers);
                 return Err(error);
             }
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            kill_capture_shell(child, group_deadline);
+            kill_capture_shell(child, leftovers);
             return Ok(None);
         }
         std::thread::sleep(pause.min(left));
@@ -1444,7 +1520,7 @@ fn wait_or_kill(
 const CAPTURE_POLL_MAX: Duration = Duration::from_millis(50);
 
 /// Kill a capture shell and reap it, leaving what it started to run until
-/// `group_deadline`.
+/// `leftovers`' deadline.
 ///
 /// Killing only the shell frees its slot and fails its capture, while what
 /// its rc files started can still finish useful work: a nix-direnv build,
@@ -1452,17 +1528,18 @@ const CAPTURE_POLL_MAX: Duration = Duration::from_millis(50);
 /// next capture fast. The shell called `setsid()`, so it leads a process
 /// group of its own, and an interactive shell without a terminal has no job
 /// control, so what it started stays in that group.
-/// [`leftover_group::kill_at`] kills whatever is left there at
-/// `group_deadline`: a `security` prompt nobody answers, say.
-fn kill_capture_shell(child: &mut std::process::Child, group_deadline: Instant) {
+/// [`leftover_group::kill_at`] kills whatever is left there at the
+/// deadline (a `security` prompt nobody answers, say), and keeps
+/// `leftovers` up to date for the timed-out mark.
+fn kill_capture_shell(child: &mut std::process::Child, leftovers: &Arc<Leftovers>) {
     let _ = child.kill();
     let _ = child.wait();
     #[cfg(unix)]
     if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
-        leftover_group::kill_at(pgid, group_deadline);
+        leftover_group::kill_at(pgid, leftovers);
     }
     #[cfg(not(unix))]
-    let _ = group_deadline;
+    let _ = leftovers;
 }
 
 fn single_quote(value: &str) -> String {

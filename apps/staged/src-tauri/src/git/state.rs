@@ -911,15 +911,17 @@ pub fn compute_local_branch_git_state_with<T: Send>(
 /// [`cli::run_bounded`]'s bound for the captured env, while the fetch waits
 /// for it however long it takes.
 ///
-/// A read that gave up on the capture and then failed in a way the captured
-/// env might have avoided ([`GitError::CapturedEnvPending`]) makes this an
-/// `Err` instead of a state. The build would read a failed `git status` as a
-/// clean tree and a failed count as zero: during a cold capture, a checkout
-/// with LFS files and git-lfs missing from the inherited PATH would show no
-/// uncommitted changes and offer Pull. The caller keeps the state it has.
-/// `refresh_branch_git_state` then queues one follow-up refresh on the
-/// capture (`timeline::git_state_follow_up`), which runs once it lands and
-/// gets the real state. Nothing retries here: a retry with the captured env
+/// A read that went without the captured env, because it gave up on the
+/// capture or the root's last capture timed out recently, and then failed in
+/// a way the captured env might have avoided ([`GitError::CapturedEnvPending`])
+/// makes this an `Err` instead of a state. The build would read a failed
+/// `git status` as a clean tree and a failed count as zero: during a cold or
+/// hung capture, a checkout with LFS files and git-lfs missing from the
+/// inherited PATH would show no uncommitted changes and offer Pull. The
+/// caller keeps the state it has. `refresh_branch_git_state` then queues one
+/// follow-up refresh on the capture (`timeline::git_state_follow_up`), which
+/// runs once it lands and gets the real state. After a timeout there is no
+/// capture to ride on, so the card keeps its state until a later refresh. Nothing retries here: a retry with the captured env
 /// would wait out the capture this build exists not to wait for, and a
 /// second bounded read of the same capture returns at once without it.
 pub fn compute_local_branch_git_state_bounded(

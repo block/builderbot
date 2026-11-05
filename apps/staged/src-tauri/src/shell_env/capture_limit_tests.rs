@@ -394,8 +394,9 @@ fn hung_shell_is_killed_at_the_capture_timeout() {
     let scratch = tempfile::tempdir().expect("tempdir");
     // Short enough to keep the test quick, long enough that on a loaded
     // machine the hung shells get as far as their markers and the fresh
-    // captures at the end finish in time. The marks expire at once, so
-    // those fresh captures can start.
+    // captures at the end finish in time. With no `retry_after`, the marks
+    // lapse once the leftover groups are killed, so those fresh captures
+    // can start.
     let timeouts = CaptureTimeouts {
         shell: Duration::from_secs(5),
         group: Duration::from_secs(8),
@@ -910,4 +911,157 @@ fn after_capture_runs_once_the_capture_lands_without_promoting_it() {
     );
     assert!(!cache.after_capture(&idle, || panic!("nothing will land")));
     drop(held);
+}
+
+/// Fake `$SHELL` for what a killed shell leaves running. Each launch logs its
+/// directory to `log/launches`. Once `log/healthy` exists a launch captures
+/// as usual. Until then it starts a child that marks `log/started`, waits
+/// for `log/go` and marks `log/finished`, and then hangs once the child is
+/// up, so the child is what the capture timeout leaves behind.
+fn leaving_shell(log: &Path) -> tempfile::TempPath {
+    let log = single_quote(&log.to_string_lossy());
+    write_fake_shell(&format!(
+        "#!/bin/sh\n\
+         PATH=/usr/bin:/bin\n\
+         export PATH\n\
+         pwd >> {log}/launches\n\
+         [ -e {log}/healthy ] && exec /bin/sh -s\n\
+         ( : > {log}/started; \
+           while [ ! -e {log}/go ]; do sleep 0.05; done; \
+           : > {log}/finished ) &\n\
+         while [ ! -e {log}/started ]; do sleep 0.05; done\n\
+         exec sleep 30\n"
+    ))
+}
+
+/// A cache using [`leaving_shell`] with `timeouts`, and a capture directory
+/// for it under `scratch`, which stands in for `$HOME`.
+fn leaving_cache(
+    log: &Path,
+    scratch: &Path,
+    timeouts: CaptureTimeouts,
+) -> (ShellEnvCache, tempfile::TempPath, PathBuf) {
+    let shell = leaving_shell(log);
+    let cache = ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+        .with_home(scratch)
+        .with_capture_timeouts(timeouts);
+    let dir = scratch.join("wt");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    (cache, shell, dir)
+}
+
+/// L14: A timed-out mark lapses as soon as everything the killed shell left
+/// running has finished on its own, however long `retry_after` is. The next
+/// lookup captures again and gets the snapshot.
+#[test]
+fn timed_out_mark_lapses_once_what_the_shell_left_finishes() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    // The shell timeout leaves a loaded machine time to start the child.
+    let (cache, _shell, dir) = leaving_cache(
+        log.path(),
+        scratch.path(),
+        CaptureTimeouts {
+            shell: Duration::from_secs(3),
+            group: Duration::from_secs(60),
+            retry_after: Duration::from_secs(600),
+        },
+    );
+
+    let error = cache
+        .get_blocking(&dir)
+        .map(|_| ())
+        .expect_err("the hung capture fails");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+    wait_until("the child to start", || log.path().join("started").exists());
+    let held = cache
+        .get_blocking_within(&dir, Duration::from_secs(5))
+        .map(|_| ())
+        .expect_err("the child holds the mark");
+    assert!(is_recent_timeout(&held), "{held}");
+    assert!(held.to_string().contains("still running"), "{held}");
+
+    std::fs::write(log.path().join("healthy"), "").expect("write healthy");
+    std::fs::write(log.path().join("go"), "").expect("write go");
+    // The watchdog sees the group gone within a poll. Until then every
+    // lookup fails at once without a shell.
+    let mut captured = None;
+    wait_until("the mark to lapse", || match cache.get_blocking(&dir) {
+        Ok(env) => {
+            captured = Some(env);
+            true
+        }
+        Err(error) => {
+            assert!(is_recent_timeout(&error), "{error}");
+            false
+        }
+    });
+    assert!(log.path().join("finished").exists());
+    let env = captured.expect("captured");
+    assert!(env
+        .vars()
+        .iter()
+        .any(|(k, v)| k == "PATH" && v == "/usr/bin:/bin"));
+    assert!(
+        entry_is_ready(&cache, &dir),
+        "the snapshot replaced the mark"
+    );
+    assert_eq!(
+        launch_dirs(log.path()).len(),
+        2,
+        "one more shell, once the child had finished"
+    );
+}
+
+/// L15: While what a killed shell left running is still going, its
+/// timed-out mark holds past `retry_after`, so no second rc run starts
+/// beside it. Once the leftovers are killed at the group deadline the mark
+/// lapses, and the next lookup captures again.
+#[test]
+fn timed_out_mark_holds_while_what_the_shell_left_runs() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    // `retry_after` is zero, so only the child holds the mark. The group
+    // deadline leaves the lookups below seconds to spare.
+    let timeouts = CaptureTimeouts {
+        shell: Duration::from_secs(3),
+        group: Duration::from_secs(8),
+        retry_after: Duration::ZERO,
+    };
+    let (cache, _shell, dir) = leaving_cache(log.path(), scratch.path(), timeouts);
+
+    let started = Instant::now();
+    let error = cache
+        .get_blocking(&dir)
+        .map(|_| ())
+        .expect_err("the hung capture fails");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+    wait_until("the child to start", || log.path().join("started").exists());
+    // A second shell would capture at once from here on.
+    std::fs::write(log.path().join("healthy"), "").expect("write healthy");
+    for _ in 0..2 {
+        let held = cache
+            .get_blocking(&dir)
+            .map(|_| ())
+            .expect_err("the child holds the mark");
+        assert!(is_recent_timeout(&held), "{held}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(
+        launch_dirs(log.path()).len(),
+        1,
+        "no second shell beside the leftovers"
+    );
+
+    wait_until("the mark to lapse", || cache.get_blocking(&dir).is_ok());
+    assert!(
+        started.elapsed() >= timeouts.group,
+        "the mark lapsed before the group deadline: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !log.path().join("finished").exists(),
+        "the child was killed at the group deadline, not left to finish"
+    );
+    assert_eq!(launch_dirs(log.path()).len(), 2);
 }

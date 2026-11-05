@@ -113,7 +113,7 @@ mod tests {
     use crate::test_utils::write_fake_shell;
     use std::path::PathBuf;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// A cache whose fake shell takes `delay` seconds, logs each launch to
     /// `launches`, and then exits with `status`. The scratch dir is its
@@ -163,6 +163,14 @@ mod tests {
         std::fs::read_to_string(path).map_or(0, |log| log.lines().count())
     }
 
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Repeated declines before the capture lands queue one follow-up per
     /// branch, which runs once the capture lands. Once it has run, a later
     /// decline queues afresh, and with the capture landed it runs at once.
@@ -209,21 +217,33 @@ mod tests {
     #[test]
     fn follow_up_is_dropped_when_the_capture_fails() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let (cache, _shell, launch_log) = cache_with_shell(scratch.path(), "0.5", 3);
+        // Slow enough that the decline, the schedule and the `get_blocking`
+        // below all find this one capture still running on a loaded machine.
+        let (cache, _shell, launch_log) = cache_with_shell(scratch.path(), "2", 3);
         let worktree = worktree(scratch.path());
         let follow_ups = FollowUps::default();
         let (runs, ran) = mpsc::channel();
 
         decline(&cache, &worktree);
         assert!(follow_ups.schedule(&cache, &worktree, "a", counted(&runs, "a")));
-        // The capture fails at about 0.5 s, and a failure isn't cached.
+        // The queued follow-up now holds the only sender.
+        drop(runs);
+        // The capture fails at about 2 s, and a failure isn't cached.
         let failed = cache.get_blocking(&worktree).map(|_| ());
         assert!(failed.is_err(), "{failed:?}");
 
-        assert!(ran.recv_timeout(Duration::from_millis(500)).is_err());
-        assert!(follow_ups.lock().is_empty(), "the branch kept its place");
+        // The capture thread drops the follow-up after it has woken its
+        // waiters, so wait for that rather than allow it a fixed time.
+        wait_until("the branch to lose its place", || {
+            follow_ups.lock().is_empty()
+        });
+        assert_eq!(
+            ran.recv_timeout(Duration::from_secs(30)),
+            Err(mpsc::RecvTimeoutError::Disconnected),
+            "the follow-up ran"
+        );
         assert!(
-            !follow_ups.schedule(&cache, &worktree, "a", counted(&runs, "a")),
+            !follow_ups.schedule(&cache, &worktree, "a", || panic!("nothing will land")),
             "nothing is capturing, so nothing is queued"
         );
         assert!(follow_ups.lock().is_empty());

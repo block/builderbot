@@ -808,4 +808,27 @@ mod tests {
         assert_eq!(applied, AppliedEnv::Captured);
         assert_eq!(capture_marker(&command).as_deref(), Some("captured"));
     }
+
+    /// A read in a repo subdirectory uses the snapshot captured at the repo's
+    /// top level, with `PWD` set to the subdirectory, rather than waiting on
+    /// a capture of its own.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_env_in_a_subdir_uses_the_top_levels_snapshot() {
+        let (cache, _shell) = marker_cache("0");
+        let repo = TempGitRepo::new();
+        let sub = repo.path().join("apps/staged");
+        std::fs::create_dir_all(&sub).expect("mkdir");
+        cache.get_blocking(repo.path()).expect("top-level capture");
+
+        let mut command = Command::new("git");
+        let applied = apply_captured_env_within(&mut command, &sub, &cache, Duration::ZERO);
+        assert_eq!(applied, AppliedEnv::Captured);
+        assert_eq!(capture_marker(&command).as_deref(), Some("captured"));
+        let pwd = command
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("PWD"))
+            .and_then(|(_, v)| v);
+        assert_eq!(pwd, Some(sub.as_os_str()));
+    }
 }

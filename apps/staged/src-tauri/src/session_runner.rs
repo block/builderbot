@@ -1610,7 +1610,7 @@ pub fn start_session(
                 let driver = driver.with_interpreter_env_snapshot(home_snapshot);
                 match cache.get(&config.working_dir).await {
                     Ok(snapshot) => {
-                        let mut vars = snapshot.vars().to_vec();
+                        let mut vars = snapshot.vars().into_owned();
                         crate::acp_tools::apply_managed_tools_env(&mut vars);
                         driver.with_env_snapshot(vars)
                     }
@@ -3305,10 +3305,12 @@ async fn run_pipeline(
     PipelineOutcome::CompletedWithoutAi
 }
 
-/// Shared cache of interactive-login-shell env snapshots, keyed by working
-/// directory. Spawning `$SHELL -ils` to capture `.zshrc`-driven PATH (e.g.
-/// Hermit) on every pipeline step costs ~50–500 ms; this amortises it to
-/// once per project per TTL window.
+/// Shared cache of interactive-login-shell env snapshots, keyed by
+/// environment root (a worktree's subdirectories share its snapshot; see
+/// [`ShellEnvCache::env_key`]). Spawning `$SHELL -ils` to capture
+/// `.zshrc`-driven PATH (e.g. Hermit) costs seconds on a dev machine with nvm
+/// and Hermit hooks (about 9 s measured, more with several at once); this
+/// amortises it to once per worktree per TTL window.
 pub fn shell_env_cache() -> &'static Arc<ShellEnvCache> {
     static CACHE: OnceLock<Arc<ShellEnvCache>> = OnceLock::new();
     CACHE.get_or_init(|| Arc::new(ShellEnvCache::new()))

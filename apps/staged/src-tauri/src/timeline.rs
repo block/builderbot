@@ -436,7 +436,11 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     &branch,
                     worktree_path,
                 );
-                if session_working_dir.as_path() != worktree_path {
+                // The state build's `run_smart` already warms the worktree
+                // root's env, which a session subdirectory shares unless it
+                // has an env root of its own.
+                let cache = crate::session_runner::shell_env_cache();
+                if cache.env_key(&session_working_dir) != cache.env_key(worktree_path) {
                     git::prewarm_shell_env(&session_working_dir);
                 }
             }

@@ -785,7 +785,7 @@ async fn discover_acp_config_for_provider_async(
     match cache.get(&working_dir).await {
         Ok(snapshot) => apply_acp_config_discovery_env(
             &mut cmd,
-            snapshot.vars(),
+            &snapshot.vars(),
             agent.path(),
             spawn_command.uses_explicit_interpreter,
         ),

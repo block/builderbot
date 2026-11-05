@@ -1,16 +1,22 @@
-//! Per-working-directory snapshot cache of an interactive login shell's
-//! environment.
+//! Snapshot cache of an interactive login shell's environment, one per
+//! environment root.
 //!
-//! Spawns one `$SHELL -ils` per working directory (so directory-based PATH
+//! Spawns one `$SHELL -ils` per environment root (so directory-based PATH
 //! managers like Hermit activate during `chpwd`/`precmd`), captures the
 //! resulting environment via `env -0` redirected to a tempfile, and caches
 //! the result for a TTL. Subsequent callers apply the snapshot to a native
 //! [`tokio::process::Command`] via [`ShellEnv::apply_to`] — paying ~zero
 //! per-call cost and producing no shell-init banners on stdout.
 //!
-//! Concurrent first-callers for the same working directory are coalesced
-//! through a `watch` channel so only one shell is spawned per (dir, miss).
+//! A working directory's environment root is its nearest Hermit root or git
+//! top level, unless a directory-scoped env tool's file sits in between (see
+//! [`ShellEnvCache::env_key`]). Subdirectories of one worktree share its
+//! snapshot, with `PWD` set to the caller's directory.
+//!
+//! Concurrent first-callers for the same root are coalesced through a
+//! `watch` channel so only one shell is spawned per (root, miss).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,28 +29,76 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::watch;
 
+mod env_root;
+
+use env_root::resolve_env_root;
+
 /// Default cache TTL — long enough that pipeline runs amortise the capture
 /// cost, short enough that edits to `~/.zshrc` or `bin/activate-hermit` are
 /// picked up within an hour without an explicit invalidation.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
 const HOME_ENV_CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Captured environment from a single interactive login shell invocation.
+/// Captured environment from a single interactive login shell invocation,
+/// as seen from the directory it was requested for.
+///
+/// The snapshot is captured at the directory's environment root and shared,
+/// untouched, by every directory that resolves to that root. When the
+/// requested directory isn't the root itself, reading or applying the
+/// variables sets `PWD` to the requested directory and drops `OLDPWD`, so a
+/// child doesn't inherit the root's `PWD` and the `cd` history of its shell.
 #[derive(Clone, Debug)]
 pub struct ShellEnv {
     vars: Arc<Vec<(String, String)>>,
     captured_at: Instant,
+    /// `PWD` for a directory beneath the environment root; `None` when the
+    /// snapshot is used in the directory it was captured in.
+    pwd: Option<Arc<str>>,
 }
 
 impl ShellEnv {
+    fn captured(vars: Vec<(String, String)>) -> Self {
+        Self {
+            vars: Arc::new(vars),
+            captured_at: Instant::now(),
+            pwd: None,
+        }
+    }
+
+    /// This snapshot, captured at `env_root`, as seen from `dir`.
+    fn seen_from(mut self, env_root: &Path, dir: &Path) -> Self {
+        if dir != env_root {
+            self.pwd = Some(dir.to_string_lossy().into());
+        }
+        self
+    }
+
     /// Time when the snapshot was captured.
     pub fn captured_at(&self) -> Instant {
         self.captured_at
     }
 
-    /// Captured `KEY=VALUE` pairs.
-    pub fn vars(&self) -> &[(String, String)] {
-        &self.vars
+    /// Captured `KEY=VALUE` pairs, with `PWD` set for the requested
+    /// directory. Borrows the shared snapshot when it was requested for the
+    /// directory it was captured in.
+    pub fn vars(&self) -> Cow<'_, [(String, String)]> {
+        if self.pwd.is_none() {
+            return Cow::Borrowed(self.vars.as_slice());
+        }
+        Cow::Owned(
+            self.iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        )
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        let pwd = self.pwd.as_deref();
+        self.vars
+            .iter()
+            .filter(move |(k, _)| pwd.is_none() || !matches!(k.as_str(), "PWD" | "OLDPWD"))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .chain(pwd.map(|pwd| ("PWD", pwd)))
     }
 
     /// Clear `cmd`'s environment and replace it with the captured variables.
@@ -53,7 +107,7 @@ impl ShellEnv {
     /// overrides *after* `apply_to` so they win.
     pub fn apply_to(&self, cmd: &mut Command) {
         cmd.env_clear();
-        for (k, v) in self.vars.iter() {
+        for (k, v) in self.iter() {
             cmd.env(k, v);
         }
     }
@@ -62,7 +116,7 @@ impl ShellEnv {
     /// `git/cli.rs::run`).
     pub fn apply_to_std(&self, cmd: &mut std::process::Command) {
         cmd.env_clear();
-        for (k, v) in self.vars.iter() {
+        for (k, v) in self.iter() {
             cmd.env(k, v);
         }
     }
@@ -71,9 +125,9 @@ impl ShellEnv {
 /// Capture the user's home/global interactive login environment and return a
 /// deterministic snapshot suitable for subprocesses that clear their env.
 ///
-/// This sanitizes only the returned clone. The underlying per-directory cache
-/// remains raw so project/git callers keep directory-scoped tool-manager state
-/// for their exact working directory.
+/// This sanitizes only the returned clone. The underlying cache remains raw so
+/// project/git callers keep directory-scoped tool-manager state for their
+/// environment root. `$HOME` is always its own root.
 pub async fn home_env_vars_with_extended_path(cache: &ShellEnvCache) -> Vec<(String, String)> {
     let shell_env = capture_home_interactive_env(cache).await;
     env_vars_with_extended_path(&shell_env)
@@ -381,9 +435,15 @@ pub enum BoundedEnv {
     StillCapturing { first: bool },
 }
 
-/// Cache of [`ShellEnv`] snapshots keyed by working directory.
+/// Cache of [`ShellEnv`] snapshots keyed by environment root (see
+/// [`ShellEnvCache::env_key`]).
 pub struct ShellEnvCache {
     inner: Mutex<HashMap<PathBuf, CachedEntry>>,
+    /// Working dir → (env root, when resolved), so the walk runs once per
+    /// directory per TTL rather than once per git op.
+    env_keys: Mutex<HashMap<PathBuf, (PathBuf, Instant)>>,
+    /// Where the env-root walk stops; see [`ShellEnvCache::env_key`].
+    home: Option<PathBuf>,
     ttl: Duration,
     shell: PathBuf,
     temp_root: PathBuf,
@@ -451,17 +511,51 @@ impl ShellEnvCache {
     pub fn with_shell_ttl_and_temp_root(shell: PathBuf, ttl: Duration, temp_root: PathBuf) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            env_keys: Mutex::new(HashMap::new()),
+            home: home_dir_from_env(),
             ttl,
             shell,
             temp_root,
         }
     }
 
-    /// Return a fresh-or-recent snapshot for `working_dir`. Spawns a shell on
-    /// miss/expiry; concurrent misses for the same dir share one capture.
-    pub async fn get(&self, working_dir: &Path) -> io::Result<ShellEnv> {
-        let key = working_dir.to_path_buf();
+    /// The directory `working_dir`'s snapshot is captured in and cached
+    /// under: its nearest Hermit root or git top level, or `working_dir`
+    /// itself when it has neither below `$HOME`, or when a directory-scoped
+    /// env tool's file sits between it and that root (rules and marker list
+    /// in `env_root.rs`). Two worktrees of one repo are always distinct keys.
+    ///
+    /// Resolved with a filesystem walk and remembered for the cache TTL.
+    /// Directories that don't exist yet aren't remembered, so a worktree
+    /// that is still being created resolves again once it is there.
+    pub fn env_key(&self, working_dir: &Path) -> PathBuf {
+        if let Some((key, resolved_at)) = self.env_keys.lock().unwrap().get(working_dir) {
+            if resolved_at.elapsed() < self.ttl {
+                return key.clone();
+            }
+        }
+        let key = resolve_env_root(working_dir, self.home.as_deref());
+        if working_dir.is_dir() {
+            self.env_keys
+                .lock()
+                .unwrap()
+                .insert(working_dir.to_path_buf(), (key.clone(), Instant::now()));
+        }
+        key
+    }
 
+    /// Return a fresh-or-recent snapshot for `working_dir`, captured at its
+    /// [`env_key`]. Spawns a shell on miss/expiry; concurrent misses for
+    /// directories with the same key share one capture.
+    ///
+    /// [`env_key`]: ShellEnvCache::env_key
+    pub async fn get(&self, working_dir: &Path) -> io::Result<ShellEnv> {
+        let key = self.env_key(working_dir);
+        let env = self.get_at_root(&key).await?;
+        Ok(env.seen_from(&key, working_dir))
+    }
+
+    async fn get_at_root(&self, key: &Path) -> io::Result<ShellEnv> {
         loop {
             enum Action {
                 Wait(InFlightHandle),
@@ -473,7 +567,7 @@ impl ShellEnvCache {
 
             let action = {
                 let mut map = self.inner.lock().unwrap();
-                match map.get(&key) {
+                match map.get(key) {
                     Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
                         return Ok(env.clone());
                     }
@@ -482,7 +576,7 @@ impl ShellEnvCache {
                         let promise = InFlightPromise::new();
                         let (tx, rx) = watch::channel(None);
                         map.insert(
-                            key.clone(),
+                            key.to_path_buf(),
                             CachedEntry::InFlight(InFlightHandle {
                                 promise: promise.clone(),
                                 async_rx: rx,
@@ -516,21 +610,18 @@ impl ShellEnvCache {
                     // become the next Capturer.
                     let mut guard = InFlightGuard {
                         cache: self,
-                        key: &key,
+                        key,
                         promise: promise.clone(),
                         promoted: false,
                     };
-                    let outcome = capture_shell_env(&key, &self.shell, &self.temp_root).await;
+                    let outcome = capture_shell_env(key, &self.shell, &self.temp_root).await;
                     match outcome {
                         Ok(vars) => {
-                            let env = ShellEnv {
-                                vars: Arc::new(vars),
-                                captured_at: Instant::now(),
-                            };
+                            let env = ShellEnv::captured(vars);
                             self.inner
                                 .lock()
                                 .unwrap()
-                                .insert(key.clone(), CachedEntry::Ready(env.clone()));
+                                .insert(key.to_path_buf(), CachedEntry::Ready(env.clone()));
                             guard.promoted = true;
                             promise.set_done(Ok(env.clone()));
                             let _ = tx.send(Some(Ok(env.clone())));
@@ -555,13 +646,17 @@ impl ShellEnvCache {
     ///
     /// Coordinates with both sync and async in-flight captures via the shared
     /// `InFlight` entry: a sync caller arriving while another (sync or async)
-    /// caller is capturing for the same dir parks on the promise condvar
+    /// caller is capturing for the same env root parks on the promise condvar
     /// rather than spawning a redundant shell.
     ///
     /// [`get`]: ShellEnvCache::get
     pub fn get_blocking(&self, working_dir: &Path) -> io::Result<ShellEnv> {
-        let key = working_dir.to_path_buf();
+        let key = self.env_key(working_dir);
+        let env = self.get_blocking_at_root(&key)?;
+        Ok(env.seen_from(&key, working_dir))
+    }
 
+    fn get_blocking_at_root(&self, key: &Path) -> io::Result<ShellEnv> {
         loop {
             enum Action {
                 Wait(Arc<InFlightPromise>),
@@ -573,7 +668,7 @@ impl ShellEnvCache {
 
             let action = {
                 let mut map = self.inner.lock().unwrap();
-                match map.get(&key) {
+                match map.get(key) {
                     Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
                         return Ok(env.clone());
                     }
@@ -582,7 +677,7 @@ impl ShellEnvCache {
                         let promise = InFlightPromise::new();
                         let (tx, rx) = watch::channel(None);
                         map.insert(
-                            key.clone(),
+                            key.to_path_buf(),
                             CachedEntry::InFlight(InFlightHandle {
                                 promise: promise.clone(),
                                 async_rx: rx,
@@ -600,7 +695,7 @@ impl ShellEnvCache {
                     None => continue, // Capturer cancelled — retry.
                 },
                 Action::Capture { promise, tx } => {
-                    return self.capture_blocking_as_owner(&key, promise, tx);
+                    return self.capture_blocking_as_owner(key, promise, tx);
                 }
             }
         }
@@ -609,7 +704,7 @@ impl ShellEnvCache {
     /// [`get_blocking`] that waits at most `bound` for the snapshot.
     ///
     /// A fresh snapshot comes back at once. Otherwise the caller waits on the
-    /// directory's in-flight capture, joining one that is already running or
+    /// env root's in-flight capture, joining one that is already running or
     /// starting one on a background thread. If the bound runs out first, the
     /// capture is left alone: it keeps running, caches its result and wakes
     /// every other waiter as usual. Only this caller goes without it.
@@ -620,13 +715,24 @@ impl ShellEnvCache {
         working_dir: &Path,
         bound: Duration,
     ) -> io::Result<BoundedEnv> {
+        let key = self.env_key(working_dir);
+        Ok(match self.get_blocking_within_at_root(&key, bound)? {
+            BoundedEnv::Ready(env) => BoundedEnv::Ready(env.seen_from(&key, working_dir)),
+            still_capturing => still_capturing,
+        })
+    }
+
+    fn get_blocking_within_at_root(
+        self: &Arc<Self>,
+        key: &Path,
+        bound: Duration,
+    ) -> io::Result<BoundedEnv> {
         let deadline = Instant::now() + bound;
-        let key = working_dir.to_path_buf();
 
         loop {
             let promise = {
                 let mut map = self.inner.lock().unwrap();
-                match map.get(&key) {
+                match map.get(key) {
                     Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
                         return Ok(BoundedEnv::Ready(env.clone()));
                     }
@@ -639,7 +745,7 @@ impl ShellEnvCache {
                         // entry is published, so if it can't be spawned nobody
                         // has seen the promise and there is nothing to unwind.
                         let cache = Arc::clone(self);
-                        let capture_key = key.clone();
+                        let capture_key = key.to_path_buf();
                         let capture_promise = promise.clone();
                         std::thread::Builder::new()
                             .name("shell-env-capture".to_string())
@@ -651,7 +757,7 @@ impl ShellEnvCache {
                                 );
                             })?;
                         map.insert(
-                            key.clone(),
+                            key.to_path_buf(),
                             CachedEntry::InFlight(InFlightHandle {
                                 promise: promise.clone(),
                                 async_rx: rx,
@@ -693,10 +799,7 @@ impl ShellEnvCache {
         };
         match capture_shell_env_blocking(key, &self.shell, &self.temp_root) {
             Ok(vars) => {
-                let env = ShellEnv {
-                    vars: Arc::new(vars),
-                    captured_at: Instant::now(),
-                };
+                let env = ShellEnv::captured(vars);
                 self.inner
                     .lock()
                     .unwrap()
@@ -715,13 +818,18 @@ impl ShellEnvCache {
         }
     }
 
-    /// Drop the cached snapshot for `working_dir` (next `get` will recapture).
+    /// Drop the cached snapshot `working_dir` uses, which is its env root's
+    /// and so shared with every directory under that root, and resolve
+    /// `working_dir`'s root afresh (next `get` will recapture).
     pub fn invalidate(&self, working_dir: &Path) {
-        self.inner.lock().unwrap().remove(working_dir);
+        let key = self.env_key(working_dir);
+        self.env_keys.lock().unwrap().remove(working_dir);
+        self.inner.lock().unwrap().remove(&key);
     }
 
-    /// Drop all cached snapshots.
+    /// Drop all cached snapshots and resolved env roots.
     pub fn invalidate_all(&self) {
+        self.env_keys.lock().unwrap().clear();
         self.inner.lock().unwrap().clear();
     }
 }
@@ -1838,12 +1946,13 @@ mod tests {
     // Bounded waits (`get_blocking_within`)
     // ---------------------------------------------------------------------
 
-    /// Fake `$SHELL` that takes `delay` seconds to start and appends a line to
-    /// `counter` on every launch, so a test can count captures.
+    /// Fake `$SHELL` that takes `delay` seconds to start and appends its
+    /// working directory to `counter` on every launch, so a test can count
+    /// captures and see where each one ran.
     #[cfg(unix)]
     fn counting_shell(counter: &Path, delay: &str) -> tempfile::TempPath {
         write_fake_shell(&format!(
-            "#!/bin/sh\necho launch >> {}\nsleep {delay}\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
+            "#!/bin/sh\npwd >> {}\nsleep {delay}\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
             single_quote(&counter.to_string_lossy())
         ))
     }
@@ -2003,5 +2112,213 @@ mod tests {
             other => panic!("expected the async snapshot, got {other:?}"),
         }
         assert_eq!(launches(&counter), 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Env-root keys
+    // ---------------------------------------------------------------------
+
+    /// A worktree root (`.git` dir) with `apps/staged` and `docs` beneath it.
+    /// Returns the scratch dir to hold, the root, and the two subdirs.
+    fn worktree_with_subdirs() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let root = scratch.path().join("wt");
+        std::fs::create_dir_all(root.join(".git")).expect("mkdir .git");
+        let staged = root.join("apps/staged");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&staged).expect("mkdir apps/staged");
+        std::fs::create_dir_all(&docs).expect("mkdir docs");
+        (scratch, root, staged, docs)
+    }
+
+    #[cfg(unix)]
+    fn launch_dirs(counter: &Path) -> Vec<PathBuf> {
+        std::fs::read_to_string(counter)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| std::fs::canonicalize(line).unwrap_or_else(|_| PathBuf::from(line)))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn canonical(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    #[cfg(unix)]
+    fn var<'a>(vars: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// K1: An async lookup from a subdirectory captures once, at the worktree
+    /// root, and every later lookup for the root or another subdirectory —
+    /// async, sync or bounded — gets that snapshot without a second shell.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subdir_lookups_share_the_roots_capture() {
+        let (_scratch, root, staged, docs) = worktree_with_subdirs();
+        let log = tempfile::tempdir().expect("tempdir");
+        let counter = log.path().join("launches");
+        let shell = counting_shell(&counter, "0");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+
+        let from_staged = cache.get(&staged).await.expect("capture");
+        assert_eq!(launch_dirs(&counter), vec![canonical(&root)]);
+
+        let from_root = cache.get(&root).await.expect("root hit");
+        let from_docs = cache.get_blocking(&docs).expect("sync hit");
+        let bounded = match cache
+            .get_blocking_within(&staged, Duration::ZERO)
+            .expect("bounded hit")
+        {
+            BoundedEnv::Ready(env) => env,
+            other => panic!("expected the root's snapshot, got {other:?}"),
+        };
+        for env in [&from_root, &from_docs, &bounded] {
+            assert_eq!(env.captured_at(), from_staged.captured_at());
+        }
+        assert_eq!(launches(&counter), 1, "subdir lookups must not recapture");
+
+        let map = cache.inner.lock().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(matches!(map.get(&root), Some(CachedEntry::Ready(_))));
+    }
+
+    /// K2: The sync paths resolve the key too. A cold bounded read from a
+    /// subdirectory starts the capture at the root, and a blocking read from
+    /// the root or a sibling subdirectory hits it.
+    #[cfg(unix)]
+    #[test]
+    fn sync_subdir_lookups_share_the_roots_capture() {
+        let (_scratch, root, staged, docs) = worktree_with_subdirs();
+        let log = tempfile::tempdir().expect("tempdir");
+        let counter = log.path().join("launches");
+        let shell = counting_shell(&counter, "0");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+
+        let bounded = match cache
+            .get_blocking_within(&staged, Duration::from_secs(30))
+            .expect("bounded wait")
+        {
+            BoundedEnv::Ready(env) => env,
+            other => panic!("a fast capture should land inside the bound, got {other:?}"),
+        };
+        let from_root = cache.get_blocking(&root).expect("root hit");
+        let from_docs = cache.get_blocking(&docs).expect("sibling hit");
+
+        assert_eq!(from_root.captured_at(), bounded.captured_at());
+        assert_eq!(from_docs.captured_at(), bounded.captured_at());
+        assert_eq!(launch_dirs(&counter), vec![canonical(&root)]);
+    }
+
+    /// K3: A directory-scoped env tool's file below the root gives that
+    /// subdirectory its own capture, in the subdirectory itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subdir_with_an_env_marker_gets_its_own_capture() {
+        let (_scratch, root, staged, _docs) = worktree_with_subdirs();
+        std::fs::write(staged.join(".envrc"), "export FROM_DIRENV=1\n").expect("write .envrc");
+        let log = tempfile::tempdir().expect("tempdir");
+        let counter = log.path().join("launches");
+        let shell = counting_shell(&counter, "0");
+        let cache =
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
+
+        let from_root = cache.get(&root).await.expect("root capture");
+        let from_staged = cache.get(&staged).await.expect("own capture");
+
+        assert_ne!(from_root.captured_at(), from_staged.captured_at());
+        assert_eq!(
+            launch_dirs(&counter),
+            vec![canonical(&root), canonical(&staged)]
+        );
+    }
+
+    /// K4: A snapshot shared from the root is seen from the requested
+    /// directory: `PWD` is that directory and `OLDPWD` is gone, both in
+    /// `vars()` and in what `apply_to`/`apply_to_std` hand a child. The
+    /// cached snapshot keeps the root's own values for the next caller.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_snapshot_sets_pwd_and_drops_oldpwd_for_a_subdir() {
+        let (_scratch, root, staged, _docs) = worktree_with_subdirs();
+        // Runs the dump script itself rather than `exec /bin/sh -s`: bash
+        // drops an inherited OLDPWD at startup, so a re-exec'd `sh` loses it.
+        let shell = write_fake_shell(
+            "#!/bin/sh\nPATH=/usr/bin:/bin\nOLDPWD=/usr\nexport PATH PWD OLDPWD\neval \"$(cat)\"\n",
+        );
+        let cache =
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
+        let staged_str = staged.to_string_lossy().into_owned();
+
+        let from_staged = cache.get(&staged).await.expect("capture");
+        let vars = from_staged.vars();
+        assert_eq!(var(&vars, "PWD"), Some(staged_str.as_str()));
+        assert_eq!(var(&vars, "OLDPWD"), None);
+        assert_eq!(var(&vars, "PATH"), Some("/usr/bin:/bin"));
+        assert_eq!(
+            vars.iter().filter(|(k, _)| k == "PWD").count(),
+            1,
+            "{vars:?}"
+        );
+
+        let from_root = cache.get(&root).await.expect("root hit");
+        let root_vars = from_root.vars();
+        assert!(
+            matches!(root_vars, Cow::Borrowed(_)),
+            "the root reads the shared snapshot as is"
+        );
+        assert_eq!(var(&root_vars, "OLDPWD"), Some("/usr"));
+        let root_pwd = var(&root_vars, "PWD").expect("root snapshot has PWD");
+        assert_eq!(canonical(Path::new(root_pwd)), canonical(&root));
+
+        let mut std_cmd = std::process::Command::new("/usr/bin/env");
+        from_staged.apply_to_std(&mut std_cmd);
+        std_cmd.current_dir(&staged);
+        let mut tokio_cmd = Command::new("/usr/bin/env");
+        from_staged.apply_to(&mut tokio_cmd);
+        tokio_cmd.current_dir(&staged);
+        let outputs = [
+            std_cmd.output().expect("run env"),
+            tokio_cmd.output().await.expect("run env"),
+        ];
+        for output in outputs {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let child: Vec<(String, String)> = stdout
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+            assert_eq!(var(&child, "PWD"), Some(staged_str.as_str()), "{stdout}");
+            assert_eq!(var(&child, "OLDPWD"), None, "{stdout}");
+        }
+    }
+
+    /// K5: `env_key` remembers what it resolved, so a marker added later
+    /// isn't seen until the memo is cleared. A directory that doesn't exist
+    /// yet isn't remembered.
+    #[test]
+    fn env_key_remembers_resolved_roots() {
+        let (_scratch, root, staged, _docs) = worktree_with_subdirs();
+        let cache = ShellEnvCache::new();
+
+        assert_eq!(cache.env_key(&staged), root);
+        std::fs::write(staged.join(".envrc"), "").expect("write .envrc");
+        assert_eq!(cache.env_key(&staged), root, "memoized");
+
+        let later = root.join("later");
+        assert_eq!(cache.env_key(&later), root);
+        std::fs::create_dir_all(&later).expect("mkdir");
+        std::fs::write(later.join(".nvmrc"), "22\n").expect("write .nvmrc");
+        assert_eq!(cache.env_key(&later), later, "missing dirs aren't memoized");
+
+        cache.invalidate_all();
+        assert_eq!(cache.env_key(&staged), staged);
     }
 }

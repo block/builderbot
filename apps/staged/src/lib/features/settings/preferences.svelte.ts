@@ -201,9 +201,9 @@ export const preferences = $state({
    */
   branchPrefix: '',
   /**
-   * The statuses a project can be set to in place of its computed PR/cloud
-   * status. Projects store the chosen option's id; one whose option is
-   * removed here falls back to Default.
+   * The statuses a project can be set to in place of its computed PR status.
+   * Projects store the chosen option's id; one whose option is removed here
+   * falls back to Default.
    */
   projectStatusOptions: DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({
     ...o,

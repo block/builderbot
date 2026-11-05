@@ -102,6 +102,11 @@
     width: 16px;
   }
 
+  /* A remote project's cloud sits under the status icon, beside the meta line. */
+  .row-main > :global(.remote-project-icon) {
+    grid-area: 2 / 1;
+  }
+
   .project-name {
     font-size: var(--size-sm);
     font-weight: 600;

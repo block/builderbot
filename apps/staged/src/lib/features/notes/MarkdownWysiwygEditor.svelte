@@ -17,6 +17,11 @@
   `--crepe-*` variables mapped to our theme tokens below (per AGENTS.md, no
   hardcoded colours), and its document typography is resized to match how
   NoteModal renders the same markdown.
+
+  Stored media (`staged-media://` images and videos, which a copied agent note
+  carries) is drawn by `wysiwygMedia.ts` with the viewer's `<figure>` markup;
+  the host carries the viewer's `markdown-content` class so the shared
+  `mediaStyles.css` sizes it the same way.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -93,7 +98,7 @@
         });
 
         // Written-note behaviour on top of Crepe: the first line held as the
-        // title H1.
+        // title H1, own-app pastes kept as references, stored media drawn.
         editor.editor.use(wysiwygPlugins);
 
         editor.on((listener) => {
@@ -139,7 +144,7 @@
 </script>
 
 <div class="editor-shell">
-  <div class="editor-host" bind:this={host}></div>
+  <div class="editor-host markdown-content" bind:this={host}></div>
   {#if loadError}
     <p class="editor-error" role="alert">Could not load the editor: {loadError}</p>
   {/if}
@@ -374,5 +379,18 @@
 
   .editor-host :global(.milkdown .crepe-placeholder::before) {
     color: var(--text-faint);
+  }
+
+  /* Stored media figures (wysiwygMedia.ts) take their size from the shared
+     mediaStyles.css. That sheet also offers a zoom cursor for the viewer's
+     lightbox, which the editor has none of: here a click selects the node,
+     and the selection ProseMirror tracks is shown on the figure. */
+  .editor-host :global(.markdown-media img) {
+    cursor: default;
+  }
+
+  .editor-host :global(.markdown-media.ProseMirror-selectednode) {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: 1px;
   }
 </style>

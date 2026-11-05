@@ -2636,10 +2636,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let note_id: String = arg(&args, "noteId")?;
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
-            let note = store
-                .update_written_note(&note_id, &title, &content)
-                .map_err(|e| e.to_string())?;
-            let item = crate::note_commands::standalone_note_to_timeline_item(note);
+            let item = crate::note_commands::update_note_impl(&store, &note_id, &title, &content)?;
             Ok(serde_json::to_value(item).unwrap())
         }
         "delete_note" => {
@@ -4369,6 +4366,22 @@ mod tests {
                 "the web `{command}` arm must call `{body}`, not delete inline: {arm}"
             );
         }
+    }
+
+    /// The web editor saves through the same body as the desktop one, so the
+    /// two can't drift apart; in particular, neither collects the media an
+    /// edit removed (see `note_commands::update_note_impl`).
+    #[test]
+    fn web_update_note_shares_the_tauri_body() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "update_note");
+        assert!(
+            arm.contains("note_commands::update_note_impl("),
+            "the web `update_note` arm must call the shared body: {arm}"
+        );
+        assert!(
+            !arm.contains("update_written_note("),
+            "the web `update_note` arm must not save around the shared body: {arm}"
+        );
     }
 
     /// Arms that write a `running` session row or a workspace status and then

@@ -1,10 +1,18 @@
 //! Moving and copying notes between projects — the transactional half.
 //!
 //! The command layer (`crate::note_transfer`) resolves where a note lands and
-//! copies its media files into place first; what remains is rewriting or
+//! puts its media files into place first; what remains is rewriting or
 //! inserting the note row together with the media rows that describe those
 //! files, in one transaction, so a failure can never leave a note half-moved
 //! or a copy without its attachments.
+//!
+//! A move hands over two kinds of media row: copies to insert, for media the
+//! note shares with something else, and rows to re-home, for media only the
+//! note uses. A re-homed row is updated in place, so its id — and every
+//! reference to it, including ones outside the note's current body — keeps
+//! resolving. Whether a row is the note's alone is checked again here, under
+//! the transaction: a note or chat message that picked it up since the caller
+//! looked would lose it to the other project, so the move is refused instead.
 //!
 //! A move is an `UPDATE`, never a delete-and-reinsert: the note keeps its id
 //! (so `#note:<id>` references elsewhere stay valid) and its `session_id`, and
@@ -80,7 +88,9 @@ impl Store {
 
     /// Re-home a branch note onto `target_branch_id`, swapping in `content`
     /// (the body with its media references rewritten to `media`, the copied
-    /// rows). Returns the note as it now reads.
+    /// rows) and re-pointing `rehomed` (each row as it should read in the
+    /// destination; see `rehome_note_media`). Returns the note as it
+    /// now reads.
     ///
     /// The note must still be on `expected_branch_id`, the branch the caller
     /// resolved the destination from; otherwise nothing is written and the
@@ -98,6 +108,7 @@ impl Store {
         target_branch_id: &str,
         content: &str,
         media: &[Image],
+        rehomed: &[Image],
     ) -> Result<Note, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -118,6 +129,7 @@ impl Store {
         for image in media {
             Self::insert_image(&tx, image)?;
         }
+        Self::rehome_note_media(&tx, note_id, &existing.title, rehomed)?;
         let now = now_timestamp();
         let changed = tx.execute(
             "UPDATE notes
@@ -188,8 +200,8 @@ impl Store {
     }
 
     /// Re-home a project note into `target_project_id`; see
-    /// [`Store::move_note_to_branch`] for the content/media contract and the
-    /// role of `expected_project_id`.
+    /// [`Store::move_note_to_branch`] for the content/media/rehomed contract
+    /// and the role of `expected_project_id`.
     ///
     /// Child notes aggregated under it are detached rather than moved: they are
     /// branch notes bound to the source project's repos, which the destination
@@ -203,6 +215,7 @@ impl Store {
         target_project_id: &str,
         content: &str,
         media: &[Image],
+        rehomed: &[Image],
     ) -> Result<ProjectNote, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -225,6 +238,7 @@ impl Store {
         for image in media {
             Self::insert_image(&tx, image)?;
         }
+        Self::rehome_note_media(&tx, note_id, &existing.title, rehomed)?;
         tx.execute(
             "UPDATE notes SET parent_project_note_id = NULL WHERE parent_project_note_id = ?1",
             params![note_id],
@@ -289,6 +303,76 @@ impl Store {
         });
         Ok(())
     }
+
+    /// Re-point media rows that move with note `note_id` at its destination,
+    /// keeping their ids: each of `rows` is written over the row with its id
+    /// (scope, filename and owning session; the caller has already linked
+    /// the file into the destination's media directory).
+    ///
+    /// A row some other note or a chat message has started using since the
+    /// caller checked, or one deleted meanwhile, refuses the move rather than
+    /// being taken from under that user.
+    ///
+    /// The row takes the moved note's session, as a copy would. Ingest already
+    /// stores a note's media under its session, so that rarely changes
+    /// anything; when it does, the session the row named loses a reference
+    /// the way it would have had the row been deleted, and is collected by the
+    /// rule `trg_cleanup_session_after_image_delete` applies to a delete.
+    fn rehome_note_media(
+        tx: &rusqlite::Transaction<'_>,
+        note_id: &str,
+        title: &str,
+        rows: &[Image],
+    ) -> Result<(), StoreError> {
+        for row in rows {
+            let displaced: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT session_id FROM images WHERE id = ?1",
+                    params![row.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(displaced) = displaced else {
+                return Err(media_changed_during_transfer(title));
+            };
+            if !Self::media_exclusive_to(tx, &row.id, note_id)? {
+                return Err(media_changed_during_transfer(title));
+            }
+            tx.execute(
+                "UPDATE images SET project_id = ?1, branch_id = ?2, filename = ?3, session_id = ?4
+                 WHERE id = ?5",
+                params![
+                    row.project_id,
+                    row.branch_id,
+                    row.filename,
+                    row.session_id,
+                    row.id
+                ],
+            )?;
+            if let Some(displaced) = displaced.filter(|s| Some(s) != row.session_id.as_ref()) {
+                tx.execute(
+                    "DELETE FROM sessions
+                     WHERE id = ?1
+                       AND status != 'running'
+                       AND NOT EXISTS (SELECT 1 FROM commits WHERE session_id = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM notes WHERE session_id = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM reviews WHERE session_id = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM project_notes WHERE session_id = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM images WHERE session_id = ?1)",
+                    params![displaced],
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Media the note was taking along as-is is now used elsewhere (or gone), so
+/// moving it would take it from under that user; a retry copies it instead.
+fn media_changed_during_transfer(title: &str) -> StoreError {
+    StoreError(format!(
+        "Media in note '{title}' changed during the transfer; try again."
+    ))
 }
 
 /// The note was not where the caller last saw it, so the destination it
@@ -429,6 +513,7 @@ mod tests {
                 &f.target_branch.id,
                 "new body",
                 std::slice::from_ref(&image),
+                &[],
             )
             .unwrap();
 
@@ -465,6 +550,7 @@ mod tests {
                 &f.target_branch.id,
                 "body",
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -490,6 +576,7 @@ mod tests {
                 &f.target_branch.id,
                 "mine",
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -513,6 +600,7 @@ mod tests {
                 "no-such-branch",
                 "body",
                 std::slice::from_ref(&image),
+                &[],
             )
             .unwrap_err();
 
@@ -549,6 +637,7 @@ mod tests {
                 &f.target_branch.id,
                 "new body",
                 std::slice::from_ref(&image),
+                &[],
             )
             .unwrap_err();
 
@@ -577,6 +666,7 @@ mod tests {
                 &f.target.id,
                 "new body",
                 std::slice::from_ref(&image),
+                &[],
             )
             .unwrap_err();
 
@@ -637,7 +727,7 @@ mod tests {
 
         let moved = f
             .store
-            .move_project_note_to_project(&parent.id, &f.source.id, &f.target.id, "body", &[])
+            .move_project_note_to_project(&parent.id, &f.source.id, &f.target.id, "body", &[], &[])
             .unwrap();
 
         assert_eq!(moved.project_id, f.target.id);
@@ -684,5 +774,171 @@ mod tests {
         assert_eq!(stored.project_id, f.target.id);
         assert_eq!(stored.content, "copied");
         assert!(f.store.get_image(&image.id).unwrap().is_some());
+    }
+
+    /// Media attached on the source branch under `session_id`.
+    fn source_media(f: &Fixture, session_id: &str) -> Image {
+        let mut image = Image::new(
+            Some(&f.source_branch.id),
+            &f.source.id,
+            "shot.png",
+            "image/png",
+            3,
+            false,
+        );
+        image.session_id = Some(session_id.to_string());
+        f.store.create_image(&image).unwrap();
+        image
+    }
+
+    /// The row as a move re-homes it onto the target branch, owned by
+    /// `session_id`.
+    fn rehomed_onto(f: &Fixture, image: &Image, filename: &str, session_id: &str) -> Image {
+        Image {
+            project_id: f.target.id.clone(),
+            branch_id: Some(f.target_branch.id.clone()),
+            filename: filename.to_string(),
+            session_id: Some(session_id.to_string()),
+            ..image.clone()
+        }
+    }
+
+    fn completed_session(f: &Fixture) -> crate::store::Session {
+        let session = crate::store::Session::new_running("note", std::path::Path::new("/tmp"));
+        f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(
+                &session.id,
+                crate::store::SessionStatus::Completed,
+                None,
+                None,
+            )
+            .unwrap();
+        session
+    }
+
+    /// A re-homed row is updated in place: same id, the destination's scope
+    /// and filename, and the moved note's session. The session it named
+    /// before, now named by nothing, is collected as a delete of the row
+    /// would have collected it.
+    #[test]
+    fn move_rehomes_media_in_place_and_collects_the_session_it_leaves() {
+        let f = fixture();
+        let owner = completed_session(&f);
+        let previous = completed_session(&f);
+        let image = source_media(&f, &previous.id);
+        let content = format!("![a](staged-media://{}.png)", image.id);
+        let note =
+            Note::new_standalone(&f.source_branch.id, "Shots", &content).with_session(&owner.id);
+        f.store.create_note(&note).unwrap();
+
+        f.store
+            .move_note_to_branch(
+                &note.id,
+                &f.source_branch.id,
+                &f.target_branch.id,
+                &content,
+                &[],
+                &[rehomed_onto(&f, &image, "shot 2.png", &owner.id)],
+            )
+            .unwrap();
+
+        let row = f.store.get_image(&image.id).unwrap().unwrap();
+        assert_eq!(row.project_id, f.target.id);
+        assert_eq!(row.branch_id.as_ref(), Some(&f.target_branch.id));
+        assert_eq!(row.filename, "shot 2.png");
+        assert_eq!(row.session_id.as_ref(), Some(&owner.id));
+        assert!(f.store.get_session(&previous.id).unwrap().is_none());
+        assert!(f.store.get_session(&owner.id).unwrap().is_some());
+    }
+
+    /// Whether a row is the note's alone is settled under the transaction:
+    /// one another note or a chat message picked up after the caller looked
+    /// is not taken from under it, and nothing about the move is written.
+    #[test]
+    fn move_is_refused_when_media_it_would_rehome_gained_another_user() {
+        for other_user in ["note", "chat"] {
+            let f = fixture();
+            let session = completed_session(&f);
+            let image = source_media(&f, &session.id);
+            let content = format!("![a](staged-media://{}.png)", image.id);
+            let note = Note::new_standalone(&f.source_branch.id, "Shots", &content)
+                .with_session(&session.id);
+            f.store.create_note(&note).unwrap();
+            match other_user {
+                "note" => f
+                    .store
+                    .create_note(&Note::new_standalone(
+                        &f.source_branch.id,
+                        "Other",
+                        &content,
+                    ))
+                    .unwrap(),
+                _ => {
+                    f.store
+                        .add_session_message_with_images(
+                            &session.id,
+                            crate::store::models::MessageRole::User,
+                            "look",
+                            std::slice::from_ref(&image.id),
+                        )
+                        .unwrap();
+                }
+            }
+
+            let err = f
+                .store
+                .move_note_to_branch(
+                    &note.id,
+                    &f.source_branch.id,
+                    &f.target_branch.id,
+                    &content,
+                    &[],
+                    &[rehomed_onto(&f, &image, "shot.png", &session.id)],
+                )
+                .unwrap_err();
+
+            assert!(
+                err.to_string().contains("changed during the transfer"),
+                "{other_user}: {err}"
+            );
+            let row = f.store.get_image(&image.id).unwrap().unwrap();
+            assert_eq!(row.project_id, f.source.id, "{other_user}");
+            assert_eq!(row.branch_id.as_ref(), Some(&f.source_branch.id));
+            assert_eq!(
+                f.store.get_note(&note.id).unwrap().unwrap().branch_id,
+                f.source_branch.id
+            );
+        }
+    }
+
+    #[test]
+    fn project_note_move_rehomes_its_media() {
+        let f = fixture();
+        let session = completed_session(&f);
+        let mut image = Image::new(None, &f.source.id, "shot.png", "image/png", 3, false);
+        image.session_id = Some(session.id.clone());
+        f.store.create_image(&image).unwrap();
+        let content = format!("![a](staged-media://{}.png)", image.id);
+        let note = ProjectNote::new(&f.source.id, "Plan", &content);
+        f.store.create_project_note(&note).unwrap();
+
+        f.store
+            .move_project_note_to_project(
+                &note.id,
+                &f.source.id,
+                &f.target.id,
+                &content,
+                &[],
+                &[Image {
+                    project_id: f.target.id.clone(),
+                    ..image.clone()
+                }],
+            )
+            .unwrap();
+
+        let row = f.store.get_image(&image.id).unwrap().unwrap();
+        assert_eq!(row.project_id, f.target.id);
+        assert!(row.branch_id.is_none());
     }
 }

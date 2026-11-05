@@ -8,18 +8,32 @@
 //!    the note has been touched yet, so an add-repo failure is simply reported
 //!    and the note stays where it was. Adding takes long enough for a save to
 //!    land, so the note is read again afterwards and that row is what moves.
-//! 2. Copy the note's media files into the target project's media directory.
-//!    Files are cheap to remove and rows are not, so the filesystem goes first.
+//! 2. Put the note's media files in place in the target project's media
+//!    directory: copied, or on a move hard-linked (see below). Files are
+//!    cheap to put back and rows are not, so the filesystem goes first.
 //! 3. One transaction rewrites (move) or inserts (copy) the note row together
-//!    with the rows for the copied media. On failure the copied files are
-//!    removed again.
+//!    with the rows for its media. Once it commits, the paths re-homed rows
+//!    no longer name are unlinked; if it fails, the copies and links are
+//!    removed. A source file is never touched before the commit, so a row
+//!    finds its file at every point, and a crash leaves at worst a spare link.
+//!    Steps 2 and 3 run under one process-wide lock (`TRANSFER_MEDIA`), since
+//!    two moves of the same note link the same destination path.
 //! 4. A move then garbage-collects whatever source media the note no longer
 //!    references, under the same rules a note delete uses.
 //!
-//! Media is always copied rather than re-homed, even on a move: two notes in
-//! one scope can share an attachment row, and relocating the file out from
-//! under the other note would break it. The copied rows belong to the note
-//! they land with: they carry its `session_id`, or `NOTE_MEDIA_SESSION_ID`
+//! A move takes media only the note uses along as it is: the row is re-homed
+//! in place and its file linked into the destination, so the id survives.
+//! Anything that still holds it — the note's session repeating a reference
+//! on its next turn, a view opened before the move — keeps resolving. That
+//! is a row in the scope the note is leaving, with a session (a session-less
+//! row is a branch-timeline attachment, which stays on its timeline), that no
+//! other note embeds and no chat message attaches: exactly what the move
+//! would otherwise copy and then garbage-collect.
+//!
+//! Everything else is copied, as is all media on a copy: two notes in one
+//! scope can share an attachment row, and relocating the file out from under
+//! the other note would break it. Rows that land with the note, copied or re-homed,
+//! belong to it: they carry its `session_id`, or `NOTE_MEDIA_SESSION_ID`
 //! when the note has none (every copy, since a copy is standalone). Either
 //! marks them as note media rather than branch-timeline attachments
 //! (`list_images_for_branch` filters on a null `session_id`), and neither
@@ -39,8 +53,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::note_media::{cleanup_unreferenced, files, refs};
 use crate::store::images::image_file_path;
@@ -140,6 +155,7 @@ where
         github_repo: repo.github_repo,
         subpath: repo.subpath,
     };
+    let source_project_id = source_branch.project_id.clone();
 
     // Step 1: the repo has to be in the target before the note can be.
     let already_tracked = store
@@ -173,17 +189,27 @@ where
             })?
     };
 
-    // Step 2: media files, then step 3: the transaction.
-    let owner_session = match mode {
-        TransferMode::Move => note.session_id.as_deref(),
-        TransferMode::Copy => None,
+    // Step 2: media files, then step 3: the transaction. There is no await
+    // past this point, so the lock is never held across one.
+    let _media = lock_transfer_media();
+    let (owner_session, rehome) = match mode {
+        TransferMode::Move => (
+            note.session_id.as_deref(),
+            Some(MoveSource {
+                note_id: &note.id,
+                project_id: &source_project_id,
+                branch_id: Some(&note.branch_id),
+            }),
+        ),
+        TransferMode::Copy => (None, None),
     };
-    let media = stage_media_copies(
+    let media = stage_media(
         store,
         &note.content,
         Some(&target_branch.id),
         &target.id,
         owner_session,
+        rehome,
     )?;
     let result = match mode {
         TransferMode::Move => store.move_note_to_branch(
@@ -192,6 +218,7 @@ where
             &target_branch.id,
             &media.content,
             &media.images,
+            &media.rehomed,
         ),
         TransferMode::Copy => {
             let mut copy = Note::new_standalone(&target_branch.id, &note.title, &media.content)
@@ -262,11 +289,26 @@ pub(crate) fn transfer_project_note(
         ));
     }
 
-    let owner_session = match mode {
-        TransferMode::Move => note.session_id.as_deref(),
-        TransferMode::Copy => None,
+    let _media = lock_transfer_media();
+    let (owner_session, rehome) = match mode {
+        TransferMode::Move => (
+            note.session_id.as_deref(),
+            Some(MoveSource {
+                note_id: &note.id,
+                project_id: &note.project_id,
+                branch_id: None,
+            }),
+        ),
+        TransferMode::Copy => (None, None),
     };
-    let media = stage_media_copies(store, &note.content, None, &target.id, owner_session)?;
+    let media = stage_media(
+        store,
+        &note.content,
+        None,
+        &target.id,
+        owner_session,
+        rehome,
+    )?;
     let result = match mode {
         TransferMode::Move => store.move_project_note_to_project(
             &note.id,
@@ -274,6 +316,7 @@ pub(crate) fn transfer_project_note(
             &target.id,
             &media.content,
             &media.images,
+            &media.rehomed,
         ),
         TransferMode::Copy => {
             let copy = ProjectNote::new(&target.id, &note.title, &media.content);
@@ -368,6 +411,25 @@ fn quoted(title: &str) -> String {
     }
 }
 
+/// Held from staging a transfer's media to settling it ([`finish`]). Two
+/// moves of one note into one project link the same id-keyed path, so if they
+/// overlapped, one could remove that path while the other's row was about to
+/// name it, or already did: the second replaces the first's link, and the
+/// move that loses the race discards it (see [`StagedMedia::discard`] for the
+/// part a re-read can catch and the part it can't). The desktop app and the
+/// web client share this process, so this covers two windows as well as two
+/// clicks. Everything before staging — the add-repo await above all — stays
+/// outside it; the transaction re-checks what was resolved there.
+static TRANSFER_MEDIA: Mutex<()> = Mutex::new(());
+
+fn lock_transfer_media() -> MutexGuard<'static, ()> {
+    // The lock guards no data, so a transfer that panicked under it left
+    // nothing half-written behind.
+    TRANSFER_MEDIA
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
 fn finish<T>(
     store: &Store,
     mode: TransferMode,
@@ -377,60 +439,140 @@ fn finish<T>(
 ) -> Result<T, String> {
     match result {
         Ok(value) => {
+            media.commit();
             if mode == TransferMode::Move {
                 cleanup_unreferenced(store, refs::media_ids(previous_content));
             }
             Ok(value)
         }
         Err(e) => {
-            media.discard();
+            media.discard(store);
             Err(e.to_string())
         }
     }
 }
 
-/// Media copies written to disk but not yet recorded: the rewritten note body,
-/// the rows to insert alongside it, and the files to remove if that never
-/// happens.
+/// Media put in place on disk but not yet recorded: the rewritten note body,
+/// the copied rows to insert alongside it and the re-homed rows to re-point,
+/// and the files to settle once the transaction commits or fails.
 struct StagedMedia {
     content: String,
     images: Vec<Image>,
-    files: Vec<PathBuf>,
+    rehomed: Vec<Image>,
+    /// The file written for each of `images`, under the copy's fresh id.
+    copies: Vec<PathBuf>,
+    /// A hard link for each of `rehomed` (by id), at the path its row names
+    /// once re-homed.
+    links: Vec<(String, PathBuf)>,
+    /// The paths `rehomed` rows named before the move. Each shares its file
+    /// with one of `links`, so it goes once the rows name the links.
+    superseded: Vec<PathBuf>,
 }
 
 impl StagedMedia {
-    fn discard(self) {
-        for path in self.files {
+    /// The transaction recorded the rows: drop the paths re-homed rows no
+    /// longer name. One left behind is only a spare link to the same file.
+    fn commit(self) {
+        for path in self.superseded {
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != ErrorKind::NotFound {
+                    log::warn!("Failed to unlink moved media {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
+    /// The transaction never happened: remove what was written for it. The
+    /// sources were left alone, so every row still finds its file.
+    ///
+    /// Except where another move of the same note committed in the meantime:
+    /// it linked the same path (the name is the row's id), its row names that
+    /// path now, and its commit unlinked the source, so the link is the only
+    /// file left. A link is kept when its row reads as naming it. That covers
+    /// the other move committing first; one that commits between this read and
+    /// the removal is what [`TRANSFER_MEDIA`] keeps from happening.
+    fn discard(self, store: &Store) {
+        for path in self.copies {
             let _ = std::fs::remove_file(path);
+        }
+        for (id, path) in self.links {
+            if !row_names(store, &id, &path) {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 }
 
-/// Copy every stored attachment `content` references into the destination
-/// scope and rewrite the references to the copies.
+/// Whether media row `id` names `path` as its file. A row that can't be read
+/// counts as naming it: a spare link costs nothing, a missing file costs the
+/// media.
+fn row_names(store: &Store, id: &str, path: &Path) -> bool {
+    match store.get_image(id) {
+        Ok(Some(row)) => image_file_path(&row.project_id, &row.id, &row.filename)
+            .map_or(true, |named| named == path),
+        Ok(None) => false,
+        Err(e) => {
+            log::warn!("Keeping media link {}: {e}", path.display());
+            true
+        }
+    }
+}
+
+/// The scope a moving note is leaving, whose media rows that only the note
+/// uses go with it instead of being copied.
+struct MoveSource<'a> {
+    note_id: &'a str,
+    project_id: &'a str,
+    branch_id: Option<&'a str>,
+}
+
+impl MoveSource<'_> {
+    /// Whether `image` moves with the note as it is; see the module docs.
+    fn takes(&self, store: &Store, image: &Image) -> Result<bool, String> {
+        Ok(image.project_id == self.project_id
+            && image.branch_id.as_deref() == self.branch_id
+            && image.session_id.is_some()
+            && store
+                .media_is_exclusive_to(&image.id, self.note_id)
+                .map_err(|e| e.to_string())?)
+    }
+}
+
+/// Put every stored attachment `content` references in place in
+/// `project_id` (and `branch_id`), returning the rewritten body and the rows
+/// to record. The rows are owned by the note that will carry them:
+/// `owner_session` is that note's session, or `None` for a note without one.
+///
+/// On a move (`rehome` set), media only the note uses is linked into place
+/// and keeps its id and references; everything else is copied under a fresh
+/// id and its references are rewritten to the copy.
 ///
 /// A reference whose row or file is already gone is left as it is: the viewer
 /// renders it unavailable today and will keep doing so after the transfer,
 /// which is better than failing the transfer over media that was lost before.
-/// Copy every stored attachment `content` references into `project_id`
-/// (and `branch_id`), returning the rewritten body and the rows to insert.
-/// The rows are owned by the note that will carry them: `owner_session` is
-/// that note's session, or `None` for a note without one.
-fn stage_media_copies(
+fn stage_media(
     store: &Store,
     content: &str,
     branch_id: Option<&str>,
     project_id: &str,
     owner_session: Option<&str>,
+    rehome: Option<MoveSource<'_>>,
 ) -> Result<StagedMedia, String> {
     let mut staged = StagedMedia {
         content: content.to_owned(),
         images: Vec::new(),
-        files: Vec::new(),
+        rehomed: Vec::new(),
+        copies: Vec::new(),
+        links: Vec::new(),
+        superseded: Vec::new(),
     };
-    let mut copies = HashMap::<String, Image>::new();
-    // Names handed out in this batch: the rows are not inserted until the
-    // transaction, so the store alone cannot keep two copies apart.
+    let owner_session = owner_session.unwrap_or(NOTE_MEDIA_SESSION_ID);
+    // How each source id is referenced from now on: `None` when it is
+    // re-homed and its references stay as written. The same id is only put
+    // in place once however often the note embeds it.
+    let mut landed = HashMap::<String, Option<String>>::new();
+    // Names handed out in this batch: the rows are not recorded until the
+    // transaction, so the store alone cannot keep two of them apart.
     let mut reserved = HashSet::<String>::new();
     let mut edits = Vec::new();
     let result = (|| -> Result<(), String> {
@@ -438,19 +580,14 @@ fn stage_media_copies(
             let Some((id, _)) = refs::stored_ref(&reference.target) else {
                 continue;
             };
-            let copy = match copies.get(id) {
-                Some(copy) => copy.clone(),
+            let replacement = match landed.get(id) {
+                Some(replacement) => replacement.clone(),
                 None => {
                     let Some(source) = store.get_image(id).map_err(|e| e.to_string())? else {
                         continue;
                     };
                     let source_path =
                         image_file_path(&source.project_id, &source.id, &source.filename)?;
-                    let bytes = match files::read_local(&source_path, files::MAX_VIDEO_SIZE) {
-                        Ok(bytes) => bytes,
-                        Err(files::ReadError::NotFound(_)) => continue,
-                        Err(e) => return Err(e.into()),
-                    };
                     let filename = store
                         .unique_image_filename_excluding(
                             branch_id,
@@ -459,44 +596,54 @@ fn stage_media_copies(
                             &reserved,
                         )
                         .map_err(|e| e.to_string())?;
-                    reserved.insert(filename.clone());
-                    let mut copy = Image::new(
-                        branch_id,
-                        project_id,
-                        &filename,
-                        &source.mime_type,
-                        source.size_bytes,
-                        false,
-                    );
-                    copy.session_id =
-                        Some(owner_session.unwrap_or(NOTE_MEDIA_SESSION_ID).to_owned());
-                    // Same bytes, same size; a source row that predates the
-                    // dimension columns is read here rather than left NULL.
-                    copy.dimensions = source
-                        .dimensions
-                        .or_else(|| crate::note_media::dimensions::probe(&bytes));
-                    let path = image_file_path(project_id, &copy.id, &filename)?;
-                    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-                    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-                    staged.files.push(path);
-                    staged.images.push(copy.clone());
-                    copies.insert(id.to_owned(), copy.clone());
-                    copy
+                    let rehomes = match &rehome {
+                        Some(from) => from.takes(store, &source)?,
+                        None => false,
+                    };
+                    let replacement = if rehomes {
+                        if !rehome_file(&source_path, project_id, &source, &mut staged)? {
+                            continue;
+                        }
+                        staged.rehomed.push(Image {
+                            project_id: project_id.to_owned(),
+                            branch_id: branch_id.map(str::to_owned),
+                            filename: filename.clone(),
+                            session_id: Some(owner_session.to_owned()),
+                            ..source
+                        });
+                        None
+                    } else {
+                        let Some(copy) = copy_file(
+                            &source_path,
+                            &source,
+                            branch_id,
+                            project_id,
+                            &filename,
+                            owner_session,
+                            &mut staged,
+                        )?
+                        else {
+                            continue;
+                        };
+                        Some(format!(
+                            "staged-media://{}.{}",
+                            copy.id,
+                            files::extension(&copy.filename)
+                        ))
+                    };
+                    reserved.insert(filename);
+                    landed.insert(id.to_owned(), replacement.clone());
+                    replacement
                 }
             };
-            edits.push((
-                reference.destination,
-                format!(
-                    "staged-media://{}.{}",
-                    copy.id,
-                    files::extension(&copy.filename)
-                ),
-            ));
+            if let Some(replacement) = replacement {
+                edits.push((reference.destination, replacement));
+            }
         }
         Ok(())
     })();
     if let Err(e) = result {
-        staged.discard();
+        staged.discard(store);
         return Err(e);
     }
     // Apply back to front so earlier offsets stay valid.
@@ -504,6 +651,99 @@ fn stage_media_copies(
         staged.content.replace_range(span, &replacement);
     }
     Ok(staged)
+}
+
+/// Hard-link `source`'s file into `project_id`'s media directory, where its
+/// row will say it is once re-homed; the name is the id and extension, neither
+/// of which changes. The source path stays until the transaction commits
+/// ([`StagedMedia::commit`]), so whatever resolves the row in the meantime
+/// still finds the file. Notes cannot embed PDFs, so there is no cached
+/// thumbnail beside it to carry. False when the file is already gone.
+fn rehome_file(
+    source_path: &Path,
+    project_id: &str,
+    source: &Image,
+    staged: &mut StagedMedia,
+) -> Result<bool, String> {
+    if !regular_file(source_path)? {
+        return Ok(false);
+    }
+    let path = image_file_path(project_id, &source.id, &source.filename)?;
+    if path == source_path {
+        return Err("media is already in the destination project".into());
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::hard_link(source_path, &path) {
+        if e.kind() != ErrorKind::AlreadyExists {
+            return Err(e.to_string());
+        }
+        // A link an earlier attempt left when it never committed. The path is
+        // keyed by this row's id and the row names the source, and no other
+        // transfer is staging (`TRANSFER_MEDIA`), so nothing else is using it.
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        std::fs::hard_link(source_path, &path).map_err(|e| e.to_string())?;
+    }
+    staged.links.push((source.id.clone(), path));
+    staged.superseded.push(source_path.to_owned());
+    Ok(true)
+}
+
+/// Whether the media file at `path` is there to transfer. Only a file that
+/// does not exist counts as already gone; any other failure to inspect it
+/// fails the transfer rather than leaving the note pointing at the source,
+/// and so does anything but a regular file.
+fn regular_file(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err("media must be a regular file".into()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot inspect media file: {e}")),
+    }
+}
+
+/// Copy `source`'s file to a fresh id in the destination and stage the row
+/// for it. The bytes are copied by the filesystem (a clone on APFS) rather
+/// than read into memory, since a note video can run to 100 MB; only an
+/// image whose row predates the dimension columns is read, to probe it.
+/// `None` when the file is already gone.
+fn copy_file(
+    source_path: &Path,
+    source: &Image,
+    branch_id: Option<&str>,
+    project_id: &str,
+    filename: &str,
+    owner_session: &str,
+    staged: &mut StagedMedia,
+) -> Result<Option<Image>, String> {
+    if !regular_file(source_path)? {
+        return Ok(None);
+    }
+    let mut copy = Image::new(
+        branch_id,
+        project_id,
+        filename,
+        &source.mime_type,
+        source.size_bytes,
+        false,
+    );
+    copy.session_id = Some(owner_session.to_owned());
+    copy.dimensions = source.dimensions.or_else(|| {
+        source
+            .mime_type
+            .starts_with("image/")
+            .then(|| files::read_local(source_path, files::MAX_IMAGE_SIZE).ok())
+            .flatten()
+            .and_then(|bytes| crate::note_media::dimensions::probe(&bytes))
+    });
+    let path = image_file_path(project_id, &copy.id, filename)?;
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::copy(source_path, &path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e.to_string());
+    }
+    staged.copies.push(path);
+    staged.images.push(copy.clone());
+    Ok(Some(copy))
 }
 
 // =============================================================================
@@ -709,6 +949,12 @@ mod tests {
         fn attachment(&self, filename: &str) -> Image {
             let session = Session::new_running("note", Path::new("/tmp/wt"));
             self.store.create_session(&session).unwrap();
+            self.attachment_with_session(filename, Some(session.id))
+        }
+
+        /// [`Self::attachment`] under `session_id`; `None` makes it a
+        /// branch-timeline attachment.
+        fn attachment_with_session(&self, filename: &str, session_id: Option<String>) -> Image {
             let mut image = Image::new(
                 Some(&self.source_branch.id),
                 &self.source.id,
@@ -717,7 +963,7 @@ mod tests {
                 PNG.len() as i64,
                 false,
             );
-            image.session_id = Some(session.id.clone());
+            image.session_id = session_id;
             let path = image_file_path(&self.source.id, &image.id, &image.filename).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, PNG).unwrap();
@@ -733,6 +979,26 @@ mod tests {
                 &format!("before ![a](staged-media://{}.png) after", image.id),
             );
             (note, image)
+        }
+
+        /// A stored project-note attachment in `source`, written to disk.
+        fn project_attachment(&self) -> Image {
+            let session = Session::new_running("note", Path::new("/tmp/wt"));
+            self.store.create_session(&session).unwrap();
+            let mut image = Image::new(
+                None,
+                &self.source.id,
+                "shot.png",
+                "image/png",
+                PNG.len() as i64,
+                false,
+            );
+            image.session_id = Some(session.id.clone());
+            let path = image_file_path(&self.source.id, &image.id, &image.filename).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, PNG).unwrap();
+            self.store.create_image(&image).unwrap();
+            image
         }
     }
 
@@ -1099,7 +1365,7 @@ mod tests {
 
     /// A moved note keeps its session, and so does the media that moves with
     /// it — the rows must stay tied to the note that owns them, not to
-    /// whichever row they were copied from.
+    /// whichever session they were attached under before.
     #[tokio::test]
     async fn moved_media_belongs_to_the_moved_note() {
         let f = fixture();
@@ -1127,13 +1393,17 @@ mod tests {
         .await
         .unwrap();
 
-        let copied_id = refs::media_ids(&moved.content).into_iter().next().unwrap();
-        let copied = f.store.get_image(&copied_id).unwrap().unwrap();
-        assert_eq!(copied.session_id.as_deref(), Some(session.id.as_str()));
+        let moved_id = refs::media_ids(&moved.content).into_iter().next().unwrap();
+        let moved_media = f.store.get_image(&moved_id).unwrap().unwrap();
+        assert_eq!(moved_media.session_id.as_deref(), Some(session.id.as_str()));
     }
 
+    /// Media only the moving note uses goes with it as it is: the row is
+    /// re-homed and the file linked into the destination (and unlinked from
+    /// the source once the move commits), so the id — and any reference to it
+    /// outside the note's body — survives the move.
     #[tokio::test]
-    async fn move_duplicates_the_media_and_garbage_collects_the_source_copy() {
+    async fn move_takes_media_only_the_note_uses_along_with_its_id() {
         let f = fixture();
         let (note, image) = f.media_note();
 
@@ -1147,13 +1417,373 @@ mod tests {
         .await
         .unwrap();
 
-        let copied_id = refs::media_ids(&moved.content).into_iter().next().unwrap();
-        assert_ne!(copied_id, image.id);
-        assert!(f.store.get_image(&copied_id).unwrap().is_some());
-        // Nothing references the source attachment any more, so it is gone.
-        assert!(f.store.get_image(&image.id).unwrap().is_none());
+        assert_eq!(moved.content, note.content);
+        let rehomed = f.store.get_image(&image.id).unwrap().unwrap();
+        assert_eq!(rehomed.project_id, f.target.id);
+        assert_eq!(rehomed.branch_id, Some(f.target_branch().unwrap().id));
+        // A written note has no session, so its media is marked as such.
+        assert_eq!(rehomed.session_id.as_deref(), Some(NOTE_MEDIA_SESSION_ID));
+        assert_eq!(rehomed.filename, "shot.png");
+        let moved_path = image_file_path(&f.target.id, &image.id, &image.filename).unwrap();
+        assert_eq!(std::fs::read(moved_path).unwrap(), PNG);
         let original_path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
         assert!(!original_path.exists());
+    }
+
+    /// The bug a re-home fixes: the note's session takes another turn after
+    /// the move and repeats a reference it saw before it, either stored or as
+    /// the `/tmp` path an earlier context build materialized it to. A copy
+    /// had a fresh id and the original was collected, so both resolved to
+    /// nothing.
+    #[tokio::test]
+    async fn a_moved_notes_next_turn_keeps_media_it_referenced_before_the_move() {
+        let f = fixture();
+        let image = f.attachment("shot.png");
+        let session_id = image.session_id.clone().unwrap();
+        f.store
+            .update_session_status(&session_id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let before = format!("![a](staged-media://{}.png)", image.id);
+        let note =
+            Note::new_standalone(&f.source_branch.id, "Shots", &before).with_session(&session_id);
+        f.store.create_note(&note).unwrap();
+
+        let moved = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        // What session_runner's note completion does with the next turn's body,
+        // scoped to where the note now is.
+        let target_branch = f.target_branch().unwrap();
+        let rewrite = format!(
+            "{}/staged-image-{}.png",
+            std::env::temp_dir()
+                .display()
+                .to_string()
+                .trim_end_matches('/'),
+            image.id
+        );
+        for body in [before.clone(), format!("![a]({rewrite})")] {
+            let outcome = crate::note_media::ingest_note_media(
+                &f.store,
+                crate::note_media::NoteScope {
+                    branch_id: Some(&target_branch.id),
+                    project_id: &f.target.id,
+                    previous_content: &moved.content,
+                },
+                &session_id,
+                None,
+                Path::new("/tmp/wt"),
+                &body,
+            );
+            assert!(
+                !outcome.markdown.contains("unavailable"),
+                "rewrite {body:?} became {:?}",
+                outcome.markdown
+            );
+        }
+    }
+
+    /// A row the note shares — with another note, a chat message, or the
+    /// branch timeline — is copied on a move, and the original stays where
+    /// it is for whatever else uses it.
+    #[tokio::test]
+    async fn move_copies_media_something_else_still_uses() {
+        let f = fixture();
+        let embedded = f.attachment("embedded.png");
+        let other = f.note(
+            "Other",
+            &format!("![o](staged-media://{}.png)", embedded.id),
+        );
+        let chatted = f.attachment("chatted.png");
+        f.store
+            .add_session_message_with_images(
+                chatted.session_id.as_deref().unwrap(),
+                crate::store::models::MessageRole::User,
+                "look",
+                std::slice::from_ref(&chatted.id),
+            )
+            .unwrap();
+        let timeline = f.attachment_with_session("timeline.png", None);
+        let note = f.note(
+            "Shots",
+            &format!(
+                "![a](staged-media://{}.png) ![b](staged-media://{}.png) ![c](staged-media://{}.png)",
+                embedded.id, chatted.id, timeline.id
+            ),
+        );
+
+        let moved = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        let moved_ids = refs::media_ids(&moved.content);
+        assert_eq!(moved_ids.len(), 3);
+        for original in [&embedded, &chatted, &timeline] {
+            assert!(
+                !moved_ids.contains(&original.id),
+                "{} was taken along",
+                original.filename
+            );
+            let kept = f.store.get_image(&original.id).unwrap().unwrap();
+            assert_eq!(kept.project_id, f.source.id);
+            assert_eq!(kept.branch_id.as_ref(), Some(&f.source_branch.id));
+            assert_eq!(kept.session_id, original.session_id);
+            assert!(
+                image_file_path(&f.source.id, &original.id, &original.filename)
+                    .unwrap()
+                    .exists(),
+                "{} lost its file",
+                original.filename
+            );
+        }
+        for id in &moved_ids {
+            let copy = f.store.get_image(id).unwrap().unwrap();
+            assert_eq!(copy.project_id, f.target.id);
+            assert!(image_file_path(&f.target.id, &copy.id, &copy.filename)
+                .unwrap()
+                .exists());
+        }
+        assert_eq!(
+            f.store.get_note(&other.id).unwrap().unwrap().content,
+            other.content
+        );
+        assert_eq!(
+            f.store
+                .list_images_for_branch(&f.source_branch.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// The files are linked into the destination before the transaction that
+    /// re-homes their rows, and the source path stays until it commits: the
+    /// file is at whichever path the row names throughout. A transaction that
+    /// fails removes the link, and the row that stayed in the source still
+    /// finds its file.
+    #[test]
+    fn a_failed_move_leaves_the_media_where_its_row_says() {
+        let f = fixture();
+        let (note, image) = f.media_note();
+        f.attach_repo(RepoKey {
+            github_repo: "acme/widgets".into(),
+            subpath: Some("apps/web".into()),
+        })
+        .unwrap();
+        let target_branch = f.target_branch().unwrap();
+        let original_path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
+        let moved_path = image_file_path(&f.target.id, &image.id, &image.filename).unwrap();
+
+        let media = stage_media(
+            &f.store,
+            &note.content,
+            Some(&target_branch.id),
+            &f.target.id,
+            None,
+            Some(MoveSource {
+                note_id: &note.id,
+                project_id: &f.source.id,
+                branch_id: Some(&f.source_branch.id),
+            }),
+        )
+        .unwrap();
+        // Staged but not yet recorded: the row still names the source.
+        assert_eq!(std::fs::read(&original_path).unwrap(), PNG);
+        assert_eq!(std::fs::read(&moved_path).unwrap(), PNG);
+        // The note left the branch the move was resolved from in the
+        // meantime, so the transaction is refused.
+        let result = f.store.move_note_to_branch(
+            &note.id,
+            "stale-branch",
+            &target_branch.id,
+            &media.content,
+            &media.images,
+            &media.rehomed,
+        );
+        let err = finish(&f.store, TransferMode::Move, &note.content, media, result).unwrap_err();
+
+        assert!(err.contains("moved or deleted"), "{err}");
+        assert_eq!(std::fs::read(&original_path).unwrap(), PNG);
+        assert!(!moved_path.exists());
+        let row = f.store.get_image(&image.id).unwrap().unwrap();
+        assert_eq!(row.project_id, f.source.id);
+        assert_eq!(row.branch_id.as_ref(), Some(&f.source_branch.id));
+        assert_eq!(row.session_id, image.session_id);
+        assert_eq!(
+            f.store.get_note(&note.id).unwrap().unwrap().branch_id,
+            f.source_branch.id
+        );
+    }
+
+    /// Two moves of one note into one project link the same id-keyed path,
+    /// the second replacing the first's link. Whichever commits unlinks the
+    /// source, so the link is then the only path to the file, and the move
+    /// that is refused (its note has left the branch) must keep it when it
+    /// discards. The transfer lock stops two moves in one process from
+    /// interleaving at all; this stages them by hand, in both commit orders.
+    #[test]
+    fn a_refused_concurrent_move_keeps_the_link_the_other_committed() {
+        for first_commits in [true, false] {
+            let f = fixture();
+            let (note, image) = f.media_note();
+            f.attach_repo(RepoKey {
+                github_repo: "acme/widgets".into(),
+                subpath: Some("apps/web".into()),
+            })
+            .unwrap();
+            let target_branch = f.target_branch().unwrap();
+            let stage = || {
+                stage_media(
+                    &f.store,
+                    &note.content,
+                    Some(&target_branch.id),
+                    &f.target.id,
+                    None,
+                    Some(MoveSource {
+                        note_id: &note.id,
+                        project_id: &f.source.id,
+                        branch_id: Some(&f.source_branch.id),
+                    }),
+                )
+                .unwrap()
+            };
+            let record = |media: &StagedMedia| {
+                f.store.move_note_to_branch(
+                    &note.id,
+                    &f.source_branch.id,
+                    &target_branch.id,
+                    &media.content,
+                    &media.images,
+                    &media.rehomed,
+                )
+            };
+
+            let first = stage();
+            // Finds the first's link in place and replaces it.
+            let second = stage();
+            let (winner, loser) = if first_commits {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let committed = record(&winner);
+            finish(
+                &f.store,
+                TransferMode::Move,
+                &note.content,
+                winner,
+                committed,
+            )
+            .unwrap();
+            let refused = record(&loser);
+            let err =
+                finish(&f.store, TransferMode::Move, &note.content, loser, refused).unwrap_err();
+
+            assert!(err.contains("moved or deleted"), "{err}");
+            let row = f.store.get_image(&image.id).unwrap().unwrap();
+            assert_eq!(row.project_id, f.target.id);
+            let path = image_file_path(&row.project_id, &row.id, &row.filename).unwrap();
+            assert_eq!(
+                std::fs::read(&path).ok().as_deref(),
+                Some(PNG),
+                "first_commits = {first_commits}: the committed row lost its file"
+            );
+            assert!(!image_file_path(&f.source.id, &image.id, &image.filename)
+                .unwrap()
+                .exists());
+        }
+    }
+
+    /// A process that died between linking and committing leaves a link at
+    /// the destination that no row names. Moving the note again replaces it
+    /// rather than failing on the existing path.
+    #[tokio::test]
+    async fn a_link_left_by_an_interrupted_move_does_not_block_the_next() {
+        let f = fixture();
+        let (note, image) = f.media_note();
+        let moved_path = image_file_path(&f.target.id, &image.id, &image.filename).unwrap();
+        std::fs::create_dir_all(moved_path.parent().unwrap()).unwrap();
+        std::fs::write(&moved_path, b"stale").unwrap();
+
+        let moved = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(moved.content, note.content);
+        assert_eq!(std::fs::read(&moved_path).unwrap(), PNG);
+        let original_path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
+        assert!(!original_path.exists());
+    }
+
+    /// Only a file that does not exist is skipped as already gone. One that
+    /// is not a regular file, or that can't be inspected at all, fails the
+    /// transfer: carrying the reference over as it is would leave a copy
+    /// relying on the source project's media, or a moved note on a row that
+    /// stayed behind.
+    #[tokio::test]
+    async fn media_that_cannot_be_inspected_fails_the_transfer() {
+        let f = fixture();
+        let (note, image) = f.media_note();
+        let original_path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
+        let images_dir = original_path.parent().unwrap().to_owned();
+        let not_a_file = || {
+            std::fs::remove_file(&original_path).unwrap();
+            std::fs::create_dir(&original_path).unwrap();
+        };
+        // Inspecting a path under a regular file fails with ENOTDIR, an error
+        // that is not "not found".
+        let unreadable = || {
+            std::fs::remove_dir_all(&images_dir).unwrap();
+            std::fs::write(&images_dir, b"").unwrap();
+        };
+        let cases: [(&dyn Fn(), &str); 2] = [
+            (&not_a_file, "media must be a regular file"),
+            (&unreadable, "cannot inspect media file"),
+        ];
+        for (break_source, expected) in cases {
+            break_source();
+            for mode in [TransferMode::Copy, TransferMode::Move] {
+                let err = transfer_branch_note(&f.store, &note.id, &f.target.id, mode, |key| {
+                    std::future::ready(f.attach_repo(key))
+                })
+                .await
+                .unwrap_err();
+                assert!(err.contains(expected), "{mode:?}: {err}");
+                assert_eq!(
+                    f.store.get_note(&note.id).unwrap().unwrap().branch_id,
+                    f.source_branch.id
+                );
+            }
+            // Put the source back as a regular file for the next case.
+            let _ = std::fs::remove_dir_all(&images_dir);
+            let _ = std::fs::remove_file(&images_dir);
+            std::fs::create_dir_all(&images_dir).unwrap();
+            std::fs::write(&original_path, PNG).unwrap();
+        }
+        assert!(f
+            .store
+            .list_notes_for_branch(&f.target_branch().unwrap().id)
+            .unwrap()
+            .is_empty());
     }
 
     /// Two attachments can share a filename in one scope. Their copies are
@@ -1312,5 +1942,122 @@ mod tests {
                 density: 2
             })
         );
+    }
+
+    #[test]
+    fn project_note_move_takes_its_media_along_with_its_id() {
+        let f = fixture();
+        let image = f.project_attachment();
+        let content = format!("![a](staged-media://{}.png)", image.id);
+        let note = ProjectNote::new(&f.source.id, "Plan", &content);
+        f.store.create_project_note(&note).unwrap();
+
+        let moved =
+            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Move).unwrap();
+
+        assert_eq!(moved.content, content);
+        let rehomed = f.store.get_image(&image.id).unwrap().unwrap();
+        assert_eq!(rehomed.project_id, f.target.id);
+        assert!(rehomed.branch_id.is_none());
+        assert_eq!(
+            std::fs::read(image_file_path(&f.target.id, &image.id, &image.filename).unwrap())
+                .unwrap(),
+            PNG
+        );
+        assert!(!image_file_path(&f.source.id, &image.id, &image.filename)
+            .unwrap()
+            .exists());
+    }
+
+    /// A copy hands the file to the filesystem rather than reading it, and
+    /// only an image is opened to read its size: a video's row keeps none.
+    #[test]
+    fn a_copied_video_is_cloned_without_being_sized() {
+        let f = fixture();
+        let bytes = b"\0\0\0\x18ftypisom\0\0\0\0not really a movie";
+        let session = Session::new_running("note", Path::new("/tmp/wt"));
+        f.store.create_session(&session).unwrap();
+        let mut video = Image::new(
+            None,
+            &f.source.id,
+            "clip.mp4",
+            "video/mp4",
+            bytes.len() as i64,
+            false,
+        );
+        video.session_id = Some(session.id.clone());
+        let path = image_file_path(&f.source.id, &video.id, &video.filename).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        f.store.create_image(&video).unwrap();
+        let note = ProjectNote::new(
+            &f.source.id,
+            "Plan",
+            &format!("![v](staged-media://{}.mp4)", video.id),
+        );
+        f.store.create_project_note(&note).unwrap();
+
+        let copy =
+            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+
+        let copied_id = refs::media_ids(&copy.content).into_iter().next().unwrap();
+        assert_ne!(copied_id, video.id);
+        let copied = f.store.get_image(&copied_id).unwrap().unwrap();
+        assert_eq!(copied.mime_type, "video/mp4");
+        assert!(copied.dimensions.is_none());
+        assert!(!f.store.image_dimensions_recorded(&copied.id).unwrap());
+        assert_eq!(
+            std::fs::read(image_file_path(&f.target.id, &copied.id, &copied.filename).unwrap())
+                .unwrap(),
+            bytes
+        );
+        assert!(path.exists());
+    }
+
+    fn assert_resolves_in(store: &Store, content: &str, project_id: &str) {
+        let refs = refs::extract_media_refs(content);
+        assert!(!refs.is_empty(), "no media refs left in {content:?}");
+        for reference in refs {
+            let file = reference.target.strip_prefix("staged-media://").unwrap();
+            let (path, mime) = crate::note_media::serving::lookup(store, file)
+                .unwrap_or_else(|s| panic!("{file} does not resolve: {s}"));
+            assert_eq!(mime, "image/png");
+            assert_eq!(std::fs::read(&path).unwrap(), PNG, "{}", path.display());
+            let (id, _) = refs::stored_ref(&reference.target).unwrap();
+            assert_eq!(store.get_image(id).unwrap().unwrap().project_id, project_id);
+        }
+    }
+
+    /// Every transfer leaves its media resolvable through the real lookup at
+    /// the destination, and still does once the source project is deleted
+    /// (taking its media rows with it).
+    #[tokio::test]
+    async fn every_transfer_leaves_media_resolvable_at_the_destination() {
+        for mode in [TransferMode::Move, TransferMode::Copy] {
+            let f = fixture();
+            let (note, _) = f.media_note();
+            let landed = transfer_branch_note(&f.store, &note.id, &f.target.id, mode, |key| {
+                std::future::ready(f.attach_repo(key))
+            })
+            .await
+            .unwrap();
+            assert_resolves_in(&f.store, &landed.content, &f.target.id);
+            f.store.delete_project(&f.source.id).unwrap();
+            assert_resolves_in(&f.store, &landed.content, &f.target.id);
+        }
+        for mode in [TransferMode::Move, TransferMode::Copy] {
+            let f = fixture();
+            let image = f.project_attachment();
+            let note = ProjectNote::new(
+                &f.source.id,
+                "Plan",
+                &format!("![a](staged-media://{}.png)", image.id),
+            );
+            f.store.create_project_note(&note).unwrap();
+            let landed = transfer_project_note(&f.store, &note.id, &f.target.id, mode).unwrap();
+            assert_resolves_in(&f.store, &landed.content, &f.target.id);
+            f.store.delete_project(&f.source.id).unwrap();
+            assert_resolves_in(&f.store, &landed.content, &f.target.id);
+        }
     }
 }

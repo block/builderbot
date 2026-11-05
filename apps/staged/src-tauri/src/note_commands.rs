@@ -91,8 +91,25 @@ pub fn update_note(
     content: String,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
+    update_note_impl(&store, &note_id, &title, &content)
+}
+
+/// The body of [`update_note`], shared with the web dispatcher's arm.
+///
+/// Media the edit removed is deliberately not collected here. The editor can
+/// still bring it back: undo after a save that left the dialog open (the
+/// transfer menu saves first), or a cut image pasted into another note. Either
+/// would then reference a row this save had deleted. Collection happens when
+/// a note is deleted ([`delete_note_impl`]), for the media it still embeds;
+/// a row an edit dropped for good is left behind, the cheaper failure.
+pub(crate) fn update_note_impl(
+    store: &Store,
+    note_id: &str,
+    title: &str,
+    content: &str,
+) -> Result<NoteTimelineItem, String> {
     let note = store
-        .update_written_note(&note_id, &title, &content)
+        .update_written_note(note_id, title, content)
         .map_err(|e| e.to_string())?;
     Ok(standalone_note_to_timeline_item(note))
 }
@@ -290,4 +307,63 @@ pub fn delete_project_note(
         let _ = store.delete_session(&sid);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::note_media::files::store_media_file;
+    use crate::note_media::tests::{Fixture, PNG};
+    use crate::store::images::image_file_path;
+    use crate::store::{Image, NOTE_MEDIA_SESSION_ID};
+
+    fn embed(image: &Image) -> String {
+        format!("![{}](staged-media://{}.png)", image.filename, image.id)
+    }
+
+    fn assert_kept(f: &Fixture, image: &Image) {
+        assert!(
+            f.store.get_image(&image.id).unwrap().is_some(),
+            "{} lost its row",
+            image.filename
+        );
+        let path = image_file_path(&image.project_id, &image.id, &image.filename).unwrap();
+        assert!(path.exists(), "{} lost its file", image.filename);
+    }
+
+    /// A save must not collect the media it dropped: the editor's undo history
+    /// and clipboard can still bring the reference back (see
+    /// [`update_note_impl`]).
+    #[test]
+    fn saving_a_written_note_keeps_the_media_the_edit_removed() {
+        let f = Fixture::new();
+        // Media a written note owns, the way a copy lands it in its new scope.
+        let image = store_media_file(
+            &f.store,
+            Some(&f.branch.id),
+            &f.project.id,
+            Some(NOTE_MEDIA_SESSION_ID),
+            "shot.png",
+            PNG,
+            true,
+        )
+        .unwrap();
+        let with_image = format!("Before\n\n{}", embed(&image));
+        let mut note = Note::new_standalone(&f.branch.id, "Shots", &with_image)
+            .with_subtype(Note::SUBTYPE_WRITTEN);
+        f.store.create_note_with_unique_title(&mut note).unwrap();
+
+        // The transfer menu saves the deletion but leaves the dialog open...
+        let saved = update_note_impl(&f.store, &note.id, "Shots", "Before").unwrap();
+        assert_eq!(saved.content, "Before");
+        assert_kept(&f, &image);
+
+        // ...so undo can restore the reference, or it can be pasted elsewhere.
+        update_note_impl(&f.store, &note.id, "Shots", &with_image).unwrap();
+        let mut pasted = Note::new_standalone(&f.branch.id, "Pasted", &embed(&image))
+            .with_subtype(Note::SUBTYPE_WRITTEN);
+        f.store.create_note_with_unique_title(&mut pasted).unwrap();
+        update_note_impl(&f.store, &note.id, "Shots", "Before").unwrap();
+        assert_kept(&f, &image);
+    }
 }

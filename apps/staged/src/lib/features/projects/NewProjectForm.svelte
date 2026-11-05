@@ -88,8 +88,9 @@
     }
   });
 
-  let repoMissing = $derived(effectiveLocation === 'remote' && !selectedRepo);
-  let canCreate = $derived(!!name.trim() && !saving && !repoMissing);
+  // A remote project needs no repo: its workspace is provisioned when the
+  // first repo is added.
+  let canCreate = $derived(!!name.trim() && !saving);
 
   async function handleCreate() {
     if (!canCreate) return;
@@ -232,7 +233,6 @@
     bind:defaultBranch
     bind:api={repoConfigApi}
     disabled={saving}
-    repoRequired={effectiveLocation === 'remote'}
     onBranchSelected={handleBranchSelected}
   />
 

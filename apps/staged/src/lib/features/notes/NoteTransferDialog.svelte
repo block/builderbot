@@ -13,13 +13,15 @@
   creating one here with Remote on offer updates), showing local while Remote
   can't be picked. A remote project starts from the note's repo, looked up
   from the stored note on each open through `loadNoteRepo` (the host's idea
-  of the repo can be missing or stale), so Remote waits on that lookup.
+  of the repo can be missing or stale), so Remote waits on that lookup; a
+  note with no repo makes a remote project with none, and no workspace yet.
   `onPrepare` runs before anything is created, so a transfer refused up front
-  leaves no project behind — a remote one starts provisioning its workspace
-  as soon as it exists. Failures — from those checks, creating the project,
-  adding the note's repo, or the transfer itself — stay inline so the choice
-  can be retried, and one that comes after the project was created says so;
-  the backend guarantees a failed transfer left the note where it was.
+  leaves no project behind — a remote one made from a repo starts
+  provisioning its workspace as soon as it exists. Failures — from those
+  checks, creating the project, adding the note's repo, or the transfer
+  itself — stay inline so the choice can be retried, and one that comes
+  after the project was created says so; the backend guarantees a failed
+  transfer left the note where it was.
 
   The line under the title says what travels: a repo note's repository, or —
   for a moved project note with child notes — those notes and their sessions
@@ -143,9 +145,10 @@
   let hint = $derived(noteTransferHint(mode, noteKind, repo, hasChildren));
   // Projects being deleted are already gone from every list, so they are not
   // offered as destinations.
+  let localOnly = $derived(childrenTravel(mode, noteKind, hasChildren));
   let candidates = $derived(
     noteTransferCandidates(projectsDataStore.liveProjects, currentProjectId, mode, {
-      localOnly: childrenTravel(mode, noteKind, hasChildren),
+      localOnly,
     })
   );
   let filtered = $derived(filterMoveTargets(candidates, projectsDataStore.reposByProject, query));
@@ -168,7 +171,10 @@
   // when it is a project to create, its location is on screen to change.
   let target = $derived(noteTransferTarget(selected, query, filtered, createName));
   let remoteProjectsAvailable = $derived(bloxAvailable());
-  let remoteBlocker = $derived(newRemoteProjectBlocker(noteRepo));
+  // Child notes only land in a local project, so a new one for them can't be remote.
+  let remoteBlocker = $derived(
+    localOnly ? 'Child notes can only move to a local project' : newRemoteProjectBlocker(noteRepo)
+  );
   let remoteSelectable = $derived(remoteProjectsAvailable && !remoteBlocker);
   // The picker shows this, so a remembered Remote doesn't sit selected on a
   // disabled tile while it is blocked; it applies once the blocker clears,
@@ -263,7 +269,8 @@
         defaultBranch
       );
     } else {
-      project = await commands.createProject(name, 'local');
+      // A remote project with no repo has no workspace until one is added.
+      project = await commands.createProject(name, at);
     }
     if (remember) setNewProjectLocation(at);
     return project;

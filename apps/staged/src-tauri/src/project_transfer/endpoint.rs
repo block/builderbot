@@ -70,6 +70,8 @@ pub struct LocalEndpoint {
     shell: PathBuf,
     env_dir: PathBuf,
     scratch_root: PathBuf,
+    /// Set on top of the captured environment.
+    vars: Vec<(String, String)>,
 }
 
 impl LocalEndpoint {
@@ -80,6 +82,7 @@ impl LocalEndpoint {
             shell: PathBuf::from("/bin/sh"),
             env_dir: env_dir.into(),
             scratch_root: scratch_root.into(),
+            vars: Vec::new(),
         }
     }
 
@@ -96,6 +99,14 @@ impl LocalEndpoint {
     /// Run scripts under another POSIX shell, e.g. `/bin/dash`.
     pub fn with_shell(mut self, shell: impl Into<PathBuf>) -> Self {
         self.shell = shell.into();
+        self
+    }
+
+    /// Run scripts with `key` set to `value`: a git config of a test's own
+    /// (`GIT_CONFIG_GLOBAL`), which the captured environment would strip.
+    #[cfg(test)]
+    pub fn with_var(mut self, key: &str, value: &str) -> Self {
+        self.vars.push((key.to_string(), value.to_string()));
         self
     }
 
@@ -144,6 +155,7 @@ impl TransferEndpoint for LocalEndpoint {
             .arg("staged-transfer")
             .args(args);
         crate::git::configure_captured(&mut command, &self.env_dir);
+        command.envs(self.vars.iter().map(|(k, v)| (k, v)));
         let output = command
             .output()
             .map_err(|e| self.exec_error(format!("cannot run {}: {e}", self.shell.display())))?;

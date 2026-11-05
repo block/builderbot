@@ -96,6 +96,10 @@ function repoPreflight(
     untrackedBytes: 0,
     ignoredFiles: 0,
     ignoredDirs: 0,
+    lfsPresent: 0,
+    lfsPresentBytes: 0,
+    lfsMissing: 0,
+    lfsMissingBytes: 0,
     hasUncommittedChanges: false,
     blockers: [],
     warnings: [],
@@ -1142,7 +1146,11 @@ describe('confirmPendingTransfer', () => {
   });
 
   it('surfaces teardown and new repo warnings, not ones the dialog already showed', async () => {
-    const lfs = { code: 'lfs', message: 'Git LFS content is not carried.' };
+    const lfs = {
+      code: 'lfs_missing',
+      message:
+        '2 LFS objects are not available locally and will be fetched from origin if possible.',
+    };
     const actions = await readyActions(preflight({ repos: [repoPreflight({ warnings: [lfs] })] }));
     const result = transferResult({
       warnings: [{ code: 'worktree_left', message: 'Transferred, but the old worktree stayed.' }],

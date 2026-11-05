@@ -17,7 +17,7 @@ use crate::store::{
 };
 
 use super::host::{TransferHost, WorkspaceState};
-use super::scripts::{self, ScriptReport, PREFLIGHT_SCRIPT};
+use super::scripts::{self, LfsCounts, ScriptReport, PREFLIGHT_SCRIPT};
 
 /// Untracked content past this size gets a warning: it is carried in full.
 const LARGE_PAYLOAD_BYTES: u64 = 100 * 1024 * 1024;
@@ -121,6 +121,15 @@ pub struct RepoPreflight {
     /// each counted once however much they hold. Like [`Self::ignored_files`],
     /// never carried.
     pub ignored_dirs: u32,
+    /// LFS objects the branch refers to that the source has, and will carry
+    /// beside the bundle; counting the modified and untracked files the LFS
+    /// filter applies to, which the snapshot stores as new objects.
+    pub lfs_present: u64,
+    pub lfs_present_bytes: u64,
+    /// LFS objects it refers to that the source never downloaded: the
+    /// destination fetches them from origin if it can.
+    pub lfs_missing: u64,
+    pub lfs_missing_bytes: u64,
     pub has_uncommitted_changes: bool,
     pub blockers: Vec<TransferIssue>,
     pub warnings: Vec<TransferIssue>,
@@ -279,6 +288,10 @@ pub(super) fn inspect_after_resuming(
             untracked_bytes: 0,
             ignored_files: 0,
             ignored_dirs: 0,
+            lfs_present: 0,
+            lfs_present_bytes: 0,
+            lfs_missing: 0,
+            lfs_missing_bytes: 0,
             has_uncommitted_changes: false,
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -793,6 +806,13 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
         .unwrap_or(0);
     row.ignored_files = count("ignored");
     row.ignored_dirs = count("ignored_dirs");
+    if let Some(lfs) = LfsCounts::from_report(report) {
+        let changed = |key: &str| report.get(key).and_then(|v| v.parse::<u64>().ok());
+        row.lfs_present = lfs.present + changed("lfs_changed").unwrap_or(0);
+        row.lfs_present_bytes = lfs.present_bytes + changed("lfs_changed_bytes").unwrap_or(0);
+        row.lfs_missing = lfs.missing;
+        row.lfs_missing_bytes = lfs.missing_bytes;
+    }
     row.has_uncommitted_changes = row.staged + row.unstaged + row.untracked + row.conflicted > 0;
 
     if report.get("detached").is_some() {
@@ -841,19 +861,30 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
             ),
         ));
     }
-    for warning in report.all("warning") {
-        match warning {
-            "submodules" => row.warnings.push(TransferIssue::new(
-                "submodules",
-                "Submodule commits aren't carried; the destination checks out what origin has.",
-            )),
-            "lfs" => row.warnings.push(TransferIssue::new(
-                "lfs",
-                "Git LFS content isn't carried; the destination fetches it from the LFS server, \
-                 so unpushed LFS files arrive as pointers.",
-            )),
-            _ => {}
-        }
+    if report.all("warning").any(|w| w == "submodules") {
+        row.warnings.push(TransferIssue::new(
+            "submodules",
+            "Submodule commits aren't carried; the destination checks out what origin has.",
+        ));
+    }
+    if row.lfs_missing > 0 {
+        let here = if kind == "worktree" {
+            "locally"
+        } else {
+            "in the workspace"
+        };
+        row.warnings.push(TransferIssue::new(
+            "lfs_missing",
+            format!(
+                "{} {} not available {here} and will be fetched from origin if possible.",
+                row.lfs_missing,
+                if row.lfs_missing == 1 {
+                    "LFS object is"
+                } else {
+                    "LFS objects are"
+                }
+            ),
+        ));
     }
     if row.untracked_bytes > LARGE_PAYLOAD_BYTES {
         row.warnings.push(TransferIssue::new(

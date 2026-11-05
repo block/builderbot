@@ -3,8 +3,9 @@
 //! Each repository's branch travels as a git bundle holding the branch tip and
 //! two snapshot commits — the index, and the working tree including untracked
 //! files — built with plumbing so the source is never written to (see
-//! [`scripts`]). The bundle comes through this machine, where it stays as the
-//! backup, is applied at the destination and checked against tree hashes.
+//! [`scripts`]) — with the Git LFS objects those refer to in an archive beside
+//! it. The bundle comes through this machine, where it stays as the backup, is
+//! applied at the destination and checked against tree hashes.
 //! Only then does [`crate::store::Store::apply_project_transfer`] switch the
 //! project's location, in one transaction.
 //!
@@ -53,7 +54,8 @@ pub use registry::{
     ensure_workspace_not_transferring, is_branch_transferring, TRANSFER_IN_PROGRESS,
 };
 pub use scripts::{
-    ApplyReport, BundleFile, ConfigEntry, OriginTips, RemoteConfig, Snapshot, SnapshotWarning,
+    ApplyReport, BundleFile, ConfigEntry, LfsCounts, LfsPayload, OriginTips, RemoteConfig,
+    Snapshot, SnapshotWarning,
 };
 
 /// Why a transfer step failed.
@@ -73,9 +75,13 @@ pub enum TransferError {
     /// A script could not be run, or a file could not be moved, at all.
     #[error("cannot reach {endpoint}: {message}")]
     Exec { endpoint: String, message: String },
-    /// The bundle that arrived is not the bundle that was made.
-    #[error("the bundle changed in transit (expected sha256 {expected}, got {actual})")]
-    Checksum { expected: String, actual: String },
+    /// The bundle (or LFS archive) that arrived is not the one that was made.
+    #[error("{file} changed in transit (expected sha256 {expected}, got {actual})")]
+    Checksum {
+        file: &'static str,
+        expected: String,
+        actual: String,
+    },
     /// The caller asked for something the transfer cannot do safely.
     #[error("invalid transfer plan: {0}")]
     InvalidPlan(String),

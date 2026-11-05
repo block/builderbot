@@ -1,8 +1,8 @@
 <!--
   ProjectTransferRepoRow.svelte — one branch in the transfer dialog: its repo
   and branch, the upstream it tracks, what it carries (unpushed commits,
-  uncommitted changes, by kind), the ignored files and folders that stay
-  behind, and whatever blocks or warns about it. Blockers and warnings differ in colour and in a screen-reader
+  uncommitted changes, by kind, and Git LFS objects), the ignored files and
+  folders that stay behind, and whatever blocks or warns about it. Blockers and warnings differ in colour and in a screen-reader
   prefix.
 -->
 <script lang="ts">
@@ -12,6 +12,7 @@
   import {
     ignoredSummary,
     issueMessage,
+    lfsSummary,
     plural,
     uncommittedBreakdown,
     uncommittedCount,
@@ -26,6 +27,7 @@
   let changes = $derived(uncommittedCount(row));
   let breakdown = $derived(uncommittedBreakdown(row));
   let ignored = $derived(ignoredSummary(row));
+  let lfs = $derived(lfsSummary(row));
   let renamed = $derived(row.destBranchName !== row.branchName);
 </script>
 
@@ -60,6 +62,9 @@
       <span class:emphasis={changes > 0}>
         {plural(changes, 'uncommitted change')}{#if breakdown}&nbsp;({breakdown}){/if}
       </span>
+      {#if lfs}
+        <span>{lfs}</span>
+      {/if}
       {#if ignored}
         <span class="ignored">{ignored}</span>
       {/if}

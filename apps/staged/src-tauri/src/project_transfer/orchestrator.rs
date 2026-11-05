@@ -42,7 +42,7 @@ use super::preflight::{
     TransferIssue,
 };
 use super::registry::TransferGuard;
-use super::scripts::{Snapshot, CLONE_SCRIPT};
+use super::scripts::{ApplyReport, Snapshot, CLONE_SCRIPT};
 use super::undo::{
     self, AddedRemote, AddedWorktree, CreatedBranch, ReplacedConfig, SourceCheckout, Undo,
 };
@@ -682,6 +682,7 @@ impl Run<'_> {
             bundle_name,
             repo_bytes: leg.source.repo_bytes,
             untracked_bytes: leg.row.untracked_bytes,
+            lfs_bytes: leg.row.lfs_present_bytes,
         };
 
         self.record(|undo| {
@@ -711,7 +712,7 @@ impl Run<'_> {
             }
             Ok(())
         });
-        let outcome = match (carried, not_recorded) {
+        let mut outcome = match (carried, not_recorded) {
             (Err(_), Some(e)) => return Err(e.into()),
             (carried, _) => carried?,
         };
@@ -729,14 +730,20 @@ impl Run<'_> {
                     worktree: worktree.clone(),
                 })
             })?;
-            crate::git::create_worktree_for_existing_branch_at_path(
-                &clone,
-                &leg.dest_branch,
-                &worktree,
-            )
-            .map_err(|e| format!("Cannot add the worktree for {}: {e}", leg.dest_branch))?;
+            // LFS files check out as pointers, which `finish` replaces with
+            // the objects that came: a smudge filter would download each one
+            // again, and fail the checkout on any it can't.
+            let add_worktree = if outcome.snapshot.lfs.is_some() {
+                crate::git::create_worktree_for_existing_branch_without_lfs_smudge
+            } else {
+                crate::git::create_worktree_for_existing_branch_at_path
+            };
+            add_worktree(&clone, &leg.dest_branch, &worktree)
+                .map_err(|e| format!("Cannot add the worktree for {}: {e}", leg.dest_branch))?;
             let endpoint = self.host.local_endpoint(&worktree)?;
-            finish(endpoint.as_ref(), &plan, &outcome, &path_str(&worktree)?)?;
+            let finished = finish(endpoint.as_ref(), &plan, &outcome, &path_str(&worktree)?)?;
+            outcome.applied.warnings.extend(finished.warnings);
+            outcome.applied.lfs_unavailable |= finished.lfs_unavailable;
             leg.worktree = Some(worktree);
         }
         leg.plan = Some(plan);
@@ -980,6 +987,40 @@ impl Run<'_> {
         })
     }
 
+    /// What the destination is still without, LFS-wise, after an apply.
+    fn lfs_warnings(&self, applied: &ApplyReport) -> Vec<TransferIssue> {
+        let here = match self.direction {
+            TransferDirection::ToRemote => "in the workspace",
+            TransferDirection::ToLocal => "on this machine",
+        };
+        let mut warnings = Vec::new();
+        if applied.lfs_unavailable {
+            warnings.push(TransferIssue::new(
+                "lfs_unavailable",
+                format!(
+                    "Git LFS isn't installed {here}, so LFS files hold pointers; install \
+                     git-lfs and run `git lfs checkout`."
+                ),
+            ));
+        }
+        if applied.lfs_missing > 0 {
+            warnings.push(TransferIssue::new(
+                "lfs_not_fetched",
+                format!(
+                    "{} {} the source didn't have couldn't be fetched from origin, so the \
+                     files that use them hold pointers until `git lfs pull` gets them.",
+                    applied.lfs_missing,
+                    if applied.lfs_missing == 1 {
+                        "LFS object"
+                    } else {
+                        "LFS objects"
+                    }
+                ),
+            ));
+        }
+        warnings
+    }
+
     fn result(
         &self,
         inspection: &Inspection,
@@ -1004,6 +1045,7 @@ impl Run<'_> {
                             .iter()
                             .map(|w| TransferIssue::new("apply", w.clone())),
                     );
+                    warnings.extend(self.lfs_warnings(&outcome.applied));
                 }
                 RepoTransferResult {
                     branch_id: leg.source.branch.id,

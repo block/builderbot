@@ -29,11 +29,21 @@
 
 use super::TransferError;
 
+#[macro_use]
+mod lfs;
+
+pub use lfs::{LfsCounts, LfsPayload};
+
 /// Definitions every script starts with.
 macro_rules! prelude {
     () => {
         concat!(
             "set -u\n",
+            // Nothing may prompt: there is no terminal to answer from. And LFS
+            // content is checked out explicitly, never by a smudge filter in
+            // the middle of a checkout: one that can't find an object fails
+            // the whole checkout (see `lfs`).
+            "export GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1\n",
             // A prefix assignment on an external command is plain POSIX.
             "G() { LC_ALL=C git -c core.hooksPath=/dev/null \"$@\"; }\n",
             // `G` against another index file. A prefix assignment on a shell
@@ -77,9 +87,13 @@ macro_rules! prelude {
 /// conflicts, and an in-progress merge, rebase, cherry-pick, revert or bisect.
 /// Prints the commits and trees of the snapshot, the bundle's size and
 /// sha256, the branch's `branch.<b>.*` config, and the `url`/`pushurl`/`fetch`
-/// of any non-origin remote the branch pulls from or pushes to.
+/// of any non-origin remote the branch pulls from or pushes to. When the
+/// snapshot refers to LFS objects it also writes `<bundle>.lfs.tar` (see
+/// [`lfs`]) and prints `lfs=1`, the `lfs_*` counts, and the archive's
+/// `lfs_size` and `lfs_sha256`.
 pub const SNAPSHOT_SCRIPT: &str = concat!(
     prelude!(),
+    lfs_prelude!(),
     "cd -- \"$1\" 2>/dev/null || fail \"cannot enter $1\"\n",
     "branch=$2 bundle=$3 tid=$4\n",
     "shift 4\n",
@@ -145,6 +159,36 @@ pub const SNAPSHOT_SCRIPT: &str = concat!(
     "else\n",
     "  printf 'bundle=deferred\\n'\n",
     "fi\n",
+    // --- The LFS objects it refers to, beside the bundle ---
+    // In W, in I, and in the bundle's commits that no remote has: a remote's
+    // are on its LFS server.
+    "lfs_ar=\"$bundle.lfs.tar\"\n",
+    "rm -rf -- \"$lfs_ar\" \"$lfs_ar.d\"\n",
+    "if uses_lfs \"$snapshot\" \"$head\"; then\n",
+    "  manifest=$({\n",
+    "    G ls-tree -r \"$snapshot\" | awk '$2 == \"blob\" { print $3, \"w\" }'\n",
+    "    G ls-tree -r \"$index_commit\" | awk '$2 == \"blob\" { print $3, \"o\" }'\n",
+    "    G rev-list --objects \"$snapshot\" --not $not --remotes | awk '{ print $1, \"o\" }'\n",
+    "  } | lfs_pointers)\n",
+    "  if [ -n \"$manifest\" ]; then\n",
+    "    lfs_d=$(lfs_dir) || fail 'cannot find the LFS object store'\n",
+    "    mkdir -p -- \"$lfs_ar.d\" || fail \"cannot create $lfs_ar.d\"\n",
+    "    printf '%s\\n' \"$manifest\" | lfs_have \"$lfs_d\" > \"$lfs_ar.d/oids\" || fail 'cannot list the LFS objects'\n",
+    "    awk '$4 == 1 { print \"objects/\" substr($1, 1, 2) \"/\" substr($1, 3, 2) \"/\" $1 }' \"$lfs_ar.d/oids\" > \"$lfs_ar.d/paths\"\n",
+    // bsdtar (macOS) would add AppleDouble `._` entries and extended
+    // attributes, which GNU tar unpacks as files in the object store.
+    "    tar_c=tar\n",
+    "    if tar --version 2>/dev/null | grep -q bsdtar; then tar_c='tar --no-mac-metadata --no-xattrs'; export COPYFILE_DISABLE=1; fi\n",
+    "    err=$(cd -- \"$lfs_ar.d\" && $tar_c -cf \"$lfs_ar\" oids 2>&1) || fail \"cannot write $lfs_ar: $err\"\n",
+    "    if [ -s \"$lfs_ar.d/paths\" ]; then\n",
+    "      err=$(cd -- \"$lfs_d\" && xargs $tar_c -rf \"$lfs_ar\" < \"$lfs_ar.d/paths\" 2>&1) || fail \"cannot pack the LFS objects: $err\"\n",
+    "    fi\n",
+    "    printf 'lfs=1\\n'\n",
+    "    lfs_counts < \"$lfs_ar.d/oids\"\n",
+    "    printf 'lfs_size=%s\\nlfs_sha256=%s\\n' \"$(size_of \"$lfs_ar\")\" \"$(sha256_of \"$lfs_ar\")\"\n",
+    "    rm -rf -- \"$lfs_ar.d\"\n",
+    "  fi\n",
+    "fi\n",
     // --- What the destination needs to track the same upstream ---
     "printf 'branch_config=%s\\n' \"$(G config --local -z --get-regexp \"^branch\\\\.$(esc \"$branch\")\\\\.\" | hex)\"\n",
     "seen=' origin . '\n",
@@ -157,7 +201,6 @@ pub const SNAPSHOT_SCRIPT: &str = concat!(
     "done\n",
     // --- What a bundle does not carry ---
     "[ -f .gitmodules ] && printf 'warning=submodules\\n'\n",
-    "G grep -q -e 'filter=lfs' -- '*.gitattributes' 2>/dev/null && printf 'warning=lfs\\n'\n",
     "exit 0\n",
 );
 
@@ -270,9 +313,20 @@ pub const ORIGIN_TIPS_SCRIPT: &str = concat!(
 /// says so with `created_branch=1`; a branch already at `head` is reused. A
 /// failure after that undoes the branch it created and the remotes it added,
 /// so what the caller rolls back is only what a successful run reported.
+///
+/// With `lfs=<archive>` (and `lfs_sha256`), `checkout` and `branch` unpack
+/// the snapshot's LFS objects and refuse to go on if one `W` uses and the
+/// source had is not there after; set the LFS filter up unless git-lfs is
+/// missing (`lfs_unavailable=1`) or some config scope already has it; fetch
+/// what the source lacked from origin, best-effort; and report what is still
+/// missing (`lfs_missing`, `lfs_missing_bytes`). `checkout` and `finish` then
+/// run `git lfs checkout` once the working tree is in place. A failure leaves the
+/// unpacked objects and the filter config behind: objects are named by their
+/// hash, and the filter is what this repository's attributes ask for.
 pub const APPLY_SCRIPT: &str = concat!(
     prelude!(),
-    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0\n",
+    lfs_prelude!(),
+    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0 lfs='' lfs_sha256=''\n",
     "while [ $# -gt 0 ]; do\n",
     "  case $1 in\n",
     "    --) shift; break ;;\n",
@@ -287,11 +341,38 @@ pub const APPLY_SCRIPT: &str = concat!(
     "    tree_i=*) tree_i=${1#tree_i=} ;;\n",
     "    tree_w=*) tree_w=${1#tree_w=} ;;\n",
     "    restore=*) restore=${1#restore=} ;;\n",
+    "    lfs=*) lfs=${1#lfs=} ;;\n",
+    "    lfs_sha256=*) lfs_sha256=${1#lfs_sha256=} ;;\n",
     "    *) fail \"unknown argument: $1\" ;;\n",
     "  esac\n",
     "  shift\n",
     "done\n",
     "case $mode in checkout|branch|finish) ;; *) fail \"unknown mode: $mode\" ;; esac\n",
+    // Route LFS through git-lfs here unless some scope already does (the
+    // clean filter is what git-lfs itself takes as "installed"), so a
+    // checkout can hold content and a later add stores a pointer; and its
+    // hooks (pre-push uploads what a push needs), unless hooks live
+    // elsewhere or are someone else's, which `update` leaves alone. Not via
+    // `G`: git-lfs would take its `core.hooksPath` for where hooks go.
+    "lfs_setup() {\n",
+    "  if ! G lfs version >/dev/null 2>&1; then\n",
+    "    [ -z \"$lfs\" ] || printf 'lfs_unavailable=1\\n'\n",
+    "    return 0\n",
+    "  fi\n",
+    "  [ -n \"$(G config --get filter.lfs.clean)\" ] && return 0\n",
+    "  err=$(G lfs install --local --skip-repo 2>&1) || { printf 'warning=cannot set Git LFS up here: %s\\n' \"$(printf '%s' \"$err\" | tr '\\n' ' ')\"; return 0; }\n",
+    "  [ -n \"$(git config --get core.hooksPath)\" ] || LC_ALL=C git lfs update >/dev/null 2>&1 || :\n",
+    "}\n",
+    // Replace the pointers in the working tree whose objects are here with
+    // content. Only for files the index has those pointers for, so it runs
+    // while the index is W. Without the clean filter `git lfs checkout` is
+    // a no-op, and the content would no longer hash to the tree it came
+    // from anyway.
+    "lfs_checkout() {\n",
+    "  [ -n \"$lfs\" ] || return 0\n",
+    "  [ -n \"$(G config --get filter.lfs.clean)\" ] || return 0\n",
+    "  err=$(G lfs checkout 2>&1) || printf 'warning=git lfs checkout failed, so LFS files may hold pointers: %s\\n' \"$(printf '%s' \"$err\" | tr '\\n' ' ')\"\n",
+    "}\n",
     "cd -- \"$dir\" 2>/dev/null || fail \"cannot enter $dir\"\n",
     "top=$(G rev-parse --show-toplevel 2>/dev/null) || fail \"not a git checkout: $PWD\"\n",
     "cd -- \"$top\" || fail \"cannot enter $top\"\n",
@@ -309,6 +390,31 @@ pub const APPLY_SCRIPT: &str = concat!(
     "  [ \"$(G rev-parse \"$w^1^1\")\" = \"$head\" ] || fail \"the snapshot is not based on $head\"\n",
     "  [ \"$(G rev-parse \"$w^{tree}\")\" = \"$tree_w\" ] || fail 'the working tree snapshot is corrupt'\n",
     "  [ \"$(G rev-parse \"$w^1^{tree}\")\" = \"$tree_i\" ] || fail 'the index snapshot is corrupt'\n",
+    // --- The LFS objects ---
+    "  if [ -n \"$lfs\" ]; then\n",
+    "    [ \"$(sha256_of \"$lfs\")\" = \"$lfs_sha256\" ] || fail 'the LFS objects do not match their checksum'\n",
+    "    lfs_d=$(lfs_dir) || fail 'cannot find the LFS object store'\n",
+    "    oids=$(tar -xOf \"$lfs\" oids) || fail 'cannot read the LFS manifest'\n",
+    "    if printf '%s\\n' \"$oids\" | awk '$4 == 1 { f = 1 } END { exit !f }'; then\n",
+    "      mkdir -p -- \"$lfs_d\" || fail \"cannot create $lfs_d\"\n",
+    "      err=$(tar -xf \"$lfs\" -C \"$lfs_d\" objects 2>&1) || fail \"cannot unpack the LFS objects: $err\"\n",
+    "    fi\n",
+    "    have=$(printf '%s\\n' \"$oids\" | lfs_have \"$lfs_d\")\n",
+    "    lost=$(printf '%s\\n' \"$have\" | awk '$3 == 1 && $4 == 1 && $5 == 0 { n++ } END { print n + 0 }')\n",
+    "    [ \"$lost\" = 0 ] || fail \"$lost LFS objects the working tree uses did not arrive\"\n",
+    "  fi\n",
+    "  if [ -n \"$lfs\" ] || uses_lfs \"$w\"; then lfs_setup; fi\n",
+    "  if [ -n \"$lfs\" ]; then\n",
+    // Pushed content the source never downloaded. A remote that wants
+    // credentials this end lacks fails fast, as nothing may prompt.
+    "    if printf '%s\\n' \"$have\" | awk '$5 == 0 { f = 1 } END { exit !f }' && G lfs version >/dev/null 2>&1; then\n",
+    "      refs=$head\n",
+    "      [ \"$restore\" = 1 ] && refs=\"$refs $snap_ref $snap_ref^1\"\n",
+    "      G -c lfs.transfer.maxretries=2 lfs fetch origin $refs >/dev/null 2>&1\n",
+    "      have=$(printf '%s\\n' \"$oids\" | lfs_have \"$lfs_d\")\n",
+    "    fi\n",
+    "    printf '%s\\n' \"$have\" | awk '$5 == 0 { n++; b += $2 } END { printf \"lfs_missing=%d\\nlfs_missing_bytes=%.0f\\n\", n, b }'\n",
+    "  fi\n",
     // --- The branch ---
     // What a failure from here on takes back. Remote names are refname
     // components, so they hold no spaces or glob characters.
@@ -396,11 +502,14 @@ pub const APPLY_SCRIPT: &str = concat!(
     // The working tree and index become W; then the index alone goes back to
     // I, which leaves W's extra content as unstaged and untracked changes.
     "    err=$(G read-tree -u --reset \"$w\" 2>&1) || fail \"cannot restore the working tree: $err\"\n",
+    "    lfs_checkout\n",
     "    G update-index -q --refresh >/dev/null 2>&1\n",
     "    [ \"$(G write-tree)\" = \"$tree_w\" ] && G diff-files --quiet || fail 'the restored working tree does not match the snapshot'\n",
     "    err=$(G read-tree --reset \"$w^1\" 2>&1) || fail \"cannot restore the index: $err\"\n",
     "    [ \"$(G write-tree)\" = \"$tree_i\" ] || fail 'the restored index does not match the snapshot'\n",
     "    G update-index -q --refresh >/dev/null 2>&1\n",
+    "  else\n",
+    "    lfs_checkout\n",
     "  fi\n",
     "  G update-ref -d \"$snap_ref\" >/dev/null 2>&1\n",
     "fi\n",
@@ -442,11 +551,16 @@ pub const CLONE_SCRIPT: &str = concat!(
 /// however much they hold) — none of which is carried — `repo_kib` (the
 /// object store's size), `unpushed` (commits on no remote-tracking ref),
 /// `upstream`, and the same `warning=`s as
-/// [`SNAPSHOT_SCRIPT`]. `status` runs with `--no-optional-locks`, so even the
-/// index's stat cache is left alone. `$branch` is only echoed back; the caller
-/// compares `head_ref` against it.
+/// [`SNAPSHOT_SCRIPT`]. In a repository that uses LFS it also prints the
+/// `lfs_*` counts for `HEAD`, the index and the unpushed commits, and — when
+/// the filter is set up, so a snapshot would store them as LFS objects —
+/// `lfs_changed`/`lfs_changed_bytes` for the modified and untracked files the
+/// filter applies to, which only a snapshot hashes. `status` runs with
+/// `--no-optional-locks`, so even the index's stat cache is left alone.
+/// `$branch` is only echoed back; the caller compares `head_ref` against it.
 pub const PREFLIGHT_SCRIPT: &str = concat!(
     prelude!(),
+    lfs_prelude!(),
     "i=0\n",
     "while [ $# -ge 2 ]; do\n",
     "  dir=$1 branch=$2\n",
@@ -485,9 +599,20 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "    printf 'unpushed=%s\\n' \"$(G rev-list --count HEAD --not --remotes 2>/dev/null)\"\n",
     "    up=$(G rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) && printf 'upstream=%s\\n' \"$up\"\n",
     "  fi\n",
+    "  if [ -n \"${head:-}\" ] && { G grep -q --untracked -e 'filter=lfs' -- '*.gitattributes' 2>/dev/null || uses_lfs HEAD; } && lfs_d=$(lfs_dir); then\n",
+    "    {\n",
+    "      G ls-tree -r HEAD | awk '$2 == \"blob\" { print $3, \"o\" }'\n",
+    "      G ls-files -s | awk '{ print $2, \"o\" }'\n",
+    "      G rev-list --objects HEAD --not --remotes | awk '{ print $1, \"o\" }'\n",
+    "    } | lfs_pointers | lfs_have \"$lfs_d\" | lfs_counts\n",
+    // check-attr -z prints `path NUL attribute NUL value NUL`.
+    "    if G config --get-regexp '^filter\\.lfs\\.(clean|process)$' >/dev/null 2>&1; then\n",
+    "      changed=$(G ls-files -z -m -o --exclude-standard | G check-attr -z --stdin filter | tr '\\0' '\\n' | awk 'NR % 3 == 1 { p = $0 } NR % 3 == 0 && $0 == \"lfs\" { print p }')\n",
+    "      [ -z \"$changed\" ] || printf '%s\\n' \"$changed\" | tr '\\n' '\\0' | xargs -0 ls -lndL -- 2>/dev/null | awk '{ n++; b += $5 } END { printf \"lfs_changed=%d\\nlfs_changed_bytes=%.0f\\n\", n, b }'\n",
+    "    fi\n",
+    "  fi\n",
     "  head=''\n",
     "  [ -f .gitmodules ] && printf 'warning=submodules\\n'\n",
-    "  G grep -q -e 'filter=lfs' -- '*.gitattributes' 2>/dev/null && printf 'warning=lfs\\n'\n",
     "done\n",
     "exit 0\n",
 );
@@ -587,15 +712,25 @@ pub struct BundleFile {
 
 impl BundleFile {
     fn from_report(step: &'static str, report: &ScriptReport) -> Result<Self, TransferError> {
-        let sha256 = report.require(step, "bundle_sha256")?;
+        Self::from_report_as(step, report, "bundle")
+    }
+
+    /// A file a report describes as `<prefix>_size` and `<prefix>_sha256`.
+    fn from_report_as(
+        step: &'static str,
+        report: &ScriptReport,
+        prefix: &str,
+    ) -> Result<Self, TransferError> {
+        let key = format!("{prefix}_sha256");
+        let sha256 = report.require(step, &key)?;
         if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(TransferError::Protocol {
                 step,
-                message: format!("bundle_sha256 is not a sha256: {sha256}"),
+                message: format!("{key} is not a sha256: {sha256}"),
             });
         }
         Ok(Self {
-            size: report.require_u64(step, "bundle_size")?,
+            size: report.require_u64(step, &format!("{prefix}_size"))?,
             sha256: sha256.to_ascii_lowercase(),
         })
     }
@@ -622,8 +757,6 @@ pub struct RemoteConfig {
 pub enum SnapshotWarning {
     /// The repository has submodules; their commits are not in the bundle.
     Submodules,
-    /// Paths are tracked with Git LFS; LFS objects are not in the bundle.
-    Lfs,
 }
 
 /// A source checkout, captured: what [`SNAPSHOT_SCRIPT`] reports.
@@ -646,6 +779,8 @@ pub struct Snapshot {
     pub branch_config: Vec<ConfigEntry>,
     pub remotes: Vec<RemoteConfig>,
     pub warnings: Vec<SnapshotWarning>,
+    /// The LFS objects it refers to, when there are any.
+    pub lfs: Option<LfsPayload>,
 }
 
 impl Snapshot {
@@ -694,7 +829,6 @@ impl Snapshot {
             .all("warning")
             .filter_map(|w| match w {
                 "submodules" => Some(SnapshotWarning::Submodules),
-                "lfs" => Some(SnapshotWarning::Lfs),
                 _ => None,
             })
             .collect();
@@ -710,6 +844,7 @@ impl Snapshot {
             branch_config,
             remotes,
             warnings,
+            lfs: LfsPayload::parse(STEP, &report)?,
         })
     }
 }
@@ -785,11 +920,18 @@ pub struct ApplyReport {
     pub added_remotes: Vec<String>,
     /// Non-fatal problems, such as an upstream that could not be fetched.
     pub warnings: Vec<String>,
+    /// LFS objects the snapshot refers to that are still not here: the
+    /// source lacked them and origin couldn't supply them.
+    pub lfs_missing: u64,
+    pub lfs_missing_bytes: u64,
+    /// LFS objects came, but git-lfs isn't installed here to check them out.
+    pub lfs_unavailable: bool,
 }
 
 impl ApplyReport {
     pub fn parse(stdout: &str, head: &str) -> Result<Self, TransferError> {
         let report = ScriptReport::parse(stdout);
+        let count = |key: &str| report.get(key).and_then(|v| v.parse().ok()).unwrap_or(0);
         let applied = report.require("apply", "applied")?;
         if applied != head {
             return Err(TransferError::Protocol {
@@ -801,6 +943,9 @@ impl ApplyReport {
             created_branch: report.get("created_branch") == Some("1"),
             added_remotes: report.all("added_remote").map(str::to_string).collect(),
             warnings: report.all("warning").map(str::to_string).collect(),
+            lfs_missing: count("lfs_missing"),
+            lfs_missing_bytes: count("lfs_missing_bytes"),
+            lfs_unavailable: report.get("lfs_unavailable") == Some("1"),
         })
     }
 }
@@ -953,8 +1098,12 @@ pub struct ApplyRequest<'a> {
     /// source's when the name was taken.
     pub branch: &'a str,
     pub snapshot: &'a Snapshot,
-    /// Restore the staged, unstaged and untracked state (`Checkout`, `Finish`).
+    /// Restore the staged, unstaged and untracked state (`Checkout`,
+    /// `Finish`; `Branch` only fetches LFS objects for it).
     pub restore: bool,
+    /// The snapshot's LFS archive at the destination, when it has one.
+    /// Unread by `Finish`, which only needs to know there is one.
+    pub lfs_path: Option<&'a str>,
 }
 
 impl ApplyRequest<'_> {
@@ -977,6 +1126,10 @@ impl ApplyRequest<'_> {
             ("restore", if self.restore { "1" } else { "0" }),
         ];
         let mut args: Vec<String> = named.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        if let (Some(path), Some(lfs)) = (self.lfs_path, &self.snapshot.lfs) {
+            args.push(format!("lfs={path}"));
+            args.push(format!("lfs_sha256={}", lfs.archive.sha256));
+        }
         args.push("--".to_string());
         if self.mode == ApplyMode::Finish {
             return args;
@@ -1017,7 +1170,7 @@ mod tests {
         for remote in remotes {
             out.push_str(&format!("remote_config={}\n", hex(remote)));
         }
-        out.push_str("warning=lfs\nwarning=submodules\n");
+        out.push_str("warning=submodules\n");
         out
     }
 
@@ -1059,11 +1212,49 @@ mod tests {
         assert_eq!(snapshot.remotes.len(), 1);
         assert_eq!(snapshot.remotes[0].name, "my.fork");
         assert_eq!(snapshot.remotes[0].entries.len(), 3);
-        assert_eq!(
-            snapshot.warnings,
-            [SnapshotWarning::Lfs, SnapshotWarning::Submodules]
-        );
+        assert_eq!(snapshot.warnings, [SnapshotWarning::Submodules]);
+        assert_eq!(snapshot.lfs, None);
         assert!(snapshot.has_uncommitted_changes());
+    }
+
+    const LFS_REPORT: &str = "lfs=1\nlfs_total=3\nlfs_present=2\nlfs_present_bytes=5000000000\n\
+                              lfs_missing=1\nlfs_missing_bytes=7\nlfs_size=5000010240\n";
+
+    #[test]
+    fn parses_the_lfs_payload_a_snapshot_reports() {
+        let stdout = format!(
+            "{}{LFS_REPORT}lfs_sha256={}\n",
+            snapshot_stdout(b"", &[]),
+            "CD".repeat(32)
+        );
+        let lfs = Snapshot::parse(&stdout, "feat").unwrap().lfs.unwrap();
+        assert_eq!(
+            lfs,
+            LfsPayload {
+                counts: LfsCounts {
+                    total: 3,
+                    present: 2,
+                    present_bytes: 5_000_000_000,
+                    missing: 1,
+                    missing_bytes: 7,
+                },
+                archive: BundleFile {
+                    size: 5_000_010_240,
+                    sha256: "cd".repeat(32),
+                },
+            }
+        );
+        assert_eq!(LfsPayload::archive_name("0-r.bundle"), "0-r.bundle.lfs.tar");
+
+        // `lfs=1` promises the rest.
+        let truncated = format!("{}{LFS_REPORT}", snapshot_stdout(b"", &[]));
+        assert!(Snapshot::parse(&truncated, "feat").is_err());
+        let no_counts = format!(
+            "{}lfs=1\nlfs_size=1\nlfs_sha256={}\n",
+            snapshot_stdout(b"", &[]),
+            "cd".repeat(32)
+        );
+        assert!(Snapshot::parse(&no_counts, "feat").is_err());
     }
 
     #[test]
@@ -1121,6 +1312,16 @@ mod tests {
         assert_eq!(ok.added_remotes, ["fork"]);
         assert_eq!(ok.warnings, ["cannot fetch"]);
         assert!(!ok.created_branch);
+        assert_eq!((ok.lfs_missing, ok.lfs_unavailable), (0, false));
+        let lfs = ApplyReport::parse(
+            &format!("lfs_unavailable=1\nlfs_missing=2\nlfs_missing_bytes=9\napplied={OID_A}\n"),
+            OID_A,
+        )
+        .unwrap();
+        assert_eq!(
+            (lfs.lfs_missing, lfs.lfs_missing_bytes, lfs.lfs_unavailable),
+            (2, 9, true)
+        );
         let created =
             ApplyReport::parse(&format!("created_branch=1\napplied={OID_A}\n"), OID_A).unwrap();
         assert!(created.created_branch);
@@ -1179,6 +1380,7 @@ mod tests {
             branch: "b-2",
             snapshot: &snapshot,
             restore: true,
+            lfs_path: Some("/t/x.bundle.lfs.tar"),
         };
         let args = request.args();
         let tail = &args[args.iter().position(|a| a == "--").unwrap() + 1..];
@@ -1197,8 +1399,23 @@ mod tests {
         );
         assert!(args.contains(&"branch=b-2".to_string()));
         assert!(args.contains(&"restore=1".to_string()));
+        // No archive without a payload to describe it.
+        assert!(!args.iter().any(|a| a.starts_with("lfs")));
 
         request.mode = ApplyMode::Finish;
         assert_eq!(request.args().last().unwrap(), "--");
+
+        let mut with_lfs = snapshot.clone();
+        with_lfs.lfs = Some(LfsPayload {
+            counts: LfsCounts::default(),
+            archive: BundleFile {
+                size: 1,
+                sha256: "ef".repeat(32),
+            },
+        });
+        request.snapshot = &with_lfs;
+        let args = request.args();
+        assert!(args.contains(&"lfs=/t/x.bundle.lfs.tar".to_string()));
+        assert!(args.contains(&format!("lfs_sha256={}", "ef".repeat(32))));
     }
 }

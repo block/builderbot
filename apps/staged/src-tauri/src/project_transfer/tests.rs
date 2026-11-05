@@ -82,6 +82,8 @@ pub(super) fn noise(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
+pub(super) mod lfs;
+
 const TID: &str = "0b5e7d3c-1f2a-4c6b-9e8d-7a6b5c4d3e2f";
 
 /// A bare origin, a source clone, a destination clone, and the two scratch
@@ -189,6 +191,7 @@ impl World {
             local_bundle: PathBuf::from(local_bundle),
             repo_bytes: 0,
             untracked_bytes: 0,
+            lfs_bytes: 0,
         }
     }
 
@@ -744,6 +747,7 @@ fn a_bundle_missing_prerequisites_is_refused_as_such() {
                     branch: "feature",
                     snapshot: &snapshot,
                     restore: true,
+                    lfs_path: None,
                 }
                 .args(),
             )
@@ -1096,6 +1100,7 @@ fn a_branch_landing_reports_only_a_branch_it_created_and_undoes_it_on_failure() 
             branch: "feature",
             snapshot: &reused.snapshot,
             restore: false,
+            lfs_path: None,
         };
         let mut args = request.args();
         args.push("bogus".to_string());
@@ -1289,10 +1294,11 @@ fn verify_checks_every_checkout_at_an_end_in_one_run() {
 }
 
 /// A [`LocalEndpoint`] noting which script each run was and the payload it
-/// was sized for.
+/// was sized for, and which files it was asked for or sent.
 struct Recording {
     inner: LocalEndpoint,
     runs: std::sync::Mutex<Vec<(&'static str, u64)>>,
+    files: std::sync::Mutex<Vec<String>>,
 }
 
 impl Recording {
@@ -1300,11 +1306,22 @@ impl Recording {
         Self {
             inner,
             runs: Default::default(),
+            files: Default::default(),
         }
     }
 
     fn runs(&self) -> Vec<(&'static str, u64)> {
         self.runs.lock().unwrap().clone()
+    }
+
+    /// `get <file name>` and `put <file name>`, in order.
+    fn files(&self) -> Vec<String> {
+        self.files.lock().unwrap().clone()
+    }
+
+    fn note_file(&self, verb: &str, path: &str) {
+        let name = Path::new(path).file_name().unwrap().to_string_lossy();
+        self.files.lock().unwrap().push(format!("{verb} {name}"));
     }
 }
 
@@ -1349,10 +1366,12 @@ impl TransferEndpoint for Recording {
     }
 
     fn put_file(&self, local: &Path, path: &str) -> Result<(), TransferError> {
+        self.note_file("put", path);
         self.inner.put_file(local, path)
     }
 
     fn get_file(&self, path: &str, local: &Path, size: u64) -> Result<(), TransferError> {
+        self.note_file("get", path);
         self.inner.get_file(path, local, size)
     }
 }

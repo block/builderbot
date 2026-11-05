@@ -65,6 +65,10 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     untrackedBytes: 0,
     ignoredFiles: 0,
     ignoredDirs: 0,
+    lfsPresent: 0,
+    lfsPresentBytes: 0,
+    lfsMissing: 0,
+    lfsMissingBytes: 0,
     hasUncommittedChanges: false,
     blockers: [],
     warnings: [],
@@ -210,7 +214,13 @@ describe('ProjectTransferDialog', () => {
               blockers: [
                 { code: 'detached_head', message: 'The worktree for feature has a detached HEAD.' },
               ],
-              warnings: [{ code: 'lfs', message: 'Git LFS content is not carried.' }],
+              warnings: [
+                {
+                  code: 'lfs_missing',
+                  message:
+                    '2 LFS objects are not available locally and will be fetched from origin if possible.',
+                },
+              ],
             }),
           ],
         })
@@ -230,7 +240,7 @@ describe('ProjectTransferDialog', () => {
     expect(blocker?.textContent).toContain('Check the branch out again');
     const warning = row?.querySelector('.issue.warning');
     expect(warning?.querySelector('.sr-only')?.textContent).toBe('Warning:');
-    expect(warning?.textContent).toContain('LFS');
+    expect(warning?.textContent).toContain('2 LFS objects are not available locally');
 
     submitButton().click();
     await settle();
@@ -285,6 +295,26 @@ describe('ProjectTransferDialog', () => {
     expect(rows[2]).not.toContain('ignored');
     expect(rows[3]).toContain('1 ignored file and 2 ignored folders stay behind');
     expect(rows[4]).toContain('1 ignored folder stays behind');
+    unmount(dialog);
+  });
+
+  it('says how many LFS objects each repo carries', async () => {
+    const dialog = mountDialog(
+      ready(
+        preflight({
+          repos: [
+            repo({ lfsPresent: 3, lfsPresentBytes: 5 * 1024 * 1024 }),
+            repo({ branchId: 'b2' }),
+          ],
+        })
+      )
+    );
+    await settle();
+    const rows = [...document.querySelectorAll('.repo-row')].map((r) =>
+      r.textContent?.replace(/\s+/g, ' ')
+    );
+    expect(rows[0]).toContain('3 LFS objects (5.0 MB) will be carried');
+    expect(rows[1]).not.toContain('LFS');
     unmount(dialog);
   });
 

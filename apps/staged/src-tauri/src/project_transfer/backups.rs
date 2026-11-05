@@ -17,6 +17,10 @@
 //!
 //! Recovering is plain git: `git fetch <bundle> refs/staged-transfer/<id>/snapshot`
 //! (or check out the backup ref), then `read-tree` the snapshot or its parent.
+//! A repository that uses Git LFS also has `<bundle>.lfs.tar` beside its
+//! bundle: the LFS objects the snapshot refers to, in the object store's
+//! `objects/xx/yy/<oid>` layout. `tar -xf <bundle>.lfs.tar -C .git/lfs objects`
+//! then `git lfs checkout` restores their content.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};

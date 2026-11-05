@@ -96,7 +96,7 @@ impl BoundedRead {
 /// ([`BoundedRead::provisional`]), for callers that put the answer on
 /// screen and can look again once the capture lands.
 pub fn run_bounded_read(repo: &Path, args: &[&str]) -> Result<BoundedRead, GitError> {
-    let (output, env) = spawn_git_with_applied_env(repo, args, EnvSource::CapturedBounded)?;
+    let (output, env) = spawn_git_with_applied_env(repo, args, EnvSource::CapturedBounded, &[])?;
     bounded_read_of(repo, output, env)
 }
 
@@ -112,6 +112,16 @@ fn bounded_read_of(
         stdout,
         provisional: env.capture_pending(),
     })
+}
+
+/// [`run`] with `vars` set on top of the captured env.
+pub(crate) fn run_with_vars(
+    repo: &Path,
+    args: &[&str],
+    vars: &[(&str, &str)],
+) -> Result<String, GitError> {
+    let (output, env) = spawn_git_with_applied_env(repo, args, EnvSource::Captured, vars)?;
+    stdout_of(repo, output).map_err(|e| flag_pending_capture(e, env))
 }
 
 /// Run a git command with the lite env (parent env minus `GIT_*`).
@@ -336,14 +346,16 @@ fn spawn_git(
     args: &[&str],
     source: EnvSource,
 ) -> Result<std::process::Output, GitError> {
-    spawn_git_with_applied_env(repo, args, source).map(|(output, _)| output)
+    spawn_git_with_applied_env(repo, args, source, &[]).map(|(output, _)| output)
 }
 
-/// [`spawn_git`], also returning the env the spawn actually got.
+/// [`spawn_git`] with `vars` set on top of `source`'s env, also returning
+/// the env the spawn actually got.
 fn spawn_git_with_applied_env(
     repo: &Path,
     args: &[&str],
     source: EnvSource,
+    vars: &[(&str, &str)],
 ) -> Result<(std::process::Output, AppliedEnv), GitError> {
     let repo_str = repo
         .to_str()
@@ -361,6 +373,7 @@ fn spawn_git_with_applied_env(
             repo.display()
         );
     }
+    command.envs(vars.iter().copied());
     force_non_interactive(&mut command);
     detach_from_ctty(&mut command);
 
@@ -387,7 +400,7 @@ pub(crate) fn configure_captured(command: &mut Command, repo: &Path) {
 }
 
 fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String, GitError> {
-    let (output, env) = spawn_git_with_applied_env(repo, args, source)?;
+    let (output, env) = spawn_git_with_applied_env(repo, args, source, &[])?;
     stdout_of(repo, output).map_err(|e| flag_pending_capture(e, env))
 }
 

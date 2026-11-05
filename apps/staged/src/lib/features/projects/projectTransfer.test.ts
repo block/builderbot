@@ -8,6 +8,7 @@ import {
   asksAboutUncommitted,
   formatBytes,
   ignoredSummary,
+  lfsSummary,
   isTransferCancellable,
   isTransferCancelledError,
   issueMessage,
@@ -41,6 +42,10 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     untrackedBytes: 0,
     ignoredFiles: 0,
     ignoredDirs: 0,
+    lfsPresent: 0,
+    lfsPresentBytes: 0,
+    lfsMissing: 0,
+    lfsMissingBytes: 0,
     hasUncommittedChanges: false,
     blockers: [],
     warnings: [],
@@ -92,6 +97,18 @@ describe('labels', () => {
     expect(ignoredSummary(repo({ ignoredDirs: 2 }))).toBe('2 ignored folders stay behind');
     expect(ignoredSummary(repo({ ignoredFiles: 3, ignoredDirs: 1 }))).toBe(
       '3 ignored files and 1 ignored folder stay behind'
+    );
+  });
+
+  it('says how many LFS objects a repo carries, and how much they hold', () => {
+    expect(lfsSummary(repo())).toBeNull();
+    // Missing objects are a warning of their own, not something carried.
+    expect(lfsSummary(repo({ lfsMissing: 2, lfsMissingBytes: 4096 }))).toBeNull();
+    expect(lfsSummary(repo({ lfsPresent: 1, lfsPresentBytes: 7 }))).toBe(
+      '1 LFS object (7 B) will be carried'
+    );
+    expect(lfsSummary(repo({ lfsPresent: 3, lfsPresentBytes: 12 * 1024 * 1024 }))).toBe(
+      '3 LFS objects (12 MB) will be carried'
     );
   });
 
@@ -208,7 +225,11 @@ describe('transferResultWarnings', () => {
   });
 
   it('keeps teardown warnings and repo warnings the dialog did not show', () => {
-    const lfs = { code: 'lfs', message: 'LFS content is not carried.' };
+    const lfs = {
+      code: 'lfs_missing',
+      message:
+        '2 LFS objects are not available locally and will be fetched from origin if possible.',
+    };
     const apply = { code: 'apply', message: 'Could not fetch the upstream.' };
     const left = { code: 'worktree_left', message: 'The old worktree stayed.' };
     const r = result({ warnings: [left] });

@@ -36,6 +36,8 @@ use crate::store::{
 };
 use crate::test_utils::TempDir;
 
+mod lfs;
+
 const WIDGETS: &str = "acme/widgets";
 const GADGETS: &str = "acme/gadgets";
 const SPROCKETS: &str = "acme/sprockets";
@@ -186,6 +188,8 @@ struct FakeHost {
     blox: Mutex<Option<BloxUnavailable>>,
     /// What a new workspace's bootstrap does to its primary clone.
     bootstrap: Mutex<Option<fn(&Path)>>,
+    /// Set for every script, at either end.
+    script_vars: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeHost {
@@ -203,6 +207,7 @@ impl FakeHost {
             faults: Arc::default(),
             blox: Mutex::default(),
             bootstrap: Mutex::default(),
+            script_vars: Mutex::default(),
         };
         for repo in repos {
             let origin = host.origin(repo);
@@ -279,8 +284,12 @@ impl FakeHost {
     }
 
     fn endpoint(&self, env_dir: &Path, scratch_root: PathBuf, side: Side) -> FaultyEndpoint {
+        let mut inner = LocalEndpoint::new(env_dir, scratch_root);
+        for (key, value) in self.script_vars.lock().unwrap().iter() {
+            inner = inner.with_var(key, value);
+        }
         FaultyEndpoint {
-            inner: LocalEndpoint::new(env_dir, scratch_root),
+            inner,
             side,
             faults: Arc::clone(&self.faults),
         }
@@ -1301,7 +1310,9 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
         vec!["detached_head", "nested_repo"]
     );
     assert!(gadgets.blockers[1].message.starts_with("vendor/lib/ "));
-    assert_eq!(codes(&gadgets.warnings), vec!["submodules", "lfs"]);
+    assert_eq!(codes(&gadgets.warnings), vec!["submodules"]);
+    // Set up for LFS, but nothing uses it yet.
+    assert_eq!((gadgets.lfs_present, gadgets.lfs_missing), (0, 0));
     // The nested repository is the blocker, not an untracked file.
     assert!(!gadgets.has_uncommitted_changes);
     assert_eq!((gadgets.ignored_files, gadgets.ignored_dirs), (0, 0));

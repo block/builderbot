@@ -1,8 +1,9 @@
 //! Carrying one repository's branch from one end to the other.
 //!
-//! [`carry_repo`] snapshots the source, brings the bundle to this machine
-//! (where it stays as the backup), sends it on to the destination, and lands
-//! it there. The steps either side of it — preparing the destination and
+//! [`carry_repo`] snapshots the source, brings the bundle — and the LFS
+//! archive beside it, when the snapshot has one — to this machine (where they
+//! stay as the backup), sends them on to the destination, and lands them
+//! there. The steps either side of it — preparing the destination and
 //! reporting its [`origin_tips`] first, adding a local worktree and running
 //! [`finish`] in it after, [`cleanup`] on failure, and checking the source is
 //! [`unchanged`] before deleting it — are the orchestrator's.
@@ -15,7 +16,8 @@ use sha2::{Digest, Sha256};
 
 use super::endpoint::TransferEndpoint;
 use super::scripts::{
-    self, ApplyMode, ApplyReport, ApplyRequest, BundleFile, OriginTips, ScriptReport, Snapshot,
+    self, ApplyMode, ApplyReport, ApplyRequest, BundleFile, LfsPayload, OriginTips, ScriptReport,
+    Snapshot,
 };
 use super::{is_valid_transfer_id, TransferError};
 
@@ -68,6 +70,19 @@ pub struct CarryPlan {
     /// take time in proportion to — not the whole repository, which a
     /// stat-cached `add -A` and a bundle cut against origin never read.
     pub untracked_bytes: u64,
+    /// The LFS objects the source has for the branch, by the preflight's
+    /// count: what the snapshot packs beside the bundle.
+    pub lfs_bytes: u64,
+}
+
+impl CarryPlan {
+    /// Where the snapshot's LFS archive is kept on this machine, beside the
+    /// bundle.
+    pub fn local_lfs(&self) -> PathBuf {
+        let mut path = self.local_bundle.as_os_str().to_owned();
+        path.push(".lfs.tar");
+        PathBuf::from(path)
+    }
 }
 
 /// A repository carried to the destination.
@@ -79,6 +94,8 @@ pub struct CarryOutcome {
     pub bundle: BundleFile,
     /// The bundle's path at the destination.
     pub dest_bundle: String,
+    /// The LFS archive's, when the snapshot has one.
+    pub dest_lfs: Option<String>,
     pub applied: ApplyReport,
     /// Whether the destination lacked the commits the first bundle was cut
     /// against, so it was re-bundled whole.
@@ -89,7 +106,7 @@ pub struct CarryOutcome {
 #[derive(Debug, Clone, Copy)]
 pub enum CarryStep<'a> {
     Snapshotting,
-    /// Moving a bundle of this many bytes.
+    /// Moving a bundle (and any LFS archive) of this many bytes.
     Moving {
         bytes: u64,
     },
@@ -125,6 +142,7 @@ pub fn carry_repo_with(
     check_transfer_id(&plan.transfer_id)?;
     let source_bundle = source.scratch_path(&plan.transfer_id, &plan.bundle_name)?;
     let dest_bundle = dest.scratch_path(&plan.transfer_id, &plan.bundle_name)?;
+    let lfs_name = LfsPayload::archive_name(&plan.bundle_name);
 
     let started = Instant::now();
     on_step(CarryStep::Snapshotting)?;
@@ -140,13 +158,50 @@ pub fn carry_repo_with(
     );
 
     let mut bundle = snapshot.bundle.clone();
-    on_step(CarryStep::Moving { bytes: bundle.size })?;
-    move_bundle(source, dest, &source_bundle, plan, &dest_bundle, &bundle)?;
+    let lfs_bytes = snapshot.lfs.as_ref().map_or(0, |lfs| lfs.archive.size);
+    on_step(CarryStep::Moving {
+        bytes: bundle.size + lfs_bytes,
+    })?;
+    move_file(
+        source,
+        dest,
+        "the bundle",
+        &source_bundle,
+        &plan.local_bundle,
+        &dest_bundle,
+        &bundle,
+    )?;
+    let dest_lfs = match &snapshot.lfs {
+        Some(lfs) => {
+            let dest_lfs = dest.scratch_path(&plan.transfer_id, &lfs_name)?;
+            move_file(
+                source,
+                dest,
+                "the LFS archive",
+                &source.scratch_path(&plan.transfer_id, &lfs_name)?,
+                &plan.local_lfs(),
+                &dest_lfs,
+                &lfs.archive,
+            )?;
+            Some(dest_lfs)
+        }
+        None => None,
+    };
     on_step(CarryStep::Applying {
         snapshot: &snapshot,
     })?;
     let mut retried = false;
-    let applied = match land(dest, plan, &snapshot, &dest_bundle, &bundle) {
+    let land_bundle = |bundle: &BundleFile| {
+        land(
+            dest,
+            plan,
+            &snapshot,
+            &dest_bundle,
+            bundle,
+            dest_lfs.as_deref(),
+        )
+    };
+    let applied = match land_bundle(&bundle) {
         Err(TransferError::MissingPrerequisites { message, .. }) if snapshot.excluded > 0 => {
             log::warn!(
                 "[project_transfer] {} lacks the bundle's prerequisites ({message}); re-bundling {} without exclusions",
@@ -155,12 +210,20 @@ pub fn carry_repo_with(
             );
             bundle = rebundle(source, plan, &source_bundle)?;
             on_step(CarryStep::Moving { bytes: bundle.size })?;
-            move_bundle(source, dest, &source_bundle, plan, &dest_bundle, &bundle)?;
+            move_file(
+                source,
+                dest,
+                "the bundle",
+                &source_bundle,
+                &plan.local_bundle,
+                &dest_bundle,
+                &bundle,
+            )?;
             on_step(CarryStep::Applying {
                 snapshot: &snapshot,
             })?;
             retried = true;
-            land(dest, plan, &snapshot, &dest_bundle, &bundle)?
+            land_bundle(&bundle)?
         }
         other => other?,
     };
@@ -175,6 +238,7 @@ pub fn carry_repo_with(
         snapshot,
         bundle,
         dest_bundle,
+        dest_lfs,
         applied,
         retried_without_exclusions: retried,
     })
@@ -215,8 +279,10 @@ pub fn finish(
             branch: &plan.dest_branch,
             snapshot: &outcome.snapshot,
             restore: plan.include_uncommitted,
+            lfs_path: outcome.dest_lfs.as_deref(),
         },
-        plan.untracked_bytes + outcome.bundle.size,
+        // Checking LFS content out writes every object again.
+        plan.untracked_bytes + outcome.bundle.size + lfs_archive_bytes(&outcome.snapshot),
     )
 }
 
@@ -338,7 +404,7 @@ fn snapshot(
             &plan.exclude_tips,
             &plan.origin_branches,
         ),
-        plan.untracked_bytes,
+        plan.untracked_bytes + plan.lfs_bytes,
     )?;
     // Nothing to cut the bundle against: it is the whole history, which the
     // rebundle step writes in a run given time by the repository's size. Its
@@ -378,11 +444,18 @@ fn land(
     snapshot: &Snapshot,
     dest_bundle: &str,
     bundle: &BundleFile,
+    dest_lfs: Option<&str>,
 ) -> Result<ApplyReport, TransferError> {
-    let (mode, restore) = match plan.landing {
-        Landing::Checkout => (ApplyMode::Checkout, plan.include_uncommitted),
-        Landing::Branch => (ApplyMode::Branch, false),
+    let mode = match plan.landing {
+        Landing::Checkout => ApplyMode::Checkout,
+        Landing::Branch => ApplyMode::Branch,
     };
+    // Unpacking the LFS objects writes them, and fetching what the source
+    // lacked downloads the rest.
+    let lfs_bytes = snapshot
+        .lfs
+        .as_ref()
+        .map_or(0, |lfs| lfs.archive.size + lfs.counts.missing_bytes);
     apply(
         dest,
         &ApplyRequest {
@@ -393,10 +466,15 @@ fn land(
             transfer_id: &plan.transfer_id,
             branch: &plan.dest_branch,
             snapshot,
-            restore,
+            restore: plan.include_uncommitted,
+            lfs_path: dest_lfs,
         },
-        plan.untracked_bytes + bundle.size,
+        plan.untracked_bytes + bundle.size + lfs_bytes,
     )
+}
+
+fn lfs_archive_bytes(snapshot: &Snapshot) -> u64 {
+    snapshot.lfs.as_ref().map_or(0, |lfs| lfs.archive.size)
 }
 
 /// Run [`scripts::APPLY_SCRIPT`] for `request`, whose work (verifying and
@@ -425,25 +503,28 @@ fn apply(
     Ok(applied)
 }
 
-/// Bring the bundle from the source to this machine, check it, and send it to
-/// the destination. Either leg is a no-op when the file is already there.
-fn move_bundle(
+/// Bring a bundle or LFS archive from the source to `local` on this machine,
+/// check it, and send it to the destination. Either leg is a no-op when the
+/// file is already there.
+fn move_file(
     source: &dyn TransferEndpoint,
     dest: &dyn TransferEndpoint,
-    source_bundle: &str,
-    plan: &CarryPlan,
-    dest_bundle: &str,
-    bundle: &BundleFile,
+    file_name: &'static str,
+    source_path: &str,
+    local: &Path,
+    dest_path: &str,
+    file: &BundleFile,
 ) -> Result<(), TransferError> {
-    source.get_file(source_bundle, &plan.local_bundle, bundle.size)?;
-    let actual = sha256_file(&plan.local_bundle)?;
-    if actual != bundle.sha256 {
+    source.get_file(source_path, local, file.size)?;
+    let actual = sha256_file(local)?;
+    if actual != file.sha256 {
         return Err(TransferError::Checksum {
-            expected: bundle.sha256.clone(),
+            file: file_name,
+            expected: file.sha256.clone(),
             actual,
         });
     }
-    dest.put_file(&plan.local_bundle, dest_bundle)
+    dest.put_file(local, dest_path)
 }
 
 fn sha256_file(path: &Path) -> Result<String, TransferError> {

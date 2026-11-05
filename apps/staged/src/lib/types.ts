@@ -464,6 +464,14 @@ export interface ProjectTransferRepoPreflight {
   /** Directories matched by an ignore pattern (`node_modules/`, `.venv/`), each counted
    *  once; none of them is carried. */
   ignoredDirs: number;
+  /** Git LFS objects the source has, carried beside the bundle (counting modified and
+   *  untracked LFS files, which the snapshot stores as new objects). */
+  lfsPresent: number;
+  lfsPresentBytes: number;
+  /** LFS objects the source never downloaded; the destination fetches them from origin
+   *  if it can. */
+  lfsMissing: number;
+  lfsMissingBytes: number;
   hasUncommittedChanges: boolean;
   blockers: ProjectTransferIssue[];
   warnings: ProjectTransferIssue[];

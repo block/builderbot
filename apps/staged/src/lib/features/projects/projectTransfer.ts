@@ -71,6 +71,16 @@ export function ignoredSummary(row: ProjectTransferRepoPreflight): string | null
 }
 
 /**
+ * The Git LFS objects a repo carries beside its bundle, e.g. "3 LFS objects
+ * (12 MB) will be carried"; null with none. The ones the source lacks are a
+ * warning of their own.
+ */
+export function lfsSummary(row: ProjectTransferRepoPreflight): string | null {
+  if (row.lfsPresent === 0) return null;
+  return `${plural(row.lfsPresent, 'LFS object')} (${formatBytes(row.lfsPresentBytes)}) will be carried`;
+}
+
+/**
  * Whether the dialog asks about uncommitted changes. Besides the repos known
  * to have some, an `unknown` repo (a workspace the transfer resumes first)
  * may turn out to, and the user's answer must still apply to it.

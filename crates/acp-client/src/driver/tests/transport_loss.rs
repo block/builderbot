@@ -437,9 +437,10 @@ wait $!"#,
     async fn a_lease_released_kill_only_never_interrupts_its_proxy() {
         for kill_only in [false, true] {
             let dir = scratch_dir(if kill_only { "kill-only" } else { "graceful" });
-            let (lease, _streams) = remote_process::attach(sigint_logging_proxy(&dir), "Test")
-                .await
-                .expect("the proxy spawns");
+            let (lease, _streams) =
+                remote_process::attach(sigint_logging_proxy(&dir), "Test", None)
+                    .await
+                    .expect("the proxy spawns");
             let (proxy, grandchild) = read_pids(&dir).await;
             if kill_only {
                 lease.never_interrupt();
@@ -464,7 +465,7 @@ wait $!"#,
     #[tokio::test(flavor = "current_thread")]
     async fn detaching_the_only_lease_kills_the_proxy_group_with_no_sigint() {
         let dir = scratch_dir("sole");
-        let (lease, _streams) = remote_process::attach(sigint_logging_proxy(&dir), "Test")
+        let (lease, _streams) = remote_process::attach(sigint_logging_proxy(&dir), "Test", None)
             .await
             .expect("the proxy spawns");
         let (proxy, grandchild) = read_pids(&dir).await;
@@ -498,12 +499,13 @@ wait $!"#,
     async fn a_proxy_a_session_detached_from_is_never_interrupted() {
         let dir = scratch_dir("shared");
         let (detached, _detached_streams) =
-            remote_process::attach(sigint_logging_proxy(&dir), "Test")
+            remote_process::attach(sigint_logging_proxy(&dir), "Test", None)
                 .await
                 .expect("the proxy spawns");
-        let (other, _other_streams) = remote_process::attach(sigint_logging_proxy(&dir), "Test")
-            .await
-            .expect("the second session joins the proxy");
+        let (other, _other_streams) =
+            remote_process::attach(sigint_logging_proxy(&dir), "Test", None)
+                .await
+                .expect("the second session joins the proxy");
         let (proxy, grandchild) = read_pids(&dir).await;
         let monitor = TransportMonitor::new();
         monitor.arm_lease(detached.detacher());

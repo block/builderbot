@@ -34,6 +34,9 @@ const WAIT: Duration = Duration::from_secs(30);
 /// `linger` exists, when it keeps running until `release` does. With `silent`
 /// it logs neither starting nor reusing a process.
 ///
+/// It writes the frames in `preload`, if that exists, ahead of its answer to
+/// `initialize`: the running turn's, relayed as soon as `sq` attaches.
+///
 /// While `hold_load` exists it never answers `session/load`. A session it
 /// loads replays the frames in `replay` first, if that exists,
 /// with `@SID@` standing for the session id. A session it loads while
@@ -81,7 +84,9 @@ while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\(staged-[^"]*\)".*/\1/p')
   result='{}'
   case "$line" in
-    *'"method":"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}' ;;
+    *'"method":"initialize"'*)
+      [ -f "$dir/preload" ] && cat "$dir/preload"
+      result='{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}' ;;
     *'"method":"session/new"'*) n=$((n+1)); result="{\"sessionId\":\"sess-$$-$n\"}" ;;
     *'"method":"session/load"'*)
       [ -f "$dir/hold_load" ] && continue
@@ -270,6 +275,23 @@ impl FakeSq {
             })
             .collect();
         std::fs::write(self.dir.join("replay"), frames).unwrap();
+    }
+
+    /// Have the agent relay these `session/update`s for `session` as soon as
+    /// it is attached to, ahead of its answer to `initialize`.
+    fn preload(&self, session: &str, updates: &[serde_json::Value]) {
+        let frames: String = updates
+            .iter()
+            .map(|update| {
+                let frame = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"sessionId": session, "update": update},
+                });
+                format!("{frame}\n")
+            })
+            .collect();
+        std::fs::write(self.dir.join("preload"), frames).unwrap();
     }
 
     /// Leave every `session/load` unanswered.
@@ -1669,9 +1691,11 @@ async fn two_quiet_reattached_turns_of_one_instance_are_told_apart() {
 }
 
 /// A process dedicated to the turn's session has no co-tenants to hide the
-/// turn's end behind, and runs unattended, so asks no permission: a turn
-/// quiet there is busy in a long, silent tool. It is waited on past the
-/// quiet cap, until bloxlet reports the process idle, and never cancelled.
+/// turn's end behind, and Claude there runs unattended (`bypassPermissions`),
+/// so asks no permission: a turn quiet there is busy in a long, silent tool.
+/// It is waited on past the quiet cap, until bloxlet reports the process
+/// idle, and never cancelled. (A dedicated Codex process, which does ask,
+/// keeps the cap: see `only_a_dedicated_unattended_agent_is_waited_on_past_the_quiet_cap`.)
 #[tokio::test(flavor = "current_thread")]
 async fn a_quiet_reattached_turn_on_a_dedicated_process_is_not_capped() {
     LocalSet::new()
@@ -1777,6 +1801,89 @@ async fn a_stored_running_call_the_reattached_replay_finished_is_completed() {
             assert_eq!(
                 log.rows(),
                 ["status:t1:completed", "tool_result:t1:3 passed"]
+            );
+        })
+        .await;
+}
+
+/// The rows a reattach to the session's own process records when the agent
+/// relays a tool call's `tool_call` and completion as soon as the proxy
+/// attaches, ahead of the `session/load` (`replayed`: the load's replay
+/// holds the call too).
+async fn rows_of_a_call_relayed_before_the_load(label: &str, replayed: bool) -> Vec<String> {
+    use super::attach::{stored_with_running_call, TranscriptLog, TranscriptStore};
+    let sq = FakeSq::new(label);
+    sq.reuse("cmd-earlier");
+    sq.set_commands(
+        r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+        "[]",
+    );
+    let started = serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "t2",
+        "title": "Run", "rawInput": {"command": "cargo test"}, "status": "pending"});
+    let completed = serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "t2",
+        "status": "completed",
+        "content": [{"type": "content", "content": {"type": "text", "text": "ok"}}]});
+    sq.preload("sess-earlier", &[started.clone(), completed.clone()]);
+    let mut replay = vec![
+        serde_json::json!({"sessionUpdate": "user_message_chunk", "messageId": "u1",
+            "content": {"type": "text", "text": "hi"}}),
+        serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run",
+            "status": "pending"}),
+        serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "3 passed"}}]}),
+    ];
+    if replayed {
+        replay.extend([started, completed]);
+    }
+    sq.replay(&replay);
+    let log = Arc::new(TranscriptLog::default());
+    let reattached = Reattach::default().start_on(
+        sq.blox_driver(Some("claude"), "staged-session"),
+        &sq,
+        Arc::new(TranscriptStore(stored_with_running_call())),
+        log.clone(),
+    );
+    wait_until("the turn is being watched", || sq.checks() > 0).await;
+
+    sq.set_commands(
+        r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+        "[]",
+    );
+    let outcome = reattached.await.unwrap();
+    assert!(
+        matches!(outcome, Ok(AgentRunOutcome::Completed)),
+        "{outcome:?}"
+    );
+    log.rows()
+}
+
+/// The proxy routes a reattached session's frames to its connection from
+/// the start, so a tool call the agent announced before the load — once:
+/// the Claude bridge sends only updates after its `tool_call` — is not lost
+/// with its title, leaving its updates nothing to land on. Absent from the
+/// replay (the agent had not written it to its transcript yet), it is
+/// recorded once the replay is over; in the replay too, it is recorded once.
+#[tokio::test(flavor = "current_thread")]
+async fn a_tool_call_relayed_before_the_reattached_load_is_recorded_once() {
+    LocalSet::new()
+        .run_until(async {
+            let expected = [
+                "status:t1:completed",
+                "tool_result:t1:3 passed",
+                "tool_call:t2",
+                "status:t2:completed",
+                "tool_result:t2:ok",
+            ];
+            assert_eq!(
+                rows_of_a_call_relayed_before_the_load("reattach-preload", false).await,
+                expected,
+                "the call the replay lacks is recorded after it"
+            );
+            assert_eq!(
+                rows_of_a_call_relayed_before_the_load("reattach-preload-replayed", true).await,
+                expected,
+                "the call the replay holds is recorded from it alone"
             );
         })
         .await;

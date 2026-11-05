@@ -385,7 +385,7 @@ impl log::Log for StderrLogger {
 
 static LOGGER: OnceLock<StderrLogger> = OnceLock::new();
 
-fn install_logger() {
+pub(super) fn install_logger() {
     let logger = LOGGER.get_or_init(|| StderrLogger {
         started: Instant::now(),
         print_level: match std::env::var("ACP_REAL_BRIDGE_LOG").as_deref() {
@@ -401,7 +401,7 @@ fn install_logger() {
 }
 
 /// Whether the driver logged a line containing `needle` (any level).
-fn logged(needle: &str) -> bool {
+pub(super) fn logged(needle: &str) -> bool {
     LOGGER.get().is_some_and(|logger| {
         logger
             .lines

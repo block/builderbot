@@ -297,9 +297,30 @@ pub(crate) fn names_a_staged_session(argv: &[String]) -> bool {
     }
 }
 
+/// The known agent a [`BloxAcpCommand`] dedicated to one Staged session runs
+/// (see [`names_a_staged_session`]): Goose behind its `sh -c` wrapper, or the
+/// agent whose command leads the argv. `None` for an argv that names no
+/// session, or whose command is no known agent's.
+pub(crate) fn staged_session_agent(argv: &[String]) -> Option<&'static str> {
+    if !names_a_staged_session(argv) {
+        return None;
+    }
+    let command = match argv {
+        [sh, c, exec, _tag, command, ..] if sh == "sh" && c == "-c" && exec == "exec \"$@\"" => {
+            command
+        }
+        [command, ..] => command,
+        [] => return None,
+    };
+    KNOWN_AGENTS
+        .iter()
+        .find(|agent| agent.command == command)
+        .map(|agent| agent.id)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{blox_acp_command, command_in_dir, names_a_staged_session};
+    use super::{blox_acp_command, command_in_dir, names_a_staged_session, staged_session_agent};
     use std::fs;
     use std::path::Path;
 
@@ -438,5 +459,23 @@ mod tests {
         assert!(!names_a_staged_session(&[]));
         let goose_unwrapped: Vec<String> = ["goose", "acp"].map(String::from).to_vec();
         assert!(!names_a_staged_session(&goose_unwrapped));
+    }
+
+    /// A dedicated argv, in either form, says which agent it runs; one that
+    /// names no session, or runs no known agent, doesn't.
+    #[test]
+    fn dedicated_argv_names_its_agent() {
+        for agent in ["claude", "codex", "goose", "pi", "amp"] {
+            let blox = blox_acp_command(Some(agent), "s1");
+            assert_eq!(staged_session_agent(&blox.argv), Some(agent));
+        }
+        assert_eq!(
+            staged_session_agent(&blox_acp_command(None, "s1").argv),
+            None
+        );
+        let unknown: Vec<String> = ["my-acp", "--staged-session=s1"].map(String::from).to_vec();
+        assert_eq!(staged_session_agent(&unknown), None);
+        let goose_unwrapped: Vec<String> = ["goose", "acp"].map(String::from).to_vec();
+        assert_eq!(staged_session_agent(&goose_unwrapped), None);
     }
 }

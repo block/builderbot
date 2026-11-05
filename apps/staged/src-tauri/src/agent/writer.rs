@@ -64,6 +64,11 @@ pub struct MessageWriter {
     tool_result_rows: Mutex<HashMap<String, i64>>,
 }
 
+/// The title of a tool call recorded from an update that names none (see
+/// [`MessageWriter::update_tool_call_title`]); a later update's title
+/// replaces it.
+const UNTITLED_TOOL_CALL: &str = "Tool call";
+
 /// Strip backticks from agent-provided tool-call titles.
 fn sanitize_title(title: &str) -> String {
     title.replace('`', "")
@@ -322,6 +327,11 @@ impl MessageWriter {
     ///
     /// When `title` is `None`, the last-known title stored at recording time
     /// is reused so that a `raw_input`-only update doesn't blank the name.
+    ///
+    /// A call with no row yet — its `tool_call` never reached this session,
+    /// as when a connection was lost and re-made around it — gets one here,
+    /// from what the update carries, so the updates and result after it land
+    /// on a titled call rather than on nothing.
     pub async fn update_tool_call_title(
         &self,
         tool_call_id: &str,
@@ -329,18 +339,25 @@ impl MessageWriter {
         raw_input: Option<&serde_json::Value>,
     ) {
         let mut rows = self.tool_call_rows.lock().await;
-        if let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) {
-            let effective_title = match title {
-                Some(t) => {
-                    let sanitized = sanitize_title(t);
-                    *stored_title = sanitized.clone();
-                    sanitized
-                }
-                None => stored_title.clone(),
-            };
-            let content = format_tool_call_content(&effective_title, raw_input);
-            let _ = self.store.update_message_content(*row_id, &content);
-        }
+        let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) else {
+            drop(rows);
+            log::warn!(
+                "Tool call {tool_call_id} updated before it was recorded; recording it from the update"
+            );
+            let title = title.unwrap_or(UNTITLED_TOOL_CALL);
+            self.record_tool_call(tool_call_id, title, raw_input).await;
+            return;
+        };
+        let effective_title = match title {
+            Some(t) => {
+                let sanitized = sanitize_title(t);
+                *stored_title = sanitized.clone();
+                sanitized
+            }
+            None => stored_title.clone(),
+        };
+        let content = format_tool_call_content(&effective_title, raw_input);
+        let _ = self.store.update_message_content(*row_id, &content);
     }
 
     /// Record the result/output of a tool call.
@@ -1083,6 +1100,93 @@ mod tests {
             messages[0].acp.acp_raw_input.as_ref().unwrap()["path"],
             "src/lib.rs"
         );
+    }
+
+    /// A `tool_call_update` for a call whose `tool_call` this session never
+    /// received, applied as the driver applies one (title, then metadata,
+    /// then result): the call gets a row from the update, titled, which its
+    /// metadata and later updates land on, rather than an untitled card of
+    /// bare metadata rows.
+    #[tokio::test]
+    async fn a_tool_call_update_with_no_call_row_records_the_call() {
+        let (store, session_id, writer) = setup_writer();
+        let raw_input = serde_json::json!({"command": "cargo test"});
+        let update = |status: &str| acp_client::AcpToolCallMetadata {
+            event_kind: Some("tool_call_update".to_string()),
+            tool_call_id: Some("tc-orphan".to_string()),
+            tool_status: Some(status.to_string()),
+            raw_input: Some(raw_input.clone()),
+            ..Default::default()
+        };
+
+        writer
+            .update_tool_call_title("tc-orphan", None, Some(&raw_input))
+            .await;
+        <MessageWriter as acp_client::MessageWriter>::record_tool_call_metadata(
+            &writer,
+            update("in_progress"),
+        )
+        .await;
+        writer
+            .update_tool_call_title("tc-orphan", Some("`cargo test`"), Some(&raw_input))
+            .await;
+        <MessageWriter as acp_client::MessageWriter>::record_tool_call_metadata(
+            &writer,
+            update("completed"),
+        )
+        .await;
+        writer.record_tool_result("tc-orphan", "3 passed").await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message.role.clone())
+            .collect();
+        assert_eq!(roles, [MessageRole::ToolCall, MessageRole::ToolResult]);
+        let call: serde_json::Value =
+            serde_json::from_str(&messages[0].content).expect("content should be valid JSON");
+        assert_eq!(
+            call["name"], "cargo test",
+            "a later title replaces the fallback"
+        );
+        assert_eq!(call["input"]["command"], "cargo test");
+        assert_eq!(
+            messages[0].acp.acp_tool_call_id.as_deref(),
+            Some("tc-orphan")
+        );
+        assert_eq!(
+            messages[0].acp.acp_tool_status.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(messages[1].content, "3 passed");
+
+        // An update with raw input but no title records the call under a
+        // stand-in title, between the text around it.
+        writer.append_text("Done.").await;
+        writer
+            .update_tool_call_title("tc-input-only", None, Some(&raw_input))
+            .await;
+        writer.append_text(" Next.").await;
+        writer.finalize().await;
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        let tail: Vec<_> = messages[2..]
+            .iter()
+            .map(|message| (message.role.clone(), message.content.as_str()))
+            .collect();
+        assert_eq!(tail.len(), 3, "{tail:?}");
+        assert_eq!(tail[0], (MessageRole::Assistant, "Done."));
+        assert_eq!(tail[1].0, MessageRole::ToolCall);
+        let call: serde_json::Value =
+            serde_json::from_str(tail[1].1).expect("content should be valid JSON");
+        assert_eq!(
+            call,
+            serde_json::json!({"name": "Tool call", "input": {"command": "cargo test"}})
+        );
+        assert_eq!(tail[2], (MessageRole::Assistant, " Next."));
     }
 
     /// An attach's writer completes the call the lost connection's writer

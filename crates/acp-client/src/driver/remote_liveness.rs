@@ -58,10 +58,11 @@ pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_millis(50);
 /// earlier connection never answered is not re-sent to a new one, so a turn
 /// blocked on one would otherwise run (and hold its branch's queue) forever.
 ///
-/// Only on a process other sessions may share (see
-/// [`Target::dedicated_to_a_session`]): one dedicated to the turn's session
-/// has no co-tenants, and runs unattended, so it asks no permission, while
-/// a long, silent tool is just as likely there.
+/// Not on a process dedicated to the turn's session whose agent runs
+/// unattended (see [`Target::reattached_turn_quiet_cap`]): it has no
+/// co-tenants and asks no permission, while a long, silent tool is just as
+/// likely there. A dedicated Codex, Pi or Amp process keeps the cap, since
+/// those agents ask.
 #[cfg(not(test))]
 pub(super) const REATTACHED_TURN_QUIET_CAP: Duration = Duration::from_secs(30 * 60);
 #[cfg(test)]
@@ -135,14 +136,22 @@ impl Target {
         })
     }
 
-    /// Whether the proxy asks `sq` for a process dedicated to one Staged
-    /// session: an argv naming it (see [`crate::types::names_a_staged_session`]).
-    /// A process pinned by `--command-id` is not known to be.
-    pub(super) fn dedicated_to_a_session(&self) -> bool {
-        match &self.requested {
+    /// How long a turn reattached to through this proxy may go quiet before
+    /// it is cancelled ([`REATTACHED_TURN_QUIET_CAP`]), or `None` to wait on
+    /// it for as long as bloxlet runs it. That is only for a process
+    /// dedicated to one Staged session (an argv naming it, see
+    /// [`crate::types::staged_session_agent`]) whose agent runs unattended
+    /// ([`super::blox_runs_unattended`]): nothing can block it on a
+    /// permission request, and no co-tenant hides its end. A process pinned
+    /// by `--command-id` is not known to be one.
+    pub(super) fn reattached_turn_quiet_cap(&self) -> Option<Duration> {
+        let alone_and_unattended = match &self.requested {
             Requested::Command(_) => false,
-            Requested::Argv(argv) => crate::types::names_a_staged_session(argv),
-        }
+            Requested::Argv(argv) => {
+                crate::types::staged_session_agent(argv).is_some_and(super::blox_runs_unattended)
+            }
+        };
+        (!alone_and_unattended).then_some(REATTACHED_TURN_QUIET_CAP)
     }
 
     /// The agent process the proxy asks `sq` for, for a log line.

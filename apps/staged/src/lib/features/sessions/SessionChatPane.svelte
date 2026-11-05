@@ -3197,6 +3197,7 @@
         reconcile={reconcileState}
         checkRequested={checkNowPending}
         stopping={cancelling}
+        {userScrolledUp}
         onCheckNow={handleCheckNow}
         onStop={handleCancel}
       />

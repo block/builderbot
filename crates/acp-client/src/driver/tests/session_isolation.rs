@@ -3,6 +3,7 @@
 //! named wait for it, and stopping a remote proxy takes its whole process
 //! group with it.
 
+use super::real_bridge::{install_logger, logged};
 use super::*;
 use crate::driver::UNNAMED_GATE_FRAME_LIMIT;
 use agent_client_protocol::schema::v1::{
@@ -204,6 +205,37 @@ async fn the_unnamed_gate_drops_its_oldest_frames_past_the_limit() {
 
     handler.name_session("mine").await;
     assert_eq!(writer.get_text().await, "kept");
+}
+
+/// A reattach is routed its running turn's frames while `initialize` is
+/// answered, so its own frames can be the ones pushed out: the oldest go,
+/// the rest are released in order, and naming the session says how many
+/// were lost.
+#[tokio::test]
+async fn an_overflowing_gate_drops_the_sessions_oldest_frames_and_says_so() {
+    install_logger();
+    let (writer, handler) = handler_with_writer();
+    handler.transition_to_live().await;
+
+    for index in 0..UNNAMED_GATE_FRAME_LIMIT + 3 {
+        handler
+            .session_notification(agent_text("overflowing", &format!("{index} ")))
+            .await
+            .expect("held");
+    }
+    handler.name_session("overflowing").await;
+
+    let expected: String = (3..UNNAMED_GATE_FRAME_LIMIT + 3)
+        .map(|index| format!("{index} "))
+        .collect();
+    assert_eq!(writer.get_text().await, expected);
+    assert!(
+        logged(&format!(
+            "ACP session overflowing: dropped the oldest 3 of its frames received before it was \
+             named, past the {UNNAMED_GATE_FRAME_LIMIT}-frame limit"
+        )),
+        "the overflow is logged"
+    );
 }
 
 #[derive(Default)]

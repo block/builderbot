@@ -32,11 +32,15 @@ pub(super) enum CatchUpStage {
     /// exceptions are text of a message still streaming, which an agent that
     /// writes messages to its transcript only once complete (the Claude
     /// bridge) cannot replay: that is kept, and recorded ahead of the
-    /// message's next live chunk, or once the replay is over; and an update
+    /// message's next live chunk, or once the replay is over; an update
     /// that settles a tool call, which an agent can send live only (the
     /// Claude bridge closes the calls a cancel left open without writing a
-    /// result): that is kept for a call the replay leaves running (see
-    /// [`CatchUpLedger::go_live`]).
+    /// result): that is kept for a call the replay leaves running; and a
+    /// tool call that started here, which an agent announces once (the
+    /// Claude bridge sends only updates after its `tool_call`) and may not
+    /// have written to its transcript by the load: that is kept, with every
+    /// frame for it after, and recorded once the replay is over unless the
+    /// replay showed the call (see [`CatchUpLedger::go_live`]).
     Held,
     /// `session/load` is out: the replay.
     Replay,
@@ -452,6 +456,11 @@ pub(super) struct CatchUpLedger {
     /// Held updates that settle a tool call: the first per call, in arrival
     /// order.
     held_settlements: Vec<(String, SessionUpdate)>,
+    /// Tool calls that started before the load: each call's `tool_call` and
+    /// every frame for it after, in arrival order, the calls in the order
+    /// they started. Bounded by the frames the own-session gate holds before
+    /// the session is named (see `UNNAMED_GATE_FRAME_LIMIT`).
+    held_calls: Vec<(String, Vec<SessionUpdate>)>,
     /// Messages with held text that went on streaming live beside the
     /// replay, which does not re-send them: their text is new as it comes.
     streaming: HashSet<String>,
@@ -496,6 +505,7 @@ impl CatchUpLedger {
             held: HashMap::new(),
             held_order: Vec::new(),
             held_settlements: Vec::new(),
+            held_calls: Vec::new(),
             streaming: HashSet::new(),
             prompts: PromptLedger::new(stored),
         }
@@ -508,24 +518,37 @@ impl CatchUpLedger {
     /// The replay is over; from here every frame is the turn's live stream.
     /// Returns what to record before the next live frame: the held text of
     /// each message the replay stage carried nothing for, in the order the
-    /// messages first appeared, then the held settling of each call the
-    /// transcript or the replay holds that is still running.
+    /// messages first appeared; then each call that started before the load
+    /// and that neither the transcript nor the replay holds, its `tool_call`
+    /// and the frames after it in arrival order; then the held settling of
+    /// each call the transcript or the replay holds that is still running.
     pub(super) fn go_live(&mut self) -> Vec<SessionUpdate> {
         self.prompts.close();
         self.stage = CatchUpStage::Live;
         let mut held = std::mem::take(&mut self.held);
-        let text = std::mem::take(&mut self.held_order)
+        let mut pending: Vec<SessionUpdate> = std::mem::take(&mut self.held_order)
             .into_iter()
             .filter_map(|id| held.remove(&id))
             .filter(|message| !message.text.is_empty())
             .map(|message| {
                 SessionUpdate::AgentMessageChunk(with_text(&message.first, &message.text))
-            });
+            })
+            .collect();
+        for (id, frames) in std::mem::take(&mut self.held_calls) {
+            if !self.tool_calls.insert(id.clone()) {
+                continue;
+            }
+            if frames.iter().any(|frame| settled_call_id(frame).is_some()) {
+                self.settled_tool_calls.insert(id);
+            }
+            pending.extend(frames);
+        }
         let settlements = std::mem::take(&mut self.held_settlements)
             .into_iter()
             .filter(|(id, _)| self.tool_calls.contains(id) && !self.settled_tool_calls.contains(id))
             .map(|(_, update)| update);
-        text.chain(settlements).collect()
+        pending.extend(settlements);
+        pending
     }
 
     /// Whether the replay re-sent the newest stored prompt (see
@@ -588,6 +611,13 @@ impl CatchUpLedger {
             }
             SessionUpdate::ToolCallUpdate(tool_update) => {
                 let id = tool_update.tool_call_id.0.to_string();
+                // A live update of a call that started before the load, which
+                // the replay has not shown: the call has no row yet, so the
+                // update waits with its `tool_call` (see `Self::go_live`).
+                if !self.tool_calls.contains(&id) && self.holds_call(&id) {
+                    self.hold(update);
+                    return LiveAction::Drop;
+                }
                 if self.settled_tool_calls.contains(&id) {
                     return LiveAction::Drop;
                 }
@@ -637,9 +667,12 @@ impl CatchUpLedger {
     }
 
     /// Keep a held text chunk that names its message, in case the replay
-    /// never re-sends that message, and a held update that settles a tool
-    /// call, in case the replay leaves the call running.
+    /// never re-sends that message; a held update that settles a tool call,
+    /// in case the replay leaves the call running; and a held `tool_call`
+    /// with every frame for it after, in case the replay does not hold the
+    /// call at all.
     fn hold(&mut self, update: &SessionUpdate) {
+        self.hold_call_frame(update);
         if let Some(id) = settled_call_id(update) {
             if !self.held_settlements.iter().any(|(held, _)| *held == id) {
                 self.held_settlements.push((id, update.clone()));
@@ -666,6 +699,26 @@ impl CatchUpLedger {
                 );
             }
         }
+    }
+
+    /// Keep `update` with the held frames of its tool call: a `tool_call`
+    /// opens the call's entry, and every frame for it after joins it.
+    fn hold_call_frame(&mut self, update: &SessionUpdate) {
+        let (id, starts) = match update {
+            SessionUpdate::ToolCall(call) => (call.tool_call_id.0.as_ref(), true),
+            SessionUpdate::ToolCallUpdate(update) => (update.tool_call_id.0.as_ref(), false),
+            _ => return,
+        };
+        match self.held_calls.iter_mut().find(|(held, _)| held == id) {
+            Some((_, frames)) => frames.push(update.clone()),
+            None if starts => self.held_calls.push((id.to_string(), vec![update.clone()])),
+            None => {}
+        }
+    }
+
+    /// Whether tool call `id` started before the load.
+    fn holds_call(&self, id: &str) -> bool {
+        self.held_calls.iter().any(|(held, _)| held == id)
     }
 
     /// What a replay-stage text chunk records for a message with text held
@@ -1182,16 +1235,19 @@ mod tests {
     fn held_frames_are_dropped_and_live_text_is_recorded_as_is() {
         let mut ledger = CatchUpLedger::new(&[boundary("assistant", "Hello ", Some("m1"), None)]);
         assert!(matches!(
-            ledger.action_for(&tool_call("t9")),
+            ledger.action_for(&text(None, "no id")),
             LiveAction::Drop
         ));
         assert!(matches!(
-            ledger.action_for(&text(None, "no id")),
+            ledger.action_for(&tool_update("t9", None, Some("progress"))),
             LiveAction::Drop
         ));
         assert!(!ledger.accepts_results());
         ledger.set_stage(CatchUpStage::Replay);
-        assert!(ledger.go_live().is_empty(), "nothing named was held");
+        assert!(
+            ledger.go_live().is_empty(),
+            "nothing named was held, and an update without its call is not kept"
+        );
         assert!(ledger.accepts_results());
         // A live delta of the stored message is new text, even where it
         // happens to repeat the stored text.
@@ -1199,12 +1255,57 @@ mod tests {
             appended(ledger.action_for(&text(Some("m1"), "Hello"))),
             Some("Hello".to_string())
         );
-        // The held tool call was not recorded, so the replay or the live
-        // stream still can.
+    }
+
+    /// A call that started before the load, which the agent had not written
+    /// to its transcript by then: the replay never shows it, and the agent
+    /// announces a call once, so its `tool_call` and the updates after it —
+    /// held, or live beside the replay — are recorded once the replay is
+    /// over, in arrival order, ahead of its live updates.
+    #[test]
+    fn a_held_call_the_replay_does_not_hold_is_recorded_after_it() {
+        let mut ledger = CatchUpLedger::new(&[stored_call("t1", Some("completed"))]);
+        let started = tool_call("t2");
+        let running = tool_update("t2", Some(ToolCallStatus::InProgress), Some("cargo test"));
+        let finished = tool_update("t2", Some(ToolCallStatus::Completed), Some("3 passed"));
+        for update in [&started, &running] {
+            assert!(matches!(ledger.action_for(update), LiveAction::Drop));
+        }
+        ledger.set_stage(CatchUpStage::Replay);
+        assert!(recorded_tool(ledger.action_for(&tool_call("t1"))).is_none());
+        assert!(
+            matches!(ledger.action_for(&finished), LiveAction::Drop),
+            "the call has no row to land on until the replay is over"
+        );
+        assert_eq!(
+            ledger.go_live(),
+            vec![started.clone(), running, finished.clone()]
+        );
+        assert!(recorded_tool(ledger.action_for(&tool_update("t2", None, Some("late")))).is_some());
+
+        // Nothing is recorded twice: a call the transcript holds is the
+        // replay's to settle, and a held call the replay showed is its.
+        let mut ledger = CatchUpLedger::new(&[stored_call("t1", Some("pending"))]);
+        ledger.action_for(&tool_call("t1"));
+        ledger.set_stage(CatchUpStage::Replay);
+        assert!(ledger.go_live().is_empty());
+    }
+
+    /// The agent wrote the call to its transcript before the load: the
+    /// replay's copy is the one recorded, and the held copy is dropped.
+    #[test]
+    fn a_held_call_the_replay_resends_is_recorded_once() {
+        let mut ledger = CatchUpLedger::new(&[]);
+        let started = tool_call("t2");
+        assert!(matches!(ledger.action_for(&started), LiveAction::Drop));
+        ledger.action_for(&tool_update("t2", None, Some("cargo test")));
+        ledger.set_stage(CatchUpStage::Replay);
         assert!(matches!(
-            ledger.action_for(&tool_call("t9")),
+            ledger.action_for(&started),
             LiveAction::RecordToolCall { .. }
         ));
+        assert!(recorded_tool(ledger.action_for(&tool_update("t2", None, Some("live")))).is_some());
+        assert!(ledger.go_live().is_empty());
     }
 
     /// The final message, still streaming when the attach connects: the
@@ -1266,8 +1367,13 @@ mod tests {
         );
         let pending = ledger.go_live();
         assert_eq!(
-            texts(&pending),
+            texts(&pending[..2]),
             vec!["first part, second part, ", "Another, "]
+        );
+        assert_eq!(
+            pending[2..],
+            [tool_call("t1")],
+            "a held call goes after the text"
         );
         assert_eq!(
             appended(ledger.action_for(&text(Some("m1"), "the end."))),

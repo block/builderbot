@@ -934,9 +934,13 @@ impl SessionRegistry {
     }
 
     /// Mark `session_id`'s run as reattaching to its remote turn, returning
-    /// what fires when a [`Self::detach`] finds no connection up to kill: the
-    /// reattach then gives up, and the run leaves the turn running on the
-    /// workstation. A token that never fires for a session with no entry.
+    /// the token every [`Self::detach`] of the entry fires from then on,
+    /// whether or not it also killed a live connection: the reattach stops
+    /// (between attempts, while one connects, or once a detached attempt
+    /// returns) and tries nothing again, and the run leaves the turn running
+    /// on the workstation and the row `disconnected`. `detach`'s only caller
+    /// is a quit, so nothing else ends a reattach this way. A token that
+    /// never fires for a session with no entry.
     fn reattaching(&self, session_id: &str) -> CancellationToken {
         let token = CancellationToken::new();
         if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
@@ -2236,6 +2240,15 @@ impl ReattachEnd {
 
     /// How one attempt's connection settled; `Err` when none came up, which
     /// left a Stop meanwhile unsent.
+    ///
+    /// A Stop on a connection that saw its transport go is unacknowledged
+    /// too, whatever the connection made of it: a reattached turn is always
+    /// in flight on the agent, and a Stop that lands while a dead proxy is
+    /// still being torn down (bloxlet asked what became of the agent) settles
+    /// the attempt cancelled without its `session/cancel` ever reaching the
+    /// workstation. This is the reattach's form of the first connection's
+    /// Stop-over-Turn-loss rule in
+    /// [`disconnect::stopped_turn_needs_fresh_cancel`].
     fn settled(
         settled: Result<acp_client::SessionSettled, String>,
         cancel_token: &CancellationToken,
@@ -2243,7 +2256,8 @@ impl ReattachEnd {
         match settled {
             Ok(settled) => Self {
                 result: settled.outcome,
-                cancel_unacknowledged: settled.cancel_unacknowledged,
+                cancel_unacknowledged: settled.cancel_unacknowledged
+                    || (cancel_token.is_cancelled() && settled.transport_loss.is_some()),
             },
             Err(error) => Self {
                 result: Err(error),
@@ -7554,6 +7568,29 @@ mod tests {
             &CancellationToken::new(),
         );
         assert!(!not_stopped.cancel_unacknowledged);
+
+        // Stopped while the reattached proxy's teardown asked bloxlet what
+        // became of the agent: the connection maps its lost turn to
+        // `Cancelled` with the cancel never sent, and says nothing of it but
+        // the loss. The turn is cancelled again all the same.
+        for phase in [
+            acp_client::TransportLossPhase::Turn,
+            acp_client::TransportLossPhase::Setup,
+            acp_client::TransportLossPhase::Hold,
+        ] {
+            let lost = acp_client::SessionSettled {
+                transport_loss: Some(acp_client::TransportLoss { phase }),
+                ..reattached_connection_settled(false)
+            };
+            let end = ReattachEnd::settled(Ok(lost.clone()), &cancel);
+            assert!(end.cancel_unacknowledged, "{phase:?}");
+            assert!(needs_fresh_cancel(&end, false), "{phase:?}");
+            assert!(!needs_fresh_cancel(&end, true), "a quit's, {phase:?}");
+
+            // The same loss with no Stop is no Stop to repeat.
+            let unstopped = ReattachEnd::settled(Ok(lost), &CancellationToken::new());
+            assert!(!unstopped.cancel_unacknowledged, "{phase:?}");
+        }
     }
 
     /// A quit's cancel is no Stop: whatever a connection made of it, the

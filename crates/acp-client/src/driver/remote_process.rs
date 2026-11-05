@@ -452,11 +452,13 @@ impl ReattachedTurn {
     /// [`super::ReattachTurn::sole_turn_of_owner`]), or else when bloxlet
     /// reports its agent process idle. bloxlet tracks prompts per process, so
     /// on a process other sessions may share the latter also waits out
-    /// prompts they have in flight — at most until the turn's session has
-    /// heard nothing for [`remote_liveness::REATTACHED_TURN_QUIET_CAP`], when
-    /// the turn is cancelled (see [`Self::cancel_quiet_turn`]). A process
-    /// dedicated to the turn's session is waited on for as long as bloxlet
-    /// runs it.
+    /// prompts they have in flight; and an agent that asks permission may be
+    /// blocked on a request the lost connection never answered. So the wait
+    /// lasts at most until the turn's session has heard nothing for
+    /// [`remote_liveness::REATTACHED_TURN_QUIET_CAP`], when the turn is
+    /// cancelled (see [`Self::cancel_quiet_turn`]). A process dedicated to the
+    /// turn's session whose agent runs unattended is waited on for as long as
+    /// bloxlet runs it (see [`remote_liveness::Target::reattached_turn_quiet_cap`]).
     ///
     /// Fails with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the
     /// cause when the process that ran the turn is gone: `sq` found none to
@@ -476,8 +478,7 @@ impl ReattachedTurn {
             self.process.describe()
         );
         let watching_from = Instant::now();
-        let quiet_cap = (!self.target.dedicated_to_a_session())
-            .then_some(remote_liveness::REATTACHED_TURN_QUIET_CAP);
+        let quiet_cap = self.target.reattached_turn_quiet_cap();
         let poll = async {
             loop {
                 match remote_liveness::check(&self.target, &command_id).await {
@@ -740,9 +741,15 @@ impl ReattachedTurnStop {
 
 /// Attach a session to the remote agent proxy `cmd` runs, starting it unless
 /// another session already holds it. `cmd` must pipe all three stdio streams.
+/// `owns` is the agent session a reattach is about to load, routed to this
+/// connection from the moment it attaches (see
+/// [`RemoteSessionRouter::attach_owning`](super::remote_routing::RemoteSessionRouter::attach_owning)).
+/// A proxy this call starts relays nothing before then: `sq` has yet to
+/// connect to the workstation.
 pub(super) async fn attach(
     cmd: Command,
     label: &str,
+    owns: Option<&str>,
 ) -> io::Result<(RemoteProcessLease, RoutedClientStreams)> {
     let key = ProxyKey {
         program: cmd.as_std().get_program().to_owned(),
@@ -769,7 +776,7 @@ pub(super) async fn attach(
                         process.describe(),
                         *leases - 1
                     );
-                    return Ok(lease(key, Arc::clone(process), false));
+                    return Ok(lease(key, Arc::clone(process), false, owns));
                 }
                 Some(Entry::Stopping { stopped, .. }) => stopped.clone(),
                 None => {
@@ -784,7 +791,7 @@ pub(super) async fn attach(
                             leases: 1,
                         },
                     );
-                    return Ok(lease(key, process, true));
+                    return Ok(lease(key, process, true, owns));
                 }
             }
         };
@@ -797,8 +804,9 @@ fn lease(
     key: ProxyKey,
     process: Arc<SharedProcess>,
     created_proxy: bool,
+    owns: Option<&str>,
 ) -> (RemoteProcessLease, RoutedClientStreams) {
-    let streams = process.transport.attach();
+    let streams = process.transport.attach_owning(owns);
     let lease = RemoteProcessLease {
         key,
         process,

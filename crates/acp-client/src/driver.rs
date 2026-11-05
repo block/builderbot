@@ -1443,6 +1443,14 @@ impl AcpDriver {
             .as_ref()
             .is_some_and(|blox| !blox.command.dedicated)
     }
+
+    /// Whether this driver's remote process is its Staged session's own (see
+    /// [`crate::types::BloxAcpCommand::dedicated`]).
+    fn runs_dedicated_remote_process(&self) -> bool {
+        self.blox_process
+            .as_ref()
+            .is_some_and(|blox| blox.command.dedicated)
+    }
 }
 
 /// Environment for the remote ACP process so the provider never blocks on a
@@ -1466,6 +1474,17 @@ pub fn blox_unattended_session_mode(agent_id: &str) -> Option<&'static str> {
         "claude" => Some("bypassPermissions"),
         _ => None,
     }
+}
+
+/// Whether `agent_id` runs on Blox without asking permission: Goose through
+/// [`blox_acp_env_vars`]' `GOOSE_MODE=auto`, Claude through
+/// [`blox_unattended_session_mode`]'s `bypassPermissions` (best-effort: the
+/// switch is skipped if the bridge doesn't offer the mode). Codex, Pi and Amp
+/// have no such knob. They rely on Staged answering `session/request_permission`
+/// itself, and a request a lost connection left unanswered is not re-sent to
+/// the next one, so their turns can wedge on it.
+pub(crate) fn blox_runs_unattended(agent_id: &str) -> bool {
+    !blox_acp_env_vars(agent_id).is_empty() || blox_unattended_session_mode(agent_id).is_some()
 }
 
 /// Shell-escape a value by wrapping it in single quotes with interior quotes
@@ -2473,7 +2492,18 @@ impl AcpDriver {
             // Connections with the same argv share one proxy that stops only
             // when the last of them is done, and its output is routed so
             // only this session's frames reach this connection.
-            let (lease, streams) = remote_process::attach(cmd, &self.agent_label)
+            //
+            // A reattach to this session's own process gets the turn's frames
+            // from the moment the proxy connects, ahead of the `session/load`
+            // that would claim them: routed here from the start, they wait at
+            // the own-session gate and go through the catch-up with the
+            // replay, instead of being dropped as nobody's — losing a
+            // `tool_call` the replay may not hold yet, and leaving its later
+            // updates without a call to land on.
+            let owns = reattach
+                .filter(|_| self.runs_dedicated_remote_process())
+                .map(|turn| turn.agent_session_id.as_str());
+            let (lease, streams) = remote_process::attach(cmd, &self.agent_label, owns)
                 .await
                 .map_err(spawn_error)?;
             let exited = lease.exited().clone();
@@ -4271,16 +4301,23 @@ enum SessionGate {
     /// Neither `session/new` nor `session/load` has named the connection's
     /// session yet. Frames wait here, each with the session id it was stamped
     /// with, until [`AcpNotificationHandler::name_session`] keeps this
-    /// session's and drops the rest.
-    Unnamed(VecDeque<(String, GatedFrame)>),
+    /// session's and drops the rest. `dropped` counts, per session, the
+    /// frames pushed out past [`UNNAMED_GATE_FRAME_LIMIT`].
+    Unnamed {
+        held: VecDeque<(String, GatedFrame)>,
+        dropped: HashMap<String, usize>,
+    },
     Named(String),
 }
 
-/// Most frames held at an unnamed gate. Past it the oldest is dropped: the
-/// only frames of the connection's own session that can arrive unnamed are
-/// the handful that race the `session/new` response, so they are the newest,
-/// and anything older belongs to another session's turn.
-const UNNAMED_GATE_FRAME_LIMIT: usize = 256;
+/// Most frames held at an unnamed gate. Past it the oldest is dropped, and
+/// naming the session logs how many of its own went. The connection's own
+/// frames that arrive unnamed are the handful that race the `session/new`
+/// response, or, on a reattach routed its session's frames from the start
+/// (see `remote_process::attach`), the running turn's while `initialize` is
+/// answered; anything older on a shared bridge belongs to another session's
+/// turn.
+const UNNAMED_GATE_FRAME_LIMIT: usize = 1024;
 
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
@@ -4370,7 +4407,10 @@ impl AcpNotificationHandler {
         let turn_permission_token = std::sync::Mutex::new(permission_cancel_token.child_token());
         Self {
             writer,
-            session_gate: Mutex::new(SessionGate::Unnamed(VecDeque::new())),
+            session_gate: Mutex::new(SessionGate::Unnamed {
+                held: VecDeque::new(),
+                dropped: HashMap::new(),
+            }),
             response: Mutex::new(response_completion::ResponseState::default()),
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
@@ -4416,7 +4456,7 @@ impl AcpNotificationHandler {
         let gate = self.session_gate.lock().await;
         let session_id = match &*gate {
             SessionGate::Named(own) => Some(own.clone()),
-            SessionGate::Unnamed(_) => None,
+            SessionGate::Unnamed { .. } => None,
         };
         let mut response = self.response.lock().await;
         let pending = match &mut *self.phase.lock().await {
@@ -4514,8 +4554,10 @@ impl AcpNotificationHandler {
 
     async fn name_session_into(&self, session_id: &str, stage: Option<catch_up::CatchUpStage>) {
         let mut gate = self.session_gate.lock().await;
-        let held = match &mut *gate {
-            SessionGate::Unnamed(held) => std::mem::take(held),
+        let (held, dropped) = match &mut *gate {
+            SessionGate::Unnamed { held, dropped } => {
+                (std::mem::take(held), dropped.remove(session_id))
+            }
             SessionGate::Named(own) => {
                 debug_assert!(false, "the ACP session is named once per connection");
                 log::warn!("ACP session {own}: ignoring a second name ({session_id})");
@@ -4524,6 +4566,12 @@ impl AcpNotificationHandler {
         };
         *gate = SessionGate::Named(session_id.to_string());
         self.transport.session_named();
+        if let Some(dropped) = dropped {
+            log::warn!(
+                "ACP session {session_id}: dropped the oldest {dropped} of its frames received \
+                 before it was named, past the {UNNAMED_GATE_FRAME_LIMIT}-frame limit"
+            );
+        }
         // Still holding the gate, so a frame arriving meanwhile waits behind
         // the held ones and arrival order is kept.
         for (frame_session_id, frame) in held {
@@ -4561,13 +4609,14 @@ impl AcpNotificationHandler {
                 );
                 None
             }
-            SessionGate::Unnamed(held) => {
+            SessionGate::Unnamed { held, dropped } => {
                 if held.len() >= UNNAMED_GATE_FRAME_LIMIT {
                     if let Some((dropped_session_id, _)) = held.pop_front() {
                         log::debug!(
                             "dropping the oldest frame held before the session was named \
                              (for {dropped_session_id})"
                         );
+                        *dropped.entry(dropped_session_id).or_default() += 1;
                     }
                 }
                 held.push_back((session_id.to_string(), frame));

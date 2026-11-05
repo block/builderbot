@@ -828,7 +828,8 @@ fn parse_rfc3339_millis(value: &str) -> Option<i64> {
 
     let (time, offset_seconds) = if let Some(time) = time_and_offset.strip_suffix('Z') {
         (time, 0)
-    } else if let Some(pos) = time_and_offset.rfind(['+', '-']) {
+    } else {
+        let pos = time_and_offset.rfind(['+', '-'])?;
         let sign = if time_and_offset.as_bytes().get(pos) == Some(&b'-') {
             -1
         } else {
@@ -840,8 +841,6 @@ fn parse_rfc3339_millis(value: &str) -> Option<i64> {
         let hours: i32 = hours.parse().ok()?;
         let minutes: i32 = minutes.parse().ok()?;
         (time, sign * (hours * 3600 + minutes * 60))
-    } else {
-        return None;
     };
 
     let mut time_parts = time.split(':');
@@ -1208,7 +1207,10 @@ mod tests {
         let gated_elsewhere = queued_push_depending_on(&store, &branch, &other.id);
         let dependent = queued_push_depending_on(&store, &branch, &paused.id);
 
-        assert!(queued_rows_all_depend_on(&[dependent.clone()], &paused.id));
+        assert!(queued_rows_all_depend_on(
+            std::slice::from_ref(&dependent),
+            &paused.id
+        ));
         assert!(!queued_rows_all_depend_on(
             &[dependent, gated_elsewhere],
             &paused.id

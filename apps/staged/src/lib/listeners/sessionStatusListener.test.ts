@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
  *
  * The rune-based stores can't be imported under plain vitest, so the registry
  * is replaced with a functional in-memory fake that mirrors the real
- * register/cleanup semantics.
+ * register/cleanup semantics. The disconnected-sessions store is the real one,
+ * loaded with `$state` stubbed as identity.
  */
 
 interface FakeMetadata {
@@ -70,6 +71,7 @@ function createFakeWorkflowStore(
 
 describe('sessionStatusListener busy-state hydration', () => {
   let getActiveSessions: ReturnType<typeof vi.fn>;
+  let getSessionReconcileStates: ReturnType<typeof vi.fn>;
   let getSession: ReturnType<typeof vi.fn>;
   let invalidateBranchTimeline: ReturnType<typeof vi.fn>;
   let getFreshSessionMessages: ReturnType<typeof vi.fn>;
@@ -109,7 +111,9 @@ describe('sessionStatusListener busy-state hydration', () => {
     vi.resetModules();
     vi.useFakeTimers({ now: 1_000 });
 
+    vi.stubGlobal('$state', (value: unknown) => value);
     getActiveSessions = vi.fn().mockResolvedValue([]);
+    getSessionReconcileStates = vi.fn().mockResolvedValue([]);
     getSession = vi.fn().mockResolvedValue(null);
     invalidateBranchTimeline = vi.fn();
     getFreshSessionMessages = vi.fn().mockResolvedValue([]);
@@ -119,10 +123,16 @@ describe('sessionStatusListener busy-state hydration', () => {
     toastError = vi.fn();
     unlistenEvents = vi.fn();
     eventCallbacks = new Map();
-    listenToEvent = vi.fn((event: string, callback: (payload: unknown) => void) => {
-      eventCallbacks.set(event, callback);
-      return unlistenEvents;
-    });
+    listenToEvent = vi.fn(
+      (
+        event: string,
+        callback: (payload: unknown) => void,
+        _options?: { onEstablished?: () => void }
+      ) => {
+        eventCallbacks.set(event, callback);
+        return unlistenEvents;
+      }
+    );
     projectStateStore = {
       addRunningSession: vi.fn(),
       removeRunningSession: vi.fn<(projectId: string, sessionId: string) => void>(),
@@ -157,6 +167,7 @@ describe('sessionStatusListener busy-state hydration', () => {
     vi.doMock('../transport', () => ({ isTauri: true, listenToEvent }));
     vi.doMock('../commands', () => ({
       getActiveSessions,
+      getSessionReconcileStates,
       invalidateBranchTimeline,
       getSession,
       getFreshSessionMessages,
@@ -190,6 +201,7 @@ describe('sessionStatusListener busy-state hydration', () => {
     vi.doUnmock('../stores/pullState.svelte');
     vi.doUnmock('svelte-sonner');
     vi.doUnmock('../stores/sessionRegistry.svelte');
+    vi.unstubAllGlobals();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -440,6 +452,160 @@ describe('sessionStatusListener busy-state hydration', () => {
     expect(sessionRegistry.getMetadata('blox-1')).toBeNull();
   });
 
+  describe('disconnected sessions', () => {
+    const disconnectedRow = (sessionId: string, projectId: string) => ({
+      sessionId,
+      projectId,
+      branchId: `branch-of-${sessionId}`,
+      sessionType: 'commit',
+      status: 'disconnected',
+      holding: false,
+    });
+
+    const reconcileEvent = (
+      sessionId: string,
+      phase: 'checking' | 'stopping' | 'waiting' | 'idle',
+      overrides: Record<string, unknown> = {}
+    ) => ({
+      sessionId,
+      branchId: 'branch-1',
+      projectId: 'project-1',
+      phase,
+      reason: null,
+      attempts: 1,
+      nextAttemptAt: null,
+      ...overrides,
+    });
+
+    async function load() {
+      const listener = await import('./sessionStatusListener');
+      const { disconnectedSessionsStore } = await import('../stores/disconnectedSessions.svelte');
+      return { ...listener, store: disconnectedSessionsStore };
+    }
+
+    it('tracks a disconnected status event per project and drops it on the next status', async () => {
+      const { listenForSessionStatus, store } = await load();
+      listenForSessionStatus();
+      const emit = eventCallbacks.get('session-status-changed')!;
+
+      emit({
+        sessionId: 'blox-1',
+        status: 'disconnected',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+      });
+      expect(store.isDisconnected('blox-1')).toBe(true);
+      expect(store.hasDisconnectedSessions('project-1')).toBe(true);
+      expect(store.hasDisconnectedSessions('project-2')).toBe(false);
+
+      // A live reattach: back to running, so no longer disconnected.
+      emit({
+        sessionId: 'blox-1',
+        status: 'running',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'commit',
+      });
+      expect(store.isDisconnected('blox-1')).toBe(false);
+      expect(store.hasDisconnectedSessions('project-1')).toBe(false);
+    });
+
+    it('adopts the snapshot’s disconnected rows as the whole set', async () => {
+      const { hydrateActiveSessions, store } = await load();
+      store.markDisconnected('settled-1', 'project-1', 'branch-x');
+      getActiveSessions.mockResolvedValue([disconnectedRow('blox-1', 'project-2')]);
+
+      await hydrateActiveSessions();
+
+      expect(store.sessionsForProject('project-2')).toEqual(['blox-1']);
+      // Its terminal event was missed; the snapshot no longer carries it.
+      expect(store.isDisconnected('settled-1')).toBe(false);
+      // Still never live busy state.
+      expect(sessionRegistry.register).not.toHaveBeenCalled();
+    });
+
+    it('lets a status event that lands mid-fetch beat the snapshot', async () => {
+      const { listenForSessionStatus, hydrateActiveSessions, store } = await load();
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      const emit = eventCallbacks.get('session-status-changed')!;
+      emit({ sessionId: 'blox-1', status: 'disconnected', projectId: 'project-1' });
+
+      vi.setSystemTime(2_000);
+      getActiveSessions.mockImplementation(async () => {
+        // blox-1 settles, and blox-2 disconnects, while a snapshot taken
+        // before either is in flight.
+        emit({ sessionId: 'blox-1', status: 'completed' });
+        emit({ sessionId: 'blox-2', status: 'disconnected', projectId: 'project-1' });
+        return [disconnectedRow('blox-1', 'project-1')];
+      });
+      await hydrateActiveSessions();
+
+      expect(store.isDisconnected('blox-1')).toBe(false);
+      expect(store.isDisconnected('blox-2')).toBe(true);
+    });
+
+    it('follows reconcile events, dropping a session’s state on idle', async () => {
+      const { listenForSessionStatus, store } = await load();
+      listenForSessionStatus();
+      const emit = eventCallbacks.get('session-reconcile-changed')!;
+
+      emit(reconcileEvent('blox-1', 'checking'));
+      expect(store.getReconcileState('blox-1')?.phase).toBe('checking');
+
+      const waiting = reconcileEvent('blox-1', 'waiting', {
+        reason: { kind: 'suspended', message: 'workspace is suspended' },
+        nextAttemptAt: 61_000,
+      });
+      emit(waiting);
+      expect(store.getReconcileState('blox-1')).toEqual(waiting);
+
+      emit(reconcileEvent('blox-1', 'idle'));
+      expect(store.getReconcileState('blox-1')).toBeNull();
+    });
+
+    it('hydrates reconcile states each time the listener is established', async () => {
+      const { listenForSessionStatus, store } = await load();
+      getSessionReconcileStates.mockResolvedValue([reconcileEvent('blox-1', 'waiting')]);
+      listenForSessionStatus();
+
+      const call = listenToEvent.mock.calls.find(
+        ([event]) => event === 'session-reconcile-changed'
+      );
+      call?.[2]?.onEstablished?.();
+      await vi.waitFor(() => expect(store.getReconcileState('blox-1')?.phase).toBe('waiting'));
+    });
+
+    it('keeps a reconcile event that lands mid-fetch over the snapshot', async () => {
+      const { listenForSessionStatus, hydrateReconcileStates, store } = await load();
+      listenForSessionStatus();
+      const emit = eventCallbacks.get('session-reconcile-changed')!;
+      emit(reconcileEvent('stale-1', 'waiting'));
+
+      getSessionReconcileStates.mockImplementation(async () => {
+        emit(reconcileEvent('blox-1', 'checking'));
+        return [reconcileEvent('blox-1', 'waiting')];
+      });
+      await hydrateReconcileStates();
+
+      expect(store.getReconcileState('blox-1')?.phase).toBe('checking');
+      // Not in the snapshot and no event mid-fetch: settled since.
+      expect(store.getReconcileState('stale-1')).toBeNull();
+    });
+
+    it('leaves reconcile state untouched when the snapshot fetch fails', async () => {
+      const { listenForSessionStatus, hydrateReconcileStates, store } = await load();
+      listenForSessionStatus();
+      eventCallbacks.get('session-reconcile-changed')!(reconcileEvent('blox-1', 'waiting'));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      getSessionReconcileStates.mockRejectedValue(new Error('offline'));
+
+      await hydrateReconcileStates();
+
+      expect(store.getReconcileState('blox-1')?.phase).toBe('waiting');
+    });
+  });
+
   it('lets a later hydration register a session terminated during an earlier fetch', async () => {
     const { listenForSessionStatus, hydrateActiveSessions } =
       await import('./sessionStatusListener');
@@ -512,7 +678,8 @@ describe('sessionStatusListener busy-state hydration', () => {
     await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(2));
 
     unlisten();
-    expect(unlistenEvents).toHaveBeenCalledTimes(4);
+    // status, pr-created, push-completed, background-hold, reconcile.
+    expect(unlistenEvents).toHaveBeenCalledTimes(5);
     window.dispatchEvent(new CustomEvent('cache-stale'));
     expect(getActiveSessions).toHaveBeenCalledTimes(2);
   });

@@ -35,9 +35,9 @@ function branch(overrides: Partial<Branch> = {}): Branch {
 
 // ── Mock plumbing ──
 //
-// The helper is pure over the two rune stores it reads; those can't be
-// imported under plain vitest, so they are replaced with spies, rebuilt per
-// test so a return value set in one test can't leak into the next.
+// The helper is pure over the rune stores it reads; those can't be imported
+// under plain vitest, so they are replaced with spies, rebuilt per test so a
+// return value set in one test can't leak into the next.
 
 let projectStateStore: {
   hasRunningSessions: ReturnType<typeof vi.fn>;
@@ -45,6 +45,8 @@ let projectStateStore: {
   isWaitingOnBackground: ReturnType<typeof vi.fn>;
   isUnread: ReturnType<typeof vi.fn>;
 };
+let disconnectedSessionsStore: { hasDisconnectedSessions: ReturnType<typeof vi.fn> };
+let runActionPhase: string | null;
 
 async function importStatus() {
   return await import('./projectStatus');
@@ -58,14 +60,18 @@ beforeEach(() => {
     isWaitingOnBackground: vi.fn().mockReturnValue(false),
     isUnread: vi.fn().mockReturnValue(false),
   };
+  disconnectedSessionsStore = { hasDisconnectedSessions: vi.fn().mockReturnValue(false) };
+  runActionPhase = null;
   vi.doMock('../../stores/projectState.svelte', () => ({ projectStateStore }));
+  vi.doMock('../../stores/disconnectedSessions.svelte', () => ({ disconnectedSessionsStore }));
   vi.doMock('../../stores/projectRunActions.svelte', () => ({
-    projectRunActionsStore: { getRunActionPhase: () => null },
+    projectRunActionsStore: { getRunActionPhase: () => runActionPhase },
   }));
 });
 
 afterEach(() => {
   vi.doUnmock('../../stores/projectState.svelte');
+  vi.doUnmock('../../stores/disconnectedSessions.svelte');
   vi.doUnmock('../../stores/projectRunActions.svelte');
 });
 
@@ -131,7 +137,39 @@ describe('getProjectStatus', () => {
 
   it('keeps deleting ahead of everything else', async () => {
     projectStateStore.hasRunningSessions.mockReturnValue(true);
+    disconnectedSessionsStore.hasDisconnectedSessions.mockReturnValue(true);
     const { getProjectStatus } = await importStatus();
     expect(getProjectStatus('p1', new Map([['p1', 'Alpha']]), [branch()]).kind).toBe('deleting');
+  });
+
+  it('reports disconnected for a project whose only session lost its connection', async () => {
+    disconnectedSessionsStore.hasDisconnectedSessions.mockImplementation((id) => id === 'p1');
+    const { getProjectStatus } = await importStatus();
+    expect(getProjectStatus('p1', undefined, [branch()])).toEqual({
+      kind: 'disconnected',
+      runningCount: 0,
+      runActionPhase: null,
+    });
+    expect(getProjectStatus('p2', undefined, [branch({ projectId: 'p2' })]).kind).toBe('idle');
+  });
+
+  it('lets live work outrank a disconnected session', async () => {
+    disconnectedSessionsStore.hasDisconnectedSessions.mockReturnValue(true);
+    projectStateStore.hasRunningSessions.mockReturnValue(true);
+    projectStateStore.getRunningSessionCount.mockReturnValue(1);
+    const { getProjectStatus } = await importStatus();
+    expect(getProjectStatus('p1', undefined, [branch()]).kind).toBe('running');
+  });
+
+  it('puts a disconnected session ahead of a build and of unread', async () => {
+    disconnectedSessionsStore.hasDisconnectedSessions.mockReturnValue(true);
+    projectStateStore.isUnread.mockReturnValue(true);
+    runActionPhase = 'building';
+    const { getProjectStatus } = await importStatus();
+    expect(getProjectStatus('p1', undefined, [branch()])).toEqual({
+      kind: 'disconnected',
+      runningCount: 0,
+      runActionPhase: 'building',
+    });
   });
 });

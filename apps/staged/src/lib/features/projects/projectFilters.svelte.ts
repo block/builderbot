@@ -231,8 +231,12 @@ class ProjectFiltersStore {
       projectsDataStore.branchesByProject.get(projectId) || [],
       workspaceLifecycle.getWorktreeErrors()
     );
+    // A disconnected Blox session counts: its agent may still be working.
     return (
-      status.kind === 'running' || status.kind === 'backgroundHold' || status.kind === 'runAction'
+      status.kind === 'running' ||
+      status.kind === 'backgroundHold' ||
+      status.kind === 'disconnected' ||
+      status.kind === 'runAction'
     );
   }
 }

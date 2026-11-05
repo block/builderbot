@@ -1,9 +1,20 @@
 import type { Branch } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
+import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
 import { projectRunActionsStore, type RunActionPhase } from '../../stores/projectRunActions.svelte';
 
 export type ProjectStatusKind =
-  'deleting' | 'runAction' | 'running' | 'backgroundHold' | 'unread' | 'idle';
+  | 'deleting'
+  | 'runAction'
+  | 'running'
+  | 'backgroundHold'
+  /**
+   * Nothing runs here, but a Blox session lost its connection mid-turn and may
+   * still be working on its workstation (see `disconnectedSessionsStore`).
+   */
+  | 'disconnected'
+  | 'unread'
+  | 'idle';
 
 export interface ProjectStatus {
   kind: ProjectStatusKind;
@@ -56,6 +67,12 @@ export function getProjectStatus(
       runningCount: projectStateStore.getRunningSessionCount(projectId),
       runActionPhase,
     };
+  }
+
+  // Ahead of a build and of unread: the agent may still be changing the
+  // project's branches, and Staged is trying to catch up with it.
+  if (disconnectedSessionsStore.hasDisconnectedSessions(projectId)) {
+    return { kind: 'disconnected', runningCount: 0, runActionPhase };
   }
 
   // A run-action in "building" phase

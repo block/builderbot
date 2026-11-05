@@ -38,6 +38,7 @@
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import Info from '@lucide/svelte/icons/info';
   import CircleStop from '@lucide/svelte/icons/circle-stop';
+  import CloudCheck from '@lucide/svelte/icons/cloud-check';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
@@ -54,6 +55,7 @@
     Session,
     SessionBackgroundHoldPayload,
     SessionMessage,
+    SessionReconcileEvent,
     SessionStatus,
     QueuedSessionMessage,
     HashtagItem,
@@ -79,6 +81,7 @@
     listQueuedSessionMessages,
     pollSession,
     queueSessionMessage,
+    reconcileSession,
     resumeSession,
     sendQueuedSessionMessage,
     sendSessionMessageNow,
@@ -105,11 +108,10 @@
   } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import ComposerError from './ComposerError.svelte';
-  import {
-    COMPOSER_DISCONNECTED_TITLE,
-    composerSendControl,
-    composerSessionBlock,
-  } from './composerSendControl';
+  import { composerSendControl, composerSessionBlock } from './composerSendControl';
+  import DisconnectedSessionAlert from './DisconnectedSessionAlert.svelte';
+  import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
+  import { isReconcileCancelNotice } from '../../shared/disconnectedSession';
   import {
     LIVE_DELIVERY_UNKNOWN,
     liveDeliveryKnowledge,
@@ -152,7 +154,13 @@
     isMaybeTextFile,
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
-  import { hasXmlBlocks, sessionEndMessage, XML_BLOCK_TAGS } from './sessionModalHelpers';
+  import {
+    hasXmlBlocks,
+    reconnectedOutcomeMessage,
+    sessionEndMessage,
+    sessionErrorMessage,
+    XML_BLOCK_TAGS,
+  } from './sessionModalHelpers';
   import AttachmentThumb from './AttachmentThumb.svelte';
   import { localPreview, type AttachmentPreview } from './attachmentPreview';
   import { fileToBase64 } from './attachmentData';
@@ -283,6 +291,23 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let cancelling = $state(false);
+  /**
+   * A "Check now" the backend hasn't answered yet: pending while the
+   * session's reconcile state is still the one it was clicked against (every
+   * `session-reconcile-changed` replaces it), or until the timeout. Raw so the
+   * identity comparison sees the store's own object, not a proxy of it.
+   */
+  let checkNowRequest = $state.raw<{
+    sessionId: string;
+    stateAtRequest: SessionReconcileEvent | null;
+  } | null>(null);
+  let checkNowTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The session this pane last saw `disconnected`, so a turn reconcile
+   * settled can say so instead of ending silently. Cleared when the user
+   * starts a new turn.
+   */
+  let observedDisconnectedId = $state<string | null>(null);
   let messagesEl: HTMLDivElement;
   let inputEl: HTMLElement | null = $state(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -414,6 +439,24 @@
   let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
+  let isDisconnected = $derived(session?.status === 'disconnected');
+  /** Where the backend's attempts to catch up with this session stand. */
+  let reconcileState = $derived(
+    session ? disconnectedSessionsStore.getReconcileState(session.id) : null
+  );
+  let checkNowPending = $derived(
+    !!checkNowRequest &&
+      checkNowRequest.sessionId === session?.id &&
+      checkNowRequest.stateAtRequest === reconcileState
+  );
+  let reconnectedNote = $derived(
+    session && observedDisconnectedId === session.id ? reconnectedOutcomeMessage(session) : null
+  );
+
+  // Remember a disconnect seen here, from the load, a status event or a poll.
+  $effect(() => {
+    if (session?.status === 'disconnected') observedDisconnectedId = session.id;
+  });
   let canSendLive = $derived(isLive && liveDelivery.supported);
   let sendControl = $derived(
     composerSendControl({ isLive, canSendLive, mode: preferences.composerSendMode })
@@ -794,6 +837,7 @@
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
+    if (checkNowTimer) clearTimeout(checkNowTimer);
     // Flush (not cancel) so a reply typed within the debounce window of
     // teardown still gets persisted.
     void replyDraftWriter.flush();
@@ -1404,7 +1448,7 @@
     composerSessionBlock({
       loading,
       hasSession: session !== null,
-      disconnected: session?.status === 'disconnected',
+      disconnected: isDisconnected,
     })
   );
 
@@ -1587,6 +1631,7 @@
       modelSpecificFollowupConfig = null;
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;
+      observedDisconnectedId = null;
       startPolling();
       scrollToBottom();
       return true;
@@ -1640,7 +1685,7 @@
   async function handleSendQueuedMessage(id: string) {
     if (isLive || sending || queueActionIds.has(id)) return;
     // The backend doesn't claim queued follow-ups while disconnected.
-    if (session?.status === 'disconnected') return;
+    if (isDisconnected) return;
     queueActionIds = new Set(queueActionIds).add(id);
     beginComposerAction();
     try {
@@ -1658,6 +1703,31 @@
       const next = new Set(queueActionIds);
       next.delete(id);
       queueActionIds = next;
+    }
+  }
+
+  /** How long a Check now shows as pending without hearing back. */
+  const CHECK_NOW_PENDING_MS = 10_000;
+
+  /**
+   * Ask the backend to reconcile this `disconnected` session now. Returns at
+   * once; the checking state, and the outcome, arrive as events.
+   */
+  async function handleCheckNow() {
+    if (!session) return;
+    const id = session.id;
+    beginComposerAction();
+    checkNowRequest = { sessionId: id, stateAtRequest: reconcileState };
+    if (checkNowTimer) clearTimeout(checkNowTimer);
+    checkNowTimer = setTimeout(() => {
+      checkNowTimer = null;
+      if (checkNowRequest?.sessionId === id) checkNowRequest = null;
+    }, CHECK_NOW_PENDING_MS);
+    try {
+      await reconcileSession(id);
+    } catch (e) {
+      if (checkNowRequest?.sessionId === id) checkNowRequest = null;
+      sendError = `Failed to check the workstation: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
@@ -3038,11 +3108,11 @@
     <!-- Cancelled sessions normally carry no message; one appears when the run
          was killed from outside with a recorded reason (e.g. a Pikchr child
          session whose generate_pikchr call timed out) and reads as an error. -->
-    {#if (session?.status === 'error' || session?.status === 'cancelled') && session.errorMessage}
+    {#if (session?.status === 'error' || session?.status === 'cancelled') && session.errorMessage && !isReconcileCancelNotice(session.status, session.errorMessage)}
       {@const authError = isAuthenticationError(session.errorMessage)}
       <Alert.Root variant="destructive" class="mt-3">
         <AlertCircle />
-        <Alert.Description>{session.errorMessage}</Alert.Description>
+        <Alert.Description>{sessionErrorMessage(session.errorMessage)}</Alert.Description>
         {#if authError}
           <Alert.Action>
             <!-- `Log in` leads when it is offered: this failure came from the
@@ -3063,29 +3133,24 @@
         {/if}
       </Alert.Root>
       <AgentLoginPrompt checkId={login.checkId} />
-    {:else if session?.status === 'disconnected'}
+    {:else if session && isDisconnected}
       <!-- Not live, so the thinking row's Stop is gone; without this the row
-           would hold its branch busy with no way to end it. -->
-      <Alert.Root class="mt-3">
-        <Info class="text-[var(--ui-warning)]" />
-        <Alert.Description>{COMPOSER_DISCONNECTED_TITLE}</Alert.Description>
-        <Alert.Action>
-          <Button variant="outline" size="xs" onclick={handleCancel} disabled={cancelling}>
-            {#if cancelling}
-              <Spinner size={14} />
-            {:else}
-              <CircleStop size={14} />
-            {/if}
-            Stop
-          </Button>
-        </Alert.Action>
-      </Alert.Root>
+           would hold its branch busy with no way to end it. No Resume: a new
+           turn would run beside the one that may still be going remotely. -->
+      <DisconnectedSessionAlert
+        reconcile={reconcileState}
+        checkRequested={checkNowPending}
+        stopping={cancelling}
+        onCheckNow={handleCheckNow}
+        onStop={handleCancel}
+      />
     {:else if session && session.status !== 'running' && session.status !== 'queued'}
       {#if isResumableReason(session.completionReason)}
         {@const isWarning =
           session.completionReason === 'crashed' ||
           session.completionReason === 'remote_agent_lost' ||
-          session.completionReason === 'app_quit'}
+          session.completionReason === 'app_quit' ||
+          isReconcileCancelNotice(session.status, session.errorMessage)}
         <Alert.Root class="mt-3">
           <Info class={isWarning ? 'text-[var(--ui-warning)]' : 'text-[var(--text-muted)]'} />
           <Alert.Description>
@@ -3101,6 +3166,16 @@
               Resume
             </Button>
           </Alert.Action>
+        </Alert.Root>
+      {:else if isReconcileCancelNotice(session.status, session.errorMessage)}
+        <Alert.Root class="mt-3">
+          <Info class="text-[var(--ui-warning)]" />
+          <Alert.Description>{sessionEndMessage(session)}</Alert.Description>
+        </Alert.Root>
+      {:else if reconnectedNote}
+        <Alert.Root class="mt-3">
+          <CloudCheck class="text-[var(--text-muted)]" />
+          <Alert.Description>{reconnectedNote}</Alert.Description>
         </Alert.Root>
       {/if}
     {/if}
@@ -3156,7 +3231,7 @@
                   <span class="queue-item-error">{msg.lastError}</span>
                 {/if}
               </div>
-              {#if !isLive && session?.status !== 'disconnected'}
+              {#if !isLive && !isDisconnected}
                 <Button
                   variant="accent"
                   size="xs"

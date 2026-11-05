@@ -20,6 +20,7 @@
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import ChevronsDown from '@lucide/svelte/icons/chevrons-down';
+  import CloudOff from '@lucide/svelte/icons/cloud-off';
   import Spinner from '../../shared/Spinner.svelte';
   import ChildSessionBadge from './ChildSessionBadge.svelte';
   import type { ChildSessionBadgeProps } from './childSessionBadges';
@@ -75,6 +76,12 @@
     /** Opens a running child's chat; receives the child's session id. */
     onChildSessionClick?: (sessionId: string) => void;
     deleting?: boolean;
+    /**
+     * A pending row whose session is `disconnected`: its agent may still be
+     * working on the Blox workstation, but nothing is streaming, so it shows
+     * a cloud-off icon instead of the spinner.
+     */
+    disconnected?: boolean;
     isLast?: boolean;
     sessionId?: string;
     /** Whether a note's chat has read or unread replies since the note. */
@@ -128,6 +135,7 @@
     childSessionBadges,
     onChildSessionClick,
     deleting = false,
+    disconnected = false,
     isLast = false,
     sessionId,
     chatState = 'none',
@@ -344,6 +352,8 @@
       >
         {#if isQueued}
           <Clock size={12} />
+        {:else if disconnected && !deleting}
+          <CloudOff size={12} />
         {:else if isPending}
           <Spinner size={12} />
         {:else if isFailed}

@@ -4,9 +4,17 @@ import {
   formatToolDisplay,
   insertedText,
   makePathsRelative,
+  reconnectedOutcomeMessage,
   sessionEndMessage,
+  sessionErrorMessage,
   snippetLabel,
 } from './sessionModalHelpers';
+import {
+  RECONCILE_MAY_STILL_RUN,
+  RECONCILE_NO_WORKSPACE,
+  RECONCILE_TURN_UNDETERMINED,
+  RECONCILE_WORKSTATION_GONE,
+} from '../../shared/disconnectedSession';
 
 describe('foldSnippetsIntoPrompt', () => {
   it('returns the prompt unchanged when there are no snippets', () => {
@@ -228,5 +236,59 @@ describe('sessionEndMessage', () => {
     expect(sessionEndMessage({ completionReason: 'remote_agent_lost' })).toBe(
       'This session’s agent stopped running on its workspace.'
     );
+  });
+
+  it('warns that a stop the workstation didn’t confirm may not have taken', () => {
+    expect(
+      sessionEndMessage({ completionReason: 'interrupted', errorMessage: RECONCILE_MAY_STILL_RUN })
+    ).toBe(
+      'You stopped this session. The workstation didn’t confirm the stop, so the turn may still be running there.'
+    );
+  });
+
+  it('says what reconcile found when it couldn’t settle the turn', () => {
+    expect(
+      sessionEndMessage({
+        completionReason: 'interrupted',
+        errorMessage: RECONCILE_TURN_UNDETERMINED,
+      })
+    ).toBe('Staged couldn’t tell whether this turn finished on the workstation.');
+    expect(
+      sessionEndMessage({ completionReason: 'interrupted', errorMessage: RECONCILE_NO_WORKSPACE })
+    ).toBe('Staged couldn’t find this session’s workstation.');
+  });
+
+  it('ignores messages it doesn’t recognise', () => {
+    expect(
+      sessionEndMessage({ completionReason: 'interrupted', errorMessage: 'something else' })
+    ).toBe('You stopped this session.');
+  });
+});
+
+describe('sessionErrorMessage', () => {
+  it('reframes a deleted workstation around the lost turn', () => {
+    expect(sessionErrorMessage(RECONCILE_WORKSTATION_GONE)).toBe(
+      'This session’s workstation no longer exists, so Staged couldn’t catch up with its last turn.'
+    );
+  });
+
+  it('renders any other error as written', () => {
+    expect(sessionErrorMessage('Blox process exited with code 1')).toBe(
+      'Blox process exited with code 1'
+    );
+  });
+});
+
+describe('reconnectedOutcomeMessage', () => {
+  it('says Staged caught up when a reconciled turn completed', () => {
+    expect(reconnectedOutcomeMessage({ status: 'completed' })).toBe(
+      'Staged reconnected to the workstation and caught up. The agent finished this turn.'
+    );
+  });
+
+  it('leaves other outcomes to their own notices', () => {
+    for (const status of ['error', 'cancelled', 'running', 'disconnected'] as const) {
+      expect(reconnectedOutcomeMessage({ status })).toBeNull();
+    }
   });
 });

@@ -81,6 +81,10 @@ const QUIT_KEEPING_BLOX_BUTTON: &str = "Quit";
 /// Alert button that dismisses the prompt and leaves the sessions alone.
 const KEEP_RUNNING_BUTTON: &str = "Keep Running";
 
+/// [`KEEP_RUNNING_BUTTON`] when the quit stops nothing: the Blox sessions keep
+/// running whichever button is pressed, so dismissing only keeps Staged open.
+const CANCEL_BUTTON: &str = "Cancel";
+
 /// Menu id of the app-menu Quit item. Custom rather than
 /// `PredefinedMenuItem::quit` so `Cmd+Q` is routable at all: the predefined item
 /// maps to `NSApp terminate:`, which reaches no Tauri hook that can gate it.
@@ -217,11 +221,36 @@ fn should_prompt(blockers: &QuitBlockers) -> bool {
 /// The confirming button's label: it only promises to stop sessions when the
 /// quit will stop some.
 fn quit_button_label(blockers: &QuitBlockers) -> &'static str {
-    if blockers.session_labels.is_empty() {
-        QUIT_KEEPING_BLOX_BUTTON
-    } else {
+    if quit_stops_sessions(blockers) {
         QUIT_BUTTON
+    } else {
+        QUIT_KEEPING_BLOX_BUTTON
     }
+}
+
+/// The dismissing button's label: "Keep Running" only when quitting would
+/// stop something, since otherwise everything keeps running either way.
+fn dismiss_button_label(blockers: &QuitBlockers) -> &'static str {
+    if quit_stops_sessions(blockers) {
+        KEEP_RUNNING_BUTTON
+    } else {
+        CANCEL_BUTTON
+    }
+}
+
+/// The alert's kind: a warning only when the quit will stop sessions. A quit
+/// that leaves every session running on Blox loses nothing.
+fn quit_prompt_kind(blockers: &QuitBlockers) -> MessageDialogKind {
+    if quit_stops_sessions(blockers) {
+        MessageDialogKind::Warning
+    } else {
+        MessageDialogKind::Info
+    }
+}
+
+/// Whether the quit stops any session, rather than only detaching Blox ones.
+fn quit_stops_sessions(blockers: &QuitBlockers) -> bool {
+    !blockers.session_labels.is_empty()
 }
 
 // =============================================================================
@@ -420,15 +449,16 @@ fn ask_before_quitting(app: &AppHandle, blockers: &QuitBlockers) {
     app.dialog()
         .message(quit_prompt_message(blockers))
         .title(QUIT_PROMPT_TITLE)
-        .kind(MessageDialogKind::Warning)
+        .kind(quit_prompt_kind(blockers))
         .buttons(MessageDialogButtons::OkCancelCustom(
-            KEEP_RUNNING_BUTTON.to_string(),
+            dismiss_button_label(blockers).to_string(),
             quit_button.to_string(),
         ))
         .show_with_result(move |result| {
             app.state::<QuitState>().take_prompt();
-            // Anything that isn't the quit button — "Keep Running", or the
-            // system dismissing the alert itself — leaves the sessions alone.
+            // Anything that isn't the quit button — "Keep Running" or
+            // "Cancel", or the system dismissing the alert itself — leaves the
+            // sessions alone.
             // Nothing to undo on that path: no window was revealed to host the
             // question, so the app is already in the state the user left it in.
             if quit_confirmed(&result, quit_button) {
@@ -574,10 +604,14 @@ pub(crate) fn quit_session_label(session: &ActiveSessionInfo, location: Option<&
 /// and whether actions go with it. Each group is mentioned only when it has
 /// sessions in it.
 ///
+/// A detached Blox session is left `disconnected`, and launch reconciles
+/// those, so the body promises Staged will catch up with it on reopening.
+///
 /// Actions never gate the quit (see [`should_prompt`]), so they are mentioned
 /// only as a consequence of one.
 fn quit_prompt_message(blockers: &QuitBlockers) -> String {
     let mut parts = Vec::new();
+    let stops_sessions = quit_stops_sessions(blockers);
     let labels = blockers.session_labels.join(", ");
     match blockers.session_labels.len() {
         0 => {}
@@ -588,27 +622,34 @@ fn quit_prompt_message(blockers: &QuitBlockers) -> String {
             "{count} sessions are still running: {labels}. Quitting will stop them."
         )),
     }
+    // "also running" after the sessions that stop, so the two don't both
+    // read "still running".
+    let blox_verb = if stops_sessions { "also" } else { "still" };
     let blox_labels = blockers.blox_session_labels.join(", ");
     match blockers.blox_session_labels.len() {
         0 => {}
         1 => parts.push(format!(
-            "1 Blox session is still running: {blox_labels}. It will keep running on its \
-             workstation."
+            "1 Blox session is {blox_verb} running: {blox_labels}. It will keep running on its \
+             workstation, and Staged will catch up with it next time it opens."
         )),
         count => parts.push(format!(
-            "{count} Blox sessions are still running: {blox_labels}. They will keep running on \
-             their workstations."
+            "{count} Blox sessions are {blox_verb} running: {blox_labels}. They will keep running \
+             on their workstations, and Staged will catch up with them next time it opens."
         )),
     }
-    let mut message = parts.join(" ");
-
+    // "also stop" only follows sessions that stop.
+    let action_verb = if stops_sessions {
+        "will also stop"
+    } else {
+        "will stop"
+    };
     match blockers.running_action_count {
         0 => {}
-        1 => message.push_str(" 1 running action will also stop."),
-        count => message.push_str(&format!(" {count} running actions will also stop.")),
+        1 => parts.push(format!("1 running action {action_verb}.")),
+        count => parts.push(format!("{count} running actions {action_verb}.")),
     }
 
-    message
+    parts.join(" ")
 }
 
 // =============================================================================
@@ -976,8 +1017,8 @@ mod tests {
         assert!(retried.load(Ordering::SeqCst));
     }
 
-    /// The ok slot is the default (`Return`) button, so it holds "Keep Running"
-    /// and the cancel slot holds the destructive answer.
+    /// The ok slot is the default (`Return`) button, so it holds the dismissing
+    /// answer and the cancel slot holds the quit.
     #[test]
     fn only_the_quit_button_confirms() {
         for quit_button in [QUIT_BUTTON, QUIT_KEEPING_BLOX_BUTTON] {
@@ -985,10 +1026,12 @@ mod tests {
                 &MessageDialogResult::Custom(quit_button.to_string()),
                 quit_button
             ));
-            assert!(!quit_confirmed(
-                &MessageDialogResult::Custom(KEEP_RUNNING_BUTTON.to_string()),
-                quit_button
-            ));
+            for dismiss_button in [KEEP_RUNNING_BUTTON, CANCEL_BUTTON] {
+                assert!(!quit_confirmed(
+                    &MessageDialogResult::Custom(dismiss_button.to_string()),
+                    quit_button
+                ));
+            }
             // What a system-dismissed alert reports.
             assert!(!quit_confirmed(&MessageDialogResult::Cancel, quit_button));
             assert!(!quit_confirmed(&MessageDialogResult::Ok, quit_button));
@@ -1008,6 +1051,33 @@ mod tests {
             quit_button_label(&with_blox(blockers(&[], 0), &["commit on fix-login"])),
             QUIT_KEEPING_BLOX_BUTTON
         );
+    }
+
+    /// "Keep Running" only means something when quitting would stop a session;
+    /// with only Blox sessions, everything keeps running either way.
+    #[test]
+    fn dismiss_button_and_kind_follow_whether_anything_stops() {
+        let local = blockers(&["note on docs"], 0);
+        assert_eq!(dismiss_button_label(&local), KEEP_RUNNING_BUTTON);
+        assert!(matches!(
+            quit_prompt_kind(&local),
+            MessageDialogKind::Warning
+        ));
+
+        let mixed = with_blox(local, &["commit on fix-login"]);
+        assert_eq!(dismiss_button_label(&mixed), KEEP_RUNNING_BUTTON);
+        assert!(matches!(
+            quit_prompt_kind(&mixed),
+            MessageDialogKind::Warning
+        ));
+
+        // Running actions stop, but don't make the quit a session-stopping one.
+        let blox_only = with_blox(blockers(&[], 2), &["commit on fix-login"]);
+        assert_eq!(dismiss_button_label(&blox_only), CANCEL_BUTTON);
+        assert!(matches!(
+            quit_prompt_kind(&blox_only),
+            MessageDialogKind::Info
+        ));
     }
 
     #[test]
@@ -1102,7 +1172,7 @@ mod tests {
         assert_eq!(
             quit_prompt_message(&with_blox(blockers(&[], 0), &["commit on fix-login"])),
             "1 Blox session is still running: commit on fix-login. It will keep running on \
-             its workstation."
+             its workstation, and Staged will catch up with it next time it opens."
         );
         assert_eq!(
             quit_prompt_message(&with_blox(
@@ -1110,7 +1180,8 @@ mod tests {
                 &["commit on fix-login", "note on api"]
             )),
             "2 Blox sessions are still running: commit on fix-login, note on api. They will \
-             keep running on their workstations."
+             keep running on their workstations, and Staged will catch up with them next time \
+             it opens."
         );
     }
 
@@ -1122,8 +1193,18 @@ mod tests {
                 &["commit on fix-login"]
             )),
             "1 session is still running: note on docs. Quitting will stop it. \
-             1 Blox session is still running: commit on fix-login. It will keep running on \
-             its workstation. 1 running action will also stop."
+             1 Blox session is also running: commit on fix-login. It will keep running on \
+             its workstation, and Staged will catch up with it next time it opens. \
+             1 running action will also stop."
+        );
+    }
+
+    /// With no session stopping, actions are the only thing that does.
+    #[test]
+    fn prompt_message_does_not_say_also_when_only_actions_stop() {
+        assert!(
+            quit_prompt_message(&with_blox(blockers(&[], 1), &["commit on fix-login"]))
+                .ends_with("next time it opens. 1 running action will stop.")
         );
     }
 

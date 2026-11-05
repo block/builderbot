@@ -1,5 +1,11 @@
 import { normalizeDisplayRoots, type DisplayRootInput } from './pathDisplayRoots';
 import type { Session } from '../../types';
+import {
+  RECONCILE_MAY_STILL_RUN,
+  RECONCILE_NO_WORKSPACE,
+  RECONCILE_TURN_UNDETERMINED,
+  RECONCILE_WORKSTATION_GONE,
+} from '../../shared/disconnectedSession';
 
 /** A text snippet attached to a new-session prompt (modal-local, never persisted). */
 export interface TextSnippet {
@@ -66,27 +72,70 @@ export interface ToolDisplay {
   detail: string;
 }
 
-export function sessionEndMessage(current: Pick<Session, 'completionReason'>): string {
-  if (current.completionReason === 'crashed') return 'This session ended unexpectedly.';
-  if (current.completionReason === 'remote_agent_lost') {
-    return 'This session’s agent stopped running on its workspace.';
+/**
+ * The resumable-session notice: why the session ended. A Blox session that
+ * Staged settled after losing its connection (see `disconnectedSession.ts`)
+ * says what Staged found instead of, or as well as, the generic reason.
+ */
+export function sessionEndMessage(
+  current: Pick<Session, 'completionReason'> & Partial<Pick<Session, 'errorMessage'>>
+): string {
+  switch (current.errorMessage) {
+    case RECONCILE_TURN_UNDETERMINED:
+      return 'Staged couldn’t tell whether this turn finished on the workstation.';
+    case RECONCILE_NO_WORKSPACE:
+      return 'Staged couldn’t find this session’s workstation.';
+    case RECONCILE_MAY_STILL_RUN:
+      return `${endReasonMessage(current.completionReason)} The workstation didn’t confirm the stop, so the turn may still be running there.`;
+    default:
+      return endReasonMessage(current.completionReason);
   }
-  if (current.completionReason === 'app_quit') {
-    return 'This session was interrupted when Staged closed.';
+}
+
+function endReasonMessage(completionReason: Session['completionReason']): string {
+  switch (completionReason) {
+    case 'crashed':
+      return 'This session ended unexpectedly.';
+    case 'remote_agent_lost':
+      return 'This session’s agent stopped running on its workspace.';
+    case 'app_quit':
+      return 'This session was interrupted when Staged closed.';
+    case 'project_session_interrupted':
+      return 'This session was stopped by its project session.';
+    case 'interrupted':
+      return 'You stopped this session.';
+    case 'held_until_cap':
+      return 'Staged stopped waiting for this session’s background work.';
+    case 'hold_stopped':
+      return 'The wait for this session’s background work was stopped.';
+    default:
+      return 'This session can be resumed.';
   }
-  if (current.completionReason === 'project_session_interrupted') {
-    return 'This session was stopped by its project session.';
+}
+
+/**
+ * A failed session's error, as the chat pane shows it. Reconcile's terse
+ * "workstation no longer exists" is reframed around what it means for the
+ * turn; any other message renders as written.
+ */
+export function sessionErrorMessage(errorMessage: string): string {
+  if (errorMessage === RECONCILE_WORKSTATION_GONE) {
+    return 'This session’s workstation no longer exists, so Staged couldn’t catch up with its last turn.';
   }
-  if (current.completionReason === 'interrupted') {
-    return 'You stopped this session.';
+  return errorMessage;
+}
+
+/**
+ * What a pane that watched its session go `disconnected` says once reconcile
+ * settled it: a completed turn otherwise ends silently, and the transcript
+ * catching up all at once would go unexplained. Other outcomes explain
+ * themselves (an error's message, `sessionEndMessage`).
+ */
+export function reconnectedOutcomeMessage(current: Pick<Session, 'status'>): string | null {
+  if (current.status === 'completed') {
+    return 'Staged reconnected to the workstation and caught up. The agent finished this turn.';
   }
-  if (current.completionReason === 'held_until_cap') {
-    return 'Staged stopped waiting for this session’s background work.';
-  }
-  if (current.completionReason === 'hold_stopped') {
-    return 'The wait for this session’s background work was stopped.';
-  }
-  return 'This session can be resumed.';
+  return null;
 }
 
 /** Tags wrapping injected context blocks in prompts/messages (rendered as collapsed cards). */

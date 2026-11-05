@@ -7,6 +7,7 @@
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Mail from '@lucide/svelte/icons/mail';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import CloudOff from '@lucide/svelte/icons/cloud-off';
   import type { Project } from '../../types';
   import {
     followWhileVisible,
@@ -17,6 +18,8 @@
   } from '../layout/navigation.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
+  import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
+  import { disconnectedLabel } from '../../shared/disconnectedSession';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
@@ -598,6 +601,19 @@
                           >
                             <Spinner size={12} />
                           </span>
+                        {:else if status.kind === 'disconnected'}
+                          {@const label = disconnectedLabel(
+                            disconnectedSessionsStore.projectReconcileState(project.id)
+                          )}
+                          <span
+                            class="status-disconnected"
+                            title={label}
+                            aria-label={label}
+                            in:fade={{ duration: 300, delay: 150 }}
+                            out:fade={{ duration: 150 }}
+                          >
+                            <CloudOff size={12} />
+                          </span>
                         {:else if status.kind === 'unread'}
                           <span
                             class="status-unread-dot"
@@ -826,6 +842,12 @@
     align-items: center;
     gap: 4px;
     color: var(--ui-accent);
+  }
+
+  .status-disconnected {
+    display: inline-flex;
+    align-items: center;
+    color: var(--ui-warning);
   }
 
   .status-unread-dot {

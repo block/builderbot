@@ -59,6 +59,8 @@
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { canResumeRow, noteRowPhase, type SessionRowPhase } from './sessionRowState';
+  import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
+  import { disconnectedLabel } from '../../shared/disconnectedSession';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
   import { sessionRowTitle } from './sessionRowTitle';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
@@ -334,6 +336,11 @@
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     completionReason?: string | null;
+    /**
+     * The row's session is `disconnected`: a Blox session whose agent may
+     * still be working on the workstation, with nothing in Staged attached.
+     */
+    disconnected?: boolean;
     /** Hashtag reference token for context menu (e.g. "#commit:abc123"). */
     hashtagRef?: string;
     showConnector?: boolean;
@@ -692,6 +699,7 @@
     for (const commit of timeline.commits) {
       const isPending = !commit.sha;
       const isRunning = isSessionInFlight(commit.sessionStatus);
+      const isDisconnected = commit.sessionStatus === 'disconnected';
       const isQueued = commit.sessionStatus === 'queued';
       const isFailed = isPending && !isRunning && !isQueued && !!commit.sessionId;
       const isDeleting =
@@ -714,7 +722,9 @@
       } else if (isPending || isRunning) {
         phase = 'running';
         type = 'pending-commit';
-        secondaryMeta = liveHint ?? 'Generating commit';
+        secondaryMeta = isDisconnected
+          ? disconnectedLabel(disconnectedSessionsStore.getReconcileState(commit.sessionId))
+          : (liveHint ?? 'Generating commit');
       } else {
         phase = 'done';
         type = 'commit';
@@ -747,6 +757,7 @@
             ? (gitActionDisabledReason ?? undefined)
             : undefined,
         completionReason: commit.completionReason,
+        disconnected: type === 'pending-commit' && isDisconnected,
         hashtagRef: type === 'commit' ? `#commit:${commit.sha}` : undefined,
       });
 
@@ -761,6 +772,7 @@
 
     for (const note of timeline.notes) {
       const phase = noteRowPhase(note);
+      const isDisconnected = note.sessionStatus === 'disconnected';
       const isDeleting = deletingNoteIds.has(note.id);
       const liveHint = note.sessionId ? liveSessionHints[note.sessionId] : undefined;
 
@@ -775,7 +787,9 @@
         secondaryMeta = 'Queued';
       } else if (phase === 'running') {
         type = 'generating-note';
-        secondaryMeta = liveHint ?? 'Generating note';
+        secondaryMeta = isDisconnected
+          ? disconnectedLabel(disconnectedSessionsStore.getReconcileState(note.sessionId))
+          : (liveHint ?? 'Generating note');
       } else {
         type = 'note';
         secondaryMeta = formatNoteTimestamp(note, nowMs);
@@ -802,6 +816,7 @@
         noteReadState: type === 'note' ? (noteReadState(note) ?? undefined) : undefined,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
+        disconnected: type === 'generating-note' && isDisconnected,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
       });
     }
@@ -809,6 +824,7 @@
     for (const review of timeline.reviews) {
       const totalCount = review.commentCount + review.annotationCount;
       const isRunning = isSessionInFlight(review.sessionStatus);
+      const isDisconnected = review.sessionStatus === 'disconnected';
       const isQueued = review.sessionStatus === 'queued';
       const isFailed = isEmptyFailedReview({
         sessionStatus: review.sessionStatus,
@@ -836,7 +852,9 @@
       } else if (isRunning) {
         phase = 'running';
         type = 'generating-review';
-        meta = liveHint ?? 'Generating review';
+        meta = isDisconnected
+          ? disconnectedLabel(disconnectedSessionsStore.getReconcileState(review.sessionId))
+          : (liveHint ?? 'Generating review');
       } else {
         phase = 'done';
         type = 'review';
@@ -863,6 +881,7 @@
         reviewId: review.id,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: review.completionReason,
+        disconnected: type === 'generating-review' && isDisconnected,
         hashtagRef: type === 'review' ? `#review:${review.id}` : undefined,
       });
     }
@@ -1216,6 +1235,7 @@
             onDiscardChangesClick={item.onDiscardChanges}
             discardChangesDisabledReason={item.discardChangesDisabledReason}
             deleting={item.deleting}
+            disconnected={item.disconnected}
             isLast={index === normalItems.length - 1 &&
               pendingAdds.length === 0 &&
               pendingItems.length === 0 &&

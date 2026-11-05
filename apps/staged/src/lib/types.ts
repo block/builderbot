@@ -805,6 +805,53 @@ export interface SessionStatusPayload {
   sessionType?: string;
 }
 
+// =============================================================================
+// Reconciling disconnected Blox sessions
+// =============================================================================
+
+/**
+ * What the backend's reconcile service is doing about a `disconnected` row.
+ * Mirrors `ReconcilePhase` in `src-tauri/src/session_runner/reconcile.rs`.
+ *
+ * - `checking`: asking Blox about the workstation and the session's process,
+ *   catching the transcript up, and (when the turn is still running)
+ *   following it — the row reads `running` again for that last part.
+ * - `stopping`: cancelling the remote turn for a Stop.
+ * - `waiting`: the last attempt couldn't settle the row; the next is at
+ *   `nextAttemptAt`, or sooner on a "Check now".
+ * - `idle`: nothing in progress or pending. The last event for a row that
+ *   settled.
+ */
+export type SessionReconcilePhase = 'checking' | 'stopping' | 'waiting' | 'idle';
+
+/** Why the last reconcile attempt left a row `disconnected`. */
+export type SessionReconcileReasonKind =
+  'unreachable' | 'not_authenticated' | 'suspended' | 'workstation_not_running' | 'attach_failed';
+
+export interface SessionReconcileReason {
+  kind: SessionReconcileReasonKind;
+  /** Human-readable detail, e.g. the `sq` error. */
+  message: string;
+}
+
+/**
+ * Payload of the `session-reconcile-changed` event, and one entry of
+ * `get_session_reconcile_states`: where reconciling one `disconnected`
+ * session stands. Emitted on every phase change.
+ */
+export interface SessionReconcileEvent {
+  sessionId: string;
+  branchId: string | null;
+  projectId: string | null;
+  phase: SessionReconcilePhase;
+  /** Why the last attempt couldn't settle the row; null before the first failure. */
+  reason: SessionReconcileReason | null;
+  /** Failed attempts since the row last made progress. */
+  attempts: number;
+  /** When the backend will next try, in ms since the epoch, while `waiting`. */
+  nextAttemptAt: number | null;
+}
+
 /**
  * One entry of the `get_active_sessions` busy-state snapshot: a running,
  * queued or disconnected session projected to its branch/project context.

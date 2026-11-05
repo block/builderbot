@@ -29,6 +29,14 @@
  * — they perform no writes, so any number of connected clients can process
  * the same events safely.
  *
+ * `disconnected` sessions (Blox sessions that lost their connection mid-turn)
+ * carry no live busy state, so they are tracked apart from the registry, in
+ * `disconnectedSessionsStore`: added by their status event, dropped by any
+ * other, and re-derived from the same snapshot. `session-reconcile-changed`
+ * (where the backend's attempts to catch up with them stand) lands there too,
+ * with its own `get_session_reconcile_states` snapshot taken whenever the
+ * listener is established.
+ *
  * `session-background-hold` is folded into projectState as a sub-state of a
  * running session, so the project row can say "waiting on background work"
  * instead of spinning generically for up to the hold cap. The hold also rides
@@ -47,12 +55,14 @@ import { prStateStore } from '../stores/prState.svelte';
 import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
+import { disconnectedSessionsStore } from '../stores/disconnectedSessions.svelte';
 import type {
   ActiveSessionInfo,
   PrCreatedPayload,
   PushCompletedPayload,
   Session,
   SessionBackgroundHoldPayload,
+  SessionReconcileEvent,
   SessionStatus,
   SessionStatusPayload,
 } from '../types';
@@ -72,6 +82,17 @@ let lastHydrationStartedAt = 0;
 // own fetch start; the map is cleared once no fetch is in flight.
 let hydrationFetchesInFlight = 0;
 const terminalWhileFetching = new Map<string, number>();
+// Every status delta processed while a snapshot fetch is in flight, by
+// arrival time: the snapshot's `disconnected` rows must not re-add a session
+// that has since moved on (a reconcile claiming it back to `running`), nor
+// drop one that disconnected mid-fetch. Same lifetime as the map above.
+const statusWhileFetching = new Map<string, number>();
+
+// Reconcile events that arrived while a `get_session_reconcile_states` fetch
+// was in flight, by session; newer than that snapshot. Cleared with the last
+// fetch.
+let reconcileFetchesInFlight = 0;
+const reconcileWhileFetching = new Set<string>();
 
 export function listenForSessionStatus(): UnlistenFn {
   const unlistenEvents = listenToEvent<SessionStatusPayload>(
@@ -86,6 +107,16 @@ export function listenForSessionStatus(): UnlistenFn {
   const unlistenBackgroundHold = listenToEvent<SessionBackgroundHoldPayload>(
     'session-background-hold',
     handleBackgroundHold
+  );
+  const unlistenReconcile = listenToEvent<SessionReconcileEvent>(
+    'session-reconcile-changed',
+    handleReconcileChanged,
+    {
+      // Emitted on change only, so a client that wasn't listening (a fresh
+      // window, a reconnected socket) asks where things stand, from inside the
+      // hook that says the listener is live: nothing can fall between.
+      onEstablished: () => void hydrateReconcileStates(),
+    }
   );
 
   // Snapshot-then-deltas: hydrate now (app/page startup) and again after a
@@ -110,6 +141,7 @@ export function listenForSessionStatus(): UnlistenFn {
     unlistenPrCreated();
     unlistenPushCompleted();
     unlistenBackgroundHold();
+    unlistenReconcile();
   };
 }
 
@@ -148,6 +180,34 @@ function handleBackgroundHold(payload: SessionBackgroundHoldPayload): void {
   projectStateStore.setSessionBackgroundHold(projectId, payload.sessionId, payload.holding);
 }
 
+function handleReconcileChanged(event: SessionReconcileEvent): void {
+  if (reconcileFetchesInFlight > 0) reconcileWhileFetching.add(event.sessionId);
+  disconnectedSessionsStore.applyReconcileEvent(event);
+}
+
+/**
+ * Adopt the backend's current reconcile states. Exported for tests; the
+ * listener runs it each time it is established.
+ */
+export async function hydrateReconcileStates(): Promise<void> {
+  reconcileFetchesInFlight++;
+  try {
+    let states: SessionReconcileEvent[];
+    try {
+      states = await commands.getSessionReconcileStates();
+    } catch (e) {
+      console.error('Failed to fetch session reconcile states:', e);
+      return;
+    }
+    disconnectedSessionsStore.applyReconcileSnapshot(states, (sessionId) =>
+      reconcileWhileFetching.has(sessionId)
+    );
+  } finally {
+    reconcileFetchesInFlight--;
+    if (reconcileFetchesInFlight === 0) reconcileWhileFetching.clear();
+  }
+}
+
 async function handleSessionStatusChanged(payload: SessionStatusPayload): Promise<void> {
   const {
     sessionId,
@@ -157,6 +217,19 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     projectId: eventProjectId,
     sessionType,
   } = payload;
+
+  if (hydrationFetchesInFlight > 0) {
+    statusWhileFetching.set(sessionId, Date.now());
+  }
+  if (status === 'disconnected') {
+    disconnectedSessionsStore.markDisconnected(
+      sessionId,
+      eventProjectId ?? null,
+      eventBranchId ?? null
+    );
+  } else {
+    disconnectedSessionsStore.clear(sessionId);
+  }
 
   if (status === 'running' && eventProjectId) {
     sessionRegistry.register(
@@ -257,18 +330,29 @@ export async function hydrateActiveSessions(): Promise<void> {
   hydrationFetchesInFlight++;
   try {
     let active: ActiveSessionInfo[];
+    let disconnected: ActiveSessionInfo[];
     try {
+      const snapshot = await commands.getActiveSessions();
       // `disconnected` rows are in the snapshot because they still hold
       // their branch, but nothing here is connected to them: like their
       // status event, they carry no live busy state, so a registered one is
-      // swept and none is registered or adopted.
-      active = (await commands.getActiveSessions()).filter(
-        (session) => session.status !== 'disconnected'
-      );
+      // swept and none is registered or adopted. They feed the disconnected
+      // store instead.
+      active = snapshot.filter((session) => session.status !== 'disconnected');
+      disconnected = snapshot.filter((session) => session.status === 'disconnected');
     } catch (e) {
       console.error('Failed to fetch active-sessions snapshot:', e);
       return;
     }
+
+    disconnectedSessionsStore.applySnapshot(
+      disconnected.map(({ sessionId, projectId, branchId }) => ({
+        sessionId,
+        projectId,
+        branchId,
+      })),
+      (sessionId) => (statusWhileFetching.get(sessionId) ?? 0) >= fetchStartedAt
+    );
 
     const activeIds = new Set(active.map((session) => session.sessionId));
     for (const sessionId of sessionRegistry.getAllSessionIds()) {
@@ -326,6 +410,7 @@ export async function hydrateActiveSessions(): Promise<void> {
     hydrationFetchesInFlight--;
     if (hydrationFetchesInFlight === 0) {
       terminalWhileFetching.clear();
+      statusWhileFetching.clear();
     }
   }
 

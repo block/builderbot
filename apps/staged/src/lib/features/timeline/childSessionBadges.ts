@@ -21,8 +21,8 @@ export interface ChildSessionBadgeProps {
   /** Drives the badge's colour, the same per-kind colour the branch timeline uses. */
   sessionType: SessionRowKind;
   /**
-   * Queued children wait on the branch queue; running (and disconnected, which
-   * may still be running remotely) ones get a spinner.
+   * Queued children wait on the branch queue; running ones get a spinner, and
+   * disconnected ones (which may still be running remotely) a cloud-off icon.
    */
   status: 'queued' | 'running' | 'disconnected';
   /** The clipped label. */

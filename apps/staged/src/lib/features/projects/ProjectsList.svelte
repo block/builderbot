@@ -10,10 +10,13 @@
   import Plus from '@lucide/svelte/icons/plus';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import CloudOff from '@lucide/svelte/icons/cloud-off';
   import type { Project } from '../../types';
   import RepoCard from './RepoCard.svelte';
   import { projectDisplayName, projectActivity } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
+  import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
+  import { disconnectedActivity, disconnectedLabel } from '../../shared/disconnectedSession';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
@@ -562,7 +565,13 @@
             {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
-            {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
+            {@const reconcileState =
+              status.kind === 'disconnected'
+                ? disconnectedSessionsStore.projectReconcileState(project.id)
+                : null}
+            {@const activity =
+              projectActivity(sessionTypes, status.runActionPhase) ||
+              (status.kind === 'disconnected' ? disconnectedActivity(reconcileState) : '')}
             {@const shortcut = shortcutNumbers.get(project.id)}
             {@const matchReason = matchReasons.get(project.id)}
             <div
@@ -606,6 +615,17 @@
                         out:fade={{ duration: 150 }}
                       >
                         <Spinner size={14} />
+                      </div>
+                    {:else if status.kind === 'disconnected'}
+                      {@const label = disconnectedLabel(reconcileState)}
+                      <div
+                        class="status-indicator disconnected"
+                        title={label}
+                        aria-label={label}
+                        in:fade={{ duration: 300, delay: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <CloudOff size={14} />
                       </div>
                     {:else if status.kind === 'unread'}
                       <div
@@ -1007,6 +1027,11 @@
     align-items: center;
     gap: 4px;
     color: var(--ui-accent);
+  }
+
+  .status-indicator.disconnected {
+    display: flex;
+    color: var(--ui-warning);
   }
 
   .status-indicator.unread-dot {

@@ -7,8 +7,12 @@
 //! in the shared local clone, pointing at the working-tree snapshot, whose
 //! history holds the index snapshot and the branch tip. [`prune`] removes
 //! both after [`RETENTION`] — except a transfer that left uncommitted changes
-//! or ignored files behind, for which this backup is the only copy: that one
-//! is kept until it is removed by hand.
+//! behind, for which this backup is the only copy: that one is kept whole
+//! until it is removed by hand. One that left only ignored files behind
+//! (not carried, or carried and left out at the destination) loses its
+//! bundles, LFS archives and refs after [`RETENTION`] like any other, but
+//! keeps its ignored files' archives and manifest until they are removed by
+//! hand.
 //!
 //! The manifest is also the transfer's journal: it is written before the
 //! transfer makes anything, with what to [`Undo`], and kept up to date as it
@@ -24,14 +28,17 @@
 //! (`.env`, but no ignored directory such as `node_modules/`) has them in
 //! `<bundle stem>.ignored.tar`, archived from the source right before it was
 //! removed, or when they were carried: `tar -xf` it in a checkout to put them
-//! back. It goes with the rest of the directory.
+//! back. It goes with the rest of the directory, or outlives it as above.
 
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use super::is_valid_transfer_id;
+use super::scripts::IgnoredFiles;
 use super::undo::Undo;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -66,12 +73,20 @@ pub struct TransferManifest {
     pub owner_pid: Option<u32>,
     /// The workspace on the remote side.
     pub workspace_name: Option<String>,
-    /// Some repo's uncommitted changes or ignored files stayed behind and
-    /// exist only in this backup, so [`prune`] never removes it: delete the
-    /// directory (and its backup refs) by hand once they are no longer
-    /// wanted.
+    /// Some repo's uncommitted changes stayed behind and exist only in this
+    /// backup, so [`prune`] never removes any of it: delete the directory
+    /// (and its backup refs) by hand once they are no longer wanted. Ignored
+    /// files left behind don't set it; see [`Self::bundles_pruned_at`].
     #[serde(default)]
     pub keep_until_removed: bool,
+    /// When [`prune`], past [`RETENTION`], removed the bundles, LFS archives
+    /// and refs of a transfer that left only ignored files behind, keeping
+    /// each repo's ignored files' archive (and its excludes list) and this
+    /// manifest: delete the directory by hand once they are no longer
+    /// wanted. Milliseconds since the epoch. The repos' bundles and backup
+    /// refs are gone from then on.
+    #[serde(default)]
+    pub bundles_pruned_at: Option<i64>,
     /// The repos carried so far.
     pub repos: Vec<ManifestRepo>,
     /// What the transfer made before the database switched, recorded before
@@ -107,16 +122,43 @@ impl TransferManifest {
         clones
     }
 
-    /// Whether this backup holds what the transfer did not restore at the
-    /// destination, and a completed transfer may have deleted at the source:
-    /// uncommitted changes left behind, or ignored files it archived and
-    /// didn't place (not carried, or carried and left out there).
-    pub fn holds_left_behind_files(&self) -> bool {
+    /// Whether this backup holds uncommitted changes the transfer did not
+    /// restore at the destination, and a completed one may have deleted at
+    /// the source: [`prune`] keeps all of it, whatever its age.
+    pub fn holds_left_behind_changes(&self) -> bool {
         self.status != ROLLED_BACK
-            && self.repos.iter().any(|r| {
-                (!self.include_uncommitted && r.has_uncommitted_changes)
-                    || r.ignored.as_ref().is_some_and(ManifestIgnored::left_behind)
-            })
+            && !self.include_uncommitted
+            && self.repos.iter().any(|r| r.has_uncommitted_changes)
+    }
+
+    /// Whether it holds ignored files the transfer archived and didn't place
+    /// (not carried, or carried and left out there), which a completed one
+    /// may have deleted at the source: [`prune`] keeps their archives,
+    /// whatever their age, and lets the rest go after [`RETENTION`].
+    pub fn holds_left_behind_ignored(&self) -> bool {
+        self.status != ROLLED_BACK
+            && self
+                .repos
+                .iter()
+                .any(|r| r.ignored.as_ref().is_some_and(ManifestIgnored::left_behind))
+    }
+
+    /// Whether [`prune`] keeps the whole directory, whatever its age.
+    fn kept_whole(&self) -> bool {
+        self.keep_until_removed || self.holds_left_behind_changes()
+    }
+
+    /// The files [`prune`] keeps once the rest has gone: the manifest, and
+    /// each repo's ignored files' archive and its excludes list.
+    fn kept_after_pruning(&self) -> HashSet<OsString> {
+        let mut kept = HashSet::from([OsString::from(MANIFEST_FILE)]);
+        for repo in &self.repos {
+            if let Some(archive) = repo.ignored.as_ref().and_then(|i| i.archive.as_deref()) {
+                kept.insert(archive.into());
+                kept.insert(IgnoredFiles::excludes_name(&repo.bundle).into());
+            }
+        }
+        kept
     }
 }
 
@@ -126,7 +168,8 @@ pub struct ManifestRepo {
     pub github_repo: String,
     pub branch: String,
     pub dest_branch: String,
-    /// The bundle's file name in this directory.
+    /// The bundle's file name in this directory, until
+    /// [`TransferManifest::bundles_pruned_at`].
     pub bundle: String,
     pub head: String,
     /// The working-tree snapshot commit: the bundle's one ref.
@@ -135,6 +178,7 @@ pub struct ManifestRepo {
     /// The shared local clone of the repo, which holds [`Self::backup_ref`]
     /// once the source comes down.
     pub local_clone: Option<String>,
+    /// Cleared when [`prune`] removes it but keeps the manifest.
     pub backup_ref: Option<String>,
     /// The source's ignored files, when it had any.
     #[serde(default)]
@@ -179,19 +223,31 @@ pub fn read_manifest(dir: &Path) -> Option<TransferManifest> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Remove every transfer directory under `transfers_dir` older than
-/// `retention` as of `now`, and every ref the transfer has in the local
-/// clones its manifest names: the backup refs, and any temporary ref a
-/// transfer that stopped part way left. Returns the directories removed. Age
-/// comes from the manifest, or the directory's mtime without one; only
-/// directories named like a transfer id are touched, and never one whose
-/// manifest keeps it until it is removed by hand.
-pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<PathBuf> {
+/// What [`prune`] did, by transfer directory.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// Removed whole.
+    pub removed: Vec<PathBuf>,
+    /// Left with only the ignored files' archives and the manifest.
+    pub trimmed: Vec<PathBuf>,
+}
+
+/// Prune every transfer directory under `transfers_dir` older than
+/// `retention` as of `now`: remove every ref the transfer has in the local
+/// clones its manifest names — the backup refs, and any temporary ref a
+/// transfer that stopped part way left — and the directory. Age comes from
+/// the manifest, or the directory's mtime without one; only directories
+/// named like a transfer id are touched. Never one that holds uncommitted
+/// changes left behind (or whose manifest keeps it until it is removed by
+/// hand); and one that holds ignored files left behind keeps their archives
+/// and the manifest, which records when the rest went and is then left
+/// alone while it still holds them.
+pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Pruned {
+    let mut pruned = Pruned::default();
     let Ok(entries) = std::fs::read_dir(transfers_dir) else {
-        return Vec::new();
+        return pruned;
     };
     let cutoff = now.checked_sub(retention).unwrap_or(SystemTime::UNIX_EPOCH);
-    let mut removed = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
         let name = entry.file_name();
@@ -199,10 +255,9 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<
             continue;
         }
         let manifest = read_manifest(&dir);
-        if manifest
-            .as_ref()
-            .is_some_and(|m| m.keep_until_removed || m.holds_left_behind_files())
-        {
+        if manifest.as_ref().is_some_and(|m| {
+            m.kept_whole() || (m.bundles_pruned_at.is_some() && m.holds_left_behind_ignored())
+        }) {
             continue;
         }
         let created = match &manifest {
@@ -222,12 +277,59 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<
                 }
             }
         }
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => removed.push(dir),
-            Err(e) => log::warn!("[project_transfer] cannot remove {}: {e}", dir.display()),
+        match manifest {
+            Some(mut manifest) if manifest.holds_left_behind_ignored() => {
+                match trim_to_ignored(&dir, &mut manifest, now) {
+                    Ok(()) => pruned.trimmed.push(dir),
+                    Err(e) => log::warn!("[project_transfer] {e}"),
+                }
+            }
+            _ => match std::fs::remove_dir_all(&dir) {
+                Ok(()) => pruned.removed.push(dir),
+                Err(e) => log::warn!("[project_transfer] cannot remove {}: {e}", dir.display()),
+            },
         }
     }
-    removed
+    pruned
+}
+
+/// Remove everything in `dir` but what `manifest` keeps once pruned (see
+/// [`TransferManifest::kept_after_pruning`]), then say so in the manifest.
+/// The manifest is only written once every other file is gone, so one that
+/// could not be removed is tried again at the next prune.
+fn trim_to_ignored(
+    dir: &Path,
+    manifest: &mut TransferManifest,
+    now: SystemTime,
+) -> Result<(), String> {
+    let kept = manifest.kept_after_pruning();
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let mut failed = Vec::new();
+    for entry in entries.flatten() {
+        if kept.contains(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        if let Err(e) = removed {
+            failed.push(format!("{}: {e}", path.display()));
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!("cannot prune {}", failed.join("; ")));
+    }
+    let now_ms = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    manifest.bundles_pruned_at = Some(now_ms);
+    for repo in &mut manifest.repos {
+        repo.backup_ref = None;
+    }
+    write_manifest(dir, manifest)
 }
 
 /// Delete `refs/staged-transfer-backup/<id>/*` and `refs/staged-transfer/<id>/*`
@@ -331,9 +433,15 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(transfers.join("not a transfer")).unwrap();
 
-        let removed = prune(&transfers, RETENTION, now);
+        let pruned = prune(&transfers, RETENTION, now);
 
-        assert_eq!(removed, vec![transfers.join("old")]);
+        assert_eq!(
+            pruned,
+            Pruned {
+                removed: vec![transfers.join("old")],
+                trimmed: vec![],
+            }
+        );
         assert!(transfers.join("new").join(MANIFEST_FILE).exists());
         assert!(transfers.join("not a transfer").exists());
         let refs = git(&[
@@ -395,7 +503,7 @@ mod tests {
         rolled.undo.clones.push(clone.clone());
         write_manifest(&transfers.join("rolled"), &rolled).unwrap();
 
-        let mut removed = prune(&transfers, RETENTION, now);
+        let mut removed = prune(&transfers, RETENTION, now).removed;
         removed.sort();
 
         assert_eq!(
@@ -438,7 +546,7 @@ mod tests {
         carried.include_uncommitted = true;
         write_manifest(&transfers.join("carried"), &carried).unwrap();
 
-        let mut removed = prune(&transfers, RETENTION, now);
+        let mut removed = prune(&transfers, RETENTION, now).removed;
         removed.sort();
 
         assert_eq!(
@@ -515,7 +623,7 @@ mod tests {
         assert!(!read.include_ignored);
         assert_eq!(read.repos[0].ignored, None);
 
-        let mut removed = prune(&transfers, RETENTION, now);
+        let mut removed = prune(&transfers, RETENTION, now).removed;
         removed.sort();
 
         // The legacy one went by its manifest's age, not its fresh mtime.
@@ -523,12 +631,215 @@ mod tests {
         assert!(transfers.join("kept").join(archive).exists());
     }
 
+    /// The files a transfer directory gets, as each repo's leg would leave
+    /// them: the bundle, its LFS archive, the ignored files' archive and
+    /// excludes list, and the scratch a local end leaves beside them.
+    fn populate(dir: &Path, with_ignored: bool) {
+        let stem = "0-widgets";
+        for name in [
+            format!("{stem}.bundle"),
+            format!("{stem}.bundle.lfs.tar"),
+            format!("{stem}.bundle.index"),
+            format!("{stem}.info-exclude.added"),
+        ] {
+            std::fs::write(dir.join(name), b"data").unwrap();
+        }
+        std::fs::create_dir_all(dir.join(format!("{stem}.ignored.tar.d/files"))).unwrap();
+        std::fs::write(dir.join(format!("{stem}.ignored.tar.d/files/x")), b"x").unwrap();
+        if with_ignored {
+            std::fs::write(dir.join(format!("{stem}.ignored.tar")), b"tar").unwrap();
+            std::fs::write(dir.join(format!("{stem}.ignored.excludes")), b"./x\n").unwrap();
+        }
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Ignored files the destination didn't get — not carried, or carried
-    /// and left out there — exist only in the archive once the source is
-    /// gone, so it is kept like uncommitted changes left behind.
+    /// and left out there — exist only in their archive once the source is
+    /// gone, so it stays, whatever its age. The rest of the backup (bundles,
+    /// LFS archives, refs) goes after the retention like any other's; only
+    /// uncommitted changes left behind keep all of it.
     #[test]
-    fn keeps_a_backup_holding_ignored_files_it_did_not_place_whatever_its_age() {
+    fn a_backup_holding_only_ignored_files_left_behind_keeps_just_their_archives() {
         let root = crate::test_utils::TempDir::new("transfer-prune-ignored-left");
+        let clone = root.path().join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        let git = |args: &[&str]| crate::git::cli_run(&clone, args).unwrap();
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        let head = git(&["rev-parse", "HEAD"]).trim().to_string();
+        let transfers = root.path().join("transfers");
+        let now = SystemTime::now();
+        let day_ms = 24 * 60 * 60 * 1000;
+        let now_ms = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let old_ms = now_ms - 30 * day_ms;
+        let ignored = |archive: bool, files: u64, placed: u64| ManifestIgnored {
+            archive: archive.then(|| "0-widgets.ignored.tar".to_string()),
+            files,
+            bytes: files * 10,
+            over_cap: !archive,
+            placed,
+        };
+        struct Case {
+            id: &'static str,
+            created_at: i64,
+            status: &'static str,
+            include_uncommitted: bool,
+            ignored: Option<ManifestIgnored>,
+            holds_changes: bool,
+            holds_ignored: bool,
+        }
+        let case = |id, created_at, ignored: Option<ManifestIgnored>| Case {
+            id,
+            created_at,
+            status: COMPLETED,
+            include_uncommitted: true,
+            holds_changes: false,
+            holds_ignored: ignored.as_ref().is_some_and(ManifestIgnored::left_behind),
+            ignored,
+        };
+        let cases = [
+            // Not carried: the archive is the only copy.
+            case("not-carried", old_ms, Some(ignored(true, 2, 0))),
+            // Carried, but one was left out at the destination.
+            case("partly-placed", old_ms, Some(ignored(true, 3, 2))),
+            // Still within the retention: nothing goes yet.
+            case("recent", now_ms - day_ms, Some(ignored(true, 2, 0))),
+            // Uncommitted changes left behind as well: all of it stays.
+            Case {
+                include_uncommitted: false,
+                holds_changes: true,
+                ..case("changes-too", old_ms, Some(ignored(true, 2, 0)))
+            },
+            // Every one placed: the directory goes whole.
+            case("all-placed", old_ms, Some(ignored(true, 2, 2))),
+            // Over the cap: nothing was archived to keep.
+            case("over-cap", old_ms, Some(ignored(false, 2, 0))),
+            // Rolled back: the source is still there.
+            Case {
+                status: ROLLED_BACK,
+                holds_ignored: false,
+                ..case("rolled-back", old_ms, Some(ignored(true, 2, 0)))
+            },
+        ];
+        for c in &cases {
+            let backup = backup_ref(c.id, "feature");
+            git(&["update-ref", &backup, &head]);
+            let mut m = manifest(c.id, c.created_at, &clone, &backup);
+            m.status = c.status.to_string();
+            m.include_uncommitted = c.include_uncommitted;
+            m.repos[0].ignored = c.ignored.clone();
+            assert_eq!(m.holds_left_behind_changes(), c.holds_changes, "{}", c.id);
+            assert_eq!(m.holds_left_behind_ignored(), c.holds_ignored, "{}", c.id);
+            m.keep_until_removed = m.holds_left_behind_changes();
+            let dir = transfers.join(c.id);
+            write_manifest(&dir, &m).unwrap();
+            populate(
+                &dir,
+                c.ignored.as_ref().is_some_and(|i| i.archive.is_some()),
+            );
+        }
+        let everything = names_in(&transfers.join("recent"));
+
+        let mut pruned = prune(&transfers, RETENTION, now);
+        pruned.removed.sort();
+        pruned.trimmed.sort();
+
+        assert_eq!(
+            pruned,
+            Pruned {
+                removed: vec![
+                    transfers.join("all-placed"),
+                    transfers.join("over-cap"),
+                    transfers.join("rolled-back"),
+                ],
+                trimmed: vec![
+                    transfers.join("not-carried"),
+                    transfers.join("partly-placed")
+                ],
+            }
+        );
+        let kept = vec![
+            "0-widgets.ignored.excludes".to_string(),
+            "0-widgets.ignored.tar".to_string(),
+            MANIFEST_FILE.to_string(),
+        ];
+        for id in ["not-carried", "partly-placed"] {
+            let dir = transfers.join(id);
+            assert_eq!(names_in(&dir), kept, "{id}");
+            let m = read_manifest(&dir).unwrap();
+            assert_eq!(m.bundles_pruned_at, Some(now_ms), "{id}");
+            assert_eq!(m.repos[0].backup_ref, None, "{id}");
+            assert!(!m.keep_until_removed, "{id}");
+            assert!(m.holds_left_behind_ignored(), "{id}");
+        }
+        for id in ["recent", "changes-too"] {
+            let dir = transfers.join(id);
+            assert_eq!(names_in(&dir), everything, "{id}");
+            assert_eq!(read_manifest(&dir).unwrap().bundles_pruned_at, None, "{id}");
+        }
+        let refs = git(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/staged-transfer-backup/",
+        ]);
+        let mut refs: Vec<&str> = refs.lines().collect();
+        refs.sort();
+        assert_eq!(
+            refs,
+            vec![
+                backup_ref("changes-too", "feature"),
+                backup_ref("recent", "feature")
+            ]
+        );
+
+        // Pruned once, the rest is left until it is removed by hand; the
+        // recent one's turn comes.
+        let later = now + RETENTION;
+        assert_eq!(
+            prune(&transfers, RETENTION, later),
+            Pruned {
+                removed: vec![],
+                trimmed: vec![transfers.join("recent")],
+            }
+        );
+        assert_eq!(names_in(&transfers.join("recent")), kept);
+        assert_eq!(names_in(&transfers.join("not-carried")), kept);
+        assert_eq!(
+            read_manifest(&transfers.join("not-carried"))
+                .unwrap()
+                .bundles_pruned_at,
+            Some(now_ms)
+        );
+    }
+
+    /// A manifest written before uncommitted changes and ignored files were
+    /// told apart may say to keep the backup whole: it is kept whole.
+    #[test]
+    fn a_backup_flagged_to_keep_stays_whole() {
+        let root = crate::test_utils::TempDir::new("transfer-prune-flagged");
         let clone = root.path().join("clone");
         let transfers = root.path().join("transfers");
         let now = SystemTime::now();
@@ -537,45 +848,22 @@ mod tests {
             .unwrap()
             .as_millis() as i64
             - 30 * 24 * 60 * 60 * 1000;
-        let ignored = |archive: bool, files: u64, placed: u64| ManifestIgnored {
-            archive: archive.then(|| "0-widgets.ignored.tar".to_string()),
-            files,
-            bytes: files * 10,
-            over_cap: !archive,
-            placed,
-        };
-        let cases = [
-            // Not carried: the archive is the only copy.
-            ("not-carried", COMPLETED, ignored(true, 2, 0), true),
-            // Carried, but one was left out at the destination.
-            ("partly-placed", COMPLETED, ignored(true, 3, 2), true),
-            ("all-placed", COMPLETED, ignored(true, 2, 2), false),
-            // Over the cap: nothing was archived to keep.
-            ("over-cap", COMPLETED, ignored(false, 2, 0), false),
-            // Rolled back: the source is still there.
-            ("rolled-back", ROLLED_BACK, ignored(true, 2, 0), false),
-        ];
-        for (id, status, ignored, holds) in &cases {
-            let mut m = manifest(id, old_ms, &clone, &backup_ref(id, "feature"));
-            m.status = status.to_string();
-            m.repos[0].ignored = Some(ignored.clone());
-            assert_eq!(m.holds_left_behind_files(), *holds, "{id}");
-            // Written by an older build, without the flag: the rule holds.
-            write_manifest(&transfers.join(id), &m).unwrap();
-        }
+        let mut m = manifest("flagged", old_ms, &clone, &backup_ref("flagged", "f"));
+        m.keep_until_removed = true;
+        m.repos[0].ignored = Some(ManifestIgnored {
+            archive: Some("0-widgets.ignored.tar".to_string()),
+            files: 1,
+            bytes: 1,
+            over_cap: false,
+            placed: 0,
+        });
+        let dir = transfers.join("flagged");
+        write_manifest(&dir, &m).unwrap();
+        populate(&dir, true);
+        let before = names_in(&dir);
 
-        let mut removed = prune(&transfers, RETENTION, now);
-        removed.sort();
+        assert_eq!(prune(&transfers, RETENTION, now), Pruned::default());
 
-        assert_eq!(
-            removed,
-            vec![
-                transfers.join("all-placed"),
-                transfers.join("over-cap"),
-                transfers.join("rolled-back")
-            ]
-        );
-        assert!(transfers.join("not-carried").join(MANIFEST_FILE).exists());
-        assert!(transfers.join("partly-placed").join(MANIFEST_FILE).exists());
+        assert_eq!(names_in(&dir), before);
     }
 }

@@ -115,6 +115,18 @@ impl CarryPlan {
         self.local_bundle
             .with_file_name(self.ignored_excludes_name())
     }
+
+    /// Where [`finish`], at a local destination, notes each entry the
+    /// excludes list adds to the clone's `info/exclude` before adding it:
+    /// `0-widgets.bundle`'s go in `0-widgets.info-exclude.added`, beside it.
+    pub fn local_excludes_journal(&self) -> PathBuf {
+        let stem = self
+            .bundle_name
+            .strip_suffix(".bundle")
+            .unwrap_or(&self.bundle_name);
+        self.local_bundle
+            .with_file_name(format!("{stem}.info-exclude.added"))
+    }
 }
 
 /// A repository carried to the destination.
@@ -304,6 +316,9 @@ pub fn carry_repo_with(
                     archive_path,
                     archive,
                     excludes: dest_ignored_excludes.as_deref().zip(ignored_excludes),
+                    // A workspace's clone is fresh, and goes whole on
+                    // rollback.
+                    excludes_journal: None,
                 }),
         )
     };
@@ -421,13 +436,20 @@ pub fn origin_tips(
 
 /// Finish a [`Landing::Branch`] carry in `checkout_dir`, a worktree on
 /// `plan.dest_branch`: restore the uncommitted state if the plan includes it,
-/// verify, and drop the temporary ref.
+/// place the ignored files it carried, verify, and drop the temporary ref.
+/// Each entry the ignored files' excludes list adds to the clone's
+/// `info/exclude` is noted in [`CarryPlan::local_excludes_journal`] first,
+/// for a rollback to take back out.
 pub fn finish(
     dest: &dyn TransferEndpoint,
     plan: &CarryPlan,
     outcome: &CarryOutcome,
     checkout_dir: &str,
 ) -> Result<ApplyReport, TransferError> {
+    let journal = plan.local_excludes_journal();
+    let journal = journal.to_str().ok_or_else(|| {
+        TransferError::InvalidPlan(format!("not a UTF-8 path: {}", journal.display()))
+    })?;
     apply(
         dest,
         &ApplyRequest {
@@ -440,7 +462,10 @@ pub fn finish(
             snapshot: &outcome.snapshot,
             restore: plan.include_uncommitted,
             lfs_path: outcome.dest_lfs.as_deref(),
-            ignored: dest_ignored(outcome),
+            ignored: dest_ignored(outcome).map(|ignored| IgnoredAtDest {
+                excludes_journal: Some(journal),
+                ..ignored
+            }),
         },
         // Checking LFS content out writes every object again.
         plan.untracked_bytes
@@ -465,6 +490,7 @@ fn dest_ignored(outcome: &CarryOutcome) -> Option<IgnoredAtDest<'_>> {
             .dest_ignored_excludes
             .as_deref()
             .zip(ignored.excludes.as_ref()),
+        excludes_journal: None,
     })
 }
 

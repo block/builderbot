@@ -30,12 +30,16 @@
 //! Two things make the destination ignore what the source did. A path on the
 //! excludes list that the destination doesn't ignore gets an anchored entry
 //! (`/<path>`) in its `info/exclude` first, as its rules can't be expected
-//! there: a fresh workspace clone has none. And an archived `.gitignore` —
-//! a cache directory's own `*` (`.pytest_cache/`, `.mypy_cache/`, a uv
-//! `.venv/`), which ignores itself and everything beside it — is put in place
-//! before asking, as until it is there nothing it ignores is; any that turns
-//! out not to be ignored itself is taken back out, and the question asked
-//! again without it.
+//! there: a fresh workspace clone has none. That file is the repository's,
+//! read by each of its worktrees, so a path another worktree has anything at
+//! gets no entry and is left out; and each entry is noted, before it is
+//! added, where the caller says, so a rollback can take exactly those back
+//! out (see [`super::super::undo::AddedExcludes`]). And an archived
+//! `.gitignore` — a cache directory's own `*` (`.pytest_cache/`,
+//! `.mypy_cache/`, a uv `.venv/`), which ignores itself and everything beside
+//! it — is put in place before asking, as until it is there nothing it
+//! ignores is; any that turns out not to be ignored itself is taken back out,
+//! and the question asked again without it.
 
 use super::{BundleFile, ScriptReport, TransferError};
 
@@ -85,10 +89,13 @@ macro_rules! ignored_prelude {
             // `$ignored_sha256`) into the checkout at `.`, with the excludes
             // list `$ignored_excludes` (checked against
             // `$ignored_excludes_sha256`) when there is one; see the module
-            // documentation. Prints `ignored_placed`, `ignored_excluded`
-            // when it added entries to `info/exclude`, and for what it left
-            // out `ignored_unignored` / `ignored_in_the_way` with one path of
-            // each as an example. Uses `fail` for anything it can't do.
+            // documentation. Notes each line it adds to `info/exclude` in
+            // `$ignored_excludes_journal`, when set, before adding it.
+            // Prints `ignored_placed`, `ignored_excluded` when it added
+            // entries to `info/exclude`, and for what it left out
+            // `ignored_unignored` / `ignored_elsewhere` /
+            // `ignored_in_the_way` with one path of each as an example. Uses
+            // `fail` for anything it can't do.
             "ignored_place() {\n",
             "  [ \"$(sha256_of \"$ignored\")\" = \"$ignored_sha256\" ] || fail 'the ignored files do not match their checksum'\n",
             "  _st=\"$ignored.d\"\n",
@@ -123,20 +130,58 @@ macro_rules! ignored_prelude {
             // each, with the characters a pattern treats specially escaped,
             // appended unless the same line is there already. A local
             // destination's `info/exclude` is its shared clone's, which
-            // usually ignores them already.
+            // usually ignores them already — and which every worktree of the
+            // clone reads, so a path another one has a file or directory at
+            // gets no entry (it would hide that one there too, from `git
+            // add -A` and a later transfer's snapshot), and isn't placed. A
+            // fresh workspace clone has no other worktree. When the
+            // worktrees can't be listed, none gets an entry (and each is
+            // left out as one this checkout doesn't ignore).
             "  LC_ALL=C comm -12 \"$_st/free\" \"$_st/local\" > \"$_st/local_free\"\n",
             "  if ignored_check \"$_st/local_free\" \"$_st/local_ignored\"; then\n",
             "    LC_ALL=C comm -23 \"$_st/local_free\" \"$_st/local_ignored\" > \"$_st/local_add\"\n",
             "  else\n",
             "    : > \"$_st/local_add\"\n",
             "  fi\n",
+            "  : > \"$_st/elsewhere\"\n",
+            "  if [ -s \"$_st/local_add\" ]; then\n",
+            "    if G worktree list --porcelain > \"$_st/worktrees.raw\" 2>/dev/null; then\n",
+            "      awk '/^worktree / { p = substr($0, 10); b = 0; next } $0 == \"bare\" { b = 1; next } $0 == \"\" { if (p != \"\" && !b) print p; p = \"\" } END { if (p != \"\" && !b) print p }' \"$_st/worktrees.raw\" > \"$_st/worktrees\"\n",
+            "      _here=$(pwd -P)\n",
+            "      while IFS= read -r _w; do\n",
+            "        [ -d \"$_w\" ] || continue\n",
+            "        [ \"$(unset CDPATH; cd -- \"$_w\" 2>/dev/null && pwd -P)\" != \"$_here\" ] || continue\n",
+            "        while IFS= read -r _p; do\n",
+            "          _r=${_p#./}\n",
+            "          if [ -e \"$_w/$_r\" ] || [ -L \"$_w/$_r\" ]; then printf '%s\\n' \"$_p\" >> \"$_st/elsewhere\"; fi\n",
+            "        done < \"$_st/local_add\"\n",
+            "      done < \"$_st/worktrees\"\n",
+            "    else\n",
+            "      : > \"$_st/local_add\"\n",
+            "    fi\n",
+            "    LC_ALL=C sort -u \"$_st/elsewhere\" > \"$_st/elsewhere.sorted\" && mv -f -- \"$_st/elsewhere.sorted\" \"$_st/elsewhere\" || fail 'cannot note the ignored files to exclude'\n",
+            "    LC_ALL=C comm -23 \"$_st/local_add\" \"$_st/elsewhere\" > \"$_st/local_own\" && mv -f -- \"$_st/local_own\" \"$_st/local_add\" || fail 'cannot note the ignored files to exclude'\n",
+            "  fi\n",
+            // The journal says, before each change is made, what file it is,
+            // whether this made it, whether this ended its last line, and
+            // each line this added: what a rollback takes back out.
             "  if [ -s \"$_st/local_add\" ]; then\n",
             "    _ex=$(G rev-parse --git-path info/exclude) || fail 'cannot find info/exclude'\n",
+            "    case $_ex in /*) ;; *) _ex=$PWD/$_ex ;; esac\n",
+            "    _jr=$ignored_excludes_journal\n",
+            "    if [ -n \"$_jr\" ]; then\n",
+            "      { printf 'file=%s\\n' \"$_ex\"; [ -e \"$_ex\" ] || printf 'created=1\\n'; } > \"$_jr\" || fail \"cannot write $_jr\"\n",
+            "    fi\n",
             "    mkdir -p -- \"$(dirname -- \"$_ex\")\" || fail \"cannot create the directory for $_ex\"\n",
-            "    if [ -s \"$_ex\" ] && [ -n \"$(tail -c 1 -- \"$_ex\")\" ]; then printf '\\n' >> \"$_ex\" || fail \"cannot write $_ex\"; fi\n",
+            "    if [ -s \"$_ex\" ] && [ -n \"$(tail -c 1 -- \"$_ex\")\" ]; then\n",
+            "      [ -z \"$_jr\" ] || printf 'terminated=1\\n' >> \"$_jr\" || fail \"cannot write $_jr\"\n",
+            "      printf '\\n' >> \"$_ex\" || fail \"cannot write $_ex\"\n",
+            "    fi\n",
             "    while IFS= read -r _p; do\n",
             "      _e=/$(printf '%s' \"${_p#./}\" | LC_ALL=C sed 's/[][\\\\*?#! ]/\\\\&/g')\n",
-            "      LC_ALL=C grep -qxF -e \"$_e\" -- \"$_ex\" 2>/dev/null || printf '%s\\n' \"$_e\" >> \"$_ex\" || fail \"cannot write $_ex\"\n",
+            "      LC_ALL=C grep -qxF -e \"$_e\" -- \"$_ex\" 2>/dev/null && continue\n",
+            "      [ -z \"$_jr\" ] || printf 'line=%s\\n' \"$_e\" >> \"$_jr\" || fail \"cannot write $_jr\"\n",
+            "      printf '%s\\n' \"$_e\" >> \"$_ex\" || fail \"cannot write $_ex\"\n",
             "    done < \"$_st/local_add\"\n",
             "    printf 'ignored_excluded=%s\\n' \"$(ignored_count \"$_st/local_add\")\"\n",
             "  fi\n",
@@ -168,7 +213,9 @@ macro_rules! ignored_prelude {
             "    mv -f -- \"$_st/kept\" \"$_st/tentative\"\n",
             "  done\n",
             "  LC_ALL=C sort -ru \"$_st/made\" | while IFS= read -r _m; do rmdir -- \"$_m\" 2>/dev/null; done\n",
-            "  LC_ALL=C comm -23 \"$_st/free\" \"$_st/ignored\" > \"$_st/unignored\"\n",
+            "  LC_ALL=C comm -23 \"$_st/free\" \"$_st/ignored\" > \"$_st/left\"\n",
+            "  LC_ALL=C comm -12 \"$_st/left\" \"$_st/elsewhere\" > \"$_st/elsewhere_left\"\n",
+            "  LC_ALL=C comm -23 \"$_st/left\" \"$_st/elsewhere\" > \"$_st/unignored\"\n",
             "  LC_ALL=C comm -23 \"$_st/ignored\" \"$_st/tentative\" > \"$_st/rest\"\n",
             "  while IFS= read -r _p; do\n",
             "    _r=${_p#./}\n",
@@ -179,6 +226,9 @@ macro_rules! ignored_prelude {
             "  printf 'ignored_placed=%s\\n' \"$(ignored_count \"$_st/ignored\")\"\n",
             "  if [ -s \"$_st/unignored\" ]; then\n",
             "    printf 'ignored_unignored=%s\\nignored_unignored_path=%s\\n' \"$(ignored_count \"$_st/unignored\")\" \"$(head -n 1 \"$_st/unignored\" | sed 's|^\\./||')\"\n",
+            "  fi\n",
+            "  if [ -s \"$_st/elsewhere_left\" ]; then\n",
+            "    printf 'ignored_elsewhere=%s\\nignored_elsewhere_path=%s\\n' \"$(ignored_count \"$_st/elsewhere_left\")\" \"$(head -n 1 \"$_st/elsewhere_left\" | sed 's|^\\./||')\"\n",
             "  fi\n",
             "  if [ -s \"$_st/in_the_way\" ]; then\n",
             "    printf 'ignored_in_the_way=%s\\nignored_in_the_way_path=%s\\n' \"$(ignored_count \"$_st/in_the_way\")\" \"$(head -n 1 \"$_st/in_the_way\")\"\n",
@@ -338,6 +388,11 @@ pub struct IgnoredPlacement {
     /// branch's own changes there.
     pub unignored: u64,
     pub unignored_example: Option<String>,
+    /// Files only the source machine's own excludes ignored, given no entry
+    /// in this one's `info/exclude` as another worktree of the repository
+    /// has something at the path, which the entry would hide there too.
+    pub elsewhere: u64,
+    pub elsewhere_example: Option<String>,
     /// Files with something already in the way: a file at the path, or a
     /// symlink or file where one of its directories goes.
     pub in_the_way: u64,
@@ -360,6 +415,8 @@ impl IgnoredPlacement {
             excluded: count("ignored_excluded"),
             unignored: count("ignored_unignored"),
             unignored_example: example("ignored_unignored_path"),
+            elsewhere: count("ignored_elsewhere"),
+            elsewhere_example: example("ignored_elsewhere_path"),
             in_the_way: count("ignored_in_the_way"),
             in_the_way_example: example("ignored_in_the_way_path"),
         })
@@ -434,6 +491,7 @@ mod tests {
     fn a_placement_report_names_what_was_left_out() {
         let report = ScriptReport::parse(
             "ignored_placed=2\nignored_excluded=1\nignored_unignored=1\nignored_unignored_path=.envrc\n\
+             ignored_elsewhere=2\nignored_elsewhere_path=NOTES.md\n\
              ignored_in_the_way=3\nignored_in_the_way_path=cache/x.log\n",
         );
         assert_eq!(
@@ -443,6 +501,8 @@ mod tests {
                 excluded: 1,
                 unignored: 1,
                 unignored_example: Some(".envrc".to_string()),
+                elsewhere: 2,
+                elsewhere_example: Some("NOTES.md".to_string()),
                 in_the_way: 3,
                 in_the_way_example: Some("cache/x.log".to_string()),
             })

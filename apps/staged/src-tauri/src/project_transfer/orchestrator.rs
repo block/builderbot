@@ -45,7 +45,8 @@ use super::preflight::{
 use super::registry::TransferGuard;
 use super::scripts::{ApplyReport, IgnoredFiles, Snapshot, CLONE_SCRIPT};
 use super::undo::{
-    self, AddedRemote, AddedWorktree, CreatedBranch, ReplacedConfig, SourceCheckout, Undo,
+    self, AddedExcludes, AddedRemote, AddedWorktree, CreatedBranch, ReplacedConfig, SourceCheckout,
+    Undo,
 };
 use super::TransferError;
 
@@ -786,7 +787,12 @@ impl Run<'_> {
             add_worktree(&clone, &leg.dest_branch, &worktree)
                 .map_err(|e| format!("Cannot add the worktree for {}: {e}", leg.dest_branch))?;
             let endpoint = self.host.local_endpoint(&worktree)?;
-            let finished = finish(endpoint.as_ref(), &plan, &outcome, &path_str(&worktree)?)?;
+            let finished = self.finish_recording_excludes(
+                endpoint.as_ref(),
+                &plan,
+                &outcome,
+                &path_str(&worktree)?,
+            )?;
             outcome.applied.warnings.extend(finished.warnings);
             outcome.applied.lfs_unavailable |= finished.lfs_unavailable;
             outcome.applied.ignored = outcome.applied.ignored.take().or(finished.ignored);
@@ -795,6 +801,42 @@ impl Run<'_> {
         leg.plan = Some(plan);
         leg.outcome = Some(outcome);
         Ok(())
+    }
+
+    /// [`finish`] in the new worktree. When the ignored files came with an
+    /// excludes list, the entries it may add to the clone's `info/exclude` —
+    /// which outlives the worktree, and every other worktree of the clone
+    /// reads — are recorded first, by the journal the finish notes them in,
+    /// and then, whatever the finish did, as the journal has them.
+    fn finish_recording_excludes(
+        &self,
+        endpoint: &dyn TransferEndpoint,
+        plan: &CarryPlan,
+        outcome: &CarryOutcome,
+        worktree: &str,
+    ) -> Result<ApplyReport, Failure> {
+        if outcome.dest_ignored_excludes.is_none() {
+            return Ok(finish(endpoint, plan, outcome, worktree)?);
+        }
+        let journal = plan.local_excludes_journal();
+        self.record(|undo| undo.excludes.push(AddedExcludes::noted_in(journal.clone())))?;
+        let finished = finish(endpoint, plan, outcome, worktree);
+        match AddedExcludes::read_journal(&journal) {
+            Ok(Some(added)) => {
+                let recorded = self.record(|undo| {
+                    if let Some(entry) = undo.excludes.iter_mut().find(|e| e.journal == journal) {
+                        *entry = added;
+                    }
+                });
+                // The entry still names the journal, which rollback reads.
+                if let Err(e) = recorded {
+                    log::warn!("[project_transfer] {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("[project_transfer] {e}"),
+        }
+        Ok(finished?)
     }
 
     /// Before `plan`'s branch lands in a local clone: record its config as it
@@ -861,7 +903,7 @@ impl Run<'_> {
 
     fn save_journal(&self) -> Result<(), String> {
         let mut manifest = self.journal.borrow_mut();
-        manifest.keep_until_removed = manifest.holds_left_behind_files();
+        manifest.keep_until_removed = manifest.holds_left_behind_changes();
         backups::write_manifest(&self.transfer_dir, &manifest)?;
         self.journaled.set(true);
         Ok(())
@@ -1076,6 +1118,13 @@ impl Run<'_> {
                 placement.in_the_way,
                 "where something was already in the way",
                 &placement.in_the_way_example,
+            ));
+        }
+        if placement.elsewhere > 0 {
+            warnings.push(not_placed(
+                placement.elsewhere,
+                "as ignoring {them} would also hide what another worktree has in the same place",
+                &placement.elsewhere_example,
             ));
         }
         warnings

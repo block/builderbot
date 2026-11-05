@@ -922,3 +922,198 @@ fn files_only_this_machines_excludes_ignore_arrive_with_an_entry_in_info_exclude
         assert_eq!(dest_env.status(&worktree), "", "{shell}");
     }
 }
+
+/// A local destination's `info/exclude` is its clone's, which every worktree
+/// of the clone reads: an entry for a path another worktree (or the clone's
+/// own checkout) has something at would hide that there too. Such a path
+/// gets no entry and isn't placed; the rest do, each noted in the journal
+/// before it is added, and taking the journal's entries back out leaves
+/// what was there before them and what was written after.
+#[test]
+fn info_exclude_entries_never_hide_another_worktrees_files_and_come_back_out() {
+    for shell in shells() {
+        let w = World::new(shell);
+        let source_env = Isolated::new(&w.root, "source", "");
+        let dest_env = Isolated::new(&w.root, "dest", "");
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        write(&w.source, "src/tracked.txt", "tracked\n");
+        commit(&w.source, "feature");
+        // Only the source's own clone ignores these.
+        append(
+            &w.source.join(".git/info/exclude"),
+            "NOTES.md\n.penpal\n*.local\n",
+        );
+        let carried: Files = [
+            ("NOTES.md", "source notes\n"),
+            (".penpal", "pen\n"),
+            ("x.local", "local\n"),
+        ]
+        .into_iter()
+        .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
+        .collect();
+        for (path, content) in &carried {
+            write(&w.source, path, content);
+        }
+        // The destination clone: its own checkout has an untracked x.local,
+        // another worktree an untracked NOTES.md, and its info/exclude a
+        // last line without a newline.
+        let sibling = w.root.join("wt-sibling");
+        git(
+            &w.dest,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "sibling",
+                sibling.to_str().unwrap(),
+            ],
+        );
+        write(&sibling, "NOTES.md", "the sibling's own\n");
+        write(&w.dest, "x.local", "the checkout's own\n");
+        let exclude = w.dest.join(".git/info/exclude");
+        fs::write(&exclude, "# before\n.envrc").unwrap();
+        let sibling_status = dest_env.status(&sibling);
+        let main_status = dest_env.status(&w.dest);
+        assert_eq!(sibling_status, "?? NOTES.md\n", "{shell}");
+        assert!(
+            main_status.contains("?? x.local\n"),
+            "{shell}: {main_status}"
+        );
+
+        let source = source_env.endpoint(w.endpoint(&w.remote_scratch));
+        let dest = dest_env.endpoint(w.endpoint(&w.local_scratch));
+        let plan = CarryPlan {
+            include_ignored: true,
+            ..w.origin_plan(
+                &source,
+                &dest,
+                Landing::Branch,
+                ("feature", "feature"),
+                false,
+                &["main"],
+            )
+        };
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+        let worktree = w.root.join("wt-feature");
+        git(
+            &w.dest,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worktree.to_str().unwrap(),
+                "feature",
+            ],
+        );
+        let finished = finish(&dest, &plan, &outcome, worktree.to_str().unwrap()).unwrap();
+
+        let placement = finished.ignored.unwrap();
+        assert_eq!(
+            placement,
+            IgnoredPlacement {
+                placed: 1,
+                excluded: 1,
+                elsewhere: 2,
+                elsewhere_example: Some("NOTES.md".to_string()),
+                ..IgnoredPlacement::default()
+            },
+            "{shell}"
+        );
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "# before\n.envrc\n/.penpal\n",
+            "{shell}"
+        );
+        assert_eq!(
+            fs::read_to_string(worktree.join(".penpal")).unwrap(),
+            "pen\n"
+        );
+        assert!(!worktree.join("NOTES.md").exists(), "{shell}");
+        assert!(!worktree.join("x.local").exists(), "{shell}");
+        assert_eq!(dest_env.status(&worktree), "", "{shell}");
+        assert_eq!(dest_env.status(&sibling), sibling_status, "{shell}");
+        assert_eq!(dest_env.status(&w.dest), main_status, "{shell}");
+        let journal = plan.local_excludes_journal();
+        let noted = undo::AddedExcludes::read_journal(&journal)
+            .unwrap()
+            .expect("a journal");
+        assert_eq!(
+            noted.file.as_deref().map(|f| f.canonicalize().unwrap()),
+            Some(exclude.canonicalize().unwrap()),
+            "{shell}"
+        );
+        assert!(noted.terminated && !noted.created, "{shell}");
+        assert_eq!(noted.lines, vec!["/.penpal".to_string()], "{shell}");
+
+        // Someone else writes an entry after the transfer's; a rollback
+        // takes out the transfer's alone.
+        append(&exclude, "later\n");
+        undo::remove_added_excludes(&undo::AddedExcludes::noted_in(journal.clone())).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "# before\n.envrc\nlater\n",
+            "{shell}"
+        );
+        assert_eq!(dest_env.status(&sibling), sibling_status, "{shell}");
+        assert_eq!(dest_env.status(&worktree), "?? .penpal\n", "{shell}");
+    }
+}
+
+/// A clone without an `info/exclude` gets one, which a rollback removes
+/// again once nothing but the transfer's entries are in it.
+#[test]
+fn an_info_exclude_a_finish_made_goes_with_its_entries() {
+    for shell in shells() {
+        let w = World::new(shell);
+        let source_env = Isolated::new(&w.root, "source", "");
+        let dest_env = Isolated::new(&w.root, "dest", "");
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        write(&w.source, "src/tracked.txt", "tracked\n");
+        commit(&w.source, "feature");
+        append(&w.source.join(".git/info/exclude"), ".penpal\n");
+        write(&w.source, ".penpal", "pen\n");
+        let exclude = w.dest.join(".git/info/exclude");
+        let _ = fs::remove_file(&exclude);
+        let source = source_env.endpoint(w.endpoint(&w.remote_scratch));
+        let dest = dest_env.endpoint(w.endpoint(&w.local_scratch));
+        let plan = CarryPlan {
+            include_ignored: true,
+            ..w.origin_plan(
+                &source,
+                &dest,
+                Landing::Branch,
+                ("feature", "feature"),
+                false,
+                &["main"],
+            )
+        };
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+        let worktree = w.root.join("wt-feature");
+        git(
+            &w.dest,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worktree.to_str().unwrap(),
+                "feature",
+            ],
+        );
+        finish(&dest, &plan, &outcome, worktree.to_str().unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "/.penpal\n",
+            "{shell}"
+        );
+        let noted = undo::AddedExcludes::read_journal(&plan.local_excludes_journal())
+            .unwrap()
+            .unwrap();
+        assert!(noted.created && !noted.terminated, "{shell}");
+
+        undo::remove_added_excludes(&noted).unwrap();
+
+        assert!(!exclude.exists(), "{shell}");
+    }
+}

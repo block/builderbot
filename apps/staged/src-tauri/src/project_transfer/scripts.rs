@@ -341,13 +341,17 @@ pub const ORIGIN_TIPS_SCRIPT: &str = concat!(
 /// and report `ignored_placed` and what they left out. With
 /// `ignored_excludes=<list>` (and `ignored_excludes_sha256`) too, the files
 /// it names that this checkout doesn't ignore first get an entry in its
-/// `info/exclude` (`ignored_excluded`), which a failure leaves behind: each
-/// names one path that isn't there, as the source had it.
+/// `info/exclude` (`ignored_excluded`) — unless another worktree of the
+/// repository has something at the path (`ignored_elsewhere`) — which a
+/// failure leaves behind: each names one path that isn't there, as the
+/// source had it. With `ignored_excludes_journal=<file>`, each entry is
+/// noted there before it is added (see [`super::undo::AddedExcludes`]), for
+/// the caller to take back out.
 pub const APPLY_SCRIPT: &str = concat!(
     prelude!(),
     lfs_prelude!(),
     ignored_prelude!(),
-    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0 lfs='' lfs_sha256='' ignored='' ignored_sha256='' ignored_excludes='' ignored_excludes_sha256=''\n",
+    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0 lfs='' lfs_sha256='' ignored='' ignored_sha256='' ignored_excludes='' ignored_excludes_sha256='' ignored_excludes_journal=''\n",
     "while [ $# -gt 0 ]; do\n",
     "  case $1 in\n",
     "    --) shift; break ;;\n",
@@ -368,6 +372,7 @@ pub const APPLY_SCRIPT: &str = concat!(
     "    ignored_sha256=*) ignored_sha256=${1#ignored_sha256=} ;;\n",
     "    ignored_excludes=*) ignored_excludes=${1#ignored_excludes=} ;;\n",
     "    ignored_excludes_sha256=*) ignored_excludes_sha256=${1#ignored_excludes_sha256=} ;;\n",
+    "    ignored_excludes_journal=*) ignored_excludes_journal=${1#ignored_excludes_journal=} ;;\n",
     "    *) fail \"unknown argument: $1\" ;;\n",
     "  esac\n",
     "  shift\n",
@@ -1174,6 +1179,9 @@ pub struct IgnoredAtDest<'a> {
     pub archive: &'a BundleFile,
     /// The excludes list beside it, when it has one.
     pub excludes: Option<(&'a str, &'a BundleFile)>,
+    /// Where to note each entry the excludes list adds to `info/exclude`,
+    /// before adding it.
+    pub excludes_journal: Option<&'a str>,
 }
 
 impl ApplyRequest<'_> {
@@ -1206,6 +1214,9 @@ impl ApplyRequest<'_> {
             if let Some((path, list)) = ignored.excludes {
                 args.push(format!("ignored_excludes={path}"));
                 args.push(format!("ignored_excludes_sha256={}", list.sha256));
+                if let Some(journal) = ignored.excludes_journal {
+                    args.push(format!("ignored_excludes_journal={journal}"));
+                }
             }
         }
         args.push("--".to_string());
@@ -1506,6 +1517,8 @@ mod tests {
             archive_path: "/t/x.ignored.tar",
             archive: &ignored,
             excludes: None,
+            // Nothing to note without an excludes list.
+            excludes_journal: Some("/t/x.info-exclude.added"),
         });
         let args = request.args();
         assert!(args.contains(&"ignored=/t/x.ignored.tar".to_string()));
@@ -1522,6 +1535,7 @@ mod tests {
         let args = request.args();
         assert!(args.contains(&"ignored_excludes=/t/x.ignored.excludes".to_string()));
         assert!(args.contains(&format!("ignored_excludes_sha256={}", "ab".repeat(32))));
+        assert!(args.contains(&"ignored_excludes_journal=/t/x.info-exclude.added".to_string()));
         request.mode = ApplyMode::Branch;
         assert!(!request.args().iter().any(|a| a.starts_with("ignored")));
     }

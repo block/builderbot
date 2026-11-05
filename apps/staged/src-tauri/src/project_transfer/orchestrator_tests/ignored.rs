@@ -270,3 +270,195 @@ fn a_source_whose_ignored_files_cant_be_backed_up_stays() {
     assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
     assert!(!f.host.calls().iter().any(|c| c.starts_with("delete")));
 }
+
+/// Entries a transfer to local adds to a clone's `info/exclude` — for
+/// ignored files only the workspace's own rules ignored — are recorded in
+/// the manifest as the finish noted them, and a rollback takes exactly those
+/// back out: the clone's other worktrees read that file too.
+#[test]
+fn a_rolled_back_transfer_to_local_takes_its_info_exclude_entries_back_out() {
+    let f = two_repo_project();
+    f.transfer_options(with_ignored(), &|_| {})
+        .result
+        .expect("to remote");
+    let checkout = f.checkout(0);
+    // Only the workspace's clone ignores it (a name no global excludes file
+    // here should match, as the fixture's ends share this machine's).
+    let mut rules = fs::read_to_string(checkout.join(".git/info/exclude")).unwrap_or_default();
+    rules.push_str("only-in-the-workspace.txt\n");
+    fs::write(checkout.join(".git/info/exclude"), rules).unwrap();
+    write(&checkout, "only-in-the-workspace.txt", "pen\n");
+    let exclude = f.host.clone_of(WIDGETS).join(".git/info/exclude");
+    let before = fs::read(&exclude).unwrap_or_default();
+    // The second repo's landing fails, after the first one finished.
+    f.host.arm(Fault::Script(Side::Local, APPLY_SCRIPT, 3));
+    let checked = Mutex::new(false);
+
+    let failed = f.transfer_options(with_ignored(), &|progress| {
+        if progress.phase == TransferPhase::Applying
+            && progress.branch_id.as_deref() == Some(&f.branches[1].id)
+        {
+            let undo = f.manifest(&progress.transfer_id).unwrap().undo;
+            let [added] = undo.excludes.as_slice() else {
+                panic!("{:?}", undo.excludes);
+            };
+            assert!(added.file.is_some(), "{added:?}");
+            assert_eq!(added.lines, vec!["/only-in-the-workspace.txt".to_string()]);
+            let now = fs::read_to_string(&exclude).unwrap();
+            assert!(
+                now.lines().any(|l| l == "/only-in-the-workspace.txt"),
+                "{now}"
+            );
+            *checked.lock().unwrap() = true;
+        }
+    });
+
+    assert!(f.host.fired());
+    assert!(*checked.lock().unwrap());
+    assert!(failed.result.is_err());
+    assert_eq!(
+        fs::read(&exclude).unwrap_or_default(),
+        before,
+        "the clone's info/exclude is as it was"
+    );
+    let manifest = f.manifest(&failed.transfer_id).unwrap();
+    assert_eq!(manifest.status, backups::ROLLED_BACK);
+
+    // Through, it stays: the new worktree ignores what it was given.
+    let done = f.transfer_options(with_ignored(), &|_| {});
+    done.result.expect("to local");
+    let worktree = f.worktree(0);
+    assert_eq!(
+        read(&worktree, "only-in-the-workspace.txt").as_deref(),
+        Some("pen\n")
+    );
+    assert!(!git(
+        &worktree,
+        &["status", "--porcelain", "--untracked-files=all"]
+    )
+    .contains("only-in-the-workspace.txt"));
+    let after = fs::read_to_string(&exclude).unwrap();
+    assert!(
+        after.lines().any(|l| l == "/only-in-the-workspace.txt"),
+        "{after}"
+    );
+}
+
+/// An ignored file only the workspace ignored, at a path another worktree of
+/// the local clone has, stays out of the new worktree: ignoring it through
+/// the shared `info/exclude` would hide that worktree's file too.
+#[test]
+fn an_ignored_file_another_local_worktree_has_is_not_placed_and_said_so() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer_options(with_ignored(), &|_| {})
+        .result
+        .expect("to remote");
+    let checkout = f.checkout(0);
+    let mut rules = fs::read_to_string(checkout.join(".git/info/exclude")).unwrap_or_default();
+    rules.push_str("only-in-the-workspace.txt\n");
+    fs::write(checkout.join(".git/info/exclude"), rules).unwrap();
+    write(&checkout, "only-in-the-workspace.txt", "workspace's\n");
+    let clone = f.host.clone_of(WIDGETS);
+    write(&clone, "only-in-the-workspace.txt", "the clone's own\n");
+    let exclude = clone.join(".git/info/exclude");
+    let before = fs::read(&exclude).unwrap_or_default();
+
+    let result = f
+        .transfer_options(with_ignored(), &|_| {})
+        .result
+        .expect("to local");
+
+    let warnings = &result.repos[0].warnings;
+    assert_eq!(codes(warnings), vec!["ignored_not_placed"]);
+    assert!(
+        warnings[0].message.contains("another worktree")
+            && warnings[0].message.contains("only-in-the-workspace.txt"),
+        "{warnings:?}"
+    );
+    assert_eq!(read(&f.worktree(0), "only-in-the-workspace.txt"), None);
+    assert_eq!(fs::read(&exclude).unwrap_or_default(), before);
+    assert!(git(&clone, &["status", "--porcelain"]).contains("?? only-in-the-workspace.txt"));
+}
+
+/// Past the retention, a transfer that left only ignored files behind keeps
+/// just their archive and its manifest: its bundles and backup refs go like
+/// any other's. An interrupted one whose bundles went is still dealt with
+/// at the next start, and goes whole once it no longer holds them.
+#[test]
+fn past_the_retention_only_the_ignored_files_left_behind_are_kept() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let worktree = f.worktree(0);
+    write(&worktree, "secret.log", "s3cret\n");
+    let to_remote = f.transfer(true);
+    let result = to_remote.result.expect("to remote");
+    let tid = &to_remote.transfer_id;
+    let transfers = f.host.root.join("transfers");
+    let dir = transfers.join(tid);
+    let manifest = f.manifest(tid).unwrap();
+    assert!(!manifest.keep_until_removed, "nothing uncommitted stayed");
+    assert!(manifest.holds_left_behind_ignored(), "{:?}", manifest.repos);
+    let backup_ref = result.repos[0].backup_ref.clone().unwrap();
+    let clone = f.host.clone_of(WIDGETS);
+    assert!(try_git(&clone, &["rev-parse", "-q", "--verify", &backup_ref]).is_ok());
+    assert_eq!(f.bundles(tid), 1);
+    let later =
+        std::time::SystemTime::now() + backups::RETENTION + std::time::Duration::from_secs(60);
+
+    let pruned = backups::prune(&transfers, backups::RETENTION, later);
+
+    assert_eq!(pruned.trimmed, vec![dir.clone()]);
+    assert!(pruned.removed.is_empty());
+    assert_eq!(f.bundles(tid), 0);
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "0-widgets.ignored.excludes")
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["0-widgets.ignored.tar", backups::MANIFEST_FILE]);
+    assert_eq!(
+        read(&backed_up(&f, tid, "0-widgets"), "secret.log").as_deref(),
+        Some("s3cret\n")
+    );
+    assert!(try_git(&clone, &["rev-parse", "-q", "--verify", &backup_ref]).is_err());
+    let trimmed = f.manifest(tid).unwrap();
+    assert!(trimmed.bundles_pruned_at.is_some());
+    assert_eq!(trimmed.repos[0].backup_ref, None);
+
+    // Cut off after the switch: marked, and still kept.
+    let mut cut = trimmed.clone();
+    cut.status = backups::COMMITTED.to_string();
+    cut.owner_pid = Some(dead_pid());
+    backups::write_manifest(&dir, &cut).unwrap();
+    let recovered = recovery::recover(&f.store, &f.host, &recovery::is_running);
+    assert!(
+        matches!(recovered.as_slice(), [(id, Recovered::Marked(_))] if id == tid),
+        "{recovered:?}"
+    );
+    let marked = f.manifest(tid).unwrap();
+    assert_eq!(marked.status, backups::COMPLETED);
+    assert_eq!(marked.bundles_pruned_at, trimmed.bundles_pruned_at);
+    assert_eq!(
+        backups::prune(&transfers, backups::RETENTION, later),
+        backups::Pruned::default()
+    );
+
+    // Cut off before it, with nothing to undo: rolled back, so the source
+    // still has the files and the rest goes too.
+    let mut cut = marked;
+    cut.status = backups::CARRYING.to_string();
+    cut.direction = "toLocal".to_string();
+    cut.undo = Undo::default();
+    backups::write_manifest(&dir, &cut).unwrap();
+    let recovered = recovery::recover(&f.store, &f.host, &recovery::is_running);
+    assert_eq!(
+        recovered,
+        vec![(tid.clone(), Recovered::RolledBack { left: vec![] })]
+    );
+    assert_eq!(
+        backups::prune(&transfers, backups::RETENTION, later).removed,
+        vec![dir.clone()]
+    );
+    assert!(!dir.exists());
+}

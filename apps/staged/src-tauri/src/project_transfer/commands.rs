@@ -245,12 +245,14 @@ pub(crate) fn prune_backups() {
     let Ok(dir) = LiveHost.transfers_dir() else {
         return;
     };
-    let removed = backups::prune(&dir, backups::RETENTION, std::time::SystemTime::now());
-    if !removed.is_empty() {
+    let pruned = backups::prune(&dir, backups::RETENTION, std::time::SystemTime::now());
+    if !pruned.removed.is_empty() || !pruned.trimmed.is_empty() {
         log::info!(
-            "[project_transfer] pruned {} transfer backups older than {} days",
-            removed.len(),
-            backups::RETENTION.as_secs() / 86_400
+            "[project_transfer] pruned {} transfer backups older than {} days, keeping only the \
+             ignored files left behind in {} more",
+            pruned.removed.len(),
+            backups::RETENTION.as_secs() / 86_400,
+            pruned.trimmed.len()
         );
     }
 }

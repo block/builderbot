@@ -1832,19 +1832,33 @@
    * Confirms a drop or an "Add image" pick that the timeline cannot show yet.
    * Without a timeline key (a remote workspace that is not running, a local
    * branch with no worktree) the card shows a status view, or an empty setup
-   * timeline whose "adding..." rows clear without the item appearing. The note
-   * or image is still stored and shows once the timeline loads, so say so
-   * rather than leave the drop looking like a no-op that invites a duplicate.
-   * Checked once the stores finish, not at drop time: what matters is whether
-   * the reload after them can show the items. Called once per drop or pick
-   * with everything it stored, so a drop of notes and images gets one toast.
+   * timeline whose "adding..." rows clear without the item appearing. With a
+   * key but no timeline after a failed load, it shows only the error and
+   * Retry. The note or image is still stored and shows once the timeline
+   * loads, so say so rather than leave the drop looking like a no-op that
+   * invites a duplicate. Checked once the stores finish, not at drop time:
+   * what matters is whether the reload after them can show the items. Called
+   * once per drop or pick with everything it stored, so a drop of notes and
+   * images gets one toast.
    */
   function notifyAddedOffTimeline(count: number) {
-    if (count === 0 || branchTimelineReadyKey(branch)) return;
+    if (count === 0) return;
+    let when: string;
+    if (!branchTimelineReadyKey(branch)) {
+      const until = isRemote
+        ? 'the workspace is running'
+        : worktreeError
+          ? 'a retry creates the worktree'
+          : 'the worktree is ready';
+      when = `on the timeline once ${until}`;
+    } else if (error && !timeline) {
+      when = 'once the timeline loads';
+    } else {
+      return;
+    }
     const pronoun = count === 1 ? 'It' : 'They';
-    const until = isRemote ? 'the workspace is running' : 'the worktree is ready';
     toast.success(`Added ${count} ${count === 1 ? 'file' : 'files'}`, {
-      description: `${pronoun} will appear on the timeline once ${until}.`,
+      description: `${pronoun} will appear ${when}.`,
     });
   }
 

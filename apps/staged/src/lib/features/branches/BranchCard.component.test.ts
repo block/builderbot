@@ -88,10 +88,10 @@ import BranchCard from './BranchCard.svelte';
 const mounted: ReturnType<typeof mount>[] = [];
 
 /** Mounts a card. Set `props.deleting` afterwards to flip its delete state. */
-function mountCard(branch: Branch) {
+function mountCard(branch: Branch, extra: { worktreeError?: string } = {}) {
   const target = document.createElement('div');
   document.body.appendChild(target);
-  const props = reactiveProps({ branch, deleting: false });
+  const props = reactiveProps({ branch, deleting: false, ...extra });
   mounted.push(mount(BranchCard, { target, props }));
   flushSync();
   return { card: target.querySelector<HTMLElement>('.branch-card')!, props };
@@ -295,6 +295,39 @@ describe('BranchCard drops the timeline cannot show yet', () => {
     expect(toast.success).toHaveBeenCalledTimes(1);
     expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
       description: 'It will appear on the timeline once the worktree is ready.',
+    });
+  });
+
+  it('confirms the stored files on a local card whose worktree failed', async () => {
+    mountCard(localBranch(null), { worktreeError: 'disk full' });
+
+    drop(['/tmp/b.png']);
+    await settle(() => expect(cmd.createImage).toHaveResolvedTimes(1));
+
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
+      description: 'It will appear on the timeline once a retry creates the worktree.',
+    });
+  });
+
+  it('confirms the stored files on a card showing a failed timeline load', async () => {
+    cmd.getBranchTimeline.mockRejectedValue(new Error('git failed'));
+    const { card } = mountCard(remoteBranch('running'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(card.querySelector('.error')?.textContent).toContain('git failed');
+    });
+
+    drop(['/tmp/b.png']);
+    // The reload after the store fails too, so the card still shows the error.
+    await settle(() => {
+      expect(cmd.createImage).toHaveResolvedTimes(1);
+      expect(cmd.getBranchTimeline).toHaveBeenCalledTimes(2);
+    });
+
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
+      description: 'It will appear once the timeline loads.',
     });
   });
 

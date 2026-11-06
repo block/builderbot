@@ -185,6 +185,9 @@ struct MonitorState {
     /// A background hold ended with the work it was waiting for still going;
     /// see [`SessionSettled::background_work_left`].
     background_work_left: bool,
+    /// The agent answered the turn's prompt with an error of its own, over a
+    /// transport that was still up to carry it.
+    answered_error: bool,
 }
 
 /// What a [`DetachHandle`] lets go of.
@@ -294,6 +297,18 @@ impl TransportMonitor {
 
     pub(super) fn background_work_left(&self) -> bool {
         self.state().background_work_left
+    }
+
+    /// The agent answered the turn's prompt with an error, not the SDK
+    /// failing it because the transport closed. The error is the agent's
+    /// own verdict on the turn, so it stands even if the proxy exits right
+    /// behind it and its shared router records the remote agent lost.
+    pub(super) fn note_answered_error(&self) {
+        self.state().answered_error = true;
+    }
+
+    pub(super) fn answered_error(&self) -> bool {
+        self.state().answered_error
     }
 
     pub(super) fn signal(&self, signal: TransportSignal) {

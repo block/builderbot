@@ -2722,20 +2722,26 @@ impl AcpDriver {
             // whatever error the ended stream produced; report the loss. A
             // session cut off for falling behind the agent's output reports
             // that instead: it is why its stream ended, even if the agent was
-            // lost afterwards.
+            // lost afterwards. An error the agent answered the prompt with
+            // stands either way: it came over a live transport, and a proxy
+            // that exits right behind it can have its loss recorded before
+            // this reads it.
+            let answered_error = transport.answered_error();
             let protocol_result = match (
                 protocol_result,
                 agent_process.cut_off(),
                 agent_process.loss(),
             ) {
-                (Err(error), Some(cause), _) if !cancel_token.is_cancelled() => {
+                (Err(error), Some(cause), _) if !cancel_token.is_cancelled() && !answered_error => {
                     log::warn!(
                         "Session {our_session_id}: cut off from the remote agent ({cause}); \
                          its connection ended with: {error}"
                     );
                     Err(format!("{REMOTE_SESSION_CUT_OFF_PREFIX}{cause}"))
                 }
-                (Err(error), None, Some(loss)) if !cancel_token.is_cancelled() => {
+                (Err(error), None, Some(loss))
+                    if !cancel_token.is_cancelled() && !answered_error =>
+                {
                     let RemoteLoss {
                         cause,
                         agent_may_survive,
@@ -7114,10 +7120,14 @@ async fn run_prompt_turn(
         return Err(transport.lost_error("before the prompt was sent"));
     }
     // A failure the SDK made because the transport closed is the structural
-    // verdict a remote session's `disconnected` status rests on.
+    // verdict a remote session's `disconnected` status rests on. Any other
+    // failure is the agent's own answer, which no loss recorded after it
+    // overrides.
     let prompt_failed = |error: agent_client_protocol::Error| {
         if agent_client_protocol::is_incoming_transport_closed(&error) {
             transport.confirm(TransportLossPhase::Turn);
+        } else {
+            transport.note_answered_error();
         }
         describe_prompt_error(error, &setup.auth_methods)
     };

@@ -589,6 +589,8 @@ while IFS= read -r line; do
           sleep 1; echo "$eof_line" >&2 ;;
         exit) exit 0 ;;
         process-exited)
+          # A FIFO beside the log holds the answer until the test says go.
+          [ -p "$log.go" ] && read -r _ < "$log.go"
           fail "$id" '{"code":-32603,"message":"Internal error","data":"Claude Code process exited with code 1"}'
           exit 0 ;;
         auth) fail "$id" '{"code":-32000,"message":"Authentication required"}' ;;
@@ -691,13 +693,43 @@ mod fake_proxy {
         detach_on: Option<&str>,
         stop_on: Option<&str>,
     ) -> Run {
-        run_inner(mode, detach_on, stop_on, None).await
+        run_inner(mode, detach_on, stop_on, None, false).await
     }
 
     /// [`run`] with the post-turn background hold on, doing `on_hold` once
     /// the connection reports it is holding.
     pub(super) async fn run_holding(mode: &str, on_hold: OnHold) -> Run {
-        run_inner(mode, None, None, Some(on_hold)).await
+        run_inner(mode, None, None, Some(on_hold), false).await
+    }
+
+    /// How long the connection's thread stays blocked after the go-ahead in
+    /// [`run_reading_answer_late`].
+    const LATE_READ_STALL: Duration = Duration::from_secs(1);
+
+    /// [`run`] in `process-exited`, with the connection reading the agent's
+    /// answer only after the proxy has seen the agent exit: the order a
+    /// loaded machine can produce. The fake holds its answer until the test
+    /// gives the go-ahead on a FIFO, and the test then blocks its own
+    /// thread, which the connection runs on too, for [`LATE_READ_STALL`].
+    /// The proxy runs on a thread of its own, so meanwhile it relays the
+    /// answer, sees the fake exit and records the remote agent lost.
+    pub(super) async fn run_reading_answer_late() -> Run {
+        run_inner("process-exited", None, None, None, true).await
+    }
+
+    /// Give the fake the go-ahead on `fifo`, blocking the calling thread
+    /// until it has taken it: from a helper thread, so a fake that never
+    /// opens the FIFO fails the test instead of hanging it.
+    fn give_go_ahead(fifo: &Path) {
+        let (given, taken) = std::sync::mpsc::channel();
+        let fifo = fifo.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = given.send(std::fs::write(fifo, "go\n"));
+        });
+        taken
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the fake opens its go-ahead FIFO")
+            .expect("the go-ahead is written");
     }
 
     async fn run_inner(
@@ -705,8 +737,17 @@ mod fake_proxy {
         detach_on: Option<&str>,
         stop_on: Option<&str>,
         on_hold: Option<OnHold>,
+        read_answer_late: bool,
     ) -> Run {
         let log = log_path(mode);
+        let go = PathBuf::from(format!("{}.go", log.display()));
+        if read_answer_late {
+            let made = std::process::Command::new("mkfifo")
+                .arg(&go)
+                .status()
+                .expect("mkfifo runs");
+            assert!(made.success(), "mkfifo {}", go.display());
+        }
         let holding = CancellationToken::new();
         let local = tokio::task::LocalSet::new();
         let run = local
@@ -765,13 +806,23 @@ mod fake_proxy {
                         OnHold::Nothing => {}
                     }
                 };
+                let late_reader = async {
+                    if read_answer_late {
+                        wait_for_log(&log, "PROMPT").await;
+                        // Blocking, not awaiting: nothing on this thread, the
+                        // connection included, runs until the stall is over.
+                        give_go_ahead(&go);
+                        std::thread::sleep(LATE_READ_STALL);
+                    }
+                };
                 // Under a hold the prompt resolves at hold entry; the
                 // connection settles later.
-                let (turn, (), (), ()) = tokio::join!(
+                let (turn, (), (), (), ()) = tokio::join!(
                     connection.prompt("hello", &[]),
                     detacher,
                     stopper,
-                    hold_action
+                    hold_action,
+                    late_reader
                 );
                 let settled = tokio::time::timeout(Duration::from_secs(30), settled_rx)
                     .await
@@ -787,6 +838,7 @@ mod fake_proxy {
             .await;
         let text = std::fs::read_to_string(&log).unwrap_or_default();
         let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(&go);
         Run { log: text, ..run }
     }
 }
@@ -902,19 +954,32 @@ async fn stdout_closing_mid_turn_is_a_turn_loss() {
 
 /// Errors the agent *answered* stay plain failures, even when the bridge
 /// exits right behind its answer.
+///
+/// In `process-exited` the proxy, on its own thread, records the remote
+/// agent lost as soon as the fake exits, and that races the connection
+/// reading the answer. Left to the scheduler, the proxy wins only now and
+/// then, so the mode also runs with the connection made to read the answer
+/// late, after the loss is recorded: a regression that lets the loss
+/// rewrite an answered error fails every run, not one in a few.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn errors_the_agent_answered_are_not_transport_loss() {
-    for mode in ["process-exited", "auth", "refused"] {
-        let run = fake_proxy::run(mode, None).await;
-        assert_eq!(run.settled.reason, SessionSettleReason::Failed, "{mode}");
-        assert_eq!(run.settled.transport_loss, None, "{mode}");
+    let assert_plain_failure = |run: fake_proxy::Run, case: &str| {
+        assert_eq!(run.settled.reason, SessionSettleReason::Failed, "{case}");
+        assert_eq!(run.settled.transport_loss, None, "{case}");
         assert_eq!(
             verdict_of(&run.settled.outcome),
             "plain error",
-            "{mode}: {:?}",
+            "{case}: {:?}",
             run.settled.outcome
         );
+    };
+    assert_plain_failure(
+        fake_proxy::run_reading_answer_late().await,
+        "process-exited, answer read late",
+    );
+    for mode in ["process-exited", "auth", "refused"] {
+        assert_plain_failure(fake_proxy::run(mode, None).await, mode);
     }
 }
 

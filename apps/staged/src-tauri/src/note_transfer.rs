@@ -382,7 +382,9 @@ where
 /// read the family again, resolve each child's destination branch, stage the
 /// media and run the transaction. Synchronous, so nothing can change between
 /// the second read and the transaction except through the store itself —
-/// which the transaction's own guards cover.
+/// which the transaction's own guards cover, keyed on each note's location,
+/// session and the body read here (staging large media can take long enough
+/// for a resumed session to finish again).
 fn move_project_note_now(
     store: &Store,
     before: &ProjectNote,
@@ -449,6 +451,7 @@ fn move_project_note_now(
             plan.push(ChildNoteMove {
                 note_id: child.id.clone(),
                 expected_branch_id: child.branch_id.clone(),
+                expected_content: child.content.clone(),
                 target_branch_id: target_branch.id.clone(),
                 content: media.content.clone(),
                 media: media.images.clone(),
@@ -468,6 +471,7 @@ fn move_project_note_now(
     let result = store.move_project_note_to_project(
         &note.id,
         &note.project_id,
+        &note.content,
         &target.id,
         &parent_media.content,
         &parent_media.images,

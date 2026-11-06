@@ -6014,3 +6014,129 @@ fn get_app_quit_sessions_since_filters_by_marker_and_orders_by_created_at() {
         .collect();
     assert!(!ids.contains(&first.id));
 }
+
+/// The launch-resume detection query hands back an interrupted row whole.
+/// It once listed its own 16 columns while `row_to_session` read a 17th
+/// (`parent_session_id`, added on main), so every matching row failed the
+/// query with `InvalidColumnIndex` and launch detection only logged a
+/// warning — the dialog never appeared.
+#[test]
+fn get_app_quit_sessions_since_returns_the_interrupted_session() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // The parent is still running, so it is not a candidate itself.
+    let parent = Session::new_running("project session", Path::new("/tmp"));
+    store.create_session(&parent).unwrap();
+    let mut child = Session::new_running("repo work", Path::new("/tmp"))
+        .with_branch(&branch.id)
+        .with_parent_session(&parent.id);
+    child.agent_id = Some("acp-session-1".to_string());
+    store.create_session(&child).unwrap();
+    store
+        .transition_from_running(
+            &child.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+
+    let found = store.get_app_quit_sessions_since(0).unwrap();
+    assert_eq!(found.len(), 1, "exactly the interrupted child: {found:?}");
+    let found = &found[0];
+    assert_eq!(found.id, child.id);
+    assert_eq!(found.status, SessionStatus::Cancelled);
+    assert_eq!(found.completion_reason, Some(CompletionReason::AppQuit));
+    assert_eq!(found.branch_id.as_deref(), Some(branch.id.as_str()));
+    assert_eq!(found.agent_id.as_deref(), Some("acp-session-1"));
+    assert_eq!(found.parent_session_id.as_deref(), Some(parent.id.as_str()));
+}
+
+/// Every query that maps rows through `row_to_session` reads a row exactly
+/// as `get_session` does, `parent_session_id` included. They all select
+/// `SESSION_COLUMNS`; this catches one that goes back to listing its own.
+#[test]
+fn session_list_queries_read_rows_like_get_session() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = Session::new_running("project session", Path::new("/tmp"));
+    store.create_session(&parent).unwrap();
+    let child = |session: Session| {
+        let session = session
+            .with_branch(&branch.id)
+            .with_parent_session(&parent.id);
+        store.create_session(&session).unwrap();
+        session.id
+    };
+    let queued = child(Session::new_queued("queued work"));
+    let running = child(Session::new_running("running work", Path::new("/tmp")));
+    let quit = child(Session::new_running("interrupted work", Path::new("/tmp")));
+    store
+        .transition_from_running(
+            &quit,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+
+    for id in [&queued, &running, &quit] {
+        let session = store.get_session(id).unwrap().unwrap();
+        assert_eq!(
+            session.parent_session_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+    }
+
+    let as_json = |session: &Session| serde_json::to_value(session).unwrap();
+    let check = |query: &str, rows: Vec<Session>, expected: &[&String]| {
+        let mut ids: Vec<&str> = rows.iter().map(|s| s.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut expected: Vec<&str> = expected.iter().map(|id| id.as_str()).collect();
+        expected.sort_unstable();
+        assert_eq!(ids, expected, "{query} returned the wrong rows");
+        for row in &rows {
+            let canonical = store.get_session(&row.id).unwrap().unwrap();
+            assert_eq!(
+                as_json(row),
+                as_json(&canonical),
+                "{query} read {} differently from get_session",
+                row.id
+            );
+        }
+    };
+
+    check(
+        "get_app_quit_sessions_since",
+        store.get_app_quit_sessions_since(0).unwrap(),
+        &[&quit],
+    );
+    check(
+        "get_running_sessions",
+        store.get_running_sessions().unwrap(),
+        &[&parent.id, &running],
+    );
+    check(
+        "get_active_sessions",
+        store.get_active_sessions().unwrap(),
+        &[&parent.id, &queued, &running],
+    );
+    check(
+        "get_queued_sessions_for_branch",
+        store.get_queued_sessions_for_branch(&branch.id).unwrap(),
+        &[&queued],
+    );
+    check(
+        "get_running_sessions_for_branch",
+        store.get_running_sessions_for_branch(&branch.id).unwrap(),
+        &[&running],
+    );
+}

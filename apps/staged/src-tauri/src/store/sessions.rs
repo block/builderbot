@@ -8,6 +8,13 @@ use super::models::{
 };
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
+/// The `sessions` columns [`Store::row_to_session`] reads, in its order.
+/// Every query that maps rows through it selects this list, so a new column
+/// is added here once rather than in each query.
+const SESSION_COLUMNS: &str = "id, prompt, status, working_dir, provider, agent_id,
+    error_message, completion_reason, created_at, updated_at, owner_pid, pipeline,
+    acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id";
+
 /// An in-flight session spawned by another session: the branch it works on
 /// and the title the branch timeline would give it. `status` is `"queued"` or
 /// `"running"`.
@@ -77,8 +84,7 @@ impl Store {
         id: &str,
     ) -> Result<Option<Session>, StoreError> {
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
-             FROM sessions WHERE id = ?1",
+            &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
             params![id],
             Self::row_to_session,
         )
@@ -356,14 +362,14 @@ impl Store {
         updated_after: i64,
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions
              WHERE completion_reason = 'app_quit'
                AND status IN ('cancelled', 'error')
                AND updated_at > ?1
-             ORDER BY created_at ASC, id ASC",
-        )?;
+             ORDER BY created_at ASC, id ASC"
+        ))?;
         let sessions = stmt
             .query_map(params![updated_after], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -402,10 +408,10 @@ impl Store {
 
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
-             FROM sessions WHERE status = 'running'",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions WHERE status = 'running'"
+        ))?;
         let sessions = stmt
             .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -434,11 +440,11 @@ impl Store {
     /// accumulated `session-status-changed` events.
     pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE status IN ('running', 'queued')
-             ORDER BY created_at ASC",
-        )?;
+             ORDER BY created_at ASC"
+        ))?;
         let sessions = stmt
             .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -644,12 +650,12 @@ impl Store {
         status: &str,
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions
              WHERE status = ?2 AND branch_id = ?1
-             ORDER BY created_at ASC",
-        )?;
+             ORDER BY created_at ASC"
+        ))?;
         let sessions = stmt
             .query_map(params![branch_id, status], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;

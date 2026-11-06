@@ -1486,27 +1486,45 @@ where
         .as_ref()
         .map(|e| e.upstream_known_missing)
         .unwrap_or(false);
-    let upstream_missing_arg = if !should_fetch && cached_upstream_missing {
-        "upstream_missing"
-    } else {
-        ""
+    let run = |fetch: bool| {
+        let upstream_missing_arg = if !fetch && cached_upstream_missing {
+            "upstream_missing"
+        } else {
+            ""
+        };
+        let skip_fetch_arg = if fetch { "" } else { "skip_fetch" };
+        run_script(
+            BATCH_GIT_STATE_SCRIPT,
+            &[
+                query.repo_path,
+                &base_refspec,
+                expected_branch,
+                base_short,
+                &base_ref,
+                skip_fetch_arg,
+                query.worktree_scope.script_arg(),
+                upstream_missing_arg,
+                query.log_format.unwrap_or(""),
+            ],
+        )
     };
-    let skip_fetch_arg = if should_fetch { "" } else { "skip_fetch" };
 
-    let raw = run_script(
-        BATCH_GIT_STATE_SCRIPT,
-        &[
-            query.repo_path,
-            &base_refspec,
-            expected_branch,
-            base_short,
-            &base_ref,
-            skip_fetch_arg,
-            query.worktree_scope.script_arg(),
-            upstream_missing_arg,
-            query.log_format.unwrap_or(""),
-        ],
-    );
+    let mut raw = run(should_fetch);
+    // The whole script failed while fetching: on Blox, a fetch that outlasts
+    // the transient exec limit kills the script with it. Read the local state
+    // without the fetch rather than blank the snapshot, and report the fetch
+    // as failed. The fetch cache is left alone so the next refresh retries.
+    let mut fetch_run_error = None;
+    if should_fetch {
+        if let Err(err) = &raw {
+            let retry = run(false);
+            if retry.is_ok() {
+                fetch_run_error = Some(err.clone());
+                raw = retry;
+            }
+        }
+    }
+    let fetched = should_fetch && fetch_run_error.is_none();
 
     match raw {
         Ok(output) => {
@@ -1518,14 +1536,20 @@ where
                 query.base_branch,
             ));
 
-            let upstream_known_missing = if should_fetch {
+            let upstream_known_missing = if fetched {
                 parsed.upstream_missing
             } else {
                 cached_upstream_missing
             };
 
             // Build fetch state
-            let fetch_state = if should_fetch {
+            let fetch_state = if let Some(err) = fetch_run_error {
+                FetchGitState {
+                    status: FetchStatus::Failed,
+                    fetched_at: previous.as_ref().map(|e| e.fetched_at),
+                    error: Some(err),
+                }
+            } else if should_fetch {
                 if let Some(ref err) = parsed.fetch_error {
                     FetchGitState {
                         status: FetchStatus::Failed,
@@ -1829,6 +1853,64 @@ mod tests {
         let state = batched_state(repo, "feature-loose", FetchMode::Never);
         assert_eq!(state.upstream.r#ref, "origin/feature-loose");
         assert!(!state.upstream.exists);
+    }
+
+    /// A script killed mid-fetch (Blox's transient 60 s limit) is retried
+    /// without the fetch: the local state still shows, the fetch reads as
+    /// failed, and the next refresh fetches again.
+    #[test]
+    fn batched_state_retries_without_the_fetch_when_the_script_fails() {
+        let seed = TempGitRepo::new();
+        seed.write_file("file.txt", "base\n");
+        seed.commit("base");
+        let origin = TempDir::new("origin");
+        let origin_str = origin.path().to_str().unwrap();
+        run_git_in(seed.path(), &["clone", "--bare", ".", origin_str]);
+        let clone = TempDir::new("clone");
+        run_git_in(
+            origin.path(),
+            &["clone", origin_str, clone.path().to_str().unwrap()],
+        );
+        let repo = clone.path();
+        run_git_in(repo, &["checkout", "-b", "feature"]);
+        let repo_str = repo.to_str().unwrap();
+
+        let calls = std::cell::RefCell::new(Vec::<bool>::new());
+        let killed_mid_fetch = |script: &str, args: &[&str]| {
+            let fetching = args[5] != "skip_fetch";
+            calls.borrow_mut().push(fetching);
+            if fetching {
+                Err("deadline_exceeded".to_string())
+            } else {
+                run_batch_script_locally(script, args)
+            }
+        };
+        let cache_key = format!("{repo_str}#feature#retry");
+        let state_with = |fetch_mode| {
+            compute_branch_git_state_batched(
+                &cache_key,
+                killed_mid_fetch,
+                repo_str,
+                "feature",
+                "main",
+                fetch_mode,
+                WorktreeStatusScope::Full,
+            )
+        };
+
+        let state = state_with(FetchMode::Ttl);
+        assert_eq!(*calls.borrow(), [true, false]);
+        assert!(state.head_sha.is_some());
+        assert_eq!(state.current_branch.as_deref(), Some("feature"));
+        assert!(state.expected_branch_matches);
+        assert!(matches!(state.fetch.status, FetchStatus::Failed));
+        assert_eq!(state.fetch.error.as_deref(), Some("deadline_exceeded"));
+
+        // The failed fetch did not refresh the cache, so a TTL refresh
+        // tries it again.
+        calls.borrow_mut().clear();
+        state_with(FetchMode::Ttl);
+        assert_eq!(*calls.borrow(), [true, false]);
     }
 
     fn batched_snapshot(repo: &Path, branch: &str) -> BatchedBranchGitSnapshot {

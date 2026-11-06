@@ -16,15 +16,17 @@ use std::path::Path;
 const TRACKED: &[(&str, &str, usize)] = &[
     // The user's own repo action: streams output and may run for minutes.
     ("actions/commands.rs", "run_branch_action_impl", 1),
-    // `git clone` and both setup fetches, for a repo added to a workspace.
-    ("branches.rs", "clone_repo_into_workspace", 3),
-    // The setup fetch probing whether the branch exists on the remote; a
-    // killed probe would silently branch from base instead.
-    ("branches.rs", "start_workspace", 1),
+    // `git clone`, both setup fetches and the setup checkout, for a repo
+    // added to a workspace. A killed checkout leaves `.git/index.lock`.
+    ("branches.rs", "clone_repo_into_workspace", 4),
+    // The setup fetch probing whether the branch exists on the remote (a
+    // killed probe would silently branch from base instead) and the setup
+    // checkout (a killed one leaves `.git/index.lock`).
+    ("branches.rs", "start_workspace", 2),
     // Pipeline steps: push runs pre-push hooks and a rebase can take minutes.
     ("session_runner.rs", "run_remote_pipeline_command", 1),
-    // The `start_workspace` arm's copy of the setup fetch.
-    ("web_server.rs", "dispatch", 1),
+    // The `start_workspace` arm's copy of the setup fetch and checkout.
+    ("web_server.rs", "dispatch", 2),
 ];
 
 #[test]

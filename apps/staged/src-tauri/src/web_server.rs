@@ -2198,23 +2198,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                         .is_ok();
 
                         let remote_ref = format!("origin/{}", branch.branch_name);
-                        let checkout_result = if has_remote_branch {
-                            crate::branches::run_workspace_git_async(
-                                ws_name,
-                                repo_subpath.as_deref(),
-                                crate::blox::ExecMode::Transient,
-                                &["checkout", "-B", &branch.branch_name, &remote_ref],
-                            )
-                            .await
+                        let checkout_args: &[&str] = if has_remote_branch {
+                            &["checkout", "-B", &branch.branch_name, &remote_ref]
                         } else {
-                            crate::branches::run_workspace_git_async(
-                                ws_name,
-                                repo_subpath.as_deref(),
-                                crate::blox::ExecMode::Transient,
-                                &["checkout", "-b", &branch.branch_name],
-                            )
-                            .await
+                            &["checkout", "-b", &branch.branch_name]
                         };
+                        // Tracked: a checkout SIGKILLed at the transient 60 s
+                        // limit leaves `.git/index.lock` behind.
+                        let checkout_result = crate::branches::run_workspace_git_async(
+                            ws_name,
+                            repo_subpath.as_deref(),
+                            crate::blox::ExecMode::Tracked,
+                            checkout_args,
+                        )
+                        .await;
                         if let Err(e) = checkout_result {
                             log::warn!(
                                 "failed to create branch '{}' in workspace '{}': {e}",

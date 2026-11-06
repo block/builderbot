@@ -628,6 +628,27 @@ pub(crate) fn normalize_branch_ref(branch: &str) -> String {
     branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
+/// Prints `present` or `absent` for `$1/.git`. Answering through stdout keeps
+/// a transport failure (a workstation whose agent hasn't reconnected yet, a
+/// deadline) from reading as "no repo here" the way a non-zero exit would.
+const GIT_DIR_PROBE_SCRIPT: &str =
+    r#"if [ -d "$1/.git" ]; then echo present; else echo absent; fi"#;
+
+/// Clones `$1` into `$2` unless `$2/.git` already exists, so a clone chosen
+/// on an unclear probe answer can't fail on an existing checkout.
+const GUARDED_CLONE_SCRIPT: &str = r#"test -d "$2/.git" || exec git clone "$1" "$2""#;
+
+/// Whether [`GIT_DIR_PROBE_SCRIPT`]'s result calls for a clone. Only a clear
+/// `present` skips it; errors that a tracked exec can't wait out either are
+/// returned, and anything else falls back to [`GUARDED_CLONE_SCRIPT`].
+fn needs_clone(probe: Result<String, blox::BloxError>) -> Result<bool, blox::BloxError> {
+    match probe {
+        Ok(out) if out.trim() == "present" => Ok(false),
+        Err(e @ (blox::BloxError::NotFound | blox::BloxError::NotAuthenticated)) => Err(e),
+        _ => Ok(true),
+    }
+}
+
 /// Clone a repo into an already-running workspace, fetch the base branch,
 /// and create the feature branch.
 ///
@@ -645,32 +666,26 @@ pub(crate) async fn clone_repo_into_workspace(
         .map_err(|e| format!("Failed to resolve workspace repo path '{repo_subpath}': {e}"))?;
 
     // Clone only if the repo directory doesn't already exist.
-    match ws_exec_async(
+    let probe = ws_exec_async(
         ws_name,
         ExecMode::Transient,
-        &["test", "-d", &format!("{repo_path}/.git")],
+        &["sh", "-c", GIT_DIR_PROBE_SCRIPT, "_", &repo_path],
     )
-    .await
-    {
-        Ok(_) => {}
-        Err(blox::BloxError::CommandFailed(_)) => {
-            let repo_url = format!("https://github.com/{repo_slug}.git");
-            // Tracked: cloning a large repo outlasts the transient 60 s limit.
-            ws_exec_async(
-                ws_name,
-                ExecMode::Tracked,
-                &["git", "clone", &repo_url, &repo_path],
-            )
-            .await
-            .map_err(|e| {
-                format!("Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}")
-            })?;
-        }
-        Err(e) => {
-            return Err(format!(
-                "Failed to verify repo path '{repo_subpath}' in workspace '{ws_name}': {e}"
-            ));
-        }
+    .await;
+    let needs_clone = needs_clone(probe).map_err(|e| {
+        format!("Failed to verify repo path '{repo_subpath}' in workspace '{ws_name}': {e}")
+    })?;
+    if needs_clone {
+        let repo_url = format!("https://github.com/{repo_slug}.git");
+        // Tracked: cloning a large repo outlasts the transient 60 s limit,
+        // and a tracked exec waits out a workstation that isn't connected yet.
+        ws_exec_async(
+            ws_name,
+            ExecMode::Tracked,
+            &["sh", "-c", GUARDED_CLONE_SCRIPT, "_", &repo_url, &repo_path],
+        )
+        .await
+        .map_err(|e| format!("Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}"))?;
     }
 
     // Apply staged-managed git config. Idempotent — also serves as the
@@ -728,10 +743,13 @@ pub(crate) async fn clone_repo_into_workspace(
     };
     let checkout_args: Vec<&str> = checkout_args.iter().map(String::as_str).collect();
 
+    // Tracked: Blox SIGKILLs a transient git at 60 s, and a checkout far from
+    // the default branch (or smudging LFS files) can outlast that, leaving
+    // `.git/index.lock` and a half-updated worktree behind.
     run_workspace_git_async(
         ws_name,
         Some(repo_subpath),
-        ExecMode::Transient,
+        ExecMode::Tracked,
         &checkout_args,
     )
     .await
@@ -2066,23 +2084,20 @@ pub async fn start_workspace(
             .is_ok();
 
             let remote_ref = format!("origin/{}", branch.branch_name);
-            let checkout_result = if has_remote_branch {
-                run_workspace_git_async(
-                    ws_name,
-                    repo_subpath.as_deref(),
-                    ExecMode::Transient,
-                    &["checkout", "-B", &branch.branch_name, &remote_ref],
-                )
-                .await
+            let checkout_args: &[&str] = if has_remote_branch {
+                &["checkout", "-B", &branch.branch_name, &remote_ref]
             } else {
-                run_workspace_git_async(
-                    ws_name,
-                    repo_subpath.as_deref(),
-                    ExecMode::Transient,
-                    &["checkout", "-b", &branch.branch_name],
-                )
-                .await
+                &["checkout", "-b", &branch.branch_name]
             };
+            // Tracked: Blox SIGKILLs a transient git at 60 s, and a killed
+            // checkout leaves `.git/index.lock` and a half-updated worktree.
+            let checkout_result = run_workspace_git_async(
+                ws_name,
+                repo_subpath.as_deref(),
+                ExecMode::Tracked,
+                checkout_args,
+            )
+            .await;
 
             if let Err(e) = checkout_result {
                 log::warn!(
@@ -3529,6 +3544,54 @@ async fn run_prerun_actions_for_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn needs_clone_only_skips_on_a_clear_present() {
+        use blox::BloxError;
+        assert!(!needs_clone(Ok("present\n".into())).unwrap());
+        assert!(needs_clone(Ok("absent\n".into())).unwrap());
+        assert!(needs_clone(Ok(String::new())).unwrap());
+        assert!(needs_clone(Err(BloxError::CommandFailed("not connected".into()))).unwrap());
+        assert!(needs_clone(Err(BloxError::Timeout(60))).unwrap());
+        assert!(matches!(
+            needs_clone(Err(BloxError::NotAuthenticated)),
+            Err(BloxError::NotAuthenticated)
+        ));
+        assert!(matches!(
+            needs_clone(Err(BloxError::NotFound)),
+            Err(BloxError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn git_dir_probe_and_guarded_clone_respect_an_existing_repo() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        let repo_path = repo.path().to_str().unwrap();
+        let sh = |script: &str, args: &[&str]| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .arg("_")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+
+        let probe = sh(GIT_DIR_PROBE_SCRIPT, &[repo_path]);
+        assert_eq!(String::from_utf8_lossy(&probe.stdout), "present\n");
+        let missing = format!("{repo_path}/nope");
+        let probe = sh(GIT_DIR_PROBE_SCRIPT, &[&missing]);
+        assert_eq!(String::from_utf8_lossy(&probe.stdout), "absent\n");
+
+        // An unreachable URL proves no clone runs over the existing repo.
+        let clone = sh(
+            GUARDED_CLONE_SCRIPT,
+            &["/nonexistent/origin.git", repo_path],
+        );
+        assert!(clone.status.success(), "{clone:?}");
+        let clone = sh(GUARDED_CLONE_SCRIPT, &["/nonexistent/origin.git", &missing]);
+        assert!(!clone.status.success());
+    }
     use crate::test_utils::TempGitRepo;
 
     /// The rule every remote read of a branch's HEAD rests on: a branch with

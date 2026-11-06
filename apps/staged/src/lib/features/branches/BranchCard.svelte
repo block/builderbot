@@ -1761,7 +1761,8 @@
   }
 
   // =========================================================================
-  // Drag-and-drop text files → notes (via Tauri native drag-drop events)
+  // Drag-and-drop: text files → notes, images → timeline (via Tauri native
+  // drag-drop events)
   // =========================================================================
 
   let dragOver = $state(false);
@@ -1907,9 +1908,10 @@
     );
   }
 
+  // Remote cards take drops too, whatever their workspace's status: the file is
+  // read on this machine and the note or image lands in the local store, never
+  // on the workspace.
   $effect(() => {
-    if (!isLocal) return;
-
     const el = cardElement;
     if (!el) return;
 

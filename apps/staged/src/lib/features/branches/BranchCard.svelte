@@ -1776,46 +1776,70 @@
   let shouldMountInterior = $state(false);
   let interiorEl: HTMLDivElement | undefined = $state();
 
-  function handleFileDrop(paths: string[]) {
+  async function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isMaybeTextFile);
     const imagePaths = paths.filter(isImageAttachmentFile);
 
-    if (textPaths.length > 0) {
-      const placeholders = textPaths.map((filePath) => ({
-        key: `drop-${Date.now()}-${filePath}`,
-        title: fileNameFromPath(filePath),
-        type: 'generating-note' as const,
-      }));
-      pendingAdds = [...pendingAdds, ...placeholders];
+    const [notesAdded, imagesAdded] = await Promise.all([
+      textPaths.length > 0 ? addTextFileNotes(textPaths) : 0,
+      imagePaths.length > 0 ? addImagePaths(imagePaths) : 0,
+    ]);
+    notifyAddedOffTimeline(notesAdded + imagesAdded);
+  }
 
-      Promise.all(
-        textPaths.map(async (filePath, i) => {
-          try {
-            const content = await commands.readTextFile(filePath);
-            // Through the same split the editor saves through, so a dropped file
-            // is stored like any other note: its own leading H1 becomes the
-            // title (and leaves the body, which the viewer would otherwise show
-            // straight under the file name), and the file name titles the rest.
-            const note = splitNoteMarkdown(content, fileNameFromPath(filePath));
-            await commands.createNote(branch.id, note.title, note.body);
-          } catch (e) {
-            const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
-            const detail = reason ?? 'it may be a binary file';
-            toast.error('Error', {
-              description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
-            });
-          } finally {
-            pendingAdds = pendingAdds.filter((p) => p.key !== placeholders[i].key);
-          }
-        })
-      ).then(() => {
-        loadTimeline();
-      });
-    }
+  /** Stores each text file as a note. Resolves to how many were stored. */
+  async function addTextFileNotes(textPaths: string[]): Promise<number> {
+    const placeholders = textPaths.map((filePath) => ({
+      key: `drop-${Date.now()}-${filePath}`,
+      title: fileNameFromPath(filePath),
+      type: 'generating-note' as const,
+    }));
+    pendingAdds = [...pendingAdds, ...placeholders];
 
-    if (imagePaths.length > 0) {
-      addImagePaths(imagePaths);
-    }
+    const stored = await Promise.all(
+      textPaths.map(async (filePath, i) => {
+        try {
+          const content = await commands.readTextFile(filePath);
+          // Through the same split the editor saves through, so a dropped file
+          // is stored like any other note: its own leading H1 becomes the
+          // title (and leaves the body, which the viewer would otherwise show
+          // straight under the file name), and the file name titles the rest.
+          const note = splitNoteMarkdown(content, fileNameFromPath(filePath));
+          await commands.createNote(branch.id, note.title, note.body);
+          return true;
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
+          const detail = reason ?? 'it may be a binary file';
+          toast.error('Error', {
+            description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
+          });
+          return false;
+        } finally {
+          pendingAdds = pendingAdds.filter((p) => p.key !== placeholders[i].key);
+        }
+      })
+    );
+    void loadTimeline();
+    return stored.filter(Boolean).length;
+  }
+
+  /**
+   * Confirms a drop that the timeline cannot show yet. Without a timeline key
+   * (a remote workspace that is not running, a local branch with no worktree)
+   * the card shows a status view, or an empty setup timeline whose "adding..."
+   * rows clear without the item appearing. The note or image is still stored
+   * and shows once the timeline loads, so say so rather than leave the drop
+   * looking like a no-op that invites a duplicate. Checked once the stores
+   * finish, not at drop time: what matters is whether the reload after them
+   * can show the items.
+   */
+  function notifyAddedOffTimeline(count: number) {
+    if (count === 0 || branchTimelineReadyKey(branch)) return;
+    const pronoun = count === 1 ? 'It' : 'They';
+    const until = isRemote ? 'the workspace is running' : 'the worktree is ready';
+    toast.success(`Added ${count} ${count === 1 ? 'file' : 'files'}`, {
+      description: `${pronoun} will appear on the timeline once ${until}.`,
+    });
   }
 
   // =========================================================================
@@ -1837,8 +1861,10 @@
    * Each store publishes a branch change, and the reload it triggers brings in
    * that image's real row. The placeholder carries the stored image's ID, so
    * `prunePlaceholders` swaps one for the other in that reload's update.
+   *
+   * Resolves to how many images were stored.
    */
-  async function addTimelineImages(images: TimelineImageUpload[]) {
+  async function addTimelineImages(images: TimelineImageUpload[]): Promise<number> {
     // Keyed by counter, not name: iOS can hand back several "image.jpg"s.
     const placeholders = images.map(({ name }) => ({
       key: `image-${nextPendingImageId++}`,
@@ -1871,8 +1897,10 @@
       // before that reload lands would blink them out.
       void loadTimeline();
       await timelineLoadsSettled();
+      return images.length - rejections.length;
     } catch (e) {
       notifyError('Could not add images', e);
+      return 0;
     } finally {
       // Fallback for a stored image whose row never arrives (the refresh
       // failed, or it was deleted meanwhile), and for every row after a batch
@@ -1883,7 +1911,7 @@
 
   /** Desktop: files dropped on the card or picked in the open panel. */
   function addImagePaths(paths: string[]) {
-    void addTimelineImages(
+    return addTimelineImages(
       paths.map((filePath) => ({
         name: attachBasename(filePath),
         store: () => commands.createImage(branch.id, branch.projectId, filePath),
@@ -1922,7 +1950,7 @@
           dragOver = over;
         },
         onDrop: (paths) => {
-          handleFileDrop(paths);
+          void handleFileDrop(paths);
         },
       })
     );

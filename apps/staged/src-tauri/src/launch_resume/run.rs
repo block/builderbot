@@ -229,8 +229,8 @@ where
 
 /// Whether a phase-1 session has settled: `running` and owned by something in
 /// this process, `queued` (the drain owns it from here), `disconnected` (its
-/// turn runs on its workstation with no local owner to wait for), `paused`
-/// (the rate-limit scheduler resumes it), terminal, or gone.
+/// turn runs on its workstation with no local owner to wait for), `paused` (a
+/// rate limit parked it; its scheduler owns the resume), terminal, or gone.
 pub(crate) fn is_settled(store: &Store, registry: &SessionRegistry, session_id: &str) -> bool {
     match store.get_session(session_id) {
         Ok(Some(session)) => match session.status {

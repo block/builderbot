@@ -1139,7 +1139,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 default_branch,
                 head_repo,
             )
-            .await?;
+            .await?
+            .repo;
             Ok(serde_json::to_value(repo).unwrap())
         }
         "update_project_repo_branch_name" => {

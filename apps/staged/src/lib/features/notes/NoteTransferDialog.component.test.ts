@@ -259,9 +259,9 @@ describe('NoteTransferDialog new project location', () => {
 
   it('shows a remembered Remote as local while blocked, and keeps remembering it', async () => {
     prefs.newProjectLocation = 'remote';
-    const { target, onConfirm } = await open('project');
+    const { target, onConfirm } = await open(() => Promise.reject(new Error('Note not found')));
     pickCreateRow(target, 'Fresh');
-    expectRemoteBlocked(target, 'Remote needs a repo, and this note has none');
+    expectRemoteBlocked(target, "Remote is unavailable: couldn't look up this note's repo");
     expect(locationTile(target, 'Local')?.dataset.state).toBe('on');
     expect(locationTile(target, 'Remote')?.dataset.state).toBe('off');
 
@@ -293,14 +293,17 @@ describe('NoteTransferDialog new project location', () => {
     expect(locationTile(target, 'Local')?.dataset.state).toBe('on');
   });
 
-  it('disables remote for a project note, which has no repo to start from', async () => {
+  it('creates a remote project with no repo for a project note, which has none', async () => {
     const { target, onConfirm } = await open('project');
     pickCreateRow(target, 'Fresh');
-    expectRemoteBlocked(target, 'Remote needs a repo, and this note has none');
+    expect(locationTile(target, 'Remote')!.disabled).toBe(false);
+    chooseRemote(target);
 
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
-    expect(createProject).toHaveBeenCalledWith('Fresh', 'local');
+    expect(createProject).toHaveBeenCalledWith('Fresh', 'remote');
+    expect(detectDefaultBranch).not.toHaveBeenCalled();
+    expect(setNewProjectLocation).toHaveBeenCalledExactlyOnceWith('remote');
   });
 
   it('offers the choice for a typed name that confirming would create, unpicked', async () => {
@@ -595,10 +598,15 @@ describe("NoteTransferDialog note's repo", () => {
     expect(setNewProjectLocation).toHaveBeenCalledExactlyOnceWith('local');
   });
 
-  it('keeps a branch note bound to no repo local', async () => {
-    const { target } = await open(null);
+  it('lets a branch note bound to no repo create a remote project with none', async () => {
+    const { target, onConfirm } = await open(null);
     pickCreateRow(target, 'Fresh');
-    expectRemoteBlocked(target, 'Remote needs a repo, and this note has none');
+    chooseRemote(target);
+    expect(locationTile(target, 'Remote')?.dataset.state).toBe('on');
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith('Fresh', 'remote');
   });
 
   it('says the lookup failed rather than that the note has no repo', async () => {
@@ -625,7 +633,7 @@ describe("NoteTransferDialog note's repo", () => {
 
     calls[1].land(branchRepo);
     await settle();
-    calls[0].land(null);
+    calls[0].fail(new Error('Note not found: note-1'));
     await settle();
     pickCreateRow(target, 'Fresh');
     expect(locationTile(target, 'Remote')!.disabled).toBe(false);

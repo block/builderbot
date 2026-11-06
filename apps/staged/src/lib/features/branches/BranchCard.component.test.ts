@@ -331,6 +331,24 @@ describe('BranchCard drops the timeline cannot show yet', () => {
     });
   });
 
+  it('confirms the stored files on a loaded card whose reload fails', async () => {
+    mountCard(remoteBranch('running'));
+    await timelineShown();
+    cmd.getBranchTimeline.mockRejectedValue(new Error('git failed'));
+
+    drop(['/tmp/b.png']);
+    // The reload after the store fails, so the card keeps its old timeline.
+    await settle(() => {
+      expect(cmd.createImage).toHaveResolvedTimes(1);
+      expect(cmd.getBranchTimeline).toHaveBeenCalledTimes(2);
+    });
+
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
+      description: 'It will appear once the timeline loads.',
+    });
+  });
+
   it('counts only the files that were stored, and still reports the rest', async () => {
     cmd.readTextFile.mockImplementation(async (filePath) => {
       if (filePath === '/tmp/bad.md') throw new Error('unreadable');

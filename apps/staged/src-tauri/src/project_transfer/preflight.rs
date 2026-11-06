@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::store::{
     Branch, BranchType, Project, ProjectLocation, ProjectRepo, Store, WorkspaceStatus,
@@ -29,7 +29,7 @@ pub(super) const IGNORED_TOO_LARGE: &str = "ignored_too_large";
 /// A row's warning that its ignored files couldn't be listed.
 const IGNORED_UNLISTED: &str = "ignored_unlisted";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TransferDirection {
     ToRemote,

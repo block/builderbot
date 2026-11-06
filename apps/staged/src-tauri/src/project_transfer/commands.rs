@@ -12,8 +12,8 @@ use crate::store::{ProjectLocation, Store};
 use super::backups;
 use super::host::{LiveHost, TransferHost};
 use super::orchestrator::{
-    run_transfer, ProjectTransferResult, RepoTransferResult, TransferOptions, TransferProgress,
-    TransferStopped,
+    check_direction, run_transfer, ProjectTransferResult, RepoTransferResult, TransferOptions,
+    TransferProgress, TransferStopped,
 };
 use super::preflight::{inspect, ProjectTransferPreflight, TransferDirection, TransferIssue};
 use super::{recovery, registry};
@@ -58,16 +58,20 @@ pub(crate) async fn get_project_transfer_preflight_impl(
 }
 
 /// Move the project to its other location, emitting
-/// `project-transfer-progress` as it goes. Resolves once the project has
-/// switched (or failed, with everything undone). A transfer that stopped
-/// unexpectedly after the switch resolves too, with a warning saying so.
+/// `project-transfer-progress` as it goes. `direction` is the one the
+/// caller's preflight showed: a project that has moved since is refused, with
+/// nothing done. Resolves once the project has switched (or failed, with
+/// everything undone). A transfer that stopped unexpectedly after the switch
+/// resolves too, with a warning saying so.
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub async fn transfer_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: AppHandle,
     executor: tauri::State<'_, Arc<ActionExecutor>>,
     act_registry: tauri::State<'_, Arc<ActionRegistry>>,
     project_id: String,
+    direction: TransferDirection,
     include_uncommitted: bool,
     include_ignored: bool,
 ) -> Result<ProjectTransferResult, String> {
@@ -78,6 +82,7 @@ pub async fn transfer_project(
         Arc::clone(&executor),
         Arc::clone(&act_registry),
         project_id,
+        direction,
         TransferOptions {
             include_uncommitted,
             include_ignored,
@@ -92,23 +97,18 @@ pub(crate) async fn transfer_project_impl(
     executor: Arc<ActionExecutor>,
     act_registry: Arc<ActionRegistry>,
     project_id: String,
+    direction: TransferDirection,
     options: TransferOptions,
 ) -> Result<ProjectTransferResult, String> {
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
     let branches = store
         .list_branches_for_project(&project_id)
         .map_err(|e| e.to_string())?;
     let branch_ids: Vec<String> = branches.iter().map(|b| b.id.clone()).collect();
     let transfer_id = uuid::Uuid::new_v4().to_string();
-    let guard = registry::begin(
-        &project_id,
-        &transfer_id,
-        TransferDirection::from_source(project.location),
-        branch_ids.clone(),
-    )?;
+    let guard = registry::begin(&project_id, &transfer_id, direction, branch_ids.clone())?;
+    // Under the entry, before anything is stopped: only a transfer moves a
+    // project, so what this reads holds until the guard drops.
+    let project = check_direction(&store, &guard)?;
     guard.cover_workspaces(branches.iter().filter_map(|b| b.workspace_name.as_deref()));
     let ids: Vec<&str> = branch_ids.iter().map(String::as_str).collect();
     crate::actions::commands::stop_actions_for_branches(&executor, &act_registry, &ids);

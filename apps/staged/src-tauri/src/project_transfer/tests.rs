@@ -1202,7 +1202,7 @@ fn verify_says_whether_a_checkout_is_still_its_snapshot_and_writes_nothing() {
             true,
             vec![],
         );
-        let check = || unchanged(&source, &plan, &outcome.snapshot).unwrap();
+        let check = || unchanged(&source, &plan, &outcome.snapshot, None).unwrap();
 
         let before = source_fingerprint(&w.source);
         assert_eq!(check(), None);
@@ -1281,7 +1281,11 @@ fn verify_checks_every_checkout_at_an_end_in_one_run() {
 
         let answers = unchanged_all(
             &source,
-            &[(&plan, snapshot), (&gone, snapshot), (&elsewhere, snapshot)],
+            &[
+                (&plan, snapshot, None),
+                (&gone, snapshot, None),
+                (&elsewhere, snapshot, None),
+            ],
         )
         .unwrap();
 

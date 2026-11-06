@@ -88,12 +88,13 @@ macro_rules! exclude_lock_functions {
 #[cfg(test)]
 pub const EXCLUDE_LOCK_FUNCTIONS: &str = exclude_lock_functions!();
 
-/// Definitions for the scripts that list, pack or place ignored files, after
-/// `prelude!`.
-macro_rules! ignored_prelude {
+/// `ignored_list`, which ignored files a transfer archives, and
+/// `ignored_fingerprint`, what they hold: all
+/// [`VERIFY_SCRIPT`](super::VERIFY_SCRIPT) needs to tell whether they are
+/// still what the backup holds. After `prelude!`.
+macro_rules! ignored_listing {
     () => {
         concat!(
-            exclude_lock_functions!(),
             // One `./<path>` line per ignored file to carry, for the checkout
             // at `.`. `-z` gives names as they are; `--no-renames` keeps
             // every record one path. A record ending in `/` is a directory an
@@ -106,6 +107,35 @@ macro_rules! ignored_prelude {
             "  { G --no-optional-locks status --porcelain=v1 -z --no-renames --untracked-files=all --ignored=matching 2>/dev/null || printf '\\000ignored_list_failed\\000'; } \\\n",
             "  | xargs -0 sh -c 'nl=\"\n\"; rc=0; for e; do case $e in ignored_list_failed) rc=1 ;; *\"$nl\"*|\"!! \"*/) ;; \"!! \"*) p=${e#\"!! \"}; if [ -f \"$p\" ] && [ ! -L \"$p\" ]; then printf \"./%s\\n\" \"$p\"; fi ;; esac; done; exit $rc' sh\n",
             "}\n",
+            // The sha256 of a `<blob id> <path>` line per path in the file
+            // `$1` (`ignored_list`'s), in path order: what those files hold
+            // now, as raw bytes (no clean filter, so not LFS's either). `$2`
+            // is a prefix for its scratch files. Prints nothing and fails
+            // when one can't be read, gone included.
+            "ignored_fingerprint() {\n",
+            "  LC_ALL=C sort < \"$1\" > \"$2.paths\" || { rm -f -- \"$2.paths\"; return 1; }\n",
+            "  : > \"$2.blobs\"\n",
+            "  if [ -s \"$2.paths\" ]; then\n",
+            "    tr '\\n' '\\000' < \"$2.paths\" | xargs -0 git -c core.hooksPath=/dev/null hash-object --no-filters > \"$2.blobs\" 2>/dev/null \\\n",
+            "      && [ \"$(wc -l < \"$2.blobs\" | tr -d ' \\t')\" = \"$(wc -l < \"$2.paths\" | tr -d ' \\t')\" ] \\\n",
+            "      || { rm -f -- \"$2.paths\" \"$2.blobs\"; return 1; }\n",
+            "  fi\n",
+            "  paste -d ' ' \"$2.blobs\" \"$2.paths\" > \"$2.lines\" || { rm -f -- \"$2.paths\" \"$2.blobs\" \"$2.lines\"; return 1; }\n",
+            "  _fp=$(sha256_of \"$2.lines\")\n",
+            "  rm -f -- \"$2.paths\" \"$2.blobs\" \"$2.lines\"\n",
+            "  [ -n \"$_fp\" ] && printf '%s\\n' \"$_fp\"\n",
+            "}\n",
+        )
+    };
+}
+
+/// Definitions for the scripts that list, pack or place ignored files, after
+/// `prelude!`.
+macro_rules! ignored_prelude {
+    () => {
+        concat!(
+            exclude_lock_functions!(),
+            ignored_listing!(),
             // stdin: path lines; stdout: `<count> <bytes>` of the regular
             // files among them. With no input, GNU xargs runs `ls` once
             // anyway, on `.`, which the `-` filter drops. `%.0f`, as mawk
@@ -293,9 +323,12 @@ macro_rules! ignored_prelude {
 /// directory is created), `$3` the cap in bytes, `$4` where to write the
 /// excludes list.
 ///
-/// Prints `ignored_files` and `ignored_bytes`. With none, that is all. Past
-/// the cap it adds `ignored_over_cap=1` and writes nothing. Otherwise it
-/// replaces `$2` whole — through `$2.part`, so an archive already there
+/// Prints `ignored_files` and `ignored_bytes`. Past the cap it adds
+/// `ignored_over_cap=1` and writes nothing. Otherwise it prints
+/// `ignored_fingerprint`, what they hold (see [`IgnoredFiles::fingerprint`]),
+/// read before the archive is, so a file that changes while or after it is
+/// archived never matches it; with none, that is all. With some it replaces
+/// `$2` whole — through `$2.part`, so an archive already there
 /// stays until this one is complete — and prints its `ignored_size` and
 /// `ignored_sha256`; and replaces `$4` with the `./<path>` lines of the ones
 /// only rules outside the checkout's `.gitignore` files ignore, printing its
@@ -317,8 +350,10 @@ pub const IGNORED_ARCHIVE_SCRIPT: &str = concat!(
     "sizes=$(ignored_sizes < \"$list\")\n",
     "n=${sizes% *} b=${sizes#* }\n",
     "printf 'ignored_files=%s\\nignored_bytes=%s\\n' \"$n\" \"$b\"\n",
-    "if [ \"$n\" = 0 ]; then rm -f -- \"$list\"; exit 0; fi\n",
     "if [ \"$b\" -gt \"$cap\" ]; then rm -f -- \"$list\"; printf 'ignored_over_cap=1\\n'; exit 0; fi\n",
+    "fp=$(ignored_fingerprint \"$list\" \"$ar.fp\") || fail 'cannot read the ignored files'\n",
+    "printf 'ignored_fingerprint=%s\\n' \"$fp\"\n",
+    "if [ \"$n\" = 0 ]; then rm -f -- \"$list\"; exit 0; fi\n",
     // bsdtar (macOS) would add AppleDouble `._` entries and extended
     // attributes, as for the LFS archive. GNU tar exits 1 when a file changed
     // while it was read (a log being written): what it read is the backup.
@@ -366,6 +401,12 @@ pub struct IgnoredFiles {
     /// The excludes list beside it: the files in it that only rules outside
     /// the checkout's `.gitignore` files ignore, when there are any.
     pub excludes: Option<BundleFile>,
+    /// What they held, as the sha256 of a `<blob id> <path>` line for each,
+    /// in path order: whenever they are within the cap, none included, so
+    /// the check before the source is removed can tell that they — or which
+    /// of them there are — changed after this was archived, which `add -A`
+    /// doesn't see. `None` past the cap, with nothing archived.
+    pub fingerprint: Option<String>,
 }
 
 impl IgnoredFiles {
@@ -402,12 +443,25 @@ impl IgnoredFiles {
             )?),
             _ => None,
         };
+        let fingerprint = if over_cap {
+            None
+        } else {
+            let fingerprint = report.require(STEP, "ignored_fingerprint")?;
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(TransferError::Protocol {
+                    step: STEP,
+                    message: format!("ignored_fingerprint is not a sha256: {fingerprint}"),
+                });
+            }
+            Some(fingerprint.to_ascii_lowercase())
+        };
         Ok(Self {
             files,
             bytes,
             over_cap,
             archive,
             excludes,
+            fingerprint,
         })
     }
 }
@@ -478,8 +532,10 @@ mod tests {
     #[test]
     fn parses_what_the_archive_script_reports() {
         let sha = "AB".repeat(32);
+        let fp = "EF".repeat(32);
         let written = IgnoredFiles::parse(&format!(
-            "ignored_files=3\nignored_bytes=120\nignored_size=10240\nignored_sha256={sha}\n"
+            "ignored_files=3\nignored_bytes=120\nignored_fingerprint={fp}\n\
+             ignored_size=10240\nignored_sha256={sha}\n"
         ))
         .unwrap();
         assert_eq!(
@@ -493,10 +549,12 @@ mod tests {
                     sha256: "ab".repeat(32)
                 }),
                 excludes: None,
+                fingerprint: Some("ef".repeat(32)),
             }
         );
         let with_excludes = IgnoredFiles::parse(&format!(
-            "ignored_files=3\nignored_bytes=120\nignored_size=10240\nignored_sha256={sha}\n\
+            "ignored_files=3\nignored_bytes=120\nignored_fingerprint={fp}\n\
+             ignored_size=10240\nignored_sha256={sha}\n\
              ignored_excludes_size=12\nignored_excludes_sha256={}\n",
             "CD".repeat(32)
         ))
@@ -510,20 +568,40 @@ mod tests {
         );
         // An excludes list promises its size.
         assert!(IgnoredFiles::parse(&format!(
-            "ignored_files=3\nignored_bytes=120\nignored_size=10240\nignored_sha256={sha}\n\
-             ignored_excludes_sha256={sha}\n"
+            "ignored_files=3\nignored_bytes=120\nignored_fingerprint={fp}\n\
+             ignored_size=10240\nignored_sha256={sha}\nignored_excludes_sha256={sha}\n"
         ))
         .is_err());
-        let none = IgnoredFiles::parse("ignored_files=0\nignored_bytes=0\n").unwrap();
+        // None at all still says what there was: nothing.
+        let none = IgnoredFiles::parse(&format!(
+            "ignored_files=0\nignored_bytes=0\nignored_fingerprint={fp}\n"
+        ))
+        .unwrap();
         assert_eq!(none.archive, None);
+        assert_eq!(none.fingerprint, Some("ef".repeat(32)));
         let over = IgnoredFiles::parse(
             "ignored_files=2\nignored_bytes=999999999999\nignored_over_cap=1\n",
         )
         .unwrap();
         assert!(over.over_cap);
         assert_eq!(over.archive, None);
+        assert_eq!(over.fingerprint, None);
+        // Within the cap there is a fingerprint, and it is a sha256: without
+        // one, nothing could check them before the source goes.
+        assert!(IgnoredFiles::parse("ignored_files=0\nignored_bytes=0\n").is_err());
+        assert!(IgnoredFiles::parse(&format!(
+            "ignored_files=3\nignored_bytes=120\nignored_size=10240\nignored_sha256={sha}\n"
+        ))
+        .is_err());
+        assert!(IgnoredFiles::parse(
+            "ignored_files=0\nignored_bytes=0\nignored_fingerprint=not-a-sha\n"
+        )
+        .is_err());
         // Files within the cap promise an archive.
-        assert!(IgnoredFiles::parse("ignored_files=1\nignored_bytes=1\n").is_err());
+        assert!(IgnoredFiles::parse(&format!(
+            "ignored_files=1\nignored_bytes=1\nignored_fingerprint={fp}\n"
+        ))
+        .is_err());
         assert!(IgnoredFiles::parse("").is_err());
         assert_eq!(
             IgnoredFiles::archive_name("0-widgets.bundle"),

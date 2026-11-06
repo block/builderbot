@@ -260,3 +260,13 @@ export function transferResultWarnings(
 export function isTransferCancelledError(message: string): boolean {
   return /transfer was cancelled/i.test(message);
 }
+
+/**
+ * Whether `message` is the backend refusing a transfer asked for in a
+ * direction the project no longer goes ("The project is already on Blox; it
+ * was transferred after this dialog opened, …"): another window moved it
+ * while this one's dialog was open. Nothing was done.
+ */
+export function isTransferStaleError(message: string): boolean {
+  return /was transferred after this dialog opened/i.test(message);
+}

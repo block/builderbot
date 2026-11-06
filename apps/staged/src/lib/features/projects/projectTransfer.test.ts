@@ -15,6 +15,7 @@ import {
   lfsSummary,
   isTransferCancellable,
   isTransferCancelledError,
+  isTransferStaleError,
   issueMessage,
   plural,
   transferActionLabel,
@@ -214,6 +215,22 @@ describe('labels', () => {
   it('recognises the backend cancellation failure', () => {
     expect(isTransferCancelledError('the transfer was cancelled')).toBe(true);
     expect(isTransferCancelledError('cancel_project_transfer: not found')).toBe(false);
+  });
+
+  it('recognises the backend refusing a direction the project no longer goes', () => {
+    // Word for word what check_direction says (orchestrator.rs), both ways.
+    expect(
+      isTransferStaleError(
+        'The project is already on Blox; it was transferred after this dialog opened, so nothing changed.'
+      )
+    ).toBe(true);
+    expect(
+      isTransferStaleError(
+        'The project is already local; it was transferred after this dialog opened, so nothing changed.'
+      )
+    ).toBe(true);
+    expect(isTransferStaleError('This project is already being transferred.')).toBe(false);
+    expect(isTransferStaleError('the transfer was cancelled')).toBe(false);
   });
 });
 

@@ -13,7 +13,10 @@
 //! directory such as `node_modules/`) are archived into the backup on this
 //! machine with [`back_up_ignored`], whether or not the transfer carried
 //! them: a source whose files can't be archived and brought here is kept.
-//! Only files over the cap go unbacked, with a warning.
+//! Only files over the cap go unbacked, with a warning. As `add -A` never
+//! reads ignored files, the unchanged check also compares them with the
+//! fingerprint the archive recorded: a file that changed, came or went after
+//! it was backed up (or that can't be read to tell) keeps the source too.
 //!
 //! A worktree an earlier transfer to local made may have entries in its
 //! clone's `info/exclude`, which every other worktree of the clone reads:
@@ -122,7 +125,13 @@ impl Run<'_> {
             .map_err(|e| failed(format!("couldn't back its ignored files up: {e}")))?;
         leg.warnings.extend(skipped_warning(&ignored, plan));
         leg.ignored_backup = Some(ignored);
-        let check = unchanged(endpoint.as_ref(), plan, &outcome.snapshot);
+        // The ignored files too: the backup holds them as they were.
+        let check = unchanged(
+            endpoint.as_ref(),
+            plan,
+            &outcome.snapshot,
+            leg.ignored_backup.as_ref(),
+        );
         match check {
             Ok(None) => {}
             Ok(Some(what)) => {
@@ -203,16 +212,24 @@ impl Run<'_> {
                 )),
             }
         }
-        // Every check in one exec, as close to the delete as it can be.
+        // Every check in one exec, as close to the delete as it can be, the
+        // ignored files each backup holds included: every repository's, as
+        // a file can change while a later one's is backed up.
         let checks: Vec<_> = legs
             .iter()
             .filter(|l| from_here(l))
-            .filter_map(|l| Some((l.plan.as_ref()?, &l.outcome.as_ref()?.snapshot)))
+            .filter_map(|l| {
+                Some((
+                    l.plan.as_ref()?,
+                    &l.outcome.as_ref()?.snapshot,
+                    l.ignored_backup.as_ref(),
+                ))
+            })
             .collect();
         if !checks.is_empty() {
             match unchanged_all(endpoint.as_ref(), &checks) {
                 Ok(answers) => {
-                    for ((plan, _), answer) in checks.iter().zip(answers) {
+                    for ((plan, _, _), answer) in checks.iter().zip(answers) {
                         let branch = &plan.source_branch;
                         match answer {
                             Ok(None) => {}

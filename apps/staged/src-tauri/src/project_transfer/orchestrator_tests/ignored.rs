@@ -3,7 +3,7 @@
 
 use super::super::backups::ManifestIgnored;
 use super::super::excludes::WorktreeExcludes;
-use super::super::scripts::IGNORED_ARCHIVE_SCRIPT;
+use super::super::scripts::{IGNORED_ARCHIVE_SCRIPT, VERIFY_SCRIPT};
 use super::*;
 
 fn with_ignored() -> TransferOptions {
@@ -265,6 +265,98 @@ fn a_source_whose_ignored_files_cant_be_backed_up_stays() {
     assert_eq!(codes(&result.warnings), vec!["workspace_left"]);
     assert!(
         result.warnings[0].message.contains("ignored files"),
+        "{:?}",
+        result.warnings
+    );
+    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert!(!f.host.calls().iter().any(|c| c.starts_with("delete")));
+}
+
+/// `add -A` never reads ignored files, so the check right before a source
+/// goes compares them with what its backup holds: one edited, added or
+/// removed after the backup keeps the source, with its files as they are now.
+#[test]
+fn ignored_files_that_change_after_their_backup_keep_the_source() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let worktree = f.worktree(0);
+    write(&worktree, "secret.log", "s3cret\n");
+
+    // Edited between the backup and the check before the worktree goes.
+    let edit = worktree.clone();
+    f.host.before(Side::Local, VERIFY_SCRIPT, 1, move || {
+        write(&edit, "secret.log", "s3cret, edited\n")
+    });
+    let result = f.transfer(true).result.expect("to remote");
+    assert!(f.host.fired());
+    assert_eq!(codes(&result.warnings), vec!["worktree_left"]);
+    assert!(
+        result.warnings[0]
+            .message
+            .contains("ignored files changed after they were backed up"),
+        "{:?}",
+        result.warnings
+    );
+    assert_eq!(
+        read(&worktree, "secret.log").as_deref(),
+        Some("s3cret, edited\n")
+    );
+
+    // From a workspace: one appears, and the workspace isn't deleted.
+    let checkout = f.checkout(0);
+    write(&checkout, "remote.log", "remote\n");
+    let add = checkout.clone();
+    f.host.before(Side::Workspace, VERIFY_SCRIPT, 1, move || {
+        write(&add, "late.log", "late\n")
+    });
+    let result = f.transfer(true).result.expect("to local");
+    assert!(f.host.fired());
+    assert_eq!(codes(&result.warnings), vec!["workspace_left"]);
+    assert!(
+        result.warnings[0]
+            .message
+            .contains("ignored files changed after they were backed up"),
+        "{:?}",
+        result.warnings
+    );
+    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert!(!f.host.calls().iter().any(|c| c.starts_with("delete")));
+    assert_eq!(read(&checkout, "late.log").as_deref(), Some("late\n"));
+    assert_eq!(read(&checkout, "remote.log").as_deref(), Some("remote\n"));
+}
+
+/// The same check with an ignored file gone, and with none backed up at
+/// all: a source with no ignored files keeps them so, a new one keeps it.
+#[test]
+fn an_ignored_file_gone_or_new_after_the_backup_keeps_the_source() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let worktree = f.worktree(0);
+    write(&worktree, "secret.log", "s3cret\n");
+    let gone = worktree.join("secret.log");
+    f.host.before(Side::Local, VERIFY_SCRIPT, 1, move || {
+        fs::remove_file(gone).unwrap()
+    });
+    let result = f.transfer(true).result.expect("to remote");
+    assert!(f.host.fired());
+    assert_eq!(codes(&result.warnings), vec!["worktree_left"]);
+    assert!(
+        result.warnings[0].message.contains("ignored files changed"),
+        "{:?}",
+        result.warnings
+    );
+    assert!(worktree.is_dir());
+
+    // No ignored files in the workspace when it was backed up.
+    let checkout = f.checkout(0);
+    assert_eq!(read(&checkout, "secret.log"), None);
+    let add = checkout.clone();
+    f.host.before(Side::Workspace, VERIFY_SCRIPT, 1, move || {
+        write(&add, "first.log", "first\n")
+    });
+    let result = f.transfer(true).result.expect("to local");
+    assert!(f.host.fired());
+    assert_eq!(codes(&result.warnings), vec!["workspace_left"]);
+    assert!(
+        result.warnings[0].message.contains("ignored files changed"),
         "{:?}",
         result.warnings
     );

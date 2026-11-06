@@ -1232,24 +1232,31 @@ pub(crate) fn infer_prefixed_branch_name(project_name: &str) -> String {
     )
 }
 
+/// The longest workspace name Staged picks, in bytes.
+pub(crate) const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
+
+/// A workspace name for `branch_name`: `stg-` and the branch name reduced the
+/// way [`infer_branch_name`] reduces a project name — lowercase ASCII letters,
+/// digits and single `-`s, everything else dropped — then cut to
+/// [`WORKSPACE_NAME_MAX_LENGTH`]. Blox itself only refuses spaces and names
+/// over 63 bytes, but a git branch can be called anything, and the name also
+/// ends up in hostnames, paths and shell commands.
 pub(crate) fn infer_workspace_name(branch_name: &str) -> String {
-    const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
-    let safe = branch_name
-        .replace('/', "-")
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    let safe = normalize_branch_component(branch_name);
     if safe.is_empty() {
         return "stg-feature".to_string();
     }
-    let mut full = format!("stg-{safe}");
-    if full.len() > WORKSPACE_NAME_MAX_LENGTH {
-        full = full[..WORKSPACE_NAME_MAX_LENGTH]
-            .trim_end_matches('-')
-            .to_string();
+    truncate_workspace_name(&format!("stg-{safe}"), WORKSPACE_NAME_MAX_LENGTH)
+}
+
+/// `name` cut to at most `max` bytes, never inside a character, without a
+/// trailing `-`.
+pub(crate) fn truncate_workspace_name(name: &str, max: usize) -> String {
+    let mut end = name.len().min(max);
+    while !name.is_char_boundary(end) {
+        end -= 1;
     }
-    full
+    name[..end].trim_end_matches('-').to_string()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3661,6 +3668,87 @@ mod tests {
     #[test]
     fn apply_branch_prefix_without_prefix_returns_branch_unchanged() {
         assert_eq!(apply_branch_prefix(None, "my-project"), "my-project");
+    }
+
+    #[test]
+    fn infer_workspace_name_keeps_ascii_names_as_they_were() {
+        assert_eq!(infer_workspace_name("feature"), "stg-feature");
+        assert_eq!(
+            infer_workspace_name("alice/my-project"),
+            "stg-alice-my-project"
+        );
+        assert_eq!(infer_workspace_name("--a//b--"), "stg-a-b");
+        assert_eq!(infer_workspace_name(""), "stg-feature");
+        assert_eq!(
+            infer_workspace_name("a-very-long-branch-name-that-goes-on"),
+            "stg-a-very-long-branch-name-that"
+        );
+        // Never ends on the `-` the cut left.
+        assert_eq!(
+            infer_workspace_name("abcdefghijklmnopqrstuvwxyza-bc"),
+            "stg-abcdefghijklmnopqrstuvwxyza"
+        );
+    }
+
+    #[test]
+    fn infer_workspace_name_reduces_any_branch_name_to_lowercase_ascii() {
+        assert_eq!(
+            infer_workspace_name("MT/Fix_Thing.v2"),
+            "stg-mt-fix-thing-v2"
+        );
+        assert_eq!(infer_workspace_name("café/naïve"), "stg-caf-nave");
+        // Nothing left: the default.
+        assert_eq!(infer_workspace_name("日本語/ブランチ"), "stg-feature");
+        assert_eq!(infer_workspace_name("🚀"), "stg-feature");
+    }
+
+    /// A long branch name with a multibyte character across byte 32 used to
+    /// panic slicing `full[..32]`, failing a transfer to Blox.
+    #[test]
+    fn infer_workspace_name_never_panics_on_long_unicode_names() {
+        // `stg-` and 27 ASCII bytes put `é` (2 bytes) at bytes 31–32, and
+        // `🚀` (4 bytes) at 31–34.
+        let ascii = "a".repeat(27);
+        for name in [
+            format!("{ascii}é-and-more"),
+            format!("{ascii}🚀-and-more"),
+            "ü".repeat(40),
+            format!("{}-{}", "分支".repeat(20), "x".repeat(40)),
+            "🚀".repeat(16),
+        ] {
+            let inferred = infer_workspace_name(&name);
+            assert!(
+                inferred.len() <= WORKSPACE_NAME_MAX_LENGTH,
+                "{name}: {inferred}"
+            );
+            assert!(
+                inferred
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "{name}: {inferred}"
+            );
+            assert!(
+                inferred.starts_with("stg-") && !inferred.ends_with('-'),
+                "{inferred}"
+            );
+        }
+        // `é` is dropped, so the cut lands on the `-` after the `a`s.
+        assert_eq!(
+            infer_workspace_name(&format!("{ascii}é-and-more")),
+            format!("stg-{ascii}")
+        );
+        assert_eq!(infer_workspace_name(&"ü".repeat(40)), "stg-feature");
+    }
+
+    #[test]
+    fn truncate_workspace_name_cuts_on_a_character_boundary() {
+        // `é` is bytes 3–4: cutting at 4 would split it.
+        assert_eq!(truncate_workspace_name("abcé", 4), "abc");
+        assert_eq!(truncate_workspace_name("abcé", 5), "abcé");
+        assert_eq!(truncate_workspace_name("ab🚀", 5), "ab");
+        assert_eq!(truncate_workspace_name("ab-🚀", 5), "ab");
+        assert_eq!(truncate_workspace_name("abc", 10), "abc");
+        assert_eq!(truncate_workspace_name("🚀", 3), "");
     }
 
     #[test]

@@ -19,6 +19,7 @@ import { readSnapshot, writeSnapshot, clearSnapshot, SNAPSHOT_KEYS } from './sha
 import type {
   Project,
   ProjectRepo,
+  ProjectTransferDirection,
   ProjectTransferPreflight,
   ProjectTransferProgress,
   ProjectTransferResult,
@@ -328,16 +329,20 @@ export function getProjectTransferPreflight(projectId: string): Promise<ProjectT
 /**
  * Move a project to its other location, emitting `project-transfer-progress`
  * as it goes. Resolves once the project has switched; rejects with everything
- * undone. `includeIgnored` also carries ignored files (`.env`) outside ignored
- * folders; they are backed up either way.
+ * undone. `direction` is the one the preflight showed: a project that has
+ * moved since (another window transferred it) is refused, with nothing done
+ * (see isTransferStaleError). `includeIgnored` also carries ignored files
+ * (`.env`) outside ignored folders; they are backed up either way.
  */
 export async function transferProject(
   projectId: string,
+  direction: ProjectTransferDirection,
   includeUncommitted: boolean,
   includeIgnored: boolean
 ): Promise<ProjectTransferResult> {
   const result = await invokeCommand<ProjectTransferResult>('transfer_project', {
     projectId,
+    direction,
     includeUncommitted,
     includeIgnored,
   });

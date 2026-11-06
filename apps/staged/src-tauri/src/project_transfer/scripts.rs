@@ -237,24 +237,31 @@ pub const REBUNDLE_SCRIPT: &str = concat!(
 /// snapshots. One run checks every checkout it is given, so a workspace's
 /// are all checked in one exec, right before the workspace is deleted.
 ///
-/// Arguments: six per checkout — the checkout, the branch it must have
-/// checked out, the snapshot's `head`, `tree_i` and `tree_w`, and a scratch
-/// file (outside the checkout) for the copy of the index.
+/// Arguments: seven per checkout — the checkout, the branch it must have
+/// checked out, the snapshot's `head`, `tree_i` and `tree_w`, a scratch file
+/// (outside the checkout) for the copy of the index, and the
+/// `ignored_fingerprint` of the ignored files backed up from it, or nothing
+/// when they weren't (past the cap).
 ///
 /// For each it prints `repo=<index>`, then `unchanged=1`, `changed=<what>` for
 /// the first difference, or `error=<message>` when it could not tell. The
 /// index and working tree are read the way [`SNAPSHOT_SCRIPT`] read them, in a
 /// copy of the index, so not even the real index's stat cache is touched.
+/// Ignored files are in neither tree, so with a fingerprint they are listed
+/// and read again the way [`IGNORED_ARCHIVE_SCRIPT`] did: one that changed,
+/// came or went since the backup was made is a difference too, as the backup
+/// holds what was there before.
 pub const VERIFY_SCRIPT: &str = concat!(
     prelude!(),
+    ignored_listing!(),
     // A subshell per checkout, so `fail` and `changed` end that one's check.
     "check() (\n",
     "  cd -- \"$1\" 2>/dev/null || fail \"cannot enter $1\"\n",
-    "  branch=$2 head=$3 tree_i=$4 tree_w=$5 tmp_index=$6\n",
+    "  branch=$2 head=$3 tree_i=$4 tree_w=$5 tmp_index=$6 ignored_fp=$7\n",
     "  top=$(G rev-parse --show-toplevel 2>/dev/null) || fail \"not a git checkout: $PWD\"\n",
     "  cd -- \"$top\" || fail \"cannot enter $top\"\n",
-    "  on_fail() { rm -f -- \"$tmp_index\"; }\n",
-    "  changed() { rm -f -- \"$tmp_index\"; printf 'changed=%s\\n' \"$*\"; exit 0; }\n",
+    "  on_fail() { rm -f -- \"$tmp_index\" \"$tmp_index.ignored\"; }\n",
+    "  changed() { rm -f -- \"$tmp_index\" \"$tmp_index.ignored\"; printf 'changed=%s\\n' \"$*\"; exit 0; }\n",
     "  [ \"$(G symbolic-ref -q HEAD)\" = \"refs/heads/$branch\" ] || changed \"$branch is no longer checked out\"\n",
     "  now=$(G rev-parse -q --verify 'HEAD^{commit}')\n",
     "  [ \"$now\" = \"$head\" ] || changed \"HEAD moved from $head to ${now:-nothing}\"\n",
@@ -268,14 +275,20 @@ pub const VERIFY_SCRIPT: &str = concat!(
     "  t=$(GI \"$tmp_index\" write-tree) || fail 'cannot read the working tree'\n",
     "  [ \"$t\" = \"$tree_w\" ] || changed 'files changed'\n",
     "  rm -f -- \"$tmp_index\"\n",
+    "  if [ -n \"$ignored_fp\" ]; then\n",
+    "    ignored_list > \"$tmp_index.ignored\" || fail 'cannot list its ignored files to compare them with the backup'\n",
+    "    fp=$(ignored_fingerprint \"$tmp_index.ignored\" \"$tmp_index.ignored\") || fail 'cannot read its ignored files to compare them with the backup'\n",
+    "    rm -f -- \"$tmp_index.ignored\"\n",
+    "    [ \"$fp\" = \"$ignored_fp\" ] || changed 'ignored files changed after they were backed up'\n",
+    "  fi\n",
     "  printf 'unchanged=1\\n'\n",
     ")\n",
     "i=0\n",
-    "while [ $# -ge 6 ]; do\n",
+    "while [ $# -ge 7 ]; do\n",
     "  printf 'repo=%s\\n' \"$i\"\n",
-    "  check \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\"\n",
+    "  check \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\"\n",
     "  i=$((i + 1))\n",
-    "  shift 6\n",
+    "  shift 7\n",
     "done\n",
     "exit 0\n",
 );
@@ -1087,12 +1100,15 @@ pub fn rebundle_args(repo_dir: &str, bundle_path: &str, transfer_id: &str) -> Ve
     ]
 }
 
-/// Arguments for [`VERIFY_SCRIPT`].
+/// Arguments for [`VERIFY_SCRIPT`]. `ignored_fingerprint` is the
+/// [`IgnoredFiles::fingerprint`] of the ignored files backed up from the
+/// checkout, which leaves them out of the check when `None`.
 pub fn verify_args(
     repo_dir: &str,
     branch: &str,
     snapshot: &Snapshot,
     scratch_index: &str,
+    ignored_fingerprint: Option<&str>,
 ) -> Vec<String> {
     [
         repo_dir,
@@ -1101,6 +1117,7 @@ pub fn verify_args(
         &snapshot.tree_i,
         &snapshot.tree_w,
         scratch_index,
+        ignored_fingerprint.unwrap_or(""),
     ]
     .map(str::to_string)
     .to_vec()

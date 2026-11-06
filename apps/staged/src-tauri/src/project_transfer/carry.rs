@@ -373,7 +373,9 @@ pub fn carry_repo_with(
 /// archive the source writes, brought here and checked. Over the cap, or with
 /// none, nothing is written (see [`IgnoredFiles`]). `carried` is what the
 /// carry already brought, which is not fetched again when the source's
-/// archive comes out the same.
+/// archive comes out the same. Within the cap the result's fingerprint is
+/// what [`unchanged`] compares the source's ignored files with, last thing
+/// before it goes.
 pub fn back_up_ignored(
     source: &dyn TransferEndpoint,
     plan: &CarryPlan,
@@ -414,7 +416,8 @@ fn archive_ignored(
             plan.ignored_cap,
             &source.scratch_path(&plan.transfer_id, &plan.ignored_excludes_name())?,
         ),
-        plan.ignored_bytes.min(plan.ignored_cap),
+        // Read twice: for the fingerprint, then into the archive.
+        2 * plan.ignored_bytes.min(plan.ignored_cap),
     )?;
     IgnoredFiles::parse(&report)
 }
@@ -500,14 +503,17 @@ fn placing_bytes(archive: Option<&BundleFile>) -> u64 {
 }
 
 /// Whether `plan`'s source checkout is still what `snapshot` captured: on
-/// its branch at the same `HEAD`, with the same index and working tree. Read
-/// only. `None` when it is; otherwise what changed.
+/// its branch at the same `HEAD`, with the same index and working tree — and,
+/// given the ignored files [`back_up_ignored`] archived from it, with those
+/// too still what the backup holds. Read only. `None` when it is; otherwise
+/// what changed.
 pub fn unchanged(
     source: &dyn TransferEndpoint,
     plan: &CarryPlan,
     snapshot: &Snapshot,
+    ignored: Option<&IgnoredFiles>,
 ) -> Result<Option<String>, TransferError> {
-    unchanged_all(source, &[(plan, snapshot)])?
+    unchanged_all(source, &[(plan, snapshot, ignored)])?
         .pop()
         .unwrap_or_else(|| Err(no_answer(source, plan)))
 }
@@ -517,27 +523,33 @@ pub fn unchanged(
 /// could not run at all; otherwise one answer per checkout, in order.
 pub fn unchanged_all(
     source: &dyn TransferEndpoint,
-    checks: &[(&CarryPlan, &Snapshot)],
+    checks: &[(&CarryPlan, &Snapshot, Option<&IgnoredFiles>)],
 ) -> Result<Vec<Result<Option<String>, TransferError>>, TransferError> {
     let mut args = Vec::new();
     let mut payload_bytes = 0;
-    for (plan, snapshot) in checks {
+    for (plan, snapshot, ignored) in checks {
         check_transfer_id(&plan.transfer_id)?;
         let scratch_index =
             source.scratch_path(&plan.transfer_id, &format!("{}.index", plan.bundle_name))?;
+        let fingerprint = ignored.and_then(|i| i.fingerprint.as_deref());
         args.extend(scripts::verify_args(
             &plan.source_dir,
             &plan.source_branch,
             snapshot,
             &scratch_index,
+            fingerprint,
         ));
         payload_bytes += plan.untracked_bytes + snapshot.bundle.size;
+        // Read again to compare.
+        if let (Some(ignored), Some(_)) = (ignored, fingerprint) {
+            payload_bytes += ignored.bytes;
+        }
     }
     let output = source.run_script_sized(scripts::VERIFY_SCRIPT, &args, payload_bytes)?;
     let mut sections = scripts::sections(&output.stdout).into_iter();
     Ok(checks
         .iter()
-        .map(|(plan, _)| match sections.next() {
+        .map(|(plan, _, _)| match sections.next() {
             Some(section) => {
                 scripts::parse_verify(&section).map_err(|message| TransferError::Script {
                     step: "verify",

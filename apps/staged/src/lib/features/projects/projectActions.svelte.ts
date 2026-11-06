@@ -41,6 +41,7 @@ import {
   asksAboutUncommitted,
   ignoredTransferBlocked,
   isTransferCancelledError,
+  isTransferStaleError,
   issueMessage,
   transferDestinationLabel,
   transferDirectionFrom,
@@ -304,7 +305,12 @@ class ProjectActionsController {
     const destination = transferDestinationLabel(direction);
     projectsDataStore.projectTransferStarted(id, direction);
     try {
-      const result = await commands.transferProject(id, includeUncommitted, includeIgnored);
+      const result = await commands.transferProject(
+        id,
+        direction,
+        includeUncommitted,
+        includeIgnored
+      );
       projectsDataStore.projectTransferFinished(id, result.transferId);
       const warnings = transferResultWarnings(result, preflight);
       const notes = warnings.map(issueMessage);
@@ -335,6 +341,13 @@ class ProjectActionsController {
               ? 'Nothing changed; the project is still local.'
               : 'Nothing changed; the project is still on Blox.',
         });
+      } else if (isTransferStaleError(message)) {
+        // The dialog was confirmed after another window moved the project:
+        // its destination is where the project already is, so say what the
+        // backend found rather than name it, and fetch where the project is
+        // now, so a new dialog offers the way it does go.
+        toast.warning(`Didn't transfer "${name}"`, { description: message });
+        void projectsDataStore.refreshTransferredProject(id);
       } else {
         console.error('Failed to transfer project:', e);
         toast.error(`Unable to transfer "${name}" to ${destination}`, {

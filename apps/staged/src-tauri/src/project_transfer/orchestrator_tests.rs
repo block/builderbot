@@ -76,6 +76,9 @@ enum Fault {
     ResumeHangs,
     /// The `nth` run (from 1) of the script at the side panics.
     Panic(Side, &'static str, usize),
+    /// The `nth` run (from 1) of the script at the side runs once the hook
+    /// [`FakeHost::before`] set has: something changing just before it.
+    Before(Side, &'static str, usize),
 }
 
 #[derive(Default)]
@@ -83,6 +86,8 @@ struct Faults {
     armed: Option<Fault>,
     seen: usize,
     fired: bool,
+    /// What [`Fault::Before`] runs.
+    hook: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Faults {
@@ -96,7 +101,7 @@ impl Faults {
         }
         self.seen += 1;
         let nth = match fault {
-            Fault::Script(_, _, nth) | Fault::Panic(_, _, nth) => nth,
+            Fault::Script(_, _, nth) | Fault::Panic(_, _, nth) | Fault::Before(_, _, nth) => nth,
             _ => 1,
         };
         self.fired = self.seen == nth;
@@ -137,6 +142,20 @@ impl TransferEndpoint for FaultyEndpoint {
             );
         if panics {
             panic!("injected panic");
+        }
+        let hook = {
+            let mut faults = self.faults.lock().unwrap();
+            let hit = faults.hit(
+                |f| matches!(f, Fault::Before(side, s, _) if *side == self.side && *s == script),
+            );
+            if hit {
+                faults.hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some(hook) = hook {
+            hook();
         }
         self.inner.run_script(script, args)
     }
@@ -283,6 +302,21 @@ impl FakeHost {
 
     fn fired(&self) -> bool {
         self.faults.lock().unwrap().fired
+    }
+
+    /// Run `hook` right before the `nth` run (from 1) of `script` at `side`.
+    fn before(
+        &self,
+        side: Side,
+        script: &'static str,
+        nth: usize,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        *self.faults.lock().unwrap() = Faults {
+            armed: Some(Fault::Before(side, script, nth)),
+            hook: Some(Box::new(hook)),
+            ..Faults::default()
+        };
     }
 
     fn bootstrap_with(&self, bootstrap: fn(&Path)) {
@@ -631,15 +665,27 @@ impl Fixture {
         options: TransferOptions,
         hook: &dyn Fn(&TransferProgress),
     ) -> Transfer {
+        self.transfer_as(self.direction(), options, hook)
+    }
+
+    /// The way the project goes from where it is now, as a dialog opened now
+    /// would show it.
+    fn direction(&self) -> TransferDirection {
+        let project = self.store.get_project(&self.project.id).unwrap().unwrap();
+        TransferDirection::from_source(project.location)
+    }
+
+    /// [`Self::transfer_options`], asked for in `direction` whichever way the
+    /// project goes now.
+    fn transfer_as(
+        &self,
+        direction: TransferDirection,
+        options: TransferOptions,
+        hook: &dyn Fn(&TransferProgress),
+    ) -> Transfer {
         let transfer_id = uuid::Uuid::new_v4().to_string();
         let branch_ids = self.branches.iter().map(|b| b.id.clone()).collect();
-        let guard = registry::begin(
-            &self.project.id,
-            &transfer_id,
-            TransferDirection::from_source(self.project.location),
-            branch_ids,
-        )
-        .unwrap();
+        let guard = registry::begin(&self.project.id, &transfer_id, direction, branch_ids).unwrap();
         let events = Mutex::new(Vec::new());
         let outcome = run_transfer(&self.store, &self.host, &guard, options, &|progress| {
             // A window that loads now reads the same phase from the registry.
@@ -1366,6 +1412,84 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
         vec!["blox_not_authenticated", "already_transferring"]
     );
     assert_eq!(codes(&preflight.repos[0].blockers), vec!["session_running"]);
+}
+
+/// A dialog left open while another window moved the project asks for the
+/// direction it showed. That is refused before anything happens, so the
+/// project isn't moved straight back and what the other transfer made stays.
+#[test]
+fn a_transfer_asked_for_in_a_direction_the_project_no_longer_goes_is_refused() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let transfers = || {
+        fs::read_dir(f.host.root.join("transfers"))
+            .map(|dir| dir.count())
+            .unwrap_or(0)
+    };
+
+    // Local, asked to come back from Blox.
+    let before = f.db_state();
+    let stale = f.transfer_as(
+        TransferDirection::ToLocal,
+        TransferOptions::default(),
+        &|_| {},
+    );
+    let err = stale.result.unwrap_err();
+    assert_eq!(
+        err,
+        "The project is already local; it was transferred after this dialog opened, so \
+         nothing changed."
+    );
+    assert!(stale.events.is_empty(), "{:?}", stale.events);
+    assert_eq!(f.db_state(), before);
+    assert!(f.host.calls().is_empty());
+    assert_eq!(transfers(), 0, "no manifest");
+    assert!(f.worktree(0).is_dir());
+
+    // On Blox, asked to go to Blox again: the workspace it went to stays.
+    f.transfer(true).result.expect("to remote");
+    let (before, calls, made) = (f.db_state(), f.host.calls(), transfers());
+    let stale = f.transfer_as(
+        TransferDirection::ToRemote,
+        TransferOptions::default(),
+        &|_| {},
+    );
+    let err = stale.result.unwrap_err();
+    assert!(err.starts_with("The project is already on Blox;"), "{err}");
+    assert!(err.contains(super::orchestrator::STALE_DIRECTION), "{err}");
+    assert!(stale.events.is_empty(), "{:?}", stale.events);
+    assert_eq!(f.db_state(), before);
+    assert_eq!(f.host.calls(), calls);
+    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(transfers(), made);
+    assert!(!registry::is_project_transferring(&f.project.id));
+
+    // Asked for the way it does go, it goes.
+    let back = f.transfer_as(
+        TransferDirection::ToLocal,
+        TransferOptions::default(),
+        &|_| {},
+    );
+    assert_eq!(
+        back.result.expect("to local").location,
+        ProjectLocation::Local
+    );
+}
+
+/// A long branch name with a multibyte character across byte 32 names the
+/// workspace it goes to: that used to panic, failing the transfer.
+#[test]
+fn a_long_unicode_branch_name_names_its_workspace_in_ascii() {
+    let branch = format!("{}é-über/naïve", "a".repeat(27));
+    let f = Fixture::new(&[(WIDGETS, branch.as_str())]);
+    write(&f.worktree(0), "notes.txt", "untracked\n");
+
+    let result = f.transfer(true).result.expect("to remote");
+
+    let workspace = format!("stg-{}", "a".repeat(27));
+    assert_eq!(result.workspace_name.as_deref(), Some(workspace.as_str()));
+    assert_eq!(f.host.workspaces(), vec![workspace]);
+    assert_eq!(result.repos[0].branch_name, branch);
+    assert!(f.checkout(0).join("notes.txt").is_file());
 }
 
 #[test]

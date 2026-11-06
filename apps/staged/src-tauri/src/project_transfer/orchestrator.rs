@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::store::{
-    BranchLanding, BranchTransfer, ProjectLocation, ProjectTransfer, Store, Workdir,
+    BranchLanding, BranchTransfer, Project, ProjectLocation, ProjectTransfer, Store, Workdir,
     WorkspaceStatus,
 };
 
@@ -157,7 +157,34 @@ impl From<String> for TransferStopped {
     }
 }
 
-/// Move the project `guard` registered to the other location.
+/// What refusing a transfer asked for in a direction the project no longer
+/// goes says, after where the project is: the frontend knows the refusal by
+/// it.
+pub const STALE_DIRECTION: &str =
+    "it was transferred after this dialog opened, so nothing changed.";
+
+/// The project `guard` registered, if it is still where the transfer was
+/// asked to move it from. Called under the registry entry, before anything
+/// else happens: a dialog left open while another window moved the project
+/// would otherwise move it straight back, deleting what that transfer made.
+pub(super) fn check_direction(store: &Store, guard: &TransferGuard) -> Result<Project, String> {
+    let project = store
+        .get_project(guard.project_id())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", guard.project_id()))?;
+    if TransferDirection::from_source(project.location) != guard.direction() {
+        let there = match project.location {
+            ProjectLocation::Local => "local",
+            ProjectLocation::Remote => "on Blox",
+        };
+        return Err(format!("The project is already {there}; {STALE_DIRECTION}"));
+    }
+    Ok(project)
+}
+
+/// Move the project `guard` registered to the other location, in the
+/// direction it was registered for; refused, with nothing done, if the
+/// project is no longer at that direction's source.
 pub(super) fn run_transfer(
     store: &Store,
     host: &dyn TransferHost,
@@ -169,11 +196,8 @@ pub(super) fn run_transfer(
         include_uncommitted,
         include_ignored,
     } = options;
-    let project = store
-        .get_project(guard.project_id())
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", guard.project_id()))?;
-    let direction = TransferDirection::from_source(project.location);
+    let project = check_direction(store, guard)?;
+    let direction = guard.direction();
     let mut run = Run {
         store,
         host,
@@ -533,15 +557,16 @@ impl Run<'_> {
 
     /// A free workspace name, from the primary branch's.
     fn pick_workspace_name(&self, seed: &str) -> Result<String, Failure> {
-        const MAX: usize = 32;
-        let base = crate::branches::infer_workspace_name(seed);
+        use crate::branches::WORKSPACE_NAME_MAX_LENGTH as MAX;
+        use crate::branches::{infer_workspace_name, truncate_workspace_name};
+        let base = infer_workspace_name(seed);
         for n in 1..=20 {
             let name = if n == 1 {
                 base.clone()
             } else {
                 let suffix = format!("-{n}");
-                let keep = base.len().min(MAX - suffix.len());
-                format!("{}{suffix}", base[..keep].trim_end_matches('-'))
+                let kept = truncate_workspace_name(&base, MAX - suffix.len());
+                format!("{kept}{suffix}")
             };
             if self.host.workspace_state(&name)? == WorkspaceState::NotFound {
                 return Ok(name);

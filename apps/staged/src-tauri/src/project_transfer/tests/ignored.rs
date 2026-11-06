@@ -493,6 +493,143 @@ fn backing_ignored_files_up_brings_them_here_once() {
     }
 }
 
+/// The unchanged check, given a backup's ignored files, says when one was
+/// edited, added or removed since: `add -A` never reads them, so only the
+/// fingerprint the archive recorded can tell. Read only, like the rest.
+#[test]
+fn verify_says_whether_the_ignored_files_are_still_what_the_backup_holds() {
+    for shell in shells() {
+        let w = World::new(shell);
+        ignored_fixture(&w.source);
+        let (outcome, _) = w.to_remote("feature", "feature", true).unwrap();
+        let source = w.endpoint(&w.remote_scratch);
+        let plan = w.plan(
+            &source,
+            Landing::Branch,
+            ("feature", "feature"),
+            true,
+            vec![],
+        );
+        let backup = super::super::carry::back_up_ignored(&source, &plan, None).unwrap();
+        let fingerprint = backup.fingerprint.clone().expect("a fingerprint");
+        assert_eq!(fingerprint.len(), 64, "{shell}");
+        let check = |ignored: Option<&IgnoredFiles>| {
+            unchanged(&source, &plan, &outcome.snapshot, ignored).unwrap()
+        };
+        let changed = Some("ignored files changed after they were backed up".to_string());
+
+        let before = source_fingerprint(&w.source);
+        assert_eq!(check(Some(&backup)), None, "{shell}");
+        assert_eq!(source_fingerprint(&w.source), before, "{shell}: read only");
+        let scratch: Vec<String> = fs::read_dir(w.remote_scratch.join(TID))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("repo.bundle.index"))
+            .collect();
+        assert!(scratch.is_empty(), "{shell}: {scratch:?}");
+        // The same files archived again: the same fingerprint.
+        let again = super::super::carry::back_up_ignored(&source, &plan, Some(&backup)).unwrap();
+        assert_eq!(again.fingerprint, backup.fingerprint, "{shell}");
+
+        // Edited, the same size.
+        write(&w.source, ".env", "SECRET=2\n");
+        assert_eq!(check(Some(&backup)), changed, "{shell}: edited");
+        // Without the backup's files to compare, not a change.
+        assert_eq!(check(None), None, "{shell}");
+        write(&w.source, ".env", "SECRET=1\n");
+        assert_eq!(check(Some(&backup)), None, "{shell}");
+
+        // Touched but the same: not a change.
+        let env = w.source.join(".env");
+        let file = fs::File::options().write(true).open(&env).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        drop(file);
+        assert_eq!(check(Some(&backup)), None, "{shell}: touched");
+
+        // Added, in a directory of its own too.
+        write(&w.source, "late.log", "late\n");
+        assert_eq!(check(Some(&backup)), changed, "{shell}: added");
+        fs::remove_file(w.source.join("late.log")).unwrap();
+        write(&w.source, "only-ignored/new.tmp", "new\n");
+        assert_eq!(check(Some(&backup)), changed, "{shell}: added deeper");
+        fs::remove_file(w.source.join("only-ignored/new.tmp")).unwrap();
+        assert_eq!(check(Some(&backup)), None, "{shell}");
+
+        // Removed.
+        fs::remove_file(w.source.join("debug.log")).unwrap();
+        assert_eq!(check(Some(&backup)), changed, "{shell}: removed");
+        write(&w.source, "debug.log", "debug\n");
+        assert_eq!(check(Some(&backup)), None, "{shell}");
+
+        // Renamed, the same bytes.
+        fs::rename(w.source.join("mixed/x.log"), w.source.join("mixed/y.log")).unwrap();
+        assert_eq!(check(Some(&backup)), changed, "{shell}: renamed");
+        fs::rename(w.source.join("mixed/y.log"), w.source.join("mixed/x.log")).unwrap();
+
+        // Files the backup never held — in an ignored directory — aren't
+        // compared.
+        write(&w.source, "node_modules/late.js", "late\n");
+        assert_eq!(check(Some(&backup)), None, "{shell}: ignored directory");
+
+        // One that can't be read: the check can't tell, so fails.
+        fs::set_permissions(&env, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = unchanged(&source, &plan, &outcome.snapshot, Some(&backup));
+        fs::set_permissions(&env, fs::Permissions::from_mode(0o644)).unwrap();
+        let message = unreadable.unwrap_err().to_string();
+        assert!(
+            message.contains("cannot read its ignored files"),
+            "{shell}: {message}"
+        );
+        assert_eq!(check(Some(&backup)), None, "{shell}");
+
+        // Over the cap: nothing backed up, so nothing to compare.
+        let small = CarryPlan {
+            ignored_cap: 1,
+            ..plan.clone()
+        };
+        let over = super::super::carry::back_up_ignored(&source, &small, None).unwrap();
+        assert!(over.over_cap, "{shell}");
+        assert_eq!(over.fingerprint, None, "{shell}");
+        write(&w.source, ".env", "SECRET=3\n");
+        assert_eq!(check(Some(&over)), None, "{shell}: over the cap");
+    }
+}
+
+/// A checkout with no ignored files gets a fingerprint too, so one that
+/// appears after the backup is a change.
+#[test]
+fn an_ignored_file_new_to_a_checkout_that_had_none_is_a_change() {
+    for shell in shells() {
+        let w = World::new(shell);
+        // The seed ignores `*.log`, and has none.
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        let (outcome, _) = w.to_remote("feature", "feature", true).unwrap();
+        let source = w.endpoint(&w.remote_scratch);
+        let plan = w.plan(
+            &source,
+            Landing::Branch,
+            ("feature", "feature"),
+            true,
+            vec![],
+        );
+        let backup = super::super::carry::back_up_ignored(&source, &plan, None).unwrap();
+        assert_eq!(backup.files, 0, "{shell}");
+        assert_eq!(backup.archive, None, "{shell}");
+        assert!(backup.fingerprint.is_some(), "{shell}");
+        let check = || unchanged(&source, &plan, &outcome.snapshot, Some(&backup)).unwrap();
+
+        assert_eq!(check(), None, "{shell}");
+        write(&w.source, "first.log", "first\n");
+        assert_eq!(
+            check().as_deref(),
+            Some("ignored files changed after they were backed up"),
+            "{shell}"
+        );
+    }
+}
+
 /// Git at one end with nothing of this machine's: no system config, a global
 /// config of `config` alone, and a home of its own — so the developer's
 /// `~/.config/git/ignore` stays out, and each end ignores only what the test

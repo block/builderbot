@@ -53,12 +53,21 @@ fn transfers() -> &'static Mutex<HashMap<String, Entry>> {
 pub struct TransferGuard {
     project_id: String,
     transfer_id: String,
+    /// The way whoever asked for the transfer saw the project go.
+    direction: TransferDirection,
     cancel: Arc<AtomicBool>,
 }
 
 impl TransferGuard {
     pub fn project_id(&self) -> &str {
         &self.project_id
+    }
+
+    /// The direction the transfer was asked for in, which the project's
+    /// location must still agree with (see
+    /// [`super::orchestrator::check_direction`]).
+    pub fn direction(&self) -> TransferDirection {
+        self.direction
     }
 
     pub fn transfer_id(&self) -> &str {
@@ -129,7 +138,10 @@ impl Drop for TransferGuard {
 }
 
 /// Register a transfer of `project_id` covering `branch_ids`, or refuse if
-/// one is already running.
+/// one is already running. `direction` is the way the caller saw the project
+/// go; nothing here checks it against the project's location, which only a
+/// transfer changes, so once this has returned it stays put until the guard
+/// drops.
 pub fn begin(
     project_id: &str,
     transfer_id: &str,
@@ -163,6 +175,7 @@ pub fn begin(
     Ok(TransferGuard {
         project_id: project_id.to_string(),
         transfer_id: transfer_id.to_string(),
+        direction,
         cancel,
     })
 }

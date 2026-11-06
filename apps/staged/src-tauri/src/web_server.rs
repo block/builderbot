@@ -1733,6 +1733,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "transfer_project" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
+            // The way the client's preflight showed the project going.
+            let direction: crate::project_transfer::TransferDirection = arg(&args, "direction")?;
             let include_uncommitted: bool = arg(&args, "includeUncommitted")?;
             // Optional, so a client from before ignored files could move
             // still transfers (without them).
@@ -1746,6 +1748,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 Arc::clone(action_executor),
                 Arc::clone(action_registry),
                 project_id,
+                direction,
                 crate::project_transfer::TransferOptions {
                     include_uncommitted,
                     include_ignored,

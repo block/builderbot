@@ -9,9 +9,12 @@
   trigger shows how many filters are active, and a Clear filters item appears
   while any are — repo filters can outlive their menu entry (delete the last
   project using a repo and its filter stays active with nothing to uncheck),
-  so clearing has to be reachable from the menu itself.
+  so clearing has to be reachable from the menu itself. It sits on the edge
+  facing the trigger, the shortest reach from opening the menu, and keeps
+  keyboard focus if the menu flips sides while it has it.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ListFilter from '@lucide/svelte/icons/list-filter';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -46,7 +49,65 @@
     if (!open || !projectsDataStore.loaded) return;
     void projectsDataStore.ensureProjectsHydrated();
   });
+
+  // bits-ui opens the menu below the trigger and flips it above when the
+  // window has no room underneath (a long pinned-repos list can push this
+  // header to the bottom of the sidebar), reporting the side it settled on as
+  // the content's data-side. Clear filters follows that side so it always
+  // faces the trigger. Positioning settles before bits-ui's keyboard focus
+  // lands (focus waits a frame), so a keyboard open still starts on the first
+  // item of the final order. Sheet menus have no data-side and keep it on top.
+  //
+  // Moving it renders the other branch, a new node (not a CSS reorder:
+  // bits-ui roves through items in DOM order, so arrow keys would run against
+  // the visual order). If the flip happens while the old node has focus
+  // (a resize or layout shift with the menu open), removing it would drop
+  // focus out of the menu and with it arrow-key and Escape handling, so the
+  // flip notes that and the new node takes focus as it mounts.
+  let content = $state<HTMLElement | null>(null);
+  let placedSide = $state<string | null>(null);
+  let refocusClear = false;
+
+  $effect(() => {
+    const el = content;
+    if (!el) {
+      placedSide = null;
+      return;
+    }
+    const read = () => {
+      const side = el.getAttribute('data-side');
+      const moving = (side === 'top') !== clearAtBottom;
+      const focused = el.ownerDocument.activeElement;
+      refocusClear = moving && !!focused?.matches('[data-clear-filters]') && el.contains(focused);
+      placedSide = side;
+    };
+    // Untracked so reading clearAtBottom doesn't re-run this on every flip.
+    untrack(read);
+    const observer = new MutationObserver(read);
+    observer.observe(el, { attributes: true, attributeFilter: ['data-side'] });
+    return () => observer.disconnect();
+  });
+
+  let clearAtBottom = $derived(placedSide === 'top');
+
+  // Runs once the new Clear filters node is in the document, in the same
+  // update that removed the old one, so focus never lands anywhere else.
+  function takeFocusFromFlip(node: HTMLElement) {
+    if (!refocusClear) return;
+    refocusClear = false;
+    node.focus({ preventScroll: true });
+  }
 </script>
+
+{#snippet clearItem()}
+  <DropdownMenu.Item
+    data-clear-filters
+    {@attach takeFocusFromFlip}
+    onSelect={() => projectFiltersStore.clearFilters()}
+  >
+    Clear filters
+  </DropdownMenu.Item>
+{/snippet}
 
 <DropdownMenu.Root bind:open>
   <DropdownMenu.Trigger
@@ -57,7 +118,11 @@
     {activeCount > 0 ? `${activeCount} filter${activeCount === 1 ? '' : 's'}` : 'Filter'}
     <ChevronDown size={11} />
   </DropdownMenu.Trigger>
-  <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[210px]">
+  <DropdownMenu.Content bind:ref={content} align="end" sideOffset={4} class="min-w-[210px]">
+    {#if projectFiltersStore.hasActiveFilters && !clearAtBottom}
+      {@render clearItem()}
+      <DropdownMenu.Separator />
+    {/if}
     <DropdownMenu.Label>Status</DropdownMenu.Label>
     <DropdownMenu.CheckboxItem
       checked={projectFiltersStore.isFilterActive('unread')}
@@ -102,11 +167,9 @@
         </DropdownMenu.CheckboxItem>
       {/each}
     {/if}
-    {#if projectFiltersStore.hasActiveFilters}
+    {#if projectFiltersStore.hasActiveFilters && clearAtBottom}
       <DropdownMenu.Separator />
-      <DropdownMenu.Item onSelect={() => projectFiltersStore.clearFilters()}>
-        Clear filters
-      </DropdownMenu.Item>
+      {@render clearItem()}
     {/if}
   </DropdownMenu.Content>
 </DropdownMenu.Root>

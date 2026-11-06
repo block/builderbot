@@ -727,6 +727,7 @@ mod tests {
                     &f.target_branch.id,
                     "new body",
                     std::slice::from_ref(&image),
+                    &[],
                 )
                 .unwrap_err();
 
@@ -760,6 +761,7 @@ mod tests {
                 &f.source_branch.id,
                 &f.target_branch.id,
                 "body",
+                &[],
                 &[],
             )
             .unwrap();
@@ -1017,6 +1019,7 @@ mod tests {
                     &f.target.id,
                     "new body",
                     std::slice::from_ref(&image),
+                    &[],
                     std::slice::from_ref(&plan),
                 )
                 .unwrap_err();
@@ -1059,6 +1062,7 @@ mod tests {
                 &f.source.id,
                 &f.target.id,
                 "body",
+                &[],
                 &[],
                 &[child_move(&child, &f.target_branch.id)],
             )

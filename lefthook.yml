@@ -2,23 +2,71 @@ skip_lfs: true
 output:
   - success
   - failure
+  - skips
 
+# Like CI, each hook skips the areas a change leaves alone, and prints "(skip)"
+# for them. `just check` runs everything.
+
+# Format each area that has staged files. stage_fixed then re-stages the
+# staged files matching the job's glob, and each glob spans every file its fmt
+# recipe can rewrite. The group keeps this hook's old job name, `fmt`, so it
+# still replaces an `fmt` job from a global or local lefthook config.
 pre-commit:
-  commands:
-    fmt:
-      run: just fmt
-      stage_fixed: true
+  jobs:
+    - name: fmt
+      group:
+        jobs:
+          - name: crates-fmt
+            glob: "crates/**"
+            run: cargo fmt --all
+            stage_fixed: true
+          - name: staged-fmt
+            glob: "apps/staged/**"
+            run: just app staged fmt
+            stage_fixed: true
+          - name: differ-fmt
+            glob: "apps/differ/**"
+            run: just app differ fmt
+            stage_fixed: true
+          - name: penpal-fmt
+            glob: "apps/penpal/**"
+            run: just app penpal fmt
+            stage_fixed: true
 
+# Skip an area's checks when the branch changes none of the paths its CI
+# workflow watches (see scripts/unchanged). Penpal is left to its CI.
+#
+# The groups keep the names `lint` and `test` so they replace the `lint` and
+# `test` jobs from a global or local lefthook config. On Blox workstations, lhm
+# merges in a global config whose `lint` runs the full `just lint` (clippy and
+# every app's lint, Penpal's included) and whose `test` runs `just test`, on
+# every push. The inner jobs name what actually runs.
 pre-push:
   parallel: true
-  commands:
-    crates-fmt:
+  jobs:
+    - name: crates-fmt
       run: cargo fmt --all --check
-    crates-lint:
-      run: cargo clippy --workspace -- -D warnings
-    crates-test:
-      run: cargo test --workspace
-    staged-ci:
+      skip:
+        - run: scripts/unchanged crates
+    - name: lint
+      group:
+        jobs:
+          - name: crates-lint
+            run: cargo clippy --workspace -- -D warnings
+            skip:
+              - run: scripts/unchanged crates
+    - name: test
+      group:
+        jobs:
+          - name: crates-test
+            run: cargo test --workspace
+            skip:
+              - run: scripts/unchanged crates
+    - name: staged-ci
       run: just app staged ci-local
-    differ-ci:
+      skip:
+        - run: scripts/unchanged staged
+    - name: differ-ci
       run: just app differ ci
+      skip:
+        - run: scripts/unchanged differ

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Succeeds when this branch changes nothing in an area, so the caller can skip
+# that area's checks the way CI's path filters do. Used by the pre-push hook
+# (lefthook.yml) and by the `ci-local` recipe in apps/staged/justfile.
+#
+# Usage: scripts/unchanged AREA      one of the path sets below
+#        scripts/unchanged NAME ERE  NAME labels the message; ERE is matched
+#                                    against repo-relative paths
+#
+# "Changes" are what the branch's PR shows: the working tree, including
+# uncommitted and untracked files, against the point where HEAD forked from
+# origin's default branch. Exits 0, with a note on stderr, when no changed path
+# matches. Exits non-zero when one does, when there is no merge-base, or on any
+# error, so a failure never skips a check.
+#
+# Like the checks it gates, this looks at what is checked out, not at the refs
+# being pushed: `git push origin other-branch` checks the current branch.
+set -euo pipefail
+
+usage() {
+    echo "usage: scripts/unchanged crates|staged|differ" >&2
+    echo "       scripts/unchanged NAME ERE" >&2
+    exit 2
+}
+
+case $# in
+    1)
+        name=$1
+        case $name in
+            crates)
+                # Keep in sync with on.paths in .github/workflows/crates-ci.yml.
+                paths=(
+                    'crates/'
+                    'Cargo\.toml$'
+                    'Cargo\.lock$'
+                    'rust-toolchain\.toml$'
+                    'bin/'
+                    '\.github/workflows/crates-ci\.yml$'
+                )
+                ;;
+            staged)
+                # Keep in sync with on.paths in .github/workflows/staged-ci.yml.
+                paths=(
+                    'apps/staged/'
+                    'packages/'
+                    'crates/'
+                    'pnpm-lock\.yaml$'
+                    'pnpm-workspace\.yaml$'
+                    'package\.json$'
+                    'rust-toolchain\.toml$'
+                    'bin/'
+                    '\.github/workflows/staged-ci\.yml$'
+                )
+                ;;
+            differ)
+                # Keep in sync with on.paths in .github/workflows/differ-ci.yml.
+                paths=(
+                    'apps/differ/'
+                    'packages/'
+                    'crates/'
+                    'pnpm-lock\.yaml$'
+                    'pnpm-workspace\.yaml$'
+                    'package\.json$'
+                    'rust-toolchain\.toml$'
+                    'bin/'
+                    '\.github/workflows/differ-ci\.yml$'
+                )
+                ;;
+            *) usage ;;
+        esac
+        pattern="^($(IFS='|' && echo "${paths[*]}"))"
+        ;;
+    2)
+        name=$1
+        pattern=$2
+        ;;
+    *) usage ;;
+esac
+
+# Each workflow lists its own file; locally, the hooks and this script play
+# that part, so editing them runs every check.
+pattern="^(lefthook\.yml|scripts/unchanged)$|$pattern"
+
+default_ref=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || echo origin/main)
+if ! base=$(git merge-base HEAD "$default_ref" 2> /dev/null); then
+    echo "$name: no merge-base with $default_ref; not skipping." >&2
+    exit 1
+fi
+
+# One git command per substitution: `set -e` stops on a failed assignment, but
+# not on a failure earlier in `$(...)`, and macOS's bash 3.2 has no
+# inherit_errexit. pipefail fails the assignment if git fails before tr.
+# Without -z, git quotes and escapes paths with non-ASCII characters, quotes,
+# backslashes or control characters, so the anchored pattern misses them. A
+# path containing a newline is still split in two, but the first part keeps the
+# leading directories the area path sets match. LC_ALL=C makes tr work byte by
+# byte, so BSD tr doesn't reject a path that isn't valid UTF-8.
+top=$(git rev-parse --show-toplevel)
+cd "$top"
+diffed=$(git diff --name-only -z --no-renames "$base" -- | LC_ALL=C tr '\0' '\n')
+untracked=$(git ls-files -z --others --exclude-standard | LC_ALL=C tr '\0' '\n')
+# grep exits 0 on a match and 2 on an error such as a bad ERE; skip only on 1.
+status=0
+grep -qE "$pattern" <<< "$diffed"$'\n'"$untracked" || status=$?
+if [ "$status" -ne 1 ]; then
+    exit 1
+fi
+echo "$name: no relevant changes since $(git rev-parse --short "$base") ($default_ref); skipping. Run \`just ci\` for everything." >&2

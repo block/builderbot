@@ -51,6 +51,32 @@ just lint         # lint repo
 just test         # run Rust workspace tests
 ```
 
+## Git Hooks
+
+`just setup` installs the hooks in `lefthook.yml`. Like CI's path filters, they
+skip the areas a change leaves alone, and print `(skip)` for them:
+
+- pre-commit formats each area (shared crates, Staged, Differ, Penpal) that has
+  staged files, then re-stages them.
+- pre-push runs the checks for shared crates, Staged and Differ, each only when
+  the branch changes a path that area's CI workflow watches. It compares the
+  working tree, including uncommitted and untracked files, with where the branch
+  forked from `origin/main` (see `scripts/unchanged`). Like the checks
+  themselves, it looks at the checked-out branch, not the refs being pushed.
+  Penpal's checks run in its CI only.
+
+On Blox workstations, lhm merges a global lefthook config into these hooks. Its
+pre-push used to run the full `just lint` (clippy and every app's lint, Penpal's
+included) and `just test` on every push. The repo's pre-push `lint` and `test`
+jobs now replace them, so pushing on Blox no longer lints Penpal. Penpal's CI
+covers it.
+
+The `fmt`, `lint` and `test` jobs are groups. A personal `lefthook-local.yml`
+override for a job inside one, such as `crates-lint`, must use
+`jobs: - name: crates-lint`, not `commands:`.
+
+`just check` runs everything.
+
 ## Repo Layout
 
 - `apps/staged`: main desktop app.

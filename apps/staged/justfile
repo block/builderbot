@@ -209,23 +209,11 @@ ci-local:
     # Keep in sync with the `rust` paths filter in .github/workflows/staged-ci.yml.
     rust_paths='^(apps/staged/src-tauri/|apps/staged/src/lib/shared/prompts/|apps/staged/node-runtime\.lock\.json$|apps/staged/justfile$|crates/|Cargo\.[^/]*$|rust-toolchain\.toml$|bin/|\.github/workflows/staged-ci\.yml$)'
 
-    # Compare the working tree, including uncommitted and untracked files,
-    # with the point where this branch forked from origin's default branch,
-    # which is the diff its PR shows. Without a merge-base, run everything.
+    # Skip Rust when this branch, as its PR shows it, changes none of those
+    # paths. The script explains a skip, and skips nothing without a merge-base.
     run_rust=true
-    default_ref=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || echo origin/main)
-    if base=$(git merge-base HEAD "$default_ref" 2>/dev/null); then
-        top=$(git rev-parse --show-toplevel)
-        changed=$(
-            git -C "$top" diff --name-only --no-renames "$base" --
-            git -C "$top" ls-files --others --exclude-standard
-        )
-        if ! grep -qE "$rust_paths" <<< "$changed"; then
-            run_rust=false
-            echo "ci-local: no Rust-affecting changes since $(git rev-parse --short "$base") ($default_ref); skipping the Rust checks. Run \`just ci\` for everything."
-        fi
-    else
-        echo "ci-local: no merge-base with $default_ref; running every check."
+    if "{{ justfile_directory() }}/../../scripts/unchanged" "Rust checks" "$rust_paths"; then
+        run_rust=false
     fi
 
     # Prefix each group's output so the concurrent logs stay readable.

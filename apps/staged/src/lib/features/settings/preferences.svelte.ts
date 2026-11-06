@@ -326,14 +326,14 @@ const newProjectLocationSync = syncedStoreValue(NEW_PROJECT_LOCATION_STORE_KEY, 
   preferences.newProjectLocation = value === 'remote' ? 'remote' : 'local';
 });
 
-const transferUncommittedChangesSync = syncedPreference(
+const transferUncommittedChangesSync = syncedStoreValue(
   TRANSFER_UNCOMMITTED_CHANGES_STORE_KEY,
   (value) => {
     preferences.transferUncommittedChanges = typeof value === 'boolean' ? value : true;
   }
 );
 
-const transferIgnoredFilesSync = syncedPreference(TRANSFER_IGNORED_FILES_STORE_KEY, (value) => {
+const transferIgnoredFilesSync = syncedStoreValue(TRANSFER_IGNORED_FILES_STORE_KEY, (value) => {
   preferences.transferIgnoredFiles = value === true;
 });
 

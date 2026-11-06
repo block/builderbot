@@ -2,18 +2,34 @@ import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Branch, BranchTimeline, WorkspaceStatus } from '../../types';
 import type { DragDropSubscription } from './dragDrop';
+import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 
-const { subscribeDragDrop, toast, cmd } = vi.hoisted(() => ({
-  subscribeDragDrop: vi.fn((_sub: DragDropSubscription) => () => {}),
-  toast: { success: vi.fn(), error: vi.fn() },
-  cmd: {
-    readTextFile: vi.fn(async (_filePath: string) => '# Dropped\n\nbody'),
-    createNote: vi.fn(async (_branchId: string, _title: string, _content: string) => ({})),
-    createImage: vi.fn(async (_branchId: string | null, _projectId: string, _filePath: string) => ({
-      id: 'image-1',
-    })),
-  },
-}));
+const { subscribeDragDrop, unsubscribeDragDrop, toast, cmd } = vi.hoisted(() => {
+  const unsubscribeDragDrop = vi.fn();
+  return {
+    unsubscribeDragDrop,
+    subscribeDragDrop: vi.fn((_sub: DragDropSubscription) => unsubscribeDragDrop),
+    toast: { success: vi.fn(), error: vi.fn() },
+    cmd: {
+      readTextFile: vi.fn(async (_filePath: string) => '# Dropped\n\nbody'),
+      createNote: vi.fn(async (_branchId: string, _title: string, _content: string) => ({})),
+      createImage: vi.fn(
+        async (_branchId: string | null, _projectId: string, _filePath: string) => ({
+          id: 'image-1',
+        })
+      ),
+      createImageFromData: vi.fn(
+        async (
+          _branchId: string | null,
+          _projectId: string,
+          _filename: string,
+          _mimeType: string,
+          _data: string
+        ) => ({ id: 'image-2' })
+      ),
+    },
+  };
+});
 
 const emptyTimeline: BranchTimeline = {
   commits: [],
@@ -37,11 +53,12 @@ vi.mock('../../commands', async (importOriginal) => ({
   ...cmd,
 }));
 
-// The card's children are stubbed out: these tests exercise only the card
-// root's drag-drop subscription.
+// The card's children are stubbed out: these tests exercise the card root's
+// drag-drop subscription and the "Add image" picker. The timeline stub shows
+// only the "adding..." rows; the picker stub picks one PNG per button.
 vi.mock(
   '../timeline/BranchTimeline.svelte',
-  () => import('../sessions/testStubs/EmptyStub.svelte')
+  () => import('../sessions/testStubs/BranchTimelineStub.svelte')
 );
 vi.mock(
   '../timeline/ImageViewerModal.svelte',
@@ -61,19 +78,23 @@ vi.mock(
 vi.mock('./BranchCardHeaderInfo.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock('./BranchCardActionsBar.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock('./BranchCardPrButton.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
-vi.mock('./BranchImagePicker.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
+vi.mock(
+  './BranchImagePicker.svelte',
+  () => import('../sessions/testStubs/BranchImagePickerStub.svelte')
+);
 
 import BranchCard from './BranchCard.svelte';
 
 const mounted: ReturnType<typeof mount>[] = [];
 
+/** Mounts a card; set `props.deleting` afterwards to flip its delete state. */
 function mountCard(branch: Branch) {
   const target = document.createElement('div');
   document.body.appendChild(target);
-  const card = mount(BranchCard, { target, props: { branch } });
-  mounted.push(card);
+  const props = reactiveProps({ branch, deleting: false });
+  mounted.push(mount(BranchCard, { target, props }));
   flushSync();
-  return target;
+  return { card: target.querySelector<HTMLElement>('.branch-card')!, props };
 }
 
 function remoteBranch(workspaceStatus: WorkspaceStatus): Branch {
@@ -116,45 +137,83 @@ function localBranch(worktreePath: string | null): Branch {
   };
 }
 
-/**
- * Drops `paths` on the card's subscription and lets the stores, and the
- * reloads that follow them, run out. Every command they reach is mocked to
- * settle on a microtask, so all of it is done by the next macrotask.
- */
-async function drop(paths: string[]) {
-  const [sub] = subscribeDragDrop.mock.calls[0];
-  sub.onDrop(paths);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+/** The card's one drag-drop subscription. */
+function subscription() {
+  expect(subscribeDragDrop).toHaveBeenCalledTimes(1);
+  return subscribeDragDrop.mock.calls[0][0];
+}
+
+/** Drops `paths` on the card through its subscription. */
+function drop(paths: string[]) {
+  subscription().onDrop(paths);
   flushSync();
+}
+
+/** Picks one PNG through "Add image": a path on desktop, a `File` on the web. */
+function pick(via: 'paths' | 'files') {
+  document.querySelector<HTMLButtonElement>(`[data-testid="pick-image-${via}"]`)!.click();
+  flushSync();
+}
+
+/** Titles of the "adding..." rows on the card's timeline (none without one). */
+function pendingRows() {
+  flushSync();
+  return [...document.querySelectorAll<HTMLElement>('[data-testid="pending-add"]')].map(
+    (row) => row.dataset.title
+  );
+}
+
+/** Waits for a card with a timeline key to load its timeline and show it. */
+async function timelineShown() {
+  await vi.waitFor(() => {
+    flushSync();
+    expect(document.querySelector('[data-testid="branch-timeline"]')).not.toBeNull();
+  });
+}
+
+/**
+ * Waits until a drop or pick has fully finished, so the test can then assert
+ * what it did not do: no toast, or no second one. `finished` asserts the
+ * test's positive signal, such as its stores having resolved, and every
+ * "adding..." row the card shows must have cleared too, which happens only
+ * once the stores and the reload after them are over. The first check runs
+ * straight away, before any store can have resolved; the rest run from a
+ * timer, so by the time one passes, the microtasks queued behind the signal
+ * (counting what was stored, the toast) have run as well.
+ */
+async function settle(finished: () => void) {
+  await vi.waitFor(() => {
+    finished();
+    expect(pendingRows()).toEqual([]);
+  });
 }
 
 afterEach(() => {
   for (const card of mounted.splice(0)) unmount(card);
   document.body.innerHTML = '';
   subscribeDragDrop.mockClear();
+  unsubscribeDragDrop.mockClear();
   toast.success.mockClear();
   toast.error.mockClear();
-  for (const fn of Object.values(cmd)) fn.mockClear();
-  cmd.readTextFile.mockImplementation(async () => '# Dropped\n\nbody');
+  // Back to the implementations given to vi.fn above.
+  for (const fn of Object.values(cmd)) fn.mockReset();
 });
 
 describe('BranchCard file drops', () => {
   it.each<WorkspaceStatus>(['running', 'starting', 'stopped', 'suspended', 'error'])(
     'subscribes a remote card whose workspace is %s, with its root as the drop target',
     (status) => {
-      const target = mountCard(remoteBranch(status));
+      const { card } = mountCard(remoteBranch(status));
 
-      expect(subscribeDragDrop).toHaveBeenCalledTimes(1);
-      const [sub] = subscribeDragDrop.mock.calls[0];
-      expect(sub.element).toBe(target.querySelector('.branch-card'));
+      const sub = subscription();
+      expect(sub.element).toBe(card);
       expect(sub.blocking).toBeFalsy();
     }
   );
 
   it('highlights a remote card while files are dragged over it', () => {
-    const target = mountCard(remoteBranch('stopped'));
-    const [sub] = subscribeDragDrop.mock.calls[0];
-    const card = target.querySelector('.branch-card')!;
+    const { card } = mountCard(remoteBranch('stopped'));
+    const sub = subscription();
 
     sub.onDragOver(true);
     flushSync();
@@ -168,7 +227,11 @@ describe('BranchCard file drops', () => {
   it('stores the files dropped on a stopped remote card against the branch', async () => {
     mountCard(remoteBranch('stopped'));
 
-    await drop(['/tmp/a.md', '/tmp/b.png']);
+    drop(['/tmp/a.md', '/tmp/b.png']);
+    await settle(() => {
+      expect(cmd.createNote).toHaveResolvedTimes(1);
+      expect(cmd.createImage).toHaveResolvedTimes(1);
+    });
 
     expect(cmd.readTextFile).toHaveBeenCalledWith('/tmp/a.md');
     expect(cmd.createNote).toHaveBeenCalledWith('branch-1', 'Dropped', 'body');
@@ -176,13 +239,61 @@ describe('BranchCard file drops', () => {
   });
 });
 
+describe('BranchCard while it is being deleted', () => {
+  it('takes neither the highlight nor the files dropped on it', async () => {
+    const { card, props } = mountCard(remoteBranch('stopped'));
+    const sub = subscription();
+
+    props.deleting = true;
+    flushSync();
+    sub.onDragOver(true);
+    flushSync();
+    expect(card.classList.contains('drag-over')).toBe(false);
+    drop(['/tmp/during-delete.md', '/tmp/during-delete.png']);
+
+    // The delete failed and the card is back. A drop now is stored, and once
+    // it has settled, anything the drop above set off would have shown too.
+    props.deleting = false;
+    flushSync();
+    drop(['/tmp/after.md']);
+    await settle(() => expect(cmd.createNote).toHaveResolved());
+
+    expect(cmd.readTextFile).toHaveBeenCalledTimes(1);
+    expect(cmd.readTextFile).toHaveBeenCalledWith('/tmp/after.md');
+    expect(cmd.createImage).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', expect.anything());
+  });
+
+  it('keeps its one subscription as the delete starts and fails', () => {
+    const { card, props } = mountCard(remoteBranch('stopped'));
+    const sub = subscription();
+
+    props.deleting = true;
+    flushSync();
+    props.deleting = false;
+    flushSync();
+
+    expect(subscribeDragDrop).toHaveBeenCalledTimes(1);
+    expect(unsubscribeDragDrop).not.toHaveBeenCalled();
+    sub.onDragOver(true);
+    flushSync();
+    expect(card.classList.contains('drag-over')).toBe(true);
+  });
+});
+
 describe('BranchCard drops the timeline cannot show yet', () => {
   it.each<WorkspaceStatus>(['starting', 'stopped', 'suspended', 'error'])(
-    'confirms the stored files on a remote card whose workspace is %s',
+    'confirms the stored files once on a remote card whose workspace is %s',
     async (status) => {
       mountCard(remoteBranch(status));
 
-      await drop(['/tmp/a.md', '/tmp/b.png']);
+      drop(['/tmp/a.md', '/tmp/b.png']);
+      await settle(() => {
+        expect(cmd.createNote).toHaveResolvedTimes(1);
+        expect(cmd.createImage).toHaveResolvedTimes(1);
+      });
 
       expect(toast.success).toHaveBeenCalledTimes(1);
       expect(toast.success).toHaveBeenCalledWith('Added 2 files', {
@@ -194,8 +305,10 @@ describe('BranchCard drops the timeline cannot show yet', () => {
   it('confirms the stored files on a local card with no worktree', async () => {
     mountCard(localBranch(null));
 
-    await drop(['/tmp/b.png']);
+    drop(['/tmp/b.png']);
+    await settle(() => expect(cmd.createImage).toHaveResolvedTimes(1));
 
+    expect(toast.success).toHaveBeenCalledTimes(1);
     expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
       description: 'It will appear on the timeline once the worktree is ready.',
     });
@@ -208,21 +321,35 @@ describe('BranchCard drops the timeline cannot show yet', () => {
     });
     mountCard(remoteBranch('stopped'));
 
-    await drop(['/tmp/a.md', '/tmp/bad.md', '/tmp/b.png']);
+    drop(['/tmp/a.md', '/tmp/bad.md', '/tmp/b.png']);
+    await settle(() => {
+      expect(cmd.createNote).toHaveResolvedTimes(1);
+      expect(cmd.createImage).toHaveResolvedTimes(1);
+      expect(toast.error).toHaveBeenCalledTimes(1);
+    });
 
     expect(toast.error).toHaveBeenCalledWith('Error', {
-      description: 'Could not read "bad" \u2014 unreadable',
+      description: 'Could not read "bad" — unreadable',
     });
+    expect(toast.success).toHaveBeenCalledTimes(1);
     expect(toast.success).toHaveBeenCalledWith('Added 2 files', expect.anything());
   });
 
-  it('confirms nothing when no file was stored', async () => {
+  it.each([
+    ['a stopped remote card', () => remoteBranch('stopped')],
+    ['a local card with no worktree', () => localBranch(null)],
+  ])('confirms nothing on %s when no file was stored', async (_label, branch) => {
     cmd.readTextFile.mockRejectedValue(new Error('unreadable'));
-    mountCard(remoteBranch('stopped'));
+    cmd.createImage.mockRejectedValue(new Error('too large'));
+    mountCard(branch());
 
-    await drop(['/tmp/bad.md']);
+    drop(['/tmp/bad.md', '/tmp/bad.png']);
+    // One error toast for the unreadable file, one for the rejected image.
+    await settle(() => {
+      expect(cmd.createImage).toHaveBeenCalledTimes(1);
+      expect(toast.error).toHaveBeenCalledTimes(2);
+    });
 
-    expect(toast.error).toHaveBeenCalledTimes(1);
     expect(toast.success).not.toHaveBeenCalled();
   });
 
@@ -231,11 +358,90 @@ describe('BranchCard drops the timeline cannot show yet', () => {
     ['a local card with a worktree', () => localBranch('/tmp/worktree')],
   ])('leaves %s to its "adding..." rows', async (_label, branch) => {
     mountCard(branch());
+    await timelineShown();
 
-    await drop(['/tmp/a.md', '/tmp/b.png']);
+    drop(['/tmp/a.md', '/tmp/b.png']);
+    expect(pendingRows()).toEqual(['a', 'b.png']);
+    await settle(() => {
+      expect(cmd.createNote).toHaveResolvedTimes(1);
+      expect(cmd.createImage).toHaveResolvedTimes(1);
+    });
 
-    expect(cmd.createNote).toHaveBeenCalledTimes(1);
-    expect(cmd.createImage).toHaveBeenCalledTimes(1);
     expect(toast.success).not.toHaveBeenCalled();
   });
+});
+
+describe('BranchCard "Add image" picks the timeline cannot show yet', () => {
+  it.each([
+    [
+      'a remote card whose workspace is starting',
+      () => remoteBranch('starting'),
+      'the workspace is running',
+    ],
+    ['a local card with no worktree', () => localBranch(null), 'the worktree is ready'],
+  ])('confirms an image picked on %s', async (_label, branch, until) => {
+    mountCard(branch());
+
+    pick('paths');
+    expect(pendingRows()).toEqual(['picked.png']);
+    await settle(() => expect(cmd.createImage).toHaveResolvedTimes(1));
+
+    expect(cmd.createImage).toHaveBeenCalledWith('branch-1', 'project-1', '/tmp/picked.png');
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
+      description: `It will appear on the timeline once ${until}.`,
+    });
+  });
+
+  it('confirms an image picked through the web file input', async () => {
+    mountCard(localBranch(null));
+
+    pick('files');
+    await settle(() => expect(cmd.createImageFromData).toHaveResolvedTimes(1));
+
+    expect(cmd.createImageFromData).toHaveBeenCalledWith(
+      'branch-1',
+      'project-1',
+      'picked.png',
+      'image/png',
+      btoa('png')
+    );
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
+      description: 'It will appear on the timeline once the worktree is ready.',
+    });
+  });
+
+  it('confirms nothing when the picked image is rejected', async () => {
+    cmd.createImage.mockRejectedValue(new Error('too large'));
+    mountCard(localBranch(null));
+
+    pick('paths');
+    await settle(() => {
+      expect(cmd.createImage).toHaveBeenCalledTimes(1);
+      expect(toast.error).toHaveBeenCalledTimes(1);
+    });
+
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['paths', 'a remote card whose workspace is running', () => remoteBranch('running')],
+    ['files', 'a remote card whose workspace is running', () => remoteBranch('running')],
+    ['paths', 'a local card with a worktree', () => localBranch('/tmp/worktree')],
+    ['files', 'a local card with a worktree', () => localBranch('/tmp/worktree')],
+  ] as const)(
+    'leaves an image picked by %s on %s to its "adding..." row',
+    async (via, _label, branch) => {
+      mountCard(branch());
+      await timelineShown();
+
+      pick(via);
+      expect(pendingRows()).toEqual(['picked.png']);
+      const store = via === 'paths' ? cmd.createImage : cmd.createImageFromData;
+      await settle(() => expect(store).toHaveResolvedTimes(1));
+
+      expect(toast.success).not.toHaveBeenCalled();
+    }
+  );
 });

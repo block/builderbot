@@ -1824,14 +1824,15 @@
   }
 
   /**
-   * Confirms a drop that the timeline cannot show yet. Without a timeline key
-   * (a remote workspace that is not running, a local branch with no worktree)
-   * the card shows a status view, or an empty setup timeline whose "adding..."
-   * rows clear without the item appearing. The note or image is still stored
-   * and shows once the timeline loads, so say so rather than leave the drop
-   * looking like a no-op that invites a duplicate. Checked once the stores
-   * finish, not at drop time: what matters is whether the reload after them
-   * can show the items.
+   * Confirms a drop or an "Add image" pick that the timeline cannot show yet.
+   * Without a timeline key (a remote workspace that is not running, a local
+   * branch with no worktree) the card shows a status view, or an empty setup
+   * timeline whose "adding..." rows clear without the item appearing. The note
+   * or image is still stored and shows once the timeline loads, so say so
+   * rather than leave the drop looking like a no-op that invites a duplicate.
+   * Checked once the stores finish, not at drop time: what matters is whether
+   * the reload after them can show the items. Called once per drop or pick
+   * with everything it stored, so a drop of notes and images gets one toast.
    */
   function notifyAddedOffTimeline(count: number) {
     if (count === 0 || branchTimelineReadyKey(branch)) return;
@@ -1921,7 +1922,7 @@
 
   /** Web: files picked through the file input (on iOS, Photo Library or Files). */
   function addImageFiles(files: File[]) {
-    void addTimelineImages(
+    return addTimelineImages(
       files.map((file) => ({
         name: file.name,
         store: async () =>
@@ -1936,9 +1937,20 @@
     );
   }
 
+  /** "Add image": stores the picked images and confirms them like a drop. */
+  async function addPickedImages(stored: Promise<number>) {
+    notifyAddedOffTimeline(await stored);
+  }
+
   // Remote cards take drops too, whatever their workspace's status: the file is
   // read on this machine and the note or image lands in the local store, never
   // on the workspace.
+  //
+  // A card being deleted takes neither the highlight nor the drop. The store
+  // would race the delete, and its toast would promise the file to a card about
+  // to vanish, or, if the delete won, blame the file ("Could not read …").
+  // `deleting` is read as each event arrives, not by the effect, so the
+  // subscription stays put while it flips; a failed delete restores the card.
   $effect(() => {
     const el = cardElement;
     if (!el) return;
@@ -1947,9 +1959,10 @@
       subscribeDragDrop({
         element: el,
         onDragOver: (over) => {
-          dragOver = over;
+          dragOver = over && !deleting;
         },
         onDrop: (paths) => {
+          if (deleting) return;
           void handleFileDrop(paths);
         },
       })
@@ -2289,8 +2302,8 @@
      build's file input has to outlive the tap that opened it. -->
 <BranchImagePicker
   bind:this={imagePicker}
-  onPickPaths={addImagePaths}
-  onPickFiles={addImageFiles}
+  onPickPaths={(paths) => void addPickedImages(addImagePaths(paths))}
+  onPickFiles={(files) => void addPickedImages(addImageFiles(files))}
   onError={(e) => notifyError('Could not open the image picker', e)}
 />
 

@@ -12,7 +12,7 @@ fn queue_health(stranded: Vec<sweep::StrandedRow>, swept_total: usize) -> QueueH
 
 #[test]
 fn session_queue_check_passes_when_nothing_is_stranded() {
-    let check = build_session_queue_check(&queue_health(Vec::new(), 0));
+    let check = build_session_queue_check(&queue_health(Vec::new(), 0), None);
 
     assert_eq!(check.id, SESSION_QUEUE_CHECK_ID);
     assert_eq!(check.status, CheckStatus::Pass);
@@ -28,7 +28,7 @@ fn session_queue_check_passes_when_nothing_is_stranded() {
 /// stays `Pass` — but the count is what makes a recurrence visible.
 #[test]
 fn session_queue_check_reports_past_sweeps_without_warning() {
-    let check = build_session_queue_check(&queue_health(Vec::new(), 2));
+    let check = build_session_queue_check(&queue_health(Vec::new(), 2), None);
 
     assert_eq!(check.status, CheckStatus::Pass);
     assert_eq!(
@@ -43,7 +43,7 @@ fn session_queue_check_warns_while_a_row_is_stranded() {
         session_id: "s-1".to_string(),
         branch_id: Some("b-1".to_string()),
     };
-    let check = build_session_queue_check(&queue_health(vec![row], 0));
+    let check = build_session_queue_check(&queue_health(vec![row], 0), None);
 
     assert_eq!(check.status, CheckStatus::Warn);
     assert_eq!(

@@ -868,7 +868,7 @@ fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
 /// when one exists, so web writes can't be clobbered by a stale in-memory
 /// copy; the backend paths that read the file directly (e.g. `branch-prefix`
 /// in `branches.rs`) see web writes because every mutation is saved to disk.
-fn preferences_store(
+pub(crate) fn preferences_store(
     app_handle: &tauri::AppHandle,
 ) -> Result<Arc<tauri_plugin_store::Store<tauri::Wry>>, String> {
     use tauri_plugin_store::StoreExt;
@@ -928,6 +928,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // confirmation this gates on is a native alert on the host anyway, with
         // no browser client to answer it.
         "quit_app" => Err(format!("{command} is not available in web mode")),
+
+        // =====================================================================
+        // Launch resume (desktop only)
+        // =====================================================================
+        // The interrupted set is computed once per process and offered to the
+        // desktop main window; a browser client must not take it or trigger a
+        // second resume of the same rows.
+        "get_interrupted_sessions" | "resume_interrupted_sessions" => {
+            Err(format!("{command} is not available in web mode"))
+        }
 
         // =====================================================================
         // Projects

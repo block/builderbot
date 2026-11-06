@@ -5796,3 +5796,347 @@ fn a_runs_prompt_is_the_user_row_its_connection_followed() {
     message(MessageRole::ToolCall, "git push");
     assert!(answered(second));
 }
+
+// =============================================================================
+// Launch resume: re-queue CAS and app_quit candidates
+// =============================================================================
+
+fn app_quit_branch_session(store: &Store, branch_id: &str, created_at: i64) -> Session {
+    let mut session = Session::new_running("work", Path::new("/tmp")).with_branch(branch_id);
+    session.created_at = created_at;
+    session.updated_at = created_at;
+    store.create_session(&session).unwrap();
+    store
+        .transition_from_running(
+            &session.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+    session
+}
+
+#[test]
+fn transition_app_quit_to_queued_requeues_and_keeps_created_at() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = app_quit_branch_session(&store, &branch.id, 1_000);
+    let before = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(before.status, SessionStatus::Cancelled);
+    assert_eq!(before.completion_reason, Some(CompletionReason::AppQuit));
+
+    assert!(store.transition_app_quit_to_queued(&session.id).unwrap());
+
+    let after = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(after.status, SessionStatus::Queued);
+    assert_eq!(after.completion_reason, None);
+    assert_eq!(after.error_message, None);
+    assert_eq!(after.owner_pid, None);
+    assert_eq!(
+        after.created_at, 1_000,
+        "the drain's ordering key is untouched"
+    );
+    assert!(after.updated_at >= before.updated_at);
+
+    // Already queued: the CAS is a no-op the second time.
+    assert!(!store.transition_app_quit_to_queued(&session.id).unwrap());
+}
+
+#[test]
+fn transition_app_quit_to_queued_takes_crash_recovered_error_rows() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&session).unwrap();
+    store
+        .transition_from_running(
+            &session.id,
+            SessionStatus::Error,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+
+    assert!(store.transition_app_quit_to_queued(&session.id).unwrap());
+    assert_eq!(
+        store.get_session(&session.id).unwrap().unwrap().status,
+        SessionStatus::Queued
+    );
+}
+
+#[test]
+fn transition_app_quit_to_queued_refuses_other_rows() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Cancelled for another reason.
+    let interrupted = Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&interrupted).unwrap();
+    store
+        .transition_from_running(
+            &interrupted.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::Interrupted),
+        )
+        .unwrap();
+    assert!(!store
+        .transition_app_quit_to_queued(&interrupted.id)
+        .unwrap());
+
+    // Completed with app_quit would be contradictory, but a completed row is
+    // never taken regardless of its reason.
+    let completed = Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&completed).unwrap();
+    store
+        .transition_from_running(
+            &completed.id,
+            SessionStatus::Completed,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+    assert!(!store.transition_app_quit_to_queued(&completed.id).unwrap());
+
+    // A project session (no branch) is never queued.
+    let project_session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&project_session).unwrap();
+    store
+        .transition_from_running(
+            &project_session.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+    assert!(!store
+        .transition_app_quit_to_queued(&project_session.id)
+        .unwrap());
+    assert_eq!(
+        store
+            .get_session(&project_session.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        SessionStatus::Cancelled
+    );
+
+    // Still running: not terminal, not taken.
+    let running = Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&running).unwrap();
+    assert!(!store.transition_app_quit_to_queued(&running.id).unwrap());
+}
+
+#[test]
+fn get_app_quit_sessions_since_filters_by_marker_and_orders_by_created_at() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Created out of order on purpose; the query sorts by created_at.
+    let second = app_quit_branch_session(&store, &branch.id, 2_000);
+    let first = app_quit_branch_session(&store, &branch.id, 1_000);
+    let third = app_quit_branch_session(&store, &branch.id, 3_000);
+
+    // A row ended for another reason is not a candidate.
+    let interrupted = Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&interrupted).unwrap();
+    store
+        .transition_from_running(
+            &interrupted.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::Interrupted),
+        )
+        .unwrap();
+
+    // A project session with app_quit is a candidate too (the caller
+    // partitions repo from project rows).
+    let project_session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&project_session).unwrap();
+    store
+        .transition_from_running(
+            &project_session.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+
+    let ids: Vec<String> = store
+        .get_app_quit_sessions_since(0)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(
+        ids[..3],
+        [first.id.clone(), second.id.clone(), third.id.clone()]
+    );
+    assert!(ids.contains(&project_session.id));
+    assert!(!ids.contains(&interrupted.id));
+
+    // The marker excludes everything at or before it. Every transition above
+    // restamped updated_at to "now", so a marker of now hides them all.
+    let newest = store
+        .get_app_quit_sessions_since(0)
+        .unwrap()
+        .iter()
+        .map(|s| s.updated_at)
+        .max()
+        .unwrap();
+    assert!(store
+        .get_app_quit_sessions_since(newest)
+        .unwrap()
+        .is_empty());
+
+    // Re-queued rows drop out: they are no longer terminal.
+    assert!(store.transition_app_quit_to_queued(&first.id).unwrap());
+    let ids: Vec<String> = store
+        .get_app_quit_sessions_since(0)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(!ids.contains(&first.id));
+}
+
+/// The launch-resume detection query hands back an interrupted row whole.
+/// It once listed its own 16 columns while `row_to_session` read a 17th
+/// (`parent_session_id`, added on main), so every matching row failed the
+/// query with `InvalidColumnIndex` and launch detection only logged a
+/// warning — the dialog never appeared.
+#[test]
+fn get_app_quit_sessions_since_returns_the_interrupted_session() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // The parent is still running, so it is not a candidate itself.
+    let parent = Session::new_running("project session", Path::new("/tmp"));
+    store.create_session(&parent).unwrap();
+    let mut child = Session::new_running("repo work", Path::new("/tmp"))
+        .with_branch(&branch.id)
+        .with_parent_session(&parent.id);
+    child.agent_id = Some("acp-session-1".to_string());
+    store.create_session(&child).unwrap();
+    store
+        .transition_from_running(
+            &child.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+
+    let found = store.get_app_quit_sessions_since(0).unwrap();
+    assert_eq!(found.len(), 1, "exactly the interrupted child: {found:?}");
+    let found = &found[0];
+    assert_eq!(found.id, child.id);
+    assert_eq!(found.status, SessionStatus::Cancelled);
+    assert_eq!(found.completion_reason, Some(CompletionReason::AppQuit));
+    assert_eq!(found.branch_id.as_deref(), Some(branch.id.as_str()));
+    assert_eq!(found.agent_id.as_deref(), Some("acp-session-1"));
+    assert_eq!(found.parent_session_id.as_deref(), Some(parent.id.as_str()));
+}
+
+/// Every query that maps rows through `row_to_session` reads a row exactly
+/// as `get_session` does, `parent_session_id` included. They all select
+/// `SESSION_COLUMNS`; this catches one that goes back to listing its own.
+#[test]
+fn session_list_queries_read_rows_like_get_session() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = Session::new_running("project session", Path::new("/tmp"));
+    store.create_session(&parent).unwrap();
+    let child = |session: Session| {
+        let session = session
+            .with_branch(&branch.id)
+            .with_parent_session(&parent.id);
+        store.create_session(&session).unwrap();
+        session.id
+    };
+    let queued = child(Session::new_queued("queued work"));
+    let running = child(Session::new_running("running work", Path::new("/tmp")));
+    let quit = child(Session::new_running("interrupted work", Path::new("/tmp")));
+    store
+        .transition_from_running(
+            &quit,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap();
+
+    for id in [&queued, &running, &quit] {
+        let session = store.get_session(id).unwrap().unwrap();
+        assert_eq!(
+            session.parent_session_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+    }
+
+    let as_json = |session: &Session| serde_json::to_value(session).unwrap();
+    let check = |query: &str, rows: Vec<Session>, expected: &[&String]| {
+        let mut ids: Vec<&str> = rows.iter().map(|s| s.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut expected: Vec<&str> = expected.iter().map(|id| id.as_str()).collect();
+        expected.sort_unstable();
+        assert_eq!(ids, expected, "{query} returned the wrong rows");
+        for row in &rows {
+            let canonical = store.get_session(&row.id).unwrap().unwrap();
+            assert_eq!(
+                as_json(row),
+                as_json(&canonical),
+                "{query} read {} differently from get_session",
+                row.id
+            );
+        }
+    };
+
+    check(
+        "get_app_quit_sessions_since",
+        store.get_app_quit_sessions_since(0).unwrap(),
+        &[&quit],
+    );
+    check(
+        "get_running_sessions",
+        store.get_running_sessions().unwrap(),
+        &[&parent.id, &running],
+    );
+    check(
+        "get_active_sessions",
+        store.get_active_sessions().unwrap(),
+        &[&parent.id, &queued, &running],
+    );
+    check(
+        "get_queued_sessions_for_branch",
+        store.get_queued_sessions_for_branch(&branch.id).unwrap(),
+        &[&queued],
+    );
+    check(
+        "get_running_sessions_for_branch",
+        store.get_running_sessions_for_branch(&branch.id).unwrap(),
+        &[&running],
+    );
+}

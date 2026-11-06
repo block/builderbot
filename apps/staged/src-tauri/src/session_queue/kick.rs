@@ -44,6 +44,8 @@ pub(crate) enum KickSource {
     DeadOwnerRecovered,
     /// The stranded-session sweep ended a row on the branch.
     Sweep,
+    /// Launch resume put rows the last quit ended back on the branch queue.
+    LaunchResume,
 }
 
 impl KickSource {
@@ -63,6 +65,7 @@ impl KickSource {
             Self::Startup => "startup",
             Self::DeadOwnerRecovered => "dead owner recovered",
             Self::Sweep => "sweep",
+            Self::LaunchResume => "launch resume",
         }
     }
 }

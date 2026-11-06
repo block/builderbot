@@ -20,6 +20,7 @@ pub mod doctor;
 pub mod git;
 pub mod github_commands;
 pub mod image_commands;
+pub mod launch_resume;
 pub mod managed_acp_tools;
 pub mod managed_node;
 mod mcp_progress;
@@ -2019,6 +2020,7 @@ pub fn run() {
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
             app.manage(app_lifecycle::QuitState::default());
+            app.manage(launch_resume::LaunchResumeState::default());
             app.manage(DbState {
                 db_path,
                 needs_reset: Mutex::new(reset_info),
@@ -2045,6 +2047,10 @@ pub fn run() {
                     &store,
                     session_queue::KickSource::Startup,
                 );
+                // Then the sessions the last quit ended, offered to the main
+                // window when it asks (see `launch_resume`). After the
+                // dead-owner recovery, so crash-orphaned rows are in the set.
+                launch_resume::detect_at_launch(app.handle(), &store);
             }
             if let Some(path) = preferences_store_path_buf() {
                 preference_events::forward_to_web(app.handle(), path, event_tx.clone());
@@ -2148,6 +2154,11 @@ pub fn run() {
             // Lifecycle — desktop only; the web-mode `dispatch` table refuses
             // this so a browser client can't quit the host.
             app_lifecycle::quit_app,
+            // Launch resume — desktop only, main window only; refused in
+            // web-mode `dispatch` so a browser client never triggers a
+            // second resume of the same set.
+            launch_resume::get_interrupted_sessions,
+            launch_resume::resume_interrupted_sessions,
             list_projects,
             create_project,
             list_project_repos,

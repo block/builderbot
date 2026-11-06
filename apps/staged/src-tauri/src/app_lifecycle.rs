@@ -482,7 +482,7 @@ fn collect_quit_blockers(app: &AppHandle) -> QuitBlockers {
 // =============================================================================
 
 /// How each session type reads in the alert.
-fn session_type_label(session_type: &str) -> Option<&'static str> {
+pub(crate) fn session_type_label(session_type: &str) -> Option<&'static str> {
     match session_type {
         "note" => Some("note"),
         "commit" => Some("commit"),
@@ -496,7 +496,7 @@ fn session_type_label(session_type: &str) -> Option<&'static str> {
 
 /// Where a session is running, as the user knows it: its branch name, or its
 /// project name for project-level sessions (a note on a project has no branch).
-fn session_location(store: &Store, session: &ActiveSessionInfo) -> Option<String> {
+pub(crate) fn session_location(store: &Store, session: &ActiveSessionInfo) -> Option<String> {
     let branch_name = session
         .branch_id
         .as_deref()
@@ -518,7 +518,7 @@ fn session_location(store: &Store, session: &ActiveSessionInfo) -> Option<String
 /// Both halves can be missing — an unrecognised session type, or a row whose
 /// branch and project have already been deleted — so each falls back rather than
 /// dropping the session from the list.
-fn quit_session_label(session: &ActiveSessionInfo, location: Option<&str>) -> String {
+pub(crate) fn quit_session_label(session: &ActiveSessionInfo, location: Option<&str>) -> String {
     let kind = session
         .session_type
         .as_deref()

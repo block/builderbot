@@ -8,6 +8,13 @@ use super::models::{
 };
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
+/// The `sessions` columns [`Store::row_to_session`] reads, in its order.
+/// Every query that maps rows through it selects this list, so a new column
+/// is added here once rather than in each query.
+const SESSION_COLUMNS: &str = "id, prompt, status, working_dir, provider, agent_id,
+    error_message, completion_reason, created_at, updated_at, owner_pid, pipeline,
+    acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id";
+
 /// An in-flight session spawned by another session: the branch it works on
 /// and the title the branch timeline would give it. `status` is `"queued"` or
 /// `"running"`.
@@ -77,8 +84,7 @@ impl Store {
         id: &str,
     ) -> Result<Option<Session>, StoreError> {
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
-             FROM sessions WHERE id = ?1",
+            &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
             params![id],
             Self::row_to_session,
         )
@@ -317,6 +323,59 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Put a branch session the last app quit ended back on its branch queue.
+    ///
+    /// The compare-and-swap takes only a row the quit left terminal —
+    /// `cancelled` (the shutdown sweep, or a session thread finishing its own
+    /// cancel) or `error` (dead-owner recovery after a crash) with
+    /// `completion_reason = 'app_quit'` — and only a branch-scoped one: a
+    /// project session is never queued. The owner, error and reason are
+    /// cleared so the row reads as freshly enqueued; `created_at` is left
+    /// alone on purpose, because the branch drain orders by it and a re-queued
+    /// row must keep the place it had before the quit. Returns `true` if the
+    /// row was moved, `false` if it was already resumed, re-queued or deleted.
+    pub fn transition_app_quit_to_queued(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE sessions
+             SET status = 'queued', owner_pid = NULL, error_message = NULL,
+                 completion_reason = NULL, updated_at = ?1
+             WHERE id = ?2
+               AND status IN ('cancelled', 'error')
+               AND completion_reason = 'app_quit'
+               AND branch_id IS NOT NULL",
+            params![now_timestamp(), id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Sessions an app quit (or a crash, recovered at the next launch) ended
+    /// after `updated_after`, oldest-created first.
+    ///
+    /// The launch-resume candidates: every row with `completion_reason =
+    /// 'app_quit'` that is still terminal. `updated_after` is the marker of
+    /// the last launch that offered them, so rows the user already dismissed
+    /// are not offered again; a row the user resumes by hand and loses to a
+    /// later quit carries a newer `updated_at` and is offered afresh.
+    pub fn get_app_quit_sessions_since(
+        &self,
+        updated_after: i64,
+    ) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions
+             WHERE completion_reason = 'app_quit'
+               AND status IN ('cancelled', 'error')
+               AND updated_at > ?1
+             ORDER BY created_at ASC, id ASC"
+        ))?;
+        let sessions = stmt
+            .query_map(params![updated_after], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
     /// Restamp the queued artifact stub linked to a session when it starts running.
     ///
     /// `sessions.created_at` is intentionally left unchanged so branch queues
@@ -349,10 +408,10 @@ impl Store {
 
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
-             FROM sessions WHERE status = 'running'",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions WHERE status = 'running'"
+        ))?;
         let sessions = stmt
             .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -381,11 +440,11 @@ impl Store {
     /// accumulated `session-status-changed` events.
     pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE status IN ('running', 'queued')
-             ORDER BY created_at ASC",
-        )?;
+             ORDER BY created_at ASC"
+        ))?;
         let sessions = stmt
             .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -591,12 +650,12 @@ impl Store {
         status: &str,
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions
              WHERE status = ?2 AND branch_id = ?1
-             ORDER BY created_at ASC",
-        )?;
+             ORDER BY created_at ASC"
+        ))?;
         let sessions = stmt
             .query_map(params![branch_id, status], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;

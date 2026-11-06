@@ -1,6 +1,7 @@
 //! Shared Blox CLI integration.
 //!
-//! Thin wrappers around `sq blox` subcommands plus common command discovery.
+//! Thin wrappers around `sq blox` subcommands plus common command discovery,
+//! and file transfer to and from a workstation (see [`ws_put_file`]).
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Read;
@@ -11,11 +12,19 @@ use thiserror::Error;
 use wait_timeout::ChildExt;
 
 mod commands;
+mod transfer;
+mod workspace_commands;
 
 pub use commands::{
     find_acp_process, find_ended_acp_process, ws_command_list, ws_output, CommandFilter,
     CommandStatus, WorkstationCommand,
 };
+pub use transfer::{
+    download_in_parts, get_file_with, put_file_with, transfer_timeout, upload_in_parts,
+    ws_download, ws_download_args, ws_get_file, ws_put_file, ws_ssh_args, ws_ssh_get, ws_ssh_put,
+    ws_upload, ws_upload_args, FileRoute, SqWorkspace, WsTransport, MAX_PART_BYTES,
+};
+pub use workspace_commands::{ws_commands, CommandType, WorkspaceCommand, WorkspaceCommandStatus};
 
 const COMMON_PATHS: &[&str] = &[
     "/opt/homebrew/bin",
@@ -28,6 +37,17 @@ const QUICK_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Slowest rate a `ws exec` whose work grows with its payload may go at
+/// before it is treated as hung, as for file transfers.
+const EXEC_MIN_BYTES_PER_SEC: u64 = 1_000_000;
+
+/// How long a `ws exec` whose work grows with `bytes` (hashing a working tree,
+/// writing or indexing a bundle, cloning) may run: the usual 300 s, plus one
+/// second per megabyte.
+pub fn exec_timeout(bytes: u64) -> Duration {
+    EXEC_TIMEOUT + Duration::from_secs(bytes / EXEC_MIN_BYTES_PER_SEC)
+}
 
 /// Structured errors from Blox CLI operations.
 #[derive(Error, Debug)]
@@ -576,34 +596,20 @@ pub struct WsExecOutput {
 /// still return `Err`, but a non-zero exit from the remote command returns
 /// `Ok(WsExecOutput { success: false, .. })`.
 pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
+    ws_exec_output_with_timeout(name, args, EXEC_TIMEOUT)
+}
+
+/// [`ws_exec_output`] with its own timeout, for a command whose running time
+/// grows with what it works on (see [`exec_timeout`]). Past the timeout `sq`
+/// is killed here; the remote command may still be running.
+pub fn ws_exec_output_with_timeout(
+    name: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<WsExecOutput, BloxError> {
     let mut full_args = vec!["ws", "exec", name, "--"];
     full_args.extend_from_slice(args);
-    run_bytes_full(&full_args, EXEC_TIMEOUT)
-}
-
-/// A bootstrap command returned by `sq blox ws commands <name> --json`.
-///
-/// Predates the CLI's camelCase listing and fails to parse it; ACP process
-/// lookups use [`WorkstationCommand`] via [`ws_command_list`] instead.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceCommand {
-    pub command_id: String,
-    pub command_type: u32,
-    pub status: u32, // 1=pending, 2=running, 3=completed
-    pub is_bootstrap: bool,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
-    /// Catch-all for any other fields the CLI returns.
-    #[serde(flatten)]
-    pub extra: serde_json::Value,
-}
-
-/// List bootstrap commands for a Blox workspace.
-///
-/// Runs: `sq blox ws commands <name> --json`
-pub fn ws_commands(name: &str) -> Result<Vec<WorkspaceCommand>, BloxError> {
-    let stdout = run(&["ws", "commands", name, "--json"], QUICK_TIMEOUT)?;
-    serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
+    run_bytes_full(&full_args, timeout)
 }
 
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.
@@ -623,6 +629,16 @@ pub fn check_auth() -> Result<(), BloxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_timeout_keeps_the_floor_and_grows_a_second_per_megabyte() {
+        assert_eq!(exec_timeout(0), EXEC_TIMEOUT);
+        assert_eq!(exec_timeout(999_999), EXEC_TIMEOUT);
+        assert_eq!(
+            exec_timeout(4_000_000_000),
+            EXEC_TIMEOUT + Duration::from_secs(4_000)
+        );
+    }
 
     #[test]
     fn acp_proxy_args_without_command_or_env_is_bare() {

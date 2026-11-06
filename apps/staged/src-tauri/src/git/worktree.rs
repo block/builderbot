@@ -170,6 +170,32 @@ pub fn create_worktree_for_existing_branch_at_path(
     branch_name: &str,
     worktree_path: &Path,
 ) -> Result<PathBuf, GitError> {
+    add_worktree_for_existing_branch(repo, branch_name, worktree_path, &[])
+}
+
+/// [`create_worktree_for_existing_branch_at_path`] with Git LFS's smudge
+/// filter skipped, so LFS files check out as pointers for the caller to
+/// replace (`git lfs checkout`): the filter fails the whole checkout on an
+/// object it can neither find nor download.
+pub fn create_worktree_for_existing_branch_without_lfs_smudge(
+    repo: &Path,
+    branch_name: &str,
+    worktree_path: &Path,
+) -> Result<PathBuf, GitError> {
+    add_worktree_for_existing_branch(
+        repo,
+        branch_name,
+        worktree_path,
+        &[("GIT_LFS_SKIP_SMUDGE", "1")],
+    )
+}
+
+fn add_worktree_for_existing_branch(
+    repo: &Path,
+    branch_name: &str,
+    worktree_path: &Path,
+    vars: &[(&str, &str)],
+) -> Result<PathBuf, GitError> {
     ensure_worktree_parent_exists(worktree_path)?;
     ensure_worktree_absent(worktree_path)?;
 
@@ -179,7 +205,7 @@ pub fn create_worktree_for_existing_branch_at_path(
 
     // Create worktree for existing branch:
     // git worktree add <path> <branch>
-    cli::run(repo, &["worktree", "add", worktree_str, branch_name])?;
+    cli::run_with_vars(repo, &["worktree", "add", worktree_str, branch_name], vars)?;
 
     Ok(worktree_path.to_path_buf())
 }

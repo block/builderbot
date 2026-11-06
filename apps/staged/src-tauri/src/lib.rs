@@ -39,6 +39,7 @@ mod preference_events;
 pub mod project_commands;
 pub mod project_mcp;
 pub mod project_search;
+pub mod project_transfer;
 pub mod prs;
 pub mod review_commands;
 pub mod session_commands;
@@ -2075,6 +2076,14 @@ pub fn run() {
             if let Some(path) = preferences_store_path_buf() {
                 preference_events::forward_to_web(app.handle(), path, event_tx.clone());
             }
+            // Transfers a previous run never finished, then old backups.
+            let transfer_store = get_store(&app.state::<Mutex<Option<Arc<Store>>>>()).ok();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Some(store) = &transfer_store {
+                    project_transfer::recover_interrupted_transfers(store);
+                }
+                project_transfer::prune_backups(transfer_store.as_deref());
+            });
 
             // Web server startup is stubbed out in this build.
             // TODO(web): restore web server startup from the `mobile-web` branch.
@@ -2228,6 +2237,10 @@ pub fn run() {
             branches::delete_branch,
             branches::rename_branch,
             branches::move_branch,
+            project_transfer::commands::get_project_transfer_preflight,
+            project_transfer::commands::transfer_project,
+            project_transfer::commands::cancel_project_transfer,
+            project_transfer::commands::list_transferring_projects,
             branches::get_blox_env,
             branches::get_workspace_info,
             branches::poll_workspace_status,

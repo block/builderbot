@@ -178,6 +178,7 @@ fn start_pipeline_for_branch(
     app_handle: &tauri::AppHandle,
     registry: &Arc<session_runner::SessionRegistry>,
 ) -> Result<String, String> {
+    crate::project_transfer::ensure_branch_not_transferring(&ctx.branch.id)?;
     let pipeline = PipelineExecution::from_steps(&steps);
 
     // pr/push pipeline sessions link no artifact row, so the session row
@@ -801,6 +802,7 @@ fn queue_commit_pipeline_locked(
     provider: Option<&str>,
     target: Option<&str>,
 ) -> Result<Option<String>, String> {
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     if !branch_has_work_in_flight(store, branch_id)? {
         return Ok(None);
     }
@@ -1124,6 +1126,7 @@ fn queue_push_pipeline_locked(
     provider: Option<&str>,
     force: bool,
 ) -> Result<Option<String>, String> {
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     if !branch_has_work_in_flight(store, branch_id)? {
         return Ok(None);
     }
@@ -1376,6 +1379,7 @@ fn claim_or_queue_pull_for_branch(
 ) -> Result<PullDisposition, String> {
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
     let _guard = launch_lock.lock().unwrap();
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
 
     let busy = branch_has_work_in_flight(store, branch_id)?;
     if busy {
@@ -1675,6 +1679,7 @@ pub(crate) async fn start_create_pr_pipeline_for_branch(
     provider: Option<String>,
     draft: Option<bool>,
 ) -> Result<String, String> {
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let base_branch = base_branch_name(&ctx.branch);
 

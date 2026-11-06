@@ -21,8 +21,8 @@ pub(crate) struct WorktreeSetupProgress {
 }
 
 /// Emit a `worktree-setup-progress` event for a branch and phase.
-pub(crate) fn emit_setup_progress(
-    handle: &AppHandle,
+pub(crate) fn emit_setup_progress<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
     branch_id: &str,
     phase: &str,
     detail: Option<String>,
@@ -1108,6 +1108,10 @@ pub(crate) fn cleanup_branch_resources(
                     .ok_or("Cannot determine clone path")?;
                 let worktree_path = Path::new(&wd.path);
                 git::remove_worktree(&repo_path, worktree_path).map_err(|e| e.to_string())?;
+                // Entries a transfer to local added to the clone's
+                // `info/exclude` for this worktree would hide a later
+                // worktree's files. Best-effort, and only logged.
+                crate::project_transfer::release_worktree_excludes(worktree_path);
                 store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
             }
         }
@@ -1116,6 +1120,7 @@ pub(crate) fn cleanup_branch_resources(
                 if workspace_outlives(store, branch, &[branch.id.as_str()])? {
                     return Ok(());
                 }
+                crate::project_transfer::ensure_workspace_not_transferring(ws_name)?;
                 match blox::ws_delete(ws_name) {
                     Ok(_) => {}
                     Err(blox::BloxError::CommandFailed(msg))
@@ -1227,24 +1232,31 @@ pub(crate) fn infer_prefixed_branch_name(project_name: &str) -> String {
     )
 }
 
+/// The longest workspace name Staged picks, in bytes.
+pub(crate) const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
+
+/// A workspace name for `branch_name`: `stg-` and the branch name reduced the
+/// way [`infer_branch_name`] reduces a project name — lowercase ASCII letters,
+/// digits and single `-`s, everything else dropped — then cut to
+/// [`WORKSPACE_NAME_MAX_LENGTH`]. Blox itself only refuses spaces and names
+/// over 63 bytes, but a git branch can be called anything, and the name also
+/// ends up in hostnames, paths and shell commands.
 pub(crate) fn infer_workspace_name(branch_name: &str) -> String {
-    const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
-    let safe = branch_name
-        .replace('/', "-")
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    let safe = normalize_branch_component(branch_name);
     if safe.is_empty() {
         return "stg-feature".to_string();
     }
-    let mut full = format!("stg-{safe}");
-    if full.len() > WORKSPACE_NAME_MAX_LENGTH {
-        full = full[..WORKSPACE_NAME_MAX_LENGTH]
-            .trim_end_matches('-')
-            .to_string();
+    truncate_workspace_name(&format!("stg-{safe}"), WORKSPACE_NAME_MAX_LENGTH)
+}
+
+/// `name` cut to at most `max` bytes, never inside a character, without a
+/// trailing `-`.
+pub(crate) fn truncate_workspace_name(name: &str, max: usize) -> String {
+    let mut end = name.len().min(max);
+    while !name.is_char_boundary(end) {
+        end -= 1;
     }
-    full
+    name[..end].trim_end_matches('-').to_string()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1320,6 +1332,7 @@ pub fn create_branch(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
 
     // Detect default branch if none specified (via GitHub API, no local clone needed)
     let target_repo = match project_repo_id {
@@ -1753,6 +1766,7 @@ pub(crate) async fn setup_worktree_from_pr_impl(
     base_ref: String,
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let target_repo = match project_repo_id {
             Some(repo_id) => store
@@ -1838,6 +1852,7 @@ pub(crate) async fn create_remote_branch_impl(
     workspace_name: String,
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let project = store
             .get_project(&project_id)
@@ -1899,6 +1914,7 @@ pub async fn start_workspace(
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
 
     let branch = store
         .get_branch(&branch_id)
@@ -2341,22 +2357,17 @@ pub async fn poll_workspace_status(
     })
 }
 
-/// Map a numeric `CommandType` (from the blox orchestrator proto) to a stable
-/// string identifier that the frontend can map to a display label.
-///
-/// Proto enum values:
-///   0 = COMMAND_TYPE_UNSPECIFIED
-///   1 = COMMAND_TYPE_CHECKOUT
-///   2 = COMMAND_TYPE_EXECUTE_PROCESS
-///   3 = COMMAND_TYPE_PROJECT_BOOTSTRAP
-///   4 = COMMAND_TYPE_PROVISION_WORKSPACE
-pub(crate) fn bootstrap_command_type_name(command_type: u32) -> &'static str {
+/// Map a blox orchestrator `CommandType` to a stable string identifier that
+/// the frontend can map to a display label.
+pub(crate) fn bootstrap_command_type_name(command_type: blox::CommandType) -> &'static str {
     match command_type {
-        1 => "checkout",
-        2 => "execute_process",
-        3 => "project_bootstrap",
-        4 => "provision_workspace",
-        _ => "unknown",
+        blox::CommandType::Checkout => "checkout",
+        blox::CommandType::ExecuteProcess => "execute_process",
+        blox::CommandType::ProjectBootstrap => "project_bootstrap",
+        blox::CommandType::ProvisionWorkspace => "provision_workspace",
+        blox::CommandType::RestoreSnapshot => "restore_snapshot",
+        blox::CommandType::ExecuteBootstrap => "execute_bootstrap",
+        blox::CommandType::Unspecified => "unknown",
     }
 }
 
@@ -2374,21 +2385,22 @@ pub(crate) fn emit_workspace_setup_progress(
     }
 
     let total = bootstrap.len();
-    let completed = bootstrap.iter().filter(|c| c.status == 3).count();
+    let completed = bootstrap.iter().filter(|c| c.status.is_finished()).count();
 
-    // All done — workspace will transition to running, no need to emit.
+    // All done — workspace will transition to running (or error), no need
+    // to emit.
     if completed == total {
         return;
     }
 
-    // Pick the first currently-running command (status 2).  If none are
-    // running yet, fall back to the first non-completed command.
+    // Pick the first currently-running command.  If none are running yet,
+    // fall back to the first unfinished command.
     // Safety: `bootstrap` is non-empty (checked above) and `completed < total`,
-    // so at least one command has status != 3 (completed).
+    // so at least one command is unfinished.
     let current_cmd = bootstrap
         .iter()
-        .find(|c| c.status == 2)
-        .or_else(|| bootstrap.iter().find(|c| c.status != 3))
+        .find(|c| c.status == blox::WorkspaceCommandStatus::Running)
+        .or_else(|| bootstrap.iter().find(|c| !c.status.is_finished()))
         .unwrap();
 
     let phase = bootstrap_command_type_name(current_cmd.command_type);
@@ -2627,6 +2639,7 @@ pub async fn resume_workspace(
     workspace_name: String,
 ) -> Result<Vec<String>, String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_workspace_not_transferring(&workspace_name)?;
 
     // Transition all peer branches to Starting so the UI begins polling.
     let branch_ids = store
@@ -2888,6 +2901,8 @@ pub(crate) async fn move_branch_impl(
     // Pre-flight, so an impossible move is refused before anything the branch is
     // running gets stopped for it. [`apply_branch_move`] plans again under the
     // launch lock, which is what makes the answer safe to act on.
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
+    crate::project_transfer::ensure_project_not_transferring(target_project_id)?;
     plan_branch_move(store, branch_id, target_project_id)?;
 
     crate::actions::commands::stop_actions_for_branches(executor, registry, &[branch_id]);
@@ -3061,6 +3076,7 @@ pub async fn rename_branch(
     branch_name: String,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     let new_name = branch_name.trim();
     if new_name.is_empty() {
         return Err("Branch name is required".to_string());
@@ -3149,6 +3165,7 @@ pub(crate) fn record_branch_rename(
     branch: &store::Branch,
     new_name: &str,
 ) -> Result<(), String> {
+    crate::project_transfer::ensure_branch_not_transferring(&branch.id)?;
     store
         .update_branch_name(&branch.id, new_name)
         .map_err(|e| e.to_string())?;
@@ -3190,11 +3207,12 @@ fn parse_git_progress_line(line: &str) -> Option<(String, u32)> {
 /// delegates to [`create_and_link_worktree`] for worktree creation and DB
 /// linkage. It clones, fetches and creates the worktree inline, so call it
 /// from the blocking pool.
-pub(crate) fn setup_worktree_sync(
+pub(crate) fn setup_worktree_sync<R: tauri::Runtime>(
     store: &Arc<Store>,
     branch_id: &str,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
 ) -> Result<String, String> {
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     let emit_progress = |phase: &str, detail: Option<String>| {
         emit_setup_progress(app_handle, branch_id, phase, detail)
     };
@@ -3203,6 +3221,15 @@ pub(crate) fn setup_worktree_sync(
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    // A caller that read the branch before a transfer to remote switched it
+    // must not give it a worktree now: during teardown that would adopt the
+    // old worktree, which is about to be removed from under the new row.
+    if branch.branch_type == store::BranchType::Remote {
+        return Err(format!(
+            "{} is on a remote workspace; it has no local worktree to set up.",
+            branch.branch_name
+        ));
+    }
 
     let project = store
         .get_project(&branch.project_id)
@@ -3305,6 +3332,12 @@ pub(crate) async fn claim_and_run_prerun_actions(
     provider: Option<&str>,
     tag: &str,
 ) -> PrerunOutcome {
+    // Before the claim, which a refused run would otherwise use up. The
+    // transfer resets the claim when it switches the branch over.
+    if crate::project_transfer::is_branch_transferring(branch_id) {
+        log::info!("[{tag}] branch {branch_id} is being transferred, skipping prerun");
+        return PrerunOutcome::NotRun;
+    }
     match store.mark_branch_setup_complete(branch_id) {
         Ok(true) => {
             emit_setup_progress(app_handle, branch_id, "running_setup_actions", None);
@@ -3635,6 +3668,87 @@ mod tests {
     #[test]
     fn apply_branch_prefix_without_prefix_returns_branch_unchanged() {
         assert_eq!(apply_branch_prefix(None, "my-project"), "my-project");
+    }
+
+    #[test]
+    fn infer_workspace_name_keeps_ascii_names_as_they_were() {
+        assert_eq!(infer_workspace_name("feature"), "stg-feature");
+        assert_eq!(
+            infer_workspace_name("alice/my-project"),
+            "stg-alice-my-project"
+        );
+        assert_eq!(infer_workspace_name("--a//b--"), "stg-a-b");
+        assert_eq!(infer_workspace_name(""), "stg-feature");
+        assert_eq!(
+            infer_workspace_name("a-very-long-branch-name-that-goes-on"),
+            "stg-a-very-long-branch-name-that"
+        );
+        // Never ends on the `-` the cut left.
+        assert_eq!(
+            infer_workspace_name("abcdefghijklmnopqrstuvwxyza-bc"),
+            "stg-abcdefghijklmnopqrstuvwxyza"
+        );
+    }
+
+    #[test]
+    fn infer_workspace_name_reduces_any_branch_name_to_lowercase_ascii() {
+        assert_eq!(
+            infer_workspace_name("MT/Fix_Thing.v2"),
+            "stg-mt-fix-thing-v2"
+        );
+        assert_eq!(infer_workspace_name("café/naïve"), "stg-caf-nave");
+        // Nothing left: the default.
+        assert_eq!(infer_workspace_name("日本語/ブランチ"), "stg-feature");
+        assert_eq!(infer_workspace_name("🚀"), "stg-feature");
+    }
+
+    /// A long branch name with a multibyte character across byte 32 used to
+    /// panic slicing `full[..32]`, failing a transfer to Blox.
+    #[test]
+    fn infer_workspace_name_never_panics_on_long_unicode_names() {
+        // `stg-` and 27 ASCII bytes put `é` (2 bytes) at bytes 31–32, and
+        // `🚀` (4 bytes) at 31–34.
+        let ascii = "a".repeat(27);
+        for name in [
+            format!("{ascii}é-and-more"),
+            format!("{ascii}🚀-and-more"),
+            "ü".repeat(40),
+            format!("{}-{}", "分支".repeat(20), "x".repeat(40)),
+            "🚀".repeat(16),
+        ] {
+            let inferred = infer_workspace_name(&name);
+            assert!(
+                inferred.len() <= WORKSPACE_NAME_MAX_LENGTH,
+                "{name}: {inferred}"
+            );
+            assert!(
+                inferred
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "{name}: {inferred}"
+            );
+            assert!(
+                inferred.starts_with("stg-") && !inferred.ends_with('-'),
+                "{inferred}"
+            );
+        }
+        // `é` is dropped, so the cut lands on the `-` after the `a`s.
+        assert_eq!(
+            infer_workspace_name(&format!("{ascii}é-and-more")),
+            format!("stg-{ascii}")
+        );
+        assert_eq!(infer_workspace_name(&"ü".repeat(40)), "stg-feature");
+    }
+
+    #[test]
+    fn truncate_workspace_name_cuts_on_a_character_boundary() {
+        // `é` is bytes 3–4: cutting at 4 would split it.
+        assert_eq!(truncate_workspace_name("abcé", 4), "abc");
+        assert_eq!(truncate_workspace_name("abcé", 5), "abcé");
+        assert_eq!(truncate_workspace_name("ab🚀", 5), "ab");
+        assert_eq!(truncate_workspace_name("ab-🚀", 5), "ab");
+        assert_eq!(truncate_workspace_name("abc", 10), "abc");
+        assert_eq!(truncate_workspace_name("🚀", 3), "");
     }
 
     #[test]
@@ -4273,6 +4387,21 @@ mod upstream_tracking_tests {
             "feature-new"
         );
         assert_eq!(resolve_remote_branch_sync(&store, &branch), "feature-new");
+    }
+
+    /// Whatever its caller read before a transfer switched the branch to a
+    /// workspace, setup gives it no worktree and no workdir row.
+    #[test]
+    fn worktree_setup_refuses_a_remote_branch() {
+        let (store, project) = store_with_project();
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", "stg-feature");
+        store.create_branch(&branch).unwrap();
+        let app = mock_app();
+
+        let err = setup_worktree_sync(&store, &branch.id, app.handle()).unwrap_err();
+
+        assert!(err.contains("remote workspace"), "{err}");
+        assert!(store.get_workdir_for_branch(&branch.id).unwrap().is_none());
     }
 
     /// Provisioning is one of the events the queue waits on: a session queued

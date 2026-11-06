@@ -1667,6 +1667,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let base_branch: String = arg(&args, "baseBranch")?;
             let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
+            crate::project_transfer::ensure_project_not_transferring(&project_id)?;
 
             let mut branch = crate::store::Branch::new(&project_id, &branch_name, &base_branch);
             if let Some(pr) = pr_number {
@@ -1721,6 +1722,52 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .await?;
             Ok(serde_json::to_value(moved).unwrap())
         }
+        "get_project_transfer_preflight" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let preflight =
+                crate::project_transfer::get_project_transfer_preflight_impl(store, project_id)
+                    .await?;
+            Ok(serde_json::to_value(preflight).unwrap())
+        }
+        "transfer_project" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            // The way the client's preflight showed the project going.
+            let direction: crate::project_transfer::TransferDirection = arg(&args, "direction")?;
+            let include_uncommitted: bool = arg(&args, "includeUncommitted")?;
+            // Optional, so a client from before ignored files could move
+            // still transfers (without them).
+            let include_ignored: bool = opt_arg(&args, "includeIgnored")?.unwrap_or(false);
+            // Detached: the transfer writes workspace statuses and the
+            // project's location, and must finish (or roll back) whether or
+            // not the client is still waiting.
+            let result = detached(crate::project_transfer::transfer_project_impl(
+                store,
+                app_handle.clone(),
+                Arc::clone(action_executor),
+                Arc::clone(action_registry),
+                project_id,
+                direction,
+                crate::project_transfer::TransferOptions {
+                    include_uncommitted,
+                    include_ignored,
+                },
+            ))
+            .await?;
+            Ok(serde_json::to_value(result).unwrap())
+        }
+        "cancel_project_transfer" => {
+            let project_id: String = arg(&args, "projectId")?;
+            Ok(
+                serde_json::to_value(crate::project_transfer::cancel_project_transfer(project_id))
+                    .unwrap(),
+            )
+        }
+        "list_transferring_projects" => Ok(serde_json::to_value(
+            crate::project_transfer::list_transferring_projects(),
+        )
+        .unwrap()),
         "get_blox_env" => Ok(serde_json::to_value(std::env::var("BLOX_ENV").ok()).unwrap()),
         // =====================================================================
         // Workspace / Blox commands (Tier 3)
@@ -2084,6 +2131,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "start_workspace" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
+            crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
             let app_handle = app_handle.clone();
             detached(async move {
                 let branch = store
@@ -2249,6 +2297,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "resume_workspace" => {
             let store = get_store(store_mutex)?;
             let workspace_name: String = arg(&args, "workspaceName")?;
+            crate::project_transfer::ensure_workspace_not_transferring(&workspace_name)?;
             detached(async move {
                 let branch_ids = store
                     .update_workspace_status_by_workspace_name(
@@ -4190,6 +4239,61 @@ mod tests {
         );
     }
 
+    /// An expression arm whose call rustfmt wraps has no block, so slicing by
+    /// braces alone ended it on its first line, with a `(` still open. The
+    /// blocking guard's scan then panicked on `list_transferring_projects`.
+    #[test]
+    fn dispatch_arms_keep_wrapped_expression_arms_whole() {
+        let source = r#"
+    match command {
+        "guard_wrapped_call" => Ok(serde_json::to_value(
+            crate::module::listing(),
+        )
+        .unwrap()),
+        "guard_wrapped_list" => Ok(json!([
+            "{ (",
+        ])),
+        "guard_one_line" | "guard_alias" => Ok(Value::Null),
+        "guard_block" => {
+            let value = compute(
+                "a {",
+            );
+            Ok(value)
+        }
+        _ => Err(String::new()),
+    }
+"#;
+        let arms: BTreeMap<String, String> = dispatch_arms(source)
+            .into_iter()
+            .map(|(commands, body)| (commands.join(" | "), body))
+            .collect();
+
+        let names: Vec<&str> = arms.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "guard_block",
+                "guard_one_line | guard_alias",
+                "guard_wrapped_call",
+                "guard_wrapped_list",
+            ]
+        );
+        assert!(
+            arms["guard_wrapped_call"]
+                .ends_with("crate::module::listing(),\n        )\n        .unwrap()),\n"),
+            "{}",
+            arms["guard_wrapped_call"]
+        );
+        assert!(arms["guard_wrapped_list"].ends_with("])),\n"));
+        assert!(arms["guard_block"].ends_with("Ok(value)\n        }\n"));
+        assert_eq!(
+            arms["guard_one_line | guard_alias"].lines().count(),
+            1,
+            "{}",
+            arms["guard_one_line | guard_alias"]
+        );
+    }
+
     /// Having an arm is not the same as having the *same* arm — which is the
     /// gap `web_dispatch_covers_tauri_commands` can't see. This one had drifted:
     /// it cancelled through `SessionRegistry::cancel` alone, so a browser Stop
@@ -4491,6 +4595,10 @@ mod tests {
 
     /// Every arm of the dispatch match as (its command patterns, its body),
     /// including the `"a" | "b" =>` arms `dispatch_arm_body` can't address.
+    /// An arm runs until its parens and brackets close as well as its braces,
+    /// so an expression arm whose call rustfmt wrapped (`=> Ok(f(` … `)),`)
+    /// stays whole. A chain whose first line balances (`=> f(x)` then
+    /// `.g()`) still ends on that line.
     pub(super) fn dispatch_arms(source: &str) -> Vec<(Vec<String>, String)> {
         let marker = "match command {";
         let start = source
@@ -4517,7 +4625,7 @@ mod tests {
                 body.push('\n');
             }
 
-            depth += brace_delta_ignoring_strings(line);
+            depth += bracket_delta_ignoring_strings(line);
             if depth == 1 {
                 arms.extend(current.take());
             } else if depth == 0 {
@@ -4599,6 +4707,17 @@ mod tests {
     }
 
     fn brace_delta_ignoring_strings(line: &str) -> isize {
+        delta_ignoring_strings(line, &[('{', '}')])
+    }
+
+    /// `brace_delta_ignoring_strings` over parens and square brackets too.
+    fn bracket_delta_ignoring_strings(line: &str) -> isize {
+        delta_ignoring_strings(line, &[('(', ')'), ('[', ']'), ('{', '}')])
+    }
+
+    /// How many of `brackets` `line` leaves open (negative for closed),
+    /// skipping string literals and a trailing `//` comment.
+    fn delta_ignoring_strings(line: &str, brackets: &[(char, char)]) -> isize {
         let mut delta = 0;
         let mut chars = line.chars().peekable();
         let mut in_string = false;
@@ -4619,8 +4738,8 @@ mod tests {
             match ch {
                 '"' => in_string = true,
                 '/' if chars.peek() == Some(&'/') => break,
-                '{' => delta += 1,
-                '}' => delta -= 1,
+                _ if brackets.iter().any(|&(open, _)| open == ch) => delta += 1,
+                _ if brackets.iter().any(|&(_, close)| close == ch) => delta -= 1,
                 _ => {}
             }
         }

@@ -1,6 +1,6 @@
 /**
- * Shared project context-menu actions: set status, mark unread and remove
- * project.
+ * Shared project context-menu actions: set status, mark unread, transfer and
+ * remove project.
  *
  * ProjectHome (top-bar button + ⌘⌫ shortcut), ProjectsList (card context
  * menu), and ProjectsSidebar (row context menu, rendered from App.svelte on
@@ -11,12 +11,15 @@
  * shared dialog (ProjectDeleteDialog, mounted once in App.svelte), and the
  * delete lifecycle against the projectsData store — so the flow behaves
  * identically on every route instead of each view carrying its own copy.
+ * Transfer follows the same shape: the preflight behind the shared
+ * ProjectTransferDialog, then the transfer itself, whose progress the
+ * projectsData store follows from the backend's events.
  */
 
 import { tick } from 'svelte';
 import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
-import type { Project } from '../../types';
+import type { Project, ProjectTransferDirection, ProjectTransferPreflight } from '../../types';
 import { projectDisplayName } from '../../shared/utils';
 import {
   goHome,
@@ -29,6 +32,32 @@ import { projectStateStore } from '../../stores/projectState.svelte';
 import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
 import { focusIfDropped, type FocusAfterRemove } from './focusAfterRemove';
 import { workspaceLifecycle } from './workspaceLifecycle.svelte';
+import {
+  setTransferIgnoredFiles,
+  setTransferUncommittedChanges,
+} from '../settings/preferences.svelte';
+import {
+  asksAboutIgnored,
+  asksAboutUncommitted,
+  ignoredTransferBlocked,
+  isTransferCancelledError,
+  isTransferStaleError,
+  issueMessage,
+  transferDestinationLabel,
+  transferDirectionFrom,
+  transferResultWarnings,
+} from './projectTransfer';
+
+/** The project behind the shared transfer dialog, and its preflight's state. */
+export type PendingTransfer = { project: Project; direction: ProjectTransferDirection } & (
+  | { status: 'loading' }
+  | { status: 'ready'; preflight: ProjectTransferPreflight }
+  | { status: 'error'; error: string }
+);
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 class ProjectActionsController {
   /** Project awaiting the user's answer in the shared confirmation dialog. */
@@ -39,6 +68,12 @@ class ProjectActionsController {
    *  dialog's close takes it. */
   private confirmedFocusAfterRemove: (() => HTMLElement | null) | null = null;
 
+  /** Project awaiting the user's answer in the shared transfer dialog. */
+  private _pendingTransfer = $state<PendingTransfer | null>(null);
+  /** Bumped per dialog open and close, so a late preflight can't land on a
+   *  dialog that was closed or reopened for another project. */
+  private transferRequest = 0;
+
   /** Each project's queue tail resolves to its last successfully persisted status. */
   private readonly statusOverrideWrites = new Map<
     string,
@@ -47,6 +82,10 @@ class ProjectActionsController {
 
   get pendingDelete(): Project | null {
     return this._pendingDelete;
+  }
+
+  get pendingTransfer(): PendingTransfer | null {
+    return this._pendingTransfer;
   }
 
   markProjectUnread(project: Project): void {
@@ -106,6 +145,8 @@ class ProjectActionsController {
    */
   async requestRemoveProject(project: Project, focusAfterRemove?: FocusAfterRemove): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
+    // The backend refuses to delete a project mid-transfer.
+    if (projectsDataStore.isProjectTransferring(project.id)) return;
 
     // Rows render as soon as the project *list* lands, so branches and repos
     // may still be the seeded fallbacks (empty branch list; repoCount 1 for a
@@ -154,6 +195,167 @@ class ProjectActionsController {
   cancelPendingDelete(): void {
     this._pendingDelete = null;
     this.pendingFocusAfterRemove = null;
+  }
+
+  /**
+   * Open the transfer dialog for a project and fetch its preflight: what each
+   * branch would carry and what stops the transfer. Resolves once the
+   * preflight has landed (or failed) in the dialog.
+   */
+  async requestTransferProject(project: Project): Promise<void> {
+    if (
+      projectsDataStore.isProjectDeleting(project.id) ||
+      projectsDataStore.isProjectTransferring(project.id)
+    ) {
+      return;
+    }
+    const request = ++this.transferRequest;
+    const direction = transferDirectionFrom(project.location);
+    this._pendingTransfer = { project, direction, status: 'loading' };
+    // The dialog labels rows from the preflight, but the progress banner
+    // names repos from the project's own, so fetch them meanwhile (deduped
+    // like the remove flow's). Never rejects, and the dialog doesn't wait.
+    void projectsDataStore.ensureProjectHydrated(project.id);
+    try {
+      const preflight = await commands.getProjectTransferPreflight(project.id);
+      if (request !== this.transferRequest) return;
+      this._pendingTransfer = {
+        project,
+        direction: preflight.direction,
+        status: 'ready',
+        preflight,
+      };
+    } catch (e) {
+      if (request !== this.transferRequest) return;
+      this._pendingTransfer = { project, direction, status: 'error', error: errorMessage(e) };
+    }
+  }
+
+  /**
+   * Start the pending transfer (dialog "Transfer" button). The dialog closes
+   * at once; progress shows on the project and the outcome as a toast.
+   * `includeUncommitted` is the checkbox, which only shows (and is only
+   * remembered) when some repo has, or may have, uncommitted changes (see
+   * asksAboutUncommitted). Without it there is nothing to opt out of, so
+   * whatever turns up meanwhile is carried.
+   *
+   * `includeIgnored` is the second checkbox, which shows only when some repo
+   * has ignored files (asksAboutIgnored) and can't be ticked when they are
+   * over the cap (ignoredTransferBlocked). It is remembered, and sent, only
+   * when it was shown and could be ticked; otherwise ignored files stay in
+   * the backup, as they always did.
+   */
+  async confirmPendingTransfer({
+    includeUncommitted,
+    includeIgnored,
+  }: {
+    includeUncommitted: boolean;
+    includeIgnored: boolean;
+  }): Promise<void> {
+    const pending = this._pendingTransfer;
+    if (pending?.status !== 'ready' || !pending.preflight.canTransfer) return;
+    const { project, preflight } = pending;
+    this._pendingTransfer = null;
+    this.transferRequest += 1;
+    const asked = asksAboutUncommitted(preflight);
+    if (asked) {
+      setTransferUncommittedChanges(includeUncommitted);
+    }
+    const askedIgnored = asksAboutIgnored(preflight) && ignoredTransferBlocked(preflight) === null;
+    if (askedIgnored) {
+      setTransferIgnoredFiles(includeIgnored);
+    }
+    await this.transferProject(project, preflight, {
+      includeUncommitted: asked ? includeUncommitted : true,
+      includeIgnored: askedIgnored && includeIgnored,
+    });
+  }
+
+  /** Dismiss the transfer dialog without transferring. */
+  cancelPendingTransfer(): void {
+    this._pendingTransfer = null;
+    this.transferRequest += 1;
+  }
+
+  /**
+   * Ask a running transfer to stop before it switches the project over (the
+   * progress banner's Cancel). Resolves whether one was running; the
+   * transfer's own promise reports the outcome.
+   */
+  async cancelTransfer(projectId: string): Promise<boolean> {
+    try {
+      return await commands.cancelProjectTransfer(projectId);
+    } catch (e) {
+      toast.error('Unable to cancel the transfer', { description: errorMessage(e) });
+      return false;
+    }
+  }
+
+  private async transferProject(
+    project: Project,
+    preflight: ProjectTransferPreflight,
+    { includeUncommitted, includeIgnored }: { includeUncommitted: boolean; includeIgnored: boolean }
+  ): Promise<void> {
+    const id = project.id;
+    if (projectsDataStore.isProjectDeleting(id) || projectsDataStore.isProjectTransferring(id)) {
+      return;
+    }
+    const name = projectDisplayName(project);
+    const direction = preflight.direction;
+    const destination = transferDestinationLabel(direction);
+    projectsDataStore.projectTransferStarted(id, direction);
+    try {
+      const result = await commands.transferProject(
+        id,
+        direction,
+        includeUncommitted,
+        includeIgnored
+      );
+      projectsDataStore.projectTransferFinished(id, result.transferId);
+      const warnings = transferResultWarnings(result, preflight);
+      const notes = warnings.map(issueMessage);
+      const leftBehind = result.repos.some((repo) => repo.uncommittedLeftBehind);
+      if (leftBehind) {
+        notes.push(
+          result.backupDir
+            ? `Uncommitted changes were left behind in the backup at ${result.backupDir}.`
+            : 'Uncommitted changes were left behind in the backup.'
+        );
+      }
+      const title = `Transferred "${name}" to ${destination}`;
+      const description = notes.length > 0 ? notes.join(' ') : undefined;
+      if (warnings.length > 0) {
+        toast.warning(title, { description, duration: Infinity });
+      } else {
+        // The backup path is how the user gets those changes back, so it
+        // stays until dismissed.
+        toast.success(title, { description, ...(leftBehind ? { duration: Infinity } : {}) });
+      }
+    } catch (e) {
+      const message = errorMessage(e);
+      projectsDataStore.projectTransferFinished(id);
+      if (isTransferCancelledError(message)) {
+        toast.info(`Cancelled transferring "${name}"`, {
+          description:
+            direction === 'toRemote'
+              ? 'Nothing changed; the project is still local.'
+              : 'Nothing changed; the project is still on Blox.',
+        });
+      } else if (isTransferStaleError(message)) {
+        // The dialog was confirmed after another window moved the project:
+        // its destination is where the project already is, so say what the
+        // backend found rather than name it, and fetch where the project is
+        // now, so a new dialog offers the way it does go.
+        toast.warning(`Didn't transfer "${name}"`, { description: message });
+        void projectsDataStore.refreshTransferredProject(id);
+      } else {
+        console.error('Failed to transfer project:', e);
+        toast.error(`Unable to transfer "${name}" to ${destination}`, {
+          description: message,
+          duration: Infinity,
+        });
+      }
+    }
   }
 
   /**

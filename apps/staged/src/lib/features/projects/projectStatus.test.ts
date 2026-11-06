@@ -140,6 +140,29 @@ describe('getProjectStatus', () => {
     disconnectedSessionsStore.hasDisconnectedSessions.mockReturnValue(true);
     const { getProjectStatus } = await importStatus();
     expect(getProjectStatus('p1', new Map([['p1', 'Alpha']]), [branch()]).kind).toBe('deleting');
+    expect(
+      getProjectStatus(
+        'p1',
+        new Map([['p1', 'Alpha']]),
+        [branch()],
+        undefined,
+        new Map([['p1', 'toRemote']])
+      ).kind
+    ).toBe('deleting');
+  });
+
+  it('reports a transfer ahead of sessions, provisioning and unread', async () => {
+    projectStateStore.hasRunningSessions.mockReturnValue(true);
+    projectStateStore.isUnread.mockReturnValue(true);
+    const { getProjectStatus } = await importStatus();
+    const transferring = new Map([['p1', 'toLocal']]);
+    expect(
+      getProjectStatus('p1', undefined, [branch({ worktreePath: null })], undefined, transferring)
+    ).toEqual({ kind: 'transferring', runningCount: 0, runActionPhase: null });
+    // Another project's transfer leaves this one alone.
+    expect(getProjectStatus('p2', undefined, [branch()], undefined, transferring).kind).toBe(
+      'running'
+    );
   });
 
   it('reports disconnected for a project whose only session lost its connection', async () => {

@@ -17,6 +17,7 @@ mod upstream;
 mod worktree;
 
 pub use branch_config::{read_branch_config_snapshot, BranchConfigSnapshot};
+pub(crate) use cli::configure_captured;
 pub(crate) use cli::prewarm_shell_env;
 pub(crate) use cli::run as cli_run;
 pub(crate) use cli::run_lite_or_captured as cli_run_lite_or_captured;
@@ -59,7 +60,8 @@ pub use upstream::{upstream_branch_name, upstream_branch_name_with};
 pub(crate) use worktree::force_delete_branch;
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_at_path, create_worktree_for_existing_branch,
-    create_worktree_for_existing_branch_at_path, create_worktree_from_pr,
+    create_worktree_for_existing_branch_at_path,
+    create_worktree_for_existing_branch_without_lfs_smudge, create_worktree_from_pr,
     create_worktree_from_pr_at_path, discard_worktree_changes, fetch_origin_branch,
     fetch_pr_head_sha, get_commits_since_base, get_full_commit_log, get_head_sha,
     get_parent_commit, has_unpushed_commits, has_upstream, list_worktree_change_paths,

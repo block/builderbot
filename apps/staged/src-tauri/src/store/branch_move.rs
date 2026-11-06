@@ -299,7 +299,7 @@ fn duplicate_repo_error(err: &rusqlite::Error) -> StoreError {
     StoreError(err.to_string())
 }
 
-fn duplicate_branch_error(err: &rusqlite::Error) -> StoreError {
+pub(super) fn duplicate_branch_error(err: &rusqlite::Error) -> StoreError {
     if is_unique_violation(err, &["branches.branch_name"]) {
         return StoreError(
             "The destination project already tracks a branch with this name for this repository."
@@ -309,7 +309,7 @@ fn duplicate_branch_error(err: &rusqlite::Error) -> StoreError {
     StoreError(err.to_string())
 }
 
-fn duplicate_workdir_error(err: &rusqlite::Error) -> StoreError {
+pub(super) fn duplicate_workdir_error(err: &rusqlite::Error) -> StoreError {
     if is_unique_violation(err, &["workdirs.path"]) {
         return StoreError(
             "The destination project already has a worktree at that path.".to_string(),

@@ -76,6 +76,9 @@
     branches: Branch[];
     reposById?: Map<string, ProjectRepo>;
     deleting?: boolean;
+    /** The project is being transferred: its branches and repos can't change
+     *  until it's over, so their actions are dimmed like a delete's. */
+    transferring?: boolean;
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     workspaceErrors?: Map<string, string>;
@@ -92,6 +95,7 @@
     branches,
     reposById = new Map(),
     deleting = false,
+    transferring = false,
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     workspaceErrors = new Map(),
@@ -996,7 +1000,13 @@
     </div>
   </section>
 
-  <div class="branches-list" class:deleting>
+  <div
+    class="branches-list"
+    class:deleting
+    class:transferring
+    inert={deleting || transferring}
+    aria-busy={transferring || undefined}
+  >
     {#each sortedBranches as branch (branch.id)}
       <BranchCard
         {branch}
@@ -1013,7 +1023,9 @@
     {/each}
   </div>
 
-  <SuggestedRepos {project} {reposById} {onRepoSelected} />
+  {#if !transferring}
+    <SuggestedRepos {project} {reposById} {onRepoSelected} />
+  {/if}
 </div>
 
 {#if showProjectSessionModal}
@@ -1143,7 +1155,8 @@
     gap: 12px;
   }
 
-  .branches-list.deleting {
+  .branches-list.deleting,
+  .branches-list.transferring {
     opacity: 0.65;
     pointer-events: none;
   }

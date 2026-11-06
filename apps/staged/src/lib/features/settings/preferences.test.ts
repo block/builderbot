@@ -145,8 +145,9 @@ describe.each([true, false])('project status synchronization (native=%s)', (nati
     await client.initPreferences();
     await client.initPreferences();
     // One listener per synced key (project statuses first, then new-project
-    // location, then composer send mode).
-    expect(listeners).toHaveLength(3);
+    // location, then composer send mode, then the transfer dialog's
+    // uncommitted-changes and ignored-files answers).
+    expect(listeners).toHaveLength(5);
 
     values.set(key, [custom]);
     listeners[0].options?.onEstablished?.();
@@ -373,5 +374,80 @@ describe.each([true, false])('new project location (native=%s)', (native) => {
 
     reads[1]('local');
     await vi.waitFor(() => expect(client.preferences.newProjectLocation).toBe('local'));
+  });
+});
+
+describe.each([true, false])('transfer uncommitted changes (native=%s)', (native) => {
+  const transferKey = 'transfer-uncommitted-changes';
+
+  it('defaults to carrying them and remembers the last answer globally', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.transferUncommittedChanges).toBe(true);
+
+    client.setTransferUncommittedChanges(false);
+    expect(client.preferences.transferUncommittedChanges).toBe(false);
+    expect(values.get(transferKey)).toBe(false);
+
+    const reopened = await newClient(native);
+    await reopened.initPreferences();
+    expect(reopened.preferences.transferUncommittedChanges).toBe(false);
+  });
+
+  it('follows another client and falls back to true when the value is malformed or gone', async () => {
+    const a = await newClient(native);
+    await a.initPreferences();
+    const b = await newClient(!native);
+    await b.initPreferences();
+
+    a.setTransferUncommittedChanges(false);
+    expect(b.preferences.transferUncommittedChanges).toBe(false);
+    expect(set).toHaveBeenCalledTimes(1);
+
+    emit('yes', { key: transferKey });
+    expect(a.preferences.transferUncommittedChanges).toBe(true);
+    emit(false, { key: transferKey });
+    emit(null, { key: transferKey, exists: false });
+    expect(a.preferences.transferUncommittedChanges).toBe(true);
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.each([true, false])('transfer ignored files (native=%s)', (native) => {
+  const ignoredKey = 'transfer-ignored-files';
+
+  it('defaults to leaving them behind and remembers the last answer globally', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.transferIgnoredFiles).toBe(false);
+
+    client.setTransferIgnoredFiles(true);
+    expect(client.preferences.transferIgnoredFiles).toBe(true);
+    expect(values.get(ignoredKey)).toBe(true);
+    // Separate from the uncommitted-changes answer.
+    expect(client.preferences.transferUncommittedChanges).toBe(true);
+    expect(values.has('transfer-uncommitted-changes')).toBe(false);
+
+    const reopened = await newClient(native);
+    await reopened.initPreferences();
+    expect(reopened.preferences.transferIgnoredFiles).toBe(true);
+  });
+
+  it('follows another client and falls back to false when the value is malformed or gone', async () => {
+    const a = await newClient(native);
+    await a.initPreferences();
+    const b = await newClient(!native);
+    await b.initPreferences();
+
+    a.setTransferIgnoredFiles(true);
+    expect(b.preferences.transferIgnoredFiles).toBe(true);
+    expect(set).toHaveBeenCalledTimes(1);
+
+    emit('yes', { key: ignoredKey });
+    expect(a.preferences.transferIgnoredFiles).toBe(false);
+    emit(true, { key: ignoredKey });
+    emit(null, { key: ignoredKey, exists: false });
+    expect(a.preferences.transferIgnoredFiles).toBe(false);
+    expect(set).toHaveBeenCalledTimes(1);
   });
 });

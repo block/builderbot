@@ -5,6 +5,7 @@ import { projectRunActionsStore, type RunActionPhase } from '../../stores/projec
 
 export type ProjectStatusKind =
   | 'deleting'
+  | 'transferring'
   | 'runAction'
   | 'running'
   | 'backgroundHold'
@@ -41,15 +42,22 @@ function hasProvisioningWorkspace(
 /**
  * `worktreeErrors` is `workspaceLifecycle.getWorktreeErrors()`: branch id →
  * message for local branches whose `setup_worktree` failed.
+ * `transferringProjects` is `projectsDataStore.transferringProjects`; a
+ * transfer stops the project's actions and refuses sessions, so it outranks
+ * everything but a delete.
  */
 export function getProjectStatus(
   projectId: string,
   deletingProjectNames?: Map<string, string>,
   branches: Branch[] = [],
-  worktreeErrors?: ReadonlyMap<string, string>
+  worktreeErrors?: ReadonlyMap<string, string>,
+  transferringProjects?: ReadonlyMap<string, unknown>
 ): ProjectStatus {
   if (deletingProjectNames?.has(projectId)) {
     return { kind: 'deleting', runningCount: 0, runActionPhase: null };
+  }
+  if (transferringProjects?.has(projectId)) {
+    return { kind: 'transferring', runningCount: 0, runActionPhase: null };
   }
 
   const runActionPhase = projectRunActionsStore.getRunActionPhase(projectId);

@@ -340,6 +340,8 @@
     execute_process: 'Executing process',
     project_bootstrap: 'Project bootstrap',
     provision_workspace: 'Provision workspace',
+    restore_snapshot: 'Restore snapshot',
+    execute_bootstrap: 'Bootstrap',
   };
 
   /** Detail text for the provisioning row (e.g. git progress percentages or step info). */

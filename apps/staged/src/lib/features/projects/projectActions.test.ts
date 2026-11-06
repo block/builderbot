@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Branch, Project, ProjectRepo } from '../../types';
+import type {
+  Branch,
+  Project,
+  ProjectRepo,
+  ProjectTransferPreflight,
+  ProjectTransferRepoPreflight,
+  ProjectTransferResult,
+} from '../../types';
 
 // ── Fixtures ──
 
@@ -68,15 +75,103 @@ function projectRepo(overrides: Partial<ProjectRepo> = {}): ProjectRepo {
   };
 }
 
+function repoPreflight(
+  overrides: Partial<ProjectTransferRepoPreflight> = {}
+): ProjectTransferRepoPreflight {
+  return {
+    branchId: 'b1',
+    projectRepoId: 'r1',
+    githubRepo: 'org/alpha',
+    subpath: null,
+    branchName: 'feature',
+    destBranchName: 'feature',
+    state: 'carry',
+    head: 'abc',
+    upstream: 'origin/feature',
+    unpushedCommits: 0,
+    staged: 0,
+    unstaged: 0,
+    untracked: 0,
+    conflicted: 0,
+    untrackedBytes: 0,
+    ignoredFiles: 0,
+    ignoredBytes: 0,
+    ignoredDirs: 0,
+    lfsPresent: 0,
+    lfsPresentBytes: 0,
+    lfsMissing: 0,
+    lfsMissingBytes: 0,
+    hasUncommittedChanges: false,
+    blockers: [],
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function preflight(overrides: Partial<ProjectTransferPreflight> = {}): ProjectTransferPreflight {
+  return {
+    projectId: 'p1',
+    from: 'local',
+    to: 'remote',
+    direction: 'toRemote',
+    workspaceName: null,
+    repos: [repoPreflight()],
+    blockers: [],
+    warnings: [],
+    canTransfer: true,
+    hasUncommittedChanges: false,
+    ...overrides,
+  };
+}
+
+function transferResult(overrides: Partial<ProjectTransferResult> = {}): ProjectTransferResult {
+  return {
+    projectId: 'p1',
+    transferId: 't1',
+    direction: 'toRemote',
+    location: 'remote',
+    workspaceName: 'alpha-feature',
+    repos: [
+      {
+        branchId: 'b1',
+        projectRepoId: 'r1',
+        githubRepo: 'org/alpha',
+        branchName: 'feature',
+        previousBranchName: 'feature',
+        carried: true,
+        head: 'abc',
+        uncommittedRestored: false,
+        uncommittedLeftBehind: false,
+        retriedWithoutExclusions: false,
+        backupRef: 'refs/staged-transfer-backup/t1/feature',
+        warnings: [],
+      },
+    ],
+    warnings: [],
+    backupDir: '/home/me/.staged/transfers/t1',
+    ...overrides,
+  };
+}
+
 // ── Mock plumbing ──
 
 let deleteProject: ReturnType<typeof vi.fn>;
+let getProjectTransferPreflight: ReturnType<typeof vi.fn>;
+let transferProject: ReturnType<typeof vi.fn>;
+let cancelProjectTransfer: ReturnType<typeof vi.fn>;
+let projectTransferStarted: ReturnType<typeof vi.fn>;
+let projectTransferFinished: ReturnType<typeof vi.fn>;
+let refreshTransferredProject: ReturnType<typeof vi.fn>;
+let setTransferUncommittedChanges: ReturnType<typeof vi.fn>;
+let setTransferIgnoredFiles: ReturnType<typeof vi.fn>;
+let toastSuccess: ReturnType<typeof vi.fn>;
+let toastWarning: ReturnType<typeof vi.fn>;
+let toastInfo: ReturnType<typeof vi.fn>;
 let hasUnpushedCommits: ReturnType<typeof vi.fn>;
 let markAsRead: ReturnType<typeof vi.fn>;
 let markAsUnread: ReturnType<typeof vi.fn>;
 let clearBranchState: ReturnType<typeof vi.fn>;
 let toastError: ReturnType<typeof vi.fn>;
-let toastSuccess: ReturnType<typeof vi.fn>;
 let selectProject: ReturnType<typeof vi.fn>;
 let goHome: ReturnType<typeof vi.fn>;
 let releaseProjectLayer: ReturnType<typeof vi.fn>;
@@ -97,6 +192,7 @@ let storeState: {
   branchesByProject: Map<string, Branch[]>;
   reposByProject: Map<string, ProjectRepo[]>;
   deletingProjectNames: Map<string, string>;
+  transferringProjects: Map<string, string>;
 };
 
 async function importActions() {
@@ -126,12 +222,26 @@ beforeEach(() => {
   vi.stubGlobal('$state', (initial: unknown) => initial);
 
   deleteProject = vi.fn().mockResolvedValue(undefined);
+  getProjectTransferPreflight = vi.fn().mockResolvedValue(preflight());
+  transferProject = vi.fn().mockResolvedValue(transferResult());
+  cancelProjectTransfer = vi.fn().mockResolvedValue(true);
+  projectTransferStarted = vi.fn((projectId: string, direction: string) => {
+    storeState.transferringProjects.set(projectId, direction);
+  });
+  projectTransferFinished = vi.fn((projectId: string) => {
+    storeState.transferringProjects.delete(projectId);
+  });
+  refreshTransferredProject = vi.fn().mockResolvedValue(undefined);
+  setTransferUncommittedChanges = vi.fn();
+  setTransferIgnoredFiles = vi.fn();
+  toastSuccess = vi.fn();
+  toastWarning = vi.fn();
+  toastInfo = vi.fn();
   hasUnpushedCommits = vi.fn().mockResolvedValue(false);
   markAsRead = vi.fn();
   markAsUnread = vi.fn();
   clearBranchState = vi.fn();
   toastError = vi.fn();
-  toastSuccess = vi.fn();
   selectProject = vi.fn();
   goHome = vi.fn();
   releaseProjectLayer = vi.fn();
@@ -152,12 +262,20 @@ beforeEach(() => {
     branchesByProject: new Map([['p1', [mergedBranch()]]]),
     reposByProject: new Map([['p1', [projectRepo()]]]),
     deletingProjectNames: new Map(),
+    transferringProjects: new Map(),
   };
 
   vi.doMock('../../api/commands', () => ({
     deleteProject,
     hasUnpushedCommits,
     setProjectStatusOverride,
+    getProjectTransferPreflight,
+    transferProject,
+    cancelProjectTransfer,
+  }));
+  vi.doMock('../settings/preferences.svelte', () => ({
+    setTransferUncommittedChanges,
+    setTransferIgnoredFiles,
   }));
   vi.doMock('../layout/navigation.svelte', () => ({
     navigation: navigationState,
@@ -187,10 +305,14 @@ beforeEach(() => {
         );
       },
       isProjectDeleting: (projectId: string) => storeState.deletingProjectNames.has(projectId),
+      isProjectTransferring: (projectId: string) => storeState.transferringProjects.has(projectId),
       ensureProjectHydrated,
       projectDeleteStarted,
       projectDeleteFailed,
       projectStatusOverrideChanged,
+      projectTransferStarted,
+      projectTransferFinished,
+      refreshTransferredProject,
     },
   }));
   vi.doMock('../../stores/projectState.svelte', () => ({
@@ -203,12 +325,13 @@ beforeEach(() => {
     projectDisplayName: (p: Project) => p.name ?? p.githubRepo ?? p.id,
   }));
   vi.doMock('svelte-sonner', () => ({
-    toast: { error: toastError, success: toastSuccess },
+    toast: { error: toastError, success: toastSuccess, warning: toastWarning, info: toastInfo },
   }));
 });
 
 afterEach(() => {
   vi.doUnmock('../../api/commands');
+  vi.doUnmock('../settings/preferences.svelte');
   vi.doUnmock('../layout/navigation.svelte');
   vi.doUnmock('../../stores/projectsData.svelte');
   vi.doUnmock('../../stores/projectState.svelte');
@@ -877,5 +1000,311 @@ describe('navigation on delete', () => {
     );
     expect(layerAtDelete).toBeNull();
     expect(navigationState.homeActive).toBe(true);
+  });
+});
+
+describe('requestTransferProject', () => {
+  it('opens the dialog loading, then lands the preflight', async () => {
+    let resolvePreflight!: (value: ProjectTransferPreflight) => void;
+    getProjectTransferPreflight.mockReturnValue(
+      new Promise<ProjectTransferPreflight>((resolve) => (resolvePreflight = resolve))
+    );
+    // The repos are fetched for the progress banner; the dialog labels rows
+    // from the preflight, so a cold project's hydration doesn't hold it back.
+    ensureProjectHydrated.mockReturnValue(new Promise(() => {}));
+    const actions = await importActions();
+
+    const request = actions.requestTransferProject(project());
+    expect(actions.pendingTransfer).toEqual({
+      project: project(),
+      direction: 'toRemote',
+      status: 'loading',
+    });
+    expect(ensureProjectHydrated).toHaveBeenCalledWith('p1');
+    expect(getProjectTransferPreflight).toHaveBeenCalledWith('p1');
+
+    resolvePreflight(preflight());
+    await request;
+    expect(actions.pendingTransfer).toEqual({
+      project: project(),
+      direction: 'toRemote',
+      status: 'ready',
+      preflight: preflight(),
+    });
+    expect(transferProject).not.toHaveBeenCalled();
+  });
+
+  it('offers the other location for a remote project', async () => {
+    getProjectTransferPreflight.mockResolvedValue(
+      preflight({ from: 'remote', to: 'local', direction: 'toLocal', workspaceName: 'ws' })
+    );
+    const actions = await importActions();
+    await actions.requestTransferProject(project({ location: 'remote' }));
+    expect(actions.pendingTransfer?.direction).toBe('toLocal');
+  });
+
+  it('shows a failed preflight in the dialog', async () => {
+    getProjectTransferPreflight.mockRejectedValue(new Error('sq exploded'));
+    const actions = await importActions();
+    await actions.requestTransferProject(project());
+    expect(actions.pendingTransfer).toEqual({
+      project: project(),
+      direction: 'toRemote',
+      status: 'error',
+      error: 'sq exploded',
+    });
+  });
+
+  it('drops a preflight that lands after the dialog was closed', async () => {
+    let resolvePreflight!: (value: ProjectTransferPreflight) => void;
+    getProjectTransferPreflight.mockReturnValue(
+      new Promise<ProjectTransferPreflight>((resolve) => (resolvePreflight = resolve))
+    );
+    const actions = await importActions();
+    const request = actions.requestTransferProject(project());
+    actions.cancelPendingTransfer();
+    resolvePreflight(preflight());
+    await request;
+    expect(actions.pendingTransfer).toBeNull();
+  });
+
+  it('no-ops for a project that is deleting or already transferring', async () => {
+    const actions = await importActions();
+    storeState.deletingProjectNames.set('p1', 'Alpha');
+    await actions.requestTransferProject(project());
+    storeState.deletingProjectNames.clear();
+    storeState.transferringProjects.set('p1', 'toRemote');
+    await actions.requestTransferProject(project());
+    expect(actions.pendingTransfer).toBeNull();
+    expect(getProjectTransferPreflight).not.toHaveBeenCalled();
+  });
+});
+
+describe('confirmPendingTransfer', () => {
+  async function readyActions(pf: ProjectTransferPreflight) {
+    getProjectTransferPreflight.mockResolvedValue(pf);
+    const actions = await importActions();
+    await actions.requestTransferProject(project());
+    expect(actions.pendingTransfer?.status).toBe('ready');
+    return actions;
+  }
+
+  it('closes the dialog, marks the project transferring and toasts the success', async () => {
+    const actions = await readyActions(preflight());
+    let transferringDuringCall: boolean | undefined;
+    transferProject.mockImplementation(async () => {
+      transferringDuringCall = storeState.transferringProjects.get('p1') === 'toRemote';
+      return transferResult();
+    });
+
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+
+    expect(actions.pendingTransfer).toBeNull();
+    expect(projectTransferStarted).toHaveBeenCalledWith('p1', 'toRemote');
+    // The direction the dialog showed, for the backend to hold it to.
+    expect(transferProject).toHaveBeenCalledWith('p1', 'toRemote', true, false);
+    expect(transferringDuringCall).toBe(true);
+    expect(projectTransferFinished).toHaveBeenCalledWith('p1', 't1');
+    expect(toastSuccess).toHaveBeenCalledWith('Transferred "Alpha" to Blox', {
+      description: undefined,
+    });
+    expect(toastWarning).not.toHaveBeenCalled();
+  });
+
+  it('remembers the checkbox only when it was shown', async () => {
+    // Nothing uncommitted: no checkbox, nothing remembered, and the transfer
+    // carries whatever turns up rather than applying a stale answer.
+    let actions = await readyActions(preflight());
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
+    expect(setTransferUncommittedChanges).not.toHaveBeenCalled();
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', true, false);
+
+    const dirty = preflight({
+      repos: [repoPreflight({ unstaged: 2, hasUncommittedChanges: true })],
+      hasUncommittedChanges: true,
+    });
+    actions = await readyActions(dirty);
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
+    expect(setTransferUncommittedChanges).toHaveBeenCalledWith(false);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', false, false);
+
+    actions = await readyActions(dirty);
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+    expect(setTransferUncommittedChanges).toHaveBeenLastCalledWith(true);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', true, false);
+
+    // A workspace the transfer resumes first may have changes nobody has
+    // counted yet: the checkbox shows for it, and its answer applies.
+    setTransferUncommittedChanges.mockClear();
+    actions = await readyActions(preflight({ repos: [repoPreflight({ state: 'unknown' })] }));
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
+    expect(setTransferUncommittedChanges).toHaveBeenCalledWith(false);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', false, false);
+  });
+
+  it('remembers and sends the ignored-files answer only when it could be given', async () => {
+    // No ignored files: no checkbox, nothing remembered, nothing carried.
+    let actions = await readyActions(preflight({ repos: [repoPreflight({ ignoredDirs: 3 })] }));
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: true });
+    expect(setTransferIgnoredFiles).not.toHaveBeenCalled();
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', true, false);
+
+    const ignored = preflight({ repos: [repoPreflight({ ignoredFiles: 2, ignoredBytes: 40 })] });
+    actions = await readyActions(ignored);
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: true });
+    expect(setTransferIgnoredFiles).toHaveBeenLastCalledWith(true);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', true, true);
+
+    actions = await readyActions(ignored);
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+    expect(setTransferIgnoredFiles).toHaveBeenLastCalledWith(false);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', true, false);
+    // Independent of the uncommitted-changes answer, which wasn't asked.
+    expect(setTransferUncommittedChanges).not.toHaveBeenCalled();
+
+    // Over the cap: the box is disabled, so its (remembered) value is neither
+    // saved nor sent, which the backend would refuse.
+    setTransferIgnoredFiles.mockClear();
+    actions = await readyActions(
+      preflight({
+        repos: [
+          repoPreflight({
+            ignoredFiles: 2,
+            warnings: [{ code: 'ignored_too_large', message: 'too big' }],
+          }),
+        ],
+      })
+    );
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: true });
+    expect(setTransferIgnoredFiles).not.toHaveBeenCalled();
+    expect(transferProject).toHaveBeenLastCalledWith('p1', 'toRemote', true, false);
+  });
+
+  it('refuses a blocked preflight', async () => {
+    const actions = await readyActions(
+      preflight({
+        canTransfer: false,
+        blockers: [{ code: 'sq_unavailable', message: 'no sq' }],
+      })
+    );
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+    expect(transferProject).not.toHaveBeenCalled();
+    expect(actions.pendingTransfer?.status).toBe('ready');
+  });
+
+  it('surfaces teardown and new repo warnings, not ones the dialog already showed', async () => {
+    const lfs = {
+      code: 'lfs_missing',
+      message:
+        '2 LFS objects are not available locally and will be fetched from origin if possible.',
+    };
+    const actions = await readyActions(preflight({ repos: [repoPreflight({ warnings: [lfs] })] }));
+    const result = transferResult({
+      warnings: [{ code: 'worktree_left', message: 'Transferred, but the old worktree stayed.' }],
+    });
+    result.repos[0].warnings = [lfs, { code: 'apply', message: 'Upstream fetch failed.' }];
+    result.repos[0].uncommittedLeftBehind = true;
+    transferProject.mockResolvedValue(result);
+
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+
+    expect(toastWarning).toHaveBeenCalledWith('Transferred "Alpha" to Blox', {
+      description:
+        'Transferred, but the old worktree stayed. Upstream fetch failed. Uncommitted changes were left behind in the backup at /home/me/.staged/transfers/t1.',
+      duration: Infinity,
+    });
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it('keeps the success toast open when changes were left behind', async () => {
+    const actions = await readyActions(preflight());
+    const result = transferResult();
+    result.repos[0].uncommittedLeftBehind = true;
+    transferProject.mockResolvedValue(result);
+
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
+
+    // It carries the backup path, the only way back to those changes.
+    expect(toastSuccess).toHaveBeenCalledWith('Transferred "Alpha" to Blox', {
+      description:
+        'Uncommitted changes were left behind in the backup at /home/me/.staged/transfers/t1.',
+      duration: Infinity,
+    });
+  });
+
+  it('clears the transferring marker and toasts a failure', async () => {
+    transferProject.mockRejectedValue(new Error('bundle verify failed'));
+    const actions = await readyActions(preflight());
+
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+
+    expect(projectTransferFinished).toHaveBeenCalledWith('p1');
+    expect(storeState.transferringProjects.has('p1')).toBe(false);
+    expect(toastError).toHaveBeenCalledWith('Unable to transfer "Alpha" to Blox', {
+      description: 'bundle verify failed',
+      duration: Infinity,
+    });
+  });
+
+  it('sends the direction the dialog of a remote project showed', async () => {
+    getProjectTransferPreflight.mockResolvedValue(
+      preflight({ from: 'remote', to: 'local', direction: 'toLocal', workspaceName: 'ws' })
+    );
+    const actions = await importActions();
+    await actions.requestTransferProject(project({ location: 'remote' }));
+
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+
+    expect(transferProject).toHaveBeenCalledWith('p1', 'toLocal', true, false);
+  });
+
+  it('shows why a dialog left open while the project moved did nothing', async () => {
+    // Opened while the project was local; another window has since moved it
+    // to Blox, so the backend refuses "Transfer to Blox".
+    const refusal =
+      'The project is already on Blox; it was transferred after this dialog opened, so nothing changed.';
+    transferProject.mockRejectedValue(refusal);
+    const actions = await readyActions(preflight());
+
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+
+    expect(actions.pendingTransfer).toBeNull();
+    expect(projectTransferFinished).toHaveBeenCalledWith('p1');
+    expect(storeState.transferringProjects.has('p1')).toBe(false);
+    // The backend's sentence, under a title that names no destination.
+    expect(toastWarning).toHaveBeenCalledWith(`Didn't transfer "Alpha"`, {
+      description: refusal,
+    });
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastInfo).not.toHaveBeenCalled();
+    // Where the project is now, so the next dialog offers the way it goes.
+    expect(refreshTransferredProject).toHaveBeenCalledWith('p1');
+  });
+
+  it('reports a cancelled transfer as cancelled, not failed', async () => {
+    transferProject.mockRejectedValue(new Error('the transfer was cancelled'));
+    const actions = await readyActions(preflight());
+
+    const confirmed = actions.confirmPendingTransfer({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
+    await expect(actions.cancelTransfer('p1')).resolves.toBe(true);
+    expect(cancelProjectTransfer).toHaveBeenCalledWith('p1');
+    await confirmed;
+
+    expect(toastInfo).toHaveBeenCalledWith('Cancelled transferring "Alpha"', {
+      description: 'Nothing changed; the project is still local.',
+    });
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it('blocks remove while the project is transferring', async () => {
+    storeState.transferringProjects.set('p1', 'toRemote');
+    const actions = await importActions();
+    await actions.requestRemoveProject(project());
+    expect(deleteProject).not.toHaveBeenCalled();
+    expect(actions.pendingDelete).toBeNull();
   });
 });

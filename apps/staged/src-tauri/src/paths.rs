@@ -30,6 +30,12 @@ pub fn packages_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("packages"))
 }
 
+/// Project transfer artifacts: `~/.staged/transfers/<transfer id>/`, holding
+/// each repository's bundle as the backup of what was transferred.
+pub fn transfers_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("transfers"))
+}
+
 /// Root directory for workspace-scoped local data: `~/.staged/workspaces/`
 pub fn workspaces_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("workspaces"))

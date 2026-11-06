@@ -3,9 +3,13 @@
 //! Thin wrappers around shared `blox-cli` helpers so existing Staged code can
 //! keep using `crate::blox::*`.
 
+use std::path::Path;
 use std::sync::OnceLock;
 
-pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry, WsExecOutput};
+pub use blox_cli::{
+    BloxError, CommandType, FileRoute, WorkspaceCommand, WorkspaceCommandStatus, WorkspaceInfo,
+    WorkspaceListEntry, WsExecOutput,
+};
 
 static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -119,6 +123,16 @@ fn reachable_on_success<T>(name: &str, result: Result<T, BloxError>) -> Result<T
     result
 }
 
+/// [`ws_exec_output`] for a command whose work grows with `payload_bytes`:
+/// it may run for [`blox_cli::exec_timeout`] of them rather than 300 s.
+pub fn ws_exec_output_sized(
+    name: &str,
+    args: &[&str],
+    payload_bytes: u64,
+) -> Result<WsExecOutput, BloxError> {
+    blox_cli::ws_exec_output_with_timeout(name, args, blox_cli::exec_timeout(payload_bytes))
+}
+
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.
 ///
 /// Returns `Ok(())` if the user appears to be authenticated, or
@@ -139,4 +153,22 @@ pub fn ws_commands(name: &str) -> Result<Vec<WorkspaceCommand>, BloxError> {
 /// Runs: `sq blox ws resume <name>`
 pub fn ws_resume(name: &str) -> Result<(), BloxError> {
     blox_cli::ws_resume(name)
+}
+
+/// Copy a local file to an absolute path under the workspace's home, creating
+/// its directory: streamed over `ws ssh`, or in parts through `ws upload` when
+/// ssh cannot reach the workstation.
+pub fn ws_put_file(name: &str, local: &Path, remote_path: &str) -> Result<FileRoute, BloxError> {
+    blox_cli::ws_put_file(name, local, remote_path)
+}
+
+/// Copy a workspace file of `size` bytes to `local`: streamed over `ws ssh`,
+/// or in parts through `ws download` when ssh cannot reach the workstation.
+pub fn ws_get_file(
+    name: &str,
+    remote_path: &str,
+    local: &Path,
+    size: u64,
+) -> Result<FileRoute, BloxError> {
+    blox_cli::ws_get_file(name, remote_path, local, size)
 }

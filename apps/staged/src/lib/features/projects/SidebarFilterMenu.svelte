@@ -9,7 +9,8 @@
   trigger shows how many filters are active, and a Clear filters item appears
   while any are — repo filters can outlive their menu entry (delete the last
   project using a repo and its filter stays active with nothing to uncheck),
-  so clearing has to be reachable from the menu itself.
+  so clearing has to be reachable from the menu itself. It sits on the edge
+  facing the trigger, the shortest reach from opening the menu.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -46,7 +47,40 @@
     if (!open || !projectsDataStore.loaded) return;
     void projectsDataStore.ensureProjectsHydrated();
   });
+
+  // bits-ui opens the menu below the trigger and flips it above when the
+  // window has no room underneath (a long pinned-repos list can push this
+  // header to the bottom of the sidebar), reporting the side it settled on as
+  // the content's data-side. Clear filters follows that side so it always
+  // faces the trigger. Positioning settles before bits-ui's keyboard focus
+  // lands (focus waits a frame), so a keyboard open still starts on the first
+  // item of the final order. Sheet menus have no data-side and keep it on top.
+  let content = $state<HTMLElement | null>(null);
+  let placedSide = $state<string | null>(null);
+
+  $effect(() => {
+    const el = content;
+    if (!el) {
+      placedSide = null;
+      return;
+    }
+    const read = () => {
+      placedSide = el.getAttribute('data-side');
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(el, { attributes: true, attributeFilter: ['data-side'] });
+    return () => observer.disconnect();
+  });
+
+  let clearAtBottom = $derived(placedSide === 'top');
 </script>
+
+{#snippet clearItem()}
+  <DropdownMenu.Item onSelect={() => projectFiltersStore.clearFilters()}>
+    Clear filters
+  </DropdownMenu.Item>
+{/snippet}
 
 <DropdownMenu.Root bind:open>
   <DropdownMenu.Trigger
@@ -57,7 +91,11 @@
     {activeCount > 0 ? `${activeCount} filter${activeCount === 1 ? '' : 's'}` : 'Filter'}
     <ChevronDown size={11} />
   </DropdownMenu.Trigger>
-  <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[210px]">
+  <DropdownMenu.Content bind:ref={content} align="end" sideOffset={4} class="min-w-[210px]">
+    {#if projectFiltersStore.hasActiveFilters && !clearAtBottom}
+      {@render clearItem()}
+      <DropdownMenu.Separator />
+    {/if}
     <DropdownMenu.Label>Status</DropdownMenu.Label>
     <DropdownMenu.CheckboxItem
       checked={projectFiltersStore.isFilterActive('unread')}
@@ -102,11 +140,9 @@
         </DropdownMenu.CheckboxItem>
       {/each}
     {/if}
-    {#if projectFiltersStore.hasActiveFilters}
+    {#if projectFiltersStore.hasActiveFilters && clearAtBottom}
       <DropdownMenu.Separator />
-      <DropdownMenu.Item onSelect={() => projectFiltersStore.clearFilters()}>
-        Clear filters
-      </DropdownMenu.Item>
+      {@render clearItem()}
     {/if}
   </DropdownMenu.Content>
 </DropdownMenu.Root>

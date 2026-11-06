@@ -302,6 +302,16 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-CLI-OPEN"></a>**P-PENPAL-CLI-OPEN**: The `penpal open <path>...` command opens one or more files or directories in the Penpal app, launching the app if it's not running. Directories are resolved to their project; `.md` files are auto-added to their containing project if not already tracked (or a new standalone project is created). Non-`.md` files are rejected.
 
+- <a id="P-PENPAL-CLI-ATTACH"></a>**P-PENPAL-CLI-ATTACH**: `penpal attach <path>` registers the calling agent as the active agent for a project. The command discovers the running server, resolves the path to a project, opens the file in the app, and claims agent ownership. If another agent is already attached, the command fails with an error. `--force` evicts the existing agent and takes over. On success, prints JSON with the project name, worktree (if any), and a session token. The session token must be passed to all subsequent CLI commands.
+
+- <a id="P-PENPAL-CLI-AGENT-TOOLS"></a>**P-PENPAL-CLI-AGENT-TOOLS**: Agents interact with penpal via CLI subcommands that mirror the MCP tools: `penpal files-in-review`, `penpal list-threads`, `penpal read-thread`, `penpal reply`, `penpal create-thread`, and `penpal wait`. Each command requires `--session <token>` for authentication and prints JSON to stdout. `penpal wait` blocks up to 30 seconds and returns when comments change or on timeout — agents call it in a loop. All commands record agent heartbeats. An invalid or evicted session token causes the command to exit with an error.
+
+- <a id="P-PENPAL-CLI-CONTENTION"></a>**P-PENPAL-CLI-CONTENTION**: At most one agent (internal or external) can be active for a project at a time. `penpal attach` fails if an agent is already active. `penpal attach --force` terminates the existing agent (kills an internally-spawned process, or evicts an external session). When an external agent's session is evicted, its next CLI command fails with an "evicted" error. Internally-launched agents and CLI-attached agents use the same contention system.
+
+- <a id="P-PENPAL-AGENT-PARITY"></a>**P-PENPAL-AGENT-PARITY**: Launched (internally-spawned) and external (CLI-attached) agents have the same capabilities and Penpal exhibits the same behavior for both. Working indicators, presence dots, auto-start suppression, stop button behavior, and comment threading all work identically regardless of how the agent connected.
+
+- <a id="P-PENPAL-AGENT-SELF-ID"></a>**P-PENPAL-AGENT-SELF-ID**: Agents identify themselves by name when attaching. `penpal attach --agent amp` records "amp" as the agent name. The agent name is stored on the session and used as the comment author for all agent-role comments, so comments show the actual agent that wrote them (e.g., "amp" or "claude") rather than a generic label. Internally-spawned agents are always named "claude". If no agent name is provided, it defaults to "agent".
+
 ---
 
 ## Real-Time Updates

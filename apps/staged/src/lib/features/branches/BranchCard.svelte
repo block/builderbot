@@ -140,9 +140,6 @@
     repoLabel?: ProjectRepo | null;
     projectName?: string;
     deleting?: boolean;
-    /** Ignore file drops without showing the card as deleting: its project is
-     *  being deleted, and the project section dims the whole list instead. */
-    dropsDisabled?: boolean;
     worktreeError?: string;
     workspaceError?: string;
     onDelete?: () => void;
@@ -156,7 +153,6 @@
     repoLabel = null,
     projectName,
     deleting = false,
-    dropsDisabled = false,
     worktreeError,
     workspaceError,
     onDelete,
@@ -1946,24 +1942,17 @@
     );
   }
 
-  /** "Add image": stores the picked images and confirms them like a drop. */
-  async function addPickedImages(stored: Promise<number>) {
-    notifyAddedOffTimeline(await stored);
-  }
-
   // Remote cards take drops too, whatever their workspace's status: the file is
   // read on this machine and the note or image lands in the local store, never
   // on the workspace.
   //
-  // A card being deleted, or in a project being deleted, takes neither the
-  // highlight nor the drop. The store would race the delete, and its toast
-  // would promise the file to a card about to vanish, or, if the delete won,
-  // blame the file ("Could not read …"). `onDrop` reads `takesDrops` as each
-  // drop arrives, not the effect, so the subscription stays put while it flips;
-  // a failed delete restores the card. The highlight derives from it in the
-  // markup, so it follows a flip mid-hover too.
-  let takesDrops = $derived(!deleting && !dropsDisabled);
-
+  // A card being deleted takes neither the highlight nor the drop. The store
+  // would race the delete, and its toast would promise the file to a card about
+  // to vanish, or, if the delete won, blame the file ("Could not read …").
+  // `onDrop` reads `deleting` as each drop arrives, not the effect, so the
+  // subscription stays put while it flips; a failed delete restores the card.
+  // The highlight derives from it in the markup, so it follows a flip mid-hover
+  // too.
   $effect(() => {
     const el = cardElement;
     if (!el) return;
@@ -1975,7 +1964,7 @@
           dragOver = over;
         },
         onDrop: (paths) => {
-          if (!takesDrops) return;
+          if (deleting) return;
           void handleFileDrop(paths);
         },
       })
@@ -2041,7 +2030,7 @@
   class:deleting
   class:creating-worktree={isLocal && !branch.worktreePath && !worktreeError && !deleting}
   data-branch-id={branch.id}
-  class:drag-over={dragOver && takesDrops}
+  class:drag-over={dragOver && !deleting}
 >
   {#if deleting}
     <div class="deleting-overlay">
@@ -2315,8 +2304,8 @@
      build's file input has to outlive the tap that opened it. -->
 <BranchImagePicker
   bind:this={imagePicker}
-  onPickPaths={(paths) => void addPickedImages(addImagePaths(paths))}
-  onPickFiles={(files) => void addPickedImages(addImageFiles(files))}
+  onPickPaths={(paths) => void addImagePaths(paths).then(notifyAddedOffTimeline)}
+  onPickFiles={(files) => void addImageFiles(files).then(notifyAddedOffTimeline)}
   onError={(e) => notifyError('Could not open the image picker', e)}
 />
 

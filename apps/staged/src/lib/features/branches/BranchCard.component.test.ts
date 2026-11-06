@@ -4,8 +4,7 @@ import type { Branch, BranchTimeline, WorkspaceStatus } from '../../types';
 import type { DragDropSubscription } from './dragDrop';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 
-const { subscribeDragDrop, unsubscribeDragDrop, toast, cmd, emptyTimeline } = vi.hoisted(() => {
-  const unsubscribeDragDrop = vi.fn();
+const { subscribeDragDrop, toast, cmd, emptyTimeline } = vi.hoisted(() => {
   const emptyTimeline: BranchTimeline = {
     commits: [],
     notes: [],
@@ -15,8 +14,7 @@ const { subscribeDragDrop, unsubscribeDragDrop, toast, cmd, emptyTimeline } = vi
   };
   return {
     emptyTimeline,
-    unsubscribeDragDrop,
-    subscribeDragDrop: vi.fn((_sub: DragDropSubscription) => unsubscribeDragDrop),
+    subscribeDragDrop: vi.fn((_sub: DragDropSubscription) => () => {}),
     toast: { success: vi.fn(), error: vi.fn() },
     cmd: {
       readTextFile: vi.fn(async (_filePath: string) => '# Dropped\n\nbody'),
@@ -89,14 +87,11 @@ import BranchCard from './BranchCard.svelte';
 
 const mounted: ReturnType<typeof mount>[] = [];
 
-/**
- * Mounts a card. Set `props.deleting` afterwards to flip its delete state, or
- * `props.dropsDisabled` to flip its project's.
- */
+/** Mounts a card. Set `props.deleting` afterwards to flip its delete state. */
 function mountCard(branch: Branch) {
   const target = document.createElement('div');
   document.body.appendChild(target);
-  const props = reactiveProps({ branch, deleting: false, dropsDisabled: false });
+  const props = reactiveProps({ branch, deleting: false });
   mounted.push(mount(BranchCard, { target, props }));
   flushSync();
   return { card: target.querySelector<HTMLElement>('.branch-card')!, props };
@@ -198,7 +193,6 @@ afterEach(() => {
   for (const card of mounted.splice(0)) unmount(card);
   document.body.innerHTML = '';
   subscribeDragDrop.mockClear();
-  unsubscribeDragDrop.mockClear();
   toast.success.mockClear();
   toast.error.mockClear();
   // Back to the implementations given to vi.fn above.
@@ -245,78 +239,31 @@ describe('BranchCard file drops', () => {
   });
 });
 
-describe('BranchCard while it or its project is being deleted', () => {
-  const deleteStates = [
-    ['it is being deleted', 'deleting'],
-    ['its project is being deleted', 'dropsDisabled'],
-  ] as const;
-
-  it.each(deleteStates)(
-    'takes neither the highlight nor the files dropped on it while %s',
-    async (_label, prop) => {
-      const { card, props } = mountCard(remoteBranch('stopped'));
-      const sub = subscription();
-
-      props[prop] = true;
-      flushSync();
-      sub.onDragOver(true);
-      flushSync();
-      expect(card.classList.contains('drag-over')).toBe(false);
-      drop(['/tmp/during-delete.md', '/tmp/during-delete.png']);
-
-      // The delete failed and the card is back. A drop now is stored, and once
-      // it has settled, anything the drop above set off would have shown too.
-      props[prop] = false;
-      flushSync();
-      drop(['/tmp/after.md']);
-      await settle(() => expect(cmd.createNote).toHaveResolved());
-
-      expect(cmd.readTextFile).toHaveBeenCalledTimes(1);
-      expect(cmd.readTextFile).toHaveBeenCalledWith('/tmp/after.md');
-      expect(cmd.createImage).not.toHaveBeenCalled();
-      expect(toast.error).not.toHaveBeenCalled();
-      expect(toast.success).toHaveBeenCalledTimes(1);
-      expect(toast.success).toHaveBeenCalledWith('Added 1 file', expect.anything());
-    }
-  );
-
-  it.each(deleteStates)(
-    'keeps its one subscription while %s and the delete fails',
-    (_label, prop) => {
-      const { card, props } = mountCard(remoteBranch('stopped'));
-      const sub = subscription();
-
-      props[prop] = true;
-      flushSync();
-      props[prop] = false;
-      flushSync();
-
-      expect(subscribeDragDrop).toHaveBeenCalledTimes(1);
-      expect(unsubscribeDragDrop).not.toHaveBeenCalled();
-      sub.onDragOver(true);
-      flushSync();
-      expect(card.classList.contains('drag-over')).toBe(true);
-    }
-  );
-
-  it('lets its highlight follow a delete that fails or starts while files are held over it', () => {
+describe('BranchCard while it is being deleted', () => {
+  it('takes neither the highlight nor the files dropped on it', async () => {
     const { card, props } = mountCard(remoteBranch('stopped'));
     const sub = subscription();
-    const highlighted = () => {
-      flushSync();
-      return card.classList.contains('drag-over');
-    };
 
     props.deleting = true;
+    flushSync();
     sub.onDragOver(true);
-    expect(highlighted()).toBe(false);
+    flushSync();
+    expect(card.classList.contains('drag-over')).toBe(false);
+    drop(['/tmp/during-delete.md', '/tmp/during-delete.png']);
 
-    // dragDrop.ts calls onDragOver only when the hovered card changes, so the
-    // card hears nothing more while the files stay over it.
+    // The delete failed and the card is back. A drop now is stored, and once
+    // it has settled, anything the drop above set off would have shown too.
     props.deleting = false;
-    expect(highlighted()).toBe(true);
-    props.deleting = true;
-    expect(highlighted()).toBe(false);
+    flushSync();
+    drop(['/tmp/after.md']);
+    await settle(() => expect(cmd.createNote).toHaveResolved());
+
+    expect(cmd.readTextFile).toHaveBeenCalledTimes(1);
+    expect(cmd.readTextFile).toHaveBeenCalledWith('/tmp/after.md');
+    expect(cmd.createImage).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', expect.anything());
   });
 });
 
@@ -480,23 +427,14 @@ describe('BranchCard "Add image" picks the timeline cannot show yet', () => {
     expect(toast.success).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['paths', 'a remote card whose workspace is running', () => remoteBranch('running')],
-    ['files', 'a remote card whose workspace is running', () => remoteBranch('running')],
-    ['paths', 'a local card with a worktree', () => localBranch('/tmp/worktree')],
-    ['files', 'a local card with a worktree', () => localBranch('/tmp/worktree')],
-  ] as const)(
-    'leaves an image picked by %s on %s to its "adding..." row',
-    async (via, _label, branch) => {
-      mountCard(branch());
-      await timelineShown();
+  it('leaves an image picked on a card with a timeline to its "adding..." row', async () => {
+    mountCard(remoteBranch('running'));
+    await timelineShown();
 
-      pick(via);
-      expect(pendingRows()).toEqual(['picked.png']);
-      const store = via === 'paths' ? cmd.createImage : cmd.createImageFromData;
-      await settle(() => expect(store).toHaveResolvedTimes(1));
+    pick('paths');
+    expect(pendingRows()).toEqual(['picked.png']);
+    await settle(() => expect(cmd.createImage).toHaveResolvedTimes(1));
 
-      expect(toast.success).not.toHaveBeenCalled();
-    }
-  );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
 });

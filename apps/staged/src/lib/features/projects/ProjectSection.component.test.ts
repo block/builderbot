@@ -1,7 +1,6 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Branch, Project, ProjectNote } from '../../types';
-import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
+import type { Project, ProjectNote } from '../../types';
 
 const { writer, loadDraftMock, commandMocks, eventHandlers, toastError } = vi.hoisted(() => ({
   writer: {
@@ -32,14 +31,11 @@ const { writer, loadDraftMock, commandMocks, eventHandlers, toastError } = vi.ho
 }));
 
 // Heavy leaf components are stubbed out: the tests exercise the section's
-// project-session draft wiring and the state it hands its note rows and branch
-// cards, not the timeline/branch/note internals. The real NewSessionModal is
-// mounted (with its own leaves stubbed) so the open paths drive its draft load
-// exactly as in the app.
-vi.mock(
-  '../branches/BranchCard.svelte',
-  () => import('../sessions/testStubs/BranchCardStub.svelte')
-);
+// project-session draft wiring and the state it hands its note rows, not the
+// timeline/branch/note internals. The real NewSessionModal is mounted (with
+// its own leaves stubbed) so the open paths drive its draft load exactly as in
+// the app.
+vi.mock('../branches/BranchCard.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock(
   '../timeline/TimelineRow.svelte',
   () => import('../sessions/testStubs/TimelineRowStub.svelte')
@@ -615,62 +611,6 @@ describe('ProjectSection note rows', () => {
       duration: Infinity,
     });
     expect(rowFor('session-1').dataset.deleting).toBe('false');
-
-    unmount(section);
-  });
-});
-
-describe('ProjectSection branch cards', () => {
-  function branch(id: string, createdAt: number): Branch {
-    return {
-      id,
-      projectId: project.id,
-      projectRepoId: null,
-      branchName: id,
-      baseBranch: 'main',
-      branchType: 'local',
-      worktreePath: `/tmp/${id}`,
-      workspaceStatus: null,
-      createdAt,
-    } as Branch;
-  }
-
-  /** Each card's id and the delete state the section hands it, newest first. */
-  function cardStates() {
-    flushSync();
-    return [...document.querySelectorAll<HTMLElement>('[data-testid="branch-card"]')].map(
-      (card) => [card.dataset.branchId, card.dataset.deleting, card.dataset.dropsDisabled]
-    );
-  }
-
-  it('keeps file drops off every card while the project is deleted, without showing each one deleting', async () => {
-    const target = document.createElement('div');
-    document.body.appendChild(target);
-    const props = reactiveProps({
-      project,
-      branches: [branch('branch-1', 1), branch('branch-2', 2)],
-      deleting: false,
-      deletingBranches: new Set(['branch-1']),
-    });
-    const section = mount(ProjectSection, { target, props });
-    await settle();
-    expect(cardStates()).toEqual([
-      ['branch-2', 'false', 'false'],
-      ['branch-1', 'true', 'false'],
-    ]);
-
-    props.deleting = true;
-    expect(cardStates()).toEqual([
-      ['branch-2', 'false', 'true'],
-      ['branch-1', 'true', 'true'],
-    ]);
-
-    // The delete failed: the cards take drops again.
-    props.deleting = false;
-    expect(cardStates()).toEqual([
-      ['branch-2', 'false', 'false'],
-      ['branch-1', 'true', 'false'],
-    ]);
 
     unmount(section);
   });

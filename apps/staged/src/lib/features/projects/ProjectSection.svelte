@@ -1013,7 +1013,6 @@
         repoLabel={repoForBranch(branch)}
         projectName={project.name}
         deleting={deletingBranches.has(branch.id)}
-        dropsDisabled={deleting}
         worktreeError={worktreeErrors.get(branch.id)}
         workspaceError={workspaceErrors.get(branch.id)}
         onDelete={() => onDeleteBranch?.(branch.id)}

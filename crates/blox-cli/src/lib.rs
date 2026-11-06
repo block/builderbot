@@ -612,8 +612,10 @@ pub fn ws_exec_command(name: &str, mode: ExecMode, args: &[&str]) -> Vec<String>
 /// base64 and exits with the command's status. Transient execs reject
 /// non-UTF-8 stdout, so binary-returning calls go through this. A temp file
 /// rather than a pipe keeps the exit code without relying on `pipefail`.
+/// A failed `base64` exits 125: its output may be empty or cut at a line
+/// boundary, either of which would otherwise decode cleanly as short bytes.
 const BASE64_STDOUT_SCRIPT: &str =
-    r#"f=$(mktemp) || exit 125; "$@" >"$f"; rc=$?; base64 <"$f"; rm -f "$f"; exit $rc"#;
+    r#"f=$(mktemp) || exit 125; "$@" >"$f"; rc=$?; base64 <"$f" || rc=125; rm -f "$f"; exit $rc"#;
 
 /// Wrap `args` in [`BASE64_STDOUT_SCRIPT`] when `mode` needs it.
 fn binary_safe_args<'a>(mode: ExecMode, args: &[&'a str]) -> Vec<&'a str> {
@@ -925,6 +927,43 @@ mod tests {
             assert_eq!(decoded, payload, "{shell}");
         }
         let _ = std::fs::remove_file(&payload_path);
+        assert!(shells_run > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn base64_wrapper_fails_when_base64_fails() {
+        let stub_dir =
+            std::env::temp_dir().join(format!("blox-cli-b64-stub-{}", std::process::id()));
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let stub = stub_dir.join("base64");
+        std::fs::write(&stub, "#!/bin/sh\nprintf 'AAAA'\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Keep the real PATH behind the stub so `mktemp` and `rm` still work.
+        let path = format!(
+            "{}:{}",
+            stub_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let mut shells_run = 0;
+        for shell in ["/bin/sh", "/bin/dash"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            shells_run += 1;
+            let args = binary_safe_args(ExecMode::Transient, &["printf", "hello"]);
+            let output = Command::new(shell)
+                .args(&args[1..])
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(125), "{shell}");
+        }
+        let _ = std::fs::remove_dir_all(&stub_dir);
         assert!(shells_run > 0);
     }
 

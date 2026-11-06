@@ -8,6 +8,8 @@
 //! and emits a `git-state-updated` event that the frontend merges into the
 //! existing timeline.
 
+mod git_state_follow_up;
+
 use crate::git;
 use crate::session_runner;
 use crate::store::{CommentAuthor, CommentType, Review, Store};
@@ -436,7 +438,11 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     &branch,
                     worktree_path,
                 );
-                if session_working_dir.as_path() != worktree_path {
+                // The state build's `run_smart` already warms the worktree
+                // root's env, which a session subdirectory shares unless it
+                // has an env root of its own.
+                let cache = crate::session_runner::shell_env_cache();
+                if cache.env_key(&session_working_dir) != cache.env_key(worktree_path) {
                     git::prewarm_shell_env(&session_working_dir);
                 }
             }
@@ -747,15 +753,25 @@ pub(crate) fn refresh_branch_git_state_impl(
     } else if let Some(ref wd) = workdir {
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
-            Some(git::compute_local_branch_git_state(
+            // Display only, so the reads don't sit out a cold capture. If one
+            // the inherited env may have got wrong makes the build decline,
+            // the card keeps the state it has; if one ran without the
+            // captured env and succeeded, the card shows that state for now.
+            // Either way a follow-up refresh queued on the capture puts the
+            // real state there once it lands (see `git_state_follow_up`). The
+            // pull, reset and discard builds keep the unbounded wait, because
+            // they guard a mutation that waits for the capture anyway.
+            let build = git::compute_local_branch_git_state_bounded(
                 worktree_path,
                 &branch.branch_name,
                 &git::upstream_branch_name(worktree_path, &branch.branch_name, &branch.base_branch),
                 &branch.base_branch,
                 fetch_mode,
                 git::WorktreeStatusScope::Full,
-                git::EnvSource::Captured,
-            ))
+            );
+            git_state_follow_up::settle_bounded_build(branch_id, build, || {
+                git_state_follow_up::refresh_after_capture(app, store, worktree_path, branch_id)
+            })
         } else {
             None
         }

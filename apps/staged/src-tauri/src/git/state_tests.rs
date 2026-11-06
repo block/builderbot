@@ -1,10 +1,12 @@
-use super::cli::EnvSource;
+use super::cli::{self, run_bounded_while_capturing, BoundedRead, EnvSource, GitError};
 use super::state::{
-    compute_branch_git_state_with, compute_local_branch_git_state, BranchGitState,
-    BranchGitStateQuery, FetchMode, UpstreamRelation, WorktreeStatusScope,
+    compute_branch_git_state_settled, compute_branch_git_state_with,
+    compute_local_branch_git_state, compute_local_branch_git_state_bounded, BoundedGitState,
+    BranchGitState, BranchGitStateQuery, FetchMode, FetchStatus, UpstreamRelation,
+    WorktreeStatusScope,
 };
 use super::strip_git_env;
-use crate::test_utils::TempGitRepo;
+use crate::test_utils::{repo_with_unrunnable_clean_filter, TempGitRepo};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -133,6 +135,282 @@ fn detects_origin_ahead_branch() {
     assert_eq!(state.upstream.relation, UpstreamRelation::OriginAhead);
     assert_eq!(state.upstream.ahead, 0);
     assert_eq!(state.upstream.behind, 1);
+}
+
+/// The bounded build only bounds the reads: the fetch still runs, so a
+/// forced refresh sees what landed on origin.
+#[test]
+fn bounded_build_still_fetches() {
+    let (origin, clone) = remote_backed_feature();
+    origin.run_git(&["checkout", "feature"]);
+    origin.write_file("origin.txt", "origin\n");
+    origin.commit("origin");
+
+    let state = compute_local_branch_git_state_bounded(
+        &clone.path,
+        "feature",
+        "feature",
+        "main",
+        FetchMode::Force,
+        WorktreeStatusScope::Full,
+    )
+    .expect("nothing pending in the test build");
+    assert!(!state.provisional, "the test build reads with the lite env");
+    let state = state.state;
+
+    assert_eq!(state.fetch.status, FetchStatus::Fresh);
+    assert_eq!(state.upstream.relation, UpstreamRelation::OriginAhead);
+    assert_eq!(state.upstream.behind, 1);
+    assert!(state.expected_branch_matches);
+}
+
+fn settled_state(
+    repo: &Path,
+    run_git: impl Fn(&[&str]) -> Result<BoundedRead, GitError> + Sync,
+) -> Result<BoundedGitState, GitError> {
+    compute_branch_git_state_settled(
+        &format!("settled:{}", repo.display()),
+        run_git,
+        BranchGitStateQuery {
+            branch_name: "main",
+            remote_branch: "main",
+            base_branch: "main",
+            fetch_mode: FetchMode::Never,
+            worktree_scope: WorktreeStatusScope::Full,
+        },
+    )
+}
+
+/// A read with the env it asked for, as a settled [`BoundedRead`].
+fn lite_read(repo: &Path, args: &[&str]) -> Result<BoundedRead, GitError> {
+    cli::run_lite(repo, args).map(BoundedRead::settled)
+}
+
+/// A bounded `git status` that gave up on a running capture and couldn't run
+/// the checkout's clean filter turns the build into an `Err`, where the
+/// same failure from any other read path is taken for a clean tree. With a
+/// filter the env can run, the same tree reads as dirty.
+#[test]
+fn bounded_build_declines_a_status_that_failed_while_capturing() {
+    let repo = repo_with_unrunnable_clean_filter();
+
+    let error = settled_state(repo.path(), |args| {
+        run_bounded_while_capturing(repo.path(), args)
+    })
+    .expect_err("status failed only for want of the captured env");
+    assert!(
+        matches!(&error, GitError::CapturedEnvPending(inner) if inner.to_string().contains("clean filter")),
+        "{error:?}"
+    );
+
+    let coerced = settled_state(repo.path(), |args| lite_read(repo.path(), args))
+        .expect("a lite failure isn't pending")
+        .state;
+    assert!(
+        !coerced.worktree.dirty,
+        "the coercion the bounded build avoids"
+    );
+
+    repo.run_git(&["config", "filter.unrunnable.clean", "cat"]);
+    let state = settled_state(repo.path(), |args| {
+        run_bounded_while_capturing(repo.path(), args)
+    })
+    .expect("every read ran");
+    assert!(state.provisional);
+    assert!(state.state.worktree.dirty);
+    assert_eq!(state.state.worktree.modified, 1);
+}
+
+/// While a root's timed-out mark is live, its bounded reads go without the
+/// captured env at once, and a `git status` that couldn't run the checkout's
+/// clean filter still declines the build rather than reading as a clean
+/// tree. The root will be captured again, so the failure says no more about
+/// the repo than one from a capture still running.
+#[cfg(unix)]
+#[test]
+fn bounded_build_declines_a_status_that_failed_after_a_capture_timed_out() {
+    use crate::shell_env::{is_recent_timeout, CaptureTimeouts, ShellEnvCache};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let repo = repo_with_unrunnable_clean_filter();
+    // The shell hangs, and once it is killed nothing it started is left, so
+    // the mark holds for `retry_after`.
+    let shell = crate::test_utils::write_fake_shell("#!/bin/sh\nexec sleep 30\n");
+    let cache = Arc::new(
+        ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+            .with_home(repo.path().parent().expect("repo parent"))
+            .with_capture_timeouts(CaptureTimeouts {
+                shell: Duration::from_secs(1),
+                group: Duration::from_secs(2),
+                retry_after: Duration::from_secs(600),
+            }),
+    );
+    let timed_out = cache
+        .get_blocking(repo.path())
+        .map(|_| ())
+        .expect_err("the capture times out");
+    assert_eq!(
+        timed_out.kind(),
+        std::io::ErrorKind::TimedOut,
+        "{timed_out}"
+    );
+    let lookup = cache
+        .get_blocking_within(repo.path(), Duration::ZERO)
+        .map(|_| ())
+        .expect_err("the mark is live");
+    assert!(is_recent_timeout(&lookup), "{lookup}");
+
+    let bound = Duration::from_secs(30);
+    let started = Instant::now();
+    let error = settled_state(repo.path(), |args| {
+        cli::run_bounded_with_cache(&cache, repo.path(), args, bound)
+    })
+    .expect_err("status failed only for want of the captured env");
+    assert!(
+        started.elapsed() < bound / 3,
+        "the reads waited on a root with nothing capturing"
+    );
+    assert!(
+        matches!(&error, GitError::CapturedEnvPending(inner) if inner.to_string().contains("clean filter")),
+        "{error:?}"
+    );
+}
+
+/// A bounded `git status` that joined a capture which then timed out while
+/// it waited declines the build as well. The capture marks its root before
+/// it wakes its waiters, so the read gets the same recent timeout as the
+/// reads after it rather than a capture that failed for good, which would
+/// make its failure an answer and the tree read as clean.
+#[cfg(unix)]
+#[test]
+fn bounded_build_declines_a_status_whose_capture_timed_out_while_it_waited() {
+    use crate::shell_env::{CaptureTimeouts, ShellEnvCache};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let repo = repo_with_unrunnable_clean_filter();
+    // The shell hangs, and once it is killed nothing it started is left, so
+    // the mark it leaves holds for `retry_after`.
+    let shell = crate::test_utils::write_fake_shell("#!/bin/sh\nexec sleep 30\n");
+    let timeouts = CaptureTimeouts {
+        shell: Duration::from_secs(3),
+        group: Duration::from_secs(4),
+        retry_after: Duration::from_secs(600),
+    };
+    let cache = Arc::new(
+        ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+            .with_home(repo.path().parent().expect("repo parent"))
+            .with_capture_timeouts(timeouts),
+    );
+    // The capture is in flight before the build's first read.
+    cache.prewarm(repo.path());
+
+    let bound = Duration::from_secs(30);
+    let status_waited = Mutex::new(None);
+    let error = settled_state(repo.path(), |args| {
+        if args.first() != Some(&"status") {
+            return lite_read(repo.path(), args);
+        }
+        let started = Instant::now();
+        let read = cli::run_bounded_with_cache(&cache, repo.path(), args, bound);
+        *status_waited.lock().unwrap() = Some(started.elapsed());
+        read
+    })
+    .expect_err("status failed only for want of the captured env");
+    let waited = status_waited
+        .into_inner()
+        .unwrap()
+        .expect("the build read the status");
+    assert!(
+        waited >= timeouts.shell / 2 && waited < bound,
+        "status didn't wait on the capture until it timed out: {waited:?}"
+    );
+    assert!(
+        matches!(&error, GitError::CapturedEnvPending(inner) if inner.to_string().contains("clean filter")),
+        "{error:?}"
+    );
+}
+
+/// A bounded `git status` that gave up on a running capture and skipped a
+/// clean filter that isn't `required` still exits 0, but reads the filtered
+/// file as modified. The build is a state, not an `Err`, and is provisional
+/// so the refresh looks again once the capture lands. With the filter on
+/// `PATH` the same tree reads as clean, and a build whose reads all ran with
+/// the env they asked for is settled.
+#[test]
+fn bounded_build_that_skipped_an_optional_filter_is_provisional() {
+    let repo = TempGitRepo::new();
+    repo.write_file(".gitattributes", "*.txt filter=upper\n");
+    repo.run_git(&["config", "filter.upper.clean", "tr a-z A-Z"]);
+    repo.write_file("data.txt", "hello\n");
+    repo.commit("init");
+    repo.run_git(&["config", "filter.upper.clean", "staged-test-no-such-filter"]);
+    // A new mtime makes `git status` look at the file again rather than
+    // trust the index's stat data.
+    fs::File::options()
+        .write(true)
+        .open(repo.path().join("data.txt"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+        .unwrap();
+
+    let status = repo.run_git(&["status", "--porcelain=1"]);
+    assert!(
+        status.contains("data.txt"),
+        "git skipped the filter: {status:?}"
+    );
+
+    let provisional = settled_state(repo.path(), |args| {
+        run_bounded_while_capturing(repo.path(), args)
+    })
+    .expect("status exited 0, so nothing is pending");
+    assert!(provisional.provisional);
+    assert!(
+        provisional.state.worktree.dirty,
+        "the answer the follow-up replaces"
+    );
+
+    repo.run_git(&["config", "filter.upper.clean", "tr a-z A-Z"]);
+    let settled =
+        settled_state(repo.path(), |args| lite_read(repo.path(), args)).expect("every read ran");
+    assert!(!settled.provisional);
+    assert!(
+        !settled.state.worktree.dirty,
+        "{:?}",
+        settled.state.worktree
+    );
+}
+
+/// A pending failure in any read, not just `status`, declines the build,
+/// and reads that fail the same way with any env, such as a `merge-base`
+/// against a missing `origin/main`, don't.
+#[test]
+fn bounded_build_declines_any_pending_read_but_not_env_independent_ones() {
+    let repo = TempGitRepo::new();
+    repo.write_file("file.txt", "hello\n");
+    repo.commit("init");
+
+    let state = settled_state(repo.path(), |args| {
+        run_bounded_while_capturing(repo.path(), args)
+    })
+    .expect("no origin is an answer, not a pending env");
+    assert!(state.state.base.sha.is_none());
+
+    let error = settled_state(repo.path(), |args| {
+        if args.first() == Some(&"rev-parse") {
+            Err(GitError::CapturedEnvPending(Box::new(
+                GitError::GitNotFound,
+            )))
+        } else {
+            lite_read(repo.path(), args)
+        }
+    })
+    .expect_err("HEAD's read was pending");
+    assert!(
+        matches!(error, GitError::CapturedEnvPending(_)),
+        "{error:?}"
+    );
 }
 
 #[test]

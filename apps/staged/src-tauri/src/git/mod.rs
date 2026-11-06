@@ -19,6 +19,7 @@ mod worktree;
 pub use branch_config::{read_branch_config_snapshot, BranchConfigSnapshot};
 pub(crate) use cli::prewarm_shell_env;
 pub(crate) use cli::run as cli_run;
+pub(crate) use cli::run_lite_or_captured as cli_run_lite_or_captured;
 pub(crate) use cli::run_smart as cli_run_smart;
 pub use cli::{EnvSource, GitError};
 pub use commit::commit;
@@ -47,13 +48,15 @@ pub use refs::{
 pub use state::{
     compute_branch_git_snapshot_batched, compute_branch_git_state,
     compute_branch_git_state_batched, compute_local_branch_git_state,
-    compute_local_branch_git_state_with, ensure_fast_forward_pullable, fast_forward_to_ref,
-    update_repo_fetch_cache, BaseGitState, BatchedBranchGitSnapshot, BranchGitState,
-    BranchGitStateQuery, FetchGitState, FetchMode, FetchStatus, UpstreamGitState, UpstreamRelation,
-    WorktreeGitState, WorktreeStatusScope,
+    compute_local_branch_git_state_bounded, compute_local_branch_git_state_with,
+    ensure_fast_forward_pullable, fast_forward_to_ref, update_repo_fetch_cache, BaseGitState,
+    BatchedBranchGitSnapshot, BoundedGitState, BranchGitState, BranchGitStateQuery, FetchGitState,
+    FetchMode, FetchStatus, UpstreamGitState, UpstreamRelation, WorktreeGitState,
+    WorktreeStatusScope,
 };
 pub use types::*;
 pub use upstream::{upstream_branch_name, upstream_branch_name_with};
+pub(crate) use worktree::force_delete_branch;
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_at_path, create_worktree_for_existing_branch,
     create_worktree_for_existing_branch_at_path, create_worktree_from_pr,

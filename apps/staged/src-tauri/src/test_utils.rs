@@ -119,3 +119,60 @@ pub fn run_git_in(repo: &Path, args: &[&str]) -> String {
     );
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
+
+/// A repo whose committed `data.bin` goes through a `required` clean filter
+/// that can't run, rewritten since, so `git status` has to run the filter and
+/// fails. That is a checkout with LFS files, seen by a git whose PATH lacks
+/// git-lfs: an app launched from Finder before the login shell's env is in.
+pub fn repo_with_unrunnable_clean_filter() -> TempGitRepo {
+    let repo = TempGitRepo::new();
+    repo.write_file(".gitattributes", "*.bin filter=unrunnable\n");
+    repo.write_file("data.bin", "v1\n");
+    repo.commit("init");
+    repo.run_git(&[
+        "config",
+        "filter.unrunnable.clean",
+        "staged-test-no-such-filter",
+    ]);
+    repo.run_git(&["config", "filter.unrunnable.required", "true"]);
+    repo.write_file("data.bin", "v2\n");
+    repo
+}
+
+/// Write `content` to a 0755 tempfile suitable for use as `$SHELL`.
+///
+/// Hold the returned handle for the test's lifetime — dropping it removes
+/// the file. Returns a `TempPath` (not `NamedTempFile`) so the writable fd
+/// is closed before the script gets exec'd: Linux's exec path refuses to
+/// load a binary whose inode has `i_writecount > 0` and returns ETXTBSY.
+/// macOS has no equivalent check, which is why the prior `NamedTempFile`
+/// shape passed locally on Darwin but failed on Linux CI. Unix-only
+/// because we set the executable mode.
+#[cfg(unix)]
+pub fn write_fake_shell(content: &str) -> tempfile::TempPath {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_path = tempfile::Builder::new()
+        .prefix("staged-fake-shell-")
+        .suffix(".sh")
+        .tempfile()
+        .expect("create fake shell tempfile")
+        .into_temp_path();
+    fs::write(&temp_path, content).expect("write script");
+    let mut perms = fs::metadata(&temp_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&temp_path, perms).expect("chmod 755");
+    temp_path
+}
+
+/// A line of `sh` for a fake shell, or something it starts, that waits for
+/// the file at `quoted_path` (already shell-quoted) to exist. It polls every
+/// 50 ms and gives up with `exit 1` after 1200 polls, about a minute, so a
+/// process a failed test never releases doesn't outlive the test binary
+/// polling a deleted tempdir.
+#[cfg(unix)]
+pub fn wait_for_file_sh(quoted_path: &str) -> String {
+    format!(
+        "i=0; while [ ! -e {quoted_path} ]; do \
+         [ $i -lt 1200 ] || exit 1; i=$((i+1)); sleep 0.05; done"
+    )
+}

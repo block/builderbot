@@ -4236,6 +4236,61 @@ mod tests {
         );
     }
 
+    /// An expression arm whose call rustfmt wraps has no block, so slicing by
+    /// braces alone ended it on its first line, with a `(` still open. The
+    /// blocking guard's scan then panicked on `list_transferring_projects`.
+    #[test]
+    fn dispatch_arms_keep_wrapped_expression_arms_whole() {
+        let source = r#"
+    match command {
+        "guard_wrapped_call" => Ok(serde_json::to_value(
+            crate::module::listing(),
+        )
+        .unwrap()),
+        "guard_wrapped_list" => Ok(json!([
+            "{ (",
+        ])),
+        "guard_one_line" | "guard_alias" => Ok(Value::Null),
+        "guard_block" => {
+            let value = compute(
+                "a {",
+            );
+            Ok(value)
+        }
+        _ => Err(String::new()),
+    }
+"#;
+        let arms: BTreeMap<String, String> = dispatch_arms(source)
+            .into_iter()
+            .map(|(commands, body)| (commands.join(" | "), body))
+            .collect();
+
+        let names: Vec<&str> = arms.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "guard_block",
+                "guard_one_line | guard_alias",
+                "guard_wrapped_call",
+                "guard_wrapped_list",
+            ]
+        );
+        assert!(
+            arms["guard_wrapped_call"]
+                .ends_with("crate::module::listing(),\n        )\n        .unwrap()),\n"),
+            "{}",
+            arms["guard_wrapped_call"]
+        );
+        assert!(arms["guard_wrapped_list"].ends_with("])),\n"));
+        assert!(arms["guard_block"].ends_with("Ok(value)\n        }\n"));
+        assert_eq!(
+            arms["guard_one_line | guard_alias"].lines().count(),
+            1,
+            "{}",
+            arms["guard_one_line | guard_alias"]
+        );
+    }
+
     /// Having an arm is not the same as having the *same* arm — which is the
     /// gap `web_dispatch_covers_tauri_commands` can't see. This one had drifted:
     /// it cancelled through `SessionRegistry::cancel` alone, so a browser Stop
@@ -4537,6 +4592,10 @@ mod tests {
 
     /// Every arm of the dispatch match as (its command patterns, its body),
     /// including the `"a" | "b" =>` arms `dispatch_arm_body` can't address.
+    /// An arm runs until its parens and brackets close as well as its braces,
+    /// so an expression arm whose call rustfmt wrapped (`=> Ok(f(` … `)),`)
+    /// stays whole. A chain whose first line balances (`=> f(x)` then
+    /// `.g()`) still ends on that line.
     pub(super) fn dispatch_arms(source: &str) -> Vec<(Vec<String>, String)> {
         let marker = "match command {";
         let start = source
@@ -4563,7 +4622,7 @@ mod tests {
                 body.push('\n');
             }
 
-            depth += brace_delta_ignoring_strings(line);
+            depth += bracket_delta_ignoring_strings(line);
             if depth == 1 {
                 arms.extend(current.take());
             } else if depth == 0 {
@@ -4645,6 +4704,17 @@ mod tests {
     }
 
     fn brace_delta_ignoring_strings(line: &str) -> isize {
+        delta_ignoring_strings(line, &[('{', '}')])
+    }
+
+    /// `brace_delta_ignoring_strings` over parens and square brackets too.
+    fn bracket_delta_ignoring_strings(line: &str) -> isize {
+        delta_ignoring_strings(line, &[('(', ')'), ('[', ']'), ('{', '}')])
+    }
+
+    /// How many of `brackets` `line` leaves open (negative for closed),
+    /// skipping string literals and a trailing `//` comment.
+    fn delta_ignoring_strings(line: &str, brackets: &[(char, char)]) -> isize {
         let mut delta = 0;
         let mut chars = line.chars().peekable();
         let mut in_string = false;
@@ -4665,8 +4735,8 @@ mod tests {
             match ch {
                 '"' => in_string = true,
                 '/' if chars.peek() == Some(&'/') => break,
-                '{' => delta += 1,
-                '}' => delta -= 1,
+                _ if brackets.iter().any(|&(open, _)| open == ch) => delta += 1,
+                _ if brackets.iter().any(|&(_, close)| close == ch) => delta -= 1,
                 _ => {}
             }
         }

@@ -491,8 +491,8 @@
   }
 
   function handlePaneSessionChange(next: Session | null) {
-    const wasActive = previousSessionStatus === 'running' || previousSessionStatus === 'queued';
-    const isInactive = next && next.status !== 'running' && next.status !== 'queued';
+    const wasActive = isSessionActive(previousSessionStatus);
+    const isInactive = next && !isSessionActive(next.status);
     if ((wasActive && isInactive) || (!previousSessionStatus && isInactive && !hasNoteContent)) {
       void refreshLiveNote();
     }

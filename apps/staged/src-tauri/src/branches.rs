@@ -1053,6 +1053,29 @@ pub(crate) fn is_blox_onboarding_precondition_error(err: &blox::BloxError) -> bo
     }
 }
 
+/// Whether `branch`'s workstation stays when the branches in `leaving` go:
+/// another remote branch of the project uses it, so
+/// [`cleanup_branch_resources`] leaves it standing. False for a branch with
+/// no workstation.
+pub(crate) fn workspace_outlives(
+    store: &Store,
+    branch: &store::Branch,
+    leaving: &[&str],
+) -> Result<bool, String> {
+    let Some(ws_name) = branch.workspace_name.as_deref() else {
+        return Ok(false);
+    };
+    Ok(store
+        .list_branches_for_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .any(|b| {
+            !leaving.contains(&b.id.as_str())
+                && b.branch_type == store::BranchType::Remote
+                && b.workspace_name.as_deref() == Some(ws_name)
+        }))
+}
+
 pub(crate) fn cleanup_branch_resources(
     store: &Arc<Store>,
     branch: &store::Branch,
@@ -1090,16 +1113,7 @@ pub(crate) fn cleanup_branch_resources(
         }
         store::BranchType::Remote => {
             if let Some(ref ws_name) = branch.workspace_name {
-                let in_use_elsewhere = store
-                    .list_branches_for_project(&branch.project_id)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .any(|b| {
-                        b.id != branch.id
-                            && b.branch_type == store::BranchType::Remote
-                            && b.workspace_name.as_deref() == Some(ws_name.as_str())
-                    });
-                if in_use_elsewhere {
+                if workspace_outlives(store, branch, &[branch.id.as_str()])? {
                     return Ok(());
                 }
                 match blox::ws_delete(ws_name) {
@@ -3472,6 +3486,29 @@ async fn run_prerun_actions_for_branch(
 mod tests {
     use super::*;
     use crate::test_utils::TempGitRepo;
+
+    /// A shared workstation outlives a teardown that leaves another branch
+    /// on it, and goes when every branch using it does.
+    #[test]
+    fn a_workspace_outlives_a_teardown_only_while_another_branch_uses_it() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let first = store::Branch::new_remote(&project.id, "first", "main", "ws-1");
+        let second = store::Branch::new_remote(&project.id, "second", "main", "ws-1");
+        let other = store::Branch::new_remote(&project.id, "other", "main", "ws-2");
+        let local = store::Branch::new(&project.id, "local", "main");
+        for branch in [&first, &second, &other, &local] {
+            store.create_branch(branch).unwrap();
+        }
+
+        assert!(workspace_outlives(&store, &first, &[first.id.as_str()]).unwrap());
+        assert!(
+            !workspace_outlives(&store, &first, &[first.id.as_str(), second.id.as_str()]).unwrap()
+        );
+        assert!(!workspace_outlives(&store, &other, &[other.id.as_str()]).unwrap());
+        assert!(!workspace_outlives(&store, &local, &[local.id.as_str()]).unwrap());
+    }
 
     /// The rule every remote read of a branch's HEAD rests on: a branch with
     /// a project repo is pinned to that repo's clone directory, so it can't

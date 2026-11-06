@@ -1,3 +1,4 @@
+import { isSessionInFlight } from '../../shared/sessionStatus';
 import type { Comment, CommitTimelineItem, Review } from '../../types';
 
 type ReviewCommit = Pick<CommitTimelineItem, 'order' | 'sha'>;
@@ -9,7 +10,7 @@ export function isEmptyFailedReview(params: {
   totalCount: number;
 }): boolean {
   const { sessionStatus, sessionId, title, totalCount } = params;
-  const isRunning = sessionStatus === 'running';
+  const isRunning = isSessionInFlight(sessionStatus);
   const isQueued = sessionStatus === 'queued';
   const hasTitle = !!title?.trim();
   return !isRunning && !isQueued && !!sessionId && totalCount === 0 && !hasTitle;

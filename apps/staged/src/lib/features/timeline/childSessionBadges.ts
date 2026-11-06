@@ -20,8 +20,11 @@ export interface ChildSessionBadgeProps {
   key: string;
   /** Drives the badge's colour, the same per-kind colour the branch timeline uses. */
   sessionType: SessionRowKind;
-  /** Queued children wait on the branch queue; running ones get a spinner. */
-  status: 'queued' | 'running';
+  /**
+   * Queued children wait on the branch queue; running ones get a spinner, and
+   * disconnected ones (which may still be running remotely) a cloud-off icon.
+   */
+  status: 'queued' | 'running' | 'disconnected';
   /** The clipped label. */
   label: string;
   /** The whole title, for the tooltip. */

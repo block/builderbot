@@ -1436,6 +1436,9 @@ pub(crate) async fn resume_session_for_store(
         .get_session(&session_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    if session.status == store::SessionStatus::Disconnected {
+        return Err(SESSION_DISCONNECTED_ERROR.to_string());
+    }
 
     let plan = prepare_resume(&store, &session, branch_id, acp_config_selection).await?;
 
@@ -1499,6 +1502,10 @@ async fn prepare_resume(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<ResumePlan, String> {
     let session_id = session.id.clone();
+    // A Stop on a Blox turn ends the row before its backfill of the stopped
+    // turn is done; the turn this starts must come after that in the
+    // transcript.
+    session_runner::reconcile::stop_backfill_finished(&session_id).await;
     // Use the provider that originally created this session so the
     // agent's conversation history can be restored correctly.
     let provider = session.provider.clone();
@@ -1811,6 +1818,7 @@ fn launch_resume(
             branch_id: event_branch_id,
             project_id: event_project_id.or(mcp_project_id.clone()),
             session_type,
+            dependency_skipped: false,
         },
     );
 
@@ -1882,6 +1890,11 @@ fn launch_resume(
 /// `running` — `continue_session_for_store` reads it back as a blocked
 /// delivery rather than an error.
 pub(crate) const SESSION_ALREADY_RUNNING_ERROR: &str = "Session is already running";
+
+/// The refusal for a follow-up to a `disconnected` Blox session: its remote
+/// turn may still be running, and a resume would start a second one beside it.
+pub(crate) const SESSION_DISCONNECTED_ERROR: &str = "the session lost its connection to its Blox \
+     workstation and may still be running there; stop it before sending a follow-up";
 
 /// How long each wait inside `route_continue_session` may take. Each has its
 /// own budget: a startup wait that ran long must not eat into the wait for a
@@ -2283,6 +2296,11 @@ pub(crate) async fn route_continue_session(
                         return Ok(ContinueRoute::Delivered(ContinueOutcome::blocked(reason)));
                     }
                 }
+            }
+            store::SessionStatus::Disconnected => {
+                return Ok(ContinueRoute::Delivered(ContinueOutcome::blocked(
+                    SESSION_DISCONNECTED_ERROR,
+                )));
             }
             store::SessionStatus::Completed
             | store::SessionStatus::Cancelled
@@ -2893,9 +2911,32 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
     if !was_running {
         let store = get_store(store)?;
         if let Ok(Some(session)) = store.get_session(session_id) {
-            if session.status == store::SessionStatus::Running
-                || session.status == store::SessionStatus::Queued
-            {
+            // A `disconnected` row has no runner anywhere. The reconcile
+            // service cancels its remote turn over a fresh connection and
+            // then ends the row (reporting a Stop it couldn't confirm), or
+            // hands the Stop to its attempt in flight.
+            if session.status == store::SessionStatus::Disconnected {
+                if let Some(reconciler) = session_runner::reconcile::active() {
+                    reconciler.request_stop(session_id, store::CompletionReason::Interrupted);
+                    return Ok(());
+                }
+            }
+            // The row turned `running` since the registry was asked — a
+            // reconcile attempt claimed it, say. Its owner registered before
+            // writing it, so ask again.
+            if session.status == store::SessionStatus::Running && registry.cancel(session_id) {
+                return Ok(());
+            }
+            // Without one (tests, or before the store's services start) this
+            // write is the only way the row ends. It only ends the row: the
+            // remote turn, if still going, is left running on its
+            // workstation.
+            if matches!(
+                session.status,
+                store::SessionStatus::Running
+                    | store::SessionStatus::Queued
+                    | store::SessionStatus::Disconnected
+            ) {
                 let _ = store.update_session_status(
                     session_id,
                     store::SessionStatus::Cancelled,
@@ -2915,6 +2956,7 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                         branch_id: branch_id.clone(),
                         project_id,
                         session_type: None,
+                        dependency_skipped: false,
                     },
                 );
                 // A running session's cancel drains the branch, which settles
@@ -2985,6 +3027,7 @@ pub(crate) fn cancel_queued_session_of_deleted_artifact<R: tauri::Runtime>(
             branch_id,
             project_id,
             session_type: None,
+            dependency_skipped: false,
         },
     );
     if let Err(e) =
@@ -3063,7 +3106,15 @@ pub(crate) fn delete_session_impl<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     session_id: &str,
 ) -> Result<(), String> {
-    registry.cancel(session_id);
+    if !registry.cancel(session_id) {
+        // A `disconnected` row's turn may still be running on its
+        // workstation, which the delete leaves standing; with the row gone
+        // nothing could stop it. A reconcile attempt following it holds an
+        // entry, and the cancel above has it stop the turn.
+        if let Ok(Some(session)) = store.get_session(session_id) {
+            session_runner::reconcile::cancel_abandoned_turn(store, &session);
+        }
+    }
     let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
 
     store
@@ -3959,7 +4010,7 @@ fn running_branch_session_kinds(
     branch_id: &str,
 ) -> Result<HashSet<BranchSessionScheduleKind>, String> {
     let running = store
-        .get_running_sessions_for_branch(branch_id)
+        .get_busy_sessions_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
     let mut active = HashSet::new();
     for session in running {
@@ -4357,6 +4408,7 @@ pub async fn start_project_session(
             branch_id: None,
             project_id: Some(project_id.clone()),
             session_type: None,
+            dependency_skipped: false,
         },
     );
 
@@ -4955,6 +5007,7 @@ fn fail_session_start_on_error<T>(
                 session_id.to_string(),
                 branch_id,
                 false,
+                crate::session_queue::KickSource::TerminalState,
             );
         }
     }
@@ -5913,7 +5966,8 @@ fn forced_start_precheck(
     match session.status {
         store::SessionStatus::Queued => {}
         store::SessionStatus::Running => return Ok(ForcedStartPrecheck::AlreadyRunning),
-        store::SessionStatus::Completed
+        store::SessionStatus::Disconnected
+        | store::SessionStatus::Completed
         | store::SessionStatus::Error
         | store::SessionStatus::Cancelled => {
             return Err(format!("Session {session_id} is no longer queued"));
@@ -6230,6 +6284,7 @@ async fn start_queued_session_for_branch(
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),
+            dependency_skipped: false,
         },
     );
 

@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
  *
  * The rune-based stores can't be imported under plain vitest, so the registry
  * is replaced with a functional in-memory fake that mirrors the real
- * register/cleanup semantics.
+ * register/cleanup semantics. The disconnected-sessions store is the real one,
+ * loaded with `$state` stubbed as identity.
  */
 
 interface FakeMetadata {
@@ -70,6 +71,7 @@ function createFakeWorkflowStore(
 
 describe('sessionStatusListener busy-state hydration', () => {
   let getActiveSessions: ReturnType<typeof vi.fn>;
+  let getSessionReconcileStates: ReturnType<typeof vi.fn>;
   let getSession: ReturnType<typeof vi.fn>;
   let invalidateBranchTimeline: ReturnType<typeof vi.fn>;
   let getFreshSessionMessages: ReturnType<typeof vi.fn>;
@@ -109,7 +111,9 @@ describe('sessionStatusListener busy-state hydration', () => {
     vi.resetModules();
     vi.useFakeTimers({ now: 1_000 });
 
+    vi.stubGlobal('$state', (value: unknown) => value);
     getActiveSessions = vi.fn().mockResolvedValue([]);
+    getSessionReconcileStates = vi.fn().mockResolvedValue([]);
     getSession = vi.fn().mockResolvedValue(null);
     invalidateBranchTimeline = vi.fn();
     getFreshSessionMessages = vi.fn().mockResolvedValue([]);
@@ -119,10 +123,16 @@ describe('sessionStatusListener busy-state hydration', () => {
     toastError = vi.fn();
     unlistenEvents = vi.fn();
     eventCallbacks = new Map();
-    listenToEvent = vi.fn((event: string, callback: (payload: unknown) => void) => {
-      eventCallbacks.set(event, callback);
-      return unlistenEvents;
-    });
+    listenToEvent = vi.fn(
+      (
+        event: string,
+        callback: (payload: unknown) => void,
+        _options?: { onEstablished?: () => void }
+      ) => {
+        eventCallbacks.set(event, callback);
+        return unlistenEvents;
+      }
+    );
     projectStateStore = {
       addRunningSession: vi.fn(),
       removeRunningSession: vi.fn<(projectId: string, sessionId: string) => void>(),
@@ -157,6 +167,7 @@ describe('sessionStatusListener busy-state hydration', () => {
     vi.doMock('../transport', () => ({ isTauri: true, listenToEvent }));
     vi.doMock('../commands', () => ({
       getActiveSessions,
+      getSessionReconcileStates,
       invalidateBranchTimeline,
       getSession,
       getFreshSessionMessages,
@@ -190,6 +201,7 @@ describe('sessionStatusListener busy-state hydration', () => {
     vi.doUnmock('../stores/pullState.svelte');
     vi.doUnmock('svelte-sonner');
     vi.doUnmock('../stores/sessionRegistry.svelte');
+    vi.unstubAllGlobals();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -288,6 +300,34 @@ describe('sessionStatusListener busy-state hydration', () => {
     expect(sessionRegistry.getMetadata('gone-1')).toBeNull();
   });
 
+  it('sweeps a registered session the snapshot reports as disconnected', async () => {
+    // Its `disconnected` event was missed: the row still holds its branch, so
+    // the snapshot carries it, but no live busy state may remain.
+    sessionRegistry.sessions.set('blox-1', {
+      sessionId: 'blox-1',
+      projectId: 'project-1',
+      type: 'commit',
+      timestamp: 500,
+    });
+    getActiveSessions.mockResolvedValue([
+      {
+        sessionId: 'blox-1',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'commit',
+        status: 'disconnected',
+        holding: false,
+      },
+    ]);
+
+    const { hydrateActiveSessions } = await import('./sessionStatusListener');
+    await hydrateActiveSessions();
+
+    expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('blox-1');
+    expect(sessionRegistry.register).not.toHaveBeenCalled();
+    expect(projectStateStore.setSessionBackgroundHold).not.toHaveBeenCalled();
+  });
+
   it('does not sweep entries registered while the snapshot fetch was in flight', async () => {
     sessionRegistry.sessions.set('stale-1', {
       sessionId: 'stale-1',
@@ -357,6 +397,330 @@ describe('sessionStatusListener busy-state hydration', () => {
     expect(projectStateStore.addRunningSession).not.toHaveBeenCalled();
     expect(projectStateStore.setSessionBackgroundHold).not.toHaveBeenCalled();
     expect(sessionRegistry.getMetadata('racy-1')).toBeNull();
+  });
+
+  it('drops a disconnected session without running completion handling, and keeps a stale snapshot from resurrecting it', async () => {
+    const { listenForSessionStatus, hydrateActiveSessions } =
+      await import('./sessionStatusListener');
+    listenForSessionStatus();
+    await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+    eventCallbacks.get('session-status-changed')?.({
+      sessionId: 'blox-1',
+      status: 'running',
+      projectId: 'project-1',
+      branchId: 'branch-1',
+      sessionType: 'pr',
+    });
+    expect(sessionRegistry.getMetadata('blox-1')).not.toBeNull();
+
+    vi.setSystemTime(2_000);
+    getActiveSessions.mockImplementation(async () => {
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'blox-1',
+        status: 'disconnected',
+        branchId: 'branch-1',
+      });
+      return [
+        {
+          sessionId: 'blox-1',
+          projectId: 'project-1',
+          branchId: 'branch-1',
+          sessionType: 'pr',
+          status: 'running',
+          holding: false,
+        },
+      ];
+    });
+
+    sessionRegistry.register.mockClear();
+    projectStateStore.addRunningSession.mockClear();
+    invalidateBranchTimeline.mockClear();
+    await hydrateActiveSessions();
+
+    // The spinner is cleared and the timeline refetched...
+    expect(invalidateBranchTimeline).toHaveBeenCalledWith('branch-1');
+    expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('blox-1');
+    expect(projectStateStore.removeRunningSession).toHaveBeenCalledWith('project-1', 'blox-1');
+    // ...but it is not a completion: the PR chip, unread state and outcome
+    // handling are all left alone, and the stale snapshot does not re-register it.
+    expect(prStateStore.setPrError).not.toHaveBeenCalled();
+    expect(prStateStore.clearSessionTracking).not.toHaveBeenCalled();
+    expect(projectStateStore.markAsUnread).not.toHaveBeenCalled();
+    expect(sessionRegistry.register).not.toHaveBeenCalled();
+    expect(projectStateStore.addRunningSession).not.toHaveBeenCalled();
+    expect(sessionRegistry.getMetadata('blox-1')).toBeNull();
+  });
+
+  describe('a disconnected session reconcile settles later', () => {
+    async function disconnect(sessionId: string, sessionType: string) {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      const emit = eventCallbacks.get('session-status-changed')!;
+      emit({
+        sessionId,
+        status: 'running',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType,
+      });
+      emit({ sessionId, status: 'disconnected', projectId: 'project-1', branchId: 'branch-1' });
+      // The disconnect cleaned it out of the registry.
+      expect(sessionRegistry.getMetadata(sessionId)).toBeNull();
+      return emit;
+    }
+
+    it('still marks the project unread and settles the PR chip from the event', async () => {
+      const emit = await disconnect('blox-pr', 'pr');
+
+      emit({
+        sessionId: 'blox-pr',
+        status: 'completed',
+        completionReason: null,
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'pr',
+      });
+
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+      expect(prStateStore.setPrError).toHaveBeenCalledWith(
+        'branch-1',
+        'PR session completed but no PR URL was found in the output.'
+      );
+      expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('settles a cancelled push as a cancellation, not a skipped force push', async () => {
+      const emit = await disconnect('blox-push', 'push');
+
+      // No completion reason either: only the explicit flag marks a skip.
+      emit({
+        sessionId: 'blox-push',
+        status: 'cancelled',
+        errorMessage: "Staged couldn't tell whether this turn finished on the workstation",
+        completionReason: null,
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'push',
+      });
+
+      expect(toastError).not.toHaveBeenCalled();
+      expect(pushStateStore.setPushError).toHaveBeenCalledWith(
+        'branch-1',
+        'Push session was cancelled.'
+      );
+      expect(pushStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+    });
+
+    it('settles from the event for a client that only knew the session as disconnected', async () => {
+      const emit = await disconnect('blox-pr', 'pr');
+
+      // A settle without the session type (any terminal emit for the row)
+      // still counts: this client saw it disconnect.
+      emit({
+        sessionId: 'blox-pr',
+        status: 'error',
+        errorMessage: 'boom',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+      });
+
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+    });
+
+    it('settles from the event on a client that never saw the session', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+      eventCallbacks.get('session-status-changed')!({
+        sessionId: 'blox-pr',
+        status: 'completed',
+        completionReason: null,
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'pr',
+      });
+
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+      expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('keeps other terminal events for unregistered sessions out of unread', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // A queued session cancelled before it ran: the event names its project
+      // and branch, but this client never registered it.
+      eventCallbacks.get('session-status-changed')!({
+        sessionId: 'queued-1',
+        status: 'cancelled',
+        completionReason: 'interrupted',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+      });
+
+      expect(projectStateStore.markAsUnread).not.toHaveBeenCalled();
+      expect(consoleWarn).toHaveBeenCalled();
+    });
+  });
+
+  describe('disconnected sessions', () => {
+    const disconnectedRow = (sessionId: string, projectId: string) => ({
+      sessionId,
+      projectId,
+      branchId: `branch-of-${sessionId}`,
+      sessionType: 'commit',
+      status: 'disconnected',
+      holding: false,
+    });
+
+    const reconcileEvent = (
+      sessionId: string,
+      phase: 'checking' | 'stopping' | 'waiting' | 'idle',
+      overrides: Record<string, unknown> = {}
+    ) => ({
+      sessionId,
+      branchId: 'branch-1',
+      projectId: 'project-1',
+      phase,
+      reason: null,
+      attempts: 1,
+      nextAttemptAt: null,
+      ...overrides,
+    });
+
+    async function load() {
+      const listener = await import('./sessionStatusListener');
+      const { disconnectedSessionsStore } = await import('../stores/disconnectedSessions.svelte');
+      return { ...listener, store: disconnectedSessionsStore };
+    }
+
+    it('tracks a disconnected status event per project and drops it on the next status', async () => {
+      const { listenForSessionStatus, store } = await load();
+      listenForSessionStatus();
+      const emit = eventCallbacks.get('session-status-changed')!;
+
+      emit({
+        sessionId: 'blox-1',
+        status: 'disconnected',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+      });
+      expect(store.isDisconnected('blox-1')).toBe(true);
+      expect(store.hasDisconnectedSessions('project-1')).toBe(true);
+      expect(store.hasDisconnectedSessions('project-2')).toBe(false);
+
+      // A live reattach: back to running, so no longer disconnected.
+      emit({
+        sessionId: 'blox-1',
+        status: 'running',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'commit',
+      });
+      expect(store.isDisconnected('blox-1')).toBe(false);
+      expect(store.hasDisconnectedSessions('project-1')).toBe(false);
+    });
+
+    it('adopts the snapshot’s disconnected rows as the whole set', async () => {
+      const { hydrateActiveSessions, store } = await load();
+      store.markDisconnected('settled-1', 'project-1', 'branch-x');
+      getActiveSessions.mockResolvedValue([disconnectedRow('blox-1', 'project-2')]);
+
+      await hydrateActiveSessions();
+
+      expect(store.sessionsForProject('project-2')).toEqual(['blox-1']);
+      // Its terminal event was missed; the snapshot no longer carries it.
+      expect(store.isDisconnected('settled-1')).toBe(false);
+      // Still never live busy state.
+      expect(sessionRegistry.register).not.toHaveBeenCalled();
+    });
+
+    it('lets a status event that lands mid-fetch beat the snapshot', async () => {
+      const { listenForSessionStatus, hydrateActiveSessions, store } = await load();
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      const emit = eventCallbacks.get('session-status-changed')!;
+      emit({ sessionId: 'blox-1', status: 'disconnected', projectId: 'project-1' });
+
+      vi.setSystemTime(2_000);
+      getActiveSessions.mockImplementation(async () => {
+        // blox-1 settles, and blox-2 disconnects, while a snapshot taken
+        // before either is in flight.
+        emit({ sessionId: 'blox-1', status: 'completed' });
+        emit({ sessionId: 'blox-2', status: 'disconnected', projectId: 'project-1' });
+        return [disconnectedRow('blox-1', 'project-1')];
+      });
+      await hydrateActiveSessions();
+
+      expect(store.isDisconnected('blox-1')).toBe(false);
+      expect(store.isDisconnected('blox-2')).toBe(true);
+    });
+
+    it('follows reconcile events, dropping a session’s state on idle', async () => {
+      const { listenForSessionStatus, store } = await load();
+      listenForSessionStatus();
+      const emit = eventCallbacks.get('session-reconcile-changed')!;
+
+      emit(reconcileEvent('blox-1', 'checking'));
+      expect(store.getReconcileState('blox-1')?.phase).toBe('checking');
+
+      const waiting = reconcileEvent('blox-1', 'waiting', {
+        reason: { kind: 'suspended', message: 'workspace is suspended' },
+        nextAttemptAt: 61_000,
+      });
+      emit(waiting);
+      expect(store.getReconcileState('blox-1')).toEqual(waiting);
+
+      emit(reconcileEvent('blox-1', 'idle'));
+      expect(store.getReconcileState('blox-1')).toBeNull();
+    });
+
+    it('hydrates reconcile states each time the listener is established', async () => {
+      const { listenForSessionStatus, store } = await load();
+      getSessionReconcileStates.mockResolvedValue([reconcileEvent('blox-1', 'waiting')]);
+      listenForSessionStatus();
+
+      const call = listenToEvent.mock.calls.find(
+        ([event]) => event === 'session-reconcile-changed'
+      );
+      call?.[2]?.onEstablished?.();
+      await vi.waitFor(() => expect(store.getReconcileState('blox-1')?.phase).toBe('waiting'));
+    });
+
+    it('keeps a reconcile event that lands mid-fetch over the snapshot', async () => {
+      const { listenForSessionStatus, hydrateReconcileStates, store } = await load();
+      listenForSessionStatus();
+      const emit = eventCallbacks.get('session-reconcile-changed')!;
+      emit(reconcileEvent('stale-1', 'waiting'));
+
+      getSessionReconcileStates.mockImplementation(async () => {
+        emit(reconcileEvent('blox-1', 'checking'));
+        return [reconcileEvent('blox-1', 'waiting')];
+      });
+      await hydrateReconcileStates();
+
+      expect(store.getReconcileState('blox-1')?.phase).toBe('checking');
+      // Not in the snapshot and no event mid-fetch: settled since.
+      expect(store.getReconcileState('stale-1')).toBeNull();
+    });
+
+    it('leaves reconcile state untouched when the snapshot fetch fails', async () => {
+      const { listenForSessionStatus, hydrateReconcileStates, store } = await load();
+      listenForSessionStatus();
+      eventCallbacks.get('session-reconcile-changed')!(reconcileEvent('blox-1', 'waiting'));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      getSessionReconcileStates.mockRejectedValue(new Error('offline'));
+
+      await hydrateReconcileStates();
+
+      expect(store.getReconcileState('blox-1')?.phase).toBe('waiting');
+    });
   });
 
   it('lets a later hydration register a session terminated during an earlier fetch', async () => {
@@ -431,7 +795,8 @@ describe('sessionStatusListener busy-state hydration', () => {
     await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(2));
 
     unlisten();
-    expect(unlistenEvents).toHaveBeenCalledTimes(4);
+    // status, pr-created, push-completed, background-hold, reconcile.
+    expect(unlistenEvents).toHaveBeenCalledTimes(5);
     window.dispatchEvent(new CustomEvent('cache-stale'));
     expect(getActiveSessions).toHaveBeenCalledTimes(2);
   });
@@ -752,6 +1117,17 @@ describe('sessionStatusListener busy-state hydration', () => {
       expect(prStateStore.clearSessionTracking).not.toHaveBeenCalled();
     });
 
+    it('leaves the chip in progress when the session is disconnected', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      getSession.mockResolvedValue({ id: 'pr-1', status: 'disconnected' });
+
+      await hydrate();
+
+      expect(prStateStore.clearPrState).not.toHaveBeenCalled();
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(prStateStore.clearSessionTracking).not.toHaveBeenCalled();
+    });
+
     it('skips a chip already tracking a different session', async () => {
       trackWorkflowSession('pr', 'pr-1');
       // The user relaunched before hydration ran: the chip belongs to pr-2 now.
@@ -861,6 +1237,19 @@ describe('sessionStatusListener busy-state hydration', () => {
 
       expect(getSession).toHaveBeenCalledTimes(1);
       expect(getSession).toHaveBeenCalledWith('running-push');
+    });
+
+    it('adopts the queued push behind a disconnected one on the same branch', async () => {
+      getActiveSessions.mockResolvedValue([
+        { ...activePush('blox-push', 'queued'), status: 'disconnected' },
+        activePush('queued-push', 'queued'),
+      ]);
+      getSession.mockResolvedValue(pushSession('queued-push', 'queued', false));
+
+      await hydrate();
+
+      expect(getSession).toHaveBeenCalledTimes(1);
+      expect(getSession).toHaveBeenCalledWith('queued-push');
     });
 
     it('skips a branch whose chip already follows a push', async () => {
@@ -1204,6 +1593,7 @@ describe('sessionStatusListener busy-state hydration', () => {
         errorMessage: skipReason,
         branchId: 'branch-1',
         sessionType: 'push',
+        dependencySkipped: true,
       });
 
       expect(toastError).toHaveBeenCalledWith('Force push skipped', { description: skipReason });
@@ -1220,6 +1610,7 @@ describe('sessionStatusListener busy-state hydration', () => {
         errorMessage: skipReason,
         branchId: 'branch-1',
         sessionType: 'push',
+        dependencySkipped: true,
       });
 
       expect(toastError).toHaveBeenCalledWith('Force push skipped', { description: skipReason });
@@ -1236,6 +1627,7 @@ describe('sessionStatusListener busy-state hydration', () => {
         errorMessage: skipReason,
         branchId: 'branch-1',
         sessionType: 'push',
+        dependencySkipped: true,
       });
 
       // The skip is the row's whole lifecycle: it was never running, so it was
@@ -1245,6 +1637,25 @@ describe('sessionStatusListener busy-state hydration', () => {
       expect(consoleWarn).not.toHaveBeenCalled();
       expect(sessionRegistry.cleanupSession).not.toHaveBeenCalled();
       expect(pushStateStore.setPushError).not.toHaveBeenCalled();
+    });
+
+    it('leaves a skipped PR to its timeline: no chip error, no unread', async () => {
+      await listen();
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'pr-1',
+        status: 'cancelled',
+        errorMessage: skipReason,
+        projectId: 'project-other',
+        branchId: 'branch-1',
+        sessionType: 'pr',
+        dependencySkipped: true,
+      });
+
+      expect(toastError).not.toHaveBeenCalled();
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(prStateStore.clearSessionTracking).not.toHaveBeenCalled();
+      expect(projectStateStore.markAsUnread).not.toHaveBeenCalled();
     });
 
     it('ignores ordinary cancellations, which carry no session type', async () => {

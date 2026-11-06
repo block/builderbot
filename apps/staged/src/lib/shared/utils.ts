@@ -145,10 +145,12 @@ function pluralize(word: string, count: number): string {
 export function projectSubtitle(
   repoCount: number,
   sessionTypes: SessionType[],
-  runActionPhase?: RunActionPhase
+  runActionPhase?: RunActionPhase,
+  /** Shown when nothing is running or building, e.g. a disconnected Blox session. */
+  idleActivity = ''
 ): string {
   const repoLabel = `${repoCount} ${pluralize('repo', repoCount)}`;
-  const activity = projectActivity(sessionTypes, runActionPhase);
+  const activity = projectActivity(sessionTypes, runActionPhase) || idleActivity;
   if (!activity) return repoLabel;
   return `${repoLabel} · ${activity}`;
 }

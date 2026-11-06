@@ -1,9 +1,10 @@
 <!--
   ProjectRowContent.svelte — how a project introduces itself in a row: a state
   icon on the left (see ProjectStatusIcon), the name, and a meta line of
-  colored repo badges with any running activity — falling back to a repo count
-  while badges haven't landed. A remote project also gets a muted cloud
-  (RemoteProjectIcon) under its state icon, on the meta line.
+  colored repo badges with any running activity (or a disconnected Blox
+  session's state) — falling back to a repo count while badges haven't landed.
+  A remote project also gets a muted cloud (RemoteProjectIcon) under its state
+  icon, on the meta line.
 
   Shared between the sidebar's project rows and pickers that list projects
   (MoveBranchDialog), so a project reads the same everywhere. Everything is
@@ -20,6 +21,8 @@
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
+  import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
+  import { disconnectedActivity } from '../../shared/disconnectedSession';
   import { getProjectStatus } from './projectStatus';
   import type { MatchReason } from './projectSearch';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
@@ -53,7 +56,14 @@
       .sort((a, b) => a.shortName.localeCompare(b.shortName))
   );
   let sessionTypes = $derived(projectStateStore.getRunningSessionTypes(project.id));
-  let activity = $derived(projectActivity(sessionTypes, status.runActionPhase));
+  // A Blox session that lost its connection runs nothing here, but its agent
+  // may still be working on the workstation; say so when nothing else is.
+  let idleActivity = $derived(
+    status.kind === 'disconnected'
+      ? disconnectedActivity(disconnectedSessionsStore.projectReconcileState(project.id))
+      : ''
+  );
+  let activity = $derived(projectActivity(sessionTypes, status.runActionPhase) || idleActivity);
   let repoCount = $derived(
     projectsDataStore.repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0)
   );
@@ -85,7 +95,7 @@
       {/if}
     {:else}
       <span class="repo-count"
-        >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}</span
+        >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase, idleActivity)}</span
       >
     {/if}
   </div>

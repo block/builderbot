@@ -326,6 +326,29 @@ fn detaching_names_the_sessions_left_with_a_prompt_in_flight() {
     assert_eq!(router.detach(b), ["sess-b"]);
 }
 
+/// A Blox session detached on quit lets go of its client with its turn left
+/// running: the client's stream ends at once, and once its connection goes
+/// nothing is named for cancelling — while another session's prompt still is.
+#[tokio::test(flavor = "current_thread")]
+async fn a_kept_client_detaches_without_naming_its_prompts_for_cancelling() {
+    let router = RemoteSessionRouter::new();
+    let (a, mut a_rx) = attach(&router);
+    let (b, _b_rx) = attach(&router);
+    router.outgoing(a, &prompt(1, "sess-a"));
+    router.outgoing(b, &prompt(1, "sess-b"));
+
+    router.keep(a);
+    let ended = tokio::time::timeout(Duration::from_secs(5), a_rx.recv())
+        .await
+        .expect("the kept client's stream ends at once");
+    assert_eq!(ended, None);
+    router.incoming(&chunk("sess-a", "after the detach"));
+    assert_eq!(received(&mut a_rx), Vec::<String>::new());
+
+    assert_eq!(router.detach(a), Vec::<String>::new(), "left running");
+    assert_eq!(router.detach(b), ["sess-b"], "others are unaffected");
+}
+
 #[test]
 fn detaching_from_a_lost_agent_names_nothing_to_cancel() {
     let router = RemoteSessionRouter::new();

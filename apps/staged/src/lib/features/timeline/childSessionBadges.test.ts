@@ -102,6 +102,13 @@ describe('buildChildSessionBadges', () => {
   });
 });
 
+describe('buildChildSessionBadges status', () => {
+  it('passes a disconnected child through rather than showing it as queued', () => {
+    const [badge] = buildChildSessionBadges([child({ status: 'disconnected' })]);
+    expect(badge.status).toBe('disconnected');
+  });
+});
+
 describe('runningChildSessionIds', () => {
   it('collects running children across parents and skips queued ones', () => {
     expect(
@@ -110,6 +117,14 @@ describe('runningChildSessionIds', () => {
         'parent-2': [child({ sessionId: 'c' })],
       })
     ).toEqual(['a', 'c']);
+  });
+
+  it('skips disconnected children, which have no live agent to poll', () => {
+    expect(
+      runningChildSessionIds({
+        'parent-1': [child({ sessionId: 'a', status: 'disconnected' })],
+      })
+    ).toEqual([]);
   });
 });
 

@@ -135,7 +135,7 @@ impl FakeAgent {
             )
             .on_receive_request(
                 async |_request: NewSessionRequest, responder, _cx| {
-                    responder.respond(NewSessionResponse::new("session-1"))
+                    responder.respond(NewSessionResponse::new("sess-1"))
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -405,7 +405,9 @@ where
     Fut: Future<Output = ()>,
 {
     let writer = Arc::new(TranscriptWriter::default());
-    let handler = Arc::new(transcript_handler(&writer));
+    // `run_prompt_turn` is driven without `session/new`, which is what names
+    // the connection's session; the fake agent stamps `sess-1`.
+    let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
     let setup = steering_setup(steering_supported);
     let (turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
     let handle = turn_control_handle(&turn_control_tx, true);
@@ -728,6 +730,7 @@ where
                     background_hold,
                     None,
                     false,
+                    None,
                     &child_exited,
                     &mut prompt_rx,
                     &mut hold_control_rx,
@@ -901,6 +904,83 @@ async fn stop_during_the_interrupt_ack_wait_fails_the_interrupt_without_a_reprom
         "no user row for an undelivered message"
     );
     assert!(stashed_reply.is_some());
+}
+
+/// A Stop under an interrupt the bridge never acknowledges: the turn
+/// settles cancelled, and the cancel is noted unacknowledged so a remote
+/// session's turn is cancelled again over a fresh connection. Runs on tokio's
+/// paused clock.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_unacknowledged_stop_under_an_interrupt_is_noted() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: false,
+        stream_on_prompt: vec!["half an answer"],
+        hold_cancel_ack: true,
+        ..FakeAgent::default()
+    });
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+
+    let (result, _reply_rx, _stashed_reply, _writer, handler) = session_with_cancel(
+        &agent,
+        None,
+        cancel,
+        |handle, agent, _writer, _handler| async move {
+            agent.await_prompt().await;
+            let interrupt = tokio::spawn(async move {
+                handle
+                    .interrupt_and_reprompt("actually, do this instead", &[], &[])
+                    .await
+            });
+            wait_until("the cancel", || agent.cancels() == 1).await;
+            stop.cancel();
+            let error = interrupt.await.unwrap().expect_err("the stop wins");
+            assert!(error.contains("stopped"), "got: {error}");
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok((AgentRunOutcome::Cancelled, _))),
+        "{result:?}"
+    );
+    assert!(handler.transport.cancel_unacknowledged());
+    assert_eq!(agent.prompts(), ["first"]);
+}
+
+/// An interrupt whose cancel the bridge never acknowledges drops the
+/// re-prompt and settles the turn cancelled — noted unacknowledged, so a
+/// remote session's turn is cancelled again over a fresh connection rather
+/// than left running behind a wedged bridge. Runs on tokio's paused clock.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_interrupt_that_times_out_is_noted_unacknowledged() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: false,
+        stream_on_prompt: vec!["half an answer"],
+        hold_cancel_ack: true,
+        ..FakeAgent::default()
+    });
+
+    let (result, _reply_rx, _stashed_reply, _writer, handler) = session_with(
+        &agent,
+        None,
+        |handle, agent, _writer, _handler| async move {
+            agent.await_prompt().await;
+            let error = handle
+                .interrupt_and_reprompt("actually, do this instead", &[], &[])
+                .await
+                .expect_err("an unacknowledged cancel fails the interrupt");
+            assert!(error.contains("did not acknowledge"), "got: {error}");
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok((AgentRunOutcome::Cancelled, _))),
+        "{result:?}"
+    );
+    assert!(handler.transport.cancel_unacknowledged());
+    assert_eq!(agent.prompts(), ["first"], "no re-prompt");
 }
 
 /// The Stop lands together with the acknowledgment: whichever of the two

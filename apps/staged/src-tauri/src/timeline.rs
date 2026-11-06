@@ -246,6 +246,7 @@ fn parse_commit_lines(
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                session_error_message: resolved.error_message,
                 pipeline_kind: None,
                 is_own_commit: false, // set later by build_branch_timeline
             });
@@ -283,6 +284,7 @@ fn map_local_commits(
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                session_error_message: resolved.error_message,
                 pipeline_kind: None,
                 is_own_commit: false, // set later by build_branch_timeline
             }
@@ -492,6 +494,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                session_error_message: resolved.error_message,
                 pipeline_kind: session.and_then(|s| s.pipeline).and_then(|p| p.kind),
                 is_own_commit: true, // pending commits are always the current user's
             });
@@ -528,6 +531,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                session_error_message: resolved.error_message,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
                 completed_at: n.completed_at,
@@ -567,6 +571,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_status: resolved.status,
                 session_provider: resolved.provider,
                 completion_reason: resolved.completion_reason,
+                session_error_message: resolved.error_message,
                 title,
                 comment_count: counts.comments,
                 annotation_count: counts.annotations,
@@ -2132,6 +2137,49 @@ mod tests {
         assert_eq!(timeline.reviews[0].title, None);
     }
 
+    /// A failed row's copy depends on why its session ended — a deleted
+    /// workstation is not a crash — so each artifact carries the session's
+    /// message alongside its completion reason.
+    #[test]
+    fn build_branch_timeline_failed_artifacts_carry_the_sessions_error() {
+        let (repo, visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let session = running_session(&store, "the prompt", None);
+        store
+            .update_session_status(
+                &session.id,
+                SessionStatus::Error,
+                Some("The workstation no longer exists"),
+                Some(&crate::store::CompletionReason::Crashed),
+            )
+            .unwrap();
+        let pending = Commit::new_pending(&branch.id).with_session(&session.id);
+        store.create_commit(&pending).unwrap();
+        let note = Note::new(&branch.id, "Plan", "").with_session(&session.id);
+        store.create_note(&note).unwrap();
+        let review =
+            Review::new(&branch.id, &visible_sha, ReviewScope::Commit).with_session(&session.id);
+        store.create_review(&review).unwrap();
+        let unsessioned = Note::new(&branch.id, "Written", "by hand");
+        store.create_note(&unsessioned).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        let gone = Some("The workstation no longer exists");
+        let failed_commit = timeline
+            .commits
+            .iter()
+            .find(|c| c.id.as_deref() == Some(pending.id.as_str()))
+            .unwrap();
+        assert_eq!(failed_commit.completion_reason.as_deref(), Some("crashed"));
+        assert_eq!(failed_commit.session_error_message.as_deref(), gone);
+        let note_of = |id: &str| timeline.notes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(note_of(&note.id).session_error_message.as_deref(), gone);
+        assert_eq!(note_of(&unsessioned.id).session_error_message, None);
+        assert_eq!(timeline.reviews[0].session_error_message.as_deref(), gone);
+    }
+
     // ── local arm: one config read, one state build, one log ───────────
 
     /// The local arm reads the user identity with the branch's upstream in
@@ -2365,6 +2413,7 @@ mod tests {
             session_id: None,
             session_status: None,
             completion_reason: None,
+            session_error_message: None,
             pipeline_kind: None,
             is_own_commit: false,
         }

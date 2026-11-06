@@ -38,6 +38,7 @@ import type {
   SessionPollRequest,
   ToolCallBody,
   SessionBackgroundHoldSnapshot,
+  SessionReconcileEvent,
   SessionLiveDelivery,
   SessionMessageDelivery,
   QueuedSessionMessage,
@@ -1429,6 +1430,25 @@ export function buildNoteFollowupMessage(
 
 export function cancelSession(sessionId: string): Promise<void> {
   return invokeCommand('cancel_session', { sessionId });
+}
+
+/**
+ * Check a `disconnected` Blox session against its workstation now, ignoring
+ * its backoff ("Check now"). Resolves at once: progress arrives as
+ * `session-reconcile-changed` events, and the outcome as
+ * `session-status-changed`. A no-op when a check is already in flight.
+ */
+export function reconcileSession(sessionId: string): Promise<void> {
+  return invokeCommand('reconcile_session', { sessionId });
+}
+
+/**
+ * Where reconciling each `disconnected` session stands, for a client that
+ * missed the `session-reconcile-changed` events. Rows the backend hasn't
+ * looked at yet, and rows that have settled, are absent.
+ */
+export function getSessionReconcileStates(): Promise<SessionReconcileEvent[]> {
+  return invokeCommand('get_session_reconcile_states');
 }
 
 /**

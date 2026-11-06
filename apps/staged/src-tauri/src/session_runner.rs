@@ -37,6 +37,10 @@
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
 pub(crate) mod attachments;
+mod disconnect;
+pub(crate) mod reconcile;
+
+pub(crate) use disconnect::may_still_run_on_workstation;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -146,6 +150,12 @@ pub struct SessionStatusEvent {
     pub branch_id: Option<String>,
     pub project_id: Option<String>,
     pub session_type: Option<String>,
+    /// Set only on the `cancelled` a queued session gets when the session it
+    /// was gated on did not succeed (see `pipeline_dependency`): it never
+    /// ran, so this client never registered it, and its completion is a
+    /// "skipped" notice rather than a session end. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dependency_skipped: bool,
 }
 
 /// Emitted while a *running* session is held open past turn end for background
@@ -285,6 +295,21 @@ struct RunningSession {
     /// sent in place of it) rather than after the turn. Set and replaced
     /// alongside `async_task_stop`.
     turn_control: std::sync::Mutex<Option<acp_client::TurnControlHandle>>,
+    /// Detach handle for the session's current ACP connection, for a remote
+    /// session only — how a quit leaves the remote turn running (see
+    /// [`SessionRegistry::detach`]). Set and replaced alongside
+    /// `async_task_stop`.
+    detach: std::sync::Mutex<Option<acp_client::DetachHandle>>,
+    /// The completion reason a [`SessionRegistry::detach`] recorded, for the
+    /// run to use if the detach lands before the prompt is sent and the run
+    /// ends `cancelled` rather than `disconnected`.
+    detach_reason: std::sync::Mutex<Option<CompletionReason>>,
+    /// Set for a run reattaching to its remote turn (see
+    /// [`SessionRegistry::reattaching`]); fired by a detach that finds no
+    /// live connection to kill — between the reattach's attempts, or before
+    /// its first is up — so the run stops reattaching and leaves the turn
+    /// running, as a detach does.
+    reattach_detach: std::sync::Mutex<Option<CancellationToken>>,
     /// The last background hold the session's connection reported, so a client
     /// that mounts mid-hold can ask for the wait it missed. The hold is
     /// reported on change only; the driver reports the cleared default on the
@@ -464,6 +489,9 @@ impl SessionRegistry {
             finished: std::sync::atomic::AtomicBool::new(false),
             async_task_stop: std::sync::Mutex::new(None),
             turn_control: std::sync::Mutex::new(None),
+            detach: std::sync::Mutex::new(None),
+            detach_reason: std::sync::Mutex::new(None),
+            reattach_detach: std::sync::Mutex::new(None),
             background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
         });
         let pending = inner.pending_cancellations.remove(session_id);
@@ -501,6 +529,33 @@ impl SessionRegistry {
         {
             inner.running.remove(session_id);
         }
+    }
+
+    /// [`deregister`](Self::deregister), reporting the cancellation the entry
+    /// had accepted. The read and the removal happen under one lock, so a
+    /// Stop either reached the entry first and is reported here, or finds no
+    /// entry and takes `cancel_session_impl`'s own path for the row.
+    ///
+    /// For an owner whose final write leaves the row non-terminal: a Stop
+    /// trusts the entry's owner to record it, and a `disconnected` write
+    /// records none, so the owner has to hand it on.
+    fn deregister_reporting_cancellation_of(
+        &self,
+        session_id: &str,
+        epoch: RegistrationEpoch,
+    ) -> Option<CompletionReason> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .running
+            .get(session_id)
+            .is_some_and(|running| running.epoch == epoch)
+        {
+            return None;
+        }
+        inner
+            .running
+            .remove(session_id)
+            .and_then(|running| running.accepted_cancellation())
     }
 
     /// Mark the entry `epoch` registered as having decided its terminal
@@ -833,6 +888,107 @@ impl SessionRegistry {
             .running
             .get(session_id)
             .and_then(|running| running.turn_control.lock().unwrap().clone())
+    }
+
+    /// Store the detach handle for `session_id`'s current remote ACP
+    /// connection, replacing the previous connection's handle.
+    fn set_detach_handle(&self, session_id: &str, handle: acp_client::DetachHandle) {
+        if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
+            *running.detach.lock().unwrap() = Some(handle);
+        }
+    }
+
+    /// Let go of a remote session without stopping it: the local proxy is
+    /// killed outright — no `session/cancel` and no SIGINT, either of which
+    /// would stop the turn on the workstation — and the run then writes the
+    /// row `disconnected`, or `cancelled` with `reason` if no prompt had been
+    /// sent yet.
+    ///
+    /// The token is deliberately not cancelled: the run must not read this as
+    /// a Stop. A run reattaching to its remote turn ([`Self::reattaching`]) is
+    /// told to stop reattaching as well, whether or not a connection was up to
+    /// kill — a detached attempt ends with the very error the reattach tries
+    /// again after — and leaves the row `disconnected` just the same. Returns
+    /// `false` when there is nothing to detach — a local session, one not yet
+    /// connected, or one already tearing down — in which case the caller
+    /// should cancel instead.
+    pub(crate) fn detach(&self, session_id: &str, reason: CompletionReason) -> bool {
+        let Some(running) = self.inner.lock().unwrap().running.get(session_id).cloned() else {
+            return false;
+        };
+        // Recorded before the kill, so the run can never settle without it.
+        *running.detach_reason.lock().unwrap() = Some(reason);
+        // The connection first: detached, it leaves the turn running before
+        // the reattach lets go of it.
+        let handle = running.detach.lock().unwrap().clone();
+        let detached = handle.is_some_and(|handle| handle.detach());
+        let reattach = running.reattach_detach.lock().unwrap().clone();
+        if let Some(reattach) = &reattach {
+            reattach.cancel();
+        }
+        if detached || reattach.is_some() {
+            return true;
+        }
+        *running.detach_reason.lock().unwrap() = None;
+        false
+    }
+
+    /// Whether [`Self::detach`] would let `session_id` go right now, rather
+    /// than leave its caller to cancel it. It checks the same two things,
+    /// a live remote connection or a reattach, and changes nothing. The quit
+    /// prompt uses it so it counts only the sessions a quit would stop. Only
+    /// a snapshot: a Blox session that is still connecting reads `false`
+    /// until its connection is up.
+    pub(crate) fn would_detach(&self, session_id: &str) -> bool {
+        let Some(running) = self.inner.lock().unwrap().running.get(session_id).cloned() else {
+            return false;
+        };
+        let connected = running
+            .detach
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(acp_client::DetachHandle::is_armed);
+        connected || running.reattach_detach.lock().unwrap().is_some()
+    }
+
+    /// Mark `session_id`'s run as reattaching to its remote turn, returning
+    /// the token every [`Self::detach`] of the entry fires from then on,
+    /// whether or not it also killed a live connection: the reattach stops
+    /// (between attempts, while one connects, or once a detached attempt
+    /// returns) and tries nothing again, and the run leaves the turn running
+    /// on the workstation and the row `disconnected`. `detach`'s only caller
+    /// is a quit, so nothing else ends a reattach this way. A token that
+    /// never fires for a session with no entry.
+    fn reattaching(&self, session_id: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
+            *running.reattach_detach.lock().unwrap() = Some(token.clone());
+        }
+        token
+    }
+
+    /// [`Self::reattaching`], for tests outside this module that need a
+    /// session the quit would detach.
+    #[cfg(test)]
+    pub(crate) fn reattaching_for_test(&self, session_id: &str) -> CancellationToken {
+        self.reattaching(session_id)
+    }
+
+    /// The reason [`detach`](Self::detach) recorded on the entry `epoch`
+    /// registered, if it detached that entry.
+    fn detach_reason_of(
+        &self,
+        session_id: &str,
+        epoch: RegistrationEpoch,
+    ) -> Option<CompletionReason> {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .get(session_id)
+            .filter(|running| running.epoch == epoch)
+            .and_then(|running| running.detach_reason.lock().unwrap().clone())
     }
 
     /// Retain the hold `session_id`'s connection just reported, so a client
@@ -1393,7 +1549,11 @@ pub fn start_session(
             // agent the user chose, without re-running the (login-shell) discovery.
             let (driver, resolved_provider_id): (AcpDriver, Option<String>) =
                 if let Some(ref ws_name) = config.workspace_name {
-                    let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
+                    let mut d = AcpDriver::for_workspace(
+                        ws_name,
+                        config.provider.as_deref(),
+                        &config.session_id,
+                    )?;
                     if let Some(ref remote_dir) = config.remote_working_dir {
                         d = d.with_remote_working_dir(remote_dir.clone());
                     }
@@ -1528,6 +1688,7 @@ pub fn start_session(
                         config.session_id.clone(),
                         config.branch_id.clone(),
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
                 return Err(failure.error);
@@ -1536,6 +1697,18 @@ pub fn start_session(
 
     let selected_acp_config_options =
         crate::acp_config::selected_acp_config_options(config.acp_config_selection.as_ref());
+
+    // The commit base lives on the row as well as in `config`, so a session
+    // that outlives this runner (`disconnected`) can still find the commits
+    // its turn made.
+    if let Err(e) =
+        store.set_session_pre_head_sha(&config.session_id, config.pre_head_sha.as_deref())
+    {
+        log::warn!(
+            "Failed to record pre-run HEAD on session {}: {e}",
+            config.session_id
+        );
+    }
 
     // The agent protocol may use !Send futures, so we spin up a dedicated
     // thread with its own single-threaded Tokio runtime + LocalSet.
@@ -1553,6 +1726,18 @@ pub fn start_session(
         // hold the cap truncated. `Cell` because the async block only ever
         // borrows it immutably.
         let settle_reason: Cell<Option<acp_client::SessionSettleReason>> = Cell::new(None);
+        // Whether, and in which phase, the last connection lost its transport
+        // (see `disconnect::run_leaves_session_disconnected`). Reset with
+        // `settle_reason`, for the same reason.
+        let transport_loss: Cell<Option<acp_client::TransportLoss>> = Cell::new(None);
+        // Whether a Stop's `session/cancel` went unanswered on the last
+        // connection, so a remote turn may still be running behind it. Reset
+        // with `settle_reason`.
+        let cancel_unacknowledged = Cell::new(false);
+        // Whether the last connection settled out of its background hold with
+        // the work still going (see `SessionSettled::background_work_left`).
+        // Reset with `settle_reason`.
+        let background_work_left = Cell::new(false);
 
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
@@ -1792,6 +1977,9 @@ pub fn start_session(
                 // A Pikchr correction re-connects, so only the last
                 // connection's settle reason describes how the session ended.
                 settle_reason.set(None);
+                transport_loss.set(None);
+                cancel_unacknowledged.set(false);
+                background_work_left.set(false);
                 let turn_result = match driver
                     .connect(
                         &config.session_id,
@@ -1821,12 +2009,21 @@ pub fn start_session(
                             &config.session_id,
                             connection.turn_control_handle(),
                         );
+                        if config.workspace_name.is_some() {
+                            registry.set_detach_handle(
+                                &config.session_id,
+                                connection.detach_handle(),
+                            );
+                        }
                         let settled_rx = connection.take_settled_receiver();
                         let turn_result = connection.prompt(&prompt, images).await;
                         match settled_rx {
                             Some(rx) => match rx.await {
                                 Ok(settled) => {
                                     settle_reason.set(Some(settled.reason));
+                                    transport_loss.set(settled.transport_loss);
+                                    cancel_unacknowledged.set(settled.cancel_unacknowledged);
+                                    background_work_left.set(settled.background_work_left);
                                     match settled.reason {
                                         acp_client::SessionSettleReason::HeldUntilCap => {
                                             log::warn!(
@@ -1926,32 +2123,90 @@ pub fn start_session(
         }
 
         // The `sq` proxy went while bloxlet still runs the agent, which may
-        // still be finishing the turn: pick it back up there. The reattached
-        // turn ends like a dead owner's does, with no settle reason.
-        let (result, settle_reason) = match result {
-            Err(error)
-                if acp_client::is_remote_agent_detached_error(&error)
-                    && !cancel_token.is_cancelled() =>
-            {
-                let result = local.block_on(
-                    &rt,
-                    reattach_detached_turn(
-                        &store_for_status,
-                        &config,
-                        turn_start_message_id,
-                        &cancel_token,
-                        error,
-                    ),
-                );
-                (result, None)
-            }
-            result => (result, settle_reason.get()),
+        // still be finishing the turn: pick it back up there — unless a quit
+        // detached it, which means to leave the turn running. The reattached
+        // turn ends like a dead owner's does (see `ReattachEnd::settlement`);
+        // it was in flight on the agent, so losing it again leaves it there.
+        let last_settlement = RunSettlement {
+            settle_reason: settle_reason.get(),
+            transport_loss: transport_loss.get(),
+            cancel_unacknowledged: cancel_unacknowledged.get(),
+            background_work_left: background_work_left.get(),
         };
+        let (result, settlement, reattached) = match result {
+            Err(error)
+                if disconnect::run_picks_up_detached_turn(
+                    &error,
+                    cancel_token.is_cancelled(),
+                    last_settlement.settle_reason,
+                ) =>
+            {
+                // Marked before the quit check: a quit after it detaches
+                // the reattach, and one before it is seen here.
+                let detached = registry.reattaching(&session_id_for_status);
+                if crate::app_lifecycle::is_quitting(&app_handle) {
+                    (Err(error), last_settlement, false)
+                } else {
+                    let on_detach_handle = |handle: acp_client::DetachHandle| {
+                        registry.set_detach_handle(&session_id_for_status, handle)
+                    };
+                    let reattached = local.block_on(
+                        &rt,
+                        reattach_detached_turn(
+                            &store_for_status,
+                            &config,
+                            turn_start_message_id,
+                            &cancel_token,
+                            &detached,
+                            &error,
+                            &on_detach_handle,
+                        ),
+                    );
+                    match reattached {
+                        Some(end) => {
+                            let settlement = end.settlement();
+                            (end.result, settlement, true)
+                        }
+                        None => (Err(error), last_settlement, false),
+                    }
+                }
+            }
+            result => (result, last_settlement, false),
+        };
+
+        // A remote turn the connection lost — dropped transport, or a quit's
+        // detach — may still be running on the workstation, as may background
+        // work a hold lost: record the row `disconnected`, with no hooks,
+        // completion effects or queue drain.
+        if disconnect::run_leaves_session_disconnected(
+            config.workspace_name.is_some(),
+            cancel_token.is_cancelled(),
+            registry.cancellation_completion_reason(&session_id_for_status)
+                == Some(CompletionReason::AppQuit),
+            result.as_ref().err().map(String::as_str),
+            settlement.settle_reason,
+            if reattached {
+                Some(REATTACHED_TURN_IN_FLIGHT)
+            } else {
+                settlement.transport_loss
+            },
+            settlement.background_work_left,
+        ) {
+            finish_disconnected_run(
+                &config,
+                &result,
+                registration,
+                &store_for_status,
+                &registry,
+                &app_handle,
+            );
+            return;
+        }
 
         finish_session_run(
             &config,
             result,
-            settle_reason,
+            settlement,
             turn_start_message_id,
             &cancel_token,
             registration,
@@ -1964,6 +2219,145 @@ pub fn start_session(
     Ok(SessionStartOutcome::Started)
 }
 
+/// How a run's last connection settled, beyond its result: what the
+/// session runner reads off [`acp_client::SessionSettled`] to decide how the
+/// run ends. A run that never settled (it failed first, or was reattached to
+/// after its connection went) has the default: no reason, no loss.
+#[derive(Clone, Copy, Debug, Default)]
+struct RunSettlement {
+    settle_reason: Option<acp_client::SessionSettleReason>,
+    transport_loss: Option<acp_client::TransportLoss>,
+    /// The Stop's `session/cancel` went unanswered before the connection
+    /// settled, so a remote turn may still be running behind it.
+    cancel_unacknowledged: bool,
+    /// The connection settled out of its background hold with the work still
+    /// going (see `SessionSettled::background_work_left`).
+    background_work_left: bool,
+}
+
+/// The transport verdict of a turn reattached to after its connection went:
+/// it was in flight on the agent, so losing it again (or detaching) leaves it
+/// there, unless the agent itself was lost.
+const REATTACHED_TURN_IN_FLIGHT: acp_client::TransportLoss = acp_client::TransportLoss {
+    phase: acp_client::TransportLossPhase::Turn,
+};
+
+/// How a reattach to a turn in flight on the agent ended (see
+/// [`reattach_agent`]).
+#[derive(Debug)]
+struct ReattachEnd {
+    result: Result<AgentRunOutcome, String>,
+    /// A Stop ended the reattach without the agent surely having its
+    /// `session/cancel`: no connection was up to send it — the Stop came
+    /// during the wait between attempts, or before one connected — or the
+    /// connection's went out on a transport already going (see
+    /// `acp_client::SessionSettled::cancel_unacknowledged`).
+    cancel_unacknowledged: bool,
+}
+
+impl ReattachEnd {
+    /// An end with no Stop the agent may have missed.
+    fn of(result: Result<AgentRunOutcome, String>) -> Self {
+        Self {
+            result,
+            cancel_unacknowledged: false,
+        }
+    }
+
+    /// How one attempt's connection settled; `Err` when none came up, which
+    /// left a Stop meanwhile unsent.
+    ///
+    /// A Stop on a connection that saw its transport go is unacknowledged
+    /// too, whatever the connection made of it: a reattached turn is always
+    /// in flight on the agent, and a Stop that lands while a dead proxy is
+    /// still being torn down (bloxlet asked what became of the agent) settles
+    /// the attempt cancelled without its `session/cancel` ever reaching the
+    /// workstation. This is the reattach's form of the first connection's
+    /// Stop-over-Turn-loss rule in
+    /// [`disconnect::stopped_turn_needs_fresh_cancel`].
+    fn settled(
+        settled: Result<acp_client::SessionSettled, String>,
+        cancel_token: &CancellationToken,
+    ) -> Self {
+        match settled {
+            Ok(settled) => Self {
+                result: settled.outcome,
+                cancel_unacknowledged: settled.cancel_unacknowledged
+                    || (cancel_token.is_cancelled() && settled.transport_loss.is_some()),
+            },
+            Err(error) => Self {
+                result: Err(error),
+                cancel_unacknowledged: cancel_token.is_cancelled(),
+            },
+        }
+    }
+
+    /// The run's settlement. The turn was in flight on the agent, so a Stop
+    /// it may not have had is cancelled again over a fresh connection (see
+    /// [`disconnect::stopped_turn_needs_fresh_cancel`]); one the connection
+    /// sent while connected stands.
+    fn settlement(&self) -> RunSettlement {
+        RunSettlement {
+            cancel_unacknowledged: self.cancel_unacknowledged,
+            ..RunSettlement::default()
+        }
+    }
+}
+
+/// End a run that [`disconnect::run_leaves_session_disconnected`] says may
+/// still be running on its workstation: the row goes `disconnected`, owned by
+/// no process and still busy to its branch, with no hooks, completion side
+/// effects or queue drain. `registration` is the run's registry entry, which
+/// this ends.
+fn finish_disconnected_run(
+    config: &SessionConfig,
+    result: &Result<AgentRunOutcome, String>,
+    registration: RegistrationEpoch,
+    store: &Store,
+    registry: &SessionRegistry,
+    app_handle: &AppHandle,
+) {
+    let session_id = &config.session_id;
+    match result {
+        Err(e) => log::warn!(
+            "Session {session_id} lost its connection with the turn in flight; it may still be \
+             running on its workstation ({e})"
+        ),
+        Ok(_) => log::warn!(
+            "Session {session_id} lost its connection holding for background work still \
+             running on its workstation; leaving it for reconcile"
+        ),
+    }
+    registry.mark_finished(session_id, registration);
+    let transitioned = store
+        .transition_from_running(session_id, SessionStatus::Disconnected, None, None)
+        .unwrap_or(false);
+    let late_stop = disconnect::deregister_disconnected_run(registry, session_id, registration);
+    if transitioned {
+        emit_status(
+            app_handle,
+            session_id,
+            SessionStatus::Disconnected.as_str(),
+            None,
+            None,
+            config.branch_id.clone(),
+            config.project_id.clone(),
+        );
+        // A Stop that reached the entry after the run read its token trusted
+        // this thread to record it; the `disconnected` row doesn't, so
+        // reconcile ends it as for any Stop on one.
+        if let Some(reason) = late_stop {
+            log::info!(
+                "Session {session_id} was stopped as it went disconnected; handing the Stop to \
+                 reconcile"
+            );
+            if let Some(reconciler) = reconcile::active() {
+                reconciler.request_stop(session_id, reason);
+            }
+        }
+    }
+}
+
 /// The normal completion path every agent run ends through: post-completion
 /// hooks for a turn that completed, the terminal state, the completion side
 /// effects, the terminal status event, and the queued follow-up and branch
@@ -1972,7 +2366,7 @@ pub fn start_session(
 fn finish_session_run(
     config: &SessionConfig,
     result: Result<AgentRunOutcome, String>,
-    settle_reason: Option<acp_client::SessionSettleReason>,
+    settlement: RunSettlement,
     turn_start_message_id: i64,
     cancel_token: &CancellationToken,
     registration: RegistrationEpoch,
@@ -1998,24 +2392,34 @@ fn finish_session_run(
     // Read once: the arms below and the late-Stop check after the hooks
     // need to agree on what "cancelled before the run settled" means.
     let cancel_requested = cancel_token.is_cancelled();
+    let cancelled_for_quit = cancellation_completion_reason == CompletionReason::AppQuit;
     let (new_status, error_msg, completion_reason) = match result {
         Ok(AgentRunOutcome::Cancelled) if cancel_requested => {
             ("cancelled", None, cancellation_completion_reason.clone())
         }
-        Ok(AgentRunOutcome::Cancelled) => ("cancelled", None, CompletionReason::Interrupted),
+        // Ended without a Stop: the agent cancelled the turn itself, or a
+        // detach landed before the prompt was sent and recorded why.
+        Ok(AgentRunOutcome::Cancelled) => (
+            "cancelled",
+            None,
+            registry
+                .detach_reason_of(&session_id_for_status, registration)
+                .unwrap_or(CompletionReason::Interrupted),
+        ),
         // A cancel that landed on a turn which had already completed and
         // held for its background work stopped only the *wait*. Fall
         // through to the completed arm so the stop can't erase the turn's
         // artifacts (commit detection, note generation, pr/push outcomes).
         Ok(AgentRunOutcome::Completed)
-            if cancel_requested && !completed_turn_survives_late_cancel(settle_reason) =>
+            if cancel_requested
+                && !completed_turn_survives_late_cancel(settlement.settle_reason) =>
         {
             ("cancelled", None, cancellation_completion_reason.clone())
         }
         Ok(AgentRunOutcome::Completed) => (
             "completed",
             None,
-            completed_turn_completion_reason(settle_reason),
+            completed_turn_completion_reason(settlement.settle_reason),
         ),
         Err(ref e) if cancel_requested => {
             log::info!("Session {session_id_for_status} cancelled (error during teardown: {e})");
@@ -2025,6 +2429,63 @@ fn finish_session_run(
             log::error!("Session {session_id_for_status} failed: {e}");
             ("error", Some(e.clone()), failed_run_completion_reason(e))
         }
+    };
+
+    // A remote Stop the agent never acknowledged — or one that won over a
+    // transport lost mid-turn — may have left the turn running on the
+    // workstation: cancel it again over a fresh connection, and say so on the
+    // row if that can't be confirmed either.
+    let stopped_turn_needs_fresh_cancel = disconnect::stopped_turn_needs_fresh_cancel(
+        config.workspace_name.is_some(),
+        new_status == "cancelled",
+        cancelled_for_quit,
+        settlement.cancel_unacknowledged,
+        settlement.transport_loss,
+    );
+    // A Stop during the hold whose out-of-turn cancel nothing showed landing:
+    // the turn stands completed, but its background work may run on,
+    // unrecorded, so cancel it again the same way. Only logged — the row is
+    // not a cancelled one to carry the message.
+    if !stopped_turn_needs_fresh_cancel
+        && disconnect::held_work_needs_fresh_cancel(
+            config.workspace_name.is_some(),
+            cancel_requested && !cancelled_for_quit,
+            settlement.background_work_left,
+        )
+    {
+        log::warn!(
+            "Session {session_id_for_status}: background work outlived the hold's Stop; \
+             cancelling over a fresh connection"
+        );
+        if let Some(message) = reconcile::stop_outliving_work(
+            &store_for_status,
+            &reconcile::LiveBlox,
+            &session_id_for_status,
+        ) {
+            log::warn!("Session {session_id_for_status}: {message}");
+        }
+    }
+    let error_msg = if stopped_turn_needs_fresh_cancel {
+        log::warn!(
+            "Session {session_id_for_status}: Stop went unacknowledged ({:?}); cancelling over \
+             a fresh connection",
+            settlement.transport_loss
+        );
+        // Returns once the cancel is known, the backfill still going: the row
+        // ends now, and the transcript catches up after it (see
+        // `reconcile::stop`).
+        let announce_app = app_handle.clone();
+        reconcile::stop_unacknowledged_turn(
+            &store_for_status,
+            Arc::new(reconcile::LiveBlox),
+            &session_id_for_status,
+            move |event| {
+                crate::web_server::emit_to_all(&announce_app, "session-reconcile-changed", event)
+            },
+        )
+        .or(error_msg)
+    } else {
+        error_msg
     };
 
     let completed_successfully =
@@ -2442,6 +2903,7 @@ pub fn start_pipeline_session(
                         session_id.clone(),
                         config.branch_id.clone(),
                         true,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }
@@ -2534,6 +2996,7 @@ pub fn start_pipeline_session(
                             session_id.clone(),
                             config.branch_id.clone(),
                             false,
+                            crate::session_queue::KickSource::TerminalState,
                         );
                     }
                 }
@@ -2593,6 +3056,7 @@ pub fn start_pipeline_session(
                         session_id.clone(),
                         config.branch_id.clone(),
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }
@@ -2628,6 +3092,7 @@ pub fn start_pipeline_session(
                         session_id.clone(),
                         config.branch_id.clone(),
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }
@@ -2985,6 +3450,7 @@ pub(crate) fn drain_queued_after_terminal_state(
     session_id: String,
     branch_id: Option<String>,
     drain_message: bool,
+    kick_source: crate::session_queue::KickSource,
 ) {
     if !drain_message && branch_id.is_none() {
         return;
@@ -3011,11 +3477,7 @@ pub(crate) fn drain_queued_after_terminal_state(
         }
 
         if let Some(branch_id) = branch_id {
-            crate::session_queue::kick(
-                &app_handle,
-                &branch_id,
-                crate::session_queue::KickSource::TerminalState,
-            );
+            crate::session_queue::kick(&app_handle, &branch_id, kick_source);
         }
     });
 }
@@ -3619,9 +4081,12 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 /// - `owner_pid` belongs to a live process → another Staged instance owns
 ///   it; leave it alone.
 /// - `owner_pid` is dead (or NULL for pre-migration rows) → a remote session
-///   with an agent session is taken over and reattached to, since its agent
-///   runs on the workspace and may outlive the owner (see
-///   [`reattach_dead_owner_session`]); anything else ended with its owner, so
+///   whose agent has answered its turn is taken over and reattached to, since
+///   its agent runs on the workspace and may outlive the owner (see
+///   [`reattach_dead_owner_session`]). Any other Blox session whose turn may
+///   still be running on its workstation is left `disconnected` (see
+///   [`disconnect::may_still_run_on_workstation`]); its branch stays busy, so
+///   there is nothing to kick. Anything else ended with its owner, so
 ///   transition it to error with `AppQuit` reason and emit
 ///   `session-status-changed` so the frontend learns the outcome.
 ///
@@ -3631,6 +4096,30 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 /// operations — so there is no cheap test here for a queued row that nothing
 /// will ever drain.
 pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
+    let reattach_handle = app_handle.clone();
+    recover_dead_sessions_with(store, app_handle, |store, session, running| {
+        if dead_owner_recovery(store, session) != DeadOwnerRecovery::Reattach {
+            return false;
+        }
+        let sole_turn_of_owner = is_owners_sole_turn(store, session, running);
+        reattach_dead_owner_session(
+            Arc::clone(store),
+            &reattach_handle,
+            session.clone(),
+            sole_turn_of_owner,
+        );
+        true
+    });
+}
+
+/// [`recover_dead_sessions`], with the reattach step as a parameter: `reattach`
+/// takes over a dead owner's row (returning `true`) when its agent can be
+/// reattached to. Generic over the runtime so the rest is testable.
+pub(crate) fn recover_dead_sessions_with<R: tauri::Runtime>(
+    store: Arc<Store>,
+    app_handle: AppHandle<R>,
+    reattach: impl Fn(&Arc<Store>, &crate::store::Session, &[crate::store::Session]) -> bool,
+) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
         Err(e) => {
@@ -3646,53 +4135,78 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
             Some(pid) if !is_process_alive(pid) => true,
             Some(_pid) => false,
         };
-
         if should_cancel {
-            if dead_owner_recovery(&store, session) == DeadOwnerRecovery::Reattach {
-                let sole_turn_of_owner = is_owners_sole_turn(&store, session, &sessions);
-                reattach_dead_owner_session(
-                    Arc::clone(&store),
-                    &app_handle,
-                    session.clone(),
-                    sole_turn_of_owner,
-                );
+            if reattach(&store, session, &sessions) {
                 continue;
             }
-            let transitioned = store
-                .transition_from_running(
-                    &session.id,
-                    SessionStatus::Error,
-                    None,
-                    Some(&CompletionReason::AppQuit),
-                )
-                .unwrap_or(false);
-            let recovered_branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
-            let recovered_project_id = store.get_project_id_for_session(&session.id).ok().flatten();
-            if transitioned {
-                log::info!(
-                    "Recovered session {} whose owner process {:?} is gone",
-                    session.id,
-                    session.owner_pid
-                );
-            }
-            emit_status(
-                &app_handle,
-                &session.id,
-                "error",
-                None,
-                Some(&CompletionReason::AppQuit),
-                recovered_branch_id.clone(),
-                recovered_project_id,
+            recover_dead_session(&store, &app_handle, session);
+        }
+    }
+}
+
+/// End `session` — read `running`, with its owner process gone — or leave it
+/// `disconnected`, and announce the status it now has.
+///
+/// `session` is a snapshot, so the row may have moved on since it was read. A
+/// write that lost to the same recovery by another instance's sweep is still
+/// announced: that sweep's event reached only its own windows, and this
+/// instance's would otherwise keep the row `running`. A row anything else
+/// moved on — resumed, settled by reconcile, deleted — is announced by
+/// whatever moved it, and repeating this sweep's status would tell the
+/// frontend it went back (`disconnected` after `completed`, say).
+fn recover_dead_session<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &AppHandle<R>,
+    session: &crate::store::Session,
+) {
+    let disconnected = disconnect::may_still_run_on_workstation(store, session);
+    let (status, reason) = if disconnected {
+        (SessionStatus::Disconnected, None)
+    } else {
+        (SessionStatus::Error, Some(CompletionReason::AppQuit))
+    };
+    let transitioned = store
+        .transition_from_running(&session.id, status.clone(), None, reason.as_ref())
+        .unwrap_or(false);
+    if transitioned {
+        log::info!(
+            "Recovered session {} whose owner process {:?} is gone",
+            session.id,
+            session.owner_pid
+        );
+    }
+    let holds_status = transitioned
+        || store
+            .get_session(&session.id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.status == status);
+    if !holds_status {
+        log::debug!(
+            "Session {} moved on before its dead-owner recovery; not announcing {}",
+            session.id,
+            status.as_str()
+        );
+        return;
+    }
+    let recovered_branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+    let recovered_project_id = store.get_project_id_for_session(&session.id).ok().flatten();
+    emit_status(
+        app_handle,
+        &session.id,
+        status.as_str(),
+        None,
+        reason.as_ref(),
+        recovered_branch_id.clone(),
+        recovered_project_id,
+    );
+    if transitioned && !disconnected {
+        if let Some(branch_id) = recovered_branch_id {
+            crate::session_queue::kick(
+                app_handle,
+                &branch_id,
+                crate::session_queue::KickSource::DeadOwnerRecovered,
             );
-            if transitioned {
-                if let Some(branch_id) = recovered_branch_id {
-                    crate::session_queue::kick(
-                        &app_handle,
-                        &branch_id,
-                        crate::session_queue::KickSource::DeadOwnerRecovered,
-                    );
-                }
-            }
         }
     }
 }
@@ -3705,6 +4219,12 @@ enum DeadOwnerRecovery {
     /// A remote session whose agent runs on its workspace, where it may still
     /// be serving the turn: reattach to it.
     Reattach,
+}
+
+/// Whether [`recover_dead_sessions`] would reattach to `session` in place.
+#[cfg(test)]
+pub(crate) fn dead_owner_reattaches(store: &Store, session: &crate::store::Session) -> bool {
+    dead_owner_recovery(store, session) == DeadOwnerRecovery::Reattach
 }
 
 fn dead_owner_recovery(store: &Store, session: &crate::store::Session) -> DeadOwnerRecovery {
@@ -3805,6 +4325,9 @@ fn reattach_dead_owner_session(
     // flag is read after, so a shutdown either sees the entry or has already
     // published the flag; a row left here is the next launch's to recover.
     let (cancel_token, registration) = registry.register(&session.id);
+    // Marked before the quit check too: until its first connection is up,
+    // a quit stops the reattach instead of cancelling the turn.
+    let detached = registry.reattaching(&session.id);
     let adopted = !crate::app_lifecycle::is_quitting(app_handle)
         && store
             .adopt_running_session(&session.id, session.owner_pid)
@@ -3825,26 +4348,64 @@ fn reattach_dead_owner_session(
             .build()
             .expect("Failed to create runtime for session");
         let local = tokio::task::LocalSet::new();
+        let on_detach_handle =
+            |handle: acp_client::DetachHandle| registry.set_detach_handle(&session.id, handle);
         let reattached = local.block_on(&rt, async {
             let config = crate::session_commands::reattach_session_config(&store, &session).await?;
             let owner = TurnOwner {
                 pid: session.owner_pid,
                 sole_turn: sole_turn_of_owner,
             };
-            Ok::<_, String>(reattach_turn(&store, config, owner, &cancel_token).await)
+            Ok::<_, String>(
+                reattach_turn(
+                    &store,
+                    config,
+                    owner,
+                    &cancel_token,
+                    &detached,
+                    &on_detach_handle,
+                )
+                .await,
+            )
         });
         match reattached {
-            Ok((config, turn_start_message_id, result)) => finish_session_run(
-                &config,
-                result,
-                None,
-                turn_start_message_id,
-                &cancel_token,
-                registration,
-                store,
-                registry,
-                app_handle,
-            ),
+            // The turn was in flight on the agent: a quit's detach, or its
+            // `sq` proxy going for good, leaves it there.
+            Ok((config, _, end))
+                if disconnect::run_leaves_session_disconnected(
+                    config.workspace_name.is_some(),
+                    cancel_token.is_cancelled(),
+                    registry.cancellation_completion_reason(&session.id)
+                        == Some(CompletionReason::AppQuit),
+                    end.result.as_ref().err().map(String::as_str),
+                    None,
+                    Some(REATTACHED_TURN_IN_FLIGHT),
+                    false,
+                ) =>
+            {
+                finish_disconnected_run(
+                    &config,
+                    &end.result,
+                    registration,
+                    &store,
+                    &registry,
+                    &app_handle,
+                )
+            }
+            Ok((config, turn_start_message_id, end)) => {
+                let settlement = end.settlement();
+                finish_session_run(
+                    &config,
+                    end.result,
+                    settlement,
+                    turn_start_message_id,
+                    &cancel_token,
+                    registration,
+                    store,
+                    registry,
+                    app_handle,
+                )
+            }
             Err(error) => {
                 let project_id = store.get_project_id_for_session(&session.id).ok().flatten();
                 let transitioned = finish_failed_before_run(
@@ -3864,6 +4425,7 @@ fn reattach_dead_owner_session(
                         session.id,
                         session.branch_id,
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }
@@ -3880,7 +4442,9 @@ async fn reattach_turn(
     mut config: SessionConfig,
     owner: TurnOwner,
     cancel_token: &CancellationToken,
-) -> (SessionConfig, i64, Result<AgentRunOutcome, String>) {
+    detached: &CancellationToken,
+    on_detach_handle: &dyn Fn(acp_client::DetachHandle),
+) -> (SessionConfig, i64, ReattachEnd) {
     // The turn starts at its prompt — not at a steer delivered during it,
     // which is a later user message.
     let turn_start = store
@@ -3931,9 +4495,11 @@ async fn reattach_turn(
         store,
         &config,
         cancel_token,
+        detached,
         prompted_at,
         connected_at,
         owner,
+        on_detach_handle,
     )
     .await;
     (config, turn_start_message_id, result)
@@ -3980,31 +4546,56 @@ const DETACHED_TURN_REATTACH_DELAYS: [std::time::Duration; 2] = [
 /// `connected_at` (both ms since the epoch), and wait for it to end (see
 /// [`AcpDriver::reattach`]), reconnecting after a delay when its `sq` proxy
 /// goes again while bloxlet still runs the agent.
+///
+/// Each connection's detach handle goes to `on_detach_handle`, so a quit can
+/// let go of the turn without cancelling it; `detached` fires for a quit
+/// that finds no connection up (see [`retry_detached_reattach`]).
+///
+/// Each connection's `session/load` replays the session, and the turn went
+/// on with no connection attached: what the replay holds that the transcript
+/// lacks is recorded, and a stored tool call it shows finished is settled in
+/// place, as reconcile's catch-up does.
+#[allow(clippy::too_many_arguments)]
 async fn reattach_agent(
     store: &Arc<Store>,
     config: &SessionConfig,
     cancel_token: &CancellationToken,
+    detached: &CancellationToken,
     prompted_at: i64,
     connected_at: Option<i64>,
     owner: TurnOwner,
-) -> Result<AgentRunOutcome, String> {
-    let agent_session_id = config
-        .agent_session_id
-        .clone()
-        .or_else(|| {
-            stored_agent_session_id(store, &config.session_id)
-                .ok()
-                .flatten()
-        })
-        .ok_or("The session has no agent session to reattach to")?;
-    let workspace_name = config
-        .workspace_name
-        .as_deref()
-        .ok_or("The session is not on a remote workspace")?;
-    let mut driver = AcpDriver::for_workspace(workspace_name, config.provider.as_deref())?;
-    if let Some(ref remote_dir) = config.remote_working_dir {
-        driver = driver.with_remote_working_dir(remote_dir.clone());
-    }
+    on_detach_handle: &dyn Fn(acp_client::DetachHandle),
+) -> ReattachEnd {
+    let reattachable = (|| {
+        let agent_session_id = config
+            .agent_session_id
+            .clone()
+            .or_else(|| {
+                stored_agent_session_id(store, &config.session_id)
+                    .ok()
+                    .flatten()
+            })
+            .ok_or("The session has no agent session to reattach to")?;
+        let workspace_name = config
+            .workspace_name
+            .as_deref()
+            .ok_or("The session is not on a remote workspace")?;
+        // The same argv as the session's own runs, so `sq` attaches to the
+        // workstation process that ran the turn.
+        let mut driver = AcpDriver::for_workspace(
+            workspace_name,
+            config.provider.as_deref(),
+            &config.session_id,
+        )?;
+        if let Some(ref remote_dir) = config.remote_working_dir {
+            driver = driver.with_remote_working_dir(remote_dir.clone());
+        }
+        Ok::<_, String>((driver, agent_session_id))
+    })();
+    let (driver, agent_session_id) = match reattachable {
+        Ok(reattachable) => reattachable,
+        Err(error) => return ReattachEnd::of(Err(error)),
+    };
     let store_trait: Arc<dyn acp_client::Store> = store.clone();
     let turn = acp_client::ReattachTurn {
         agent_session_id,
@@ -4014,22 +4605,29 @@ async fn reattach_agent(
         sole_turn_of_owner: owner.sole_turn,
     };
     let (driver, store_trait, turn) = (&driver, &store_trait, &turn);
-    retry_detached_reattach(&config.session_id, cancel_token, move || async move {
-        let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::new(
-            config.session_id.clone(),
-            Arc::clone(store),
-        ));
-        driver
-            .reattach(
-                &config.session_id,
-                &config.working_dir,
-                store_trait,
-                &writer,
-                cancel_token,
-                turn,
-            )
-            .await
-    })
+    retry_detached_reattach(
+        &config.session_id,
+        cancel_token,
+        detached,
+        move || async move {
+            let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::catching_up(
+                config.session_id.clone(),
+                Arc::clone(store),
+            ));
+            let settled = driver
+                .reattach_detachable(
+                    &config.session_id,
+                    &config.working_dir,
+                    store_trait,
+                    &writer,
+                    cancel_token,
+                    turn,
+                    on_detach_handle,
+                )
+                .await;
+            ReattachEnd::settled(settled, cancel_token)
+        },
+    )
     .await
 }
 
@@ -4037,54 +4635,85 @@ async fn reattach_agent(
 /// [`acp_client::is_remote_agent_detached_error`]), waiting out each of
 /// [`DETACHED_TURN_REATTACH_DELAYS`] before trying again; after the last it
 /// fails with the detached error.
+///
+/// `detached` is a quit (see [`SessionRegistry::reattaching`]): between
+/// attempts, or while one connects or runs. It ends the reattach at once
+/// with the turn still in flight on the agent — an error the run leaves
+/// `disconnected`, as a quit's detach of a live connection does — and
+/// nothing is tried again after it.
 async fn retry_detached_reattach<F, Fut>(
     session_id: &str,
     cancel_token: &CancellationToken,
+    detached: &CancellationToken,
     mut reattach: F,
-) -> Result<AgentRunOutcome, String>
+) -> ReattachEnd
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<AgentRunOutcome, String>>,
+    Fut: std::future::Future<Output = ReattachEnd>,
 {
     let mut delays = DETACHED_TURN_REATTACH_DELAYS.iter();
     loop {
-        let result = reattach().await;
-        let error = match result {
-            Err(error)
-                if acp_client::is_remote_agent_detached_error(&error)
-                    && !cancel_token.is_cancelled() =>
-            {
-                error
+        // An attempt still connecting goes with its proxy, killed on drop:
+        // as a detach does, without a `session/cancel` or a SIGINT.
+        let end = tokio::select! {
+            biased;
+            () = detached.cancelled() => {
+                return ReattachEnd::of(Err(QUIT_WHILE_REATTACHING.to_string()));
             }
-            result => return result,
+            end = reattach() => end,
+        };
+        let error = match &end.result {
+            Err(error)
+                if acp_client::is_remote_agent_detached_error(error)
+                    && !cancel_token.is_cancelled()
+                    && !detached.is_cancelled() =>
+            {
+                error.clone()
+            }
+            _ => return end,
         };
         let Some(delay) = delays.next() else {
-            return Err(error);
+            return end;
         };
         log::warn!(
             "Session {session_id}: {error}; reattaching to its turn again in {}s",
             delay.as_secs_f32()
         );
         // A stop while waiting ends the session at once. No connection is
-        // watching the turn then, so nothing cancels it on the agent.
+        // watching the turn then, so nothing cancels it on the agent: the run
+        // cancels it over a fresh one. A quit leaves the turn as it is.
         tokio::select! {
             _ = tokio::time::sleep(*delay) => {}
-            _ = cancel_token.cancelled() => return Ok(AgentRunOutcome::Cancelled),
+            _ = cancel_token.cancelled() => {
+                return ReattachEnd {
+                    result: Ok(AgentRunOutcome::Cancelled),
+                    cancel_unacknowledged: true,
+                };
+            }
+            _ = detached.cancelled() => return end,
         }
     }
 }
 
+/// How a reattach a quit cut short ends: the turn in flight on the agent,
+/// left there.
+const QUIT_WHILE_REATTACHING: &str =
+    "Detached with the turn still in flight (Staged quit while reattaching to it)";
+
 /// Pick up the turn `config` prompted (its prompt is row
 /// `turn_start_message_id`) after its `sq` proxy went with `error` while
 /// bloxlet still ran the agent, rather than failing a turn the agent may
-/// still be finishing.
+/// still be finishing. `None` when the turn never reached the agent, so there
+/// is nothing to pick up and `error` stands.
 async fn reattach_detached_turn(
     store: &Arc<Store>,
     config: &SessionConfig,
     turn_start_message_id: i64,
     cancel_token: &CancellationToken,
-    error: String,
-) -> Result<AgentRunOutcome, String> {
+    detached: &CancellationToken,
+    error: &str,
+    on_detach_handle: &dyn Fn(acp_client::DetachHandle),
+) -> Option<ReattachEnd> {
     let prompted_at = store
         .get_session_messages_since(&config.session_id, turn_start_message_id, &[])
         .ok()
@@ -4093,10 +4722,7 @@ async fn reattach_detached_turn(
                 .into_iter()
                 .find(|message| message.id == turn_start_message_id)
         })
-        .map(|message| message.created_at);
-    let Some(prompted_at) = prompted_at else {
-        return Err(error);
-    };
+        .map(|message| message.created_at)?;
     let connected_at = turn_connected_at(store, &config.session_id, turn_start_message_id);
     // A proxy that went while the session was still setting up may never
     // have sent the prompt, and the idle agent would then read as the turn
@@ -4105,7 +4731,7 @@ async fn reattach_detached_turn(
         .agent_answered_message(&config.session_id, turn_start_message_id)
         .unwrap_or(false);
     if !turn_reached_agent {
-        return Err(error);
+        return None;
     }
     log::warn!(
         "Session {}: {error}; reattaching to its turn",
@@ -4117,15 +4743,19 @@ async fn reattach_detached_turn(
         pid: Some(std::process::id()),
         sole_turn: false,
     };
-    reattach_agent(
-        store,
-        config,
-        cancel_token,
-        prompted_at,
-        connected_at,
-        owner,
+    Some(
+        reattach_agent(
+            store,
+            config,
+            cancel_token,
+            detached,
+            prompted_at,
+            connected_at,
+            owner,
+            on_detach_handle,
+        )
+        .await,
     )
-    .await
 }
 
 /// The HEAD a turn prompted at `at` (ms since the epoch) started from: what
@@ -5376,6 +6006,7 @@ pub(crate) fn emit_status<R: tauri::Runtime>(
         branch_id,
         project_id,
         session_type: None,
+        dependency_skipped: false,
     };
     crate::web_server::emit_to_all(app_handle, "session-status-changed", &event);
 }
@@ -5441,6 +6072,7 @@ pub fn emit_session_running(
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),
+        dependency_skipped: false,
     };
     crate::web_server::emit_to_all(app_handle, "session-status-changed", &event);
 }
@@ -5908,15 +6540,21 @@ mod tests {
     }
 
     /// `sq` going is usually transient, so a turn it detached from is tried
-    /// again only after a growing wait — and a stop during one ends it.
+    /// again only after a growing wait — and a stop during one ends it, with
+    /// no connection up to have sent the agent its cancel.
     #[tokio::test(start_paused = true)]
     async fn a_detached_reattachment_is_retried_after_growing_delays() {
-        let detached = || Err("Remote agent detached: the `sq blox acp` proxy exited".to_string());
+        let detached = || {
+            ReattachEnd::of(Err(
+                "Remote agent detached: the `sq blox acp` proxy exited".to_string()
+            ))
+        };
         let cancel = CancellationToken::new();
+        let no_quit = CancellationToken::new();
         let started = tokio::time::Instant::now();
 
         let mut attempts = Vec::new();
-        let result = retry_detached_reattach("s", &cancel, || {
+        let end = retry_detached_reattach("s", &cancel, &no_quit, || {
             attempts.push(started.elapsed());
             std::future::ready(detached())
         })
@@ -5929,21 +6567,21 @@ mod tests {
         );
         assert!(first < second);
         assert!(acp_client::is_remote_agent_detached_error(
-            &result.unwrap_err()
+            &end.result.unwrap_err()
         ));
 
         // Anything else ends it at once.
         let mut attempts = 0;
-        let result = retry_detached_reattach("s", &cancel, || {
+        let end = retry_detached_reattach("s", &cancel, &no_quit, || {
             attempts += 1;
             std::future::ready(if attempts == 1 {
                 detached()
             } else {
-                Ok(AgentRunOutcome::Completed)
+                ReattachEnd::of(Ok(AgentRunOutcome::Completed))
             })
         })
         .await;
-        assert_eq!((attempts, result), (2, Ok(AgentRunOutcome::Completed)));
+        assert_eq!((attempts, end.result), (2, Ok(AgentRunOutcome::Completed)));
 
         // A stop during the wait.
         let stop = cancel.clone();
@@ -5952,12 +6590,80 @@ mod tests {
             stop.cancel();
         });
         let mut attempts = 0;
-        let result = retry_detached_reattach("s", &cancel, || {
+        let end = retry_detached_reattach("s", &cancel, &no_quit, || {
             attempts += 1;
             std::future::ready(detached())
         })
         .await;
-        assert_eq!((attempts, result), (1, Ok(AgentRunOutcome::Cancelled)));
+        assert!(end.cancel_unacknowledged, "no connection sent its cancel");
+        assert_eq!((attempts, end.result), (1, Ok(AgentRunOutcome::Cancelled)));
+    }
+
+    /// A quit that finds no connection up to detach — during the wait
+    /// between attempts, while one connects, or before the first — ends the
+    /// reattach at once, without cancelling: the turn is left in flight on
+    /// the agent, and the run leaves the row `disconnected`.
+    #[tokio::test(start_paused = true)]
+    async fn a_quit_while_reattaching_leaves_the_turn_in_flight() {
+        let detached = || Err("Remote agent detached: the `sq blox acp` proxy exited".to_string());
+        let [first, _] = DETACHED_TURN_REATTACH_DELAYS;
+        let cancel = CancellationToken::new();
+        let quit_in = |after: std::time::Duration| {
+            let quit = CancellationToken::new();
+            let quitting = quit.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                quitting.cancel();
+            });
+            quit
+        };
+        let leaves_disconnected = |end: &ReattachEnd| {
+            !end.cancel_unacknowledged
+                && disconnect::run_leaves_session_disconnected(
+                    true,
+                    false,
+                    false,
+                    end.result.as_ref().err().map(String::as_str),
+                    None,
+                    Some(REATTACHED_TURN_IN_FLIGHT),
+                    false,
+                )
+        };
+
+        // During the wait between attempts.
+        let quit = quit_in(first / 2);
+        let mut attempts = 0;
+        let end = retry_detached_reattach("s", &cancel, &quit, || {
+            attempts += 1;
+            std::future::ready(ReattachEnd::of(detached()))
+        })
+        .await;
+        assert_eq!(attempts, 1);
+        assert!(acp_client::is_remote_agent_detached_error(
+            end.result.as_ref().unwrap_err()
+        ));
+        assert!(leaves_disconnected(&end), "{end:?}");
+
+        // While an attempt connects, or runs.
+        let quit = quit_in(first / 2);
+        let end = retry_detached_reattach("s", &cancel, &quit, std::future::pending).await;
+        assert_eq!(end.result, Err(QUIT_WHILE_REATTACHING.to_string()));
+        assert!(leaves_disconnected(&end));
+
+        // Before the first: none is ever polled.
+        let quit = CancellationToken::new();
+        quit.cancel();
+        let connected = std::cell::Cell::new(0);
+        let end = retry_detached_reattach("s", &cancel, &quit, || async {
+            connected.set(connected.get() + 1);
+            ReattachEnd::of(Ok(AgentRunOutcome::Completed))
+        })
+        .await;
+        assert_eq!(
+            (connected.get(), end.result),
+            (0, Err(QUIT_WHILE_REATTACHING.to_string()))
+        );
+        assert!(!cancel.is_cancelled());
     }
 
     #[test]
@@ -6805,6 +7511,146 @@ mod tests {
         assert!(!registry.is_running("session-resumed"));
     }
 
+    /// A quit that finds a run reattaching to its remote turn stops the
+    /// reattach instead of cancelling the run — after detaching the
+    /// connection when one is up, and here with none to kill (between
+    /// attempts, or before the first is up): the turn is left running, and
+    /// the run, not stopped, leaves the row `disconnected`.
+    #[test]
+    fn a_quit_stops_a_reattach_with_no_connection_to_detach() {
+        let registry = SessionRegistry::new();
+        let (token, epoch) = registry.register("session-reattaching");
+        let detached = registry.reattaching("session-reattaching");
+
+        assert!(registry.would_detach("session-reattaching"));
+        assert!(!detached.is_cancelled(), "asking detaches nothing");
+        assert!(registry.detach("session-reattaching", CompletionReason::AppQuit));
+        assert!(detached.is_cancelled());
+        assert!(!token.is_cancelled(), "a detach is no Stop");
+        assert_eq!(
+            registry.detach_reason_of("session-reattaching", epoch),
+            Some(CompletionReason::AppQuit)
+        );
+        assert!(!registry.reattaching("unknown").is_cancelled());
+    }
+
+    fn reattached_connection_settled(cancel_unacknowledged: bool) -> acp_client::SessionSettled {
+        acp_client::SessionSettled {
+            outcome: Ok(AgentRunOutcome::Cancelled),
+            reason: acp_client::SessionSettleReason::Cancelled,
+            transport_loss: None,
+            cancel_unacknowledged,
+            background_work_left: false,
+        }
+    }
+
+    fn needs_fresh_cancel(end: &ReattachEnd, cancelled_for_quit: bool) -> bool {
+        let settlement = end.settlement();
+        disconnect::stopped_turn_needs_fresh_cancel(
+            true,
+            end.result == Ok(AgentRunOutcome::Cancelled),
+            cancelled_for_quit,
+            settlement.cancel_unacknowledged,
+            settlement.transport_loss,
+        )
+    }
+
+    /// A Stop the reattached connection sent and the agent answered ends the
+    /// reattach in one attempt, and stands: nothing cancels the turn again.
+    #[tokio::test(start_paused = true)]
+    async fn an_acknowledged_stop_on_a_reattached_turn_is_not_cancelled_again() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut attempts = 0;
+        let end = retry_detached_reattach("s", &cancel, &CancellationToken::new(), || {
+            attempts += 1;
+            std::future::ready(ReattachEnd::settled(
+                Ok(reattached_connection_settled(false)),
+                &cancel,
+            ))
+        })
+        .await;
+        assert_eq!(
+            (attempts, &end.result),
+            (1, &Ok(AgentRunOutcome::Cancelled))
+        );
+        assert!(!needs_fresh_cancel(&end, false));
+    }
+
+    /// A Stop the agent may not have had — the reattached connection's
+    /// cancel went unanswered, or no connection was up to send it — has the
+    /// turn cancelled again over a fresh connection.
+    #[test]
+    fn an_unacknowledged_stop_on_a_reattached_turn_is_cancelled_again() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let unanswered = ReattachEnd::settled(Ok(reattached_connection_settled(true)), &cancel);
+        assert!(needs_fresh_cancel(&unanswered, false));
+
+        // Stopped before the attempt's connection came up: its error is the
+        // run's, and the turn is cancelled again just the same.
+        let unconnected = ReattachEnd::settled(Err("connection refused".to_string()), &cancel);
+        assert!(unconnected.cancel_unacknowledged);
+        let not_stopped = ReattachEnd::settled(
+            Err("connection refused".to_string()),
+            &CancellationToken::new(),
+        );
+        assert!(!not_stopped.cancel_unacknowledged);
+
+        // Stopped while the reattached proxy's teardown asked bloxlet what
+        // became of the agent: the connection maps its lost turn to
+        // `Cancelled` with the cancel never sent, and says nothing of it but
+        // the loss. The turn is cancelled again all the same.
+        for phase in [
+            acp_client::TransportLossPhase::Turn,
+            acp_client::TransportLossPhase::Setup,
+            acp_client::TransportLossPhase::Hold,
+        ] {
+            let lost = acp_client::SessionSettled {
+                transport_loss: Some(acp_client::TransportLoss { phase }),
+                ..reattached_connection_settled(false)
+            };
+            let end = ReattachEnd::settled(Ok(lost.clone()), &cancel);
+            assert!(end.cancel_unacknowledged, "{phase:?}");
+            assert!(needs_fresh_cancel(&end, false), "{phase:?}");
+            assert!(!needs_fresh_cancel(&end, true), "a quit's, {phase:?}");
+
+            // The same loss with no Stop is no Stop to repeat.
+            let unstopped = ReattachEnd::settled(Ok(lost), &CancellationToken::new());
+            assert!(!unstopped.cancel_unacknowledged, "{phase:?}");
+        }
+    }
+
+    /// A quit's cancel is no Stop: whatever a connection made of it, the
+    /// turn is never cancelled again. (A run reattaching is marked so before
+    /// it checks for a quit, so a quit detaches it rather than cancelling it
+    /// — see `a_quit_stops_a_reattach_with_no_connection_to_detach`.)
+    #[test]
+    fn a_quit_s_cancel_never_has_a_reattached_turn_cancelled_again() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let end = ReattachEnd::settled(Ok(reattached_connection_settled(true)), &cancel);
+        assert!(needs_fresh_cancel(&end, false), "a Stop's would be");
+        assert!(!needs_fresh_cancel(&end, true));
+    }
+
+    /// Only a connected remote session has a detach handle. Anything else —
+    /// unknown, or registered but not connected (a local session never is) —
+    /// answers `false` so the quit cancels it instead, and the refusal leaves
+    /// neither a Stop nor a detach reason behind.
+    #[test]
+    fn detach_without_a_remote_connection_falls_back_to_cancel() {
+        let registry = SessionRegistry::new();
+        assert!(!registry.would_detach("unknown"));
+        assert!(!registry.detach("unknown", CompletionReason::AppQuit));
+
+        let (token, epoch) = registry.register("session-local");
+        assert!(!registry.would_detach("session-local"));
+        assert!(!registry.detach("session-local", CompletionReason::AppQuit));
+        assert!(!token.is_cancelled());
+        assert_eq!(registry.detach_reason_of("session-local", epoch), None);
+    }
+
     /// A hold is the registry's lighter entry: it makes the row live for the
     /// sweep without making it cancellable, so a Stop still takes
     /// `cancel_session_impl`'s store-write fallback and shutdown's cancel
@@ -7369,7 +8215,7 @@ mod tests {
         assert_eq!(row.completion_reason, Some(CompletionReason::AppQuit));
         assert!(!registry.is_running(&session.id));
         assert!(
-            registry.wait_for_sessions(&[session.id.clone()], Duration::ZERO),
+            registry.wait_for_sessions(std::slice::from_ref(&session.id), Duration::ZERO),
             "shutdown must not wait on a session the refusal took over"
         );
     }
@@ -7402,6 +8248,99 @@ mod tests {
             refused_start_completion_reason(&registry, "session-handoff"),
             CompletionReason::Interrupted
         );
+    }
+
+    /// A `running` Blox session with an agent session, as the dead-owner
+    /// sweep reads it.
+    fn running_blox_session(store: &Store) -> crate::store::Session {
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new_remote(&project.id, "remote", "main", "ws-1");
+        store.create_branch(&branch).unwrap();
+        let mut session =
+            crate::store::Session::new_running("prompt", std::path::Path::new("/tmp"))
+                .with_branch(&branch.id);
+        session.agent_id = Some("acp-1".to_string());
+        store.create_session(&session).unwrap();
+        store.get_session(&session.id).unwrap().unwrap()
+    }
+
+    fn status_events(
+        app: &tauri::App<tauri::test::MockRuntime>,
+    ) -> Arc<std::sync::Mutex<Vec<String>>> {
+        use tauri::Listener;
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        app.handle()
+            .listen_any("session-status-changed", move |event| {
+                seen.lock().unwrap().push(event.payload().to_string());
+            });
+        events
+    }
+
+    #[test]
+    fn a_dead_owners_blox_session_is_left_disconnected_and_announced() {
+        let store = Store::in_memory().unwrap();
+        let session = running_blox_session(&store);
+        let app = mock_app();
+        let events = status_events(&app);
+
+        recover_dead_session(&store, app.handle(), &session);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Disconnected);
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains("\"disconnected\""), "{events:?}");
+    }
+
+    /// Another instance's sweep wrote the same status first: its event only
+    /// reached its own windows, so this one still announces it.
+    #[test]
+    fn a_recovery_another_sweep_made_first_is_still_announced() {
+        let store = Store::in_memory().unwrap();
+        let session = running_blox_session(&store);
+        assert!(store
+            .transition_from_running(&session.id, SessionStatus::Disconnected, None, None)
+            .unwrap());
+        let app = mock_app();
+        let events = status_events(&app);
+
+        recover_dead_session(&store, app.handle(), &session);
+
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains("\"disconnected\""), "{events:?}");
+    }
+
+    /// The row went `disconnected` and was then settled (reconcile in
+    /// another instance) between the sweep's read and its write: announcing
+    /// `disconnected` would send the settled session back in the UI.
+    #[test]
+    fn a_row_that_moved_on_since_the_sweep_read_it_is_not_announced() {
+        let store = Store::in_memory().unwrap();
+        let session = running_blox_session(&store);
+        assert!(store
+            .transition_from_running(&session.id, SessionStatus::Disconnected, None, None)
+            .unwrap());
+        let disconnected = store.get_session(&session.id).unwrap().unwrap();
+        assert!(store
+            .transition_from_disconnected_observed_at(
+                &session.id,
+                disconnected.updated_at,
+                SessionStatus::Completed,
+                None,
+                None,
+            )
+            .unwrap());
+        let app = mock_app();
+        let events = status_events(&app);
+
+        recover_dead_session(&store, app.handle(), &session);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Completed);
+        assert!(events.lock().unwrap().is_empty());
     }
 
     /// A mock app so the refusal's status event has somewhere to go. Nothing

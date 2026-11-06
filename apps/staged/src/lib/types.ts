@@ -177,6 +177,11 @@ export interface CommitTimelineItem {
   sessionStatus: string | null;
   completionReason: string | null;
   /**
+   * The session's error message, for a failed row's copy (a deleted
+   * workstation reads differently from a crash).
+   */
+  sessionErrorMessage?: string | null;
+  /**
    * Kind of the git pipeline behind this row's session. Only set on pending
    * rows: it is how a queued/running rebase or squash is told apart from a
    * plain commit session, since the subject is a display label an agent-pushed
@@ -194,6 +199,11 @@ export interface NoteTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  /**
+   * The session's error message, for a failed row's copy (a deleted
+   * workstation reads differently from a crash).
+   */
+  sessionErrorMessage?: string | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -245,6 +255,11 @@ export interface ReviewTimelineItem {
   sessionStatus: string | null;
   sessionProvider: string | null;
   completionReason: string | null;
+  /**
+   * The session's error message, for a failed row's copy (a deleted
+   * workstation reads differently from a crash).
+   */
+  sessionErrorMessage?: string | null;
   title: string | null;
   /** Active non-`information` comments (what the detail view lists as comments). */
   commentCount: number;
@@ -456,7 +471,8 @@ export interface ProjectSearchItem {
 // Sessions
 // =============================================================================
 
-export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
+export type SessionStatus =
+  'queued' | 'running' | 'disconnected' | 'completed' | 'error' | 'cancelled';
 
 export type CompletionReason =
   | 'turn_complete'
@@ -802,13 +818,72 @@ export interface SessionStatusPayload {
   branchId?: string;
   projectId?: string;
   sessionType?: string;
+  /**
+   * Set only on the `cancelled` of a queued session skipped because the
+   * session it was gated on did not succeed: it never ran.
+   */
+  dependencySkipped?: boolean;
+}
+
+// =============================================================================
+// Reconciling disconnected Blox sessions
+// =============================================================================
+
+/**
+ * What the backend's reconcile service is doing about a `disconnected` row.
+ * Mirrors `ReconcilePhase` in `src-tauri/src/session_runner/reconcile.rs`.
+ *
+ * - `checking`: asking Blox about the workstation and the session's process,
+ *   catching the transcript up, and (when the turn is still running)
+ *   following it — the row reads `running` again for that last part.
+ * - `stopping`: cancelling the remote turn for a Stop.
+ * - `waiting`: the last attempt couldn't settle the row; the next is at
+ *   `nextAttemptAt`, or sooner on a "Check now".
+ * - `idle`: nothing in progress or pending. The last event for a row that
+ *   settled.
+ */
+export type SessionReconcilePhase = 'checking' | 'stopping' | 'waiting' | 'idle';
+
+/** Why the last reconcile attempt left a row `disconnected`. */
+export type SessionReconcileReasonKind =
+  | 'unreachable'
+  | 'not_authenticated'
+  | 'suspended'
+  | 'workstation_not_running'
+  | 'attach_failed'
+  /** Not a failure: the turn is over, but work it started is still running. */
+  | 'background_work';
+
+export interface SessionReconcileReason {
+  kind: SessionReconcileReasonKind;
+  /** Human-readable detail, e.g. the `sq` error. */
+  message: string;
 }
 
 /**
- * One entry of the `get_active_sessions` busy-state snapshot: a running or
- * queued session projected to its branch/project context. Carries the same
- * discriminators as `SessionStatusPayload` so the snapshot and the
- * `session-status-changed` delta stream describe sessions identically.
+ * Payload of the `session-reconcile-changed` event, and one entry of
+ * `get_session_reconcile_states`: where reconciling one `disconnected`
+ * session stands. Emitted on every phase change.
+ */
+export interface SessionReconcileEvent {
+  sessionId: string;
+  branchId: string | null;
+  projectId: string | null;
+  phase: SessionReconcilePhase;
+  /** Why the last attempt couldn't settle the row; null before the first failure. */
+  reason: SessionReconcileReason | null;
+  /** Failed attempts since the row last made progress. */
+  attempts: number;
+  /** When the backend will next try, in ms since the epoch, while `waiting`. */
+  nextAttemptAt: number | null;
+}
+
+/**
+ * One entry of the `get_active_sessions` busy-state snapshot: a running,
+ * queued or disconnected session projected to its branch/project context.
+ * Carries the same discriminators as `SessionStatusPayload` so the snapshot
+ * and the `session-status-changed` delta stream describe sessions
+ * identically.
  */
 export interface ActiveSessionInfo {
   sessionId: string;
@@ -834,8 +909,11 @@ export interface ChildSessionInfo {
   sessionId: string;
   /** One of `'commit'`, `'note'`, `'review'`. */
   sessionType: string;
-  /** The only two statuses the query returns. */
-  status: 'queued' | 'running';
+  /**
+   * The only statuses the query returns. `disconnected` is a Blox child that
+   * lost its connection and may still be running remotely.
+   */
+  status: 'queued' | 'running' | 'disconnected';
   /**
    * The child's title as the branch timeline would show it, resolved by the
    * backend with the branch timeline's own rules: a commit's ACP title else

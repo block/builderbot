@@ -1,7 +1,12 @@
 //! Reading bloxlet's view of a remote agent process.
 
-use crate::driver::remote_liveness::{parse_commands, parse_utc_timestamp, CommandRecord, Target};
-use std::ffi::OsString;
+use crate::driver::remote_liveness::{
+    parse_commands, parse_utc_timestamp, CommandRecord, Target, REATTACHED_TURN_QUIET_CAP,
+};
+use crate::driver::{AcpDriver, BackgroundHoldConfig};
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
+use std::time::Duration;
 
 fn record(id: &str, status: &str, message: &str) -> CommandRecord {
     CommandRecord {
@@ -102,4 +107,59 @@ fn only_a_blox_acp_proxy_has_a_workspace_to_ask() {
     .is_some());
     assert!(Target::of("sq".as_ref(), &args(&["blox", "ws", "ws-1"])).is_none());
     assert!(Target::of("claude-agent-acp".as_ref(), &args(&[])).is_none());
+}
+
+/// The quiet cap's target for the proxy `AcpDriver::for_workspace` builds for
+/// `agent_id`.
+fn workspace_target(agent_id: Option<&str>) -> Target {
+    let driver =
+        AcpDriver::for_workspace_with_binary(PathBuf::from("sq"), "ws-1", agent_id, "session-1");
+    let args: Vec<OsString> = driver.acp_args.iter().map(OsString::from).collect();
+    Target::of(OsStr::new("sq"), &args).expect("a blox acp proxy")
+}
+
+/// A reattached turn gets the long cap, the post-turn hold's 4 h ceiling,
+/// only on a process dedicated to its session whose agent runs unattended
+/// (Goose's `GOOSE_MODE=auto`, Claude's `bypassPermissions`); never none,
+/// since Claude's bypass is best-effort and some asks get through it. A
+/// dedicated Codex, Pi or Amp process keeps the 30 min cap, as do Blox's
+/// shared default and a process pinned by id: those agents ask permission,
+/// and a request the lost connection never answered would otherwise hold
+/// the turn.
+#[test]
+fn only_a_dedicated_unattended_agent_is_waited_on_past_the_quiet_cap() {
+    let long_cap = BackgroundHoldConfig::default().hold_ceiling;
+    assert_eq!(long_cap, Duration::from_secs(4 * 60 * 60));
+    for agent in ["claude", "goose"] {
+        assert_eq!(
+            workspace_target(Some(agent)).reattached_turn_quiet_cap(),
+            long_cap,
+            "{agent}"
+        );
+    }
+    // The 30 min cap (shortened under test) is distinct from the long one,
+    // so the cases below tell the two apart.
+    assert!(REATTACHED_TURN_QUIET_CAP < long_cap);
+    for agent in ["codex", "pi", "amp"] {
+        assert_eq!(
+            workspace_target(Some(agent)).reattached_turn_quiet_cap(),
+            REATTACHED_TURN_QUIET_CAP,
+            "{agent}"
+        );
+    }
+    assert_eq!(
+        workspace_target(None).reattached_turn_quiet_cap(),
+        REATTACHED_TURN_QUIET_CAP,
+        "Blox's shared default"
+    );
+    let pinned: Vec<OsString> = ["blox", "acp", "ws-1", "--command-id=cmd-1"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    assert_eq!(
+        Target::of(OsStr::new("sq"), &pinned)
+            .unwrap()
+            .reattached_turn_quiet_cap(),
+        REATTACHED_TURN_QUIET_CAP
+    );
 }

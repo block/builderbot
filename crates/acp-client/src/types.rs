@@ -192,20 +192,135 @@ fn command_in_dir(dir: Option<&Path>, cmd: &str) -> Option<PathBuf> {
     doctor::resolve::resolve_executable_from_path(cmd, &dir.to_string_lossy())
 }
 
-/// Map an agent ID to the `--command` value for `blox acp`.
+/// What `blox acp` runs on the workstation when given no `--command`.
+pub(crate) const BLOX_DEFAULT_ACP_ARGV: &[&str] = &["goose", "acp"];
+
+/// The workstation process one Staged session's agent runs as.
 ///
-/// Returns `None` if the agent uses the workspace default (no flag needed).
-pub(crate) fn blox_acp_command(agent_id: &str) -> Option<String> {
-    KNOWN_AGENTS.iter().find(|a| a.id == agent_id).map(|a| {
-        let mut parts = vec![a.command];
-        parts.extend(a.acp_args.iter().copied());
-        parts.join(",")
-    })
+/// `blox acp` reuses a running process whose argv equals the requested one
+/// exactly (env, tags and cwd play no part), so an argv that names the Staged
+/// session gives each session a process of its own, and gives the same
+/// session (a resume, a reattach) that process back. A dedicated process is
+/// what makes SIGINT at teardown safe (it stops this session's turn only) and
+/// makes the process status (`RUNNING`/`IDLE`) this session's alone.
+///
+/// Forms, verified against a live workstation:
+/// - Claude, Codex, Pi and Amp take a trailing `--staged-session=<id>`
+///   argument they ignore. Blox keys its per-agent env defaults and the
+///   `blox:agent` tag off the command (and its catalog args as a prefix), so
+///   both survive. Claude runs `claude-agent-acp` directly: Blox swaps in its
+///   `BLOX_FF_CLAUDE_ACP_PI` `sh -c` wrapper only for the exact argv
+///   `claude-agent-acp`, and no unique argv can keep that wrapper. Running
+///   the bridge directly is also what gives Staged the `_claude/sdkMessage`
+///   frames, steering and `bypassPermissions` mode it relies on.
+/// - Goose's CLI rejects unknown flags, so its argv is wrapped as
+///   `sh -c 'exec "$@"' staged-session-<id> goose acp …`: the session id is
+///   the wrapper's `$0`, and goose runs with its usual args. Blox no longer
+///   recognises the process as goose, so it loses the `blox:agent` display
+///   tag; goose has no catalog env to lose, and `GOOSE_MODE` is still passed
+///   with `--env-vars`.
+/// - With no known provider the flag is left off and Blox runs its default,
+///   which every such session (and any other plain `blox acp` client)
+///   shares. Teardown of a shared process must never SIGINT it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BloxAcpCommand {
+    /// The argv Blox records for the process (`processCommand` followed by
+    /// `processArgs`), and finds it again by.
+    pub(crate) argv: Vec<String>,
+    /// Whether `argv` is passed as `--command`, rather than being Blox's
+    /// own default.
+    pub(crate) explicit: bool,
+    /// Whether the process serves this Staged session alone.
+    pub(crate) dedicated: bool,
+}
+
+impl BloxAcpCommand {
+    /// The `--command` value: argv joined with commas (the CLI's list
+    /// separator), or `None` for Blox's default.
+    pub(crate) fn flag_value(&self) -> Option<String> {
+        self.explicit.then(|| self.argv.join(","))
+    }
+}
+
+/// The [`BloxAcpCommand`] for `staged_session_id` running `agent_id`.
+pub(crate) fn blox_acp_command(agent_id: Option<&str>, staged_session_id: &str) -> BloxAcpCommand {
+    let Some(agent) = agent_id.and_then(|id| KNOWN_AGENTS.iter().find(|a| a.id == id)) else {
+        return BloxAcpCommand {
+            argv: BLOX_DEFAULT_ACP_ARGV
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            explicit: false,
+            dedicated: false,
+        };
+    };
+    // `--command` is split on commas, so keep the id to characters that
+    // cannot split it (Staged's ids are UUIDs, which already are).
+    let session_tag: String = staged_session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let agent_argv = std::iter::once(agent.command)
+        .chain(agent.acp_args.iter().copied())
+        .map(str::to_string);
+    let argv = if agent.id == "goose" {
+        ["sh", "-c", "exec \"$@\""]
+            .into_iter()
+            .map(str::to_string)
+            .chain(std::iter::once(format!("staged-session-{session_tag}")))
+            .chain(agent_argv)
+            .collect()
+    } else {
+        agent_argv
+            .chain(std::iter::once(format!("--staged-session={session_tag}")))
+            .collect()
+    };
+    BloxAcpCommand {
+        argv,
+        explicit: true,
+        dedicated: true,
+    }
+}
+
+/// Whether `argv` is a [`BloxAcpCommand`] dedicated to one Staged session,
+/// in either of [`blox_acp_command`]'s forms: a trailing
+/// `--staged-session=<id>`, or Goose's `sh -c 'exec "$@"' staged-session-<id>`
+/// wrapper. Blox's shared default names no session.
+pub(crate) fn names_a_staged_session(argv: &[String]) -> bool {
+    match argv {
+        [sh, c, exec, tag, ..] if sh == "sh" && c == "-c" && exec == "exec \"$@\"" => {
+            tag.starts_with("staged-session-")
+        }
+        _ => argv
+            .last()
+            .is_some_and(|arg| arg.starts_with("--staged-session=")),
+    }
+}
+
+/// The known agent a [`BloxAcpCommand`] dedicated to one Staged session runs
+/// (see [`names_a_staged_session`]): Goose behind its `sh -c` wrapper, or the
+/// agent whose command leads the argv. `None` for an argv that names no
+/// session, or whose command is no known agent's.
+pub(crate) fn staged_session_agent(argv: &[String]) -> Option<&'static str> {
+    if !names_a_staged_session(argv) {
+        return None;
+    }
+    let command = match argv {
+        [sh, c, exec, _tag, command, ..] if sh == "sh" && c == "-c" && exec == "exec \"$@\"" => {
+            command
+        }
+        [command, ..] => command,
+        [] => return None,
+    };
+    KNOWN_AGENTS
+        .iter()
+        .find(|agent| agent.command == command)
+        .map(|agent| agent.id)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::command_in_dir;
+    use super::{blox_acp_command, command_in_dir, names_a_staged_session, staged_session_agent};
     use std::fs;
     use std::path::Path;
 
@@ -256,5 +371,111 @@ mod tests {
 
         assert_eq!(command_in_dir(Some(&dir), "claude-agent-acp"), None);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blox_commands_name_the_session_for_every_known_agent() {
+        let claude = blox_acp_command(Some("claude"), "6f1c-aa");
+        assert_eq!(
+            claude.argv,
+            ["claude-agent-acp", "--staged-session=6f1c-aa"]
+        );
+        assert_eq!(
+            claude.flag_value().as_deref(),
+            Some("claude-agent-acp,--staged-session=6f1c-aa")
+        );
+        assert!(claude.dedicated);
+        for (agent, command) in [("codex", "codex-acp"), ("pi", "pi-acp"), ("amp", "amp-acp")] {
+            let blox = blox_acp_command(Some(agent), "s1");
+            assert_eq!(blox.argv, [command, "--staged-session=s1"], "{agent}");
+            assert!(blox.dedicated, "{agent}");
+        }
+    }
+
+    #[test]
+    fn goose_runs_under_an_exec_wrapper_carrying_the_session() {
+        let goose = blox_acp_command(Some("goose"), "s1");
+        assert_eq!(
+            goose.argv,
+            [
+                "sh",
+                "-c",
+                "exec \"$@\"",
+                "staged-session-s1",
+                "goose",
+                "acp",
+                "--with-builtin",
+                "developer",
+                "--with-builtin",
+                "extensionmanager",
+            ]
+        );
+        assert_eq!(
+            goose.flag_value().as_deref(),
+            Some(
+                "sh,-c,exec \"$@\",staged-session-s1,goose,acp,--with-builtin,developer,\
+                 --with-builtin,extensionmanager"
+            )
+        );
+        assert!(goose.dedicated);
+    }
+
+    #[test]
+    fn an_unknown_provider_shares_blox_default_process() {
+        for agent in [None, Some("mystery")] {
+            let blox = blox_acp_command(agent, "s1");
+            assert_eq!(blox.argv, ["goose", "acp"]);
+            assert_eq!(blox.flag_value(), None);
+            assert!(!blox.dedicated);
+        }
+    }
+
+    #[test]
+    fn a_session_id_cannot_split_the_command_list() {
+        let blox = blox_acp_command(Some("codex"), "a,b c");
+        assert_eq!(blox.argv, ["codex-acp", "--staged-session=abc"]);
+    }
+
+    /// Every dedicated form names its session; Blox's shared default doesn't.
+    #[test]
+    fn dedicated_argv_names_its_staged_session() {
+        for agent in [
+            Some("claude"),
+            Some("codex"),
+            Some("goose"),
+            Some("pi"),
+            Some("amp"),
+        ] {
+            let blox = blox_acp_command(agent, "s1");
+            assert_eq!(
+                names_a_staged_session(&blox.argv),
+                blox.dedicated,
+                "{agent:?}"
+            );
+            assert!(blox.dedicated, "{agent:?}");
+        }
+        let shared = blox_acp_command(None, "s1");
+        assert!(!names_a_staged_session(&shared.argv));
+        assert!(!names_a_staged_session(&[]));
+        let goose_unwrapped: Vec<String> = ["goose", "acp"].map(String::from).to_vec();
+        assert!(!names_a_staged_session(&goose_unwrapped));
+    }
+
+    /// A dedicated argv, in either form, says which agent it runs; one that
+    /// names no session, or runs no known agent, doesn't.
+    #[test]
+    fn dedicated_argv_names_its_agent() {
+        for agent in ["claude", "codex", "goose", "pi", "amp"] {
+            let blox = blox_acp_command(Some(agent), "s1");
+            assert_eq!(staged_session_agent(&blox.argv), Some(agent));
+        }
+        assert_eq!(
+            staged_session_agent(&blox_acp_command(None, "s1").argv),
+            None
+        );
+        let unknown: Vec<String> = ["my-acp", "--staged-session=s1"].map(String::from).to_vec();
+        assert_eq!(staged_session_agent(&unknown), None);
+        let goose_unwrapped: Vec<String> = ["goose", "acp"].map(String::from).to_vec();
+        assert_eq!(staged_session_agent(&goose_unwrapped), None);
     }
 }

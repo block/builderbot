@@ -66,6 +66,7 @@ fn replay_boundaries_from_messages(
                     content,
                     acp_message_id: Some(message_id),
                     acp_tool_call_id: None,
+                    acp_tool_status: None,
                 });
             }
             continue;
@@ -80,6 +81,7 @@ fn replay_boundaries_from_messages(
             content: message.content,
             acp_message_id: message.acp.acp_message_id,
             acp_tool_call_id: message.acp.acp_tool_call_id,
+            acp_tool_status: message.acp.acp_tool_status,
         });
     }
 
@@ -295,6 +297,7 @@ mod tests {
                 "Read file",
                 AcpMessageMetadata {
                     acp_tool_call_id: Some("tool-1".to_string()),
+                    acp_tool_status: Some("in_progress".to_string()),
                     ..Default::default()
                 },
             ),
@@ -306,6 +309,12 @@ mod tests {
         assert_eq!(boundaries[0].acp_message_id.as_deref(), Some("msg-1"));
         assert_eq!(boundaries[1].role, "tool_call");
         assert_eq!(boundaries[1].acp_tool_call_id.as_deref(), Some("tool-1"));
+        // An attach's catch-up tells a call still running from a finished one
+        // by it.
+        assert_eq!(
+            boundaries[1].acp_tool_status.as_deref(),
+            Some("in_progress")
+        );
     }
 
     /// The model-fallback notice is real transcript content, but Staged wrote

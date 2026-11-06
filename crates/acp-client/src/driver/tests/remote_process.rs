@@ -25,13 +25,22 @@ const WAIT: Duration = Duration::from_secs(30);
 ///   output stream, as `sq` does once the agent process exits, and like
 ///   `sq` relays nothing more;
 /// - "exit": ends its output;
+/// - "crash": dies of SIGKILL, as an `sq` killed or cut off by the network
+///   does, leaving the agent process it started running on the workstation;
 /// - "flood": streams 200 chunks of 4000 bytes, then holds the prompt like
 ///   "hold me".
 ///
 /// Once its stdin closes it notes that in `stdin_closed` and exits — unless
-/// `linger` exists, when it keeps running until `release` does.
+/// `linger` exists, when it keeps running until `release` does. With `silent`
+/// it logs neither starting nor reusing a process.
 ///
-/// A session it loads while reusing a process is one an earlier connection
+/// It writes the frames in `preload`, if that exists, ahead of its answer to
+/// `initialize`: the running turn's, relayed as soon as `sq` attaches.
+///
+/// While `hold_load` exists it never answers `session/load`. A session it
+/// loads replays the frames in `replay` first, if that exists,
+/// with `@SID@` standing for the session id. A session it loads while
+/// reusing a process is one an earlier connection
 /// prompted: once `finish` exists, the agent streams the rest of that turn,
 /// then answers the earlier connection's prompt with `owner_response`, if
 /// that exists. A cancel with no held prompt, naming the session in
@@ -58,7 +67,9 @@ if [ "$2" = ws ]; then
   exit 0
 fi
 echo $$ >> "$dir/launches"
-if [ -f "$dir/reuse" ]; then
+if [ -f "$dir/silent" ]; then
+  :
+elif [ -f "$dir/reuse" ]; then
   printf '  0.42s \033[92mINF\033[0m Found existing ACP process, reusing \033[2mprocess_id=\033[0m%s\n' "$(cat "$dir/reuse")" >&2
 else
   printf '  0.42s \033[92mINF\033[0m Started new ACP process \033[2mprocess_id=\033[0mcmd-%s\n' $$ >&2
@@ -73,11 +84,15 @@ while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\(staged-[^"]*\)".*/\1/p')
   result='{}'
   case "$line" in
-    *'"method":"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}' ;;
+    *'"method":"initialize"'*)
+      [ -f "$dir/preload" ] && cat "$dir/preload"
+      result='{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}' ;;
     *'"method":"session/new"'*) n=$((n+1)); result="{\"sessionId\":\"sess-$$-$n\"}" ;;
     *'"method":"session/load"'*)
+      [ -f "$dir/hold_load" ] && continue
+      sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+      [ -f "$dir/replay" ] && sed "s/@SID@/$sid/g" "$dir/replay"
       if [ -f "$dir/reuse" ]; then
-        sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
         (
           while [ ! -f "$dir/finish" ] && kill -0 $$ 2>/dev/null; do sleep 0.02; done
           printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Committed the fix."}}}}\n' "$sid"
@@ -98,6 +113,7 @@ while IFS= read -r line; do
       eof=1
       continue ;;
     *'"method":"session/prompt"'*'exit'*) exit 0 ;;
+    *'"method":"session/prompt"'*'crash'*) kill -9 $$ ;;
     *'"method":"session/prompt"'*'flood'*)
       sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
       pad=$(printf '%4000s' '' | tr ' ' x)
@@ -159,10 +175,26 @@ impl FakeSq {
         self.driver_with_args(vec![])
     }
 
-    /// A remote driver for workspace `test-ws`, as `AcpDriver::for_workspace`
-    /// builds it, so its proxy can ask bloxlet about its agent.
+    /// A remote driver proxying `sq blox acp test-ws`, so its proxy can ask
+    /// bloxlet about its agent. Unlike the driver `AcpDriver::for_workspace`
+    /// builds ([`FakeSq::blox_driver`]) it carries no Blox process, so its
+    /// sessions' last release interrupts the proxy whatever argv it runs.
     fn workspace_driver(&self) -> AcpDriver {
-        self.driver_with_args(blox_cli::acp_proxy_args("test-ws", None))
+        self.driver_with_args(blox_cli::acp_proxy_args("test-ws", None, &[]))
+    }
+
+    /// The driver `AcpDriver::for_workspace` builds for Staged session
+    /// `staged_session_id` on workspace `test-ws`, with the fake as `sq`: a
+    /// known `agent_id` gets the session a dedicated process; `None` runs
+    /// Blox's default agent on the process every such session shares.
+    fn blox_driver(&self, agent_id: Option<&str>, staged_session_id: &str) -> AcpDriver {
+        AcpDriver::for_workspace_with_binary(
+            self.dir.join("sq"),
+            "test-ws",
+            agent_id,
+            staged_session_id,
+        )
+        .with_remote_working_dir(PathBuf::from("/home/bloxer/repo"))
     }
 
     fn driver_with_args(&self, acp_args: Vec<String>) -> AcpDriver {
@@ -179,6 +211,8 @@ impl FakeSq {
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
+            blox_process: None,
         }
     }
 
@@ -226,9 +260,53 @@ impl FakeSq {
         std::fs::write(self.dir.join("blocked_prompt"), format!("{session} {id}")).unwrap();
     }
 
+    /// Have `session/load` replay these `session/update`s, each for the
+    /// loaded session, ahead of its answer.
+    fn replay(&self, updates: &[serde_json::Value]) {
+        let frames: String = updates
+            .iter()
+            .map(|update| {
+                let frame = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"sessionId": "@SID@", "update": update},
+                });
+                format!("{frame}\n")
+            })
+            .collect();
+        std::fs::write(self.dir.join("replay"), frames).unwrap();
+    }
+
+    /// Have the agent relay these `session/update`s for `session` as soon as
+    /// it is attached to, ahead of its answer to `initialize`.
+    fn preload(&self, session: &str, updates: &[serde_json::Value]) {
+        let frames: String = updates
+            .iter()
+            .map(|update| {
+                let frame = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"sessionId": session, "update": update},
+                });
+                format!("{frame}\n")
+            })
+            .collect();
+        std::fs::write(self.dir.join("preload"), frames).unwrap();
+    }
+
+    /// Leave every `session/load` unanswered.
+    fn hold_load(&self) {
+        std::fs::write(self.dir.join("hold_load"), "").unwrap();
+    }
+
     /// Fail the next `count` `sq blox ws commands` calls.
     fn fail_checks(&self, count: usize) {
         std::fs::write(self.dir.join("failing_checks"), count.to_string()).unwrap();
+    }
+
+    /// Log nothing about which agent process `sq` reached.
+    fn silent(&self) {
+        std::fs::write(self.dir.join("silent"), "").unwrap();
     }
 
     /// Keep running once stdin closes.
@@ -248,6 +326,24 @@ impl FakeSq {
         std::fs::write(self.dir.join("history.json"), history).unwrap();
     }
 
+    /// Once `count` agents have launched, have bloxlet list each as running,
+    /// so a prompt quiet long enough for the proxy to check on its agent
+    /// (as one can be under load) finds it there, not gone.
+    async fn list_launched_as_running(&self, count: usize) {
+        wait_until("the agents launch", || self.launches().len() == count).await;
+        let active: Vec<_> = self
+            .launches()
+            .iter()
+            .map(|pid| {
+                serde_json::json!({
+                    "commandId": format!("cmd-{pid}"),
+                    "status": "COMMAND_STATUS_RUNNING",
+                })
+            })
+            .collect();
+        self.set_commands(&serde_json::Value::from(active).to_string(), "[]");
+    }
+
     /// The bloxlet command id the (only) launch announced.
     async fn command_id(&self) -> String {
         wait_until("the agent launches", || !self.launches().is_empty()).await;
@@ -263,7 +359,15 @@ impl FakeSq {
     }
 
     fn interrupted(&self) -> bool {
-        self.read("signals").contains("interrupted")
+        self.interrupts() > 0
+    }
+
+    /// How many proxies were sent SIGINT.
+    fn interrupts(&self) -> usize {
+        self.read("signals")
+            .lines()
+            .filter(|line| *line == "interrupted")
+            .count()
     }
 
     /// Every frame the agent read with this method.
@@ -332,14 +436,17 @@ async fn wait_until(what: &str, ready: impl Fn() -> bool) {
     }
 }
 
+/// Sessions on Blox's default agent share its process, so none of them may
+/// SIGINT the proxy — not even the last to let go, which `sq` would take as
+/// stopping the process and the other apps' turns on it.
 #[tokio::test(flavor = "current_thread")]
 async fn a_shared_remote_agent_stops_only_when_its_last_session_finishes() {
     LocalSet::new()
         .run_until(async {
             let sq = FakeSq::new("last-out");
-            let driver = sq.driver();
-            let mut first = Session::connect(&driver, &sq, "first").await;
-            let mut second = Session::connect(&driver, &sq, "second").await;
+            let mut first = Session::connect(&sq.blox_driver(None, "first"), &sq, "first").await;
+            let mut second = Session::connect(&sq.blox_driver(None, "second"), &sq, "second").await;
+            sq.list_launched_as_running(1).await;
 
             let outcome = first.prompt("one").await;
             assert!(
@@ -359,13 +466,18 @@ async fn a_shared_remote_agent_stops_only_when_its_last_session_finishes() {
                 "{outcome:?}"
             );
             assert!(
-                sq.interrupted() && !alive(launches[0]),
+                !alive(launches[0]),
                 "the last session finishing should stop the proxy"
+            );
+            assert!(
+                !sq.interrupted(),
+                "a shared proxy is stopped without SIGINT, which would stop the agent"
             );
 
             // The next session starts its own proxy instead of joining the
             // stopped one.
-            let mut third = Session::connect(&driver, &sq, "third").await;
+            let mut third = Session::connect(&sq.blox_driver(None, "third"), &sq, "third").await;
+            sq.list_launched_as_running(2).await;
             let outcome = third.prompt("three").await;
             assert!(
                 matches!(outcome, Ok(AgentRunOutcome::Completed)),
@@ -381,9 +493,9 @@ async fn cancelling_a_session_on_a_shared_remote_agent_cancels_only_that_session
     LocalSet::new()
         .run_until(async {
             let sq = FakeSq::new("cancel");
-            let driver = sq.driver();
-            let mut first = Session::connect(&driver, &sq, "first").await;
-            let mut second = Session::connect(&driver, &sq, "second").await;
+            let mut first = Session::connect(&sq.blox_driver(None, "first"), &sq, "first").await;
+            let mut second = Session::connect(&sq.blox_driver(None, "second"), &sq, "second").await;
+            sq.list_launched_as_running(1).await;
 
             let cancel_first = first.cancel.clone();
             let held = tokio::task::spawn_local(async move {
@@ -418,8 +530,69 @@ async fn cancelling_a_session_on_a_shared_remote_agent_cancels_only_that_session
                 "{outcome:?}"
             );
             assert_ne!(second.agent_session_id(), first.agent_session_id());
-            assert_eq!(sq.launches().len(), 1);
-            assert!(sq.interrupted());
+            let launches = sq.launches();
+            assert_eq!(launches.len(), 1);
+            assert!(!alive(launches[0]), "the last session out stops the proxy");
+            assert!(!sq.interrupted(), "a shared proxy is never sent SIGINT");
+        })
+        .await;
+}
+
+/// A known provider runs on a process of the session's own: each session
+/// leases a proxy of its own, and its last connection letting go stops it
+/// the way stopping a local agent does, with SIGINT.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dedicated_remote_agent_is_leased_per_session_and_interrupted_by_its_last_release() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("dedicated");
+            let first_driver = sq.blox_driver(Some("claude"), "first");
+            let mut first = Session::connect(&first_driver, &sq, "first").await;
+            let mut first_again = Session::connect(&first_driver, &sq, "first again").await;
+            wait_until("the first session's proxy launches", || {
+                sq.received("session/new").len() == 2
+            })
+            .await;
+            assert_eq!(
+                sq.launches().len(),
+                1,
+                "a session's own connections share its proxy"
+            );
+            let mut second =
+                Session::connect(&sq.blox_driver(Some("claude"), "second"), &sq, "second").await;
+            sq.list_launched_as_running(2).await;
+            let launches = sq.launches();
+
+            let outcome = first.prompt("one").await;
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert!(
+                alive(launches[0]) && !sq.interrupted(),
+                "the session's other connection still uses its proxy"
+            );
+
+            let outcome = first_again.prompt("one again").await;
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert!(
+                !alive(launches[0]) && sq.interrupts() == 1,
+                "the session's last connection out interrupts its proxy"
+            );
+            assert!(
+                alive(launches[1]),
+                "another session's proxy is left running"
+            );
+
+            let outcome = second.prompt("two").await;
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert!(!alive(launches[1]) && sq.interrupts() == 2);
         })
         .await;
 }
@@ -558,12 +731,167 @@ async fn sessions_fail_as_remote_agent_lost_when_sq_exits_and_bloxlet_reports_th
         .await;
 }
 
+/// Two sessions on one proxy, one holding a prompt, when `sq` dies of
+/// SIGKILL under the other's: what each session's prompt ended with.
+/// `listed` gets the agent's command id once both are connected.
+async fn prompts_when_sq_dies(
+    sq: &FakeSq,
+    listed: impl FnOnce(&str),
+) -> (
+    Result<AgentRunOutcome, String>,
+    Result<AgentRunOutcome, String>,
+) {
+    let driver = sq.workspace_driver();
+    let first = Session::connect(&driver, sq, "first").await;
+    let second = Session::connect(&driver, sq, "second").await;
+    listed(&sq.command_id().await);
+    let first = prompt_in_background(first, "hold me");
+    wait_until("the agent holds the first prompt", || {
+        !sq.received("session/prompt").is_empty()
+    })
+    .await;
+    let second = prompt_in_background(second, "crash");
+    let (_, first) = first.await.unwrap();
+    let (_, second) = second.await.unwrap();
+    (first, second)
+}
+
+/// Only an interrupted `sq` stops the agent process it started: one
+/// SIGKILLed, or cut off by the network, leaves it running. So while bloxlet
+/// still lists it the sessions are detached, as for a process `sq` reused,
+/// for their turns to be reattached to rather than failed.
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_detach_when_sq_dies_while_bloxlet_still_runs_the_agent_it_started() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("started-crash");
+            let mut started = String::new();
+            let (first, second) = prompts_when_sq_dies(&sq, |command| {
+                started = command.to_string();
+                sq.set_commands(
+                    &format!(r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_RUNNING"}}]"#),
+                    "[]",
+                );
+            })
+            .await;
+
+            let error = first.expect_err("the proxy went");
+            assert!(
+                is_remote_agent_detached_error(&error) && !is_remote_agent_lost_error(&error),
+                "{error}"
+            );
+            assert!(
+                error.contains(&format!(
+                    "bloxlet still runs the agent process (command {started})"
+                )),
+                "{error}"
+            );
+            assert_eq!(second, Err(error));
+            assert!(
+                sq.checks() > 0,
+                "bloxlet is asked before anything is failed"
+            );
+            assert!(
+                sq.received("session/cancel").is_empty() && !sq.interrupted(),
+                "detached turns are left running for a reattachment"
+            );
+        })
+        .await;
+}
+
+/// The same death with bloxlet reporting the process gone is a loss, and
+/// when bloxlet can't be asked the sessions are detached: nothing says the
+/// turn ended, so it is left for a reattachment (and then reconcile) to
+/// settle.
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_dying_with_a_started_agent_follow_what_bloxlet_says() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("started-crash-gone");
+            let mut command = String::new();
+            let (first, second) =
+                prompts_when_sq_dies(&sq, |listed| command = listed.to_string()).await;
+            let error = first.expect_err("the agent went");
+            assert!(is_remote_agent_lost_error(&error), "{error}");
+            assert!(
+                error.contains(&format!(
+                    "bloxlet no longer lists the agent process (command {command}) as running"
+                )),
+                "{error}"
+            );
+            assert_eq!(second, Err(error));
+
+            let sq = FakeSq::new("started-crash-unknown");
+            sq.fail_checks(1000);
+            let mut command = String::new();
+            let (first, second) =
+                prompts_when_sq_dies(&sq, |listed| command = listed.to_string()).await;
+            let error = first.expect_err("the proxy went");
+            assert!(
+                is_remote_agent_detached_error(&error) && !is_remote_agent_lost_error(&error),
+                "{error}"
+            );
+            assert!(
+                error.contains(&format!(
+                    "whether the agent process (command {command}) still runs is unknown"
+                )),
+                "{error}"
+            );
+            assert_eq!(second, Err(error));
+        })
+        .await;
+}
+
+/// `sq` never said which agent process it reached: bloxlet is asked about
+/// the one the proxy's arguments name, matched by argv as `sq` matches it.
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_dying_on_an_unnamed_agent_ask_bloxlet_by_its_argv() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("unnamed-crash");
+            sq.silent();
+            sq.set_commands(
+                r#"[{"commandId":"cmd-other","status":"COMMAND_STATUS_RUNNING","processCommand":"claude-agent-acp","processArgs":[],"tags":{"blox:role":"acp"}},
+                    {"commandId":"cmd-goose","status":"COMMAND_STATUS_IDLE","processCommand":"goose","processArgs":["acp"],"tags":{"blox:role":"acp"}}]"#,
+                "[]",
+            );
+            let (first, second) = prompts_when_sq_dies(&sq, |_| {}).await;
+            let error = first.expect_err("the proxy went");
+            assert!(
+                is_remote_agent_detached_error(&error) && !is_remote_agent_lost_error(&error),
+                "{error}"
+            );
+            assert!(
+                error.contains("bloxlet still runs the agent process (running `goose acp`)"),
+                "{error}"
+            );
+            assert_eq!(second, Err(error));
+
+            let sq = FakeSq::new("unnamed-crash-gone");
+            sq.silent();
+            sq.set_commands(
+                r#"[{"commandId":"cmd-other","status":"COMMAND_STATUS_RUNNING","processCommand":"claude-agent-acp","processArgs":[],"tags":{"blox:role":"acp"}}]"#,
+                "[]",
+            );
+            let (first, _) = prompts_when_sq_dies(&sq, |_| {}).await;
+            let error = first.expect_err("the agent went");
+            assert!(is_remote_agent_lost_error(&error), "{error}");
+            assert!(
+                error.contains("bloxlet lists no running agent process running `goose acp`"),
+                "{error}"
+            );
+        })
+        .await;
+}
+
 /// `sq` only logs that the orchestrator ended the agent's output stream: it
 /// relays nothing after that, yet keeps its stdout open until its stdin
 /// closes, while bloxlet can go on listing the process as running. So the
-/// proxy closes `sq`'s stdin, the session still attached learns its agent is
-/// gone once `sq` exits, and the next session gets a proxy of its own rather
-/// than joining a stream that would never answer its `initialize`.
+/// proxy closes `sq`'s stdin, the session still attached learns it lost its
+/// agent once `sq` exits — detached, while bloxlet still lists the process,
+/// for the runner's reattach to settle — and the next session gets a proxy
+/// of its own rather than joining a stream that would never answer its
+/// `initialize`.
 #[tokio::test(flavor = "current_thread")]
 async fn the_orchestrator_ending_the_agent_stream_closes_the_proxy_to_new_sessions() {
     LocalSet::new()
@@ -588,9 +916,15 @@ async fn the_orchestrator_ending_the_agent_stream_closes_the_proxy_to_new_sessio
             wait_until("the proxy closes `sq`'s stdin", || sq.stdin_closed()).await;
 
             let error = second.prompt("next").await.expect_err("the agent is gone");
-            assert!(is_remote_agent_lost_error(&error), "{error}");
             assert!(
-                error.contains("the orchestrator ended the agent's output stream"),
+                is_remote_agent_detached_error(&error) && !is_remote_agent_lost_error(&error),
+                "{error}"
+            );
+            assert!(
+                error.contains(&format!(
+                    "the orchestrator ended the agent's output stream, but bloxlet still runs \
+                     the agent process (command {command})"
+                )),
                 "{error}"
             );
             assert!(!sq.interrupted(), "`sq` exited once its stdin closed");
@@ -617,40 +951,74 @@ async fn the_orchestrator_ending_the_agent_stream_closes_the_proxy_to_new_sessio
 
 /// Should `sq` keep running once its stdin is closed, the proxy is stopped
 /// after a grace period; a session connecting meanwhile waits for that
-/// rather than joining it.
+/// rather than joining it. Returns whether the lingering proxy was sent
+/// SIGINT. `bloxlet` sets up what bloxlet says of the agent process (its
+/// command id passed in) once the agent has launched.
+async fn lingering_proxy_interrupted(label: &str, bloxlet: impl FnOnce(&FakeSq, &str)) -> bool {
+    let sq = FakeSq::new(label);
+    sq.linger();
+    let driver = sq.workspace_driver();
+    let mut first = Session::connect(&driver, &sq, "first").await;
+    let _second = Session::connect(&driver, &sq, "second").await;
+    let command = sq.command_id().await;
+    bloxlet(&sq, &command);
+
+    let outcome = first.prompt("orchestrator eof").await;
+    assert!(
+        matches!(outcome, Ok(AgentRunOutcome::Completed)),
+        "{label}: {outcome:?}"
+    );
+    wait_until("the proxy closes `sq`'s stdin", || sq.stdin_closed()).await;
+    let lingering = sq.launches()[0];
+
+    let mut third = Session::connect(&driver, &sq, "third").await;
+    assert!(
+        !alive(lingering),
+        "{label}: the lingering proxy is stopped before another starts"
+    );
+    // Read before the third session's prompt: its proxy is interrupted once
+    // that connection lets go.
+    let interrupted = sq.interrupted();
+    let outcome = third.prompt("three").await;
+    assert!(
+        matches!(outcome, Ok(AgentRunOutcome::Completed)),
+        "{label}: {outcome:?}"
+    );
+    assert_eq!(sq.launches().len(), 2, "{label}");
+    interrupted
+}
+
+/// The `sq` that started the agent lingers after its output stream ended
+/// while bloxlet still lists the agent — or can't be asked: the session still
+/// attached is detached, for its turn to be reattached to, so the proxy is
+/// killed without SIGINT, which `sq` would take as stopping the agent it
+/// started. Only an agent bloxlet reports gone leaves nothing for a SIGINT to
+/// stop.
 #[tokio::test(flavor = "current_thread")]
 async fn a_proxy_lingering_after_the_agent_stream_ended_is_stopped_and_not_joined() {
     LocalSet::new()
         .run_until(async {
-            let sq = FakeSq::new("orchestrator-eof-linger");
-            sq.linger();
-            let driver = sq.workspace_driver();
-            let mut first = Session::connect(&driver, &sq, "first").await;
-            let _second = Session::connect(&driver, &sq, "second").await;
-            let command = sq.command_id().await;
-            sq.set_commands(
-                &format!(r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_RUNNING"}}]"#),
-                "[]",
+            let running = lingering_proxy_interrupted("linger-running", |sq, command| {
+                sq.set_commands(
+                    &format!(r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_RUNNING"}}]"#),
+                    "[]",
+                );
+            })
+            .await;
+            assert!(
+                !running,
+                "an agent bloxlet still runs is not interrupted under its detached session"
             );
 
-            let outcome = first.prompt("orchestrator eof").await;
+            let unknown =
+                lingering_proxy_interrupted("linger-unknown", |sq, _| sq.fail_checks(1000)).await;
             assert!(
-                matches!(outcome, Ok(AgentRunOutcome::Completed)),
-                "{outcome:?}"
+                !unknown,
+                "an agent bloxlet can't say is gone is not interrupted either"
             );
-            wait_until("the proxy closes `sq`'s stdin", || sq.stdin_closed()).await;
 
-            let mut third = Session::connect(&driver, &sq, "third").await;
-            assert!(
-                sq.interrupted(),
-                "the lingering proxy is stopped before another starts"
-            );
-            let outcome = third.prompt("three").await;
-            assert!(
-                matches!(outcome, Ok(AgentRunOutcome::Completed)),
-                "{outcome:?}"
-            );
-            assert_eq!(sq.launches().len(), 2);
+            let gone = lingering_proxy_interrupted("linger-gone", |_, _| {}).await;
+            assert!(gone, "a proxy whose agent is gone is stopped as usual");
         })
         .await;
 }
@@ -762,10 +1130,19 @@ impl Reattach {
         sq: &FakeSq,
         writer: Arc<BasicMessageWriter>,
     ) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
+        self.start_on(driver, sq, Arc::new(RecordingStore::default()), writer)
+    }
+
+    /// [`Self::start`] on a session whose transcript is `store`'s.
+    fn start_on(
+        self,
+        driver: AcpDriver,
+        sq: &FakeSq,
+        store: Arc<dyn Store>,
+        writer: Arc<dyn MessageWriter>,
+    ) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
         let dir = sq.dir.clone();
         tokio::task::spawn_local(async move {
-            let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
-            let writer: Arc<dyn MessageWriter> = writer;
             timeout(
                 WAIT,
                 driver.reattach(
@@ -781,6 +1158,42 @@ impl Reattach {
                         owner_pid: self.owner_pid,
                         sole_turn_of_owner: self.sole_turn_of_owner,
                     },
+                ),
+            )
+            .await
+            .expect("the reattachment should end")
+        })
+    }
+}
+
+impl Reattach {
+    /// [`Self::start`] through [`AcpDriver::reattach_detachable`], for how
+    /// the connection settled.
+    fn settle(
+        self,
+        driver: AcpDriver,
+        sq: &FakeSq,
+    ) -> tokio::task::JoinHandle<Result<crate::driver::SessionSettled, String>> {
+        let dir = sq.dir.clone();
+        tokio::task::spawn_local(async move {
+            let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+            let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+            timeout(
+                WAIT,
+                driver.reattach_detachable(
+                    "staged-session",
+                    &dir,
+                    &store,
+                    &writer,
+                    &self.cancel,
+                    &ReattachTurn {
+                        agent_session_id: self.agent_session_id.to_string(),
+                        prompted_at: self.prompted_at,
+                        connected_at: self.connected_at,
+                        owner_pid: self.owner_pid,
+                        sole_turn_of_owner: self.sole_turn_of_owner,
+                    },
+                    &|_| {},
                 ),
             )
             .await
@@ -1277,6 +1690,246 @@ async fn two_quiet_reattached_turns_of_one_instance_are_told_apart() {
         .await;
 }
 
+/// A process dedicated to the turn's session has no co-tenants to hide the
+/// turn's end behind, and Claude there runs unattended (`bypassPermissions`),
+/// so should ask no permission: a turn quiet there is most likely busy in a
+/// long, silent tool. It is waited on past the quiet cap, under the much
+/// longer one such a process gets, until bloxlet reports the process idle,
+/// and not cancelled. (A dedicated Codex process, which does ask, keeps the
+/// quiet cap: see `only_a_dedicated_unattended_agent_is_waited_on_past_the_quiet_cap`.)
+#[tokio::test(flavor = "current_thread")]
+async fn a_quiet_reattached_turn_on_a_dedicated_process_outlasts_the_quiet_cap() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-dedicated-quiet");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            let reattached = Reattach {
+                owner_pid: Some(424_242),
+                ..Reattach::default()
+            }
+            .start(
+                sq.blox_driver(Some("claude"), "staged-session"),
+                &sq,
+                Arc::new(BasicMessageWriter::new()),
+            );
+
+            // A cap's cancel would go out the moment it fired.
+            tokio::time::sleep(
+                crate::driver::remote_liveness::REATTACHED_TURN_QUIET_CAP + Duration::from_secs(1),
+            )
+            .await;
+            assert!(!reattached.is_finished(), "the quiet turn was given up on");
+            assert!(sq.received("session/cancel").is_empty());
+
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+                "[]",
+            );
+            let outcome = reattached.await.unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert!(
+                sq.received("session/cancel").is_empty(),
+                "a turn that ended is not cancelled"
+            );
+        })
+        .await;
+}
+
+/// The tool call running when the earlier connection went is stored
+/// `pending`, with its description as its result; the replay of the
+/// reattachment's `session/load` holds its completion. That completion
+/// lands on the stored call, as a live one would, and nothing the
+/// transcript holds is recorded again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stored_running_call_the_reattached_replay_finished_is_completed() {
+    use super::attach::{stored_with_running_call, TranscriptLog, TranscriptStore};
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-replay-settles");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            let text = |message_id: &str, text: &str| {
+                serde_json::json!({"sessionUpdate": "agent_message_chunk", "messageId": message_id,
+                    "content": {"type": "text", "text": text}})
+            };
+            let tool = |id: &str| {
+                serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": id, "title": "Run",
+                    "status": "pending"})
+            };
+            let completed = |id: &str, output: &str| {
+                serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": id,
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": output}}]})
+            };
+            sq.replay(&[
+                serde_json::json!({"sessionUpdate": "user_message_chunk", "messageId": "u1",
+                    "content": {"type": "text", "text": "hi"}}),
+                text("m0", "Earlier."),
+                tool("t0"),
+                completed("t0", "listed"),
+                text("m1", "Hello "),
+                tool("t1"),
+                completed("t1", "3 passed"),
+            ]);
+            let log = Arc::new(TranscriptLog::default());
+            let reattached = Reattach::default().start_on(
+                sq.workspace_driver(),
+                &sq,
+                Arc::new(TranscriptStore(stored_with_running_call())),
+                log.clone(),
+            );
+            wait_until("the turn is being watched", || sq.checks() > 0).await;
+
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+                "[]",
+            );
+            let outcome = reattached.await.unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                log.rows(),
+                ["status:t1:completed", "tool_result:t1:3 passed"]
+            );
+        })
+        .await;
+}
+
+/// The rows a reattach to the session's own process records when the agent
+/// relays a tool call's `tool_call` and completion as soon as the proxy
+/// attaches, ahead of the `session/load` (`replayed`: the load's replay
+/// holds the call too).
+async fn rows_of_a_call_relayed_before_the_load(label: &str, replayed: bool) -> Vec<String> {
+    use super::attach::{stored_with_running_call, TranscriptLog, TranscriptStore};
+    let sq = FakeSq::new(label);
+    sq.reuse("cmd-earlier");
+    sq.set_commands(
+        r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+        "[]",
+    );
+    let started = serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "t2",
+        "title": "Run", "rawInput": {"command": "cargo test"}, "status": "pending"});
+    let completed = serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "t2",
+        "status": "completed",
+        "content": [{"type": "content", "content": {"type": "text", "text": "ok"}}]});
+    sq.preload("sess-earlier", &[started.clone(), completed.clone()]);
+    let mut replay = vec![
+        serde_json::json!({"sessionUpdate": "user_message_chunk", "messageId": "u1",
+            "content": {"type": "text", "text": "hi"}}),
+        serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run",
+            "status": "pending"}),
+        serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "3 passed"}}]}),
+    ];
+    if replayed {
+        replay.extend([started, completed]);
+    }
+    sq.replay(&replay);
+    let log = Arc::new(TranscriptLog::default());
+    let reattached = Reattach::default().start_on(
+        sq.blox_driver(Some("claude"), "staged-session"),
+        &sq,
+        Arc::new(TranscriptStore(stored_with_running_call())),
+        log.clone(),
+    );
+    wait_until("the turn is being watched", || sq.checks() > 0).await;
+
+    sq.set_commands(
+        r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+        "[]",
+    );
+    let outcome = reattached.await.unwrap();
+    assert!(
+        matches!(outcome, Ok(AgentRunOutcome::Completed)),
+        "{outcome:?}"
+    );
+    log.rows()
+}
+
+/// The proxy routes a reattached session's frames to its connection from
+/// the start, so a tool call the agent announced before the load — once:
+/// the Claude bridge sends only updates after its `tool_call` — is not lost
+/// with its title, leaving its updates nothing to land on. Absent from the
+/// replay (the agent had not written it to its transcript yet), it is
+/// recorded once the replay is over; in the replay too, it is recorded once.
+#[tokio::test(flavor = "current_thread")]
+async fn a_tool_call_relayed_before_the_reattached_load_is_recorded_once() {
+    LocalSet::new()
+        .run_until(async {
+            let expected = [
+                "status:t1:completed",
+                "tool_result:t1:3 passed",
+                "tool_call:t2",
+                "status:t2:completed",
+                "tool_result:t2:ok",
+            ];
+            assert_eq!(
+                rows_of_a_call_relayed_before_the_load("reattach-preload", false).await,
+                expected,
+                "the call the replay lacks is recorded after it"
+            );
+            assert_eq!(
+                rows_of_a_call_relayed_before_the_load("reattach-preload-replayed", true).await,
+                expected,
+                "the call the replay holds is recorded from it alone"
+            );
+        })
+        .await;
+}
+
+/// Only a reattach to the session's own process claims its frames when the
+/// proxy attaches. On Blox's shared default argv (no `--staged-session`)
+/// another session's connection may own the agent session, so nothing is
+/// claimed until the `session/load`.
+#[test]
+fn only_a_dedicated_reattach_claims_its_session_at_attach_time() {
+    let turn = ReattachTurn {
+        agent_session_id: "sess-earlier".to_string(),
+        prompted_at: 0,
+        connected_at: None,
+        owner_pid: None,
+        sole_turn_of_owner: false,
+    };
+    let driver = |agent_id| {
+        AcpDriver::for_workspace_with_binary(PathBuf::from("sq"), "test-ws", agent_id, "session-1")
+    };
+
+    let shared = driver(None);
+    assert!(
+        !shared
+            .acp_args
+            .iter()
+            .any(|arg| arg.contains("--staged-session")),
+        "{:?}",
+        shared.acp_args
+    );
+    assert_eq!(shared.reattach_session_claim(Some(&turn)), None);
+
+    let dedicated = driver(Some("claude"));
+    assert_eq!(
+        dedicated.reattach_session_claim(Some(&turn)),
+        Some("sess-earlier")
+    );
+    assert_eq!(
+        dedicated.reattach_session_claim(None),
+        None,
+        "not a reattach"
+    );
+}
+
 /// Stopping a reattached turn cancels it on the agent, which `sq` leaves
 /// running, even though nothing waits for the answer and the session was the
 /// last one on the proxy, which is stopped right after.
@@ -1295,18 +1948,19 @@ async fn stopping_a_reattached_turn_cancels_it_before_the_proxy_stops() {
                 cancel: cancel.clone(),
                 ..Reattach::default()
             }
-            .start(
-                sq.workspace_driver(),
-                &sq,
-                Arc::new(BasicMessageWriter::new()),
-            );
+            .settle(sq.workspace_driver(), &sq);
             wait_until("the turn is being watched", || sq.checks() > 0).await;
 
             cancel.cancel();
-            let outcome = reattached.await.unwrap();
+            let settled = reattached.await.unwrap().expect("the connection settles");
             assert!(
-                matches!(outcome, Ok(AgentRunOutcome::Cancelled)),
-                "{outcome:?}"
+                matches!(settled.outcome, Ok(AgentRunOutcome::Cancelled)),
+                "{:?}",
+                settled.outcome
+            );
+            assert!(
+                !settled.cancel_unacknowledged,
+                "the cancel went out on a proxy still connected"
             );
             let received = sq.read("received");
             let cancelled_at = received
@@ -1323,6 +1977,43 @@ async fn stopping_a_reattached_turn_cancels_it_before_the_proxy_stops() {
             assert!(
                 cancelled_at < interrupted_at,
                 "the cancel reached the agent before the proxy stopped: {received}"
+            );
+        })
+        .await;
+}
+
+/// Stopped before its `session/load` answers, a reattachment sends the agent
+/// no `session/cancel`: the turn runs on, and the connection says so, for
+/// the caller to cancel it over a fresh one.
+#[tokio::test(flavor = "current_thread")]
+async fn stopping_a_reattachment_still_setting_up_leaves_its_cancel_unacknowledged() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-stop-setup");
+            sq.reuse("cmd-earlier");
+            sq.hold_load();
+            let cancel = CancellationToken::new();
+            let reattached = Reattach {
+                cancel: cancel.clone(),
+                ..Reattach::default()
+            }
+            .settle(sq.workspace_driver(), &sq);
+            wait_until("the session is being loaded", || {
+                !sq.received("session/load").is_empty()
+            })
+            .await;
+
+            cancel.cancel();
+            let settled = reattached.await.unwrap().expect("the connection settles");
+            assert!(
+                matches!(settled.outcome, Ok(AgentRunOutcome::Cancelled)),
+                "{:?}",
+                settled.outcome
+            );
+            assert!(settled.cancel_unacknowledged);
+            assert!(
+                sq.received("session/cancel").is_empty(),
+                "a connection still setting up sends no cancel"
             );
         })
         .await;

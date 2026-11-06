@@ -120,10 +120,11 @@ impl ResponseState {
             || self.session_id.as_deref() != params["sessionId"].as_str()
             || self.session_id.is_none()
             || !message["parent_tool_use_id"].is_null()
-            || !matches!(
-                &*handler.phase.lock().await,
-                HandlerPhase::Live { .. } | HandlerPhase::BackgroundHolding { .. }
-            )
+            || !match &*handler.phase.lock().await {
+                HandlerPhase::Live { .. } | HandlerPhase::BackgroundHolding { .. } => true,
+                HandlerPhase::CatchingUp(ledger) => ledger.accepts_results(),
+                HandlerPhase::Replaying(_) | HandlerPhase::WaitingForPrompt { .. } => false,
+            }
             || self.completed
         {
             return Ok(());

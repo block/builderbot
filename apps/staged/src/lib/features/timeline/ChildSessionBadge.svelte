@@ -5,7 +5,9 @@
   Shaped like a hashtag badge and coloured the way the branch timeline colours
   that kind of session (note / commit / review), with a spinner where the
   hashtag badge puts its type icon — or a clock while the child is still
-  waiting on the branch queue, as the branch timeline's queued rows do.
+  waiting on the branch queue, as the branch timeline's queued rows do, or a
+  cloud-off icon while a Blox child is disconnected (its agent may still be
+  working on the workstation, but nothing is streaming).
 
   A running child's badge is a button that opens the child's chat, and stops
   the click so the parent row's own click action doesn't fire too. Queued
@@ -14,12 +16,14 @@
 -->
 <script lang="ts">
   import Clock from '@lucide/svelte/icons/clock';
+  import CloudOff from '@lucide/svelte/icons/cloud-off';
+  import { disconnectedActivity } from '../../shared/disconnectedSession';
   import Spinner from '../../shared/Spinner.svelte';
   import type { SessionRowKind } from './sessionRowTitle';
 
   interface Props {
     sessionType: SessionRowKind;
-    status: 'queued' | 'running';
+    status: 'queued' | 'running' | 'disconnected';
     /** The clipped label. */
     label: string;
     /** The whole title, shown in the tooltip. */
@@ -35,10 +39,14 @@
     review: 'Review',
   };
 
-  let tooltip = $derived(
-    `${KIND_LABEL[sessionType]}${status === 'queued' ? ' (queued)' : ''}: ${title}`
-  );
-  let clickable = $derived(status === 'running' && !!onclick);
+  const STATUS_SUFFIX: Record<Props['status'], string> = {
+    queued: ' (queued)',
+    running: '',
+    disconnected: ` (${disconnectedActivity(null)})`,
+  };
+
+  let tooltip = $derived(`${KIND_LABEL[sessionType]}${STATUS_SUFFIX[status]}: ${title}`);
+  let clickable = $derived(status !== 'queued' && !!onclick);
 
   function handleClick(e: MouseEvent) {
     e.stopPropagation();
@@ -49,6 +57,8 @@
 {#snippet body()}
   {#if status === 'queued'}
     <Clock size={12} />
+  {:else if status === 'disconnected'}
+    <CloudOff size={12} />
   {:else}
     <Spinner size={12} />
   {/if}

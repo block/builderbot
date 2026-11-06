@@ -29,6 +29,14 @@
  * — they perform no writes, so any number of connected clients can process
  * the same events safely.
  *
+ * `disconnected` sessions (Blox sessions that lost their connection mid-turn)
+ * carry no live busy state, so they are tracked apart from the registry, in
+ * `disconnectedSessionsStore`: added by their status event, dropped by any
+ * other, and re-derived from the same snapshot. `session-reconcile-changed`
+ * (where the backend's attempts to catch up with them stand) lands there too,
+ * with its own `get_session_reconcile_states` snapshot taken whenever the
+ * listener is established.
+ *
  * `session-background-hold` is folded into projectState as a sub-state of a
  * running session, so the project row can say "waiting on background work"
  * instead of spinning generically for up to the hold cap. The hold also rides
@@ -47,12 +55,14 @@ import { prStateStore } from '../stores/prState.svelte';
 import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
+import { disconnectedSessionsStore } from '../stores/disconnectedSessions.svelte';
 import type {
   ActiveSessionInfo,
   PrCreatedPayload,
   PushCompletedPayload,
   Session,
   SessionBackgroundHoldPayload,
+  SessionReconcileEvent,
   SessionStatus,
   SessionStatusPayload,
 } from '../types';
@@ -72,6 +82,17 @@ let lastHydrationStartedAt = 0;
 // own fetch start; the map is cleared once no fetch is in flight.
 let hydrationFetchesInFlight = 0;
 const terminalWhileFetching = new Map<string, number>();
+// Every status delta processed while a snapshot fetch is in flight, by
+// arrival time: the snapshot's `disconnected` rows must not re-add a session
+// that has since moved on (a reconcile claiming it back to `running`), nor
+// drop one that disconnected mid-fetch. Same lifetime as the map above.
+const statusWhileFetching = new Map<string, number>();
+
+// Reconcile events that arrived while a `get_session_reconcile_states` fetch
+// was in flight, by session; newer than that snapshot. Cleared with the last
+// fetch.
+let reconcileFetchesInFlight = 0;
+const reconcileWhileFetching = new Set<string>();
 
 export function listenForSessionStatus(): UnlistenFn {
   const unlistenEvents = listenToEvent<SessionStatusPayload>(
@@ -86,6 +107,16 @@ export function listenForSessionStatus(): UnlistenFn {
   const unlistenBackgroundHold = listenToEvent<SessionBackgroundHoldPayload>(
     'session-background-hold',
     handleBackgroundHold
+  );
+  const unlistenReconcile = listenToEvent<SessionReconcileEvent>(
+    'session-reconcile-changed',
+    handleReconcileChanged,
+    {
+      // Emitted on change only, so a client that wasn't listening (a fresh
+      // window, a reconnected socket) asks where things stand, from inside the
+      // hook that says the listener is live: nothing can fall between.
+      onEstablished: () => void hydrateReconcileStates(),
+    }
   );
 
   // Snapshot-then-deltas: hydrate now (app/page startup) and again after a
@@ -110,6 +141,7 @@ export function listenForSessionStatus(): UnlistenFn {
     unlistenPrCreated();
     unlistenPushCompleted();
     unlistenBackgroundHold();
+    unlistenReconcile();
   };
 }
 
@@ -148,6 +180,34 @@ function handleBackgroundHold(payload: SessionBackgroundHoldPayload): void {
   projectStateStore.setSessionBackgroundHold(projectId, payload.sessionId, payload.holding);
 }
 
+function handleReconcileChanged(event: SessionReconcileEvent): void {
+  if (reconcileFetchesInFlight > 0) reconcileWhileFetching.add(event.sessionId);
+  disconnectedSessionsStore.applyReconcileEvent(event);
+}
+
+/**
+ * Adopt the backend's current reconcile states. Exported for tests; the
+ * listener runs it each time it is established.
+ */
+export async function hydrateReconcileStates(): Promise<void> {
+  reconcileFetchesInFlight++;
+  try {
+    let states: SessionReconcileEvent[];
+    try {
+      states = await commands.getSessionReconcileStates();
+    } catch (e) {
+      console.error('Failed to fetch session reconcile states:', e);
+      return;
+    }
+    disconnectedSessionsStore.applyReconcileSnapshot(states, (sessionId) =>
+      reconcileWhileFetching.has(sessionId)
+    );
+  } finally {
+    reconcileFetchesInFlight--;
+    if (reconcileFetchesInFlight === 0) reconcileWhileFetching.clear();
+  }
+}
+
 async function handleSessionStatusChanged(payload: SessionStatusPayload): Promise<void> {
   const {
     sessionId,
@@ -157,6 +217,22 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     projectId: eventProjectId,
     sessionType,
   } = payload;
+
+  if (hydrationFetchesInFlight > 0) {
+    statusWhileFetching.set(sessionId, Date.now());
+  }
+  // Read before the clear below: whether this event ends a session this
+  // client knew as disconnected.
+  const wasDisconnected = disconnectedSessionsStore.isDisconnected(sessionId);
+  if (status === 'disconnected') {
+    disconnectedSessionsStore.markDisconnected(
+      sessionId,
+      eventProjectId ?? null,
+      eventBranchId ?? null
+    );
+  } else {
+    disconnectedSessionsStore.clear(sessionId);
+  }
 
   if (status === 'running' && eventProjectId) {
     sessionRegistry.register(
@@ -183,6 +259,22 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     return;
   }
 
+  if (status === 'disconnected') {
+    // A Blox session whose local proxy connection was lost mid-turn: the
+    // remote turn may still be running, but nothing here is connected to it.
+    // Not terminal, so no completion handling (handleSessionEnd, PR/push/pull
+    // outcomes, unread marking) — only drop the live busy state, and keep a
+    // snapshot fetched before this event from re-registering it as running.
+    if (hydrationFetchesInFlight > 0) {
+      terminalWhileFetching.set(sessionId, Date.now());
+    }
+    if (eventBranchId) {
+      invalidateBranchTimeline(eventBranchId);
+    }
+    sessionRegistry.cleanupSession(sessionId);
+    return;
+  }
+
   if (status === 'completed' || status === 'error' || status === 'cancelled') {
     if (hydrationFetchesInFlight > 0) {
       terminalWhileFetching.set(sessionId, Date.now());
@@ -193,14 +285,43 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     if (eventBranchId) {
       invalidateBranchTimeline(eventBranchId);
     }
-    if (status === 'cancelled' && sessionType === 'push' && errorMessage && eventBranchId) {
+    if (payload.dependencySkipped && sessionType === 'push' && eventBranchId) {
       // A skipped push never ran, so it was never registered: handleSessionEnd
       // would only warn about an unknown session and clean up nothing.
-      handleSkippedPush(sessionId, eventBranchId, errorMessage);
+      handleSkippedPush(
+        sessionId,
+        eventBranchId,
+        errorMessage ?? 'The session it was waiting on did not succeed.'
+      );
       return;
     }
-    handleSessionEnd(sessionId, status, errorMessage);
+    handleSessionEnd(
+      sessionId,
+      status,
+      errorMessage,
+      settledByReconcile(payload, wasDisconnected)
+        ? {
+            projectId: eventProjectId,
+            branchId: eventBranchId,
+            sessionType: sessionType as SessionType | undefined,
+          }
+        : {}
+    );
   }
+}
+
+/**
+ * Whether a terminal event is reconcile settling a session that went
+ * `disconnected`. That session was cleaned out of the registry when it
+ * disconnected, so its completion handling has to come from the event — but
+ * only for these: every other terminal event keeps to what this client saw
+ * running, so a session it never registered (cancelled while queued, or
+ * skipped for its dependency) still marks nothing unread. This client knew
+ * the session as disconnected, or the event carries the session type, which
+ * among terminal events only reconcile's settles and the dependency skip do.
+ */
+function settledByReconcile(payload: SessionStatusPayload, wasDisconnected: boolean): boolean {
+  return wasDisconnected || (!!payload.sessionType && !payload.dependencySkipped);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,12 +362,29 @@ export async function hydrateActiveSessions(): Promise<void> {
   hydrationFetchesInFlight++;
   try {
     let active: ActiveSessionInfo[];
+    let disconnected: ActiveSessionInfo[];
     try {
-      active = await commands.getActiveSessions();
+      const snapshot = await commands.getActiveSessions();
+      // `disconnected` rows are in the snapshot because they still hold
+      // their branch, but nothing here is connected to them: like their
+      // status event, they carry no live busy state, so a registered one is
+      // swept and none is registered or adopted. They feed the disconnected
+      // store instead.
+      active = snapshot.filter((session) => session.status !== 'disconnected');
+      disconnected = snapshot.filter((session) => session.status === 'disconnected');
     } catch (e) {
       console.error('Failed to fetch active-sessions snapshot:', e);
       return;
     }
+
+    disconnectedSessionsStore.applySnapshot(
+      disconnected.map(({ sessionId, projectId, branchId }) => ({
+        sessionId,
+        projectId,
+        branchId,
+      })),
+      (sessionId) => (statusWhileFetching.get(sessionId) ?? 0) >= fetchStartedAt
+    );
 
     const activeIds = new Set(active.map((session) => session.sessionId));
     for (const sessionId of sessionRegistry.getAllSessionIds()) {
@@ -304,6 +442,7 @@ export async function hydrateActiveSessions(): Promise<void> {
     hydrationFetchesInFlight--;
     if (hydrationFetchesInFlight === 0) {
       terminalWhileFetching.clear();
+      statusWhileFetching.clear();
     }
   }
 
@@ -429,6 +568,9 @@ async function reconcileSweptWorkflowSession({
   // The backend resumed it between the snapshot and this lookup — leave the
   // chip alone; its running event re-registers the session.
   if (status === 'running' || status === 'queued') return;
+  // Not terminal: the remote turn may still be running, so the chip stays in
+  // progress until the session ends or is stopped.
+  if (status === 'disconnected') return;
 
   if (kind === 'pr') {
     if (status === 'completed') {
@@ -483,10 +625,29 @@ function handlePushCompleted(payload: PushCompletedPayload): void {
   }
 }
 
-function handleSessionEnd(sessionId: string, status: SessionStatus, errorMessage?: string | null) {
-  const sessionProjectId = sessionRegistry.getProjectId(sessionId);
-  const sessionType = sessionRegistry.getType(sessionId);
-  const branchId = sessionRegistry.getBranchId(sessionId);
+/** What a terminal status event says about its session. */
+interface SessionEndContext {
+  projectId?: string | null;
+  branchId?: string | null;
+  sessionType?: SessionType | null;
+}
+
+/**
+ * Completion handling for a terminal status: unread marking and PR/push/pull
+ * outcomes. The registry knows the sessions this client saw running; one that
+ * went `disconnected` was cleaned out of it then, so when reconcile settles it
+ * later the caller passes the event's own fields to stand in (see
+ * `settledByReconcile`), and an empty context otherwise.
+ */
+function handleSessionEnd(
+  sessionId: string,
+  status: SessionStatus,
+  errorMessage?: string | null,
+  event: SessionEndContext = {}
+) {
+  const sessionProjectId = sessionRegistry.getProjectId(sessionId) ?? event.projectId ?? null;
+  const sessionType = sessionRegistry.getType(sessionId) ?? event.sessionType ?? null;
+  const branchId = sessionRegistry.getBranchId(sessionId) ?? event.branchId ?? null;
   const currentProjectId = navigation.selectedProjectId;
 
   if (!sessionProjectId && !sessionType && !branchId) {

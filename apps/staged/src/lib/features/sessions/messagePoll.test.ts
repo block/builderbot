@@ -303,6 +303,10 @@ describe('pollShouldStop', () => {
     expect(pollShouldStop({ status: 'completed' }, false, 'completed')).toBe(true);
   });
 
+  it('stops on a disconnected session: it has no live connection to stream from', () => {
+    expect(pollShouldStop({ status: 'disconnected' }, false, 'disconnected')).toBe(true);
+  });
+
   it('defers to a status event that landed during the fetch', () => {
     expect(pollShouldStop({ status: 'completed' }, true, 'running')).toBe(false);
     expect(pollShouldStop({ status: 'completed' }, false, 'running')).toBe(false);

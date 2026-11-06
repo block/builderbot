@@ -168,6 +168,9 @@ pub struct CommitTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    /// The session's `error_message`, for the copy a failed row shows (a
+    /// deleted workstation reads differently from a crash).
+    pub session_error_message: Option<String>,
     /// Kind of the git pipeline behind this row's session. Only set on pending
     /// rows: it is how the frontend tells a queued/running rebase or squash
     /// apart from a plain commit session, since the subject is a display label
@@ -187,6 +190,9 @@ pub struct NoteTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    /// The session's `error_message`, for the copy a failed row shows (a
+    /// deleted workstation reads differently from a crash).
+    pub session_error_message: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
@@ -214,6 +220,9 @@ pub struct ReviewTimelineItem {
     pub session_status: Option<String>,
     pub session_provider: Option<String>,
     pub completion_reason: Option<String>,
+    /// The session's `error_message`, for the copy a failed row shows (a
+    /// deleted workstation reads differently from a crash).
+    pub session_error_message: Option<String>,
     pub title: Option<String>,
     /// Active non-`information` comments (what the detail view lists as comments).
     pub comment_count: usize,
@@ -292,6 +301,13 @@ fn start_store_services(
     app_handle: tauri::AppHandle,
 ) {
     background_sync::spawn(Arc::clone(&store), app_handle.clone());
+    // Settles `disconnected` Blox sessions against their workstations; its
+    // launch pass runs after startup recovery, below.
+    session_runner::reconcile::install(
+        Arc::clone(&store),
+        Arc::clone(&registry),
+        app_handle.clone(),
+    );
     session_queue::sweep::spawn(Arc::clone(&store), registry, app_handle.clone());
     // The startup dead-owner recovery only helps the instance that restarts:
     // an instance that dies later leaves its sessions `running` in every other
@@ -1007,6 +1023,7 @@ async fn get_repo_default_branch_timeline(
                     session_id: None,
                     session_status: None,
                     completion_reason: None,
+                    session_error_message: None,
                     pipeline_kind: None,
                     is_own_commit: false,
                 })
@@ -2042,6 +2059,9 @@ pub fn run() {
             // anyone connected.
             if let Ok(store) = get_store(&app.state::<Mutex<Option<Arc<Store>>>>()) {
                 session_runner::recover_dead_sessions(Arc::clone(&store), app.handle().clone());
+                // Recovery has left every orphaned Blox turn `disconnected`;
+                // ask the workstations how each one ended.
+                session_runner::reconcile::reconcile_all();
                 session_queue::kick_all_with_queued_work(
                     app.handle(),
                     &store,
@@ -2333,6 +2353,8 @@ pub fn run() {
             session_commands::cancel_session,
             session_commands::stop_session_async_task,
             session_commands::get_session_background_hold,
+            session_runner::reconcile::reconcile_session,
+            session_runner::reconcile::get_session_reconcile_states,
             session_commands::delete_session,
             session_commands::start_branch_session,
             session_commands::start_or_queue_branch_session,

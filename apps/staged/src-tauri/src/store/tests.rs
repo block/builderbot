@@ -863,13 +863,19 @@ fn test_transition_to_running_preserves_a_non_matching_agent_id() {
 }
 
 #[test]
-fn test_get_active_sessions_returns_running_and_queued_only() {
+fn test_get_active_sessions_returns_running_queued_and_disconnected_only() {
     let store = Store::in_memory().unwrap();
 
     let running = Session::new_running("running", Path::new("/tmp"));
     store.create_session(&running).unwrap();
     let queued = Session::new_queued("queued");
     store.create_session(&queued).unwrap();
+    // A disconnected row still holds its branch, so clients hydrate it.
+    let disconnected = Session::new_running("disconnected", Path::new("/tmp"));
+    store.create_session(&disconnected).unwrap();
+    store
+        .update_session_status(&disconnected.id, SessionStatus::Disconnected, None, None)
+        .unwrap();
 
     for status in [
         SessionStatus::Completed,
@@ -884,9 +890,138 @@ fn test_get_active_sessions_returns_running_and_queued_only() {
     }
 
     let active = store.get_active_sessions().unwrap();
-    assert_eq!(active.len(), 2);
+    assert_eq!(active.len(), 3);
     assert!(active.iter().any(|s| s.id == running.id));
     assert!(active.iter().any(|s| s.id == queued.id));
+    assert!(active.iter().any(|s| s.id == disconnected.id));
+}
+
+/// Make `session` a `disconnected` row, as the runner leaves one, and return
+/// the row as a reconcile would read it.
+fn disconnected_row(store: &Store, session: &Session) -> Session {
+    store.create_session(session).unwrap();
+    store
+        .transition_from_running(&session.id, SessionStatus::Disconnected, None, None)
+        .unwrap();
+    store.get_session(&session.id).unwrap().unwrap()
+}
+
+#[test]
+fn test_disconnected_rows_settle_only_from_the_row_that_was_read() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("remote", Path::new("/tmp"));
+    let row = disconnected_row(&store, &session);
+    assert_eq!(store.get_disconnected_sessions().unwrap().len(), 1);
+
+    // A Stop's fallback restamps the row first: the reconcile's CAS loses.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_session_status(&session.id, SessionStatus::Disconnected, None, None)
+        .unwrap();
+    assert!(!store
+        .transition_from_disconnected_observed_at(
+            &session.id,
+            row.updated_at,
+            SessionStatus::Error,
+            Some("gone"),
+            Some(&CompletionReason::Crashed),
+        )
+        .unwrap());
+    assert!(!store
+        .claim_disconnected_session(&session.id, row.updated_at)
+        .unwrap());
+
+    // The fresh read wins, keeps the message, and a second write of the same
+    // snapshot is a no-op.
+    let fresh = store.get_session(&session.id).unwrap().unwrap();
+    assert!(store
+        .transition_from_disconnected_observed_at(
+            &session.id,
+            fresh.updated_at,
+            SessionStatus::Error,
+            Some("gone"),
+            Some(&CompletionReason::Crashed),
+        )
+        .unwrap());
+    assert!(!store
+        .transition_from_disconnected_observed_at(
+            &session.id,
+            fresh.updated_at,
+            SessionStatus::Completed,
+            None,
+            None,
+        )
+        .unwrap());
+    let ended = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(ended.status, SessionStatus::Error);
+    assert_eq!(ended.error_message.as_deref(), Some("gone"));
+    assert!(store.get_disconnected_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn test_claiming_a_disconnected_row_makes_it_ours_and_running() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("remote", Path::new("/tmp"));
+    let row = disconnected_row(&store, &session);
+    assert_eq!(row.owner_pid, None);
+
+    assert!(store
+        .claim_disconnected_session(&session.id, row.updated_at)
+        .unwrap());
+    let claimed = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(claimed.status, SessionStatus::Running);
+    assert_eq!(claimed.owner_pid, Some(std::process::id()));
+    // Idempotent: the claimed row is no longer the one that was read.
+    assert!(!store
+        .claim_disconnected_session(&session.id, row.updated_at)
+        .unwrap());
+}
+
+#[test]
+fn test_blox_command_pin_survives_bookkeeping_and_clears_on_a_new_turn() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("remote", Path::new("/tmp"));
+    let row = disconnected_row(&store, &session);
+
+    store
+        .set_session_blox_command_id(&session.id, Some("27305746"))
+        .unwrap();
+    let pinned = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(pinned.blox_command_id.as_deref(), Some("27305746"));
+    // Bookkeeping only: the reconcile's CAS on `updated_at` still holds.
+    assert_eq!(pinned.updated_at, row.updated_at);
+
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    assert!(store.transition_to_running(&session.id).unwrap());
+    let resumed = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(resumed.blox_command_id, None);
+}
+
+#[test]
+fn test_latest_user_message_id_marks_where_the_last_turn_starts() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("remote", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    assert_eq!(store.latest_user_message_id(&session.id).unwrap(), None);
+
+    store
+        .add_session_message(&session.id, MessageRole::User, "first")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "one")
+        .unwrap();
+    let second = store
+        .add_session_message(&session.id, MessageRole::User, "second")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "two")
+        .unwrap();
+    assert_eq!(
+        store.latest_user_message_id(&session.id).unwrap(),
+        Some(second)
+    );
 }
 
 #[test]
@@ -3856,6 +3991,30 @@ fn test_running_session_not_cleaned_up() {
     assert!(store.get_session(&session.id).unwrap().is_some());
 }
 
+/// A Blox session whose turn may still be running on its workstation keeps
+/// its row when its artifacts go, so reconcile can still settle it.
+#[test]
+fn test_disconnected_session_not_cleaned_up() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("working remotely", Path::new("/tmp"));
+    disconnected_row(&store, &session);
+    let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+    let note = Note::new(&branch.id, "Design", "content").with_session(&session.id);
+    store.create_note(&note).unwrap();
+
+    store.delete_note(&note.id).unwrap();
+    store.delete_branch(&branch.id).unwrap();
+
+    let row = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(row.status, SessionStatus::Disconnected);
+}
+
 #[test]
 fn test_session_cleaned_up_via_note_delete() {
     let store = Store::in_memory().unwrap();
@@ -6139,4 +6298,85 @@ fn session_list_queries_read_rows_like_get_session() {
         store.get_running_sessions_for_branch(&branch.id).unwrap(),
         &[&running],
     );
+}
+
+/// A `disconnected` Blox session may still be working on its workstation:
+/// it has no owner, holds its branch like a running one, and neither a resume
+/// nor a queued follow-up may start a second turn beside it.
+#[test]
+fn test_disconnected_session_is_unowned_busy_and_not_resumable() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let session = Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&session).unwrap();
+    store
+        .add_queued_session_message(&session.id, "queued", &[], None)
+        .unwrap();
+
+    assert!(store
+        .transition_from_running(&session.id, SessionStatus::Disconnected, None, None)
+        .unwrap());
+    let row = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(row.status, SessionStatus::Disconnected);
+    assert_eq!(row.owner_pid, None);
+    assert_eq!(row.completion_reason, None);
+
+    assert!(store.has_running_session_for_branch(&branch.id).unwrap());
+    let busy = store.get_busy_sessions_for_branch(&branch.id).unwrap();
+    assert_eq!(busy.len(), 1);
+    assert_eq!(busy[0].id, session.id);
+    assert!(store
+        .get_running_sessions_for_branch(&branch.id)
+        .unwrap()
+        .is_empty());
+    // The dead-owner and stranded sweeps read only `running` rows.
+    assert!(store.get_running_sessions().unwrap().is_empty());
+
+    assert!(!store.transition_to_running(&session.id).unwrap());
+    assert!(store
+        .claim_oldest_queued_session_message(&session.id)
+        .unwrap()
+        .is_none());
+
+    // Once stopped, the session is an ordinary finished one again.
+    store
+        .update_session_status(&session.id, SessionStatus::Cancelled, None, None)
+        .unwrap();
+    assert!(!store.has_running_session_for_branch(&branch.id).unwrap());
+    assert_eq!(
+        store
+            .claim_oldest_queued_session_message(&session.id)
+            .unwrap()
+            .unwrap()
+            .content,
+        "queued"
+    );
+}
+
+#[test]
+fn test_session_pre_head_and_blox_command_round_trip() {
+    let store = Store::in_memory().unwrap();
+    let mut session = Session::new_running("work", Path::new("/tmp"));
+    session.blox_command_id = Some("cmd-1".to_string());
+    store.create_session(&session).unwrap();
+
+    let row = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(row.pre_head_sha, None);
+    assert_eq!(row.blox_command_id.as_deref(), Some("cmd-1"));
+
+    // Bookkeeping, not a lifecycle change: the stranded sweep's CAS on
+    // `updated_at` must not lose to it.
+    store
+        .set_session_pre_head_sha(&session.id, Some("abc123"))
+        .unwrap();
+    let after = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(after.pre_head_sha.as_deref(), Some("abc123"));
+    assert_eq!(after.updated_at, row.updated_at);
+
+    store.set_session_pre_head_sha(&session.id, None).unwrap();
+    let cleared = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(cleared.pre_head_sha, None);
 }

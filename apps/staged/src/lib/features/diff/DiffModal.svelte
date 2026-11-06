@@ -693,6 +693,8 @@
       case 'queued':
         return 'queued';
       case 'running':
+      // May still be running on its Blox workstation; not retryable.
+      case 'disconnected':
         return 'running';
       case 'completed':
         return 'completed';

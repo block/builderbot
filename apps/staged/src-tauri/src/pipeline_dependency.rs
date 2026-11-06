@@ -67,9 +67,9 @@ fn status_gate(dependency: Option<&store::Session>) -> Option<DependencyGate> {
     };
     let noun = dependency_noun(dependency);
     match dependency.status {
-        SessionStatus::Queued | SessionStatus::Running => Some(DependencyGate::Waiting(format!(
-            "This waits for the {noun} to finish first."
-        ))),
+        SessionStatus::Queued | SessionStatus::Running | SessionStatus::Disconnected => Some(
+            DependencyGate::Waiting(format!("This waits for the {noun} to finish first.")),
+        ),
         SessionStatus::Error => Some(DependencyGate::Unmet(format!(
             "Skipped because the {noun} failed."
         ))),
@@ -233,6 +233,7 @@ pub(crate) fn skip_dependent_session<R: tauri::Runtime>(
             branch_id: Some(branch_id.to_string()),
             project_id,
             session_type: Some(session_type_for(session).to_string()),
+            dependency_skipped: true,
         },
     );
     Ok(true)

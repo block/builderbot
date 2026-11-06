@@ -9,6 +9,7 @@
  * sessions run side by side and have no such gate.
  */
 
+import { isSessionInFlight } from '../../shared/sessionStatus';
 import { isResumableReason } from '../../types';
 
 /** The prompt a row's Resume button sends to the session it resumes. */
@@ -21,8 +22,10 @@ export const RESUME_ROW_PROMPT = 'Continue where you left off.';
 export type SessionRowPhase = 'queued' | 'running' | 'failed' | 'done';
 
 /**
- * The phase of a note row. A note whose session has finished but whose
- * content is still empty failed: the session ended without writing the note.
+ * The phase of a note row. A disconnected session is still in flight on its
+ * workstation, so it reads as running. A note whose session has finished but
+ * whose content is still empty failed: the session ended without writing the
+ * note.
  * A note with no session is a note the user wrote, so it is always done.
  */
 export function noteRowPhase(note: {
@@ -31,7 +34,7 @@ export function noteRowPhase(note: {
   content?: string | null;
 }): SessionRowPhase {
   if (note.sessionStatus === 'queued') return 'queued';
-  if (note.sessionStatus === 'running') return 'running';
+  if (isSessionInFlight(note.sessionStatus)) return 'running';
   if (note.sessionId && !note.content?.trim()) return 'failed';
   return 'done';
 }

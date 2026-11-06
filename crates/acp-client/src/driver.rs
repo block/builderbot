@@ -8,7 +8,7 @@
 //! - Cancellation support
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,8 +28,9 @@ use agent_client_protocol::{
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
             SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
             SessionConfigOptionCategory, SessionConfigSelectOptions, SessionInfoUpdate,
-            SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-            StopReason, TextContent, ToolCallContent,
+            SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+            SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent,
+            ToolCallContent,
         },
         ProtocolVersion,
     },
@@ -49,10 +50,33 @@ use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
 
+mod attach;
+mod blox_process;
+mod catch_up;
+mod connection_io;
+mod recorded_turn;
 mod remote_liveness;
 mod remote_process;
 mod remote_routing;
 mod response_completion;
+mod transport_loss;
+
+pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, TurnResult};
+pub(crate) use blox_process::BloxProcess;
+#[cfg(test)]
+pub(crate) use blox_process::RemoteProcessProbe;
+pub use blox_process::{RemoteProcess, RemoteProcessStatus};
+pub use catch_up::LatestPrompt;
+use connection_io::{normalized_stdout, spawn_stderr_reader, staged_client};
+pub use recorded_turn::{recording_shows_held_work, RecordedTurn};
+
+use transport_loss::{
+    formatted_error_is_transport_closed, kill_without_interrupt, ProxyStop, TransportMonitor,
+    TransportSignal, TRANSPORT_LOSS_REPLY_GRACE,
+};
+pub use transport_loss::{
+    is_transport_loss_error, DetachHandle, TransportLoss, TransportLossPhase,
+};
 
 use remote_routing::RemoteLoss;
 
@@ -552,6 +576,12 @@ pub struct ReplayBoundary {
     pub content: String,
     pub acp_message_id: Option<String>,
     pub acp_tool_call_id: Option<String>,
+    /// A tool call row's last ACP status (`pending`, `in_progress`,
+    /// `completed`, `failed`), as the transcript holds it. An attach's
+    /// catch-up reads it to tell a call that was still running at the
+    /// disconnect, whose replayed updates are new, from one whose final
+    /// state the transcript already holds.
+    pub acp_tool_status: Option<String>,
 }
 
 impl ReplayBoundary {
@@ -561,6 +591,7 @@ impl ReplayBoundary {
             content,
             acp_message_id: None,
             acp_tool_call_id: None,
+            acp_tool_status: None,
         }
     }
 }
@@ -699,6 +730,9 @@ pub enum OutOfTurnPermissionPolicy {
     AutoDeny,
 }
 
+/// The default [`BackgroundHoldConfig::hold_ceiling`]: 4 hours.
+pub(crate) const DEFAULT_HOLD_CEILING: Duration = Duration::from_secs(4 * 60 * 60);
+
 /// Configuration for the post-turn background hold.
 ///
 /// When set on a driver (see [`AcpDriver::with_background_hold`]), a
@@ -794,7 +828,7 @@ impl Default for BackgroundHoldConfig {
     fn default() -> Self {
         Self {
             hold_cap: Duration::from_secs(1800),
-            hold_ceiling: Duration::from_secs(14400),
+            hold_ceiling: DEFAULT_HOLD_CEILING,
             debounce: Duration::from_secs(10),
             taskless_debounce: Duration::from_secs(1),
             idle_latch_staleness: Duration::from_secs(120),
@@ -952,6 +986,11 @@ pub enum SessionSettleReason {
     Cancelled,
     /// The connection failed (protocol error, or the agent process exited).
     Failed,
+    /// The caller detached ([`DetachHandle`]) with a prompt in flight: the
+    /// proxy was SIGKILLed without a `session/cancel`, so the turn may still be
+    /// running remotely. The outcome is an error, and
+    /// [`SessionSettled::transport_loss`] is a [`TransportLossPhase::Turn`].
+    Detached,
 }
 
 /// Event emitted exactly once by the connection task when the session
@@ -968,6 +1007,32 @@ pub struct SessionSettled {
     /// it with a per-turn result.
     pub outcome: Result<AgentRunOutcome, String>,
     pub reason: SessionSettleReason,
+    /// Set when the connection ended because its transport went away rather
+    /// than because the agent said so (see [`TransportLoss`]). A remote
+    /// session lost with its turn in flight may still be running.
+    pub transport_loss: Option<TransportLoss>,
+    /// A `session/cancel` was sent — for a Stop, or an interrupt — and the
+    /// turn's prompt went unanswered: past [`CANCEL_ACK_DEADLINE`] (an
+    /// interrupt's `INTERRUPT_ACK_TIMEOUT`), or because the transport went
+    /// first under a Stop. The connection settled cancelled without the
+    /// agent confirming it. For a remote session the turn may still be
+    /// running on its workstation, behind a hung transport, and the caller
+    /// should stop it over a fresh connection ([`AcpDriver::attach_cancel`]).
+    pub cancel_unacknowledged: bool,
+    /// The connection settled out of a background hold with the work the
+    /// hold was waiting for still going, as far as it last saw (tasks live,
+    /// or a continuation cycle busy): the transport went (a detach
+    /// included), or a Stop's `session/cancel` — sent out of turn, so never
+    /// answered — went out and nothing showed the work stopping within
+    /// `HOLDING_CANCEL_DRAIN`. The turn itself completed and stands.
+    ///
+    /// A local agent's background work goes down with it. A remote one's
+    /// goes on on the workstation, and any continuation it triggers is
+    /// recorded by no one: after a loss the caller should leave the session
+    /// for reconcile to catch up with rather than treat it as settled, and
+    /// after a Stop cancel it again over a fresh connection
+    /// ([`AcpDriver::attach_cancel`]).
+    pub background_work_left: bool,
 }
 
 impl SessionSettled {
@@ -1125,6 +1190,13 @@ pub struct AcpDriver {
     /// the interrupt-and-reprompt path. See
     /// [`AcpDriver::with_steering_disabled`].
     steering_disabled: bool,
+    /// Session mode to switch to right after `session/new` / `session/load`
+    /// when the agent advertises it; see
+    /// [`AcpDriver::with_unattended_session_mode`].
+    unattended_session_mode: Option<String>,
+    /// The workstation process a Blox driver's session runs on; `None` for
+    /// local drivers. See [`AcpDriver::for_workspace`].
+    blox_process: Option<BloxProcess>,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
@@ -1150,6 +1222,8 @@ impl AcpDriver {
                 background_hold: None,
                 background_hold_observer: None,
                 steering_disabled: false,
+                unattended_session_mode: None,
+                blox_process: None,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
     }
@@ -1170,6 +1244,8 @@ impl AcpDriver {
                 background_hold: None,
                 background_hold_observer: None,
                 steering_disabled: false,
+                unattended_session_mode: None,
+                blox_process: None,
             })
             .ok_or_else(|| {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
@@ -1191,19 +1267,53 @@ impl AcpDriver {
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
+            blox_process: None,
         }
     }
 
     /// Create a driver that proxies through `sq blox acp <workspace>`.
-    pub fn for_workspace(workspace_name: &str, agent_id: Option<&str>) -> Result<Self, String> {
+    ///
+    /// Remote agents run unattended by construction — the laptop that answers
+    /// `session/request_permission` may disconnect mid-turn — so the driver
+    /// configures the provider to never wait on a permission prompt
+    /// ([`blox_acp_env_vars`], [`blox_unattended_session_mode`]).
+    ///
+    /// The remote argv names `staged_session_id`, so a known provider gets a
+    /// workstation process of its own, and the same session gets it back on
+    /// resume or reattach (see [`AcpDriver::attach`]). A driver with no
+    /// known provider runs Blox's default agent on a process other sessions
+    /// share, and its teardown never sends SIGINT.
+    pub fn for_workspace(
+        workspace_name: &str,
+        agent_id: Option<&str>,
+        staged_session_id: &str,
+    ) -> Result<Self, String> {
         let binary_path = blox_cli::find_sq_binary().ok_or_else(|| {
             "Could not find `sq` binary. Install it and ensure it's on your PATH.".to_string()
         })?;
+        Ok(Self::for_workspace_with_binary(
+            binary_path,
+            workspace_name,
+            agent_id,
+            staged_session_id,
+        ))
+    }
 
-        let command = agent_id.and_then(blox_acp_command);
-        let args = blox_cli::acp_proxy_args(workspace_name, command.as_deref());
+    /// [`AcpDriver::for_workspace`] with the `sq` binary already resolved, so
+    /// the argument and mode plumbing can be checked without `sq` installed.
+    pub(crate) fn for_workspace_with_binary(
+        binary_path: PathBuf,
+        workspace_name: &str,
+        agent_id: Option<&str>,
+        staged_session_id: &str,
+    ) -> Self {
+        let command = blox_acp_command(agent_id, staged_session_id);
+        let env_vars = agent_id.map(blox_acp_env_vars).unwrap_or_default();
+        let args =
+            blox_cli::acp_proxy_args(workspace_name, command.flag_value().as_deref(), &env_vars);
 
-        Ok(Self {
+        Self {
             binary_path,
             acp_args: args,
             agent_label: "Blox".to_string(),
@@ -1216,7 +1326,11 @@ impl AcpDriver {
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
-        })
+            unattended_session_mode: agent_id
+                .and_then(blox_unattended_session_mode)
+                .map(str::to_string),
+            blox_process: Some(BloxProcess::new(workspace_name, command)),
+        }
     }
 
     /// Set extra environment variables to pass to the agent process.
@@ -1309,6 +1423,82 @@ impl AcpDriver {
         self.steering_disabled = disabled;
         self
     }
+
+    /// Switch the agent to `mode_id` (an ACP session mode such as the Claude
+    /// bridge's `bypassPermissions`) right after `session/new` or
+    /// `session/load`, when the agent lists it among its available modes.
+    /// Best-effort: an agent without modes, or without this one, is left as
+    /// it is and the omission is logged. `None` clears the request.
+    pub fn with_unattended_session_mode(mut self, mode_id: Option<String>) -> Self {
+        self.unattended_session_mode = mode_id;
+        self
+    }
+
+    /// The session mode this driver switches to after session setup, if any.
+    pub fn unattended_session_mode(&self) -> Option<&str> {
+        self.unattended_session_mode.as_deref()
+    }
+
+    /// Whether this driver's remote process may serve other sessions too, so
+    /// its teardown must never SIGINT it (see [`TransportMonitor::spares_proxy`]).
+    fn shares_remote_process(&self) -> bool {
+        self.blox_process
+            .as_ref()
+            .is_some_and(|blox| !blox.command.dedicated)
+    }
+
+    /// Whether this driver's remote process is its Staged session's own (see
+    /// [`crate::types::BloxAcpCommand::dedicated`]).
+    fn runs_dedicated_remote_process(&self) -> bool {
+        self.blox_process
+            .as_ref()
+            .is_some_and(|blox| blox.command.dedicated)
+    }
+
+    /// The agent session a connection's proxy routes to it from the moment it
+    /// attaches (see `remote_process::attach`): `reattach`'s, and only on a
+    /// process dedicated to this Staged session. On Blox's shared default the
+    /// session may belong to another connection, so the claim waits for the
+    /// `session/load`.
+    fn reattach_session_claim<'a>(&self, reattach: Option<&'a ReattachTurn>) -> Option<&'a str> {
+        reattach
+            .filter(|_| self.runs_dedicated_remote_process())
+            .map(|turn| turn.agent_session_id.as_str())
+    }
+}
+
+/// Environment for the remote ACP process so the provider never blocks on a
+/// permission prompt the laptop might not be connected to answer.
+///
+/// Goose reads `GOOSE_MODE`; `auto` approves every tool call itself. The
+/// other providers have no environment knob (Claude's bridge is switched via
+/// a session mode instead, see [`blox_unattended_session_mode`]).
+pub fn blox_acp_env_vars(agent_id: &str) -> Vec<(String, String)> {
+    match agent_id {
+        "goose" => vec![("GOOSE_MODE".to_string(), "auto".to_string())],
+        _ => Vec::new(),
+    }
+}
+
+/// The ACP session mode that makes a remote provider run without permission
+/// prompts, when it exposes one. The Claude bridge advertises
+/// `bypassPermissions` in `session/new`'s `modes`.
+pub fn blox_unattended_session_mode(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        "claude" => Some("bypassPermissions"),
+        _ => None,
+    }
+}
+
+/// Whether `agent_id` runs on Blox without asking permission: Goose through
+/// [`blox_acp_env_vars`]' `GOOSE_MODE=auto`, Claude through
+/// [`blox_unattended_session_mode`]'s `bypassPermissions` (best-effort: the
+/// switch is skipped if the bridge doesn't offer the mode). Codex, Pi and Amp
+/// have no such knob. They rely on Staged answering `session/request_permission`
+/// itself, and a request a lost connection left unanswered is not re-sent to
+/// the next one, so their turns can wedge on it.
+pub(crate) fn blox_runs_unattended(agent_id: &str) -> bool {
+    !blox_acp_env_vars(agent_id).is_empty() || blox_unattended_session_mode(agent_id).is_some()
 }
 
 /// Shell-escape a value by wrapping it in single quotes with interior quotes
@@ -1911,6 +2101,8 @@ pub struct SessionConnection {
     /// Receiver for the connection's one settled event; handed out (once) via
     /// [`SessionConnection::take_settled_receiver`].
     settled_rx: Option<oneshot::Receiver<SessionSettled>>,
+    /// The connection's transport-loss evidence (see [`DetachHandle`]).
+    transport: Arc<TransportMonitor>,
 }
 
 impl SessionConnection {
@@ -1953,6 +2145,13 @@ impl SessionConnection {
             turn_control_tx: self.turn_control_tx.clone(),
             connection_alive: Arc::clone(&self.connection_alive),
         }
+    }
+
+    /// A cloneable, thread-safe handle that abandons this connection while
+    /// leaving a remote turn running on the workstation (see
+    /// [`DetachHandle`]).
+    pub fn detach_handle(&self) -> DetachHandle {
+        DetachHandle::new(Arc::clone(&self.transport))
     }
 
     /// Take the receiver for the connection's [`SessionSettled`] event.
@@ -2073,6 +2272,41 @@ impl AcpDriver {
         cancel_token: &CancellationToken,
         turn: &ReattachTurn,
     ) -> Result<AgentRunOutcome, String> {
+        self.reattach_detachable(
+            session_id,
+            working_dir,
+            store,
+            writer,
+            cancel_token,
+            turn,
+            &|_| {},
+        )
+        .await
+        .and_then(|settled| settled.outcome)
+    }
+
+    /// [`Self::reattach`], handing the connection's [`DetachHandle`] to
+    /// `on_detach_handle` once it is up, so the caller can let go of the turn
+    /// without cancelling it. A detach ends the reattach with an error and
+    /// leaves the turn running on the agent.
+    ///
+    /// Returns how the connection settled, its outcome included, so a caller
+    /// can tell a Stop the agent was sent from one it may never have had
+    /// ([`SessionSettled::cancel_unacknowledged`]): stopped while still
+    /// setting up, no `session/cancel` goes out, and one queued on a proxy
+    /// already losing its transport may never be delivered. `Err` when no
+    /// connection came up to settle.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reattach_detachable(
+        &self,
+        session_id: &str,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        cancel_token: &CancellationToken,
+        turn: &ReattachTurn,
+        on_detach_handle: &dyn Fn(DetachHandle),
+    ) -> Result<SessionSettled, String> {
         if !self.is_remote {
             return Err("Only a remote session's turn can be reattached to".to_string());
         }
@@ -2089,13 +2323,13 @@ impl AcpDriver {
                 Some(turn),
             )
             .await?;
+        on_detach_handle(connection.detach_handle());
         let Some(settled) = connection.take_settled_receiver() else {
             return Err("The reattached connection has no settled event".to_string());
         };
         settled
             .await
-            .map_err(|_| "The reattached connection ended without settling".to_string())?
-            .outcome
+            .map_err(|_| "The reattached connection ended without settling".to_string())
     }
 
     /// [`Self::connect`], or with `reattach` [`Self::reattach`]'s connection.
@@ -2243,6 +2477,17 @@ impl AcpDriver {
             )
         };
 
+        // Structural transport-loss evidence for this connection, and how a
+        // `DetachHandle` lets go of it. Both stdout readers below record the
+        // EOF as soon as they see it: the SDK sees it on this same thread only
+        // after that task yields, so the signal is always in before any
+        // request fails over it.
+        let transport = TransportMonitor::new();
+        let stdout_transport = Arc::clone(&transport);
+        if self.shares_remote_process() {
+            transport.mark_shared_process();
+        }
+
         // `child_exited` fires when the agent process is observed to be gone
         // (stderr EOF). The post-turn holding wait keys its involuntary-exit
         // trigger off this: a dead bridge otherwise looks identical to a quiet
@@ -2254,43 +2499,50 @@ impl AcpDriver {
             Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
             Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         ) = if self.is_remote {
-            // `sq blox acp` attaches every session on this workspace and
-            // agent to one workstation process, so they share one proxy that
-            // stops only when the last of them is done, and its output is
-            // routed so only this session's frames reach this connection.
-            let (lease, streams) = remote_process::attach(cmd, &self.agent_label)
+            // `sq blox acp` attaches every connection with the same argv to
+            // one workstation process: the argv names the Staged session
+            // where the agent allows it (see `blox_acp_command`), so that is
+            // this session's own process, and otherwise Blox's shared one.
+            // Connections with the same argv share one proxy that stops only
+            // when the last of them is done, and its output is routed so
+            // only this session's frames reach this connection.
+            //
+            // A reattach to this session's own process gets the turn's frames
+            // from the moment the proxy connects, ahead of the `session/load`
+            // that would claim them: routed here from the start, they wait at
+            // the own-session gate and go through the catch-up with the
+            // replay, instead of being dropped as nobody's — losing a
+            // `tool_call` the replay may not hold yet, and leaving its later
+            // updates without a call to land on.
+            let owns = self.reattach_session_claim(reattach);
+            let (lease, streams) = remote_process::attach(cmd, &self.agent_label, owns)
                 .await
                 .map_err(spawn_error)?;
             let exited = lease.exited().clone();
+            // A detach lets go of this session's lease without cancelling its
+            // turn, and stops the proxy without SIGINT if nobody else holds it.
+            transport.arm_lease(lease.detacher());
+            // The routed stream ending is this connection's stdout EOF.
+            let incoming = relay_routed_stream(streams.incoming, move || {
+                stdout_transport.signal(TransportSignal::StdoutClosed)
+            });
             (
                 AgentProcess::Remote(lease),
                 exited,
                 Box::new(streams.outgoing),
-                Box::new(streams.incoming),
+                Box::new(incoming),
             )
         } else {
             let mut child = cmd.spawn().map_err(spawn_error)?;
             let child_exited = CancellationToken::new();
-
-            // Drain the agent's stderr to the log so spawn/shebang failures are
-            // visible instead of vanishing into a generic "server shut down".
             if let Some(stderr) = child.stderr.take() {
-                let agent_label = self.agent_label.clone();
-                let session_id = session_id.to_string();
-                let exited = child_exited.clone();
-                tokio::task::spawn_local(async move {
-                    let mut lines = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        log::warn!("[{agent_label} stderr][session {session_id}] {line}");
-                    }
-                    // stderr EOF (or a read error) means the agent process has
-                    // exited or torn down its stderr — either way it can no
-                    // longer be trusted to report background state.
-                    exited.cancel();
-                });
+                spawn_stderr_reader(
+                    stderr,
+                    self.agent_label.clone(),
+                    session_id.to_string(),
+                    child_exited.clone(),
+                    Arc::clone(&transport),
+                );
             }
 
             let mut stdin = child
@@ -2328,25 +2580,12 @@ impl AcpDriver {
                 .stdout
                 .take()
                 .ok_or_else(|| "Failed to get stdout".to_string())?;
-
-            // On the shell-spawn fallback, shell init (.zshrc, plugin banners,
-            // Hermit activation) may write to stdout before `exec` replaces the
-            // shell. Filter out any non-JSON lines so they don't reach the
-            // JSON-RPC parser. On the direct-spawn (snapshot) path there is no
-            // shell banner, so this is a harmless passthrough.
-            let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
-            tokio::task::spawn_local(async move {
-                if let Err(error) =
-                    normalize_local_acp_stdout(stdout, normalized_stdout_writer).await
-                {
-                    log::error!("local ACP stdout normalization failed: {error}");
-                }
-            });
+            let incoming = normalized_stdout(stdout, false, Arc::clone(&transport));
             (
                 AgentProcess::Local(child),
                 child_exited,
                 Box::new(stdin),
-                Box::new(normalized_stdout_reader),
+                incoming,
             )
         };
         let reattached_turn = match (&agent_process, reattach) {
@@ -2363,32 +2602,48 @@ impl AcpDriver {
 
         let is_resuming = agent_session_id.is_some();
         let replay_boundaries = if is_resuming {
-            store
-                .get_session_replay_boundaries(session_id)
-                .unwrap_or_else(|e| {
-                    log::warn!("Failed to load session replay boundaries: {e}");
-                    vec![]
-                })
+            store.get_session_replay_boundaries(session_id)
         } else {
-            vec![]
+            Ok(vec![])
         };
-        let handler = Arc::new(
-            AcpNotificationHandler::new(
+        let handler = match (reattach, replay_boundaries) {
+            // A reattached turn went on while no connection was attached, so
+            // its replay can hold what the transcript lacks — a tool call that
+            // finished meanwhile included, whose ending nothing live re-sends.
+            // It catches up as an attach does (see `HandlerPhase::CatchingUp`):
+            // only what is new is recorded, and a stored call still running is
+            // settled from the replay. Unless the transcript can't be read,
+            // when that would record the whole replay again.
+            (Some(_), Ok(stored)) => AcpNotificationHandler::new(
                 Arc::clone(writer),
-                is_resuming,
-                replay_boundaries,
+                false,
+                Vec::new(),
                 cancel_token.clone(),
             )
-            // Only a held connection can be asked for permission out-of-turn;
-            // without a hold the policy is unreachable.
-            .with_out_of_turn_permissions(
-                self.background_hold
-                    .as_ref()
-                    .map(|hold| hold.out_of_turn_permissions)
-                    .unwrap_or_default(),
+            .catching_up(&stored),
+            (_, replay_boundaries) => AcpNotificationHandler::new(
+                Arc::clone(writer),
+                is_resuming,
+                replay_boundaries.unwrap_or_else(|e| {
+                    log::warn!("Failed to load session replay boundaries: {e}");
+                    vec![]
+                }),
+                cancel_token.clone(),
             ),
+        };
+        let handler = Arc::new(
+            handler
+                // Only a held connection can be asked for permission out-of-turn;
+                // without a hold the policy is unreachable.
+                .with_out_of_turn_permissions(
+                    self.background_hold
+                        .as_ref()
+                        .map(|hold| hold.out_of_turn_permissions)
+                        .unwrap_or_default(),
+                )
+                .with_transport_monitor(Arc::clone(&transport)),
         );
-        let transport = ByteStreams::new(stdin_compat, stdout_compat);
+        let byte_streams = ByteStreams::new(stdin_compat, stdout_compat);
 
         let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<QueuedSessionTurn>();
         let (hold_control_tx, mut hold_control_rx) =
@@ -2414,90 +2669,26 @@ impl AcpDriver {
         let mcp_servers = self.mcp_servers.clone();
         let agent_label = self.agent_label.clone();
         let steering_disabled = self.steering_disabled;
+        let unattended_session_mode = self.unattended_session_mode.clone();
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
+        let connection_transport = Arc::clone(&transport);
 
         let connection_task = tokio::task::spawn_local(async move {
+            let transport = connection_transport;
+            // Whether `run_acp_session` returned on its own, as opposed to
+            // the SDK ending the connection under it (see
+            // [`TransportMonitor::verdict`]).
+            let session_returned = std::cell::Cell::new(false);
             // Reply sender for the turn in flight, stashed by the session
             // loop. The outcome is delivered only after finalize() +
             // release() below, so `SessionConnection::prompt` resumes
             // with the child already stopped — the old per-turn ordering.
             let pending_reply: RefCell<Option<oneshot::Sender<SessionTurnResult>>> =
                 RefCell::new(None);
-            let permission_handler = Arc::clone(&handler);
-            let notification_handler = Arc::clone(&handler);
-            let ext_notification_handler = Arc::clone(&handler);
-            let protocol_result: Result<_, String> = Client
-                .builder()
-                .name("staged-acp-client")
-                .on_receive_request(
-                    async move |args: RequestPermissionRequest, responder, connection| {
-                        // The decision may wait on a person. Handlers run on
-                        // the connection's single dispatch task, so awaiting
-                        // it here would stall every other frame — the prompt
-                        // response that acknowledges a cancel, a steer's
-                        // answer — until someone clicks.
-                        let handler = Arc::clone(&permission_handler);
-                        connection.spawn(async move {
-                            let response = handler.request_permission(args).await?;
-                            responder.respond(response)
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                // `session/update` frames — the typed `SessionUpdate` kinds
-                // plus the asyncTasks extension's three `async_task_*`
-                // discriminators the v1 enum cannot represent (see
-                // [`IncomingSessionUpdate`]). The wrapper must parse the
-                // typed updates on the same connection that advertises the
-                // capability: an unparseable matched notification is a hard
-                // dispatch error, not a fall-through.
-                .on_receive_notification(
-                    async move |notification: IncomingSessionUpdate, _connection| match notification
-                    {
-                        IncomingSessionUpdate::Standard(notification) => {
-                            notification_handler
-                                .session_notification(notification)
-                                .await
-                        }
-                        IncomingSessionUpdate::AsyncTask(notification) => {
-                            notification_handler.async_task_update(notification).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_notification!(),
-                )
-                // Second, enum-typed handler for whatever the
-                // `session/update`-typed handler doesn't match — in practice
-                // the bridge's `_claude/sdkMessage` ExtNotification frames,
-                // which would otherwise be actively rejected with a
-                // method_not_found error frame back to the agent.
-                // Registration order matters: `AgentNotification`'s
-                // `matches_method` accepts every method and handlers run in
-                // registration order, so this must come after the
-                // `session/update`-typed handler above to avoid stealing its
-                // frames.
-                .on_receive_notification(
-                    async move |notification: AgentNotification, _connection| {
-                        match notification {
-                            AgentNotification::ExtNotification(ext) => {
-                                ext_notification_handler.ext_notification(ext).await
-                            }
-                            // `session/update` never lands here (consumed by
-                            // the handler above); drop any other known-but-
-                            // unused notification kind.
-                            other => {
-                                log::debug!(
-                                    "Ignoring unhandled ACP notification '{}'",
-                                    other.method()
-                                );
-                                Ok(())
-                            }
-                        }
-                    },
-                    agent_client_protocol::on_receive_notification!(),
-                )
-                .connect_with(transport, async |connection| {
-                    run_acp_session(
+            let protocol_result: Result<_, String> = staged_client(&handler)
+                .connect_with(byte_streams, async |connection| {
+                    let result = run_acp_session(
                         &connection,
                         &acp_working_dir,
                         &store,
@@ -2512,6 +2703,7 @@ impl AcpDriver {
                         background_hold.as_ref(),
                         background_hold_observer.as_ref(),
                         steering_disabled,
+                        unattended_session_mode.as_deref(),
                         &child_exited,
                         &mut prompt_rx,
                         &mut hold_control_rx,
@@ -2520,8 +2712,9 @@ impl AcpDriver {
                         &pending_reply,
                         reattached_turn,
                     )
-                    .await
-                    .map_err(agent_client_protocol::util::internal_error)
+                    .await;
+                    session_returned.set(true);
+                    result.map_err(agent_client_protocol::util::internal_error)
                 })
                 .await
                 .map_err(|e| format!("ACP protocol failed: {e:?}"));
@@ -2529,20 +2722,26 @@ impl AcpDriver {
             // whatever error the ended stream produced; report the loss. A
             // session cut off for falling behind the agent's output reports
             // that instead: it is why its stream ended, even if the agent was
-            // lost afterwards.
+            // lost afterwards. An error the agent answered the prompt with
+            // stands either way: it came over a live transport, and a proxy
+            // that exits right behind it can have its loss recorded before
+            // this reads it.
+            let answered_error = transport.answered_error();
             let protocol_result = match (
                 protocol_result,
                 agent_process.cut_off(),
                 agent_process.loss(),
             ) {
-                (Err(error), Some(cause), _) if !cancel_token.is_cancelled() => {
+                (Err(error), Some(cause), _) if !cancel_token.is_cancelled() && !answered_error => {
                     log::warn!(
                         "Session {our_session_id}: cut off from the remote agent ({cause}); \
                          its connection ended with: {error}"
                     );
                     Err(format!("{REMOTE_SESSION_CUT_OFF_PREFIX}{cause}"))
                 }
-                (Err(error), None, Some(loss)) if !cancel_token.is_cancelled() => {
+                (Err(error), None, Some(loss))
+                    if !cancel_token.is_cancelled() && !answered_error =>
+                {
                     let RemoteLoss {
                         cause,
                         agent_may_survive,
@@ -2572,8 +2771,15 @@ impl AcpDriver {
             reject_queued_turn_control_requests(&mut turn_control_rx, "the ACP connection closed");
 
             writer.finalize().await;
-            agent_process.release().await;
+            // Disarms the detach handle before the agent can be let go of. A
+            // detached connection's, or a shared process's, proxy is stopped
+            // without SIGINT, so remote turns keep running.
+            agent_process.release(&transport).await;
 
+            let transport_loss = transport.verdict(
+                session_returned.get(),
+                protocol_result.as_ref().err().map(String::as_str),
+            );
             let (result, settle_reason) = match protocol_result {
                 Ok((outcome, reason)) => (Ok(outcome), reason),
                 Err(e) if cancel_token.is_cancelled() => {
@@ -2582,6 +2788,25 @@ impl AcpDriver {
                         Ok(AgentRunOutcome::Cancelled),
                         SessionSettleReason::Cancelled,
                     )
+                }
+                // Detached on purpose: only a prompt in flight leaves anything
+                // running remotely. Before one, the session simply stopped.
+                Err(e) if transport.detach_requested() => {
+                    if transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Turn) {
+                        log::info!(
+                            "Session {our_session_id} detached with its turn in flight: {e}"
+                        );
+                        (
+                            Err(format!("Detached with the turn still in flight ({e})")),
+                            SessionSettleReason::Detached,
+                        )
+                    } else {
+                        log::info!("Session {our_session_id} detached before its turn: {e}");
+                        (
+                            Ok(AgentRunOutcome::Cancelled),
+                            SessionSettleReason::Cancelled,
+                        )
+                    }
                 }
                 Err(e) => (Err(e), SessionSettleReason::Failed),
             };
@@ -2592,6 +2817,9 @@ impl AcpDriver {
             let _ = settled_tx.send(SessionSettled {
                 outcome: result.clone(),
                 reason: settle_reason,
+                transport_loss,
+                cancel_unacknowledged: transport.cancel_unacknowledged(),
+                background_work_left: transport.background_work_left(),
             });
 
             if let Some(reply) = pending_reply.borrow_mut().take() {
@@ -2614,6 +2842,7 @@ impl AcpDriver {
             connection_task: Some(connection_task),
             exit_result: None,
             settled_rx: Some(settled_rx),
+            transport,
         })
     }
 }
@@ -2690,23 +2919,86 @@ impl AgentProcess {
     }
 
     /// Stop a local agent; detach from a remote one, which stops only once no
-    /// other session is attached.
-    async fn release(self) {
+    /// other session is attached. First disarms `transport`'s detach handle.
+    /// A detached or shared remote process is never sent SIGINT, which would
+    /// stop a process `sq` started along with every turn on it (see
+    /// [`TransportMonitor::spares_proxy`]); a detach also already let go of
+    /// the lease leaving its turn running (see [`DetachHandle`]).
+    async fn release(self, transport: &TransportMonitor) {
+        transport.begin_teardown();
         match self {
             Self::Local(mut child) => graceful_stop(&mut child, false).await,
-            Self::Remote(lease) => lease.release().await,
+            Self::Remote(lease) => {
+                if transport.spares_proxy() {
+                    lease.never_interrupt();
+                }
+                lease.release().await
+            }
         }
     }
 }
 
+/// Copy a routed client stream into a pipe for the connection, calling
+/// `on_eof` once the routed stream ends (or fails to read) — the remote
+/// equivalent of the proxy's stdout closing. The connection going away first
+/// (a failed write) is a normal end, not a lost transport, so it calls
+/// nothing.
+fn relay_routed_stream<R>(mut routed: R, on_eof: impl FnOnce() + 'static) -> tokio::io::DuplexStream
+where
+    R: tokio::io::AsyncRead + Unpin + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let (mut relay_writer, relay_reader) = tokio::io::duplex(64 * 1024);
+    tokio::task::spawn_local(async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let read = match routed.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => {
+                    log::warn!("Failed to read the routed remote ACP stream: {error}");
+                    break;
+                }
+            };
+            if relay_writer.write_all(&buf[..read]).await.is_err() {
+                return;
+            }
+        }
+        on_eof();
+        // Dropping the writer now hands the EOF on to the connection.
+        drop(relay_writer);
+    });
+    relay_reader
+}
+
+/// How long a remote proxy's `sq` wrapper gets to exit after SIGINT before
+/// its whole process group is SIGKILLed.
+const GRACEFUL_STOP_GRACE: Duration = Duration::from_secs(5);
+
 /// Gracefully stop the ACP child process.
 ///
 /// For remote proxies (spawned with `process_group(0)`), sends SIGINT to the
-/// process group so the proxy and its children can run cleanup. Falls back to
-/// SIGKILL after a 5-second timeout.
+/// process group so the proxy and its children can run cleanup, waits up to
+/// [`GRACEFUL_STOP_GRACE`] for the wrapper to exit, then SIGKILLs the *whole
+/// group* unconditionally. Killing only the wrapper pid is not enough, and
+/// neither is trusting the wrapper's exit: `sq blox acp` wraps a
+/// `blox.exoskeleton` child, and a child that cannot act on the SIGINT
+/// (frozen, or blocked on a dead socket) would otherwise be orphaned alive —
+/// a stopped orphan is even SIGCONTed by the kernel once its group loses its
+/// last running member — and could go on relaying whatever was queued for
+/// the workstation after Staged has finished with the session.
 ///
 /// For local agents (no separate process group), kills immediately.
 async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
+    graceful_stop_with_grace(child, is_remote, GRACEFUL_STOP_GRACE).await
+}
+
+/// [`graceful_stop`] with the SIGINT grace period as a parameter (tests).
+async fn graceful_stop_with_grace(
+    child: &mut tokio::process::Child,
+    is_remote: bool,
+    grace: Duration,
+) {
     #[cfg(unix)]
     if is_remote {
         let Some(pid) = child.id() else {
@@ -2716,14 +3008,20 @@ async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
             let _ = child.kill().await;
             return;
         };
-        // Send SIGINT to the process group (negative PID) so both `sq`
-        // and its child processes (the blox acp proxy) receive the signal.
-        if signal::kill(Pid::from_raw(-pid), Signal::SIGINT).is_ok() {
-            if let Ok(Ok(_status)) =
-                tokio::time::timeout(Duration::from_secs(5), child.wait()).await
-            {
-                return;
-            }
+        // Negative pid: the process group `sq` leads, so the blox proxy it
+        // spawned gets every signal too.
+        let group = Pid::from_raw(-pid);
+        if signal::kill(group, Signal::SIGINT).is_ok() {
+            let _ = tokio::time::timeout(grace, child.wait()).await;
+        }
+        // Always SIGKILL the group, even when the wrapper honoured the
+        // SIGINT and exited within the grace: `sq` exiting says nothing
+        // about its `blox.exoskeleton` child. SIGKILL reaches a stopped
+        // process too. An already-empty group answers ESRCH, which is the
+        // expected outcome and not worth more than a trace; the pgid cannot
+        // be reused while any member is alive.
+        if let Err(e) = signal::kill(group, Signal::SIGKILL) {
+            log::trace!("SIGKILL of remote proxy process group {pid}: {e}");
         }
     }
     let _ = child.kill().await;
@@ -2948,6 +3246,10 @@ enum HandlerPhase {
         /// The continuation record, opened by the first out-of-turn update.
         continuation: Option<ContinuationRecord>,
     },
+    /// An attach ([`AcpDriver::attach`]) for the life of its connection: no
+    /// prompt of its own, only a replay and a turn it catches up on, recorded
+    /// past what the transcript already holds (see [`catch_up`]).
+    CatchingUp(Box<catch_up::CatchUpLedger>),
 }
 
 /// One background continuation: everything an out-of-turn burst records
@@ -3999,8 +4301,51 @@ struct LiveTaskSnapshot {
     tasks: Vec<BackgroundHoldTask>,
 }
 
+/// A session-stamped frame passing the own-session gate (see
+/// [`AcpNotificationHandler::admit`]).
+// Not boxed, like [`IncomingSessionUpdate`]: a frame is moved straight from
+// the notification handler through the gate, and boxing the common variant
+// would cost a heap allocation on every streamed session/update.
+#[allow(clippy::large_enum_variant)]
+enum GatedFrame {
+    Update(SessionNotification),
+    AsyncTask(AsyncTaskNotification),
+    /// The parsed params of a `_claude/sdkMessage` frame.
+    SdkMessage(serde_json::Value),
+}
+
+/// Whose frames a connection accepts.
+enum SessionGate {
+    /// Neither `session/new` nor `session/load` has named the connection's
+    /// session yet. Frames wait here, each with the session id it was stamped
+    /// with, until [`AcpNotificationHandler::name_session`] keeps this
+    /// session's and drops the rest. `dropped` counts, per session, the
+    /// frames pushed out past [`UNNAMED_GATE_FRAME_LIMIT`].
+    Unnamed {
+        held: VecDeque<(String, GatedFrame)>,
+        dropped: HashMap<String, usize>,
+    },
+    Named(String),
+}
+
+/// Most frames held at an unnamed gate. Past it the oldest is dropped, and
+/// naming the session logs how many of its own went. The connection's own
+/// frames that arrive unnamed are the handful that race the `session/new`
+/// response, or, on a reattach routed its session's frames from the start
+/// (see `remote_process::attach`), the running turn's while `initialize` is
+/// answered; anything older on a shared bridge belongs to another session's
+/// turn.
+const UNNAMED_GATE_FRAME_LIMIT: usize = 1024;
+
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
+    /// The connection's own-session filter ([`Self::admit`]). A bridge shared
+    /// between connections (the Blox proxy reuses one long-lived workstation
+    /// `claude-agent-acp`) relays every session's frames down every open
+    /// connection, and another session's trailing turn must not be stored
+    /// under, or count as activity for, the session that happens to be
+    /// connected.
+    session_gate: Mutex<SessionGate>,
     /// Serializes response chunks and result boundaries through writer awaits,
     /// so acceptance cannot race the persistence of a final chunk.
     response: Mutex<response_completion::ResponseState>,
@@ -4050,6 +4395,14 @@ struct AcpNotificationHandler {
     pending_permissions: Mutex<HashSet<String>>,
     /// How to resolve permission requests that arrive out-of-turn.
     out_of_turn_permissions: OutOfTurnPermissionPolicy,
+    /// The connection's transport-loss evidence. Naming the session and
+    /// starting a turn or a hold move its phase; the session loop's waits
+    /// watch its `lost` token.
+    transport: Arc<TransportMonitor>,
+    /// The session's most recent top-level `result` raw SDK frame: how an
+    /// attach, which never sees the prompt's own response, learns why the
+    /// turn stopped.
+    last_result: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
 impl AcpNotificationHandler {
@@ -4072,6 +4425,10 @@ impl AcpNotificationHandler {
         let turn_permission_token = std::sync::Mutex::new(permission_cancel_token.child_token());
         Self {
             writer,
+            session_gate: Mutex::new(SessionGate::Unnamed {
+                held: VecDeque::new(),
+                dropped: HashMap::new(),
+            }),
             response: Mutex::new(response_completion::ResponseState::default()),
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
@@ -4087,7 +4444,87 @@ impl AcpNotificationHandler {
             tool_call_announced: tokio::sync::Notify::new(),
             pending_permissions: Mutex::new(HashSet::new()),
             out_of_turn_permissions: OutOfTurnPermissionPolicy::default(),
+            transport: TransportMonitor::new(),
+            last_result: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Catch up on a session instead of prompting it (see
+    /// [`HandlerPhase::CatchingUp`]): `stored` is what the transcript holds.
+    fn catching_up(mut self, stored: &[ReplayBoundary]) -> Self {
+        self.phase = Mutex::new(HandlerPhase::CatchingUp(Box::new(
+            catch_up::CatchUpLedger::new(stored),
+        )));
+        self
+    }
+
+    /// Move a catch-up to `stage`; a no-op for any other phase.
+    async fn set_catch_up_stage(&self, stage: catch_up::CatchUpStage) {
+        if let HandlerPhase::CatchingUp(ledger) = &mut *self.phase.lock().await {
+            ledger.set_stage(stage);
+        }
+    }
+
+    /// End a catch-up's replay: every frame from here is the turn's live
+    /// stream. Text held from before the load that the replay never re-sent
+    /// is recorded first (see [`catch_up::CatchUpLedger::go_live`]), under
+    /// the gate, so no live frame can land ahead of it. A no-op for any
+    /// other phase.
+    async fn finish_catch_up(&self) {
+        let gate = self.session_gate.lock().await;
+        let session_id = match &*gate {
+            SessionGate::Named(own) => Some(own.clone()),
+            SessionGate::Unnamed { .. } => None,
+        };
+        let mut response = self.response.lock().await;
+        let pending = match &mut *self.phase.lock().await {
+            HandlerPhase::CatchingUp(ledger) => ledger.go_live(),
+            _ => return,
+        };
+        let Some(session_id) = session_id else {
+            return;
+        };
+        for update in pending {
+            let notification = SessionNotification::new(session_id.clone(), update);
+            if let Err(e) = self
+                .session_notification_inner(notification, &mut response)
+                .await
+            {
+                log::warn!(
+                    "ACP session {session_id}: recording text held before the load failed: {e:?}"
+                );
+            }
+        }
+    }
+
+    /// Whether a catch-up's replay showed the agent holding the newest
+    /// prompt the transcript has; `Unknown` for any other phase.
+    async fn latest_prompt(&self) -> catch_up::LatestPrompt {
+        match &*self.phase.lock().await {
+            HandlerPhase::CatchingUp(ledger) => ledger.latest_prompt(),
+            _ => catch_up::LatestPrompt::Unknown,
+        }
+    }
+
+    /// The session's most recent top-level `result` frame, if any.
+    fn last_result(&self) -> Option<serde_json::Value> {
+        self.last_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Share the connection's transport monitor (see [`TransportMonitor`]).
+    fn with_transport_monitor(mut self, transport: Arc<TransportMonitor>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Whether `session_id` is the session this connection serves. `false`
+    /// before the session is named: nothing of this session's can be asked
+    /// for a decision until a prompt goes out.
+    async fn owns_session(&self, session_id: &str) -> bool {
+        matches!(&*self.session_gate.lock().await, SessionGate::Named(own) if own == session_id)
     }
 
     /// Set the policy for permission requests arriving during a background
@@ -4095,6 +4532,142 @@ impl AcpNotificationHandler {
     fn with_out_of_turn_permissions(mut self, policy: OutOfTurnPermissionPolicy) -> Self {
         self.out_of_turn_permissions = policy;
         self
+    }
+
+    /// A handler whose session is already named `session_id`, for tests that
+    /// drive notifications without running `session/new`.
+    #[cfg(test)]
+    fn named(mut self, session_id: &str) -> Self {
+        self.session_gate = Mutex::new(SessionGate::Named(session_id.to_string()));
+        self
+    }
+
+    /// Name the ACP session this connection serves, then release the frames
+    /// held for it, in arrival order, and drop the rest. Called once: before
+    /// `session/load` goes out (its replay streams ahead of the response), or
+    /// as soon as `session/new` answers. Frames stamped with the new session
+    /// can beat that answer through the dispatch task (the Claude bridge
+    /// sends `available_commands_update` right behind it), so the gate holds
+    /// them rather than dropping them.
+    async fn name_session(&self, session_id: &str) {
+        self.name_session_into(session_id, Some(catch_up::CatchUpStage::Replay))
+            .await;
+    }
+
+    /// [`Self::name_session`] for a connection that sends something else
+    /// before its `session/load`: a catch-up stays held until
+    /// [`Self::begin_replay`].
+    async fn name_session_holding(&self, session_id: &str) {
+        self.name_session_into(session_id, None).await;
+    }
+
+    /// A held catch-up's `session/load` is about to go out (see
+    /// [`Self::name_session_holding`]): what arrives from here is its replay.
+    /// Under the gate, as in [`Self::name_session`].
+    async fn begin_replay(&self) {
+        let _gate = self.session_gate.lock().await;
+        self.set_catch_up_stage(catch_up::CatchUpStage::Replay)
+            .await;
+    }
+
+    async fn name_session_into(&self, session_id: &str, stage: Option<catch_up::CatchUpStage>) {
+        let mut gate = self.session_gate.lock().await;
+        let (held, dropped) = match &mut *gate {
+            SessionGate::Unnamed { held, dropped } => {
+                (std::mem::take(held), dropped.remove(session_id))
+            }
+            SessionGate::Named(own) => {
+                debug_assert!(false, "the ACP session is named once per connection");
+                log::warn!("ACP session {own}: ignoring a second name ({session_id})");
+                return;
+            }
+        };
+        *gate = SessionGate::Named(session_id.to_string());
+        self.transport.session_named();
+        if let Some(dropped) = dropped {
+            log::warn!(
+                "ACP session {session_id}: dropped the oldest {dropped} of its frames received \
+                 before it was named, past the {UNNAMED_GATE_FRAME_LIMIT}-frame limit"
+            );
+        }
+        // Still holding the gate, so a frame arriving meanwhile waits behind
+        // the held ones and arrival order is kept.
+        for (frame_session_id, frame) in held {
+            if frame_session_id != session_id {
+                log::debug!(
+                    "ACP session {session_id}: dropping a frame for another session \
+                     ({frame_session_id}) received before this session was named"
+                );
+                continue;
+            }
+            if let Err(e) = self.dispatch_admitted(frame).await {
+                log::warn!("ACP session {session_id}: a held frame failed on release: {e:?}");
+            }
+        }
+        // Anything after the held frames follows the `session/load` about to
+        // go out: a catch-up's replay. Still under the gate, so no frame can
+        // slip in between.
+        if let Some(stage) = stage {
+            self.set_catch_up_stage(stage).await;
+        }
+    }
+
+    /// Pass a frame stamped `session_id` through the own-session gate: hand
+    /// it back when it belongs to this connection's session, drop it (logged
+    /// at debug) when it names another, and hold it while the connection's
+    /// session is still unnamed.
+    async fn admit(&self, session_id: &str, frame: GatedFrame) -> Option<GatedFrame> {
+        let mut gate = self.session_gate.lock().await;
+        match &mut *gate {
+            SessionGate::Named(own) if own == session_id => Some(frame),
+            SessionGate::Named(own) => {
+                log::debug!(
+                    "ACP session {own}: dropping a frame for another session ({session_id}) \
+                     relayed over this connection"
+                );
+                None
+            }
+            SessionGate::Unnamed { held, dropped } => {
+                if held.len() >= UNNAMED_GATE_FRAME_LIMIT {
+                    if let Some((dropped_session_id, _)) = held.pop_front() {
+                        log::debug!(
+                            "dropping the oldest frame held before the session was named \
+                             (for {dropped_session_id})"
+                        );
+                        *dropped.entry(dropped_session_id).or_default() += 1;
+                    }
+                }
+                held.push_back((session_id.to_string(), frame));
+                None
+            }
+        }
+    }
+
+    /// Every gated entry point's first step: [`Self::admit`], then the
+    /// frame's handling if it was admitted.
+    async fn gate_and_dispatch(
+        &self,
+        session_id: &str,
+        frame: GatedFrame,
+    ) -> agent_client_protocol::Result<()> {
+        match self.admit(session_id, frame).await {
+            Some(frame) => self.dispatch_admitted(frame).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Handle a frame the own-session gate has let through, live or on
+    /// release from [`Self::name_session`].
+    async fn dispatch_admitted(&self, frame: GatedFrame) -> agent_client_protocol::Result<()> {
+        match frame {
+            GatedFrame::Update(notification) => {
+                let mut response = self.response.lock().await;
+                self.session_notification_inner(notification, &mut response)
+                    .await
+            }
+            GatedFrame::AsyncTask(notification) => self.apply_async_task_update(notification).await,
+            GatedFrame::SdkMessage(params) => self.apply_sdk_message(params).await,
+        }
     }
 
     /// Fix this connection's task-tracking mode, decided by the initialize
@@ -4175,7 +4748,8 @@ impl AcpNotificationHandler {
             }
             HandlerPhase::WaitingForPrompt { .. }
             | HandlerPhase::Live { .. }
-            | HandlerPhase::BackgroundHolding { .. } => return,
+            | HandlerPhase::BackgroundHolding { .. }
+            | HandlerPhase::CatchingUp(_) => return,
         };
         *phase = HandlerPhase::WaitingForPrompt {
             replayed_tool_call_ids: ids,
@@ -4205,7 +4779,7 @@ impl AcpNotificationHandler {
                 std::mem::take(replayed_tool_call_ids),
                 continuation.is_some(),
             ),
-            HandlerPhase::Live { .. } => return,
+            HandlerPhase::Live { .. } | HandlerPhase::CatchingUp(_) => return,
         };
         *phase = HandlerPhase::Live {
             replayed_tool_call_ids: ids,
@@ -4233,7 +4807,8 @@ impl AcpNotificationHandler {
             // A hold is only ever entered from a resolved live turn.
             HandlerPhase::Replaying(_)
             | HandlerPhase::WaitingForPrompt { .. }
-            | HandlerPhase::BackgroundHolding { .. } => return,
+            | HandlerPhase::BackgroundHolding { .. }
+            | HandlerPhase::CatchingUp(_) => return,
         };
         *phase = HandlerPhase::BackgroundHolding {
             replayed_tool_call_ids: ids,
@@ -4270,7 +4845,8 @@ impl AcpNotificationHandler {
             HandlerPhase::Replaying(buf) => buf.is_complete(),
             HandlerPhase::WaitingForPrompt { .. }
             | HandlerPhase::Live { .. }
-            | HandlerPhase::BackgroundHolding { .. } => true,
+            | HandlerPhase::BackgroundHolding { .. }
+            | HandlerPhase::CatchingUp(_) => true,
         }
     }
 }
@@ -4471,6 +5047,25 @@ impl AcpNotificationHandler {
                 return Ok(());
             }
         };
+        match params
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        {
+            Some(session_id) => {
+                self.gate_and_dispatch(&session_id, GatedFrame::SdkMessage(params))
+                    .await
+            }
+            None => self.apply_sdk_message(params).await,
+        }
+    }
+
+    /// The body of [`Self::ext_notification`] for a `_claude/sdkMessage`
+    /// frame the own-session gate admitted (or one carrying no session id).
+    async fn apply_sdk_message(
+        &self,
+        params: serde_json::Value,
+    ) -> agent_client_protocol::Result<()> {
         let Some(message) = params.get("message") else {
             log::warn!("{CLAUDE_SDK_MESSAGE_METHOD} params carried no message field");
             return Ok(());
@@ -4510,6 +5105,13 @@ impl AcpNotificationHandler {
         let mentions_task = sdk_message_mentions_task(message);
         let task_settled = sdk_message_settles_task(message);
         let session_state = sdk_message_session_state(message);
+        if message.get("type").and_then(serde_json::Value::as_str) == Some("result")
+            && message
+                .get("parent_tool_use_id")
+                .is_none_or(serde_json::Value::is_null)
+        {
+            *self.last_result.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
+        }
         self.response
             .lock()
             .await
@@ -4538,6 +5140,17 @@ impl AcpNotificationHandler {
     /// holding wait; counts as activity for the holding debounce, like every
     /// other notification on the connection.
     async fn async_task_update(
+        &self,
+        notification: AsyncTaskNotification,
+    ) -> agent_client_protocol::Result<()> {
+        let session_id = notification.session_id.to_string();
+        self.gate_and_dispatch(&session_id, GatedFrame::AsyncTask(notification))
+            .await
+    }
+
+    /// The body of [`Self::async_task_update`] once the own-session gate has
+    /// admitted the update.
+    async fn apply_async_task_update(
         &self,
         notification: AsyncTaskNotification,
     ) -> agent_client_protocol::Result<()> {
@@ -4597,8 +5210,8 @@ impl AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        let mut response = self.response.lock().await;
-        self.session_notification_inner(notification, &mut response)
+        let session_id = notification.session_id.to_string();
+        self.gate_and_dispatch(&session_id, GatedFrame::Update(notification))
             .await
     }
 
@@ -4790,6 +5403,12 @@ impl AcpNotificationHandler {
                         action,
                     }
                 }
+
+                // ── CatchingUp phase: an attach records what is new ──
+                HandlerPhase::CatchingUp(ledger) => LiveDecision {
+                    close_open_record: false,
+                    action: ledger.action_for(&notification.update),
+                },
 
                 // ── BackgroundHolding phase: out-of-turn continuation ──
                 HandlerPhase::BackgroundHolding {
@@ -5451,6 +6070,17 @@ const STEER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// (which the bridge answers by aborting the turn).
 const HOLDING_CANCEL_DRAIN: Duration = Duration::from_millis(500);
 
+/// Whether the background work a hold waits for is still going, as far as
+/// the connection last saw: tasks live, or a continuation cycle busy.
+fn background_work_live(activity: &BackgroundActivity) -> bool {
+    activity.live_tasks > 0 || activity.session_state == Some(SdkSessionState::Busy)
+}
+
+/// How long a Stop waits for the agent to answer the turn's prompt after
+/// `session/cancel` before settling cancelled anyway (and reporting
+/// [`SessionSettled::cancel_unacknowledged`]).
+const CANCEL_ACK_DEADLINE: Duration = Duration::from_secs(5);
+
 /// How one prompt turn ended, from the session loop's point of view.
 enum TurnStep {
     /// The turn ran to its own stop reason (or the user cancelled it).
@@ -5496,6 +6126,9 @@ enum HoldOutcome {
     Cancelled,
     /// The agent process exited (stderr EOF) while holding.
     ChildExited,
+    /// The transport went away while holding (see [`TransportMonitor`]),
+    /// including a detach.
+    TransportLost,
 }
 
 // Hand-written so the queued turn (which carries a reply channel, not a
@@ -5509,6 +6142,7 @@ impl std::fmt::Debug for HoldOutcome {
             HoldOutcome::NewTurn(_) => "NewTurn",
             HoldOutcome::Cancelled => "Cancelled",
             HoldOutcome::ChildExited => "ChildExited",
+            HoldOutcome::TransportLost => "TransportLost",
         })
     }
 }
@@ -5823,7 +6457,16 @@ async fn hold_for_background_quiescence(
         }
         tokio::select! {
             _ = cancel_token.cancelled() => break HoldOutcome::Cancelled,
-            _ = child_exited.cancelled() => break HoldOutcome::ChildExited,
+            // A remote session's `child_exited` is its leased proxy's exit,
+            // which the proxy's thread announces before its routed stream
+            // ends: the transport went, and the agent's background work may
+            // run on behind it.
+            _ = child_exited.cancelled() => break if handler.transport.through_lease() {
+                HoldOutcome::TransportLost
+            } else {
+                HoldOutcome::ChildExited
+            },
+            _ = handler.transport.lost().cancelled() => break HoldOutcome::TransportLost,
             turn = prompt_rx.recv(), if prompts_open => match turn {
                 Some(turn) => break HoldOutcome::NewTurn(turn),
                 // All connection handles dropped: no further prompts can
@@ -5928,6 +6571,7 @@ async fn run_acp_session(
     background_hold: Option<&BackgroundHoldConfig>,
     background_hold_observer: Option<&BackgroundHoldObserver>,
     steering_disabled: bool,
+    unattended_session_mode: Option<&str>,
     child_exited: &CancellationToken,
     prompt_rx: &mut mpsc::UnboundedReceiver<QueuedSessionTurn>,
     hold_control_rx: &mut mpsc::UnboundedReceiver<StopAsyncTaskRequest>,
@@ -5949,23 +6593,47 @@ async fn run_acp_session(
             mcp_servers,
             agent_label,
             auth_selection,
+            unattended_session_mode,
         }),
     );
-    let mut setup = tokio::select! {
+    let transport = &handler.transport;
+    tokio::pin!(setup_task);
+    let setup_result = tokio::select! {
         _ = cancel_token.cancelled() => {
             handler.cancel_pending_permissions();
+            // No prompt of this connection's is in flight, but a reattached
+            // turn is, on the agent, and no `session/cancel` went out for it.
+            if reattached_turn.is_some() {
+                transport.note_cancel_unacknowledged();
+            }
             return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
         }
-        result = setup_task => {
-            result
-                .map_err(|_| {
-                    format!(
-                        "Timed out waiting for ACP protocol startup after {}s",
-                        ACP_SETUP_TIMEOUT.as_secs()
-                    )
-                })??
+        result = &mut setup_task => result,
+        // A proxy that lost its remote process keeps stdout open, so the
+        // request in flight would otherwise sit out the whole setup timeout.
+        // A reply already on its way still wins.
+        _ = transport.lost().cancelled() => {
+            match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut setup_task).await {
+                Ok(result) => result,
+                Err(_) => {
+                    transport.confirm(TransportLossPhase::Setup);
+                    return Err(transport.lost_error("during session setup"));
+                }
+            }
         }
     };
+    let mut setup = setup_result
+        .map_err(|_| {
+            format!(
+                "Timed out waiting for ACP protocol startup after {}s",
+                ACP_SETUP_TIMEOUT.as_secs()
+            )
+        })?
+        .inspect_err(|error| {
+            if formatted_error_is_transport_closed(error) {
+                transport.confirm(TransportLossPhase::Setup);
+            }
+        })?;
     if steering_disabled && setup.steering_supported {
         log::info!(
             "ACP session {our_session_id}: steering disabled by the driver; steers will be refused"
@@ -5985,10 +6653,19 @@ async fn run_acp_session(
                     if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
                         log::warn!("{e}");
                     }
+                    // Nothing waits for the answer, and the connection closes
+                    // right after: a reattached turn may run on.
+                    if reattached_turn.is_some() {
+                        transport.note_cancel_unacknowledged();
+                    }
                     return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
                 }
                 _ = handler.replay_done.notified() => {
                     break;
+                }
+                _ = transport.lost().cancelled() => {
+                    transport.confirm(TransportLossPhase::Setup);
+                    return Err(transport.lost_error("while the session replayed"));
                 }
                 _ = tokio::time::sleep_until(absolute_deadline) => {
                     log::warn!("Replay-wait absolute timeout reached (10s) — proceeding");
@@ -6006,6 +6683,10 @@ async fn run_acp_session(
         handler.transition_to_waiting_for_prompt().await;
     }
     if let Some(turn) = reattached_turn {
+        // The replay is in: what follows is the turn's live stream, recorded
+        // whole, behind any text held from before the load that the replay
+        // never re-sent.
+        handler.finish_catch_up().await;
         return observe_reattached_turn(&setup, handler, our_session_id, cancel_token, turn).await;
     }
 
@@ -6044,6 +6725,10 @@ async fn run_acp_session(
                     _ = cancel_token.cancelled() => {
                         handler.cancel_pending_permissions();
                         return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
+                    }
+                    _ = transport.lost().cancelled() => {
+                        transport.confirm(TransportLossPhase::Setup);
+                        return Err(transport.lost_error("before the prompt was sent"));
                     }
                     turn = prompt_rx.recv() => match turn {
                         Some(turn) => break turn,
@@ -6213,6 +6898,7 @@ async fn run_acp_session(
         // an attributed continuation on its own message boundary, never folded
         // into the turn that just finished (or the one that may follow).
         handler.transition_to_background_holding().await;
+        transport.begin_hold();
 
         match hold_for_background_quiescence(
             hold_config,
@@ -6277,6 +6963,16 @@ async fn run_acp_session(
                     log::warn!("{e}");
                 }
                 tokio::time::sleep(HOLDING_CANCEL_DRAIN).await;
+                // Out of turn the cancel has no answer to wait for: the only
+                // sign it landed is the work going away. Over a hung remote
+                // transport it never arrives, and the work would run on.
+                if background_work_live(&handler.subscribe_background_activity().borrow()) {
+                    log::warn!(
+                        "ACP session {our_session_id}: background work still live after the \
+                         hold's session/cancel"
+                    );
+                    transport.note_background_work_left();
+                }
                 transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TornDown);
                 return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
             }
@@ -6292,6 +6988,31 @@ async fn run_acp_session(
                      for background tasks — settling the completed turn with its wait \
                      truncated"
                 );
+                transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Failed);
+                return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
+            }
+            HoldOutcome::TransportLost => {
+                // Like `ChildExited`: the turn completed before the transport
+                // went, so it stands with its wait truncated. A detach lands
+                // here on purpose, leaving any background work running
+                // remotely. Work still live is reported, so a remote session
+                // is left for reconcile rather than settled under it.
+                transport.confirm(TransportLossPhase::Hold);
+                if background_work_live(&handler.subscribe_background_activity().borrow()) {
+                    transport.note_background_work_left();
+                }
+                if transport.detach_requested() {
+                    log::info!(
+                        "ACP session {our_session_id}: detached while holding for background \
+                         tasks — settling the completed turn with its wait truncated"
+                    );
+                } else {
+                    log::warn!(
+                        "ACP session {our_session_id}: {} — settling the completed turn with \
+                         its wait truncated",
+                        transport.lost_error("while holding for background tasks")
+                    );
+                }
                 transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Failed);
                 return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
             }
@@ -6317,22 +7038,48 @@ async fn observe_reattached_turn(
         .await
         .start_prompt(setup.agent_session_id.to_string());
     let stop = turn.stopper();
-    tokio::select! {
-        _ = cancel_token.cancelled() => {
-            handler.cancel_pending_permissions();
-            // Nothing here waits for the agent to answer the cancel, so it
-            // goes straight onto the proxy (see `ReattachedTurnStop::cancel`)
-            // rather than through this connection, which is about to close.
-            stop.cancel();
-            Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled))
-        }
-        ended = turn.ended() => match ended {
-            Ok(()) => {
-                log::info!("Session {our_session_id}: the reattached turn has ended");
-                Ok((AgentRunOutcome::Completed, SessionSettleReason::ResponseComplete))
+    // The turn is in flight on the agent: losing this connection, or letting
+    // go of it on purpose, leaves it running there.
+    let transport = &handler.transport;
+    let ended = if transport.begin_turn() {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                handler.cancel_pending_permissions();
+                // Nothing here waits for the agent to answer the cancel, so it
+                // goes straight onto the proxy (see `ReattachedTurnStop::cancel`)
+                // rather than through this connection, which is about to close.
+                stop.cancel();
+                // The proxy delivers what is queued before it stops — unless
+                // its transport is already going, when the cancel may never
+                // reach the agent.
+                if transport.first_signal().is_some() {
+                    transport.note_cancel_unacknowledged();
+                }
+                return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
             }
-            Err(error) => Err(error),
-        },
+            _ = transport.lost().cancelled() => {
+                Err(transport.lost_error("with the reattached turn in flight"))
+            }
+            ended = turn.ended() => ended,
+        }
+    } else {
+        Err(transport.lost_error("with the reattached turn in flight"))
+    };
+    match ended {
+        Ok(()) => {
+            log::info!("Session {our_session_id}: the reattached turn has ended");
+            Ok((
+                AgentRunOutcome::Completed,
+                SessionSettleReason::ResponseComplete,
+            ))
+        }
+        Err(error) => {
+            if transport.first_signal().is_some() {
+                transport.confirm(TransportLossPhase::Turn);
+            }
+            Err(error)
+        }
     }
 }
 
@@ -6365,6 +7112,26 @@ async fn run_prompt_turn(
     let content_blocks = build_prompt_content_blocks(prompt, images, supports_images);
     let prompt_request = PromptRequest::new(setup.agent_session_id.clone(), content_blocks);
 
+    // The prompt would go to a transport already known dead: nothing is
+    // running remotely for it, so the loss is the session's, not a turn's.
+    let transport = &handler.transport;
+    if !transport.begin_turn() {
+        transport.confirm(TransportLossPhase::Setup);
+        return Err(transport.lost_error("before the prompt was sent"));
+    }
+    // A failure the SDK made because the transport closed is the structural
+    // verdict a remote session's `disconnected` status rests on. Any other
+    // failure is the agent's own answer, which no loss recorded after it
+    // overrides.
+    let prompt_failed = |error: agent_client_protocol::Error| {
+        if agent_client_protocol::is_incoming_transport_closed(&error) {
+            transport.confirm(TransportLossPhase::Turn);
+        } else {
+            transport.note_answered_error();
+        }
+        describe_prompt_error(error, &setup.auth_methods)
+    };
+
     handler.begin_turn_permissions();
     handler.transition_to_live().await;
     handler
@@ -6381,24 +7148,28 @@ async fn run_prompt_turn(
     let prompt_response = loop {
         tokio::select! {
             result = &mut prompt_task => {
-                break result.map_err(|error| describe_prompt_error(error, &setup.auth_methods))?;
+                break result.map_err(prompt_failed)?;
+            }
+            // A proxy that lost its remote process keeps stdout open, so no
+            // reply (and no transport-closed failure) would ever come. A
+            // reply already on its way still wins.
+            _ = transport.lost().cancelled() => {
+                match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut prompt_task).await {
+                    Ok(result) => break result.map_err(prompt_failed)?,
+                    Err(_) => {
+                        transport.confirm(TransportLossPhase::Turn);
+                        return Err(transport.lost_error("with the turn in flight"));
+                    }
+                }
             }
             _ = cancel_token.cancelled() => {
                 handler.cancel_pending_permissions();
                 if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
                     log::warn!("{e}");
                 }
-
-                match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
-                    Ok(result) => {
-                        break result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?;
-                    }
-                    Err(_) => {
-                        log::warn!(
-                            "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
-                        );
-                        return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
-                    }
+                match await_stopped_turn(&mut prompt_task, transport, our_session_id).await? {
+                    Some(response) => break response,
+                    None => return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled)),
                 }
             }
             request = turn_control_rx.recv(), if control_open => match request {
@@ -6450,14 +7221,14 @@ async fn run_prompt_turn(
                     // caller is not told it was.
                     let acked = tokio::select! {
                         biased;
-                        result = tokio::time::timeout(INTERRUPT_ACK_TIMEOUT, &mut prompt_task) => Some(result),
+                        ack = await_cancel_ack(&mut prompt_task, INTERRUPT_ACK_TIMEOUT, transport) => Some(ack),
                         _ = cancel_token.cancelled() => None,
                     };
                     match acked {
                         // Whatever the stop reason (`cancelled`, or `end_turn`
                         // if the turn finished under the cancel), the turn is
                         // over and the message is the next one.
-                        Some(Ok(Ok(response))) => {
+                        Some(CancelAck::Answered(Ok(response))) => {
                             if let Some(metadata) = prompt_response_metadata(&response) {
                                 handler.writer.record_acp_event_metadata(metadata).await;
                             }
@@ -6469,14 +7240,28 @@ async fn run_prompt_turn(
                                 control: Some(TurnControlReply::Interrupt(reply)),
                             }));
                         }
-                        Some(Ok(Err(e))) => {
+                        Some(CancelAck::Answered(Err(e))) => {
+                            if agent_client_protocol::is_incoming_transport_closed(&e) {
+                                transport.confirm(TransportLossPhase::Turn);
+                            }
                             let message = format!("Prompt failed after interrupt: {e:?}");
                             let _ = reply.send(Err(message.clone()));
                             return Err(message);
                         }
+                        // Lost with the turn in flight, as the wait above
+                        // would be: the turn may still be running remotely.
+                        Some(CancelAck::TransportLost) => {
+                            transport.confirm(TransportLossPhase::Turn);
+                            let message = transport
+                                .lost_error("while an interrupt awaited the cancel acknowledgment");
+                            let _ = reply.send(Err(message.clone()));
+                            return Err(message);
+                        }
                         // A wedged bridge should not get a second prompt:
-                        // settle the turn cancelled, as a plain cancel would.
-                        Some(Err(_)) => {
+                        // settle the turn cancelled, as a plain cancel would,
+                        // and leave the turn to a fresh connection's cancel
+                        // (the wait noted it unacknowledged).
+                        Some(CancelAck::TimedOut) => {
                             log::warn!(
                                 "Timed out waiting for ACP prompt response after session/cancel \
                                  for session {our_session_id}; dropping the re-prompt"
@@ -6499,16 +7284,9 @@ async fn run_prompt_turn(
                                 "Session stopped before the message could be sent".to_string(),
                             ));
                             handler.cancel_pending_permissions();
-                            match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
-                                Ok(result) => {
-                                    break result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?;
-                                }
-                                Err(_) => {
-                                    log::warn!(
-                                        "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
-                                    );
-                                    return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
-                                }
+                            match await_stopped_turn(&mut prompt_task, transport, our_session_id).await? {
+                                Some(response) => break response,
+                                None => return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled)),
                             }
                         }
                     }
@@ -6533,6 +7311,95 @@ async fn run_prompt_turn(
     Ok(TurnStep::Settled(AgentRunOutcome::from_stop_reason(
         prompt_response.stop_reason,
     )))
+}
+
+/// How a wait for a cancelled turn's prompt answer ended.
+// Not boxed: it lives only from the wait to the match on it, once per Stop or
+// interrupt.
+#[allow(clippy::large_enum_variant)]
+enum CancelAck {
+    /// The agent answered the prompt.
+    Answered(agent_client_protocol::Result<PromptResponse>),
+    /// The deadline passed with no answer.
+    TimedOut,
+    /// The transport was lost first (a proxy that lost its remote process
+    /// keeps stdout open), and no reply came within the usual grace.
+    TransportLost,
+}
+
+/// Wait up to `deadline` for the prompt of a turn just sent `session/cancel`
+/// to be answered. A wait that gets no answer notes the cancel
+/// unacknowledged: over a remote connection the cancel may never have
+/// reached the turn, which a fresh connection's cancel can still stop (see
+/// [`SessionSettled::cancel_unacknowledged`]).
+async fn await_cancel_ack<F>(
+    prompt_task: &mut std::pin::Pin<&mut F>,
+    deadline: Duration,
+    transport: &TransportMonitor,
+) -> CancelAck
+where
+    F: std::future::Future<Output = agent_client_protocol::Result<PromptResponse>>,
+{
+    let ack = tokio::select! {
+        result = tokio::time::timeout(deadline, prompt_task.as_mut()) => match result {
+            Ok(result) => CancelAck::Answered(result),
+            Err(_) => CancelAck::TimedOut,
+        },
+        _ = transport.lost().cancelled() => {
+            match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, prompt_task.as_mut()).await {
+                Ok(result) => CancelAck::Answered(result),
+                Err(_) => CancelAck::TransportLost,
+            }
+        }
+    };
+    if matches!(ack, CancelAck::TimedOut | CancelAck::TransportLost) {
+        transport.note_cancel_unacknowledged();
+    }
+    ack
+}
+
+/// Wait out a Stop's cancel for [`CANCEL_ACK_DEADLINE`]: the turn's prompt
+/// response, or `None` to settle the turn cancelled without one. A Stop always
+/// ends the turn locally, so losing the transport under it is no
+/// disconnect; like a cancel that times out, it is noted unacknowledged, so
+/// the turn is cancelled again over a fresh connection.
+async fn await_stopped_turn<F>(
+    prompt_task: &mut std::pin::Pin<&mut F>,
+    transport: &TransportMonitor,
+    our_session_id: &str,
+) -> Result<Option<PromptResponse>, String>
+where
+    F: std::future::Future<Output = agent_client_protocol::Result<PromptResponse>>,
+{
+    match await_cancel_ack(prompt_task, CANCEL_ACK_DEADLINE, transport).await {
+        CancelAck::Answered(Ok(response)) => Ok(Some(response)),
+        CancelAck::Answered(Err(e)) => {
+            if agent_client_protocol::is_incoming_transport_closed(&e)
+                || transport.first_signal().is_some()
+            {
+                log::warn!(
+                    "ACP session {our_session_id}: the transport closed before session/cancel \
+                     was acknowledged"
+                );
+                transport.note_cancel_unacknowledged();
+            }
+            Err(format!("Prompt failed after cancellation: {e:?}"))
+        }
+        CancelAck::TimedOut => {
+            log::warn!(
+                "Timed out waiting for ACP prompt response after session/cancel for session \
+                 {our_session_id}"
+            );
+            Ok(None)
+        }
+        CancelAck::TransportLost => {
+            log::warn!(
+                "ACP session {our_session_id}: {} — settling the stopped turn cancelled",
+                transport.lost_error("before session/cancel was acknowledged")
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// The text a failed `session/prompt` surfaces to the user.
@@ -6631,8 +7498,8 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
 }
 
 /// Starts the error a session ends with when its remote agent process was
-/// lost under it — its output ended, or bloxlet reports it stopped — followed
-/// by the cause.
+/// lost under it — bloxlet reports it stopped, or the output of a proxy with
+/// no bloxlet to ask ended — followed by the cause.
 const REMOTE_AGENT_LOST_PREFIX: &str = "Remote agent lost: ";
 
 /// Whether a session error means its remote agent process was lost under it,
@@ -6660,6 +7527,13 @@ pub fn is_remote_agent_detached_error(error: &str) -> bool {
 /// the session's connection was let go, and any turn it had in flight
 /// cancelled there, so the session fails as an ordinary crash.
 const REMOTE_SESSION_CUT_OFF_PREFIX: &str = "Remote session cut off: ";
+
+/// Whether a session error means it was cut off from its remote agent for
+/// falling behind its output: its turn was cancelled on the workstation, so
+/// unlike a lost transport there is nothing left running to come back for.
+pub fn is_remote_session_cut_off_error(error: &str) -> bool {
+    error.contains(REMOTE_SESSION_CUT_OFF_PREFIX)
+}
 
 /// The turn [`AcpDriver::reattach`] picks back up.
 #[derive(Clone, Debug)]
@@ -7143,6 +8017,8 @@ struct AcpSessionSetupContext<'a> {
     mcp_servers: &'a [McpServer],
     agent_label: &'a str,
     auth_selection: Option<&'a AcpAuthenticationSelection>,
+    /// See [`AcpDriver::with_unattended_session_mode`].
+    unattended_session_mode: Option<&'a str>,
 }
 
 /// `_meta` for `session/new` and `session/load` asking the Claude bridge to
@@ -7193,29 +8069,19 @@ fn background_task_tracking_meta(mode: TaskTrackingMode) -> Meta {
     meta
 }
 
-async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSessionSetup, String> {
-    let AcpSessionSetupContext {
-        connection,
-        working_dir,
-        store,
-        handler,
-        our_session_id,
-        acp_session_id,
-        config_options,
-        mcp_servers,
-        agent_label,
-        auth_selection,
-    } = context;
+/// `initialize`, and what must follow its answer before any session request:
+/// recording it, the protocol and MCP transport checks, and fixing the
+/// connection's task-tracking mode on the handler, so no `session/update`
+/// can race the selection.
+async fn initialize_connection(
+    connection: &ConnectionTo<Agent>,
+    handler: &AcpNotificationHandler,
+    our_session_id: &str,
+    agent_label: &str,
+    mcp_servers: &[McpServer],
+) -> Result<(InitializeResponse, TaskTrackingMode), String> {
     let writer = &handler.writer;
-
-    let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
-    // Advertise the AIR asyncTasks capability. `_meta` is the spec's
-    // extension point — agents that don't recognize the namespace ignore it —
-    // and an agent that does support it mirrors the accepted list back in the
-    // initialize response's `_meta`, which selects typed tracking below.
-    let init_request = InitializeRequest::new(ProtocolVersion::V1)
-        .client_info(client_info)
-        .client_capabilities(ClientCapabilities::new().meta(air_client_capabilities_meta()));
+    let init_request = build_initialize_request();
 
     let init_response = connection
         .send_request(init_request)
@@ -7262,8 +8128,6 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         ));
     }
 
-    let agent_capabilities = init_response.agent_capabilities.clone();
-
     // Negotiation resolves here, before session/new or session/load is sent:
     // any `session/update` this connection ever delivers is dispatched with
     // the mode already set, so a typed async-task update can't race the
@@ -7275,52 +8139,109 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         task_tracking_mode == TaskTrackingMode::Typed
     );
     handler.set_task_tracking_mode(task_tracking_mode);
+    Ok((init_response, task_tracking_mode))
+}
+
+/// `session/load` `existing_id` on a connection `initialize` answered with
+/// `init_response`, then apply the session's modes and config options. The
+/// handler must already have the session named, so the replay passes the
+/// own-session gate.
+async fn load_acp_session(
+    context: &AcpSessionSetupContext<'_>,
+    existing_id: &str,
+    init_response: &InitializeResponse,
+    task_tracking_mode: TaskTrackingMode,
+) -> Result<(), String> {
+    let AcpSessionSetupContext {
+        connection,
+        working_dir,
+        handler,
+        our_session_id,
+        config_options,
+        mcp_servers,
+        agent_label,
+        auth_selection,
+        unattended_session_mode,
+        ..
+    } = *context;
+    let writer = &handler.writer;
+    if !init_response.agent_capabilities.load_session {
+        return Err("Agent does not support load_session — cannot resume conversation".to_string());
+    }
+
+    log::info!("Resuming ACP session {existing_id} via load_session for session {our_session_id}");
+    let load_request = || {
+        LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
+            .mcp_servers(mcp_servers.to_vec())
+            // The Claude bridge recreates the session on load and reads
+            // `_meta.claudeCode.emitRawSDKMessages` there too, so resumed
+            // sessions keep the raw background-task frames flowing.
+            .meta(background_task_tracking_meta(task_tracking_mode))
+    };
+    let load_response = send_session_setup_request(
+        connection,
+        load_request,
+        &init_response.auth_methods,
+        auth_selection,
+        "load ACP session",
+    )
+    .await?;
+
+    if let Some(ref modes) = load_response.modes {
+        writer.on_model_state_update(modes).await;
+    }
+    apply_unattended_session_mode(
+        connection,
+        existing_id,
+        load_response.modes.as_ref(),
+        unattended_session_mode,
+        agent_label,
+    )
+    .await;
+    apply_or_record_session_config_options(
+        connection,
+        existing_id,
+        load_response.config_options.as_deref(),
+        config_options,
+        writer,
+        true,
+    )
+    .await
+}
+
+async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSessionSetup, String> {
+    let AcpSessionSetupContext {
+        connection,
+        working_dir,
+        store,
+        handler,
+        our_session_id,
+        acp_session_id,
+        config_options,
+        mcp_servers,
+        agent_label,
+        auth_selection,
+        unattended_session_mode,
+    } = context;
+    let writer = &handler.writer;
+    let (init_response, task_tracking_mode) = initialize_connection(
+        connection,
+        handler,
+        our_session_id,
+        agent_label,
+        mcp_servers,
+    )
+    .await?;
+    let agent_capabilities = init_response.agent_capabilities.clone();
     let steering_supported = steering_supported_from_initialize(init_response.meta.as_ref());
     log::debug!("ACP session {our_session_id}: steering advertised: {steering_supported}");
 
     match acp_session_id {
         Some(existing_id) => {
-            if !agent_capabilities.load_session {
-                return Err(
-                    "Agent does not support load_session — cannot resume conversation".to_string(),
-                );
-            }
-
-            log::info!(
-                "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
-            );
-
-            let load_request = || {
-                LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
-                    .mcp_servers(mcp_servers.to_vec())
-                    // The Claude bridge recreates the session on load and
-                    // reads `_meta.claudeCode.emitRawSDKMessages` there
-                    // too, so resumed sessions keep the raw
-                    // background-task frames flowing.
-                    .meta(background_task_tracking_meta(task_tracking_mode))
-            };
-            let load_response = send_session_setup_request(
-                connection,
-                load_request,
-                &init_response.auth_methods,
-                auth_selection,
-                "load ACP session",
-            )
-            .await?;
-
-            if let Some(ref modes) = load_response.modes {
-                writer.on_model_state_update(modes).await;
-            }
-            apply_or_record_session_config_options(
-                connection,
-                existing_id,
-                load_response.config_options.as_deref(),
-                config_options,
-                writer,
-                true,
-            )
-            .await?;
-
+            // Before the load goes out: its replay streams `session/update`s
+            // ahead of the response, and they must pass the own-session gate.
+            handler.name_session(existing_id).await;
+            load_acp_session(&context, existing_id, &init_response, task_tracking_mode).await?;
             Ok(AcpSessionSetup {
                 agent_session_id: existing_id.to_string(),
                 agent_capabilities,
@@ -7345,6 +8266,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             .await?;
 
             let new_id = session_response.session_id.to_string();
+            handler.name_session(&new_id).await;
             store
                 .set_agent_session_id(our_session_id, &new_id)
                 .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
@@ -7352,6 +8274,14 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             if let Some(ref modes) = session_response.modes {
                 writer.on_model_state_update(modes).await;
             }
+            apply_unattended_session_mode(
+                connection,
+                &new_id,
+                session_response.modes.as_ref(),
+                unattended_session_mode,
+                agent_label,
+            )
+            .await;
             apply_or_record_session_config_options(
                 connection,
                 &new_id,
@@ -7370,6 +8300,78 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 steering_supported,
             })
         }
+    }
+}
+
+/// The `initialize` request every connection opens with.
+///
+/// Advertises the AIR asyncTasks capability through `_meta` — the spec's
+/// extension point; agents that don't recognize the namespace ignore it, and
+/// one that does mirrors the accepted list back in the response's `_meta`,
+/// which selects typed tracking. It deliberately advertises *no* `fs/*` or
+/// `terminal/*` client capabilities: the agent works on its own machine
+/// (local or a Blox workstation), and a remote agent must never route file or
+/// terminal access through a laptop that may disconnect mid-turn.
+fn build_initialize_request() -> InitializeRequest {
+    let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
+    InitializeRequest::new(ProtocolVersion::V1)
+        .client_info(client_info)
+        .client_capabilities(ClientCapabilities::new().meta(air_client_capabilities_meta()))
+}
+
+/// Which mode, if any, [`apply_unattended_session_mode`] should switch to:
+/// the requested one when the agent lists it and isn't already in it.
+fn unattended_mode_switch(
+    modes: Option<&SessionModeState>,
+    wanted: Option<&str>,
+) -> Option<SessionModeId> {
+    let wanted = wanted?;
+    let modes = modes?;
+    let available = modes
+        .available_modes
+        .iter()
+        .find(|mode| mode.id.0.as_ref() == wanted)?;
+    (modes.current_mode_id != available.id).then(|| available.id.clone())
+}
+
+/// Best-effort `session/set_mode` to the driver's unattended mode (see
+/// [`AcpDriver::with_unattended_session_mode`]). Never fails the session:
+/// a provider that lacks the mode keeps answering permission requests through
+/// the client, which is the status quo.
+async fn apply_unattended_session_mode(
+    connection: &ConnectionTo<Agent>,
+    agent_session_id: &str,
+    modes: Option<&SessionModeState>,
+    wanted: Option<&str>,
+    agent_label: &str,
+) {
+    let Some(wanted) = wanted else {
+        return;
+    };
+    let Some(mode_id) = unattended_mode_switch(modes, Some(wanted)) else {
+        match modes {
+            Some(modes) if modes.current_mode_id.0.as_ref() == wanted => {
+                log::debug!("{agent_label}: session already in mode '{wanted}'");
+            }
+            _ => log::info!(
+                "{agent_label}: session mode '{wanted}' not offered; permission requests \
+                 stay routed through the client"
+            ),
+        }
+        return;
+    };
+    match connection
+        .send_request(SetSessionModeRequest::new(
+            agent_session_id.to_string(),
+            mode_id.clone(),
+        ))
+        .block_task()
+        .await
+    {
+        Ok(_) => log::info!("{agent_label}: switched session to mode '{mode_id}'"),
+        Err(e) => log::warn!(
+            "{agent_label}: failed to switch session to mode '{mode_id}' (continuing): {e:?}"
+        ),
     }
 }
 
@@ -7698,13 +8700,16 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
+    mod attach;
     mod real_bridge;
     mod remote_liveness;
     #[cfg(unix)]
     mod remote_process;
     mod remote_routing;
     mod response_completion;
+    mod session_isolation;
     mod settlement;
+    mod transport_loss;
     mod turn_control;
 
     use std::collections::BTreeSet;
@@ -7713,7 +8718,8 @@ mod tests {
         acp_spawn_command, agent_auth_required_detail, air_client_capabilities_meta,
         apply_or_record_session_config_options, async_task_stop_message, async_task_stop_outcome,
         autoapprove_permission_decision, background_continuation_origin,
-        background_task_tracking_meta, build_prompt_content_blocks, carry_config_value_hint,
+        background_task_tracking_meta, blox_acp_env_vars, blox_unattended_session_mode,
+        build_initialize_request, build_prompt_content_blocks, carry_config_value_hint,
         consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
         describe_prompt_error, hold_for_background_quiescence,
         is_config_selection_unavailable_error, is_missing_mcp_transport_error,
@@ -7724,9 +8730,9 @@ mod tests {
         sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
         sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
         setup_acp_session, shell_exec_line, shell_quote, task_tracking_mode_from_initialize,
-        AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
-        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
-        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        unattended_mode_switch, AcpAuthenticationMethodCategory, AcpAuthenticationRequired,
+        AcpAuthenticationSelection, AcpDriver, AcpEventMetadata, AcpNotificationHandler,
+        AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
         AcpSessionConfigOptionSelection, AcpSessionSetup, AcpSessionSetupContext,
         AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification, AsyncTaskState,
         AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
@@ -7877,12 +8883,15 @@ mod tests {
             ))],
             steering_supported: false,
         };
-        let handler = Arc::new(AcpNotificationHandler::new(
-            Arc::new(BasicMessageWriter::new()),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(
+                Arc::new(BasicMessageWriter::new()),
+                false,
+                vec![],
+                CancellationToken::new(),
+            )
+            .named("sess-1"),
+        );
 
         let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let outcome = agent_client_protocol::Client
@@ -8302,6 +9311,7 @@ mod tests {
                     mcp_servers: &[],
                     agent_label: "Codex",
                     auth_selection: None,
+                    unattended_session_mode: None,
                 })
                 .await
                 .map(|_| ())
@@ -8370,6 +9380,7 @@ mod tests {
                     mcp_servers: &[],
                     agent_label: "Claude",
                     auth_selection: None,
+                    unattended_session_mode: None,
                 })
                 .await
                 .map(|_| ())
@@ -9361,6 +10372,125 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     }
 
     #[test]
+    fn remote_goose_driver_runs_unattended_through_env() {
+        let driver = AcpDriver::for_workspace_with_binary(
+            PathBuf::from("/usr/local/bin/sq"),
+            "ws-1",
+            Some("goose"),
+            "s1",
+        );
+
+        assert!(driver.is_remote);
+        let command = [
+            "--command=sh,-c,exec \"$@\",staged-session-s1",
+            "goose,acp,--with-builtin,developer,--with-builtin,extensionmanager",
+        ]
+        .join(",");
+        assert!(
+            driver.acp_args.contains(&command),
+            "goose runs under the per-session wrapper: {:?}",
+            driver.acp_args
+        );
+        assert!(!driver.shares_remote_process());
+        assert!(
+            driver
+                .acp_args
+                .contains(&"--env-vars=GOOSE_MODE=auto".to_string()),
+            "goose must be told to approve its own tool calls: {:?}",
+            driver.acp_args
+        );
+        assert_eq!(driver.unattended_session_mode(), None);
+    }
+
+    #[test]
+    fn remote_claude_driver_runs_unattended_through_a_session_mode() {
+        let driver = AcpDriver::for_workspace_with_binary(
+            PathBuf::from("/usr/local/bin/sq"),
+            "ws-1",
+            Some("claude"),
+            "s1",
+        );
+
+        assert!(driver
+            .acp_args
+            .contains(&"--command=claude-agent-acp,--staged-session=s1".to_string()));
+        assert!(!driver.shares_remote_process());
+        assert!(
+            !driver
+                .acp_args
+                .iter()
+                .any(|arg| arg.starts_with("--env-vars=")),
+            "claude has no env knob for permissions: {:?}",
+            driver.acp_args
+        );
+        assert_eq!(driver.unattended_session_mode(), Some("bypassPermissions"));
+    }
+
+    #[test]
+    fn remote_driver_without_a_known_provider_adds_nothing() {
+        let driver = AcpDriver::for_workspace_with_binary(
+            PathBuf::from("/usr/local/bin/sq"),
+            "ws-1",
+            None,
+            "s1",
+        );
+        assert_eq!(driver.acp_args, vec!["blox", "acp", "ws-1"]);
+        assert!(
+            driver.shares_remote_process(),
+            "Blox's default agent is one process every such session shares"
+        );
+        assert_eq!(driver.unattended_session_mode(), None);
+        assert!(blox_acp_env_vars("codex").is_empty());
+        assert_eq!(blox_unattended_session_mode("codex"), None);
+    }
+
+    #[test]
+    fn unattended_mode_switch_only_fires_for_an_offered_different_mode() {
+        use agent_client_protocol::schema::v1::{SessionMode, SessionModeState};
+        let modes = SessionModeState::new(
+            "default",
+            vec![
+                SessionMode::new("default", "Default"),
+                SessionMode::new("bypassPermissions", "Bypass Permissions"),
+            ],
+        );
+
+        assert_eq!(unattended_mode_switch(Some(&modes), None), None);
+        assert_eq!(
+            unattended_mode_switch(None, Some("bypassPermissions")),
+            None
+        );
+        assert_eq!(unattended_mode_switch(Some(&modes), Some("yolo")), None);
+        assert_eq!(
+            unattended_mode_switch(Some(&modes), Some("bypassPermissions"))
+                .map(|id| id.0.to_string()),
+            Some("bypassPermissions".to_string())
+        );
+
+        let already = SessionModeState::new(
+            "bypassPermissions",
+            vec![SessionMode::new("bypassPermissions", "Bypass Permissions")],
+        );
+        assert_eq!(
+            unattended_mode_switch(Some(&already), Some("bypassPermissions")),
+            None
+        );
+    }
+
+    #[test]
+    fn initialize_request_advertises_no_fs_or_terminal_capabilities() {
+        let request = serde_json::to_value(build_initialize_request()).unwrap();
+        let caps = &request["clientCapabilities"];
+        assert_eq!(caps["fs"]["readTextFile"], serde_json::Value::Bool(false));
+        assert_eq!(caps["fs"]["writeTextFile"], serde_json::Value::Bool(false));
+        assert_eq!(caps["terminal"], serde_json::Value::Bool(false));
+        assert!(
+            caps["_meta"].is_object(),
+            "the AIR asyncTasks advertisement still rides along: {request}"
+        );
+    }
+
+    #[test]
     fn env_snapshot_is_ignored_for_remote_drivers() {
         let snapshot = vec![(String::from("PATH"), String::from("/snapshot/bin"))];
         let local = AcpDriver {
@@ -9376,6 +10506,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
+            blox_process: None,
         }
         .with_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -9391,6 +10523,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
+            blox_process: None,
         }
         .with_env_snapshot(snapshot);
 
@@ -9417,6 +10551,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
+            blox_process: None,
         }
         .with_interpreter_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -9432,6 +10568,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             background_hold: None,
             background_hold_observer: None,
             steering_disabled: false,
+            unattended_session_mode: None,
+            blox_process: None,
         }
         .with_interpreter_env_snapshot(snapshot);
 
@@ -9754,6 +10892,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             content: "persisted text".to_string(),
             acp_message_id: Some("msg-1".to_string()),
             acp_tool_call_id: None,
+            acp_tool_status: None,
         }]);
 
         let completed = buffer.try_match(&ReplayEvent {
@@ -9775,12 +10914,14 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 content: "first".to_string(),
                 acp_message_id: Some("msg-1".to_string()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
             ReplayBoundary {
                 role: "assistant".to_string(),
                 content: "second".to_string(),
                 acp_message_id: Some("msg-2".to_string()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
         ]);
 
@@ -9827,7 +10968,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 "previous prompt".to_string(),
             )],
             CancellationToken::new(),
-        );
+        )
+        .named("session-1");
 
         assert!(handler.is_replay_complete().await);
     }
@@ -9843,7 +10985,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 "previous response".to_string(),
             )],
             CancellationToken::new(),
-        );
+        )
+        .named("session-1");
 
         handler
             .session_notification(SessionNotification::new(
@@ -10765,7 +11908,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
 
         let sdk_message = |message: serde_json::Value| {
             let params = serde_json::value::to_raw_value(&serde_json::json!({
@@ -10822,7 +11966,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         let mut activity_rx = handler.subscribe_background_activity();
         assert_eq!(
             *activity_rx.borrow_and_update(),
@@ -10932,7 +12077,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         // Raw until initialize resolves — and initialize precedes session/new,
         // so no session/update is ever dispatched against the default.
         assert_eq!(handler.task_tracking_mode(), TaskTrackingMode::Raw);
@@ -10965,7 +12111,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
         let mut activity_rx = handler.subscribe_background_activity();
 
@@ -11039,7 +12186,8 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             false,
             vec![],
             CancellationToken::new(),
-        );
+        )
+        .named("sess-1");
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
         let mut activity_rx = handler.subscribe_background_activity();
 
@@ -11813,8 +12961,13 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
     #[test]
     fn settled_outcome_overrides_a_completed_turn_but_never_a_failed_one() {
-        let settled =
-            |outcome: Result<AgentRunOutcome, String>, reason| SessionSettled { outcome, reason };
+        let settled = |outcome: Result<AgentRunOutcome, String>, reason| SessionSettled {
+            outcome,
+            reason,
+            transport_loss: None,
+            cancel_unacknowledged: false,
+            background_work_left: false,
+        };
 
         // A hold that was cancelled or failed after the turn completed is the
         // session's real outcome — the completed turn does not mask it.
@@ -11879,12 +13032,15 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     /// Handler wired for holding-wait tests, plus a helper that feeds it raw
     /// SDK frames the way the bridge would.
     fn hold_test_handler() -> Arc<AcpNotificationHandler> {
-        Arc::new(AcpNotificationHandler::new(
-            Arc::new(BasicMessageWriter::new()),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ))
+        Arc::new(
+            AcpNotificationHandler::new(
+                Arc::new(BasicMessageWriter::new()),
+                false,
+                vec![],
+                CancellationToken::new(),
+            )
+            .named("sess-1"),
+        )
     }
 
     async fn feed_sdk_frame(handler: &Arc<AcpNotificationHandler>, message: serde_json::Value) {
@@ -12996,7 +14152,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn continuation_is_a_separate_record_attributed_to_its_autonomous_cycle() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "starting the build")).await;
         handler.transition_to_background_holding().await;
@@ -13042,7 +14198,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn continuation_without_a_usable_chunk_id_gets_a_synthesized_boundary() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "kicked off the tests")).await;
         handler.transition_to_background_holding().await;
@@ -13083,7 +14239,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_continuation_chunk_reusing_the_turns_message_id_is_still_split_off() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "waiting on the shell")).await;
         handler.transition_to_background_holding().await;
@@ -13103,7 +14259,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_new_prompt_during_the_hold_does_not_absorb_continuation_text() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "build running")).await;
         handler.transition_to_background_holding().await;
@@ -13139,7 +14295,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_second_autonomous_cycle_gets_its_own_continuation_record() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, agent_text(Some("msg-1"), "two shells running")).await;
         handler.transition_to_background_holding().await;
@@ -13170,7 +14326,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_tool_call_mid_message_resumes_the_same_message() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.response.lock().await.start_prompt("sess-1".into());
 
         // A background subagent's tool call lands while the parent is still
@@ -13199,7 +14355,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     async fn text_after_a_tool_call_under_another_id_is_a_new_message() {
         for (before, after) in [(Some("msg-1"), Some("msg-2")), (None, None)] {
             let writer = Arc::new(TranscriptWriter::default());
-            let handler = Arc::new(transcript_handler(&writer));
+            let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
             handler.response.lock().await.start_prompt("sess-1".into());
 
             feed(&handler, agent_text(before, "running the tests")).await;
@@ -13216,7 +14372,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_settled_typed_task_names_the_continuation_it_wakes() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
 
         feed(&handler, agent_text(Some("msg-1"), "starting the tests")).await;
@@ -13263,7 +14419,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn an_unnamed_settle_does_not_inherit_an_earlier_tasks_name() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
 
         feed(&handler, agent_text(Some("msg-1"), "two tasks running")).await;
@@ -13315,7 +14471,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_new_hold_does_not_inherit_the_previous_wake_name() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
 
         feed(&handler, agent_text(Some("msg-1"), "first turn")).await;
@@ -13367,7 +14523,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn out_of_turn_tool_calls_are_attributed_to_the_continuation() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         feed(&handler, tool_call_notification("tc-live")).await;
         handler.transition_to_background_holding().await;
@@ -13392,7 +14548,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn origin_evidence_does_not_leak_across_holds() {
         let writer = Arc::new(TranscriptWriter::default());
-        let handler = Arc::new(transcript_handler(&writer));
+        let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
 
         handler.transition_to_background_holding().await;
         feed_sdk_frame(
@@ -13433,12 +14589,14 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 content: "build running".to_string(),
                 acp_message_id: Some("msg-1".to_string()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
             ReplayBoundary {
                 role: "assistant".to_string(),
                 content: "build finished".to_string(),
                 acp_message_id: Some(continuation_id.clone()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
         ]);
 
@@ -13555,12 +14713,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
 
         // A live turn's request carries no attribution.
         feed(&handler, tool_call_notification("tc-live")).await;
@@ -13600,12 +14756,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         // The client can never resolve this one — exactly the #851 deadlock, if
         // the request were dispatched and awaited.
         let writer = PermissionWriter::new(PermissionWriterBehavior::Hang);
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         handler.transition_to_background_holding().await;
 
         let response = tokio::time::timeout(
@@ -13637,12 +14791,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         handler.transition_to_background_holding().await;
         feed(&handler, tool_call_notification("tc-announced")).await;
 
@@ -13672,12 +14824,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         handler.transition_to_background_holding().await;
 
         let announcing = {
@@ -13707,12 +14857,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     #[tokio::test]
     async fn a_duplicate_permission_id_is_answered_defensively_while_the_first_is_pending() {
         let writer = PermissionWriter::new(PermissionWriterBehavior::Hang);
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
         feed(&handler, tool_call_notification("tc-dup")).await;
 
         // The first request is outstanding (the client is still deciding)...
@@ -13784,6 +14932,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     vec![],
                     CancellationToken::new(),
                 )
+                .named("sess-1")
                 .with_out_of_turn_permissions(policy),
             );
             handler.transition_to_background_holding().await;
@@ -13812,12 +14961,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 option_id: "allow-once".to_string(),
             },
         ));
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            CancellationToken::new(),
-        ));
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer.clone(), false, vec![], CancellationToken::new())
+                .named("sess-1"),
+        );
 
         let response = tokio::time::timeout(
             PERMISSION_TIMEOUT,

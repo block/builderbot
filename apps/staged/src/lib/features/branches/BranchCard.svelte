@@ -1399,7 +1399,7 @@
     ) {
       try {
         const session = await commands.getSession(closedSessionId);
-        if (session && session.status !== 'running') {
+        if (session && classifyPolledSession(session) === 'finished') {
           prButton.handlePrSessionComplete(session.status);
         }
       } catch {
@@ -1415,7 +1415,7 @@
     ) {
       try {
         const session = await commands.getSession(closedSessionId);
-        if (session && session.status !== 'running') {
+        if (session && classifyPolledSession(session) === 'finished') {
           prButton.handlePushSessionComplete(session.status, session);
         }
       } catch {

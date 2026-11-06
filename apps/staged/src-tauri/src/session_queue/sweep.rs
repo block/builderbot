@@ -85,7 +85,11 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
         if !is_stranded(&session, registry.is_live(&session.id), own_pid) {
             continue;
         }
-        if !end_observed_row(store, &session) {
+        // A Blox turn may outlive the runner that lost track of it; see
+        // `may_still_run_on_workstation`.
+        let disconnect =
+            crate::session_runner::may_still_run_on_workstation(store.as_ref(), &session);
+        if !end_observed_row(store, &session, disconnect) {
             // The owner finished between our row read and our registry read
             // (and may have been resumed since); see the function doc.
             // Nothing was stranded.
@@ -99,7 +103,8 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
             crate::session_commands::pending_branch_start_agent_id(session.agent_id.as_deref())
                 .is_some();
         log::warn!(
-            "[session_queue] ended stranded session {} (branch {:?}, running since {}, {})",
+            "[session_queue] {} stranded session {} (branch {:?}, running since {}, {})",
+            if disconnect { "disconnected" } else { "ended" },
             session.id,
             session.branch_id,
             session.updated_at,
@@ -110,17 +115,30 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
             }
         );
         let project_id = store.get_project_id_for_session(&session.id).ok().flatten();
-        crate::session_runner::emit_status(
-            app_handle,
-            &session.id,
-            "error",
-            Some(STRANDED_SESSION_MESSAGE.to_string()),
-            Some(&CompletionReason::Crashed),
-            session.branch_id.clone(),
-            project_id,
-        );
-        if let Some(branch_id) = session.branch_id.as_deref() {
-            kick(app_handle, branch_id, KickSource::Sweep);
+        if disconnect {
+            // Still busy on its branch, so there is nothing to kick.
+            crate::session_runner::emit_status(
+                app_handle,
+                &session.id,
+                SessionStatus::Disconnected.as_str(),
+                None,
+                None,
+                session.branch_id.clone(),
+                project_id,
+            );
+        } else {
+            crate::session_runner::emit_status(
+                app_handle,
+                &session.id,
+                "error",
+                Some(STRANDED_SESSION_MESSAGE.to_string()),
+                Some(&CompletionReason::Crashed),
+                session.branch_id.clone(),
+                project_id,
+            );
+            if let Some(branch_id) = session.branch_id.as_deref() {
+                kick(app_handle, branch_id, KickSource::Sweep);
+            }
         }
         ended.push(session.id);
     }
@@ -139,15 +157,21 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
 /// into or out of `running` restamps `updated_at`, so the successor fails
 /// this predicate and a genuinely stranded row — which nothing writes to —
 /// passes it.
-pub(crate) fn end_observed_row(store: &Store, session: &Session) -> bool {
-    store
-        .transition_from_running_observed_at(
-            &session.id,
-            session.updated_at,
+///
+/// With `disconnect`, the row is left `disconnected` rather than ended: a Blox
+/// session whose turn may still be running on its workstation.
+pub(crate) fn end_observed_row(store: &Store, session: &Session, disconnect: bool) -> bool {
+    let (status, error, reason) = if disconnect {
+        (SessionStatus::Disconnected, None, None)
+    } else {
+        (
             SessionStatus::Error,
             Some(STRANDED_SESSION_MESSAGE),
             Some(&CompletionReason::Crashed),
         )
+    };
+    store
+        .transition_from_running_observed_at(&session.id, session.updated_at, status, error, reason)
         .unwrap_or(false)
 }
 

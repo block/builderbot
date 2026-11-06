@@ -47,6 +47,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { isSessionInFlight } from '../../shared/sessionStatus';
   import {
     formatNoteTimestamp,
     noteLastWrittenAt,
@@ -58,6 +59,8 @@
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { canResumeRow, noteRowPhase, type SessionRowPhase } from './sessionRowState';
+  import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
+  import { disconnectedLabel } from '../../shared/disconnectedSession';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
   import { sessionRowTitle } from './sessionRowTitle';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
@@ -333,6 +336,11 @@
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     completionReason?: string | null;
+    /**
+     * The row's session is `disconnected`: a Blox session whose agent may
+     * still be working on the workstation, with nothing in Staged attached.
+     */
+    disconnected?: boolean;
     /** Hashtag reference token for context menu (e.g. "#commit:abc123"). */
     hashtagRef?: string;
     showConnector?: boolean;
@@ -356,13 +364,13 @@
   /** True when there is at least one non-queued active session (running in timeline or pending-but-not-queued). */
   let hasActiveSession = $derived.by(() => {
     for (const commit of timeline.commits) {
-      if (commit.sessionStatus === 'running') return true;
+      if (isSessionInFlight(commit.sessionStatus)) return true;
     }
     for (const note of timeline.notes) {
-      if (note.sessionStatus === 'running') return true;
+      if (isSessionInFlight(note.sessionStatus)) return true;
     }
     for (const review of timeline.reviews) {
-      if (review.sessionStatus === 'running') return true;
+      if (isSessionInFlight(review.sessionStatus)) return true;
     }
     for (const item of pendingItems) {
       if (item.sessionId && !item.type.startsWith('queued-')) return true;
@@ -389,7 +397,7 @@
    */
   let hasActiveCommitSession = $derived.by(() => {
     for (const commit of timeline.commits) {
-      if (commit.sessionStatus === 'running') return true;
+      if (isSessionInFlight(commit.sessionStatus)) return true;
     }
     for (const item of pendingItems) {
       if (item.type === 'pending-commit' && item.sessionId) return true;
@@ -690,7 +698,8 @@
 
     for (const commit of timeline.commits) {
       const isPending = !commit.sha;
-      const isRunning = commit.sessionStatus === 'running';
+      const isRunning = isSessionInFlight(commit.sessionStatus);
+      const isDisconnected = commit.sessionStatus === 'disconnected';
       const isQueued = commit.sessionStatus === 'queued';
       const isFailed = isPending && !isRunning && !isQueued && !!commit.sessionId;
       const isDeleting =
@@ -705,7 +714,11 @@
       if (isFailed) {
         phase = 'failed';
         type = 'failed-commit';
-        secondaryMeta = failedArtifactSubtitle(commit.completionReason, 'commit');
+        secondaryMeta = failedArtifactSubtitle(
+          commit.completionReason,
+          'commit',
+          commit.sessionErrorMessage
+        );
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-commit';
@@ -713,7 +726,9 @@
       } else if (isPending || isRunning) {
         phase = 'running';
         type = 'pending-commit';
-        secondaryMeta = liveHint ?? 'Generating commit';
+        secondaryMeta = isDisconnected
+          ? disconnectedLabel(disconnectedSessionsStore.getReconcileState(commit.sessionId))
+          : (liveHint ?? 'Generating commit');
       } else {
         phase = 'done';
         type = 'commit';
@@ -746,6 +761,7 @@
             ? (gitActionDisabledReason ?? undefined)
             : undefined,
         completionReason: commit.completionReason,
+        disconnected: type === 'pending-commit' && isDisconnected,
         hashtagRef: type === 'commit' ? `#commit:${commit.sha}` : undefined,
       });
 
@@ -760,6 +776,7 @@
 
     for (const note of timeline.notes) {
       const phase = noteRowPhase(note);
+      const isDisconnected = note.sessionStatus === 'disconnected';
       const isDeleting = deletingNoteIds.has(note.id);
       const liveHint = note.sessionId ? liveSessionHints[note.sessionId] : undefined;
 
@@ -768,13 +785,19 @@
 
       if (phase === 'failed') {
         type = 'failed-note';
-        secondaryMeta = failedArtifactSubtitle(note.completionReason, 'note');
+        secondaryMeta = failedArtifactSubtitle(
+          note.completionReason,
+          'note',
+          note.sessionErrorMessage
+        );
       } else if (phase === 'queued') {
         type = 'queued-note';
         secondaryMeta = 'Queued';
       } else if (phase === 'running') {
         type = 'generating-note';
-        secondaryMeta = liveHint ?? 'Generating note';
+        secondaryMeta = isDisconnected
+          ? disconnectedLabel(disconnectedSessionsStore.getReconcileState(note.sessionId))
+          : (liveHint ?? 'Generating note');
       } else {
         type = 'note';
         secondaryMeta = formatNoteTimestamp(note, nowMs);
@@ -801,13 +824,15 @@
         noteReadState: type === 'note' ? (noteReadState(note) ?? undefined) : undefined,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
+        disconnected: type === 'generating-note' && isDisconnected,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
       });
     }
 
     for (const review of timeline.reviews) {
       const totalCount = review.commentCount + review.annotationCount;
-      const isRunning = review.sessionStatus === 'running';
+      const isRunning = isSessionInFlight(review.sessionStatus);
+      const isDisconnected = review.sessionStatus === 'disconnected';
       const isQueued = review.sessionStatus === 'queued';
       const isFailed = isEmptyFailedReview({
         sessionStatus: review.sessionStatus,
@@ -827,7 +852,11 @@
       if (isFailed) {
         phase = 'failed';
         type = 'failed-review';
-        meta = failedArtifactSubtitle(review.completionReason, 'review');
+        meta = failedArtifactSubtitle(
+          review.completionReason,
+          'review',
+          review.sessionErrorMessage
+        );
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-review';
@@ -835,7 +864,9 @@
       } else if (isRunning) {
         phase = 'running';
         type = 'generating-review';
-        meta = liveHint ?? 'Generating review';
+        meta = isDisconnected
+          ? disconnectedLabel(disconnectedSessionsStore.getReconcileState(review.sessionId))
+          : (liveHint ?? 'Generating review');
       } else {
         phase = 'done';
         type = 'review';
@@ -862,6 +893,7 @@
         reviewId: review.id,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: review.completionReason,
+        disconnected: type === 'generating-review' && isDisconnected,
         hashtagRef: type === 'review' ? `#review:${review.id}` : undefined,
       });
     }
@@ -1215,6 +1247,7 @@
             onDiscardChangesClick={item.onDiscardChanges}
             discardChangesDisabledReason={item.discardChangesDisabledReason}
             deleting={item.deleting}
+            disconnected={item.disconnected}
             isLast={index === normalItems.length - 1 &&
               pendingAdds.length === 0 &&
               pendingItems.length === 0 &&

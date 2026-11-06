@@ -20,10 +20,17 @@
 //! cancels sessions with [`CompletionReason::AppQuit`] and stops actions. That
 //! cancel is the only thing that shuts an agent down: ACP children are spawned
 //! with `process_group(0)` and `kill_on_drop`, and `process::exit` runs no
-//! destructors, so a bare exit leaves the agent CLIs running. Once a shutdown is
-//! claimed the branch queue stops draining ([`QuitState::is_quitting`]), so
-//! those cancels — terminal transitions like any other — can't feed fresh agent
-//! children into an exit that would orphan them.
+//! destructors, so a bare exit leaves the agent CLIs running. Blox sessions are
+//! the exception: their agent runs on the workstation, so a quit *detaches*
+//! them instead — it kills only the local `blox acp` proxy, sending no
+//! `session/cancel`, and leaves the row `disconnected` with the turn still
+//! running remotely (see [`SessionRegistry::detach`]). Since a quit stops
+//! nothing of theirs, they don't gate it: with only Blox sessions running it
+//! asks nothing, and when it does ask it counts only what it stops. Once a
+//! shutdown is claimed the branch queue stops draining
+//! ([`QuitState::is_quitting`]), so those cancels — terminal transitions like
+//! any other — can't feed fresh agent children into an exit that would orphan
+//! them.
 //!
 //! The question is asked by a native alert with **no parent window**, not by a
 //! dialog in a webview. Quitting is scoped to the application, and the case the
@@ -45,6 +52,7 @@
 //! Quit, logout), which never emits `ExitRequested`. That wait is what keeps an
 //! impatient second quit gesture from cutting a cleanup already in flight short.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -183,8 +191,10 @@ pub(crate) fn is_quitting<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
 /// What a quit would interrupt, as the alert describes it.
 #[derive(Debug, Default)]
 struct QuitBlockers {
-    /// One label per running or queued session owned by this process, e.g.
-    /// `review on fix-login` — the only thing that gates a quit.
+    /// One label per running or queued session owned by this process that a
+    /// quit stops, e.g. `review on fix-login`. These are the only thing that
+    /// gates a quit. A Blox session the quit detaches is left out (see
+    /// [`sessions_a_quit_stops`]): it keeps running on its workstation.
     session_labels: Vec<String>,
     /// Running actions. Reported so the alert can say they stop too, but they
     /// don't gate the quit on their own: a dev server left running is the normal
@@ -448,14 +458,10 @@ fn spawn_quit(app: &AppHandle) {
 /// Snapshot what a quit would interrupt.
 fn collect_quit_blockers(app: &AppHandle) -> QuitBlockers {
     let session_labels = match app_store(app) {
-        Some(store) => owned_active_sessions(&store)
-            .iter()
-            .map(|session| {
-                let session = session_commands::project_active_session(&store, session);
-                let location = session_location(&store, &session);
-                quit_session_label(&session, location.as_deref())
-            })
-            .collect(),
+        Some(store) => {
+            let registry = app.try_state::<Arc<SessionRegistry>>();
+            sessions_a_quit_stops(&store, registry.as_deref().map(Arc::as_ref))
+        }
         None => Vec::new(),
     };
 
@@ -475,6 +481,31 @@ fn collect_quit_blockers(app: &AppHandle) -> QuitBlockers {
         session_labels,
         running_action_count,
     }
+}
+
+/// Labels of the owned sessions a quit would stop.
+///
+/// That is every one except a running session the quit would detach. The
+/// registry makes that call ([`SessionRegistry::would_detach`]), and the quit
+/// acts on the same call ([`signal_owned_sessions`], [`sweep_sessions`]). That
+/// leaves out only a connected or reattaching Blox session. A Blox session
+/// still starting its workstation, before its connection is up, is cancelled
+/// by a quit, so it counts, as does a queued one, which has no remote turn
+/// yet. With no registry nothing would be detached, so everything counts.
+fn sessions_a_quit_stops(store: &Store, registry: Option<&SessionRegistry>) -> Vec<String> {
+    owned_active_sessions(store)
+        .iter()
+        .filter(|session| {
+            let detaches = session.status == SessionStatus::Running
+                && registry.is_some_and(|registry| registry.would_detach(&session.id));
+            !detaches
+        })
+        .map(|session| {
+            let info = session_commands::project_active_session(store, session);
+            let location = session_location(store, &info);
+            quit_session_label(&info, location.as_deref())
+        })
+        .collect()
 }
 
 // =============================================================================
@@ -538,6 +569,9 @@ pub(crate) fn quit_session_label(session: &ActiveSessionInfo, location: Option<&
 
 /// Alert body: how much stops, what it is, and whether actions go with it.
 ///
+/// Only what the quit stops: a Blox session it detaches keeps running on its
+/// workstation, so it is neither counted nor named.
+///
 /// Actions never gate the quit (see [`should_prompt`]), so they are mentioned
 /// only as a consequence of one.
 fn quit_prompt_message(blockers: &QuitBlockers) -> String {
@@ -576,7 +610,10 @@ pub fn shutdown_cleanup(app: &AppHandle) {
     quit_state.run_cleanup_once(|| {
         // Signal both kinds of work before waiting on either, so they shut down
         // in parallel inside one shared budget instead of one after the other.
-        let session_ids = cancel_owned_sessions(app);
+        let OwnedSessionSignals {
+            session_ids,
+            detached,
+        } = signal_owned_sessions(app);
         let execution_ids = stop_running_actions(app);
 
         let deadline = Instant::now() + SHUTDOWN_BUDGET;
@@ -595,22 +632,49 @@ pub fn shutdown_cleanup(app: &AppHandle) {
 
         // Last, so the rows reflect whatever the session threads managed to
         // write for themselves first.
-        sweep_active_sessions(app);
+        sweep_active_sessions(app, &detached);
     });
 }
 
-/// Cancel every session this process is running, recording `AppQuit` as the
-/// reason. Returns the ids that were signalled.
-fn cancel_owned_sessions(app: &AppHandle) -> Vec<String> {
+/// What [`signal_owned_sessions`] did.
+#[derive(Default)]
+struct OwnedSessionSignals {
+    /// Every session signalled, to wait on.
+    session_ids: Vec<String>,
+    /// The Blox sessions among them that were detached rather than cancelled.
+    detached: HashSet<String>,
+}
+
+/// Stop every session this process is running, recording `AppQuit` as the
+/// reason — except a connected Blox session, which is detached and keeps
+/// running on its workstation (see [`SessionRegistry::detach`]). So does one
+/// reattaching to its remote turn with no connection up to detach: waiting
+/// between attempts, or before its first is up. Cancelling it would end the
+/// row `cancelled` with the turn still running on the workstation, out of
+/// reconcile's reach.
+///
+/// Detach is SIGKILL-only by design. A SIGINT to the `blox acp` proxy that
+/// started the remote agent stops that agent and every turn on it, even with
+/// no `session/cancel`, so the graceful stop a cancel ends in would end the
+/// very turn the detach means to keep.
+fn signal_owned_sessions(app: &AppHandle) -> OwnedSessionSignals {
     let Some(registry) = app.try_state::<Arc<SessionRegistry>>() else {
-        return Vec::new();
+        return OwnedSessionSignals::default();
     };
 
     let session_ids = registry.running_session_ids();
+    let mut detached = HashSet::new();
     for session_id in &session_ids {
-        registry.cancel_with_completion_reason(session_id, CompletionReason::AppQuit);
+        if registry.detach(session_id, CompletionReason::AppQuit) {
+            detached.insert(session_id.clone());
+        } else {
+            registry.cancel_with_completion_reason(session_id, CompletionReason::AppQuit);
+        }
     }
-    session_ids
+    OwnedSessionSignals {
+        session_ids,
+        detached,
+    }
 }
 
 /// Send every running action's process group a hangup, escalating to `SIGKILL`
@@ -650,43 +714,45 @@ fn remaining_until(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
-/// Mark whatever is still active in the DB as cancelled by the quit.
+/// Mark whatever is still active in the DB as cancelled by the quit, or as
+/// `disconnected` for a detached Blox session.
 ///
 /// Covers sessions whose thread didn't finish its own terminal write inside the
 /// budget, plus queued sessions that never started. Without this the next launch
 /// finds them owned by a dead process and reports them as errored sessions.
-fn sweep_active_sessions(app: &AppHandle) {
+fn sweep_active_sessions(app: &AppHandle, detached: &HashSet<String>) {
     let Some(store) = app_store(app) else {
         return;
     };
 
-    let swept = sweep_sessions(&store);
+    let swept = sweep_sessions(&store, detached);
     if swept > 0 {
-        log::info!("Marked {swept} session(s) cancelled (app_quit) during shutdown");
+        log::info!("Settled {swept} session(s) the quit left active");
     }
 }
 
-/// The sweep itself: snapshot what we own, then CAS each row to cancelled.
-/// Returns how many rows it actually moved.
-fn sweep_sessions(store: &Store) -> usize {
+/// The sweep itself: snapshot what we own, then CAS each row to cancelled —
+/// or to `disconnected` for a session in `detached`, whose turn is still
+/// running on its workstation. Returns how many rows it actually moved.
+fn sweep_sessions(store: &Store, detached: &HashSet<String>) -> usize {
     let owner_pid = std::process::id();
 
     owned_active_sessions(store)
         .iter()
         .filter(|session| {
+            let (status, reason) =
+                if session.status == SessionStatus::Running && detached.contains(&session.id) {
+                    (SessionStatus::Disconnected, None)
+                } else {
+                    (SessionStatus::Cancelled, Some(CompletionReason::AppQuit))
+                };
             // Guarded CAS per row, on liveness *and* ownership. A session thread
             // that wrote its own terminal status while we were waiting keeps
             // that status; so does a row another instance claimed since the
             // snapshot, which stamped its pid in the same statement that took
             // the row off `queued`.
             store
-                .transition_from_owned_active(
-                    &session.id,
-                    SessionStatus::Cancelled,
-                    None,
-                    Some(&CompletionReason::AppQuit),
-                    owner_pid,
-                )
+                .transition_from_owned_active(&session.id, status, None, reason.as_ref(), owner_pid)
                 .unwrap_or_else(|e| {
                     log::warn!("Failed to cancel session {} on quit: {e}", session.id);
                     false
@@ -755,6 +821,91 @@ mod tests {
     #[test]
     fn active_sessions_prompt() {
         assert!(should_prompt(&blockers(&["review on fix-login"], 0)));
+    }
+
+    /// A session on `branch`, created in `store`.
+    fn session_on(store: &Store, branch: &crate::store::Branch, status: SessionStatus) -> Session {
+        let mut session = match status {
+            SessionStatus::Queued => Session::new_queued("work"),
+            _ => Session::new_running("work", Path::new("/tmp")),
+        };
+        session.branch_id = Some(branch.id.clone());
+        store.create_session(&session).unwrap();
+        session
+    }
+
+    /// A store with a local branch (`local-fix`) and a Blox one (`blox-fix`).
+    fn store_with_branches() -> (Store, crate::store::Branch, crate::store::Branch) {
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("owner/repo");
+        store.create_project(&project).unwrap();
+        let local = crate::store::Branch::new(&project.id, "local-fix", "main");
+        store.create_branch(&local).unwrap();
+        let blox = crate::store::Branch::new_remote(&project.id, "blox-fix", "main", "ws-blox");
+        store.create_branch(&blox).unwrap();
+        (store, local, blox)
+    }
+
+    /// The quit prompt's count. A running Blox session the quit detaches
+    /// (here one reattaching to its remote turn, which `detach` lets go of
+    /// with or without a connection up) keeps running on its workstation and
+    /// is not counted. A quit cancels the rest, so they count: a running
+    /// local session, a Blox session the registry can't detach yet (still
+    /// starting its workstation, no connection up) and a queued Blox session.
+    #[test]
+    fn only_sessions_a_quit_stops_are_counted() {
+        let (store, local_branch, blox_branch) = store_with_branches();
+        let local = session_on(&store, &local_branch, SessionStatus::Running);
+        let blox = session_on(&store, &blox_branch, SessionStatus::Running);
+        let connecting = session_on(&store, &blox_branch, SessionStatus::Running);
+        session_on(&store, &blox_branch, SessionStatus::Queued);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let _local = registry.register_external(&local.id);
+        let _blox = registry.register_external(&blox.id);
+        let reattach = registry.reattaching_for_test(&blox.id);
+        let _connecting = registry.register_external(&connecting.id);
+
+        let mut counted = sessions_a_quit_stops(&store, Some(&registry));
+        counted.sort();
+        assert_eq!(
+            counted,
+            [
+                "session on blox-fix",
+                "session on blox-fix (queued)",
+                "session on local-fix",
+            ]
+        );
+        assert!(!reattach.is_cancelled(), "counting detaches nothing");
+        assert_eq!(
+            quit_prompt_message(&QuitBlockers {
+                session_labels: counted,
+                running_action_count: 0,
+            }),
+            "3 sessions are still running: session on blox-fix, session on blox-fix (queued), \
+             session on local-fix. Quitting will stop them."
+        );
+    }
+
+    /// With every running session on Blox and detachable, nothing gates the
+    /// quit, whatever actions are running. Without a registry nothing would
+    /// be detached, so the same session counts.
+    #[test]
+    fn only_detachable_blox_sessions_running_does_not_prompt() {
+        let (store, _, blox_branch) = store_with_branches();
+        let blox = session_on(&store, &blox_branch, SessionStatus::Running);
+        let registry = Arc::new(SessionRegistry::new());
+        let _blox = registry.register_external(&blox.id);
+        let _reattach = registry.reattaching_for_test(&blox.id);
+
+        let session_labels = sessions_a_quit_stops(&store, Some(&registry));
+        assert!(session_labels.is_empty(), "{session_labels:?}");
+        assert!(!should_prompt(&QuitBlockers {
+            session_labels,
+            running_action_count: 1,
+        }));
+
+        assert_eq!(sessions_a_quit_stops(&store, None), ["session on blox-fix"]);
     }
 
     #[test]
@@ -881,8 +1032,8 @@ mod tests {
         assert!(retried.load(Ordering::SeqCst));
     }
 
-    /// The ok slot is the default (`Return`) button, so it holds "Keep Running"
-    /// and the cancel slot holds the destructive answer.
+    /// The ok slot is the default (`Return`) button, so it holds the dismissing
+    /// answer and the cancel slot holds the quit.
     #[test]
     fn only_the_quit_button_confirms() {
         assert!(quit_confirmed(&MessageDialogResult::Custom(
@@ -1021,13 +1172,45 @@ mod tests {
         let queued = Session::new_queued("queued");
         store.create_session(&queued).unwrap();
 
-        assert_eq!(sweep_sessions(&store), 2);
+        assert_eq!(sweep_sessions(&store, &HashSet::new()), 2);
 
         for id in [&running.id, &queued.id] {
             let session = store.get_session(id).unwrap().unwrap();
             assert_eq!(session.status, SessionStatus::Cancelled);
             assert_eq!(session.completion_reason, Some(CompletionReason::AppQuit));
         }
+    }
+
+    /// A detached Blox session whose thread did not write its own state in
+    /// time is left `disconnected` and unowned, not cancelled: its turn is
+    /// still running on the workstation. A queued row in the same set has no
+    /// turn to keep, and a disconnected row is not the sweep's to touch.
+    #[test]
+    fn sweep_leaves_detached_sessions_disconnected() {
+        let store = Store::in_memory().unwrap();
+
+        let detached = Session::new_running("detached", Path::new("/tmp"));
+        store.create_session(&detached).unwrap();
+        let queued = Session::new_queued("queued");
+        store.create_session(&queued).unwrap();
+        let already = Session::new_running("already", Path::new("/tmp"));
+        store.create_session(&already).unwrap();
+        store
+            .update_session_status(&already.id, SessionStatus::Disconnected, None, None)
+            .unwrap();
+
+        let ids = HashSet::from([detached.id.clone(), queued.id.clone(), already.id.clone()]);
+        assert_eq!(sweep_sessions(&store, &ids), 2);
+
+        let session = store.get_session(&detached.id).unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Disconnected);
+        assert_eq!(session.completion_reason, None);
+        assert_eq!(session.owner_pid, None);
+        let session = store.get_session(&queued.id).unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert_eq!(session.completion_reason, Some(CompletionReason::AppQuit));
+        let session = store.get_session(&already.id).unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Disconnected);
     }
 
     #[test]
@@ -1046,7 +1229,7 @@ mod tests {
             .unwrap();
 
         assert!(owned_active_sessions(&store).is_empty());
-        assert_eq!(sweep_sessions(&store), 0);
+        assert_eq!(sweep_sessions(&store, &HashSet::new()), 0);
 
         let session = store.get_session(&completed.id).unwrap().unwrap();
         assert_eq!(session.status, SessionStatus::Completed);
@@ -1068,7 +1251,7 @@ mod tests {
         theirs.owner_pid = Some(std::process::id().wrapping_add(1));
         store.create_session(&theirs).unwrap();
 
-        assert_eq!(sweep_sessions(&store), 0);
+        assert_eq!(sweep_sessions(&store, &HashSet::new()), 0);
         assert!(!store
             .transition_from_owned_active(
                 &theirs.id,

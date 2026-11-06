@@ -64,6 +64,11 @@ pub struct MessageWriter {
     tool_result_rows: Mutex<HashMap<String, i64>>,
 }
 
+/// The title of a tool call recorded from an update that names none (see
+/// [`MessageWriter::update_tool_call_title`]); a later update's title
+/// replaces it.
+const UNTITLED_TOOL_CALL: &str = "Tool call";
+
 /// Strip backticks from agent-provided tool-call titles.
 fn sanitize_title(title: &str) -> String {
     title.replace('`', "")
@@ -78,6 +83,15 @@ fn format_tool_call_content(title: &str, raw_input: Option<&serde_json::Value>) 
         Some(input) => serde_json::json!({ "name": title, "input": input }).to_string(),
         None => title.to_string(),
     }
+}
+
+/// The title a stored tool call row was written with: the inverse of
+/// [`format_tool_call_content`].
+fn stored_tool_call_title(content: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| value.get("name")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| content.to_string())
 }
 
 fn acp_tool_call_metadata(metadata: AcpToolCallMetadata) -> AcpMessageMetadata {
@@ -125,6 +139,48 @@ impl MessageWriter {
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
             tool_result_rows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// A writer that carries on a transcript another writer started: an
+    /// attach catching a session up after its connection was lost. It knows
+    /// the session's stored tool call and result rows by tool-call id, so an
+    /// update for a call the lost connection recorded (the one running at
+    /// the disconnect, which the replay or the live stream then completes)
+    /// updates that call's rows, as it would have on the original
+    /// connection, instead of adding rows of its own.
+    pub fn catching_up(session_id: String, store: Arc<Store>) -> Self {
+        let mut tool_call_rows = HashMap::new();
+        let mut tool_result_rows = HashMap::new();
+        match store.get_session_replay_messages(&session_id) {
+            Ok(messages) => {
+                for message in messages {
+                    let Some(tool_call_id) = message.acp.acp_tool_call_id else {
+                        continue;
+                    };
+                    // Later rows win: the writer's own maps do the same.
+                    match message.role {
+                        MessageRole::ToolCall => {
+                            let title = stored_tool_call_title(&message.content);
+                            tool_call_rows.insert(tool_call_id, (message.id, title));
+                        }
+                        MessageRole::ToolResult => {
+                            tool_result_rows.insert(tool_call_id, message.id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => log::warn!(
+                "Session {session_id}: couldn't read its stored tool calls; updates to them \
+                 will add rows of their own: {e}"
+            ),
+        }
+        let writer = Self::new(session_id, store);
+        Self {
+            tool_call_rows: Mutex::new(tool_call_rows),
+            tool_result_rows: Mutex::new(tool_result_rows),
+            ..writer
         }
     }
 
@@ -271,6 +327,11 @@ impl MessageWriter {
     ///
     /// When `title` is `None`, the last-known title stored at recording time
     /// is reused so that a `raw_input`-only update doesn't blank the name.
+    ///
+    /// A call with no row yet — its `tool_call` never reached this session,
+    /// as when a connection was lost and re-made around it — gets one here,
+    /// from what the update carries, so the updates and result after it land
+    /// on a titled call rather than on nothing.
     pub async fn update_tool_call_title(
         &self,
         tool_call_id: &str,
@@ -278,18 +339,25 @@ impl MessageWriter {
         raw_input: Option<&serde_json::Value>,
     ) {
         let mut rows = self.tool_call_rows.lock().await;
-        if let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) {
-            let effective_title = match title {
-                Some(t) => {
-                    let sanitized = sanitize_title(t);
-                    *stored_title = sanitized.clone();
-                    sanitized
-                }
-                None => stored_title.clone(),
-            };
-            let content = format_tool_call_content(&effective_title, raw_input);
-            let _ = self.store.update_message_content(*row_id, &content);
-        }
+        let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) else {
+            drop(rows);
+            log::warn!(
+                "Tool call {tool_call_id} updated before it was recorded; recording it from the update"
+            );
+            let title = title.unwrap_or(UNTITLED_TOOL_CALL);
+            self.record_tool_call(tool_call_id, title, raw_input).await;
+            return;
+        };
+        let effective_title = match title {
+            Some(t) => {
+                let sanitized = sanitize_title(t);
+                *stored_title = sanitized.clone();
+                sanitized
+            }
+            None => stored_title.clone(),
+        };
+        let content = format_tool_call_content(&effective_title, raw_input);
+        let _ = self.store.update_message_content(*row_id, &content);
     }
 
     /// Record the result/output of a tool call.
@@ -580,7 +648,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use super::MessageWriter;
+    use super::{format_tool_call_content, stored_tool_call_title, MessageWriter};
     use crate::store::{MessageRole, Session, Store};
     use acp_client::{
         AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
@@ -1031,6 +1099,166 @@ mod tests {
         assert_eq!(
             messages[0].acp.acp_raw_input.as_ref().unwrap()["path"],
             "src/lib.rs"
+        );
+    }
+
+    /// A `tool_call_update` for a call whose `tool_call` this session never
+    /// received, applied as the driver applies one (title, then metadata,
+    /// then result): the call gets a row from the update, titled, which its
+    /// metadata and later updates land on, rather than an untitled card of
+    /// bare metadata rows.
+    #[tokio::test]
+    async fn a_tool_call_update_with_no_call_row_records_the_call() {
+        let (store, session_id, writer) = setup_writer();
+        let raw_input = serde_json::json!({"command": "cargo test"});
+        let update = |status: &str| acp_client::AcpToolCallMetadata {
+            event_kind: Some("tool_call_update".to_string()),
+            tool_call_id: Some("tc-orphan".to_string()),
+            tool_status: Some(status.to_string()),
+            raw_input: Some(raw_input.clone()),
+            ..Default::default()
+        };
+
+        writer
+            .update_tool_call_title("tc-orphan", None, Some(&raw_input))
+            .await;
+        <MessageWriter as acp_client::MessageWriter>::record_tool_call_metadata(
+            &writer,
+            update("in_progress"),
+        )
+        .await;
+        writer
+            .update_tool_call_title("tc-orphan", Some("`cargo test`"), Some(&raw_input))
+            .await;
+        <MessageWriter as acp_client::MessageWriter>::record_tool_call_metadata(
+            &writer,
+            update("completed"),
+        )
+        .await;
+        writer.record_tool_result("tc-orphan", "3 passed").await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message.role.clone())
+            .collect();
+        assert_eq!(roles, [MessageRole::ToolCall, MessageRole::ToolResult]);
+        let call: serde_json::Value =
+            serde_json::from_str(&messages[0].content).expect("content should be valid JSON");
+        assert_eq!(
+            call["name"], "cargo test",
+            "a later title replaces the fallback"
+        );
+        assert_eq!(call["input"]["command"], "cargo test");
+        assert_eq!(
+            messages[0].acp.acp_tool_call_id.as_deref(),
+            Some("tc-orphan")
+        );
+        assert_eq!(
+            messages[0].acp.acp_tool_status.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(messages[1].content, "3 passed");
+
+        // An update with raw input but no title records the call under a
+        // stand-in title, between the text around it.
+        writer.append_text("Done.").await;
+        writer
+            .update_tool_call_title("tc-input-only", None, Some(&raw_input))
+            .await;
+        writer.append_text(" Next.").await;
+        writer.finalize().await;
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        let tail: Vec<_> = messages[2..]
+            .iter()
+            .map(|message| (message.role.clone(), message.content.as_str()))
+            .collect();
+        assert_eq!(tail.len(), 3, "{tail:?}");
+        assert_eq!(tail[0], (MessageRole::Assistant, "Done."));
+        assert_eq!(tail[1].0, MessageRole::ToolCall);
+        let call: serde_json::Value =
+            serde_json::from_str(tail[1].1).expect("content should be valid JSON");
+        assert_eq!(
+            call,
+            serde_json::json!({"name": "Tool call", "input": {"command": "cargo test"}})
+        );
+        assert_eq!(tail[2], (MessageRole::Assistant, " Next."));
+    }
+
+    /// An attach's writer completes the call the lost connection's writer
+    /// left running: its call and result rows are updated in place, with the
+    /// real output and the final status, and nothing is added.
+    #[tokio::test]
+    async fn a_catching_up_writer_updates_the_rows_another_writer_recorded() {
+        let (store, session_id, writer) = setup_writer();
+        let raw_input = serde_json::json!({"command": "./step1.sh"});
+        writer
+            .record_tool_call("tc-1", "./step1.sh", Some(&raw_input))
+            .await;
+        <MessageWriter as acp_client::MessageWriter>::record_tool_call_metadata(
+            &writer,
+            acp_client::AcpToolCallMetadata {
+                event_kind: Some("tool_call".to_string()),
+                tool_call_id: Some("tc-1".to_string()),
+                tool_status: Some("pending".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        // The Claude bridge's refinement: the description is the content.
+        writer.record_tool_result("tc-1", "Run step 1").await;
+        writer.finalize().await;
+        drop(writer);
+
+        let writer = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
+        writer
+            .update_tool_call_title("tc-1", None, Some(&raw_input))
+            .await;
+        <MessageWriter as acp_client::MessageWriter>::record_tool_call_metadata(
+            &writer,
+            acp_client::AcpToolCallMetadata {
+                event_kind: Some("tool_call_update".to_string()),
+                tool_call_id: Some("tc-1".to_string()),
+                tool_status: Some("completed".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        writer.record_tool_result("tc-1", "step 1 done").await;
+
+        let messages = store.get_session_replay_messages(&session_id).unwrap();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert_eq!(messages[0].role, MessageRole::ToolCall);
+        assert_eq!(
+            messages[0].acp.acp_tool_status.as_deref(),
+            Some("completed")
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&messages[0].content).unwrap();
+        assert_eq!(parsed["name"], "./step1.sh", "the stored title is kept");
+        assert_eq!(messages[1].role, MessageRole::ToolResult);
+        assert_eq!(messages[1].content, "step 1 done");
+
+        // A call it has never seen is recorded as usual.
+        writer.record_tool_call("tc-2", "ls", None).await;
+        writer.record_tool_result("tc-2", "a b").await;
+        let messages = store.get_session_messages(&session_id).unwrap();
+        assert_eq!(messages.len(), 4);
+    }
+
+    #[test]
+    fn stored_tool_call_titles_round_trip() {
+        let input = serde_json::json!({"path": "a.rs"});
+        assert_eq!(
+            stored_tool_call_title(&format_tool_call_content("Read a.rs", Some(&input))),
+            "Read a.rs"
+        );
+        assert_eq!(
+            stored_tool_call_title(&format_tool_call_content("Run ls", None)),
+            "Run ls"
         );
     }
 

@@ -122,6 +122,10 @@ struct RouterState {
     foreign_prompt_watches: Vec<ForeignPromptWatch>,
     /// When a `session/cancel` was last queued for the agent.
     last_cancel_at: Option<Instant>,
+    /// Clients let go of on purpose with their turns left running on the
+    /// agent (see [`RemoteSessionRouter::keep`]): detaching them cancels
+    /// nothing.
+    kept: HashSet<RemoteClientId>,
 }
 
 /// Answers `ended` with the stop reason once a response ending a prompt
@@ -215,7 +219,18 @@ impl RemoteSessionRouter {
     /// Once the router is closed, the inbox's queue is dropped at once, so
     /// the client sees end-of-stream instead of waiting on output that will
     /// never come.
+    #[cfg(test)]
     pub(super) fn attach(&self) -> (RemoteClientId, ClientInbox) {
+        self.attach_owning(None)
+    }
+
+    /// [`Self::attach`] for a client that owns `session_id` from the start,
+    /// claimed in the same step: a reattach to a turn still running, whose
+    /// frames the agent relays from the moment the proxy connects, while the
+    /// session's `session/load` — which would otherwise claim it — waits
+    /// behind `initialize`. The connection holds them until the load is out
+    /// (see `AcpNotificationHandler::admit`).
+    pub(super) fn attach_owning(&self, session_id: Option<&str>) -> (RemoteClientId, ClientInbox) {
         let client = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
         let (frames, inbound) = mpsc::unbounded_channel();
         let backlog = Arc::new(AtomicUsize::new(0));
@@ -235,6 +250,9 @@ impl RemoteSessionRouter {
                     cut_off,
                 },
             );
+            if let Some(session_id) = session_id {
+                state.claim(session_id, client);
+            }
         }
         (client, inbox)
     }
@@ -247,11 +265,27 @@ impl RemoteSessionRouter {
     pub(super) fn detach(&self, client: RemoteClientId) -> Vec<String> {
         let mut state = self.state();
         state.clients.remove(&client);
+        let kept = state.kept.remove(&client);
         let abandoned = state.forget(client);
         if !state.session_new_pending() {
             state.drop_early_frames();
         }
-        abandoned
+        if kept {
+            Vec::new()
+        } else {
+            abandoned
+        }
+    }
+
+    /// Let `client` go while leaving its turns running on the agent: its
+    /// stream ends now, so its connection sees end-of-stream, and once that
+    /// connection stops writing [`Self::detach`] cancels nothing for it. How
+    /// a Blox session whose turn should outlive its connection lets go (see
+    /// [`super::DetachHandle`]).
+    pub(super) fn keep(&self, client: RemoteClientId) {
+        let mut state = self.state();
+        state.kept.insert(client);
+        state.clients.remove(&client);
     }
 
     /// Why `client` was cut off for falling behind the agent's output, if it
@@ -822,6 +856,11 @@ impl RemoteTransport {
         self.router.watch_foreign_prompts(owner_pid, stop_reason)
     }
 
+    /// See [`RemoteSessionRouter::keep`].
+    pub(super) fn keep_client(&self, client: RemoteClientId) {
+        self.router.keep(client);
+    }
+
     /// Ask the agent to cancel `session_id`'s turn, whoever prompted it.
     /// The cancel is queued on the agent's stdin directly, so it is written
     /// even when no connection is left to send it.
@@ -856,8 +895,15 @@ impl RemoteTransport {
     }
 
     /// Attach one ACP connection. It detaches once it stops writing.
+    #[cfg(test)]
     pub(super) fn attach(&self) -> RoutedClientStreams {
-        let (client, inbox) = self.router.attach();
+        self.attach_owning(None)
+    }
+
+    /// [`Self::attach`] for a connection that owns `session_id` from the
+    /// start (see [`RemoteSessionRouter::attach_owning`]).
+    pub(super) fn attach_owning(&self, session_id: Option<&str>) -> RoutedClientStreams {
+        let (client, inbox) = self.router.attach_owning(session_id);
         let (outgoing, from_client) = tokio::io::duplex(CLIENT_PIPE_BYTES);
         let (to_client, incoming) = tokio::io::duplex(CLIENT_PIPE_BYTES);
         self.forwarding.send_modify(|count| *count += 1);

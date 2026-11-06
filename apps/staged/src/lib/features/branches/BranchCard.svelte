@@ -865,10 +865,20 @@
     };
   });
 
-  // Load timeline when a branch becomes timeline-ready
+  // Load timeline when a branch becomes timeline-ready.
+  //
+  // While it is not ready, forget which key was loaded. A remote branch has
+  // the same key every time its workspace runs, and `timeline-invalidated` is
+  // ignored while it is stopped, so a note or image added then (a dropped
+  // file) would otherwise never show: the restart would find its key already
+  // loaded and skip. Forgetting it makes the restart an initial load, which
+  // shows the cached timeline if it is still fresh and fetches otherwise.
   $effect(() => {
     const timelineKey = branchTimelineReadyKey(branch);
-    if (!timelineKey) return;
+    if (!timelineKey) {
+      loadedTimelineKey = null;
+      return;
+    }
     if (timelineKey === loadedTimelineKey || timelineKey === requestedTimelineKey) return;
 
     void loadTimeline({ timelineKey });

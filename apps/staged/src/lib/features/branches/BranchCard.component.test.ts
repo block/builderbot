@@ -286,6 +286,30 @@ describe('BranchCard drops the timeline cannot show yet', () => {
     }
   );
 
+  it('reloads the timeline once a stopped remote card that had loaded it runs again', async () => {
+    const { props } = mountCard(remoteBranch('running'));
+    await timelineShown();
+    expect(cmd.getBranchTimeline).toHaveBeenCalledTimes(1);
+
+    props.branch = remoteBranch('stopped');
+    flushSync();
+    drop(['/tmp/b.png']);
+    await settle(() => expect(cmd.createImage).toHaveResolvedTimes(1));
+    expect(toast.success).toHaveBeenCalledWith('Added 1 file', {
+      description: 'It will appear on the timeline once the workspace is running.',
+    });
+    // The store's invalidation is ignored while the workspace is stopped.
+    window.dispatchEvent(
+      new CustomEvent('timeline-invalidated', { detail: { branchIds: ['branch-1'] } })
+    );
+    expect(cmd.getBranchTimeline).toHaveBeenCalledTimes(1);
+
+    props.branch = remoteBranch('running');
+    flushSync();
+    await vi.waitFor(() => expect(cmd.getBranchTimeline).toHaveResolvedTimes(2));
+    await timelineShown();
+  });
+
   it('confirms the stored files on a local card with no worktree', async () => {
     mountCard(localBranch(null));
 

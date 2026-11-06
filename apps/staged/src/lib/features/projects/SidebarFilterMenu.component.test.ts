@@ -65,6 +65,11 @@ async function placeOn(content: HTMLElement, side: 'top' | 'bottom') {
   await settle();
 }
 
+/** Press a key on the focused item, the way the menu's roving focus sees it. */
+function pressKey(key: string) {
+  document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+}
+
 /** bits-ui moves keyboard focus into an opened menu on the next frame. */
 async function keyboardFocusLanded() {
   await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -140,6 +145,62 @@ describe('SidebarFilterMenu Clear filters placement', () => {
     await keyboardFocusLanded();
 
     expect(label(document.activeElement)).toBe('Unread');
+  });
+
+  // A flip swaps which branch renders Clear filters, replacing its node, so
+  // focus on it has to be handed to the new node or keyboard input stops
+  // reaching the menu.
+  it('keeps focus on Clear filters when the menu flips above the trigger', async () => {
+    const content = await openMenu();
+    await placeOn(content, 'bottom');
+    await keyboardFocusLanded();
+    const before = document.activeElement;
+    expect(label(before)).toBe('Clear');
+
+    await placeOn(content, 'top');
+
+    expect(rows(content)).toEqual(['Unread', 'Running', '---', 'Clear']);
+    expect(document.activeElement).not.toBe(before);
+    expect(content.contains(document.activeElement)).toBe(true);
+    expect(label(document.activeElement)).toBe('Clear');
+    expect(document.activeElement!.hasAttribute('data-highlighted')).toBe(true);
+    // Arrow keys still rove from it, now upward into the filters.
+    pressKey('ArrowUp');
+    expect(label(document.activeElement)).toBe('Running');
+  });
+
+  it('keeps focus on Clear filters when the menu flips below the trigger', async () => {
+    const content = await openMenu();
+    await placeOn(content, 'top');
+    await keyboardFocusLanded();
+    expect(label(document.activeElement)).toBe('Unread');
+    pressKey('ArrowUp'); // wraps to Clear filters, last above the trigger
+    const before = document.activeElement;
+    expect(label(before)).toBe('Clear');
+
+    await placeOn(content, 'bottom');
+
+    expect(rows(content)).toEqual(['Clear', '---', 'Unread', 'Running']);
+    expect(document.activeElement).not.toBe(before);
+    expect(content.contains(document.activeElement)).toBe(true);
+    expect(label(document.activeElement)).toBe('Clear');
+    expect(document.activeElement!.hasAttribute('data-highlighted')).toBe(true);
+    pressKey('ArrowDown');
+    expect(label(document.activeElement)).toBe('Unread');
+  });
+
+  it('leaves focus alone when the menu flips with another item focused', async () => {
+    const content = await openMenu();
+    await placeOn(content, 'bottom');
+    await keyboardFocusLanded();
+    pressKey('ArrowDown');
+    pressKey('ArrowDown');
+    const running = document.activeElement;
+    expect(label(running)).toBe('Running');
+
+    await placeOn(content, 'top');
+
+    expect(document.activeElement).toBe(running);
   });
 
   it('is absent with no active filters', async () => {

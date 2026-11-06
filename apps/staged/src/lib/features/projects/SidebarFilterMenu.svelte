@@ -10,9 +10,11 @@
   while any are — repo filters can outlive their menu entry (delete the last
   project using a repo and its filter stays active with nothing to uncheck),
   so clearing has to be reachable from the menu itself. It sits on the edge
-  facing the trigger, the shortest reach from opening the menu.
+  facing the trigger, the shortest reach from opening the menu, and keeps
+  keyboard focus if the menu flips sides while it has it.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ListFilter from '@lucide/svelte/icons/list-filter';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -55,8 +57,16 @@
   // faces the trigger. Positioning settles before bits-ui's keyboard focus
   // lands (focus waits a frame), so a keyboard open still starts on the first
   // item of the final order. Sheet menus have no data-side and keep it on top.
+  //
+  // Moving it renders the other branch, a new node (not a CSS reorder:
+  // bits-ui roves through items in DOM order, so arrow keys would run against
+  // the visual order). If the flip happens while the old node has focus
+  // (a resize or layout shift with the menu open), removing it would drop
+  // focus out of the menu and with it arrow-key and Escape handling, so the
+  // flip notes that and the new node takes focus as it mounts.
   let content = $state<HTMLElement | null>(null);
   let placedSide = $state<string | null>(null);
+  let refocusClear = false;
 
   $effect(() => {
     const el = content;
@@ -65,19 +75,36 @@
       return;
     }
     const read = () => {
-      placedSide = el.getAttribute('data-side');
+      const side = el.getAttribute('data-side');
+      const moving = (side === 'top') !== clearAtBottom;
+      const focused = el.ownerDocument.activeElement;
+      refocusClear = moving && !!focused?.matches('[data-clear-filters]') && el.contains(focused);
+      placedSide = side;
     };
-    read();
+    // Untracked so reading clearAtBottom doesn't re-run this on every flip.
+    untrack(read);
     const observer = new MutationObserver(read);
     observer.observe(el, { attributes: true, attributeFilter: ['data-side'] });
     return () => observer.disconnect();
   });
 
   let clearAtBottom = $derived(placedSide === 'top');
+
+  // Runs once the new Clear filters node is in the document, in the same
+  // update that removed the old one, so focus never lands anywhere else.
+  function takeFocusFromFlip(node: HTMLElement) {
+    if (!refocusClear) return;
+    refocusClear = false;
+    node.focus({ preventScroll: true });
+  }
 </script>
 
 {#snippet clearItem()}
-  <DropdownMenu.Item onSelect={() => projectFiltersStore.clearFilters()}>
+  <DropdownMenu.Item
+    data-clear-filters
+    {@attach takeFocusFromFlip}
+    onSelect={() => projectFiltersStore.clearFilters()}
+  >
     Clear filters
   </DropdownMenu.Item>
 {/snippet}

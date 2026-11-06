@@ -47,6 +47,7 @@ mod tests;
 pub use branch_move::{BranchMove, RepoPlacement, WorkdirMove};
 pub use messages::TranscriptWindow;
 pub use models::*;
+pub use note_transfer::ChildNoteMove;
 pub use project_notes::DeletedProjectNoteSessions;
 pub use project_search::{ProjectSearchItem, ProjectSearchItemKind};
 pub use repo_badges::{fallback_short_name, next_hue};

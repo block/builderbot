@@ -23,11 +23,34 @@
 //! and a note relocated (or deleted) between that read and this transaction
 //! would otherwise be silently overwritten; matching zero rows fails the
 //! transaction instead, so the media rows roll back with it.
+//!
+//! A project-note move keys the parent's and every child's `UPDATE` on the
+//! body the caller read, too. The body it hands over, and the media rows
+//! that come with it, were rewritten from that read, and staging the media
+//! can take long enough for a resumed session to finish again (or an edit to
+//! land). That note is settled again but newer than the body that would
+//! replace it, so the move is refused and a retry reads it afresh.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use super::models::{Branch, Image, Note, ProjectNote, ProjectRepo};
 use super::{now_timestamp, Store, StoreChange, StoreError};
+
+/// One child note's share of a project-note move: where the command layer
+/// last saw it and what its body read then, the destination branch it
+/// resolved, that body with its media references rewritten to `media` (the
+/// copied rows), and the rows only the child uses, re-homed in place
+/// (`rehomed`; see `rehome_note_media`).
+#[derive(Debug, Clone)]
+pub struct ChildNoteMove {
+    pub note_id: String,
+    pub expected_branch_id: String,
+    pub expected_content: String,
+    pub target_branch_id: String,
+    pub content: String,
+    pub media: Vec<Image>,
+    pub rehomed: Vec<Image>,
+}
 
 impl Store {
     /// The `project_repos` row in `project_id` for `github_repo` at `subpath`,
@@ -98,9 +121,11 @@ impl Store {
     ///
     /// The title is made unique among the destination branch's notes, the
     /// same way a fresh save would be. `parent_project_note_id` is cleared:
-    /// a child note's parent project note stays in the source project, and a
-    /// cross-project parent link would let deleting that parent cascade into
-    /// another project.
+    /// moving one child on its own leaves its parent project note in the
+    /// source project, and a cross-project parent link would let deleting
+    /// that parent cascade into another project. (A project note moved
+    /// through [`Store::move_project_note_to_project`] takes its children
+    /// with it instead.)
     pub fn move_note_to_branch(
         &self,
         note_id: &str,
@@ -152,10 +177,7 @@ impl Store {
         // session as queued or running work, and its completion would drain
         // the branch it left.
         if let Some(session_id) = existing.session_id.as_deref() {
-            tx.execute(
-                "UPDATE sessions SET branch_id = ?1 WHERE id = ?2",
-                params![target_branch_id, session_id],
-            )?;
+            move_settled_session(&tx, session_id, target_branch_id, &existing.title)?;
         }
         tx.commit()?;
 
@@ -199,25 +221,35 @@ impl Store {
         Ok(())
     }
 
-    /// Re-home a project note into `target_project_id`; see
-    /// [`Store::move_note_to_branch`] for the content/media/rehomed contract
-    /// and the role of `expected_project_id`.
+    /// Re-home a project note into `target_project_id`, taking its child notes
+    /// along; see [`Store::move_note_to_branch`] for the content/media/rehomed
+    /// contract and the role of `expected_project_id`.
     ///
-    /// Child notes aggregated under it are detached rather than moved: they are
-    /// branch notes bound to the source project's repos, which the destination
-    /// need not have. Detached, they surface as ordinary notes on their own
-    /// branch timelines, and the `#note:<id>` references in the parent's body
-    /// keep resolving (that lookup has no project scope). They surface read
-    /// (as the 0037 backfill did): the user acted on the parent, not on them,
-    /// so they mustn't light up unread dots across those timelines.
+    /// `expected_content` is the body the caller read and rewrote `content`
+    /// from (each child carries its own); a note whose body has changed since
+    /// fails the whole transaction rather than losing the newer body.
+    ///
+    /// `children` must cover every note whose `parent_project_note_id` is this
+    /// note. Each is rewritten onto its `target_branch_id` — a branch in the
+    /// destination tracking the same repo, resolved by the command layer —
+    /// together with its session and its own media, and keeps the parent link
+    /// (and its read state), so the family stays one unit: the parent view's
+    /// child list, the `#note:<id>` references in the parent's body and the
+    /// delete cascade all keep working and none of them crosses a project. A
+    /// child the plan did not cover (spawned, moved or re-parented since it was
+    /// made) fails the whole transaction rather than leaving a cross-project
+    /// link behind.
+    #[allow(clippy::too_many_arguments)]
     pub fn move_project_note_to_project(
         &self,
         note_id: &str,
         expected_project_id: &str,
+        expected_content: &str,
         target_project_id: &str,
         content: &str,
         media: &[Image],
         rehomed: &[Image],
+        children: &[ChildNoteMove],
     ) -> Result<ProjectNote, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -230,36 +262,136 @@ impl Store {
             )
             .optional()?
             .ok_or_else(|| StoreError(format!("Project note not found: {note_id}")))?;
-        let child_branch_ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT branch_id FROM notes WHERE parent_project_note_id = ?1",
-            )?;
-            let rows = stmt.query_map(params![note_id], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
         for image in media {
             Self::insert_image(&tx, image)?;
         }
         Self::rehome_note_media(&tx, note_id, &existing.title, rehomed)?;
-        tx.execute(
-            "UPDATE notes SET parent_project_note_id = NULL, read_at = COALESCE(read_at, completed_at)
-             WHERE parent_project_note_id = ?1",
-            params![note_id],
-        )?;
         let now = now_timestamp();
+        let mut touched_branches: Vec<String> = Vec::new();
+        for child in children {
+            for image in &child.media {
+                Self::insert_image(&tx, image)?;
+            }
+            let (child_title, session_id): (String, Option<String>) = tx
+                .query_row(
+                    "SELECT title, session_id FROM notes WHERE id = ?1",
+                    params![child.note_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError(format!("Note not found: {}", child.note_id)))?;
+            Self::rehome_note_media(&tx, &child.note_id, &child_title, &child.rehomed)?;
+            let title = if child_title.is_empty() {
+                String::new()
+            } else {
+                Self::resolve_unique_note_title(
+                    &tx,
+                    &child.target_branch_id,
+                    &child_title,
+                    Some(&child.note_id),
+                )?
+            };
+            // Keyed on the parent too: a child re-parented since the plan was
+            // made is not ours to move. And on the body the plan read: a
+            // child whose session was resumed and finished again since then
+            // passes the session check below, but `child.content` (and the
+            // media staged from it) would overwrite the body that run wrote.
+            // Zero rows means the child left, or its body changed; a second
+            // read tells them apart.
+            let changed = tx.execute(
+                "UPDATE notes
+                 SET branch_id = ?1, title = ?2, content = ?3, updated_at = ?4
+                 WHERE id = ?5 AND branch_id = ?6 AND parent_project_note_id = ?7
+                   AND content = ?8",
+                params![
+                    child.target_branch_id,
+                    title,
+                    child.content,
+                    now,
+                    child.note_id,
+                    child.expected_branch_id,
+                    note_id,
+                    child.expected_content
+                ],
+            )?;
+            if changed != 1 {
+                let still_here: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM notes
+                      WHERE id = ?1 AND branch_id = ?2 AND parent_project_note_id = ?3)",
+                    params![child.note_id, child.expected_branch_id, note_id],
+                    |row| row.get(0),
+                )?;
+                return Err(if still_here {
+                    updated_during_transfer(&child_title)
+                } else {
+                    relocated_during_transfer(&child_title)
+                });
+            }
+            // Same as `move_note_to_branch`: the session is scheduled by
+            // `sessions.branch_id` and has to arrive with its note.
+            if let Some(session_id) = session_id.as_deref() {
+                move_settled_session(&tx, session_id, &child.target_branch_id, &child_title)?;
+            }
+            for branch_id in [&child.expected_branch_id, &child.target_branch_id] {
+                if !touched_branches.contains(branch_id) {
+                    touched_branches.push(branch_id.clone());
+                }
+            }
+        }
+        let child_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM notes WHERE parent_project_note_id = ?1",
+            params![note_id],
+            |row| row.get(0),
+        )?;
+        if child_count != children.len() as i64 {
+            return Err(StoreError(format!(
+                "The child notes of '{}' changed during the transfer.",
+                existing.title
+            )));
+        }
+        // The parent's own session is keyed on too: the caller checked it was
+        // settled, but a resume from another window can land before this
+        // write, and a running project session keeps creating child notes in
+        // the project it started in — which would be the wrong one after the
+        // move. So is its body, as for a child: a session that resumed and
+        // finished again (or an edit) since the caller read it is settled
+        // again, and `content` would overwrite what it wrote. Zero rows means
+        // a parent that left the expected project, a live session or a newer
+        // body; the second read tells them apart, a live session first, since
+        // a retry would only stop on it again.
         let changed = tx.execute(
             "UPDATE project_notes SET project_id = ?1, content = ?2, updated_at = ?3
-             WHERE id = ?4 AND project_id = ?5",
+             WHERE id = ?4 AND project_id = ?5 AND content = ?6
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions s
+                    WHERE s.id = project_notes.session_id
+                      AND s.status IN ('queued', 'running'))",
             params![
                 target_project_id,
                 content,
                 now,
                 note_id,
-                expected_project_id
+                expected_project_id,
+                expected_content
             ],
         )?;
         if changed != 1 {
-            return Err(relocated_during_transfer(&existing.title));
+            let session_live: Option<bool> = tx
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sessions s
+                          WHERE s.id = project_notes.session_id
+                            AND s.status IN ('queued', 'running'))
+                     FROM project_notes WHERE id = ?1 AND project_id = ?2",
+                    params![note_id, expected_project_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            return Err(match session_live {
+                None => relocated_during_transfer(&existing.title),
+                Some(true) => session_resumed_during_transfer(&existing.title),
+                Some(false) => updated_during_transfer(&existing.title),
+            });
         }
         tx.commit()?;
 
@@ -271,8 +403,8 @@ impl Store {
             branch_id: None,
             project_id: Some(target_project_id.to_string()),
         });
-        // Detached children just appeared on their branch timelines.
-        for branch_id in child_branch_ids {
+        // The children's sessions left one branch's queue and joined another's.
+        for branch_id in touched_branches {
             self.publish(StoreChange::Notes {
                 branch_id: Some(branch_id),
                 project_id: None,
@@ -378,6 +510,56 @@ fn media_changed_during_transfer(title: &str) -> StoreError {
     ))
 }
 
+/// Re-home a note's session with the note. The caller checked the session
+/// was settled before planning, but a resume can land between that read and
+/// this write, and a live drain must not have its session handed to a branch
+/// that is not running it — so the status is part of the key, and a live
+/// session fails the whole move. A session row that no longer exists is not
+/// a live one: the planner reads a missing session as settled, and so does
+/// this, or a retry could never clear the error.
+fn move_settled_session(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    target_branch_id: &str,
+    note_title: &str,
+) -> Result<(), StoreError> {
+    let changed = tx.execute(
+        "UPDATE sessions SET branch_id = ?1
+         WHERE id = ?2 AND status NOT IN ('queued', 'running')",
+        params![target_branch_id, session_id],
+    )?;
+    if changed == 1 {
+        return Ok(());
+    }
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    Err(session_resumed_during_transfer(note_title))
+}
+
+/// The note's session went live again between the caller's check and the
+/// transaction; the move has to wait for it.
+fn session_resumed_during_transfer(title: &str) -> StoreError {
+    StoreError(format!(
+        "The session of '{title}' started again during the transfer; wait for it to finish before moving the note."
+    ))
+}
+
+/// The note's body is no longer the one the caller read — a resumed session
+/// finished again, or an edit landed — so the body rewritten from that read,
+/// and the media staged from it, would overwrite the newer one. Unlike a live
+/// session, nothing has to settle first: a retry reads the body afresh.
+fn updated_during_transfer(title: &str) -> StoreError {
+    StoreError(format!(
+        "Note '{title}' was updated during the transfer; try again."
+    ))
+}
+
 /// The note was not where the caller last saw it, so the destination it
 /// resolved no longer applies.
 fn relocated_during_transfer(title: &str) -> StoreError {
@@ -389,7 +571,7 @@ fn relocated_during_transfer(title: &str) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::models::Project;
+    use crate::store::models::{Project, SessionStatus};
 
     struct Fixture {
         store: Store,
@@ -543,6 +725,9 @@ mod tests {
         let session = crate::store::Session::new_running("write", std::path::Path::new("/tmp"))
             .with_branch(&f.source_branch.id);
         f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
         let note = Note::new(&f.source_branch.id, "Findings", "body").with_session(&session.id);
         f.store.create_note(&note).unwrap();
 
@@ -561,6 +746,81 @@ mod tests {
             f.store.get_branch_id_for_session(&session.id).unwrap(),
             Some(f.target_branch.id.clone())
         );
+    }
+
+    /// The planner's status check and this write are separate reads: a session
+    /// that went live again in between fails the move inside the transaction.
+    #[test]
+    fn move_is_refused_when_the_notes_session_resumed_after_planning() {
+        let f = fixture();
+        let session = crate::store::Session::new_running("write", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        let note = Note::new(&f.source_branch.id, "Findings", "body").with_session(&session.id);
+        f.store.create_note(&note).unwrap();
+        let image = Image::new(
+            Some(&f.target_branch.id),
+            &f.target.id,
+            "shot.png",
+            "image/png",
+            3,
+            false,
+        );
+
+        for status in [SessionStatus::Queued, SessionStatus::Running] {
+            f.store
+                .update_session_status(&session.id, status, None, None)
+                .unwrap();
+
+            let err = f
+                .store
+                .move_note_to_branch(
+                    &note.id,
+                    &f.source_branch.id,
+                    &f.target_branch.id,
+                    "new body",
+                    std::slice::from_ref(&image),
+                    &[],
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "The session of 'Findings' started again during the transfer; wait for it to finish before moving the note."
+            );
+            let stored = f.store.get_note(&note.id).unwrap().unwrap();
+            assert_eq!(stored.branch_id, f.source_branch.id);
+            assert_eq!(stored.content, "body");
+            assert_eq!(
+                f.store.get_branch_id_for_session(&session.id).unwrap(),
+                Some(f.source_branch.id.clone())
+            );
+            assert!(f.store.get_image(&image.id).unwrap().is_none());
+        }
+    }
+
+    /// A note whose session row is gone has nothing live to protect; the
+    /// move goes ahead rather than failing on a session no retry can settle.
+    #[test]
+    fn move_proceeds_when_the_notes_session_row_is_gone() {
+        let f = fixture();
+        let note = Note::new(&f.source_branch.id, "Findings", "body").with_session("ghost");
+        f.store.create_note(&note).unwrap();
+
+        let moved = f
+            .store
+            .move_note_to_branch(
+                &note.id,
+                &f.source_branch.id,
+                &f.target_branch.id,
+                "body",
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(moved.branch_id, f.target_branch.id);
+        assert_eq!(moved.session_id.as_deref(), Some("ghost"));
     }
 
     #[test]
@@ -651,13 +911,33 @@ mod tests {
         assert!(f.store.get_image(&image.id).unwrap().is_none());
     }
 
+    /// A child's plan for the move, with nothing to rewrite in its body.
+    fn child_move(child: &Note, target_branch_id: &str) -> ChildNoteMove {
+        ChildNoteMove {
+            note_id: child.id.clone(),
+            expected_branch_id: child.branch_id.clone(),
+            expected_content: child.content.clone(),
+            target_branch_id: target_branch_id.to_string(),
+            content: child.content.clone(),
+            media: Vec::new(),
+            rehomed: Vec::new(),
+        }
+    }
+
     #[test]
     fn project_note_move_is_refused_when_the_note_left_the_expected_project() {
         let f = fixture();
         let note = ProjectNote::new(&f.source.id, "Plan", "body");
         f.store.create_project_note(&note).unwrap();
+        let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
         let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
-            .with_parent_project_note(&note.id);
+            .with_parent_project_note(&note.id)
+            .with_session(&session.id);
         f.store.create_note(&child).unwrap();
         let image = Image::new(None, &f.target.id, "shot.png", "image/png", 3, false);
 
@@ -666,10 +946,12 @@ mod tests {
             .move_project_note_to_project(
                 &note.id,
                 "stale-project",
+                &note.content,
                 &f.target.id,
                 "new body",
                 std::slice::from_ref(&image),
                 &[],
+                &[child_move(&child, &f.target_branch.id)],
             )
             .unwrap_err();
 
@@ -677,17 +959,273 @@ mod tests {
         let stored = f.store.get_project_note(&note.id).unwrap().unwrap();
         assert_eq!(stored.project_id, f.source.id);
         assert_eq!(stored.content, "body");
-        // The child detach ran inside the same transaction and was undone.
+        // The child's move ran inside the same transaction and was undone:
+        // it is still on its branch, still linked, and so is its session.
+        let child = f.store.get_note(&child.id).unwrap().unwrap();
+        assert_eq!(child.branch_id, f.source_branch.id);
         assert_eq!(
-            f.store
-                .get_note(&child.id)
-                .unwrap()
-                .unwrap()
-                .parent_project_note_id
-                .as_deref(),
+            child.parent_project_note_id.as_deref(),
             Some(note.id.as_str())
         );
+        assert_eq!(
+            f.store.get_branch_id_for_session(&session.id).unwrap(),
+            Some(f.source_branch.id.clone())
+        );
         assert!(f.store.get_image(&image.id).unwrap().is_none());
+    }
+
+    /// A child whose session went live again after the plan was made — the
+    /// planner's status check and this write are separate reads — fails the
+    /// move inside the transaction, and nothing of the family changes.
+    #[test]
+    fn project_note_move_is_refused_when_a_child_session_resumed_after_planning() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+        let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id)
+            .with_session(&session.id);
+        f.store.create_note(&child).unwrap();
+        let plan = child_move(&child, &f.target_branch.id);
+        let image = Image::new(None, &f.target.id, "shot.png", "image/png", 3, false);
+
+        for status in [SessionStatus::Queued, SessionStatus::Running] {
+            f.store
+                .update_session_status(&session.id, status, None, None)
+                .unwrap();
+
+            let err = f
+                .store
+                .move_project_note_to_project(
+                    &note.id,
+                    &f.source.id,
+                    &note.content,
+                    &f.target.id,
+                    "new body",
+                    std::slice::from_ref(&image),
+                    &[],
+                    std::slice::from_ref(&plan),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "The session of 'Child' started again during the transfer; wait for it to finish before moving the note."
+            );
+            let stored = f.store.get_project_note(&note.id).unwrap().unwrap();
+            assert_eq!(stored.project_id, f.source.id);
+            assert_eq!(stored.content, "body");
+            let child = f.store.get_note(&child.id).unwrap().unwrap();
+            assert_eq!(child.branch_id, f.source_branch.id);
+            assert_eq!(child.content, "body");
+            assert_eq!(
+                child.parent_project_note_id.as_deref(),
+                Some(note.id.as_str())
+            );
+            assert_eq!(
+                f.store.get_branch_id_for_session(&session.id).unwrap(),
+                Some(f.source_branch.id.clone())
+            );
+            assert!(f.store.get_image(&image.id).unwrap().is_none());
+        }
+    }
+
+    /// The parent's own session, resumed after the plan was made, fails the
+    /// move inside the transaction like a child's would.
+    #[test]
+    fn project_note_move_is_refused_when_the_parent_session_resumed_after_planning() {
+        let f = fixture();
+        let parent_session =
+            crate::store::Session::new_running("plan", std::path::Path::new("/tmp"));
+        f.store.create_session(&parent_session).unwrap();
+        f.store
+            .update_session_status(&parent_session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body").with_session(&parent_session.id);
+        f.store.create_project_note(&note).unwrap();
+        let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id)
+            .with_session(&session.id);
+        f.store.create_note(&child).unwrap();
+        let plan = child_move(&child, &f.target_branch.id);
+        let image = Image::new(None, &f.target.id, "shot.png", "image/png", 3, false);
+
+        for status in [SessionStatus::Queued, SessionStatus::Running] {
+            f.store
+                .update_session_status(&parent_session.id, status, None, None)
+                .unwrap();
+
+            let err = f
+                .store
+                .move_project_note_to_project(
+                    &note.id,
+                    &f.source.id,
+                    &note.content,
+                    &f.target.id,
+                    "new body",
+                    std::slice::from_ref(&image),
+                    &[],
+                    std::slice::from_ref(&plan),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "The session of 'Plan' started again during the transfer; wait for it to finish before moving the note."
+            );
+            let stored = f.store.get_project_note(&note.id).unwrap().unwrap();
+            assert_eq!(stored.project_id, f.source.id);
+            assert_eq!(stored.content, "body");
+            // The child's move ran first in the same transaction and rolled
+            // back with it.
+            let child = f.store.get_note(&child.id).unwrap().unwrap();
+            assert_eq!(child.branch_id, f.source_branch.id);
+            assert_eq!(
+                f.store.get_branch_id_for_session(&session.id).unwrap(),
+                Some(f.source_branch.id.clone())
+            );
+            assert!(f.store.get_image(&image.id).unwrap().is_none());
+        }
+    }
+
+    /// A child whose session row is gone moves like one whose session is
+    /// settled.
+    #[test]
+    fn project_note_move_proceeds_when_a_child_session_row_is_gone() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id)
+            .with_session("ghost");
+        f.store.create_note(&child).unwrap();
+
+        let moved = f
+            .store
+            .move_project_note_to_project(
+                &note.id,
+                &f.source.id,
+                &note.content,
+                &f.target.id,
+                "body",
+                &[],
+                &[],
+                &[child_move(&child, &f.target_branch.id)],
+            )
+            .unwrap();
+
+        assert_eq!(moved.project_id, f.target.id);
+        let child = f.store.get_note(&child.id).unwrap().unwrap();
+        assert_eq!(child.branch_id, f.target_branch.id);
+        assert_eq!(child.session_id.as_deref(), Some("ghost"));
+    }
+
+    /// The mirror image: a child that is no longer where the plan saw it
+    /// fails the move, and the parent stays put with it.
+    #[test]
+    fn project_note_move_is_refused_when_a_child_left_its_expected_branch() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id);
+        f.store.create_note(&child).unwrap();
+        let image = Image::new(
+            Some(&f.target_branch.id),
+            &f.target.id,
+            "shot.png",
+            "image/png",
+            3,
+            false,
+        );
+
+        let err = f
+            .store
+            .move_project_note_to_project(
+                &note.id,
+                &f.source.id,
+                &note.content,
+                &f.target.id,
+                "body",
+                &[],
+                &[],
+                &[ChildNoteMove {
+                    expected_branch_id: "stale-branch".to_string(),
+                    media: vec![image.clone()],
+                    ..child_move(&child, &f.target_branch.id)
+                }],
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("moved or deleted"), "{err}");
+        assert_eq!(
+            f.store
+                .get_project_note(&note.id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            f.source.id
+        );
+        assert_eq!(
+            f.store.get_note(&child.id).unwrap().unwrap().branch_id,
+            f.source_branch.id
+        );
+        assert!(f.store.get_image(&image.id).unwrap().is_none());
+    }
+
+    /// A child the plan does not cover would be left linked to a parent in
+    /// another project — the cross-project cascade the move exists to avoid.
+    #[test]
+    fn project_note_move_is_refused_when_a_child_was_not_planned_for() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+        let planned = Note::new_standalone(&f.source_branch.id, "Planned", "body")
+            .with_parent_project_note(&note.id);
+        let unplanned = Note::new_standalone(&f.source_branch.id, "Unplanned", "body")
+            .with_parent_project_note(&note.id);
+        f.store.create_note(&planned).unwrap();
+        f.store.create_note(&unplanned).unwrap();
+
+        let err = f
+            .store
+            .move_project_note_to_project(
+                &note.id,
+                &f.source.id,
+                &note.content,
+                &f.target.id,
+                "body",
+                &[],
+                &[],
+                &[child_move(&planned, &f.target_branch.id)],
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("changed during"), "{err}");
+        assert_eq!(
+            f.store
+                .get_project_note(&note.id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            f.source.id
+        );
+        assert_eq!(
+            f.store.get_note(&planned.id).unwrap().unwrap().branch_id,
+            f.source_branch.id
+        );
     }
 
     #[test]
@@ -717,25 +1255,50 @@ mod tests {
     }
 
     #[test]
-    fn project_note_move_detaches_its_children_and_publishes_their_branches() {
+    fn project_note_move_takes_its_children_along_and_publishes_both_branches() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(64);
         let f = fixture_in(Store::in_memory().unwrap().with_change_sender(tx));
-        let branch = &f.source_branch;
         let parent = ProjectNote::new(&f.source.id, "Parent", "body");
         f.store.create_project_note(&parent).unwrap();
-        let child =
-            Note::new_standalone(&branch.id, "Child", "body").with_parent_project_note(&parent.id);
+        let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&parent.id)
+            .with_session(&session.id);
         f.store.create_note(&child).unwrap();
-        // Still being written, so it has nothing to read yet.
-        let pending = Note::new(&branch.id, "", "")
-            .with_session("session-1")
-            .with_parent_project_note(&parent.id);
-        f.store.create_note(&pending).unwrap();
+        // A note by the same title already on the destination branch.
+        let taken = Note::new_standalone(&f.target_branch.id, "Child", "theirs");
+        f.store.create_note(&taken).unwrap();
+        let image = Image::new(
+            Some(&f.target_branch.id),
+            &f.target.id,
+            "shot.png",
+            "image/png",
+            3,
+            false,
+        );
         while rx.try_recv().is_ok() {}
 
         let moved = f
             .store
-            .move_project_note_to_project(&parent.id, &f.source.id, &f.target.id, "body", &[], &[])
+            .move_project_note_to_project(
+                &parent.id,
+                &f.source.id,
+                &parent.content,
+                &f.target.id,
+                "body",
+                &[],
+                &[],
+                &[ChildNoteMove {
+                    content: "child body, rewritten".to_string(),
+                    media: vec![image.clone()],
+                    ..child_move(&child, &f.target_branch.id)
+                }],
+            )
             .unwrap();
 
         assert_eq!(moved.project_id, f.target.id);
@@ -748,30 +1311,76 @@ mod tests {
             f.target.id
         );
         let child = f.store.get_note(&child.id).unwrap().unwrap();
-        assert!(child.parent_project_note_id.is_none());
-        assert_eq!(child.branch_id, branch.id);
-        // The user never opened the child on its own; it surfaces read rather
-        // than as a stray unread row on its branch timeline.
-        assert!(child.is_read());
-        assert_eq!(child.read_at, child.completed_at);
-        let pending = f.store.get_note(&pending.id).unwrap().unwrap();
-        assert!(pending.parent_project_note_id.is_none());
-        assert_eq!(pending.read_at, None);
+        assert_eq!(child.branch_id, f.target_branch.id);
+        assert_eq!(
+            child.parent_project_note_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(child.title, "Child (2)");
+        assert_eq!(child.content, "child body, rewritten");
+        assert_eq!(
+            f.store.get_branch_id_for_session(&session.id).unwrap(),
+            Some(f.target_branch.id.clone())
+        );
+        assert!(f.store.get_image(&image.id).unwrap().is_some());
         assert!(f.store.list_project_notes(&f.source.id).unwrap().is_empty());
+        // Still a child: listed under the parent, hidden from the timeline.
+        assert_eq!(
+            f.store
+                .list_child_notes(&parent.id)
+                .unwrap()
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
+            [child.id.as_str()]
+        );
+        assert_eq!(
+            f.store
+                .list_notes_for_branch(&f.target_branch.id)
+                .unwrap()
+                .len(),
+            1
+        );
 
         let project_change = |project_id: &str| StoreChange::Notes {
             branch_id: None,
             project_id: Some(project_id.to_string()),
         };
+        let branch_change = |branch_id: &str| StoreChange::Notes {
+            branch_id: Some(branch_id.to_string()),
+            project_id: None,
+        };
         assert_eq!(rx.try_recv().unwrap(), project_change(&f.source.id));
         assert_eq!(rx.try_recv().unwrap(), project_change(&f.target.id));
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            StoreChange::Notes {
-                branch_id: Some(branch.id.clone()),
-                project_id: None,
-            }
-        );
+        assert_eq!(rx.try_recv().unwrap(), branch_change(&f.source_branch.id));
+        assert_eq!(rx.try_recv().unwrap(), branch_change(&f.target_branch.id));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A childless move publishes only the two project surfaces.
+    #[test]
+    fn project_note_move_without_children_touches_no_branch() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        let f = fixture_in(Store::in_memory().unwrap().with_change_sender(tx));
+        let parent = ProjectNote::new(&f.source.id, "Parent", "body");
+        f.store.create_project_note(&parent).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        f.store
+            .move_project_note_to_project(
+                &parent.id,
+                &f.source.id,
+                &parent.content,
+                &f.target.id,
+                "body",
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err());
     }
 
@@ -942,6 +1551,7 @@ mod tests {
             .move_project_note_to_project(
                 &note.id,
                 &f.source.id,
+                &note.content,
                 &f.target.id,
                 &content,
                 &[],
@@ -949,11 +1559,266 @@ mod tests {
                     project_id: f.target.id.clone(),
                     ..image.clone()
                 }],
+                &[],
             )
             .unwrap();
 
         let row = f.store.get_image(&image.id).unwrap().unwrap();
         assert_eq!(row.project_id, f.target.id);
         assert!(row.branch_id.is_none());
+    }
+
+    /// A parent and one child, each with a settled session and a media row
+    /// only it uses, and the plan a move would make for them: both bodies
+    /// rewritten, each note's own row re-homed and one more row copied in.
+    struct PlannedFamily {
+        note: ProjectNote,
+        parent_session: crate::store::Session,
+        parent_image: Image,
+        child: Note,
+        child_session: crate::store::Session,
+        child_image: Image,
+        content: String,
+        media: Vec<Image>,
+        rehomed: Vec<Image>,
+        plan: ChildNoteMove,
+    }
+
+    fn planned_family(f: &Fixture) -> PlannedFamily {
+        let parent_session = completed_session(f);
+        let mut parent_image = Image::new(None, &f.source.id, "plan.png", "image/png", 3, false);
+        parent_image.session_id = Some(parent_session.id.clone());
+        f.store.create_image(&parent_image).unwrap();
+        let note = ProjectNote::new(
+            &f.source.id,
+            "Plan",
+            &format!("![a](staged-media://{}.png)", parent_image.id),
+        )
+        .with_session(&parent_session.id);
+        f.store.create_project_note(&note).unwrap();
+
+        let child_session =
+            crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
+                .with_branch(&f.source_branch.id);
+        f.store.create_session(&child_session).unwrap();
+        f.store
+            .update_session_status(&child_session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let child_image = source_media(f, &child_session.id);
+        let child = Note::new_standalone(
+            &f.source_branch.id,
+            "Child",
+            &format!("![a](staged-media://{}.png)", child_image.id),
+        )
+        .with_parent_project_note(&note.id)
+        .with_session(&child_session.id);
+        f.store.create_note(&child).unwrap();
+
+        let plan = ChildNoteMove {
+            content: format!("{}, rewritten", child.content),
+            media: vec![Image::new(
+                Some(&f.target_branch.id),
+                &f.target.id,
+                "child copy.png",
+                "image/png",
+                3,
+                false,
+            )],
+            rehomed: vec![rehomed_onto(f, &child_image, "shot.png", &child_session.id)],
+            ..child_move(&child, &f.target_branch.id)
+        };
+        PlannedFamily {
+            content: format!("{}, rewritten", note.content),
+            media: vec![Image::new(
+                None,
+                &f.target.id,
+                "plan copy.png",
+                "image/png",
+                3,
+                false,
+            )],
+            rehomed: vec![Image {
+                project_id: f.target.id.clone(),
+                ..parent_image.clone()
+            }],
+            note,
+            parent_session,
+            parent_image,
+            child,
+            child_session,
+            child_image,
+            plan,
+        }
+    }
+
+    impl PlannedFamily {
+        fn move_as_planned(&self, f: &Fixture) -> Result<ProjectNote, StoreError> {
+            f.store.move_project_note_to_project(
+                &self.note.id,
+                &f.source.id,
+                &self.note.content,
+                &f.target.id,
+                &self.content,
+                &self.media,
+                &self.rehomed,
+                std::slice::from_ref(&self.plan),
+            )
+        }
+
+        /// Nothing the move wrote survived: both notes are where they were,
+        /// still linked, the child's session is still scheduled on its
+        /// branch, the re-homed rows are back in the source and the copied
+        /// rows are gone.
+        fn assert_rolled_back(&self, f: &Fixture) {
+            let parent = f.store.get_project_note(&self.note.id).unwrap().unwrap();
+            assert_eq!(parent.project_id, f.source.id);
+            let child = f.store.get_note(&self.child.id).unwrap().unwrap();
+            assert_eq!(child.branch_id, f.source_branch.id);
+            assert_eq!(
+                child.parent_project_note_id.as_deref(),
+                Some(self.note.id.as_str())
+            );
+            assert_eq!(
+                f.store
+                    .get_branch_id_for_session(&self.child_session.id)
+                    .unwrap(),
+                Some(f.source_branch.id.clone())
+            );
+            let parent_row = f.store.get_image(&self.parent_image.id).unwrap().unwrap();
+            assert_eq!(parent_row.project_id, f.source.id);
+            assert!(parent_row.branch_id.is_none());
+            let child_row = f.store.get_image(&self.child_image.id).unwrap().unwrap();
+            assert_eq!(child_row.project_id, f.source.id);
+            assert_eq!(child_row.branch_id.as_ref(), Some(&f.source_branch.id));
+            assert_eq!(child_row.filename, self.child_image.filename);
+            for copied in self.media.iter().chain(&self.plan.media) {
+                assert!(f.store.get_image(&copied.id).unwrap().is_none());
+            }
+        }
+    }
+
+    /// A child whose session was resumed and finished again after the plan
+    /// was made reads as settled — only its body shows the run — and the
+    /// planned body was rewritten from the one before it. The move is
+    /// refused rather than overwriting that run, and nothing of the family
+    /// or its media changes; a plan made from the new body goes through.
+    #[test]
+    fn project_note_move_is_refused_when_a_child_body_changed_after_planning() {
+        let f = fixture();
+        let family = planned_family(&f);
+        let newer = format!("{}\n\nMore findings.", family.child.content);
+        f.store
+            .update_session_status(&family.child_session.id, SessionStatus::Running, None, None)
+            .unwrap();
+        f.store
+            .update_note_content(&family.child.id, &newer)
+            .unwrap();
+        f.store
+            .update_session_status(
+                &family.child_session.id,
+                SessionStatus::Completed,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let err = family.move_as_planned(&f).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Note 'Child' was updated during the transfer; try again."
+        );
+        family.assert_rolled_back(&f);
+        assert_eq!(
+            f.store.get_note(&family.child.id).unwrap().unwrap().content,
+            newer
+        );
+        assert_eq!(
+            f.store
+                .get_project_note(&family.note.id)
+                .unwrap()
+                .unwrap()
+                .content,
+            family.note.content
+        );
+
+        // The retry reads the child again and plans from what it reads now.
+        let replanned = PlannedFamily {
+            plan: ChildNoteMove {
+                expected_content: newer.clone(),
+                content: format!("{newer}, rewritten"),
+                ..family.plan.clone()
+            },
+            ..family
+        };
+        replanned.move_as_planned(&f).unwrap();
+        let child = f.store.get_note(&replanned.child.id).unwrap().unwrap();
+        assert_eq!(child.branch_id, f.target_branch.id);
+        assert_eq!(child.content, format!("{newer}, rewritten"));
+    }
+
+    /// The parent's body is keyed on the same way. A parent whose own session
+    /// was resumed and finished again since the plan was made is refused with
+    /// the family and its media untouched; one whose session is live again
+    /// too is told to wait for it, since a retry would only stop there.
+    #[test]
+    fn project_note_move_is_refused_when_the_parent_body_changed_after_planning() {
+        let f = fixture();
+        let family = planned_family(&f);
+        let newer = format!("{}\n\nNext steps.", family.note.content);
+        f.store
+            .update_session_status(
+                &family.parent_session.id,
+                SessionStatus::Running,
+                None,
+                None,
+            )
+            .unwrap();
+        f.store
+            .update_project_note_title_and_content(&family.note.id, "Plan", &newer, None, None)
+            .unwrap();
+        f.store
+            .update_session_status(
+                &family.parent_session.id,
+                SessionStatus::Completed,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let err = family.move_as_planned(&f).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Note 'Plan' was updated during the transfer; try again."
+        );
+        family.assert_rolled_back(&f);
+        assert_eq!(
+            f.store
+                .get_project_note(&family.note.id)
+                .unwrap()
+                .unwrap()
+                .content,
+            newer
+        );
+        assert_eq!(
+            f.store.get_note(&family.child.id).unwrap().unwrap().content,
+            family.child.content
+        );
+
+        f.store
+            .update_session_status(
+                &family.parent_session.id,
+                SessionStatus::Running,
+                None,
+                None,
+            )
+            .unwrap();
+        let err = family.move_as_planned(&f).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "The session of 'Plan' started again during the transfer; wait for it to finish before moving the note."
+        );
+        family.assert_rolled_back(&f);
     }
 }

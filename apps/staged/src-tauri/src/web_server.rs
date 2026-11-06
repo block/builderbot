@@ -2816,7 +2816,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 &project_note_id,
                 &target_project_id,
                 mode,
-            )?;
+                |key| {
+                    crate::note_transfer::add_repo_to_project(
+                        app_handle.clone(),
+                        Arc::clone(&store),
+                        target_project_id.clone(),
+                        key,
+                    )
+                },
+            )
+            .await?;
             Ok(serde_json::to_value(note).unwrap())
         }
 

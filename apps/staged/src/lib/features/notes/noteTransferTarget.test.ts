@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  childrenTravel,
   createProjectOption,
   lookedUpRepo,
   noteTransferCandidates,
   newRemoteProjectBlocker,
   noteTransferBlocker,
+  noteTransferHint,
   noteTransferLabels,
   noteTransferTarget,
   repoAddedHint,
@@ -67,6 +69,23 @@ describe('noteTransferCandidates', () => {
 
   it('offers everything when the current project is unknown', () => {
     expect(noteTransferCandidates([here, there], null, 'move')).toEqual([here, there]);
+  });
+
+  it('leaves remote projects off when the note brings child notes along', () => {
+    const remote = project({ id: 'remote', name: 'Remote', location: 'remote' });
+    expect(
+      noteTransferCandidates([here, there, remote], 'here', 'move', { localOnly: true })
+    ).toEqual([there]);
+    expect(noteTransferCandidates([here, there, remote], 'here', 'move')).toEqual([there, remote]);
+  });
+});
+
+describe('childrenTravel', () => {
+  it('is only true for a moved project note that has children', () => {
+    expect(childrenTravel('move', 'project', true)).toBe(true);
+    expect(childrenTravel('move', 'project', false)).toBe(false);
+    expect(childrenTravel('copy', 'project', true)).toBe(false);
+    expect(childrenTravel('move', 'branch', true)).toBe(false);
   });
 });
 
@@ -221,5 +240,29 @@ describe('transferFailedAfterCreate', () => {
     expect(transferFailedAfterCreate('copy', 'Fresh', 'disk full')).toBe(
       "Created Fresh, but the note wasn't copied: disk full"
     );
+  });
+});
+
+describe('noteTransferHint', () => {
+  const repo = { githubRepo: 'acme/widgets', subpath: null };
+
+  it('talks about the repo for a branch note, moved or copied', () => {
+    expect(noteTransferHint('move', 'branch', repo)).toBe(repoAddedHint(repo));
+    expect(noteTransferHint('copy', 'branch', repo)).toBe(repoAddedHint(repo));
+  });
+
+  it('says a moved project note takes its child notes but not its commits or reviews', () => {
+    const hint = noteTransferHint('move', 'project', null, true);
+    expect(hint).toContain('child notes and their sessions');
+    expect(hint).toContain('Commits and code reviews stay on their branch');
+  });
+
+  it('says nothing for a project note without children, which moves alone', () => {
+    expect(noteTransferHint('move', 'project', null, false)).toBeNull();
+    expect(noteTransferHint('move', 'project', null)).toBeNull();
+  });
+
+  it('says nothing for a copied project note, which is standalone', () => {
+    expect(noteTransferHint('copy', 'project', null, true)).toBeNull();
   });
 });

@@ -6,7 +6,10 @@
   which note is on screen: it calls the branch-note or project-note command
   for `noteKind`, toasts a successful copy (the note stays open), and reports
   a successful move through `onMoved` so the host can close — the note no
-  longer belongs where it was opened from.
+  longer belongs where it was opened from. "Move" is disabled, with the reason
+  under it, while the note's session is queued or running: the backend would
+  refuse (a live session is scheduled by the branch it is on), and saying so
+  up front beats an error after picking a project.
 -->
 <script lang="ts">
   import Copy from '@lucide/svelte/icons/copy';
@@ -30,6 +33,10 @@
     noteTitle: string;
     /** The project the note is in now. */
     projectId?: string | null;
+    /** A project note's child notes travel with a move; shapes the picker. */
+    hasChildren?: boolean;
+    /** The note's session is queued or running, so a move is refused for now. */
+    sessionActive?: boolean;
     /**
      * Runs after the picker confirms, before it creates a project for the note
      * and before the command. The transfer acts on the stored note, so a host
@@ -41,7 +48,16 @@
     onMoved?: () => void;
   }
 
-  let { noteId, noteKind, noteTitle, projectId = null, beforeTransfer, onMoved }: Props = $props();
+  let {
+    noteId,
+    noteKind,
+    noteTitle,
+    projectId = null,
+    hasChildren = false,
+    sessionActive = false,
+    beforeTransfer,
+    onMoved,
+  }: Props = $props();
 
   let mode = $state<NoteTransferMode>('move');
   let dialogOpen = $state(false);
@@ -129,9 +145,14 @@
     <MoreHorizontal size={16} />
   </DropdownMenu.Trigger>
   <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[180px]">
-    <DropdownMenu.Item onSelect={() => openPicker('move')}>
+    <DropdownMenu.Item onSelect={() => openPicker('move')} disabled={sessionActive}>
       <FolderInput size={14} />
-      Move to project…
+      <span class="flex flex-col">
+        <span>Move to project…</span>
+        {#if sessionActive}
+          <span class="text-xs text-muted-foreground">Wait for the session to finish</span>
+        {/if}
+      </span>
     </DropdownMenu.Item>
     <DropdownMenu.Item onSelect={() => openPicker('copy')}>
       <Copy size={14} />
@@ -143,9 +164,11 @@
 <NoteTransferDialog
   bind:open={dialogOpen}
   {mode}
+  {noteKind}
   {noteTitle}
   currentProjectId={projectId}
   loadNoteRepo={noteKind === 'branch' ? loadRepo : undefined}
   onPrepare={prepare}
+  hasChildren={noteKind === 'project' && hasChildren}
   onConfirm={transfer}
 />

@@ -20,6 +20,12 @@
   adding the note's repo, or the transfer itself — stay inline so the choice
   can be retried, and one that comes after the project was created says so;
   the backend guarantees a failed transfer left the note where it was.
+
+  The line under the title says what travels: a repo note's repository, or —
+  for a moved project note with child notes — those notes and their sessions
+  (commits and code reviews from that session stay on their branch). A note
+  that brings children can only land in a local project, so remote ones are
+  left off the list then.
 -->
 <script lang="ts" module>
   let inputCounter = 0;
@@ -43,16 +49,18 @@
   import * as commands from '../../api/commands';
   import { filterMoveTargets, nextMoveTargetIndex } from '../branches/moveBranchTarget';
   import {
+    childrenTravel,
     createProjectOption,
     lookedUpRepo,
     newRemoteProjectBlocker,
     noteTransferCandidates,
+    noteTransferHint,
     noteTransferLabels,
     noteTransferTarget,
-    repoAddedHint,
     transferFailedAfterCreate,
     type NoteRepo,
     type NoteRepoLookup,
+    type NoteTransferKind,
     type NoteTransferMode,
     type NoteTransferSelection,
   } from './noteTransferTarget';
@@ -61,6 +69,8 @@
   interface Props {
     open: boolean;
     mode: NoteTransferMode;
+    /** Branch notes bring their repo; project notes bring their children. */
+    noteKind: NoteTransferKind;
     noteTitle: string;
     /** The project the note is in now; left off the list for a move. */
     currentProjectId?: string | null;
@@ -76,6 +86,8 @@
      * creates nothing.
      */
     onPrepare?: () => Promise<void>;
+    /** Whether a project note has child notes that a move would bring along. */
+    hasChildren?: boolean;
     /** Perform the transfer into an existing (or just-created) project. */
     onConfirm: (targetProjectId: string) => Promise<void>;
   }
@@ -83,10 +95,12 @@
   let {
     open = $bindable(false),
     mode,
+    noteKind,
     noteTitle,
     currentProjectId = null,
     loadNoteRepo,
     onPrepare,
+    hasChildren = false,
     onConfirm,
   }: Props = $props();
 
@@ -125,11 +139,13 @@
 
   let labels = $derived(noteTransferLabels(mode));
   let repo = $derived(lookedUpRepo(noteRepo));
-  let hint = $derived(repoAddedHint(repo));
+  let hint = $derived(noteTransferHint(mode, noteKind, repo, hasChildren));
   // Projects being deleted are already gone from every list, so they are not
   // offered as destinations.
   let candidates = $derived(
-    noteTransferCandidates(projectsDataStore.liveProjects, currentProjectId, mode)
+    noteTransferCandidates(projectsDataStore.liveProjects, currentProjectId, mode, {
+      localOnly: childrenTravel(mode, noteKind, hasChildren),
+    })
   );
   let filtered = $derived(filterMoveTargets(candidates, projectsDataStore.reposByProject, query));
   // Checked against every project, not just the candidates: for a move the

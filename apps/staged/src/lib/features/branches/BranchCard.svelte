@@ -140,6 +140,9 @@
     repoLabel?: ProjectRepo | null;
     projectName?: string;
     deleting?: boolean;
+    /** Ignore file drops without showing the card as deleting: its project is
+     *  being deleted, and the project section dims the whole list instead. */
+    dropsDisabled?: boolean;
     worktreeError?: string;
     workspaceError?: string;
     onDelete?: () => void;
@@ -153,6 +156,7 @@
     repoLabel = null,
     projectName,
     deleting = false,
+    dropsDisabled = false,
     worktreeError,
     workspaceError,
     onDelete,
@@ -1813,13 +1817,18 @@
           toast.error('Error', {
             description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
           });
-          return false;
-        } finally {
           pendingAdds = pendingAdds.filter((p) => p.key !== placeholders[i].key);
+          return false;
         }
       })
     );
+    // A stored note's row stays until the newest load has settled, as an
+    // image's does in addTimelineImages, so it gives way to the note rather
+    // than clearing before the reload brings the note in.
     void loadTimeline();
+    await timelineLoadsSettled();
+    const keys = placeholders.map((p) => p.key);
+    pendingAdds = pendingAdds.filter((p) => !keys.includes(p.key));
     return stored.filter(Boolean).length;
   }
 
@@ -1946,11 +1955,15 @@
   // read on this machine and the note or image lands in the local store, never
   // on the workspace.
   //
-  // A card being deleted takes neither the highlight nor the drop. The store
-  // would race the delete, and its toast would promise the file to a card about
-  // to vanish, or, if the delete won, blame the file ("Could not read …").
-  // `deleting` is read as each event arrives, not by the effect, so the
-  // subscription stays put while it flips; a failed delete restores the card.
+  // A card being deleted, or in a project being deleted, takes neither the
+  // highlight nor the drop. The store would race the delete, and its toast
+  // would promise the file to a card about to vanish, or, if the delete won,
+  // blame the file ("Could not read …"). `onDrop` reads `takesDrops` as each
+  // drop arrives, not the effect, so the subscription stays put while it flips;
+  // a failed delete restores the card. The highlight derives from it in the
+  // markup, so it follows a flip mid-hover too.
+  let takesDrops = $derived(!deleting && !dropsDisabled);
+
   $effect(() => {
     const el = cardElement;
     if (!el) return;
@@ -1959,10 +1972,10 @@
       subscribeDragDrop({
         element: el,
         onDragOver: (over) => {
-          dragOver = over && !deleting;
+          dragOver = over;
         },
         onDrop: (paths) => {
-          if (deleting) return;
+          if (!takesDrops) return;
           void handleFileDrop(paths);
         },
       })
@@ -2028,7 +2041,7 @@
   class:deleting
   class:creating-worktree={isLocal && !branch.worktreePath && !worktreeError && !deleting}
   data-branch-id={branch.id}
-  class:drag-over={dragOver}
+  class:drag-over={dragOver && takesDrops}
 >
   {#if deleting}
     <div class="deleting-overlay">

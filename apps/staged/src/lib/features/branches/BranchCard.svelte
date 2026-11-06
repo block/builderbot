@@ -865,10 +865,20 @@
     };
   });
 
-  // Load timeline when a branch becomes timeline-ready
+  // Load timeline when a branch becomes timeline-ready.
+  //
+  // While it is not ready, forget which key was loaded. A remote branch has
+  // the same key every time its workspace runs, and `timeline-invalidated` is
+  // ignored while it is stopped, so a note or image added then (a dropped
+  // file) would otherwise never show: the restart would find its key already
+  // loaded and skip. Forgetting it makes the restart an initial load, which
+  // shows the cached timeline if it is still fresh and fetches otherwise.
   $effect(() => {
     const timelineKey = branchTimelineReadyKey(branch);
-    if (!timelineKey) return;
+    if (!timelineKey) {
+      loadedTimelineKey = null;
+      return;
+    }
     if (timelineKey === loadedTimelineKey || timelineKey === requestedTimelineKey) return;
 
     void loadTimeline({ timelineKey });
@@ -1761,7 +1771,8 @@
   }
 
   // =========================================================================
-  // Drag-and-drop text files → notes (via Tauri native drag-drop events)
+  // Drag-and-drop: text files → notes, images → timeline (via Tauri native
+  // drag-drop events)
   // =========================================================================
 
   let dragOver = $state(false);
@@ -1775,46 +1786,92 @@
   let shouldMountInterior = $state(false);
   let interiorEl: HTMLDivElement | undefined = $state();
 
-  function handleFileDrop(paths: string[]) {
+  async function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isMaybeTextFile);
     const imagePaths = paths.filter(isImageAttachmentFile);
 
-    if (textPaths.length > 0) {
-      const placeholders = textPaths.map((filePath) => ({
-        key: `drop-${Date.now()}-${filePath}`,
-        title: fileNameFromPath(filePath),
-        type: 'generating-note' as const,
-      }));
-      pendingAdds = [...pendingAdds, ...placeholders];
+    const [notesAdded, imagesAdded] = await Promise.all([
+      textPaths.length > 0 ? addTextFileNotes(textPaths) : 0,
+      imagePaths.length > 0 ? addImagePaths(imagePaths) : 0,
+    ]);
+    notifyAddedOffTimeline(notesAdded + imagesAdded);
+  }
 
-      Promise.all(
-        textPaths.map(async (filePath, i) => {
-          try {
-            const content = await commands.readTextFile(filePath);
-            // Through the same split the editor saves through, so a dropped file
-            // is stored like any other note: its own leading H1 becomes the
-            // title (and leaves the body, which the viewer would otherwise show
-            // straight under the file name), and the file name titles the rest.
-            const note = splitNoteMarkdown(content, fileNameFromPath(filePath));
-            await commands.createNote(branch.id, note.title, note.body);
-          } catch (e) {
-            const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
-            const detail = reason ?? 'it may be a binary file';
-            toast.error('Error', {
-              description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
-            });
-          } finally {
-            pendingAdds = pendingAdds.filter((p) => p.key !== placeholders[i].key);
-          }
-        })
-      ).then(() => {
-        loadTimeline();
-      });
-    }
+  /** Stores each text file as a note. Resolves to how many were stored. */
+  async function addTextFileNotes(textPaths: string[]): Promise<number> {
+    const placeholders = textPaths.map((filePath) => ({
+      key: `drop-${Date.now()}-${filePath}`,
+      title: fileNameFromPath(filePath),
+      type: 'generating-note' as const,
+    }));
+    pendingAdds = [...pendingAdds, ...placeholders];
 
-    if (imagePaths.length > 0) {
-      addImagePaths(imagePaths);
+    const stored = await Promise.all(
+      textPaths.map(async (filePath, i) => {
+        try {
+          const content = await commands.readTextFile(filePath);
+          // Through the same split the editor saves through, so a dropped file
+          // is stored like any other note: its own leading H1 becomes the
+          // title (and leaves the body, which the viewer would otherwise show
+          // straight under the file name), and the file name titles the rest.
+          const note = splitNoteMarkdown(content, fileNameFromPath(filePath));
+          await commands.createNote(branch.id, note.title, note.body);
+          return true;
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
+          const detail = reason ?? 'it may be a binary file';
+          toast.error('Error', {
+            description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
+          });
+          pendingAdds = pendingAdds.filter((p) => p.key !== placeholders[i].key);
+          return false;
+        }
+      })
+    );
+    // A stored note's row stays until the newest load has settled, as an
+    // image's does in addTimelineImages, so it gives way to the note rather
+    // than clearing before the reload brings the note in.
+    void loadTimeline();
+    await timelineLoadsSettled();
+    const keys = placeholders.map((p) => p.key);
+    pendingAdds = pendingAdds.filter((p) => !keys.includes(p.key));
+    return stored.filter(Boolean).length;
+  }
+
+  /**
+   * Confirms a drop or an "Add image" pick that the timeline cannot show yet.
+   * Without a timeline key (a remote workspace that is not running, a local
+   * branch with no worktree) the card shows a status view, or an empty setup
+   * timeline whose "adding..." rows clear without the item appearing. With a
+   * key, a failed reload leaves the card showing the error and Retry, with no
+   * timeline or an older one that lacks the item. The note or image is still
+   * stored and shows once the timeline loads, so say so rather than leave the
+   * drop looking like a no-op that invites a duplicate. Checked once the
+   * stores and their reload finish, not at drop time: what matters is whether
+   * that reload showed the items. `error` then reflects the newest load only,
+   * since each load clears it as it starts and cancels older revalidations.
+   * Called once per drop or pick with everything it stored, so a drop of
+   * notes and images gets one toast.
+   */
+  function notifyAddedOffTimeline(count: number) {
+    if (count === 0) return;
+    let when: string;
+    if (!branchTimelineReadyKey(branch)) {
+      const until = isRemote
+        ? 'the workspace is running'
+        : worktreeError
+          ? 'a retry creates the worktree'
+          : 'the worktree is ready';
+      when = `on the timeline once ${until}`;
+    } else if (error) {
+      when = 'once the timeline loads';
+    } else {
+      return;
     }
+    const pronoun = count === 1 ? 'It' : 'They';
+    toast.success(`Added ${count} ${count === 1 ? 'file' : 'files'}`, {
+      description: `${pronoun} will appear ${when}.`,
+    });
   }
 
   // =========================================================================
@@ -1836,8 +1893,10 @@
    * Each store publishes a branch change, and the reload it triggers brings in
    * that image's real row. The placeholder carries the stored image's ID, so
    * `prunePlaceholders` swaps one for the other in that reload's update.
+   *
+   * Resolves to how many images were stored.
    */
-  async function addTimelineImages(images: TimelineImageUpload[]) {
+  async function addTimelineImages(images: TimelineImageUpload[]): Promise<number> {
     // Keyed by counter, not name: iOS can hand back several "image.jpg"s.
     const placeholders = images.map(({ name }) => ({
       key: `image-${nextPendingImageId++}`,
@@ -1870,8 +1929,10 @@
       // before that reload lands would blink them out.
       void loadTimeline();
       await timelineLoadsSettled();
+      return images.length - rejections.length;
     } catch (e) {
       notifyError('Could not add images', e);
+      return 0;
     } finally {
       // Fallback for a stored image whose row never arrives (the refresh
       // failed, or it was deleted meanwhile), and for every row after a batch
@@ -1882,7 +1943,7 @@
 
   /** Desktop: files dropped on the card or picked in the open panel. */
   function addImagePaths(paths: string[]) {
-    void addTimelineImages(
+    return addTimelineImages(
       paths.map((filePath) => ({
         name: attachBasename(filePath),
         store: () => commands.createImage(branch.id, branch.projectId, filePath),
@@ -1892,7 +1953,7 @@
 
   /** Web: files picked through the file input (on iOS, Photo Library or Files). */
   function addImageFiles(files: File[]) {
-    void addTimelineImages(
+    return addTimelineImages(
       files.map((file) => ({
         name: file.name,
         store: async () =>
@@ -1907,9 +1968,18 @@
     );
   }
 
+  // Remote cards take drops too, whatever their workspace's status: the file is
+  // read on this machine and the note or image lands in the local store, never
+  // on the workspace.
+  //
+  // A card being deleted takes neither the highlight nor the drop. The store
+  // would race the delete, and its toast would promise the file to a card about
+  // to vanish, or, if the delete won, blame the file ("Could not read …").
+  // `onDrop` reads `deleting` as each drop arrives, not the effect, so the
+  // subscription stays put while it flips; a failed delete restores the card.
+  // The highlight derives from it in the markup, so it follows a flip mid-hover
+  // too.
   $effect(() => {
-    if (!isLocal) return;
-
     const el = cardElement;
     if (!el) return;
 
@@ -1920,7 +1990,8 @@
           dragOver = over;
         },
         onDrop: (paths) => {
-          handleFileDrop(paths);
+          if (deleting) return;
+          void handleFileDrop(paths);
         },
       })
     );
@@ -1985,7 +2056,7 @@
   class:deleting
   class:creating-worktree={isLocal && !branch.worktreePath && !worktreeError && !deleting}
   data-branch-id={branch.id}
-  class:drag-over={dragOver}
+  class:drag-over={dragOver && !deleting}
 >
   {#if deleting}
     <div class="deleting-overlay">
@@ -2259,8 +2330,8 @@
      build's file input has to outlive the tap that opened it. -->
 <BranchImagePicker
   bind:this={imagePicker}
-  onPickPaths={addImagePaths}
-  onPickFiles={addImageFiles}
+  onPickPaths={(paths) => void addImagePaths(paths).then(notifyAddedOffTimeline)}
+  onPickFiles={(files) => void addImageFiles(files).then(notifyAddedOffTimeline)}
   onError={(e) => notifyError('Could not open the image picker', e)}
 />
 

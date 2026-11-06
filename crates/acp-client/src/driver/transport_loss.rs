@@ -410,6 +410,11 @@ impl TransportMonitor {
         Some(TransportLoss { phase })
     }
 
+    /// See [`DetachHandle::is_armed`].
+    fn detach_armed(&self) -> bool {
+        self.state().detach_target.is_some()
+    }
+
     /// See [`DetachHandle::detach`].
     fn detach(&self) -> bool {
         {
@@ -487,5 +492,12 @@ impl DetachHandle {
     /// go of its proxy itself.
     pub fn detach(&self) -> bool {
         self.monitor.detach()
+    }
+
+    /// Whether [`Self::detach`] would let go of something now, without
+    /// detaching. Only a snapshot: the connection may start tearing down right
+    /// after.
+    pub fn is_armed(&self) -> bool {
+        self.monitor.detach_armed()
     }
 }

@@ -40,7 +40,7 @@ pub(crate) mod attachments;
 mod disconnect;
 pub(crate) mod reconcile;
 
-pub(crate) use disconnect::{may_still_run_on_workstation, runs_on_blox};
+pub(crate) use disconnect::may_still_run_on_workstation;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -933,6 +933,25 @@ impl SessionRegistry {
         false
     }
 
+    /// Whether [`Self::detach`] would let `session_id` go right now, rather
+    /// than leave its caller to cancel it. It checks the same two things,
+    /// a live remote connection or a reattach, and changes nothing. The quit
+    /// prompt uses it so it counts only the sessions a quit would stop. Only
+    /// a snapshot: a Blox session that is still connecting reads `false`
+    /// until its connection is up.
+    pub(crate) fn would_detach(&self, session_id: &str) -> bool {
+        let Some(running) = self.inner.lock().unwrap().running.get(session_id).cloned() else {
+            return false;
+        };
+        let connected = running
+            .detach
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(acp_client::DetachHandle::is_armed);
+        connected || running.reattach_detach.lock().unwrap().is_some()
+    }
+
     /// Mark `session_id`'s run as reattaching to its remote turn, returning
     /// the token every [`Self::detach`] of the entry fires from then on,
     /// whether or not it also killed a live connection: the reattach stops
@@ -947,6 +966,13 @@ impl SessionRegistry {
             *running.reattach_detach.lock().unwrap() = Some(token.clone());
         }
         token
+    }
+
+    /// [`Self::reattaching`], for tests outside this module that need a
+    /// session the quit would detach.
+    #[cfg(test)]
+    pub(crate) fn reattaching_for_test(&self, session_id: &str) -> CancellationToken {
+        self.reattaching(session_id)
     }
 
     /// The reason [`detach`](Self::detach) recorded on the entry `epoch`
@@ -7496,6 +7522,8 @@ mod tests {
         let (token, epoch) = registry.register("session-reattaching");
         let detached = registry.reattaching("session-reattaching");
 
+        assert!(registry.would_detach("session-reattaching"));
+        assert!(!detached.is_cancelled(), "asking detaches nothing");
         assert!(registry.detach("session-reattaching", CompletionReason::AppQuit));
         assert!(detached.is_cancelled());
         assert!(!token.is_cancelled(), "a detach is no Stop");
@@ -7613,9 +7641,11 @@ mod tests {
     #[test]
     fn detach_without_a_remote_connection_falls_back_to_cancel() {
         let registry = SessionRegistry::new();
+        assert!(!registry.would_detach("unknown"));
         assert!(!registry.detach("unknown", CompletionReason::AppQuit));
 
         let (token, epoch) = registry.register("session-local");
+        assert!(!registry.would_detach("session-local"));
         assert!(!registry.detach("session-local", CompletionReason::AppQuit));
         assert!(!token.is_cancelled());
         assert_eq!(registry.detach_reason_of("session-local", epoch), None);

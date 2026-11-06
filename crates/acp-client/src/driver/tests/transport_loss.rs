@@ -226,6 +226,25 @@ fn a_detach_with_no_lease_armed_does_nothing() {
     assert!(!monitor.lost().is_cancelled());
 }
 
+/// The quit prompt asks the handle whether a detach would let go of anything
+/// before the quit tries one: armed once a proxy is recorded, disarmed once
+/// teardown begins, and asking never detaches.
+#[test]
+fn a_detach_handle_reports_whether_it_is_armed() {
+    let monitor = TransportMonitor::new();
+    let handle = DetachHandle::new(Arc::clone(&monitor));
+    assert!(!handle.is_armed(), "a local session: nothing armed");
+
+    // Only recorded, never signalled: nothing below detaches.
+    monitor.arm_proxy_group(i32::MAX);
+    assert!(handle.is_armed());
+    assert!(!monitor.detach_requested(), "asking is not detaching");
+    assert!(!monitor.lost().is_cancelled());
+
+    monitor.begin_teardown();
+    assert!(!handle.is_armed(), "disarmed once teardown began");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn owns_session_admits_only_the_named_session() {
     let handler = AcpNotificationHandler::new(

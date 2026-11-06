@@ -24,10 +24,13 @@
 //! the exception: their agent runs on the workstation, so a quit *detaches*
 //! them instead — it kills only the local `blox acp` proxy, sending no
 //! `session/cancel`, and leaves the row `disconnected` with the turn still
-//! running remotely (see [`SessionRegistry::detach`]). Once a shutdown is
-//! claimed the branch queue stops draining ([`QuitState::is_quitting`]), so
-//! those cancels — terminal transitions like any other — can't feed fresh agent
-//! children into an exit that would orphan them.
+//! running remotely (see [`SessionRegistry::detach`]). Since a quit stops
+//! nothing of theirs, they don't gate it: with only Blox sessions running it
+//! asks nothing, and when it does ask it counts only what it stops. Once a
+//! shutdown is claimed the branch queue stops draining
+//! ([`QuitState::is_quitting`]), so those cancels — terminal transitions like
+//! any other — can't feed fresh agent children into an exit that would orphan
+//! them.
 //!
 //! The question is asked by a native alert with **no parent window**, not by a
 //! dialog in a webview. Quitting is scoped to the application, and the case the
@@ -61,7 +64,7 @@ use tauri_plugin_dialog::{
 
 use crate::actions;
 use crate::session_commands::{self, ActiveSessionInfo};
-use crate::session_runner::{self, SessionRegistry};
+use crate::session_runner::SessionRegistry;
 use crate::store::{CompletionReason, Session, SessionStatus, Store};
 
 /// Title of the quit confirmation alert.
@@ -74,16 +77,8 @@ const QUIT_PROMPT_TITLE: &str = "Quit Staged?";
 /// Return must not be what kills a room full of running agents.
 const QUIT_BUTTON: &str = "Quit & Stop Sessions";
 
-/// [`QUIT_BUTTON`] when the quit stops nothing: every session it would
-/// interrupt is a Blox session, which keeps running on its workstation.
-const QUIT_KEEPING_BLOX_BUTTON: &str = "Quit";
-
 /// Alert button that dismisses the prompt and leaves the sessions alone.
 const KEEP_RUNNING_BUTTON: &str = "Keep Running";
-
-/// [`KEEP_RUNNING_BUTTON`] when the quit stops nothing: the Blox sessions keep
-/// running whichever button is pressed, so dismissing only keeps Staged open.
-const CANCEL_BUTTON: &str = "Cancel";
 
 /// Menu id of the app-menu Quit item. Custom rather than
 /// `PredefinedMenuItem::quit` so `Cmd+Q` is routable at all: the predefined item
@@ -197,13 +192,10 @@ pub(crate) fn is_quitting<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
 #[derive(Debug, Default)]
 struct QuitBlockers {
     /// One label per running or queued session owned by this process that a
-    /// quit stops, e.g. `review on fix-login`. These and
-    /// `blox_session_labels` are the only things that gate a quit.
+    /// quit stops, e.g. `review on fix-login`. These are the only thing that
+    /// gates a quit. A Blox session the quit detaches is left out (see
+    /// [`sessions_a_quit_stops`]): it keeps running on its workstation.
     session_labels: Vec<String>,
-    /// One label per running Blox session owned by this process. A quit
-    /// detaches these rather than stopping them: they keep running on their
-    /// workstations.
-    blox_session_labels: Vec<String>,
     /// Running actions. Reported so the alert can say they stop too, but they
     /// don't gate the quit on their own: a dev server left running is the normal
     /// state of a workspace, and blocking `Cmd+Q` on it would be noise.
@@ -215,41 +207,6 @@ struct QuitBlockers {
 /// Queued sessions count: they're work the user asked for that a quit silently
 /// drops, so they belong in the prompt.
 fn should_prompt(blockers: &QuitBlockers) -> bool {
-    !blockers.session_labels.is_empty() || !blockers.blox_session_labels.is_empty()
-}
-
-/// The confirming button's label: it only promises to stop sessions when the
-/// quit will stop some.
-fn quit_button_label(blockers: &QuitBlockers) -> &'static str {
-    if quit_stops_sessions(blockers) {
-        QUIT_BUTTON
-    } else {
-        QUIT_KEEPING_BLOX_BUTTON
-    }
-}
-
-/// The dismissing button's label: "Keep Running" only when quitting would
-/// stop something, since otherwise everything keeps running either way.
-fn dismiss_button_label(blockers: &QuitBlockers) -> &'static str {
-    if quit_stops_sessions(blockers) {
-        KEEP_RUNNING_BUTTON
-    } else {
-        CANCEL_BUTTON
-    }
-}
-
-/// The alert's kind: a warning only when the quit will stop sessions. A quit
-/// that leaves every session running on Blox loses nothing.
-fn quit_prompt_kind(blockers: &QuitBlockers) -> MessageDialogKind {
-    if quit_stops_sessions(blockers) {
-        MessageDialogKind::Warning
-    } else {
-        MessageDialogKind::Info
-    }
-}
-
-/// Whether the quit stops any session, rather than only detaching Blox ones.
-fn quit_stops_sessions(blockers: &QuitBlockers) -> bool {
     !blockers.session_labels.is_empty()
 }
 
@@ -445,23 +402,21 @@ pub fn request_quit(app: &AppHandle, trigger: QuitTrigger) {
 /// loop keeps turning underneath it.
 fn ask_before_quitting(app: &AppHandle, blockers: &QuitBlockers) {
     let app = app.clone();
-    let quit_button = quit_button_label(blockers);
     app.dialog()
         .message(quit_prompt_message(blockers))
         .title(QUIT_PROMPT_TITLE)
-        .kind(quit_prompt_kind(blockers))
+        .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            dismiss_button_label(blockers).to_string(),
-            quit_button.to_string(),
+            KEEP_RUNNING_BUTTON.to_string(),
+            QUIT_BUTTON.to_string(),
         ))
         .show_with_result(move |result| {
             app.state::<QuitState>().take_prompt();
-            // Anything that isn't the quit button — "Keep Running" or
-            // "Cancel", or the system dismissing the alert itself — leaves the
-            // sessions alone.
+            // Anything that isn't the quit button — "Keep Running", or the
+            // system dismissing the alert itself — leaves the sessions alone.
             // Nothing to undo on that path: no window was revealed to host the
             // question, so the app is already in the state the user left it in.
-            if quit_confirmed(&result, quit_button) {
+            if quit_confirmed(&result) {
                 // The snapshot the message was built from may be stale by now:
                 // the alert is not modal to the app, so a session could have
                 // started or finished behind it. `shutdown_cleanup` re-queries,
@@ -471,10 +426,9 @@ fn ask_before_quitting(app: &AppHandle, blockers: &QuitBlockers) {
         });
 }
 
-/// Whether the alert was answered with its quit button, `quit_button` (see
-/// [`quit_button_label`]).
-fn quit_confirmed(result: &MessageDialogResult, quit_button: &str) -> bool {
-    matches!(result, MessageDialogResult::Custom(label) if label == quit_button)
+/// Whether the alert was answered with [`QUIT_BUTTON`].
+fn quit_confirmed(result: &MessageDialogResult) -> bool {
+    matches!(result, MessageDialogResult::Custom(label) if label == QUIT_BUTTON)
 }
 
 /// Quit from the UI, through the same gate as `Cmd+Q`.
@@ -503,24 +457,13 @@ fn spawn_quit(app: &AppHandle) {
 
 /// Snapshot what a quit would interrupt.
 fn collect_quit_blockers(app: &AppHandle) -> QuitBlockers {
-    let mut session_labels = Vec::new();
-    let mut blox_session_labels = Vec::new();
-    if let Some(store) = app_store(app) {
-        for session in owned_active_sessions(&store) {
-            // A queued Blox session has no remote turn yet; the quit cancels it
-            // like any other queued row.
-            let detaches = session.status == SessionStatus::Running
-                && session_runner::runs_on_blox(&store, &session);
-            let info = session_commands::project_active_session(&store, &session);
-            let location = session_location(&store, &info);
-            let label = quit_session_label(&info, location.as_deref());
-            if detaches {
-                blox_session_labels.push(label);
-            } else {
-                session_labels.push(label);
-            }
+    let session_labels = match app_store(app) {
+        Some(store) => {
+            let registry = app.try_state::<Arc<SessionRegistry>>();
+            sessions_a_quit_stops(&store, registry.as_deref().map(Arc::as_ref))
         }
-    }
+        None => Vec::new(),
+    };
 
     let running_action_count = match (
         app.try_state::<Arc<actions::ActionExecutor>>(),
@@ -536,9 +479,33 @@ fn collect_quit_blockers(app: &AppHandle) -> QuitBlockers {
 
     QuitBlockers {
         session_labels,
-        blox_session_labels,
         running_action_count,
     }
+}
+
+/// Labels of the owned sessions a quit would stop.
+///
+/// That is every one except a running session the quit would detach. The
+/// registry makes that call ([`SessionRegistry::would_detach`]), and the quit
+/// acts on the same call ([`signal_owned_sessions`], [`sweep_sessions`]). That
+/// leaves out only a connected or reattaching Blox session. A Blox session
+/// still starting its workstation, before its connection is up, is cancelled
+/// by a quit, so it counts, as does a queued one, which has no remote turn
+/// yet. With no registry nothing would be detached, so everything counts.
+fn sessions_a_quit_stops(store: &Store, registry: Option<&SessionRegistry>) -> Vec<String> {
+    owned_active_sessions(store)
+        .iter()
+        .filter(|session| {
+            let detaches = session.status == SessionStatus::Running
+                && registry.is_some_and(|registry| registry.would_detach(&session.id));
+            !detaches
+        })
+        .map(|session| {
+            let info = session_commands::project_active_session(store, session);
+            let location = session_location(store, &info);
+            quit_session_label(&info, location.as_deref())
+        })
+        .collect()
 }
 
 // =============================================================================
@@ -600,56 +567,31 @@ pub(crate) fn quit_session_label(session: &ActiveSessionInfo, location: Option<&
     }
 }
 
-/// Alert body: how much stops, how much keeps running on Blox, what each is,
-/// and whether actions go with it. Each group is mentioned only when it has
-/// sessions in it.
+/// Alert body: how much stops, what it is, and whether actions go with it.
 ///
-/// A detached Blox session is left `disconnected`, and launch reconciles
-/// those, so the body promises Staged will catch up with it on reopening.
+/// Only what the quit stops: a Blox session it detaches keeps running on its
+/// workstation, so it is neither counted nor named.
 ///
 /// Actions never gate the quit (see [`should_prompt`]), so they are mentioned
 /// only as a consequence of one.
 fn quit_prompt_message(blockers: &QuitBlockers) -> String {
-    let mut parts = Vec::new();
-    let stops_sessions = quit_stops_sessions(blockers);
     let labels = blockers.session_labels.join(", ");
-    match blockers.session_labels.len() {
-        0 => {}
-        1 => parts.push(format!(
-            "1 session is still running: {labels}. Quitting will stop it."
-        )),
-        count => parts.push(format!(
-            "{count} sessions are still running: {labels}. Quitting will stop them."
-        )),
-    }
-    // "also running" after the sessions that stop, so the two don't both
-    // read "still running".
-    let blox_verb = if stops_sessions { "also" } else { "still" };
-    let blox_labels = blockers.blox_session_labels.join(", ");
-    match blockers.blox_session_labels.len() {
-        0 => {}
-        1 => parts.push(format!(
-            "1 Blox session is {blox_verb} running: {blox_labels}. It will keep running on its \
-             workstation, and Staged will catch up with it next time it opens."
-        )),
-        count => parts.push(format!(
-            "{count} Blox sessions are {blox_verb} running: {blox_labels}. They will keep running \
-             on their workstations, and Staged will catch up with them next time it opens."
-        )),
-    }
-    // "also stop" only follows sessions that stop.
-    let action_verb = if stops_sessions {
-        "will also stop"
+    let mut message = if blockers.session_labels.len() == 1 {
+        format!("1 session is still running: {labels}. Quitting will stop it.")
     } else {
-        "will stop"
+        format!(
+            "{} sessions are still running: {labels}. Quitting will stop them.",
+            blockers.session_labels.len()
+        )
     };
+
     match blockers.running_action_count {
         0 => {}
-        1 => parts.push(format!("1 running action {action_verb}.")),
-        count => parts.push(format!("{count} running actions {action_verb}.")),
+        1 => message.push_str(" 1 running action will also stop."),
+        count => message.push_str(&format!(" {count} running actions will also stop.")),
     }
 
-    parts.join(" ")
+    message
 }
 
 // =============================================================================
@@ -872,14 +814,8 @@ mod tests {
     fn blockers(session_labels: &[&str], running_action_count: usize) -> QuitBlockers {
         QuitBlockers {
             session_labels: session_labels.iter().map(|s| s.to_string()).collect(),
-            blox_session_labels: Vec::new(),
             running_action_count,
         }
-    }
-
-    fn with_blox(mut blockers: QuitBlockers, blox_session_labels: &[&str]) -> QuitBlockers {
-        blockers.blox_session_labels = blox_session_labels.iter().map(|s| s.to_string()).collect();
-        blockers
     }
 
     #[test]
@@ -887,14 +823,89 @@ mod tests {
         assert!(should_prompt(&blockers(&["review on fix-login"], 0)));
     }
 
-    /// A Blox session survives the quit, but the user should still hear that
-    /// it is being left running.
+    /// A session on `branch`, created in `store`.
+    fn session_on(store: &Store, branch: &crate::store::Branch, status: SessionStatus) -> Session {
+        let mut session = match status {
+            SessionStatus::Queued => Session::new_queued("work"),
+            _ => Session::new_running("work", Path::new("/tmp")),
+        };
+        session.branch_id = Some(branch.id.clone());
+        store.create_session(&session).unwrap();
+        session
+    }
+
+    /// A store with a local branch (`local-fix`) and a Blox one (`blox-fix`).
+    fn store_with_branches() -> (Store, crate::store::Branch, crate::store::Branch) {
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("owner/repo");
+        store.create_project(&project).unwrap();
+        let local = crate::store::Branch::new(&project.id, "local-fix", "main");
+        store.create_branch(&local).unwrap();
+        let blox = crate::store::Branch::new_remote(&project.id, "blox-fix", "main", "ws-blox");
+        store.create_branch(&blox).unwrap();
+        (store, local, blox)
+    }
+
+    /// The quit prompt's count. A running Blox session the quit detaches
+    /// (here one reattaching to its remote turn, which `detach` lets go of
+    /// with or without a connection up) keeps running on its workstation and
+    /// is not counted. A quit cancels the rest, so they count: a running
+    /// local session, a Blox session the registry can't detach yet (still
+    /// starting its workstation, no connection up) and a queued Blox session.
     #[test]
-    fn blox_sessions_alone_prompt() {
-        assert!(should_prompt(&with_blox(
-            blockers(&[], 0),
-            &["commit on fix-login"]
-        )));
+    fn only_sessions_a_quit_stops_are_counted() {
+        let (store, local_branch, blox_branch) = store_with_branches();
+        let local = session_on(&store, &local_branch, SessionStatus::Running);
+        let blox = session_on(&store, &blox_branch, SessionStatus::Running);
+        let connecting = session_on(&store, &blox_branch, SessionStatus::Running);
+        session_on(&store, &blox_branch, SessionStatus::Queued);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let _local = registry.register_external(&local.id);
+        let _blox = registry.register_external(&blox.id);
+        let reattach = registry.reattaching_for_test(&blox.id);
+        let _connecting = registry.register_external(&connecting.id);
+
+        let mut counted = sessions_a_quit_stops(&store, Some(&registry));
+        counted.sort();
+        assert_eq!(
+            counted,
+            [
+                "session on blox-fix",
+                "session on blox-fix (queued)",
+                "session on local-fix",
+            ]
+        );
+        assert!(!reattach.is_cancelled(), "counting detaches nothing");
+        assert_eq!(
+            quit_prompt_message(&QuitBlockers {
+                session_labels: counted,
+                running_action_count: 0,
+            }),
+            "3 sessions are still running: session on blox-fix, session on blox-fix (queued), \
+             session on local-fix. Quitting will stop them."
+        );
+    }
+
+    /// With every running session on Blox and detachable, nothing gates the
+    /// quit, whatever actions are running. Without a registry nothing would
+    /// be detached, so the same session counts.
+    #[test]
+    fn only_detachable_blox_sessions_running_does_not_prompt() {
+        let (store, _, blox_branch) = store_with_branches();
+        let blox = session_on(&store, &blox_branch, SessionStatus::Running);
+        let registry = Arc::new(SessionRegistry::new());
+        let _blox = registry.register_external(&blox.id);
+        let _reattach = registry.reattaching_for_test(&blox.id);
+
+        let session_labels = sessions_a_quit_stops(&store, Some(&registry));
+        assert!(session_labels.is_empty(), "{session_labels:?}");
+        assert!(!should_prompt(&QuitBlockers {
+            session_labels,
+            running_action_count: 1,
+        }));
+
+        assert_eq!(sessions_a_quit_stops(&store, None), ["session on blox-fix"]);
     }
 
     #[test]
@@ -1025,63 +1036,15 @@ mod tests {
     /// answer and the cancel slot holds the quit.
     #[test]
     fn only_the_quit_button_confirms() {
-        for quit_button in [QUIT_BUTTON, QUIT_KEEPING_BLOX_BUTTON] {
-            assert!(quit_confirmed(
-                &MessageDialogResult::Custom(quit_button.to_string()),
-                quit_button
-            ));
-            for dismiss_button in [KEEP_RUNNING_BUTTON, CANCEL_BUTTON] {
-                assert!(!quit_confirmed(
-                    &MessageDialogResult::Custom(dismiss_button.to_string()),
-                    quit_button
-                ));
-            }
-            // What a system-dismissed alert reports.
-            assert!(!quit_confirmed(&MessageDialogResult::Cancel, quit_button));
-            assert!(!quit_confirmed(&MessageDialogResult::Ok, quit_button));
-        }
-    }
-
-    /// The button only promises to stop sessions when the quit stops some.
-    #[test]
-    fn quit_button_names_stopping_only_when_something_stops() {
-        let local = blockers(&["note on docs"], 0);
-        assert_eq!(quit_button_label(&local), QUIT_BUTTON);
-        assert_eq!(
-            quit_button_label(&with_blox(local, &["commit on fix-login"])),
-            QUIT_BUTTON
-        );
-        assert_eq!(
-            quit_button_label(&with_blox(blockers(&[], 0), &["commit on fix-login"])),
-            QUIT_KEEPING_BLOX_BUTTON
-        );
-    }
-
-    /// "Keep Running" only means something when quitting would stop a session;
-    /// with only Blox sessions, everything keeps running either way.
-    #[test]
-    fn dismiss_button_and_kind_follow_whether_anything_stops() {
-        let local = blockers(&["note on docs"], 0);
-        assert_eq!(dismiss_button_label(&local), KEEP_RUNNING_BUTTON);
-        assert!(matches!(
-            quit_prompt_kind(&local),
-            MessageDialogKind::Warning
-        ));
-
-        let mixed = with_blox(local, &["commit on fix-login"]);
-        assert_eq!(dismiss_button_label(&mixed), KEEP_RUNNING_BUTTON);
-        assert!(matches!(
-            quit_prompt_kind(&mixed),
-            MessageDialogKind::Warning
-        ));
-
-        // Running actions stop, but don't make the quit a session-stopping one.
-        let blox_only = with_blox(blockers(&[], 2), &["commit on fix-login"]);
-        assert_eq!(dismiss_button_label(&blox_only), CANCEL_BUTTON);
-        assert!(matches!(
-            quit_prompt_kind(&blox_only),
-            MessageDialogKind::Info
-        ));
+        assert!(quit_confirmed(&MessageDialogResult::Custom(
+            QUIT_BUTTON.to_string()
+        )));
+        assert!(!quit_confirmed(&MessageDialogResult::Custom(
+            KEEP_RUNNING_BUTTON.to_string()
+        )));
+        // What a system-dismissed alert reports.
+        assert!(!quit_confirmed(&MessageDialogResult::Cancel));
+        assert!(!quit_confirmed(&MessageDialogResult::Ok));
     }
 
     #[test]
@@ -1168,47 +1131,6 @@ mod tests {
             quit_prompt_message(&blockers(&["commit on fix-login", "note on docs"], 0)),
             "2 sessions are still running: commit on fix-login, note on docs. \
              Quitting will stop them."
-        );
-    }
-
-    #[test]
-    fn prompt_message_says_blox_sessions_keep_running() {
-        assert_eq!(
-            quit_prompt_message(&with_blox(blockers(&[], 0), &["commit on fix-login"])),
-            "1 Blox session is still running: commit on fix-login. It will keep running on \
-             its workstation, and Staged will catch up with it next time it opens."
-        );
-        assert_eq!(
-            quit_prompt_message(&with_blox(
-                blockers(&[], 0),
-                &["commit on fix-login", "note on api"]
-            )),
-            "2 Blox sessions are still running: commit on fix-login, note on api. They will \
-             keep running on their workstations, and Staged will catch up with them next time \
-             it opens."
-        );
-    }
-
-    #[test]
-    fn prompt_message_separates_stopped_and_blox_sessions() {
-        assert_eq!(
-            quit_prompt_message(&with_blox(
-                blockers(&["note on docs"], 1),
-                &["commit on fix-login"]
-            )),
-            "1 session is still running: note on docs. Quitting will stop it. \
-             1 Blox session is also running: commit on fix-login. It will keep running on \
-             its workstation, and Staged will catch up with it next time it opens. \
-             1 running action will also stop."
-        );
-    }
-
-    /// With no session stopping, actions are the only thing that does.
-    #[test]
-    fn prompt_message_does_not_say_also_when_only_actions_stop() {
-        assert!(
-            quit_prompt_message(&with_blox(blockers(&[], 1), &["commit on fix-login"]))
-                .ends_with("next time it opens. 1 running action will stop.")
         );
     }
 

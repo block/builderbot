@@ -233,8 +233,11 @@
     min-height: 0;
   }
 
+  /* The panels are cards on the page's chrome; the bottom inset keeps them
+     clear of the home indicator (App.svelte's main leaves it to the panes). */
   .panel-pad {
     padding: 14px;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
     overflow: hidden;
   }
 

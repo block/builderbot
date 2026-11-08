@@ -253,12 +253,15 @@
     overflow: hidden;
   }
 
+  /* Ends the dialog; clear of the home indicator in a full-screen one
+     (`--dialog-safe-bottom`, see dialog-content). */
   .write-note-footer {
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 8px;
     padding: 12px 16px;
+    padding-bottom: calc(12px + var(--dialog-safe-bottom, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;

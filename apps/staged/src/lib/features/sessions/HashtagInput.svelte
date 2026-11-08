@@ -183,13 +183,26 @@
   let lastExtractedValue = '';
   let hasUnresolvedTokens = false;
 
-  // When value changes from outside, re-render the editor content
+  // When value changes from outside, re-render the editor content. The text a
+  // pending #-mention was being typed into goes with it, so the dropdown
+  // closes. Replacing the contents can also take the caret with the removed
+  // text; if the editor kept focus it is put back, because a touch Send keeps
+  // the keyboard up in the box it has just cleared (ChatComposer) and typing
+  // carries on there.
   $effect(() => {
     if (value !== lastExtractedValue && editorEl) {
+      const focused = document.activeElement === editorEl;
       renderContent(value);
       lastExtractedValue = value;
+      closeDropdown();
+      if (focused && !selectionWithin(editorEl)) focusAtEndSync(editorEl);
     }
   });
+
+  function selectionWithin(root: HTMLElement): boolean {
+    const sel = window.getSelection();
+    return !!sel && sel.rangeCount > 0 && root.contains(sel.anchorNode);
+  }
 
   // When items become available, re-render to resolve plain-text tokens into badges
   $effect(() => {

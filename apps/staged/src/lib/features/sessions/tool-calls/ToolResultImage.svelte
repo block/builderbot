@@ -67,7 +67,11 @@
 </div>
 
 <Dialog.Root bind:open>
-  <Dialog.Content class="max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] w-auto overflow-auto">
+  <!-- The dialog is its own scroller, so its bottom padding is what keeps the
+       image's end clear of the home indicator when full screen. -->
+  <Dialog.Content
+    class="max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] w-auto overflow-auto pb-[calc(--spacing(6)+var(--dialog-safe-bottom,0px))]"
+  >
     <Dialog.Header>
       <Dialog.Title>Tool result image</Dialog.Title>
     </Dialog.Header>

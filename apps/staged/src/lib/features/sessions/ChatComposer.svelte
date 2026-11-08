@@ -144,6 +144,26 @@
     if (value === 'queue' || value === 'send') onSendModeChange?.(value);
   }
 
+  // A touch press on Send leaves focus, and so the on-screen keyboard, in the
+  // message box, as in a messaging app: the next message can be typed straight
+  // away, and the full-screen dialog doesn't start resizing for a closing
+  // keyboard under the tap. Cancelling the press stops it moving focus; the
+  // click still fires. iOS follows a touch's pointerdown with a compatibility
+  // mousedown, which also moves focus, so that is cancelled too. Mouse presses
+  // keep the default. Only the Send segment does this: the split button's
+  // menu trigger moves focus into its menu as usual.
+  let sendPressIsTouch = false;
+
+  function keepFocusOnTouchPointerDown(e: PointerEvent) {
+    sendPressIsTouch = e.pointerType === 'touch' || e.pointerType === 'pen';
+    if (sendPressIsTouch) e.preventDefault();
+  }
+
+  function keepFocusOnTouchMouseDown(e: MouseEvent) {
+    if (sendPressIsTouch) e.preventDefault();
+    sendPressIsTouch = false;
+  }
+
   function openImagePicker() {
     fileInputEl?.click();
   }
@@ -221,6 +241,8 @@
         <Button
           variant="accent"
           class="composer-send-primary h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm max-[640px]:min-h-11"
+          onpointerdown={keepFocusOnTouchPointerDown}
+          onmousedown={keepFocusOnTouchMouseDown}
           onclick={onSend}
           disabled={sendDisabled}
         >
@@ -257,6 +279,8 @@
         <Button
           variant="accent"
           class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
+          onpointerdown={keepFocusOnTouchPointerDown}
+          onmousedown={keepFocusOnTouchMouseDown}
           onclick={onSend}
           disabled={sendDisabled}
         >
@@ -277,11 +301,15 @@
 {/snippet}
 
 <style>
+  /* The composer ends its dialog, so in a full-screen one its chrome runs
+     under the home indicator and only the controls are inset from it
+     (`--dialog-safe-bottom`, see dialog-content). */
   .chat-composer {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 10px 14px;
+    padding-bottom: calc(10px + var(--dialog-safe-bottom, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;

@@ -142,7 +142,10 @@
   font-weight: 400;
 
   color: var(--text-primary);
-  background-color: var(--bg-primary);
+  /* The page canvas: whatever no surface covers, such as the strip under the
+     home indicator on iOS (viewport-fit=cover), matches the app shell's
+     chrome. <main> covers all of it on desktop. */
+  background-color: var(--bg-chrome);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;

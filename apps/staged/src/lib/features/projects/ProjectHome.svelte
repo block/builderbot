@@ -1194,11 +1194,14 @@
   }
 
   /* Projects list */
+  /* The bottom inset is the home indicator's (App.svelte's main leaves it to
+     the panes' content). */
   .projects-list {
     width: 100%;
     max-width: 900px;
     margin: 0 auto;
     padding: 16px;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -1230,6 +1233,7 @@
 
     .projects-list {
       padding: 12px;
+      padding-bottom: calc(12px + env(safe-area-inset-bottom));
       gap: 20px;
     }
   }

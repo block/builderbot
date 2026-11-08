@@ -46,34 +46,51 @@
 
   // Edge-to-edge geometry applied as inline style so it cleanly overrides any
   // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
-  // `max-h-[calc(100dvh-16dvh)]`) without specificity fights. Safe-area padding
-  // keeps the header/footer clear of notches and home indicators; with the
-  // keyboard up the footer sits on the keyboard instead, so the bottom inset
-  // goes. Tailwind v4 translate utilities use the individual `translate`
-  // property, so reset that alongside `transform` to prevent desktop centering
-  // from shifting the mobile panel offscreen. `top` and `height` track the
-  // visual viewport, pinning the footer to the keyboard's top edge. Rows
-  // pack at the top (`align-content: start`) instead of stretching over the
-  // full height, so a short form starts under the header rather than
-  // spreading down the screen to where the keyboard will open.
+  // `max-h-[calc(100dvh-16dvh)]`) without specificity fights. Tailwind v4
+  // translate utilities use the individual `translate` property, so reset that
+  // alongside `transform` to prevent desktop centering from shifting the
+  // mobile panel offscreen. Rows pack at the top (`align-content: start`)
+  // instead of stretching over the full height, so a short form starts under
+  // the header rather than spreading down the screen to where the keyboard
+  // will open.
+  //
+  // While nothing takes typing (`height === null`) the dialog is anchored to
+  // all four edges, so its surface covers the whole layout viewport, under
+  // the home indicator included, whatever `100dvh` measures. While a text
+  // input has focus, `top` and `height` track the visual viewport instead,
+  // pinning the last row to the keyboard's top edge (or above the bar iOS
+  // shows over a hardware keyboard).
+  //
+  // The surface reaches the screen's edges; only content is inset. The top
+  // inset is the dialog's own padding, as the header is always the first
+  // row. The bottom padding stays the caller's (`p-6`, or none for `p-0`
+  // layouts) and the inset goes to whichever row ends the dialog — a footer,
+  // the chat composer, a scrolling body — through `--dialog-safe-bottom`, so
+  // that row's own background runs under the home indicator rather than the
+  // dialog's showing as a band beneath it, and a scrolling body scrolls
+  // behind it. It is 0 with the keyboard up, which covers the indicator.
+  // Outside a full-screen dialog the property is unset; read it as
+  // `var(--dialog-safe-bottom, 0px)`.
   const fullScreenStyle = $derived.by(() => {
     const { top, height, keyboardOpen } = visibleViewport;
+    const geometry =
+      height === null
+        ? ['top:0', 'bottom:0', 'height:auto']
+        : [`top:${top}px`, 'bottom:auto', `height:${height}px`];
     return [
       'position:fixed',
       'left:0',
       'right:0',
-      'bottom:auto',
-      `top:${top}px`,
+      ...geometry,
       'width:100%',
       'max-width:none',
-      `height:${height === null ? '100dvh' : `${height}px`}`,
       'max-height:none',
       'transform:none',
       'translate:none',
       'border-radius:0',
       'align-content:start',
       'padding-top:env(safe-area-inset-top)',
-      `padding-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
+      `--dialog-safe-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
     ].join(';');
   });
 

@@ -137,11 +137,15 @@
     flex-shrink: 0;
   }
 
+  /* Ends the dialog; keeps the image clear of the home indicator in a
+     full-screen one (`--dialog-safe-bottom`, see dialog-content). The PDF
+     frame below runs to the edge and scrolls itself. */
   .modal-body {
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 16px;
+    padding-bottom: calc(16px + var(--dialog-safe-bottom, 0px));
     overflow: auto;
     min-height: 200px;
   }

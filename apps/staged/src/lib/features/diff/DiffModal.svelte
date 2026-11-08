@@ -1896,11 +1896,15 @@
    * Body layout
    * ====================================================================== */
 
+  /* The diff panes are cards on the chrome, which runs to the screen's edge;
+     the bottom inset keeps the cards (and their horizontal scrollbars) clear
+     of the home indicator. App.svelte's main leaves it to the panes. */
   .modal-body {
     display: flex;
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    padding-bottom: env(safe-area-inset-bottom);
   }
 
   /* ========================================================================
@@ -1966,9 +1970,12 @@
     width: 100vw;
     height: 100vh;
     height: 100dvh;
-    /* Clear of the status bar and home indicator (viewport-fit=cover). */
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-      env(safe-area-inset-left);
+    /* Clear of the status bar and the screen's sides (viewport-fit=cover).
+       The bottom inset goes to the drawer's last row instead, as in a
+       full-screen dialog (see dialog-content), so the file list scrolls
+       behind the home indicator. */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+    --dialog-safe-bottom: env(safe-area-inset-bottom);
     background: var(--bg-chrome);
   }
 
@@ -1994,6 +2001,12 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+
+  /* The file list when it ends the drawer; otherwise the commit session
+     launcher under it pads the inset itself. */
+  .mobile-sidebar-body .sidebar-scroll:last-child {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
   }
 
   :global(.diff-viewer-container .comment-editor) {

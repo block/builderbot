@@ -146,9 +146,12 @@
     overflow-y: scroll;
   }
 
+  /* The bottom inset is the home indicator's (App.svelte's main leaves it to
+     the panes' content). */
   .content {
     flex: 1;
     padding: 24px;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -194,6 +197,7 @@
   @media (max-width: 640px) {
     .content {
       padding: 16px;
+      padding-bottom: calc(16px + env(safe-area-inset-bottom));
     }
 
     .repos-grid {

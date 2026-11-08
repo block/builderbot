@@ -284,10 +284,13 @@
     font-size: var(--size-xs);
   }
 
+  /* Last row of NewProjectModal; clear of the home indicator when that is
+     full screen (`--dialog-safe-bottom`, see dialog-content). 0 elsewhere. */
   .actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    padding-bottom: var(--dialog-safe-bottom, 0px);
   }
 
   @media (max-width: 640px) {

@@ -848,7 +848,9 @@
     flex-shrink: 0;
     border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
     background: var(--bg-app-bar);
-    padding: 0 var(--repo-row-bleed) 10px;
+    /* A full-height column here, so it ends at the home indicator; stacked
+       on top on narrow screens (below) it does not. */
+    padding: 0 var(--repo-row-bleed) calc(10px + env(safe-area-inset-bottom));
     overflow-y: auto;
     min-height: 0;
   }
@@ -957,11 +959,14 @@
     gap: 8px;
   }
 
+  /* The bottom inset keeps the content clear of the home indicator
+     (App.svelte's main leaves it to the panes). */
   .main-panel {
     flex: 1;
     min-width: 0;
     background: var(--bg-chrome);
     padding: 14px;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
     overflow: hidden;
     min-height: 0;
     display: flex;
@@ -1206,6 +1211,7 @@
       border-right: none;
       border-bottom: 1px solid var(--border-subtle);
       max-height: 160px;
+      padding-bottom: 10px;
     }
 
     .repo-overview-main {

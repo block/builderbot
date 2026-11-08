@@ -579,11 +579,14 @@
     font-size: var(--size-xs);
   }
 
+  /* The dialog's last row; clear of the home indicator in a full-screen
+     dialog (`--dialog-safe-bottom`, see dialog-content). */
   .form-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
     margin-top: 4px;
+    padding-bottom: var(--dialog-safe-bottom, 0px);
     flex-shrink: 0;
   }
 

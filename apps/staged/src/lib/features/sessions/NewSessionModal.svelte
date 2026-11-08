@@ -1083,6 +1083,9 @@
     justify-content: space-between;
     gap: 8px;
     margin-top: 4px;
+    /* The dialog's last row; clear of the home indicator in a full-screen
+       dialog (`--dialog-safe-bottom`, see dialog-content). */
+    padding-bottom: var(--dialog-safe-bottom, 0px);
     /* Stay pinned at the bottom of the keyboard-shrunk dialog while the prompt
        editor above is the only scroller. */
     flex-shrink: 0;

@@ -145,7 +145,8 @@
         <div class="error-message" transition:slide={{ duration: 150 }}>{error}</div>
       {/if}
 
-      <div class="flex justify-end gap-2">
+      <!-- Last row: clear of the home indicator when full screen (see dialog-content). -->
+      <div class="flex justify-end gap-2 pb-[var(--dialog-safe-bottom,0px)]">
         <Button type="submit" variant="outline" class="w-full" disabled={!selectedRepo || saving}>
           {#if saving}
             <span class="inline-flex items-center gap-1.5">

@@ -611,11 +611,15 @@
     gap: 8px;
   }
 
+  /* Ends the dialog: in a full-screen one the output scrolls behind the home
+     indicator and its last line can still scroll clear of it
+     (`--dialog-safe-bottom`, see dialog-content). */
   .modal-content {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
     padding: 16px;
+    padding-bottom: calc(16px + var(--dialog-safe-bottom, 0px));
     background: #1e1e1e;
   }
 

@@ -32,7 +32,7 @@
     active    — whether the pane should load/poll
 -->
 <script lang="ts">
-  import { onDestroy, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { slide } from 'svelte/transition';
   import X from '@lucide/svelte/icons/x';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
@@ -187,6 +187,7 @@
   import PlanCard from './PlanCard.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { observeHeightChanges } from '../../shared/observeHeightChanges';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -2068,6 +2069,27 @@
       scrollToBottom(afterSlide);
     }
   }
+
+  // Keep a transcript that follows the bottom at the bottom when its own box
+  // changes height: the full-screen dialog shrinking to the visual viewport
+  // as the on-screen keyboard opens (and growing back as it closes), the
+  // composer gaining a line, a window resize. Shrinking the box leaves
+  // `scrollTop` alone and fires no scroll event, so neither `handleScroll`
+  // nor the append path would re-pin it and the newest messages would end
+  // up under the composer. A parked pane is left alone: its box is detached
+  // or, just reattached, waiting for `unpark`'s deferred restore, which this
+  // must not overwrite (observeHeightChanges already skips the 0-high
+  // detached box itself).
+  onMount(() => {
+    const el = messagesEl;
+    if (!el) return;
+    return observeHeightChanges(el, () => {
+      if (!active || closed || parkedScroll || deferredRestore.pending) return;
+      if (userScrolledUp) return;
+      el.scrollTop = el.scrollHeight;
+      noteScrollPosition(el);
+    });
+  });
 
   /** LRU cache for rendered markdown, keyed by source string. Live-transcript
    *  re-renders mostly re-request unchanged content, and each render is a full
@@ -3955,12 +3977,14 @@
   /* ----- Pipeline stop area ---------------------------------------------- */
 
   /* Same chrome as .chat-composer: the error line (if any) above, the
-     button right-aligned beneath it. */
+     button right-aligned beneath it, and the same bottom inset, as it ends
+     the dialog in the composer's place. */
   .pipeline-stop-area {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 10px 14px;
+    padding-bottom: calc(10px + var(--dialog-safe-bottom, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;

@@ -1029,6 +1029,13 @@
     background: var(--bg-primary);
   }
 
+  /* With no next steps below it the note ends the dialog: it scrolls behind
+     the home indicator of a full-screen dialog, and its last line can still
+     scroll clear of it (`--dialog-safe-bottom`, see dialog-content). */
+  .modal-content:last-child {
+    padding-bottom: calc(24px + var(--dialog-safe-bottom, 0px));
+  }
+
   .modal-content::-webkit-scrollbar {
     width: 6px;
   }
@@ -1193,6 +1200,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px 16px;
+    padding-bottom: calc(12px + var(--dialog-safe-bottom, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;

@@ -14,16 +14,22 @@
 //
 // The state follows focus too (see viewportGeometry.ts): it is the visual
 // viewport only while a text input has focus, so focus changes re-measure.
-// Focus arriving in a text input re-measures at once. Focus leaving one waits
-// for the visual viewport's next `resize` — the keyboard going away — or
-// BLUR_SETTLE_MS, whichever comes first. iOS moves focus off the input on the
-// synthetic `mousedown` of a tap and hit-tests the `click` again at the same
-// point afterwards: re-measuring on the blur restyled the full-screen layout
-// to the layout viewport in between, its bottom row (a Send or Start button)
-// dropped by the keyboard's height, and the click landed on whatever slid
-// under the finger instead. The keyboard starts to leave only once the tap is
-// over, so by the time `resize` arrives the click has been delivered, and the
-// layout follows the keyboard down instead of jumping ahead of it. The timer
+// Focus arriving in a text input (`focusin`) re-measures at once. A text
+// input losing focus (its `focusout`) arms a re-measure that waits for the
+// visual viewport's next `resize` — the keyboard going away — or
+// BLUR_SETTLE_MS, whichever comes first; focus arriving in a text input
+// meanwhile cancels it. Focus moving between elements that take no typing
+// changes nothing, as no keyboard comes or goes.
+//
+// iOS moves focus off the input on the synthetic `mousedown` of a tap and
+// hit-tests the `click` again at the same point afterwards. Re-measuring on
+// the blur restyled the full-screen layout to the layout viewport in
+// between: its bottom row (a Send or Start button) dropped by the
+// keyboard's height, and the click landed on whatever slid under the finger
+// instead. The click follows the mousedown within the same gesture, ahead
+// of the keyboard's `resize`, so waiting for that lets it land; whether iOS
+// sends the `resize` as the keyboard starts or finishes sliding away decides
+// whether the layout follows it down or catches up at the end. The timer
 // covers blurs with no on-screen keyboard to wait for (a hardware keyboard,
 // a programmatic blur). While a blur is pending, viewport `scroll` events
 // still undo the page scroll but leave the geometry alone.
@@ -120,16 +126,19 @@ function handleViewportScroll(): void {
   syncVisualViewport();
 }
 
-function handleFocusChange(): void {
-  if (isTextInput(document.activeElement)) {
-    // Into a text input (including straight from another one, whose
-    // `focusout` scheduled a settle): the keyboard is coming or staying.
-    cancelBlurSettle();
-    syncVisualViewport();
-    return;
-  }
-  // Out of a text input: `focusout`, or `focusin` on whatever took focus
-  // instead (a button, the dialog itself). Wait for the keyboard.
+function handleFocusIn(): void {
+  // Into a text input, including straight from another one whose `focusout`
+  // armed a settle: the keyboard is coming or staying. Focus landing on
+  // anything else (a button, the dialog itself) is left to the `focusout`
+  // of the input it came from, if it came from one.
+  if (!isTextInput(document.activeElement)) return;
+  cancelBlurSettle();
+  syncVisualViewport();
+}
+
+function handleFocusOut(event: FocusEvent): void {
+  // Only a text input losing focus can take the keyboard away; wait for it.
+  if (!isTextInput(event.target as Element | null)) return;
   if (!blurSettleTimer) blurSettleTimer = setTimeout(settleBlur, BLUR_SETTLE_MS);
 }
 
@@ -142,8 +151,8 @@ export function watchVisualViewport(): () => void {
     trackedViewport = window.visualViewport;
     trackedViewport.addEventListener('resize', handleViewportResize);
     trackedViewport.addEventListener('scroll', handleViewportScroll);
-    document.addEventListener('focusin', handleFocusChange);
-    document.addEventListener('focusout', handleFocusChange);
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
   }
   // The initial read forces a style/layout flush. Subscribers call this as
   // they mount — e.g. a dialog that has just been portalled in — so reading
@@ -165,8 +174,8 @@ export function watchVisualViewport(): () => void {
       cancelBlurSettle();
       trackedViewport?.removeEventListener('resize', handleViewportResize);
       trackedViewport?.removeEventListener('scroll', handleViewportScroll);
-      document.removeEventListener('focusin', handleFocusChange);
-      document.removeEventListener('focusout', handleFocusChange);
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('focusout', handleFocusOut);
       trackedViewport = null;
       // Nothing keeps the state current any more; don't let the next
       // subscriber start from a stale keyboard.

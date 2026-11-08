@@ -35,7 +35,7 @@
 </script>
 
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { onDestroy, type Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -56,6 +56,7 @@
   import ComposerError from './ComposerError.svelte';
   import type { AttachmentPreview } from './attachmentPreview';
   import HashtagInput from './HashtagInput.svelte';
+  import { createCompositionSendGate, createTouchPressFocusGuard } from './composerSendPress';
   import type { HashtagItem } from '../../types';
 
   interface Props {
@@ -147,22 +148,38 @@
   // A touch press on Send leaves focus, and so the on-screen keyboard, in the
   // message box, as in a messaging app: the next message can be typed straight
   // away, and the full-screen dialog doesn't start resizing for a closing
-  // keyboard under the tap. Cancelling the press stops it moving focus; the
-  // click still fires. iOS follows a touch's pointerdown with a compatibility
-  // mousedown, which also moves focus, so that is cancelled too. Mouse presses
-  // keep the default. Only the Send segment does this: the split button's
-  // menu trigger moves focus into its menu as usual.
-  let sendPressIsTouch = false;
+  // keyboard under the tap. Only the press's compatibility mousedown is
+  // cancelled (see createTouchPressFocusGuard); the click still fires. Mouse
+  // presses keep the default, and so does the split button's menu trigger,
+  // which moves focus into its menu as usual.
+  //
+  // While the box holds an IME or dictation composition the press moves focus
+  // after all, which commits the composition, and the send waits for its
+  // `compositionend` (createCompositionSendGate) so the committed text is in
+  // the draft it sends rather than landing in the box after it was cleared.
+  let composing = $state(false);
+  const sendPress = createTouchPressFocusGuard();
+  const sendGate = createCompositionSendGate();
+  let deferredSendTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function keepFocusOnTouchPointerDown(e: PointerEvent) {
-    sendPressIsTouch = e.pointerType === 'touch' || e.pointerType === 'pen';
-    if (sendPressIsTouch) e.preventDefault();
+  function handleSendMouseDown(e: MouseEvent) {
+    if (sendPress.mouseDown(composing)) e.preventDefault();
   }
 
-  function keepFocusOnTouchMouseDown(e: MouseEvent) {
-    if (sendPressIsTouch) e.preventDefault();
-    sendPressIsTouch = false;
+  function handleSendClick() {
+    sendPress.reset();
+    if (sendGate.press(composing)) onSend?.();
   }
+
+  function handleCompositionEnd() {
+    if (!sendGate.compositionEnded()) return;
+    // WebKit fires the committing `input` after `compositionend`; send once
+    // it has reached the draft.
+    clearTimeout(deferredSendTimer);
+    deferredSendTimer = setTimeout(() => onSend?.(), 0);
+  }
+
+  onDestroy(() => clearTimeout(deferredSendTimer));
 
   function openImagePicker() {
     fileInputEl?.click();
@@ -205,6 +222,8 @@
   <HashtagInput
     bind:textareaEl
     bind:value
+    bind:composing
+    oncompositionend={handleCompositionEnd}
     class="message-input"
     {placeholder}
     rows={1}
@@ -241,9 +260,10 @@
         <Button
           variant="accent"
           class="composer-send-primary h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm max-[640px]:min-h-11"
-          onpointerdown={keepFocusOnTouchPointerDown}
-          onmousedown={keepFocusOnTouchMouseDown}
-          onclick={onSend}
+          onpointerdown={(e) => sendPress.pointerDown(e.pointerType)}
+          onpointercancel={() => sendPress.reset()}
+          onmousedown={handleSendMouseDown}
+          onclick={handleSendClick}
           disabled={sendDisabled}
         >
           {@render sendLabel()}
@@ -279,9 +299,10 @@
         <Button
           variant="accent"
           class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
-          onpointerdown={keepFocusOnTouchPointerDown}
-          onmousedown={keepFocusOnTouchMouseDown}
-          onclick={onSend}
+          onpointerdown={(e) => sendPress.pointerDown(e.pointerType)}
+          onpointercancel={() => sendPress.reset()}
+          onmousedown={handleSendMouseDown}
+          onclick={handleSendClick}
           disabled={sendDisabled}
         >
           {@render sendLabel()}

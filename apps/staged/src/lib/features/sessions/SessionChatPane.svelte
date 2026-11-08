@@ -187,7 +187,7 @@
   import PlanCard from './PlanCard.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
-  import { observeHeightChanges } from '../../shared/observeHeightChanges';
+  import { observeSizeChanges } from '../../shared/observeSizeChanges';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -1871,7 +1871,9 @@
   // =========================================================================
 
   function handleInputKeydown(e: KeyboardEvent) {
-    // Multiline input: plain Enter inserts a newline; Cmd/Ctrl+Enter sends.
+    // Multiline input: plain Enter inserts a newline; Cmd/Ctrl+Enter sends,
+    // but not while it commits an IME composition (see ChatComposer).
+    if (e.isComposing) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleSend();
@@ -2071,19 +2073,20 @@
   }
 
   // Keep a transcript that follows the bottom at the bottom when its own box
-  // changes height: the full-screen dialog shrinking to the visual viewport
-  // as the on-screen keyboard opens (and growing back as it closes), the
-  // composer gaining a line, a window resize. Shrinking the box leaves
-  // `scrollTop` alone and fires no scroll event, so neither `handleScroll`
+  // is resized: the full-screen dialog shrinking to the visual viewport as
+  // the on-screen keyboard opens (and growing back as it closes), the
+  // composer gaining a line, a window or dialog resize, the phone rotating.
+  // Shrinking the box leaves `scrollTop` alone and narrowing it reflows the
+  // messages taller; neither fires a scroll event, so neither `handleScroll`
   // nor the append path would re-pin it and the newest messages would end
   // up under the composer. A parked pane is left alone: its box is detached
   // or, just reattached, waiting for `unpark`'s deferred restore, which this
-  // must not overwrite (observeHeightChanges already skips the 0-high
-  // detached box itself).
+  // must not overwrite (observeSizeChanges already skips the 0×0 detached
+  // box itself).
   onMount(() => {
     const el = messagesEl;
     if (!el) return;
-    return observeHeightChanges(el, () => {
+    return observeSizeChanges(el, () => {
       if (!active || closed || parkedScroll || deferredRestore.pending) return;
       if (userScrolledUp) return;
       el.scrollTop = el.scrollHeight;

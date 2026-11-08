@@ -64,6 +64,10 @@
     oninput?: (e: Event) => void;
     onpaste?: (e: ClipboardEvent) => void;
     textareaEl?: HTMLElement | null;
+    /** An IME or dictation composition is open in the editor. */
+    composing?: boolean;
+    /** The open composition ended (committed or cancelled). */
+    oncompositionend?: () => void;
   }
 
   let {
@@ -77,6 +81,8 @@
     oninput,
     onpaste,
     textareaEl = $bindable(null),
+    composing = $bindable(false),
+    oncompositionend,
   }: Props = $props();
 
   let editorEl: HTMLDivElement | undefined = $state();
@@ -185,23 +191,29 @@
 
   // When value changes from outside, re-render the editor content. The text a
   // pending #-mention was being typed into goes with it, so the dropdown
-  // closes. Replacing the contents can also take the caret with the removed
-  // text; if the editor kept focus it is put back, because a touch Send keeps
-  // the keyboard up in the box it has just cleared (ChatComposer) and typing
-  // carries on there.
+  // closes. If the editor has focus the caret goes to the end of the new
+  // content: replacing the contents leaves the selection wherever the removed
+  // nodes were, and a touch Send keeps the keyboard up in the box it clears
+  // (ChatComposer), or puts the draft back after a failed send, with typing
+  // carrying on there.
   $effect(() => {
     if (value !== lastExtractedValue && editorEl) {
       const focused = document.activeElement === editorEl;
       renderContent(value);
       lastExtractedValue = value;
       closeDropdown();
-      if (focused && !selectionWithin(editorEl)) focusAtEndSync(editorEl);
+      if (focused) focusAtEndSync(editorEl);
     }
   });
 
-  function selectionWithin(root: HTMLElement): boolean {
-    const sel = window.getSelection();
-    return !!sel && sel.rangeCount > 0 && root.contains(sel.anchorNode);
+  function handleCompositionStart() {
+    composing = true;
+  }
+
+  function handleCompositionEnd() {
+    if (!composing) return;
+    composing = false;
+    oncompositionend?.();
   }
 
   // When items become available, re-render to resolve plain-text tokens into badges
@@ -436,6 +448,12 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // Keys during an IME composition (Enter to commit it, arrows to pick a
+    // candidate, Escape to cancel it) belong to the IME, not the dropdown.
+    if (e.isComposing || composing) {
+      onkeydown?.(e);
+      return;
+    }
     if (showDropdown && filteredItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -547,6 +565,9 @@
   }
 
   function handleBlur(e: FocusEvent) {
+    // Leaving the editor ends any composition; don't wait on a
+    // `compositionend` the browser may not send.
+    handleCompositionEnd();
     if (wrapperEl && e.relatedTarget instanceof Node && wrapperEl.contains(e.relatedTarget)) {
       return;
     }
@@ -570,6 +591,8 @@
       oninput={handleInput}
       onkeydown={handleKeydown}
       onblur={handleBlur}
+      oncompositionstart={handleCompositionStart}
+      oncompositionend={handleCompositionEnd}
       oncopy={handleCopy}
       oncut={handleCut}
       onpaste={handlePaste}

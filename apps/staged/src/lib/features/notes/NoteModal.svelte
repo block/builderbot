@@ -733,7 +733,11 @@
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
-    <Dialog.Header class="gap-0 border-b border-[var(--border-subtle)] p-0 flex-shrink-0">
+    <Dialog.Header
+      class="gap-0 border-b border-[var(--border-subtle)] p-0 flex-shrink-0 {chatOnly
+        ? 'note-modal-chat-header'
+        : ''}"
+    >
       <div class:split-chat-open={splitChatOpen} class="note-modal-header-grid">
         <div class="note-header-pane" class:split-pane={splitChatOpen}>
           {#if referenceNav}
@@ -936,6 +940,10 @@
     min-width: 0;
     flex: 1;
     padding: 12px 16px;
+    /* The header's ends clear a full-screen dialog's side insets, Close
+       included (`--dialog-safe-left` / `--dialog-safe-right`, see
+       dialog-content); the dialog is never split there. */
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
   }
 
   .note-header-pane.split-pane {
@@ -949,6 +957,7 @@
     gap: 4px;
     flex: 1 1 0;
     padding: 12px;
+    padding-right: calc(12px + var(--dialog-safe-right, 0px));
     border-left: 1px solid var(--border-subtle);
   }
 
@@ -982,6 +991,7 @@
 
   .header-actions {
     padding: 12px 16px 12px 0;
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
   }
 
   .modal-body {
@@ -990,6 +1000,14 @@
     min-height: 0;
     display: flex;
     overflow: hidden;
+  }
+
+  /* With the keyboard up on a phone held sideways only the composer's row
+     fits (dialog-content's `cramped`): the chat view drops its header, as
+     the session dialog does, unless the header holds the focus (the search
+     field). It is back once the keyboard closes. */
+  :global([data-cramped]) > :global(.note-modal-chat-header:not(:focus-within)) {
+    display: none;
   }
 
   .note-pane {
@@ -1021,10 +1039,14 @@
     border-left: none;
   }
 
+  /* The note spans a full-screen dialog's width, so a swipe over the side
+     insets still scrolls it; its text clears them. */
   .modal-content {
     flex: 1;
     overflow-y: auto;
     padding: 24px;
+    padding-left: calc(24px + var(--dialog-safe-left, 0px));
+    padding-right: calc(24px + var(--dialog-safe-right, 0px));
     min-height: 0;
     background: var(--bg-primary);
   }
@@ -1201,6 +1223,8 @@
     gap: 8px;
     padding: 12px 16px;
     padding-bottom: calc(12px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;

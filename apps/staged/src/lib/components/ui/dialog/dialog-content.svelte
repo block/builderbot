@@ -8,7 +8,7 @@
   import type { ComponentProps } from 'svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import XIcon from '@lucide/svelte/icons/x';
-  import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
+  import { SHORT_VIEWPORT_PX, viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import { visibleViewport, watchVisualViewport } from '$lib/shared/visualViewport.svelte';
   import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
   import { getWindowSync } from '$lib/transport';
@@ -36,13 +36,6 @@
   onMount(() => watchViewport());
 
   const fullScreen = $derived(fullScreenOnMobile && viewport.isMobile);
-
-  /**
-   * Below this visible height (the on-screen keyboard up on a phone held
-   * sideways leaves about 48px) a full-screen dialog can't show its header
-   * and its last row together; see `cramped`.
-   */
-  const CRAMPED_HEIGHT_PX = 240;
 
   // A full-screen dialog covers the visual viewport — the part of the page
   // actually on screen — so the on-screen keyboard shrinks it rather than
@@ -81,9 +74,14 @@
   // `var(--dialog-safe-bottom, 0px)`.
   //
   // The side insets (a phone held sideways: the Dynamic Island and the
-  // rounded corners) are transparent borders, so they add to whatever
-  // padding the caller's class sets rather than replace it, and the
-  // background, painted under the border, still reaches the edges.
+  // rounded corners) work the same way, through `--dialog-safe-left` and
+  // `--dialog-safe-right`: each full-width row adds them to its own inline
+  // padding, so its background runs to the screen's edges and a swipe there
+  // still scrolls it. The default padding (`p-6`) includes them; a caller
+  // that sets its own (`p-0` and rows that pad themselves) takes them on in
+  // those rows. `--dialog-safe-top` is the top inset, for anything
+  // positioned at the top (the default Close button). All three are unset
+  // outside a full-screen dialog.
   //
   // Only colours, opacity and transforms transition. The base class's
   // `duration-100` with no transition property would mean `transition: all`,
@@ -93,12 +91,13 @@
   //
   // `cramped`: with too little visible to fit every row, the dialog scrolls
   // rather than clip, and `data-cramped` lets its rows give way (the session
-  // dialog drops its header and puts Send beside the message box).
+  // dialog drops its header, puts Send beside the message box and scrolls
+  // its chat pane anchored at that row).
   const cramped = $derived(
     fullScreen &&
-      visibleViewport.keyboardOpen &&
-      visibleViewport.height !== null &&
-      visibleViewport.height < CRAMPED_HEIGHT_PX
+      (visibleViewport.height !== null
+        ? visibleViewport.height < SHORT_VIEWPORT_PX
+        : viewport.shortWindow)
   );
 
   const fullScreenStyle = $derived.by(() => {
@@ -118,10 +117,11 @@
       'transform:none',
       'translate:none',
       'border-radius:0',
-      'border-left:env(safe-area-inset-left) solid transparent',
-      'border-right:env(safe-area-inset-right) solid transparent',
       'align-content:start',
       'padding-top:env(safe-area-inset-top)',
+      '--dialog-safe-top:env(safe-area-inset-top)',
+      '--dialog-safe-left:env(safe-area-inset-left)',
+      '--dialog-safe-right:env(safe-area-inset-right)',
       `--dialog-safe-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
       'transition-property:color,background-color,border-color,outline-color,opacity,transform,translate,scale',
       ...(cramped ? ['overflow-y:auto', 'overscroll-behavior:contain'] : []),
@@ -206,7 +206,7 @@
     bind:ref
     data-slot="dialog-content"
     class={cn(
-      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl p-6 text-sm ring-1 duration-100 sm:max-w-md fixed z-(--z-index-overlay) w-full outline-none',
+      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl py-6 pl-[calc(--spacing(6)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(6)+var(--dialog-safe-right,0px))] text-sm ring-1 duration-100 sm:max-w-md fixed z-(--z-index-overlay) w-full outline-none',
       fullScreen
         ? 'data-open:slide-in-from-bottom data-closed:slide-out-to-bottom'
         : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 data-closed:zoom-out-95 data-open:zoom-in-95',
@@ -226,7 +226,12 @@
     {#if showCloseButton}
       <DialogPrimitive.Close data-slot="dialog-close">
         {#snippet child({ props })}
-          <Button variant="ghost" class="absolute top-4 right-4" size="icon-sm" {...props}>
+          <Button
+            variant="ghost"
+            class="absolute top-[calc(--spacing(4)+var(--dialog-safe-top,0px))] right-[calc(--spacing(4)+var(--dialog-safe-right,0px))]"
+            size="icon-sm"
+            {...props}
+          >
             <XIcon />
             <span class="sr-only">Close</span>
           </Button>

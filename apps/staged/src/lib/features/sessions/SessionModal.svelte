@@ -158,7 +158,7 @@
           <Button
             variant="outline"
             size="sm"
-            class="touch-hit h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:h-10"
+            class="touch-hit h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground mobile:h-10"
             onclick={() => onOpenNote?.(noteInfo!)}
           >
             View note
@@ -167,7 +167,7 @@
         <Button
           variant="ghost"
           size="icon"
-          class="touch-hit size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:size-10 [&_svg]:!size-4"
+          class="touch-hit size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground mobile:size-10 [&_svg]:!size-4"
           title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
           aria-label="Close"
           onclick={requestClose}
@@ -230,9 +230,16 @@
     flex-shrink: 0;
   }
 
-  @media (max-width: 700px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). The side
+     insets of the full-screen dialog keep Close clear of the Dynamic Island
+     (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .modal-header {
       padding: 12px;
+      padding-left: calc(12px + var(--dialog-safe-left, 0px));
+      padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }
   }
 

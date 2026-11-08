@@ -80,7 +80,7 @@
     showCloseButton={false}
   >
     <Dialog.Header
-      class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]"
+      class="flex-row items-center justify-between gap-3 py-3 pl-[calc(--spacing(4)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(4)+var(--dialog-safe-right,0px))] border-b border-[var(--border-subtle)]"
     >
       {#if referenceNav}
         <ReferenceNavControls nav={referenceNav} />
@@ -146,6 +146,8 @@
     justify-content: center;
     padding: 16px;
     padding-bottom: calc(16px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     overflow: auto;
     min-height: 200px;
   }

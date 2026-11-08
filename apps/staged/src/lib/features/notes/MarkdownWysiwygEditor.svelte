@@ -186,6 +186,8 @@
   .editor-error {
     margin: 0;
     padding: 12px 24px;
+    padding-left: calc(24px + var(--dialog-safe-left, 0px));
+    padding-right: calc(24px + var(--dialog-safe-right, 0px));
     color: var(--ui-danger);
     font-size: var(--size-xs);
   }
@@ -228,8 +230,13 @@
      resizes the document to NoteModal's `.markdown-content`, so writing a
      note looks close to reading one. (Those rules are Svelte-scoped to
      NoteModal, so parity here means restating them, not sharing them.) */
+  /* In a full-screen dialog the editor spans its width and the text clears
+     the side insets (`--dialog-safe-left` / `--dialog-safe-right`, see
+     dialog-content). */
   .editor-host :global(.milkdown .ProseMirror) {
     padding: 24px;
+    padding-left: calc(24px + var(--dialog-safe-left, 0px));
+    padding-right: calc(24px + var(--dialog-safe-right, 0px));
     outline: none;
     line-height: 1.7;
   }

@@ -94,7 +94,7 @@
     showCloseButton={false}
   >
     <Dialog.Header
-      class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]"
+      class="flex-row items-center justify-between gap-3 py-3 pl-[calc(--spacing(4)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(4)+var(--dialog-safe-right,0px))] border-b border-[var(--border-subtle)]"
     >
       <Dialog.Title class="min-w-0 text-[var(--size-sm)] font-medium text-foreground truncate"
         >{title || 'Image'}</Dialog.Title

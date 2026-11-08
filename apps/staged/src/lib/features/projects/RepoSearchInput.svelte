@@ -283,7 +283,7 @@
       {disabled}
       oninput={handleInput}
       onfocus={handleFocus}
-      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 md:text-base"
+      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-base"
     />
   </div>
 

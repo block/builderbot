@@ -1131,8 +1131,12 @@
   @media (max-width: 768px),
     (pointer: coarse) and (max-device-width: 500px),
     (pointer: coarse) and (max-device-height: 500px) {
+    /* Full-width rows: clear of a full-screen dialog's side insets, Close
+       included (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
     .modal-header {
       padding: 12px 16px;
+      padding-left: calc(16px + var(--dialog-safe-left, 0px));
+      padding-right: calc(16px + var(--dialog-safe-right, 0px));
     }
 
     .mode-switcher-btn {
@@ -1141,6 +1145,8 @@
 
     .modal-body {
       padding: 16px;
+      padding-left: calc(16px + var(--dialog-safe-left, 0px));
+      padding-right: calc(16px + var(--dialog-safe-right, 0px));
     }
 
     .form-actions {

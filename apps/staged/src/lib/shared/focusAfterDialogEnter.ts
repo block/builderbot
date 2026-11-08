@@ -38,24 +38,40 @@ export function focusAfterDialogEnter<T extends HTMLElement>(
 
 /**
  * Give a dialog's text input the focus it asks for as the dialog opens (or
- * as its content is swapped under it, e.g. a mode switch) — but on a touch
- * screen only if the input already has it.
+ * as its content is swapped under it, e.g. a mode switch) — but on an
+ * iPhone or iPad only if the input already has it.
  *
  * A focus that doesn't come from the user's own tap raises no keyboard on
- * iOS: the input is left focused with nothing to type on, showing its
- * spell-check underlines or selection handles, and it still takes a tap on
- * it to bring the keyboard up. With a mouse and keyboard the input is
- * focused (after focusAfterDialogEnter) so typing can start at once. An
- * input that already has focus is refocused through `focus` everywhere, so
- * a caller that places the caret or selects still gets that.
+ * iOS and iPadOS: the input is left focused with nothing to type on,
+ * showing its spell-check underlines or selection handles, and it still
+ * takes a tap on it to bring the keyboard up. Everywhere else the input is
+ * focused (after focusAfterDialogEnter): with a mouse and keyboard typing
+ * can start at once, and Android's Chrome raises its keyboard for a focus
+ * that follows the tap that opened the dialog. An input that already has
+ * focus is refocused through `focus` everywhere, so a caller that places
+ * the caret or selects still gets that.
+ *
+ * The trade-off: an iPad with a hardware keyboard would type into the
+ * focused input fine, but can't be told apart from one without (a keyboard
+ * attaches and detaches with no event), so it too waits for a tap.
  */
 export function autofocusOnOpen<T extends HTMLElement>(
   el: T | null | undefined,
   focus?: (el: T) => void
 ): void {
   if (!el) return;
-  if (hasCoarsePointer() && el.ownerDocument.activeElement !== el) return;
+  if (isAppleTouchDevice() && el.ownerDocument.activeElement !== el) return;
   focusAfterDialogEnter(el, focus);
+}
+
+/**
+ * An iPhone, iPod or iPad driven by touch. iPadOS presents itself as a Mac
+ * ("MacIntel"); a real Mac reports no touch points.
+ */
+function isAppleTouchDevice(): boolean {
+  if (!hasCoarsePointer() || typeof navigator === 'undefined') return false;
+  if (!(navigator.maxTouchPoints > 1)) return false;
+  return /iPhone|iPad|iPod/.test(navigator.userAgent) || navigator.platform === 'MacIntel';
 }
 
 /**

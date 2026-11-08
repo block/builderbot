@@ -833,7 +833,7 @@
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0"
+        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground mobile:size-10 mobile:p-0"
         title={selectedProjectTransferLabel}
         onclick={() => projectActions.requestTransferProject(selectedProject)}
         disabled={selectedProjectTransferring}

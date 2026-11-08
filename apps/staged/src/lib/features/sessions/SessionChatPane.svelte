@@ -3442,6 +3442,8 @@
 
   .session-chat-pane.compact .modal-content {
     padding: 12px;
+    padding-left: calc(12px + var(--dialog-safe-left, 0px));
+    padding-right: calc(12px + var(--dialog-safe-right, 0px));
   }
 
   .session-chat-pane.compact .messages {
@@ -3466,6 +3468,11 @@
        second time. */
     overflow-anchor: none;
     padding: 16px;
+    /* The transcript spans a full-screen dialog's width, so a swipe over
+       the side insets still scrolls it; its content clears them
+       (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     min-height: 0;
     background: var(--bg-primary);
   }
@@ -3917,12 +3924,40 @@
     flex-shrink: 0;
   }
 
+  /* Too little height for the composer's row and what sits above it (the
+     keyboard up on a phone held sideways, dialog-content's `cramped`, which
+     also drops the session dialog's header): the pane scrolls rather than
+     clip, anchored at its foot. The message box and Send stay in view, and a
+     queued message, the slash-command list, attachments or an error line
+     above them are a scroll away. `column-reverse` does the anchoring: a
+     scroller starts at a reversed column's main-start, the bottom, and holds
+     that edge while content above it grows or goes. The `order`s put the
+     rows back in their usual top-to-bottom order. The transcript keeps
+     whatever height is left (none, in the 48px the keyboard leaves), so its
+     own scroll position is untouched. */
+  :global([data-cramped]) .session-chat-pane {
+    flex-direction: column-reverse;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-block-width: 0;
+  }
+
+  :global([data-cramped]) .input-wrapper {
+    order: -2;
+  }
+
+  :global([data-cramped]) .modal-content {
+    order: -1;
+  }
+
   .queue-popover,
   .slash-command-popover {
     display: flex;
     flex-direction: column;
     gap: 0;
     margin: 0 14px;
+    margin-left: calc(14px + var(--dialog-safe-left, 0px));
+    margin-right: calc(14px + var(--dialog-safe-right, 0px));
     border: 1px solid var(--border-muted);
     border-bottom: none;
     border-radius: 10px 10px 0 0;
@@ -4002,6 +4037,8 @@
     gap: 8px;
     padding: 10px 14px;
     padding-bottom: calc(10px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(14px + var(--dialog-safe-left, 0px));
+    padding-right: calc(14px + var(--dialog-safe-right, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
@@ -4147,13 +4184,14 @@
     font-weight: 600;
   }
 
-  @media (max-width: 700px) {
-    .modal-header {
-      padding: 12px;
-    }
-
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .modal-content {
       padding: 12px;
+      padding-left: calc(12px + var(--dialog-safe-left, 0px));
+      padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }
   }
 </style>

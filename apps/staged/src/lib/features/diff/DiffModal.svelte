@@ -83,6 +83,7 @@
     type ReferenceDiffContext,
     type ReferenceHistoryEntry,
   } from '../references/referenceHistory.svelte';
+  import { MOBILE_LAYOUT_QUERY } from '../../shared/viewport.svelte';
 
   // ==========================================================================
   // Props
@@ -149,7 +150,6 @@
   type ReviewHandle = ReturnType<typeof createReviewState>;
   let reviewHandle = $state<ReviewHandle | null>(null);
 
-  const SMALL_DIFF_BREAKPOINT = 700;
   const MOBILE_DIFF_REST_OFFSET = 20;
   const MOBILE_DIFF_EDGE_PEEK = 28;
   const MOBILE_DIFF_REVEAL_HIT_WIDTH = 28;
@@ -315,7 +315,14 @@
   let commentJumpToken = 0;
   let jumpToLine = $state<{ lineIndex: number; token: number } | null>(null);
   let lineJumpToken = 0;
-  let isSmallDiffViewport = $state(false);
+  // The mobile layout (MOBILE_LAYOUT_QUERY): the file list becomes a drawer
+  // and the diff a sliding pane. Read at once so a phone doesn't paint the
+  // desktop layout first.
+  let isSmallDiffViewport = $state(
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia(MOBILE_LAYOUT_QUERY).matches
+      : false
+  );
   let showMobileSidebar = $state(false);
   let diffDetailEl: HTMLDivElement | null = $state(null);
   let diffViewerContainerEl: HTMLDivElement | null = $state(null);
@@ -1258,7 +1265,7 @@
   });
 
   onMount(() => {
-    const mediaQuery = window.matchMedia(`(max-width: ${SMALL_DIFF_BREAKPOINT}px)`);
+    const mediaQuery = window.matchMedia(MOBILE_LAYOUT_QUERY);
     const updateSmallDiffViewport = () => {
       isSmallDiffViewport = mediaQuery.matches;
       if (!isSmallDiffViewport) {
@@ -1925,11 +1932,14 @@
     padding: 0;
   }
 
+  /* The side insets apply in the phone drawer only (unset in the sidebar). */
   .sidebar-scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    padding-left: var(--dialog-safe-left, 0px);
+    padding-right: var(--dialog-safe-right, 0px);
   }
 
   .sidebar-loading,
@@ -1939,6 +1949,8 @@
     align-items: center;
     gap: 8px;
     padding: 12px 16px;
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     font-size: var(--size-sm);
     color: var(--text-muted);
   }
@@ -1970,12 +1982,16 @@
     width: 100vw;
     height: 100vh;
     height: 100dvh;
-    /* Clear of the status bar and the screen's sides (viewport-fit=cover).
-       The bottom inset goes to the drawer's last row instead, as in a
-       full-screen dialog (see dialog-content), so the file list scrolls
-       behind the home indicator. */
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+    /* Clear of the status bar (viewport-fit=cover). The other insets go to
+       the drawer's rows, as in a full-screen dialog (see dialog-content):
+       the bottom one to its last row, so the file list scrolls behind the
+       home indicator, and the side ones to each row's inline padding, so
+       the rows run to the screen's edges and a swipe there still scrolls
+       the list. */
+    padding-top: env(safe-area-inset-top);
     --dialog-safe-bottom: env(safe-area-inset-bottom);
+    --dialog-safe-left: env(safe-area-inset-left);
+    --dialog-safe-right: env(safe-area-inset-right);
     background: var(--bg-chrome);
   }
 
@@ -1985,6 +2001,8 @@
     gap: 8px;
     min-height: 44px;
     padding: 8px 12px;
+    padding-left: calc(12px + var(--dialog-safe-left, 0px));
+    padding-right: calc(12px + var(--dialog-safe-right, 0px));
     border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
   }
@@ -2046,7 +2064,10 @@
     background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
   }
 
-  @media (max-width: 700px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .context-label {
       max-width: 96px;
     }

@@ -223,6 +223,10 @@
     min-width: 0;
     width: 100%;
     padding: 12px 16px;
+    /* Full-width rows (this, the editor, the footer) clear a full-screen
+       dialog's side insets, Close included (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
   }
 
   .note-title-icon {
@@ -262,6 +266,8 @@
     gap: 8px;
     padding: 12px 16px;
     padding-bottom: calc(12px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;

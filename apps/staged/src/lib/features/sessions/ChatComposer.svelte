@@ -23,7 +23,7 @@
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
   const controlBaseClass =
-    'min-h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:min-h-11 max-[640px]:justify-center';
+    'min-h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-11 mobile:justify-center';
 
   /** Styling for the agent config picker trigger rendered in the control row. */
   export const composerControlClass = `${controlBaseClass} px-4 py-1`;
@@ -271,10 +271,10 @@
       </span>
     {/if}
     {#if sendControl.split}
-      <span class="inline-flex composer-send composer-send-split" title={sendTitle}>
+      <span class="inline-flex composer-send composer-send-split touch-hit-group" title={sendTitle}>
         <Button
           variant="accent"
-          class="composer-send-primary h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm max-[640px]:min-h-11"
+          class="composer-send-primary touch-hit h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm mobile:min-h-11"
           onpointerdown={(e) => sendPress.pointerDown(e.pointerType)}
           onpointercancel={() => sendPress.reset()}
           onmousedown={handleSendMouseDown}
@@ -287,7 +287,7 @@
           <DropdownMenu.Trigger
             class={cn(
               buttonVariants({ variant: 'accent' }),
-              'composer-send-menu-trigger -ml-px h-auto min-h-9 w-8 rounded-l-none px-0 max-[640px]:min-h-11'
+              'composer-send-menu-trigger touch-hit -ml-px h-auto min-h-9 w-8 rounded-l-none px-0 mobile:min-h-11'
             )}
             title="Change how messages are delivered"
             aria-label="Change how messages are delivered"
@@ -313,7 +313,7 @@
       <span class="inline-flex composer-send" title={sendTitle}>
         <Button
           variant="accent"
-          class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
+          class="touch-hit h-auto min-h-9 gap-1.5 px-4 py-1 text-sm mobile:min-h-11"
           onpointerdown={(e) => sendPress.pointerDown(e.pointerType)}
           onpointercancel={() => sendPress.reset()}
           onmousedown={handleSendMouseDown}
@@ -338,14 +338,17 @@
 
 <style>
   /* The composer ends its dialog, so in a full-screen one its chrome runs
-     under the home indicator and only the controls are inset from it
-     (`--dialog-safe-bottom`, see dialog-content). */
+     under the home indicator and to the screen's sides, and only the
+     controls are inset (`--dialog-safe-bottom`, `--dialog-safe-left` /
+     `--dialog-safe-right`, see dialog-content). */
   .chat-composer {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 10px 14px;
     padding-bottom: calc(10px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(14px + var(--dialog-safe-left, 0px));
+    padding-right: calc(14px + var(--dialog-safe-right, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
@@ -448,6 +451,13 @@
 
   :global([data-cramped]) .composer-controls > :global(:not(.composer-send)) {
     display: none;
+  }
+
+  /* Send matches the message box's height, so the row fits the 48px the
+     keyboard leaves (SessionChatPane keeps it in view); its touch area
+     stays 44px (`touch-hit`). */
+  :global([data-cramped]) .composer-send :global(button) {
+    min-height: 36px;
   }
 
   /* A hairline between the split button's two accent segments, exactly the

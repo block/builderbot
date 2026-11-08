@@ -296,9 +296,14 @@
     composing = false;
   }
 
+  // The line break a browser leaves after every line is deleted reads as
+  // empty, so the placeholder comes back. The DOM is left as it is: editing
+  // it in the input event would drop the native undo entry and can reset
+  // iOS's auto-capitalisation.
   function extractValue(): string {
     if (!editorEl) return '';
-    return extractFromNode(editorEl);
+    const extracted = extractFromNode(editorEl);
+    return isLeftoverLineBreak(extracted, editorEl.textContent ?? '') ? '' : extracted;
   }
 
   function extractFromNode(node: Node): string {
@@ -327,13 +332,7 @@
   }
 
   function handleInput(e: Event) {
-    let extracted = extractValue();
-    // Clear a leftover line break so the editor reads as empty again, unless
-    // an IME composition is still writing into it.
-    if (editorEl && !composing && isLeftoverLineBreak(extracted, editorEl.textContent ?? '')) {
-      editorEl.replaceChildren();
-      extracted = '';
-    }
+    const extracted = extractValue();
     lastExtractedValue = extracted;
     value = extracted;
     detectHashtag();

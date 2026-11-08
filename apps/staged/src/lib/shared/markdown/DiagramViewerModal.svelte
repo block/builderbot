@@ -219,6 +219,9 @@
     min-height: 42px;
     flex-shrink: 0;
     padding: 8px 8px 8px 78px;
+    /* Close clears a full-screen dialog's side inset (`--dialog-safe-right`,
+       see dialog-content); the left padding already does. */
+    padding-right: calc(8px + var(--dialog-safe-right, 0px));
     background: var(--bg-app-bar);
     border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
   }

@@ -19,6 +19,13 @@
  */
 export const MOBILE_LAYOUT_QUERY =
   '(max-width: 768px), (pointer: coarse) and (max-device-width: 500px), (pointer: coarse) and (max-device-height: 500px)';
+/**
+ * Below this height a full-screen dialog can't show its header and its last
+ * row together: the on-screen keyboard up on a phone held sideways leaves
+ * about 48px of it. See dialog-content's `cramped`.
+ */
+export const SHORT_VIEWPORT_PX = 240;
+const SHORT_WINDOW_QUERY = `(max-height: ${SHORT_VIEWPORT_PX - 0.02}px)`;
 const SPLIT_QUERY = '(min-width: 1000px)';
 const COARSE_POINTER_QUERY = '(pointer: coarse)';
 const NO_HOVER_QUERY = '(hover: none)';
@@ -34,6 +41,11 @@ export interface ViewportState {
   // Both conditions, so a narrow desktop window keeps its popovers and a
   // tablet in landscape keeps menus anchored to what was pressed.
   sheetMenus: boolean;
+  // The window itself is shorter than SHORT_VIEWPORT_PX: on Android the
+  // on-screen keyboard shrinks it (`interactive-widget=resizes-content`), so
+  // a phone held sideways is left this short. iOS leaves the window alone
+  // and only the visual viewport shrinks (visualViewport.svelte.ts).
+  shortWindow: boolean;
 }
 
 /** The state for the given media query answers. */
@@ -46,6 +58,7 @@ export function readViewport(matches: (query: string) => boolean): ViewportState
     hasCoarsePointer,
     showShortcutHints: !(hasCoarsePointer || matches(NO_HOVER_QUERY)),
     sheetMenus: isMobile && hasCoarsePointer,
+    shortWindow: matches(SHORT_WINDOW_QUERY),
   };
 }
 
@@ -60,7 +73,13 @@ function matchesNow(query: string): boolean {
 // layout first and then animate the sidebar away.
 export const viewport = $state<ViewportState>(readViewport(matchesNow));
 
-const QUERIES = [MOBILE_LAYOUT_QUERY, SPLIT_QUERY, COARSE_POINTER_QUERY, NO_HOVER_QUERY];
+const QUERIES = [
+  MOBILE_LAYOUT_QUERY,
+  SPLIT_QUERY,
+  COARSE_POINTER_QUERY,
+  NO_HOVER_QUERY,
+  SHORT_WINDOW_QUERY,
+];
 /** The live query lists, while anything is subscribed. */
 let lists: Map<string, MediaQueryList> | null = null;
 let subscriberCount = 0;

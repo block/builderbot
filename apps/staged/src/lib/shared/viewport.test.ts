@@ -51,7 +51,21 @@ describe('viewport', () => {
       hasCoarsePointer: true,
       showShortcutHints: false,
       sheetMenus: true,
+      shortWindow: false,
     });
+  });
+
+  it('says when the window itself is too short for a dialog to show every row', async () => {
+    // Android's keyboard up on a phone held sideways shrinks the window.
+    const { SHORT_VIEWPORT_PX, viewport, watchViewport } = await importModule();
+    const query = `(max-height: ${SHORT_VIEWPORT_PX - 0.02}px)`;
+    const stop = watchViewport();
+    expect(viewport.shortWindow).toBe(false);
+
+    matching.add(query);
+    for (const cb of listeners.get(query) ?? []) cb();
+    expect(viewport.shortWindow).toBe(true);
+    stop();
   });
 
   it('starts at the desktop layout without matchMedia (node, jsdom)', async () => {
@@ -99,12 +113,29 @@ describe('the mobile layout in CSS', () => {
       for (const match of source.matchAll(/@media ([^{]*\(max-width: 768px\)[^{]*)\{/g)) {
         uses.push(match[1].replace(/\s+/g, ' ').trim());
       }
+      // Width alone, which a phone held sideways (874 px wide) passes as a
+      // desktop: Tailwind's `md` breakpoint (48rem = 768 px) either way, the
+      // arbitrary form, and the range syntax. `mobile:` is the variant.
       expect(source, file).not.toMatch(/max-\[768px\]:/);
+      expect(source, file).not.toMatch(/(^|[\s"'`{(:])(max-)?md:/m);
+      expect(source, file).not.toMatch(/\(\s*width\s*<=?\s*(768px|48rem)\s*\)/);
+      expect(source, file).not.toMatch(/\(\s*(768px|48rem)\s*>=?\s*width\s*\)/);
     }
 
     // A silently empty glob would pass with nothing checked.
     expect(Object.keys(styleSources)).toContain('/src/app.css');
     expect(uses.length).toBeGreaterThan(5);
     for (const query of uses) expect(query).toBe(MOBILE_LAYOUT_QUERY);
+  });
+
+  it('catches the width-only forms', () => {
+    // The patterns above, against what they're meant to reject. Made-up
+    // utilities, as Tailwind scans this file too and would build real ones.
+    const tailwindMd = /(^|[\s"'`{(:])(max-)?md:/m;
+    expect('class="max-md:drift-a"').toMatch(tailwindMd);
+    expect("'h-9 md:drift-b'").toMatch(tailwindMd);
+    expect('dark:md:drift-c').toMatch(tailwindMd);
+    expect('class="mobile:drift-d sm:drift-e"').not.toMatch(tailwindMd);
+    expect('@media (width <= 768px) {').toMatch(/\(\s*width\s*<=?\s*(768px|48rem)\s*\)/);
   });
 });

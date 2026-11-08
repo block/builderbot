@@ -37,6 +37,28 @@ export function focusAfterDialogEnter<T extends HTMLElement>(
 }
 
 /**
+ * Give a dialog's text input the focus it asks for as the dialog opens (or
+ * as its content is swapped under it, e.g. a mode switch) — but on a touch
+ * screen only if the input already has it.
+ *
+ * A focus that doesn't come from the user's own tap raises no keyboard on
+ * iOS: the input is left focused with nothing to type on, showing its
+ * spell-check underlines or selection handles, and it still takes a tap on
+ * it to bring the keyboard up. With a mouse and keyboard the input is
+ * focused (after focusAfterDialogEnter) so typing can start at once. An
+ * input that already has focus is refocused through `focus` everywhere, so
+ * a caller that places the caret or selects still gets that.
+ */
+export function autofocusOnOpen<T extends HTMLElement>(
+  el: T | null | undefined,
+  focus?: (el: T) => void
+): void {
+  if (!el) return;
+  if (hasCoarsePointer() && el.ownerDocument.activeElement !== el) return;
+  focusAfterDialogEnter(el, focus);
+}
+
+/**
  * The same query as `viewport.hasCoarsePointer`, read directly: a dialog's
  * form can ask for focus as it mounts, before anything has synced that.
  */

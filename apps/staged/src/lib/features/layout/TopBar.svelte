@@ -13,6 +13,7 @@
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import { getTrafficLightSpacerWidth, watchWindowChrome } from '../../shared/windowChrome.svelte';
   import { Button } from '$lib/components/ui/button';
+  import { centerSlotRoom } from './topBarCenter';
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
@@ -37,16 +38,72 @@
     !!topBar.title || !!topBar.subtitle || !!topBar.leading || !!topBar.badges
   );
   let trafficLightSpacerWidth = $derived(getTrafficLightSpacerWidth(viewport.isMobile));
+
+  // The desktop centre slot's room (see centerSlotRoom), measured whenever
+  // the bar or anything beside the slot changes size. The left and right
+  // groups come and go with the route, so each registers itself.
+  const SIDE_GAP_PX = 8;
+  let barEl = $state<HTMLDivElement | null>(null);
+  let leftEls: HTMLElement[] = [];
+  let rightEl: HTMLElement | null = null;
+  let centerRoom = $state<number | null>(null);
+
+  function measureCenterRoom() {
+    if (!barEl) return;
+    const bar = barEl.getBoundingClientRect();
+    if (bar.width === 0) return;
+    let leftEnd = bar.left;
+    for (const el of leftEls) leftEnd = Math.max(leftEnd, el.getBoundingClientRect().right);
+    centerRoom = centerSlotRoom({
+      barLeft: bar.left,
+      barRight: bar.right,
+      leftEnd,
+      rightStart: rightEl?.getBoundingClientRect().left ?? bar.right,
+      gap: SIDE_GAP_PX,
+    });
+  }
+
+  let resizeObserver: ResizeObserver | null = null;
+
+  $effect(() => {
+    if (!barEl || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measureCenterRoom);
+    resizeObserver = observer;
+    observer.observe(barEl);
+    for (const el of leftEls) observer.observe(el);
+    if (rightEl) observer.observe(rightEl);
+    return () => {
+      observer.disconnect();
+      resizeObserver = null;
+    };
+  });
+
+  function besideCenter(el: HTMLElement, side: 'left' | 'right') {
+    if (side === 'left') leftEls.push(el);
+    else rightEl = el;
+    resizeObserver?.observe(el);
+    measureCenterRoom();
+    return {
+      destroy() {
+        if (side === 'left') leftEls = leftEls.filter((other) => other !== el);
+        else if (rightEl === el) rightEl = null;
+        resizeObserver?.unobserve(el);
+        measureCenterRoom();
+      },
+    };
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  bind:this={barEl}
   class="top-bar"
-  style={`--traffic-light-spacer-width: ${trafficLightSpacerWidth}px`}
+  style:--traffic-light-spacer-width="{trafficLightSpacerWidth}px"
+  style:--top-bar-center-room={centerRoom === null ? undefined : `${centerRoom}px`}
   onpointerdown={startDrag}
 >
   <div class="traffic-light-spacer" class:collapsed={trafficLightSpacerWidth === 0}></div>
-  <div class="left-actions">
+  <div class="left-actions" use:besideCenter={'left'}>
     {#if navigation.canGoBack}
       <Button
         variant="ghost"
@@ -66,7 +123,7 @@
   </div>
 
   {#if hasTitle}
-    <div class="title-content">
+    <div class="title-content" use:besideCenter={'left'}>
       {#if topBar.leading}
         <div class="leading-slot">
           {@render topBar.leading()}
@@ -97,7 +154,7 @@
   <div class="drag-spacer"></div>
 
   {#if topBar.rightActions}
-    <div class="top-bar-actions">
+    <div class="top-bar-actions" use:besideCenter={'right'}>
       {@render topBar.rightActions()}
     </div>
   {/if}
@@ -189,11 +246,20 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: min(42vw, 420px);
+    /* No wider than the room between what's either side of it (measured,
+       see centerSlotRoom), and hidden once that's too narrow to read. */
+    width: min(42vw, 420px, var(--top-bar-center-room, 100vw));
     min-width: 0;
     pointer-events: none;
     transform: translate(-50%, -50%);
     -webkit-app-region: drag;
+    container-type: inline-size;
+  }
+
+  @container (width < 6em) {
+    .center-content > :global(*) {
+      visibility: hidden;
+    }
   }
 
   .subtitle {
@@ -221,7 +287,10 @@
     display: none;
   }
 
-  @media (max-width: 768px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .top-bar {
       --top-bar-action-size: 44px;
       padding: 2px 8px;

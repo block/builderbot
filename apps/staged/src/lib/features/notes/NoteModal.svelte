@@ -647,7 +647,7 @@
     variant="outline"
     size="sm"
     class={[
-      'h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground',
+      'touch-hit h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground',
       copied && 'text-[var(--status-added)] hover:text-[var(--status-added)]',
     ]}
     title={copied ? 'Copied!' : 'Copy note to clipboard'}
@@ -667,7 +667,7 @@
     <Button
       variant="outline"
       size="sm"
-      class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+      class="touch-hit h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
       title={readToggleLabel}
       aria-label={readToggleLabel}
       disabled={readTracker.toggling}
@@ -687,7 +687,7 @@
     <Button
       variant="outline"
       size="sm"
-      class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+      class="touch-hit h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
       title={chatToggleAriaLabel}
       aria-label={chatToggleAriaLabel}
       aria-pressed={chatOpen}
@@ -707,7 +707,7 @@
   <Button
     variant="ghost"
     size="icon-sm"
-    class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+    class="touch-hit size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
     title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
     aria-label="Close"
     onclick={onClose}
@@ -760,7 +760,7 @@
               onClose={closeSearch}
             />
           {/if}
-          <div class="note-header-actions">
+          <div class="note-header-actions touch-hit-group">
             {#if displayNoteId}
               <NoteTransferMenu
                 noteId={displayNoteId}
@@ -782,7 +782,7 @@
           </div>
         </div>
         {#if splitChatOpen}
-          <div class="chat-header-pane">
+          <div class="chat-header-pane touch-hit-group">
             {@render chatToggleButton()}
             {@render closeButton()}
           </div>

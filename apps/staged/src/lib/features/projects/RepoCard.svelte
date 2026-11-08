@@ -404,10 +404,10 @@
     <RepoLabel githubRepo={repo.githubRepo} subpath={repo.subpath || null} wrap />
   </span>
 
-  <div class="card-actions">
+  <div class="card-actions touch-hit-group">
     <Button
       variant="ghost"
-      class="h-[22px] gap-1 whitespace-nowrap rounded-[4px] px-1.5 text-[length:var(--size-xs)] font-medium text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
+      class="touch-hit h-[22px] gap-1 whitespace-nowrap rounded-[4px] px-1.5 text-[length:var(--size-xs)] font-medium text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
       title="Add project"
       onclick={(e) => {
         e.stopPropagation();
@@ -431,7 +431,7 @@
           <span class="inline-flex" title="Detect actions">
             <Button
               variant="ghost"
-              class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+              class="touch-hit size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
               aria-label="Detect actions"
               disabled={detecting}
               onclick={(e) => {
@@ -451,7 +451,7 @@
         <span class="inline-flex" title="Clone repo locally">
           <Button
             variant="ghost"
-            class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+            class="touch-hit size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
             aria-label="Clone repo locally"
             disabled={cloning}
             onclick={(e) => {
@@ -472,7 +472,7 @@
         <Button
           variant="ghost"
           class={[
-            'size-[22px] rounded-[4px] p-0 hover:bg-[var(--card-bg-strong)] [&_svg]:!size-3',
+            'touch-hit size-[22px] rounded-[4px] p-0 hover:bg-[var(--card-bg-strong)] [&_svg]:!size-3',
             repo.pinned
               ? 'text-[var(--accent)] hover:text-[var(--accent)]'
               : 'text-[var(--text-faint)] hover:text-[var(--text-primary)]',
@@ -503,7 +503,7 @@
       >
         <DropdownMenu.Trigger
           bind:ref={moreTrigger}
-          class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
+          class="touch-hit inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
           title="More options"
           aria-label="More options"
         >

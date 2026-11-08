@@ -33,6 +33,14 @@ function element(props: Record<string, unknown>, inFullScreen = true) {
 
 const composer = element({ tagName: 'TEXTAREA' });
 
+/** A client rect for an element `pageTop` down the unscrolled page. */
+function pageRect(pageTop: number) {
+  return () => {
+    const top = pageTop - fakeWindow.scrollY - body.scrollTop;
+    return { top, bottom: top + 30 };
+  };
+}
+
 function flushFrames(): void {
   const pending = rafCallbacks;
   rafCallbacks = [];
@@ -129,11 +137,12 @@ const LAYOUT_GEOMETRY = { top: 0, height: null, keyboardOpen: false, zoomed: fal
 describe('watchVisualViewport', () => {
   it('holds the layout geometry until the deferred first read', async () => {
     const { visibleViewport, watchVisualViewport } = await importModule();
+    viewport.height = 384;
     watchVisualViewport();
-    expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
 
     flushFrames();
-    expect(visibleViewport).toEqual({ top: 0, height: 714, keyboardOpen: false, zoomed: false });
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
   });
 
   it('undoes the page scroll Safari adds for the keyboard and pins to what is left', async () => {
@@ -265,14 +274,16 @@ describe('watchVisualViewport', () => {
   });
 
   it('re-measures a blur after BLUR_SETTLE_MS when no resize comes', async () => {
-    // A hardware keyboard, or a blur with no keyboard on screen at all.
+    // A hardware keyboard: only iOS's accessory bar covers the page, and the
+    // blur may come with no resize to wait for.
     useFakeTimeouts();
     const { BLUR_SETTLE_MS, visibleViewport, watchVisualViewport } = await importModule();
     const field = element({ tagName: 'INPUT', type: 'text' });
     fakeDocument.activeElement = field;
+    viewport.height = 660;
     watchVisualViewport();
     flushFrames();
-    expect(visibleViewport).toEqual({ top: 0, height: 714, keyboardOpen: false, zoomed: false });
+    expect(visibleViewport).toEqual({ top: 0, height: 660, keyboardOpen: false, zoomed: false });
 
     const button = element({ tagName: 'BUTTON' });
     moveFocus(field, button);
@@ -280,7 +291,7 @@ describe('watchVisualViewport', () => {
     vi.advanceTimersByTime(BLUR_SETTLE_MS - 100);
     moveFocus(button, element({ tagName: 'A' }));
     vi.advanceTimersByTime(99);
-    expect(visibleViewport.height).toBe(714);
+    expect(visibleViewport.height).toBe(660);
 
     vi.advanceTimersByTime(1);
     expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
@@ -348,6 +359,18 @@ describe('watchVisualViewport', () => {
     expect(visibleViewport.height).toBe(484);
   });
 
+  it('keeps the layout geometry for a focused input with no keyboard over it', async () => {
+    // A dialog focusing its input as it opens: iOS raises no keyboard for a
+    // focus outside a tap, so nothing switches to keyboard sizing.
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    fakeDocument.activeElement = composer;
+    watchVisualViewport();
+    flushFrames();
+    dispatchFocus('focusin', composer);
+
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+  });
+
   it('follows a focused contenteditable', async () => {
     const { visibleViewport, watchVisualViewport } = await importModule();
     fakeDocument.activeElement = element({ tagName: 'DIV', isContentEditable: true });
@@ -367,7 +390,10 @@ describe('watchVisualViewport', () => {
     watchVisualViewport();
     flushFrames();
 
-    fakeDocument.activeElement = element({ tagName: 'INPUT', type: 'text' }, false);
+    fakeDocument.activeElement = element(
+      { tagName: 'INPUT', type: 'text', getBoundingClientRect: pageRect(600) },
+      false
+    );
     viewport.height = 384;
     viewport.offsetTop = 330;
     fakeWindow.scrollY = 330;
@@ -384,6 +410,26 @@ describe('watchVisualViewport', () => {
 
     expect(fakeWindow.scrollTo).toHaveBeenCalledWith(0, 0);
     expect(visibleViewport).toEqual({ top: 0, height: 384, keyboardOpen: true, zoomed: false });
+  });
+
+  it('drops a page scroll an input outside the layout shows without', async () => {
+    // A search field near the top of the page, which Safari still scrolled
+    // 5 px for. The layout stays at the layout viewport's geometry.
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    watchVisualViewport();
+    flushFrames();
+
+    fakeDocument.activeElement = element(
+      { tagName: 'INPUT', type: 'search', getBoundingClientRect: pageRect(100) },
+      false
+    );
+    viewport.height = 384;
+    viewport.offsetTop = 5;
+    fakeWindow.scrollY = 5;
+    viewport.dispatchEvent(new Event('resize'));
+
+    expect(fakeWindow.scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
   });
 
   it('leaves a pinch-zoomed page where the user panned it', async () => {

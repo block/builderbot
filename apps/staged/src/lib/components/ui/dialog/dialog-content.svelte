@@ -37,6 +37,13 @@
 
   const fullScreen = $derived(fullScreenOnMobile && viewport.isMobile);
 
+  /**
+   * Below this visible height (the on-screen keyboard up on a phone held
+   * sideways leaves about 48px) a full-screen dialog can't show its header
+   * and its last row together; see `cramped`.
+   */
+  const CRAMPED_HEIGHT_PX = 240;
+
   // A full-screen dialog covers the visual viewport — the part of the page
   // actually on screen — so the on-screen keyboard shrinks it rather than
   // scrolling it away.
@@ -54,12 +61,13 @@
   // the header rather than spreading down the screen to where the keyboard
   // will open.
   //
-  // While nothing takes typing (`height === null`) the dialog is anchored to
-  // all four edges, so its surface covers the whole layout viewport, under
-  // the home indicator included, whatever `100dvh` measures. While a text
-  // input has focus, `top` and `height` track the visual viewport instead,
-  // pinning the last row to the keyboard's top edge (or above the bar iOS
-  // shows over a hardware keyboard).
+  // While the visual viewport is the whole layout viewport (`height ===
+  // null`: nothing takes typing, or a focused input has no keyboard over it)
+  // the dialog is anchored to all four edges, so its surface covers the whole
+  // layout viewport, under the home indicator included, whatever `100dvh`
+  // measures. While a keyboard (or the bar iOS shows over a hardware one)
+  // covers part of it, `top` and `height` track the visual viewport instead,
+  // pinning the last row to the keyboard's top edge.
   //
   // The surface reaches the screen's edges; only content is inset. The top
   // inset is the dialog's own padding, as the header is always the first
@@ -71,6 +79,28 @@
   // behind it. It is 0 with the keyboard up, which covers the indicator.
   // Outside a full-screen dialog the property is unset; read it as
   // `var(--dialog-safe-bottom, 0px)`.
+  //
+  // The side insets (a phone held sideways: the Dynamic Island and the
+  // rounded corners) are transparent borders, so they add to whatever
+  // padding the caller's class sets rather than replace it, and the
+  // background, painted under the border, still reaches the edges.
+  //
+  // Only colours, opacity and transforms transition. The base class's
+  // `duration-100` with no transition property would mean `transition: all`,
+  // animating `top` and `height` behind every keyboard move; a tap on the
+  // last row then landed or missed depending on whether a caller happened to
+  // narrow the property (NewSessionModal's `transition-colors` did).
+  //
+  // `cramped`: with too little visible to fit every row, the dialog scrolls
+  // rather than clip, and `data-cramped` lets its rows give way (the session
+  // dialog drops its header and puts Send beside the message box).
+  const cramped = $derived(
+    fullScreen &&
+      visibleViewport.keyboardOpen &&
+      visibleViewport.height !== null &&
+      visibleViewport.height < CRAMPED_HEIGHT_PX
+  );
+
   const fullScreenStyle = $derived.by(() => {
     const { top, height, keyboardOpen } = visibleViewport;
     const geometry =
@@ -88,9 +118,13 @@
       'transform:none',
       'translate:none',
       'border-radius:0',
+      'border-left:env(safe-area-inset-left) solid transparent',
+      'border-right:env(safe-area-inset-right) solid transparent',
       'align-content:start',
       'padding-top:env(safe-area-inset-top)',
       `--dialog-safe-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
+      'transition-property:color,background-color,border-color,outline-color,opacity,transform,translate,scale',
+      ...(cramped ? ['overflow-y:auto', 'overscroll-behavior:contain'] : []),
     ].join(';');
   });
 
@@ -180,6 +214,7 @@
     )}
     style={contentStyle}
     data-full-screen={fullScreen ? '' : undefined}
+    data-cramped={cramped ? '' : undefined}
     onOpenAutoFocus={handleOpenAutoFocus}
     onCloseAutoFocus={handleCloseAutoFocus}
     onpointerdown={handlePointerDown}

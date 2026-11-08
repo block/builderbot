@@ -1076,7 +1076,10 @@
      it, "Suspended" is hidden visually (the pause icon shows the state and
      screen readers still read it), and Add Repo, disabled until the workspace
      is running, drops its label (its aria-label still names it). */
-  @media (max-width: 768px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .workspace-badge.suspended .status-label {
       position: absolute;
       width: 1px;

@@ -7,7 +7,11 @@ vi.mock('../../commands', () => ({
 }));
 
 import type { HashtagItem } from '../../types';
-import { BADGE_CARET_ANCHOR, hashtagContentFragment } from './hashtagEditorContent';
+import {
+  BADGE_CARET_ANCHOR,
+  hashtagContentFragment,
+  isLeftoverLineBreak,
+} from './hashtagEditorContent';
 
 const note: HashtagItem = {
   type: 'note',
@@ -55,5 +59,21 @@ describe('hashtagContentFragment', () => {
       '<br>',
       'b',
     ]);
+  });
+});
+
+describe('isLeftoverLineBreak', () => {
+  it('spots the break left after deleting every line', () => {
+    // `<div><br></div>`, or a lone `<br>`, with no text.
+    expect(isLeftoverLineBreak('\n', '')).toBe(true);
+    expect(isLeftoverLineBreak('\n', BADGE_CARET_ANCHOR)).toBe(true);
+  });
+
+  it('keeps anything typed', () => {
+    expect(isLeftoverLineBreak('', '')).toBe(false);
+    expect(isLeftoverLineBreak('a', 'a')).toBe(false);
+    expect(isLeftoverLineBreak('\n\n', '')).toBe(false);
+    // A newline held as text rather than as a `<br>`.
+    expect(isLeftoverLineBreak('\n', '\n')).toBe(false);
   });
 });

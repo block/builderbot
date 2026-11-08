@@ -186,7 +186,7 @@
   } from './acpTranscript';
   import PlanCard from './PlanCard.svelte';
   import { viewport } from '../../shared/viewport.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import { observeSizeChanges } from '../../shared/observeSizeChanges';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import {
@@ -914,9 +914,10 @@
 
   // The focus can wait out a full-screen dialog's enter animation, and the
   // pane may be parked or retargeted by then, so the open is re-checked when
-  // the focus lands rather than when it was asked for.
+  // the focus lands rather than when it was asked for. On a touch screen the
+  // composer is left for the user to tap (see autofocusOnOpen).
   function focusComposerWhileOpen(id: string) {
-    focusAfterDialogEnter(inputEl, (el) => {
+    autofocusOnOpen(inputEl, (el) => {
       if (!closed && active && sessionId === id) el.focus();
     });
   }
@@ -2963,7 +2964,7 @@
                     <Button
                       variant="ghost"
                       size="icon"
-                      class="message-copy-action absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
+                      class="message-copy-action touch-hit absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
                       title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       onclick={() => copyContent(group.message.content, group.message.id)}
@@ -3007,7 +3008,7 @@
                     <Button
                       variant="ghost"
                       size="icon"
-                      class="message-copy-action absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
+                      class="message-copy-action touch-hit absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
                       title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       onclick={() => copyContent(group.message.content, group.message.id)}
@@ -3670,6 +3671,18 @@
 
   .assistant-content-has-copy {
     padding-right: 28px;
+  }
+
+  /* The bubble clips (overflow: hidden): the copy button's touch area moves
+     in from the corner to stay whole. The assistant's starts at the button's
+     top, short of the message above. */
+  .human-bubble :global(.message-copy-action) {
+    --touch-hit-dx: calc(0.375rem - 13px);
+    --touch-hit-dy: calc(13px - 0.375rem);
+  }
+
+  .assistant-content :global(.message-copy-action) {
+    --touch-hit-dy: 13px;
   }
 
   .human-bubble:focus-within :global(.message-copy-action),

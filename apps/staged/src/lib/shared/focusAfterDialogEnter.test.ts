@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { focusAfterDialogEnter } from './focusAfterDialogEnter';
+import { autofocusOnOpen, focusAfterDialogEnter } from './focusAfterDialogEnter';
 
 // vitest runs in node: elements are stubbed down to what the helper touches
 // (`closest`, `getAnimations`, `dataset.state`, `isConnected`, `focus`), and
@@ -36,7 +36,12 @@ function fakeElement(dialog: FakeDialog | null) {
     isConnected: true,
     focus: vi.fn(),
     closest: vi.fn(() => dialog),
-  } as unknown as HTMLElement & { focus: ReturnType<typeof vi.fn>; isConnected: boolean };
+    ownerDocument: { activeElement: null as unknown },
+  } as unknown as HTMLElement & {
+    focus: ReturnType<typeof vi.fn>;
+    isConnected: boolean;
+    ownerDocument: { activeElement: unknown };
+  };
 }
 
 async function settle(): Promise<void> {
@@ -142,5 +147,41 @@ describe('focusAfterDialogEnter', () => {
 
   it('ignores a missing element', () => {
     expect(() => focusAfterDialogEnter(null)).not.toThrow();
+  });
+});
+
+describe('autofocusOnOpen', () => {
+  it('focuses with a mouse and keyboard', () => {
+    coarsePointer = false;
+    const el = fakeElement(fakeDialog(deferredAnimation()));
+    const focus = vi.fn();
+
+    autofocusOnOpen(el, focus);
+
+    expect(focus).toHaveBeenCalledWith(el);
+  });
+
+  it('leaves an unfocused input alone on a touch screen, where it would get no keyboard', async () => {
+    const el = fakeElement(null);
+
+    autofocusOnOpen(el);
+    await settle();
+
+    expect(el.focus).not.toHaveBeenCalled();
+  });
+
+  it('still refocuses an input that already has focus on a touch screen', () => {
+    // A mode switch that swaps the prompt under the caret puts it back.
+    const el = fakeElement(null);
+    el.ownerDocument.activeElement = el;
+    const focus = vi.fn();
+
+    autofocusOnOpen(el, focus);
+
+    expect(focus).toHaveBeenCalledWith(el);
+  });
+
+  it('ignores a missing element', () => {
+    expect(() => autofocusOnOpen(undefined)).not.toThrow();
   });
 });

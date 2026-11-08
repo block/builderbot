@@ -9,8 +9,11 @@
 // top and the visual viewport's height as its height.
 //
 // The visual viewport is only followed while a text input has focus, the
-// one time the page can have a keyboard over it. Otherwise the layout
-// viewport is the screen. iOS can also leave the visual viewport stale: a
+// one time the page can have a keyboard over it, and only once it is
+// actually shorter than the layout viewport. Otherwise the layout viewport is
+// the screen: a focused input need not have a keyboard over it (iOS raises
+// none for a programmatic focus outside a tap, or with a hardware keyboard
+// and no accessory bar). iOS can also leave the visual viewport stale: a
 // keyboard raised by a system sheet (Add to Home Screen) and still up when
 // Safari went to the background stays subtracted from it after Safari
 // returns, with nothing covering the page.
@@ -20,7 +23,13 @@
  * browser chrome changing size (the input accessory bar shown over a hardware
  * keyboard sits where Safari's toolbar was), not something covering the page.
  */
-const KEYBOARD_MIN_INSET_PX = 100;
+export const KEYBOARD_MIN_INSET_PX = 100;
+
+/**
+ * How much shorter than the layout viewport the visual viewport has to be
+ * before anything covers the page: less is rounding.
+ */
+const COVERED_MIN_PX = 1;
 
 /**
  * Above this scale the user has pinch-zoomed (iOS ignores `user-scalable=no`):
@@ -73,11 +82,12 @@ export function computeViewportGeometry(sample: ViewportSample): ViewportGeometr
   if (isPinchZoomed(sample.scale)) {
     return { ...LAYOUT_VIEWPORT_GEOMETRY, zoomed: true };
   }
-  if (!sample.textInputFocused) return { ...LAYOUT_VIEWPORT_GEOMETRY };
+  const covered = sample.layoutHeight - sample.height;
+  if (!sample.textInputFocused || covered < COVERED_MIN_PX) return { ...LAYOUT_VIEWPORT_GEOMETRY };
   return {
     top: Math.max(0, sample.offsetTop),
     height: sample.height,
-    keyboardOpen: sample.layoutHeight - sample.height >= KEYBOARD_MIN_INSET_PX,
+    keyboardOpen: covered >= KEYBOARD_MIN_INSET_PX,
     zoomed: false,
   };
 }

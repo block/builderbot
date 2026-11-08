@@ -508,7 +508,7 @@
               <Button
                 variant="ghost"
                 size="sm"
-                class="h-7 text-muted-foreground"
+                class="touch-hit h-7 text-muted-foreground"
                 onclick={showAllRepos}>View all</Button
               >
             </div>

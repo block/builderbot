@@ -12,7 +12,8 @@
     disabled
     items      — full list of HashtagItems (parent provides, scoped correctly)
     class      — pass-through for styling
-    rows       — approximate initial height in rows
+    rows       — approximate initial height in rows (the editor's minimum
+                 height; a host overrides it with --hashtag-input-min-height)
     onkeydown  — pass-through keydown handler (called after hashtag handling)
     oninput    — pass-through input handler
     onpaste    — pass-through paste handler (e.g. for image paste)
@@ -30,7 +31,11 @@
   import FileSearch from '@lucide/svelte/icons/file-search';
   import ImageLucide from '@lucide/svelte/icons/image';
   import { HASHTAG_TOKEN_RE, createExtractedValueBuilder } from './hashtagItems';
-  import { createBadgeElement, hashtagContentFragment } from './hashtagEditorContent';
+  import {
+    createBadgeElement,
+    hashtagContentFragment,
+    isLeftoverLineBreak,
+  } from './hashtagEditorContent';
   import { readReferenceClipboard, writeReferenceClipboard } from './referenceClipboard';
   import { placeHashtagDropdown } from './hashtagDropdownPlacement';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
@@ -322,7 +327,13 @@
   }
 
   function handleInput(e: Event) {
-    const extracted = extractValue();
+    let extracted = extractValue();
+    // Clear a leftover line break so the editor reads as empty again, unless
+    // an IME composition is still writing into it.
+    if (editorEl && !composing && isLeftoverLineBreak(extracted, editorEl.textContent ?? '')) {
+      editorEl.replaceChildren();
+      extracted = '';
+    }
     lastExtractedValue = extracted;
     value = extracted;
     detectHashtag();
@@ -591,7 +602,7 @@
       role="textbox"
       aria-multiline="true"
       data-placeholder={placeholder}
-      style="min-height: {Number(rows) * 1.5}em"
+      style="min-height: var(--hashtag-input-min-height, {Number(rows) * 1.5}em)"
       oninput={handleInput}
       onkeydown={handleKeydown}
       onblur={handleBlur}

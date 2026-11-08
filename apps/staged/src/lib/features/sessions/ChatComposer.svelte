@@ -422,6 +422,34 @@
     margin-left: auto;
   }
 
+  /* Too little height for two rows (the keyboard up on a phone held
+     sideways, dialog-content's `cramped`): the message box and Send share
+     one, and the other controls wait for the keyboard to close. Anything
+     else (attachments, an error line) keeps a full-width row of its own and
+     the dialog scrolls to it. */
+  :global([data-cramped]) .chat-composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    padding-block: 5px;
+  }
+
+  :global([data-cramped]) .chat-composer > :global(*) {
+    grid-column: 1 / -1;
+  }
+
+  :global([data-cramped]) .chat-composer > :global(.hashtag-input-wrapper) {
+    grid-column: 1;
+  }
+
+  :global([data-cramped]) .chat-composer > .composer-controls {
+    grid-column: 2;
+  }
+
+  :global([data-cramped]) .composer-controls > :global(:not(.composer-send)) {
+    display: none;
+  }
+
   /* A hairline between the split button's two accent segments, exactly the
      height of the fills. Every button paints a 1px transparent border with
      bg-clip-padding, so its fill is inset 1px from the border box on all

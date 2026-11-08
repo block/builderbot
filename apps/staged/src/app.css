@@ -6,6 +6,18 @@
  */
 @custom-variant dark (&:is(.dark *));
 
+/* The mobile layout: a narrow window, or a phone either way up. The same
+   query as MOBILE_LAYOUT_QUERY (src/lib/shared/viewport.svelte.ts, which
+   explains it); component <style> blocks repeat it in their own @media rules
+   for this layout. */
+@custom-variant mobile {
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
+    @slot;
+  }
+}
+
 /**
  * Global styles for Staged
  *
@@ -487,5 +499,44 @@ mark.search-match-current {
   }
   html {
     @apply font-sans;
+  }
+}
+
+/* A 44 px hit area on touch screens around a control drawn smaller (an icon
+   button in a dense header, a link-sized text button). The area is an
+   invisible pseudo-element, so nothing moves or changes look, and with a
+   mouse the class does nothing. It positions the control so the area centres
+   on it; a control positioned by a utility or its component's own style keeps
+   that, as both win over this layer. `--touch-hit-dx` / `--touch-hit-dy` move
+   the area off centre, say to keep it inside a parent that clips.
+
+   `touch-hit-group` goes on a row of such controls set closer than 44 px:
+   the areas then sit under every control's own box (the row is their
+   stacking context), so a tap lands on the control drawn under the finger
+   and each area only takes the free space around its control. The areas
+   overlap in the gaps, where the later control takes the tap. */
+@layer components {
+  @media (pointer: coarse) {
+    .touch-hit {
+      position: relative;
+    }
+
+    .touch-hit::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, 44px);
+      height: max(100%, 44px);
+      translate: calc(-50% + var(--touch-hit-dx, 0px)) calc(-50% + var(--touch-hit-dy, 0px));
+    }
+
+    .touch-hit-group {
+      isolation: isolate;
+    }
+
+    .touch-hit-group .touch-hit::after {
+      z-index: -1;
+    }
   }
 }

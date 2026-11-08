@@ -107,7 +107,7 @@
         <Button
           variant="ghost"
           size="icon"
-          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:size-10 [&_svg]:!size-[18px]"
+          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground mobile:size-10 [&_svg]:!size-[18px]"
           title="Close"
           aria-label="Close"
           onclick={close}
@@ -222,7 +222,7 @@
           <Button
             type="button"
             variant="outline"
-            class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+            class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground mobile:h-11 mobile:flex-1 mobile:justify-center"
             onclick={close}
           >
             Cancel
@@ -230,7 +230,7 @@
           <Button
             type="submit"
             variant="accent"
-            class="gap-1.5 px-4 py-2 text-sm max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+            class="gap-1.5 px-4 py-2 text-sm mobile:h-11 mobile:flex-1 mobile:justify-center"
             disabled={!preflight?.canTransfer}
           >
             {title}
@@ -365,7 +365,10 @@
     flex-shrink: 0;
   }
 
-  @media (max-width: 768px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .modal-header {
       padding: 12px 16px;
     }

@@ -153,12 +153,12 @@
         onPrevious={previousMatch}
         onClose={closeSearch}
       />
-      <div class="header-actions">
+      <div class="header-actions touch-hit-group">
         {#if noteInfo?.content.trim() && onOpenNote}
           <Button
             variant="outline"
             size="sm"
-            class="h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:h-10"
+            class="touch-hit h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:h-10"
             onclick={() => onOpenNote?.(noteInfo!)}
           >
             View note
@@ -167,7 +167,7 @@
         <Button
           variant="ghost"
           size="icon"
-          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:size-10 [&_svg]:!size-4"
+          class="touch-hit size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:size-10 [&_svg]:!size-4"
           title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
           aria-label="Close"
           onclick={requestClose}
@@ -234,5 +234,12 @@
     .modal-header {
       padding: 12px;
     }
+  }
+
+  /* With the keyboard up on a phone held sideways only the composer's row
+     fits (dialog-content's `cramped`); the header is back once the keyboard
+     closes. */
+  :global([data-cramped]) > .modal-header {
+    display: none;
   }
 </style>

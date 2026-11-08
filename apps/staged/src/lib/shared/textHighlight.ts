@@ -5,6 +5,8 @@
  * and navigate between them.
  */
 
+import { revealWithin } from './revealWithin';
+
 export interface HighlightResult {
   total: number;
   elements: HTMLElement[];
@@ -157,11 +159,11 @@ function isNonEmptyText(node: Node | null): node is Text {
  * Centers the element in the viewport.
  *
  * @param element - The element to scroll to
+ * @param within - The box being searched. When given, only it and the
+ *   scrollers inside it move (see revealWithin), not the boxes around it.
  */
-export function scrollToMatch(element: HTMLElement): void {
-  element.scrollIntoView({
-    behavior: 'smooth',
-    block: 'center',
-    inline: 'nearest',
-  });
+export function scrollToMatch(element: HTMLElement, within?: HTMLElement): void {
+  const options = { behavior: 'smooth', block: 'center', inline: 'nearest' } as const;
+  if (within) revealWithin(element, within, options);
+  else element.scrollIntoView(options);
 }

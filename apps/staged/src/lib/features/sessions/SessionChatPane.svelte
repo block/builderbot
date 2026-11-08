@@ -199,6 +199,7 @@
   import ToolCallCard from './tool-calls/ToolCallCard.svelte';
   import ToolCallHeader from './tool-calls/ToolCallHeader.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
+  import { revealWithin } from '../../shared/revealWithin';
   import '../../shared/markdown/diagramStyles.css';
   import {
     extractMarkdownDiagramFences,
@@ -2082,6 +2083,21 @@
     }
   }
 
+  // The note follow-up row appears below the messages once the turn that
+  // wrote the note ends. That isn't an append, and the row slides in inside
+  // the messages list rather than as a row of the box itself, so the
+  // observer above misses it too. It is followed like an append when it
+  // appears: `afterSlide` re-pins once the slide has played. Only the row
+  // appearing does this; whether the pane may scroll is read untracked.
+  let noteFollowupShown = $derived(!!noteFollowupLabel);
+  $effect(() => {
+    if (!noteFollowupShown) return;
+    untrack(() => {
+      if (!active || closed || parkedScroll || deferredRestore.pending) return;
+      scrollToBottomIfNear(true);
+    });
+  });
+
   // Keep a transcript that follows the bottom at the bottom when its own box
   // is resized: the full-screen dialog shrinking to the visual viewport as
   // the on-screen keyboard opens (and growing back as it closes), the
@@ -2356,7 +2372,7 @@
 
     // Scroll to first match if any
     if (matchElements.length > 0) {
-      scrollToMatch(matchElements[0]);
+      scrollToMatch(matchElements[0], messagesEl);
     }
     publishSearchState();
   }
@@ -2375,7 +2391,7 @@
 
     // Add current class to new match
     matchElements[currentMatchIndex].classList.add('search-match-current');
-    scrollToMatch(matchElements[currentMatchIndex]);
+    scrollToMatch(matchElements[currentMatchIndex], messagesEl);
     publishSearchState();
   }
 
@@ -2393,7 +2409,7 @@
 
     // Add current class to new match
     matchElements[currentMatchIndex].classList.add('search-match-current');
-    scrollToMatch(matchElements[currentMatchIndex]);
+    scrollToMatch(matchElements[currentMatchIndex], messagesEl);
     publishSearchState();
   }
 
@@ -3255,6 +3271,7 @@
         checkRequested={checkNowPending}
         stopping={cancelling}
         {userScrolledUp}
+        reveal={(el) => revealWithin(el, messagesEl, { block: 'nearest' })}
         onCheckNow={handleCheckNow}
         onStop={handleCancel}
       />

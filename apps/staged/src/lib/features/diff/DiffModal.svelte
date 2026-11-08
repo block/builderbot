@@ -1933,6 +1933,24 @@
     bottom: var(--dialog-safe-bottom, 0px);
   }
 
+  /* The viewer's other states end at the screen's edge too: an image diff
+     (16px of padding, none above or below the slider), and the binary and
+     file-not-found notices, centred in what's left. These add to the
+     viewer's own padding, so they're scoped to the container: one class more
+     specific than its rules. */
+  .diff-viewer-container :global(.image-content) {
+    padding-bottom: calc(16px + var(--dialog-safe-bottom, 0px));
+  }
+
+  .diff-viewer-container :global(.image-content.slider-active) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
+  }
+
+  .diff-viewer-container :global(.empty-state),
+  .diff-viewer-container :global(.binary-notice) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
+  }
+
   /* ========================================================================
    * File sidebar
    * ====================================================================== */

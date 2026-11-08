@@ -28,7 +28,13 @@ const OWN_SIZE: Record<string, Sizes> = {
   '/src/lib/shared/SearchField.svelte': { mobile: 'text-sm', desktop: 'text-sm' },
 };
 
-const FONT_SIZE = /^text-(xs|sm|base|lg|xl|[2-9]xl)$/;
+/**
+ * A font size is whatever tailwind-merge treats as one: merged after
+ * `text-sm`, it replaces it. That takes in the arbitrary sizes
+ * (`text-[13px]`, `text-[length:…]`) and leaves out a bare
+ * `text-[var(--x)]`, which it reads as a colour.
+ */
+const isFontSize = (token: string) => cn('text-sm', token) === token;
 
 function baseClasses(): string {
   const source = sources['/src/lib/components/ui/input/input.svelte'];
@@ -65,10 +71,10 @@ function inputTags(source: string): string[] {
 
 function effectiveSizes(classes: string): Sizes {
   const tokens = classes.split(/\s+/);
-  const desktop = tokens.filter((t) => FONT_SIZE.test(t)).at(-1) ?? 'inherit';
+  const desktop = tokens.filter(isFontSize).at(-1) ?? 'inherit';
   const mobile =
     tokens
-      .filter((t) => t.startsWith('mobile:') && FONT_SIZE.test(t.slice('mobile:'.length)))
+      .filter((t) => t.startsWith('mobile:') && isFontSize(t.slice('mobile:'.length)))
       .at(-1)
       ?.slice('mobile:'.length) ?? desktop;
   return { mobile, desktop };
@@ -105,5 +111,17 @@ describe('Input font size', () => {
       mobile: 'text-base',
       desktop: 'text-sm',
     });
+    expect(effectiveSizes(cn(base, 'text-[13px]'))).toEqual({
+      mobile: 'text-base',
+      desktop: 'text-[13px]',
+    });
+    expect(effectiveSizes(cn(base, 'text-[length:var(--size-xs)]'))).toEqual({
+      mobile: 'text-base',
+      desktop: 'text-[length:var(--size-xs)]',
+    });
+  });
+
+  it('reads a bare var() colour as no size at all', () => {
+    expect(effectiveSizes(cn(baseClasses(), 'text-[var(--text-muted)]'))).toEqual(DEFAULT);
   });
 });

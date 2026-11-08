@@ -555,3 +555,14 @@ mark.search-match-current {
     }
   }
 }
+
+/* A disabled control in a `touch-hit-through` box still takes its own taps
+   (a disabled button fires no click), so they can't pass through it to a
+   neighbour's area or the card behind. The Button's
+   `disabled:pointer-events-none` utility would beat the components layer,
+   so this rule sits outside the layers. */
+@media (pointer: coarse) {
+  .touch-hit-through .touch-hit:disabled {
+    pointer-events: auto;
+  }
+}

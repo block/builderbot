@@ -34,6 +34,10 @@
     /** The reader has scrolled up the transcript, so nothing here may pull
      *  them back down to the alert. */
     userScrolledUp?: boolean;
+    /** Brings the alert into view. The pane scrolls only its transcript box:
+     *  scrollIntoView would scroll the pane and the dialog around it too,
+     *  and could push the composer under the keyboard. */
+    reveal: (el: HTMLElement) => void;
     onCheckNow: () => void;
     onStop: () => void;
   }
@@ -43,6 +47,7 @@
     checkRequested = false,
     stopping = false,
     userScrolledUp = false,
+    reveal,
     onCheckNow,
     onStop,
   }: Props = $props();
@@ -67,8 +72,9 @@
   // The alert lands at the end of the transcript, which can sit below the
   // fold; bring it (and its Check now / Stop buttons) into view when it
   // appears, and as the reader's own action plays out, so the status line it
-  // grows stays visible. Never when the reader has scrolled up. `nearest` is a
-  // no-op when it is already visible, and nothing here takes focus.
+  // grows stays visible. Never when the reader has scrolled up. The pane
+  // reveals it with `nearest`, a no-op when it is already visible, and
+  // nothing here takes focus.
   $effect(() => {
     void statusKey;
     const el = root;
@@ -76,7 +82,7 @@
     untrack(() => {
       if (!scrollFor) return;
       if (scrollFor === 'appearance' || status.busy === null) scrollFor = null;
-      if (!userScrolledUp) el.scrollIntoView?.({ block: 'nearest' });
+      if (!userScrolledUp) reveal(el);
     });
   });
 

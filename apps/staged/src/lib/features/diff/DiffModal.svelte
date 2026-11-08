@@ -1903,15 +1903,34 @@
    * Body layout
    * ====================================================================== */
 
-  /* The diff panes are cards on the chrome, which runs to the screen's edge;
-     the bottom inset keeps the cards (and their horizontal scrollbars) clear
-     of the home indicator. App.svelte's main leaves it to the panes. */
+  /* The body runs to the screen's bottom edge (App.svelte's main leaves the
+     inset to the routes), and so do the surfaces in it: the diff panes and
+     the file sidebar. Only their content clears the home indicator, through
+     `--dialog-safe-bottom`, the same contract as a full-screen dialog's rows
+     (see dialog-content): the panes' code areas below, and whichever row
+     ends the sidebar. */
   .modal-body {
     display: flex;
     flex: 1;
     min-height: 0;
     overflow: hidden;
-    padding-bottom: env(safe-area-inset-bottom);
+    --dialog-safe-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* The diff viewer scrolls its lines by transform over a viewport the size
+     of its code container, so padding the code area shrinks that viewport:
+     the last line and the horizontal scrollbar stop above the home
+     indicator, while the pane's own background fills the strip beneath. The
+     scrollbars are positioned in the code area's padding box, so they're
+     lifted to match. A markdown preview scrolls natively, and the same
+     padding ends its scroll. */
+  :global(.diff-viewer-container .code-area) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
+  }
+
+  :global(.diff-viewer-container .code-area > .scrollbar),
+  :global(.diff-viewer-container .code-area > .scrollbar-h) {
+    bottom: var(--dialog-safe-bottom, 0px);
   }
 
   /* ========================================================================
@@ -2022,9 +2041,9 @@
     overflow: hidden;
   }
 
-  /* The file list when it ends the drawer; otherwise the commit session
-     launcher under it pads the inset itself. */
-  .mobile-sidebar-body .sidebar-scroll:last-child {
+  /* The file list when it ends the sidebar or the phone's drawer; otherwise
+     the commit session launcher under it pads the inset itself. */
+  .sidebar-scroll:last-child {
     padding-bottom: var(--dialog-safe-bottom, 0px);
   }
 

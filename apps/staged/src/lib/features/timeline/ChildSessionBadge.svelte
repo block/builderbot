@@ -107,8 +107,11 @@
     cursor: pointer;
   }
 
-  button.child-session-badge:hover {
-    filter: brightness(1.1);
+  /* A touch browser keeps :hover on the badge after a tap. */
+  @media (hover: hover) {
+    button.child-session-badge:hover {
+      filter: brightness(1.1);
+    }
   }
 
   button.child-session-badge:focus-visible {

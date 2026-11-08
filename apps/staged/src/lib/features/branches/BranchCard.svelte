@@ -2130,7 +2130,7 @@
         {refreshingGitState}
         fetchError={timeline?.gitState?.fetch.error ?? null}
       />
-      <div class="header-actions">
+      <div class="header-actions touch-hit-group">
         {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}

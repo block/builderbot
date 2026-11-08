@@ -1955,11 +1955,19 @@
    * invisible, so a trackpad's 1 px events are coalesced into one capture.
    */
   const ANCHOR_RECAPTURE_PX = 4;
+  /**
+   * How close to the end still counts as at the bottom. `clientHeight` rounds
+   * a fractional box height and `scrollTop` may read truncated, so a box
+   * scrolled to its true bottom can read a pixel short of it (615.27 tall:
+   * restored to 2623 of a reported 2624); read as the user scrolling up, that
+   * would stop the transcript following the bottom.
+   */
+  const AT_BOTTOM_TOLERANCE_PX = 2;
 
   function handleScroll() {
     if (!messagesEl) return;
     const { scrollTop, scrollHeight, clientHeight } = messagesEl;
-    const atBottom = scrollHeight - scrollTop - clientHeight < 1;
+    const atBottom = scrollHeight - scrollTop - clientHeight < AT_BOTTOM_TOLERANCE_PX;
 
     if (scrollTop < lastScrollTop && !atBottom) {
       // Scroll position moved upward — user scrolled up (any input method)
@@ -2085,15 +2093,33 @@
   // or, just reattached, waiting for `unpark`'s deferred restore, which this
   // must not overwrite (observeSizeChanges already skips the 0×0 detached
   // box itself).
+  //
+  // Rows the session's state adds below the messages (an error or
+  // end-of-session card, the disconnected alert) aren't appends, which is
+  // what the append path follows, so they're followed here as they're added:
+  // a card arriving with the keyboard up would otherwise sit below the
+  // composer until the box was next resized.
   onMount(() => {
     const el = messagesEl;
     if (!el) return;
-    return observeSizeChanges(el, () => {
+    const follow = () => {
       if (!active || closed || parkedScroll || deferredRestore.pending) return;
       if (userScrolledUp) return;
       el.scrollTop = el.scrollHeight;
       noteScrollPosition(el);
-    });
+    };
+    const stopResize = observeSizeChanges(el, follow);
+    const rows =
+      typeof MutationObserver === 'undefined'
+        ? null
+        : new MutationObserver((records) => {
+            if (records.some((r) => [...r.addedNodes].some((n) => n.nodeType === 1))) follow();
+          });
+    rows?.observe(el, { childList: true });
+    return () => {
+      stopResize();
+      rows?.disconnect();
+    };
   });
 
   /** LRU cache for rendered markdown, keyed by source string. Live-transcript
@@ -2522,6 +2548,10 @@
     lastScrollTop = restored.scrollTop;
     scrollAnchor = restored.anchor;
     anchorScrollTop = restored.scrollTop;
+    // Back at the bottom it was following, so it follows again, whatever a
+    // scroll event read while the box was detached or not yet restored (the
+    // keyboard opening must re-pin it).
+    if (saved.atBottom) userScrolledUp = false;
   });
 
   /**

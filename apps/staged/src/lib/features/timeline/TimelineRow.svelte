@@ -677,8 +677,14 @@
     transition: background-color 0.15s ease;
   }
 
-  .timeline-row:hover {
-    background-color: var(--bg-hover);
+  /* Only where a pointer hovers. A touch browser leaves :hover on whatever
+     was under the last tap, so the row under a dialog's Start button stayed
+     highlighted once the dialog closed. Tailwind's hover: utilities are
+     gated the same way. */
+  @media (hover: hover) {
+    .timeline-row:hover {
+      background-color: var(--bg-hover);
+    }
   }
 
   .timeline-row.clickable {

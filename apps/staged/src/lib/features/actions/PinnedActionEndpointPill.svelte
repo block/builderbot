@@ -57,11 +57,11 @@
   });
 </script>
 
-<div class="pinned-action-pill" class:outline>
+<div class="pinned-action-pill touch-hit-through" class:outline>
   <Button
     variant="ghost"
     class={[
-      'size-7 rounded-full border-0 bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground [&_svg]:!size-3.5',
+      'touch-hit size-7 rounded-full border-0 bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground [&_svg]:!size-3.5',
       stopping && 'opacity-60',
       showStop && 'text-destructive',
     ]}
@@ -74,7 +74,7 @@
   <Button
     variant="ghost"
     class={[
-      'relative size-7 rounded-none border-0 border-l bg-transparent text-muted-foreground hover:text-foreground [&_svg]:!size-3',
+      'touch-hit relative size-7 rounded-none border-0 border-l bg-transparent text-muted-foreground hover:text-foreground [&_svg]:!size-3',
       outline
         ? 'border-l-[var(--card-border-hover)] hover:bg-[var(--card-bg-strong)]'
         : 'border-l-[var(--border-muted)] hover:bg-[var(--bg-elevated)]',
@@ -109,6 +109,22 @@
     background: transparent;
     border: 1px solid var(--card-border-hover);
     box-sizing: border-box;
+  }
+
+  /* On touch screens each half carries a 44 px hit area (touch-hit), which
+     the pill's clip would cut back to the pill. The copy half rounds its own
+     end instead, so its background still follows the pill's curve. The pill
+     is taller than its halves and lets taps through (touch-hit-through), so
+     a tap just above or below a half reaches that half's area. */
+  @media (pointer: coarse) {
+    .pinned-action-pill {
+      overflow: visible;
+    }
+
+    .pinned-action-pill > :global(:last-child) {
+      border-start-end-radius: 999px;
+      border-end-end-radius: 999px;
+    }
   }
 
   .copy-icon-wrapper {

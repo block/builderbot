@@ -418,7 +418,7 @@
       Add project
     </Button>
 
-    <div class="card-actions-secondary">
+    <div class="card-actions-secondary touch-hit-through">
       {#if repo.hasLocalClone}
         <!-- The outline variant reads the --accent / --card-border-hover /
              --card-bg-strong vars set on the card root, so the runner

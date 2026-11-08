@@ -110,8 +110,16 @@ describe('restoredScrollTop', () => {
 });
 
 describe('applyParkedScroll', () => {
-  /** A scrollable box that clamps assignments like a real element. */
-  function fakeBox(scrollHeight: number, clientHeight: number, scrollTop = 0): HTMLElement {
+  /**
+   * A scrollable box that clamps assignments like a real element: to its
+   * laid-out height, which `clientHeight` reports rounded.
+   */
+  function fakeBox(
+    scrollHeight: number,
+    clientHeight: number,
+    scrollTop = 0,
+    layoutHeight = clientHeight
+  ): HTMLElement {
     const box = {
       scrollHeight,
       clientHeight,
@@ -120,7 +128,7 @@ describe('applyParkedScroll', () => {
         return this._scrollTop;
       },
       set scrollTop(value: number) {
-        this._scrollTop = Math.min(Math.max(0, value), Math.max(0, scrollHeight - clientHeight));
+        this._scrollTop = Math.min(Math.max(0, value), Math.max(0, scrollHeight - layoutHeight));
       },
     };
     return box as unknown as HTMLElement;
@@ -160,6 +168,15 @@ describe('applyParkedScroll', () => {
     expect(lookup).not.toHaveBeenCalled();
     expect(box.scrollTop).toBe(1500);
     expect(restored?.scrollTop).toBe(1500);
+  });
+
+  it('pins to the true bottom of a box whose height is fractional', () => {
+    // 614.6px tall reads as 615: `scrollHeight - clientHeight` would stop
+    // 0.4px short, which the scroll handler could read as scrolled up.
+    const box = fakeBox(3239, 615, 0, 614.6);
+    const restored = applyParkedScroll(box, { scrollTop: 2600, atBottom: true, anchor: null });
+    expect(box.scrollTop).toBeCloseTo(3239 - 614.6);
+    expect(restored?.scrollTop).toBeCloseTo(3239 - 614.6);
   });
 
   it('reports the clamped position the box actually took', () => {

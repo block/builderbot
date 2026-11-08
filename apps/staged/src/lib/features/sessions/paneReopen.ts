@@ -95,7 +95,10 @@ export interface RestoredScroll {
  * capture point) should take, so the scroll handler does not read the restore
  * as the user scrolling up. The anchored group is looked up in the box as laid
  * out now (`lookupAnchorTop`, injectable for tests), only when the pane was
- * not following the bottom. A null `el` — the box is gone or was never bound —
+ * not following the bottom. A pane that was is scrolled to `scrollHeight`,
+ * which the box clamps to its true bottom: `scrollHeight - clientHeight`
+ * rounds a fractional box height (615.27 reads as 615), and written as is it
+ * could land a pixel short. A null `el` — the box is gone or was never bound —
  * is a no-op and returns null: nothing was scrolled, so nothing is recorded.
  */
 export function applyParkedScroll(
@@ -105,11 +108,13 @@ export function applyParkedScroll(
 ): RestoredScroll | null {
   if (!el) return null;
   const anchorTop = saved.anchor && !saved.atBottom ? lookupAnchorTop(el, saved.anchor) : null;
-  el.scrollTop = restoredScrollTop(
-    saved,
-    { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
-    anchorTop
-  );
+  el.scrollTop = saved.atBottom
+    ? el.scrollHeight
+    : restoredScrollTop(
+        saved,
+        { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
+        anchorTop
+      );
   return { scrollTop: el.scrollTop, anchor: saved.anchor };
 }
 

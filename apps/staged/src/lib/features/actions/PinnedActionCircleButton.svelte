@@ -41,7 +41,7 @@
 <Button
   variant="ghost"
   class={[
-    'size-7 rounded-full [&_svg]:!size-3.5',
+    'touch-hit size-7 rounded-full [&_svg]:!size-3.5',
     outline
       ? 'border border-[var(--card-border-hover)] bg-transparent hover:bg-[var(--card-bg-strong)]'
       : 'border-0 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)]',

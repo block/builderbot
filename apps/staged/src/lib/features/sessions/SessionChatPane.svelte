@@ -3422,12 +3422,28 @@
   /* Modal shell                                                             */
   /* ======================================================================= */
 
+  /* When its rows don't all fit, the pane scrolls rather than clip,
+     anchored at its foot: the message box and Send stay in view, and what
+     sits above them (the plan, a queued message, the slash-command list,
+     attachments, an error line) is a scroll away. The keyboard up on a phone
+     held sideways leaves 48px (dialog-content's `cramped`); a long queue or
+     slash-command list can overflow a short window too. `column-reverse`
+     does the anchoring: a scroller starts at a reversed column's
+     main-start, the bottom, and holds that edge while content above it
+     grows or goes. The `order`s on the transcript and the input area put
+     the rows back in their usual top-to-bottom order. While everything fits
+     the transcript takes up the slack, so the rows sit just as in a plain
+     column. When it doesn't, the transcript keeps whatever height is left,
+     but never less than its own padding (24px in the mobile layout), and its
+     own scroll position is untouched. */
   .session-chat-pane {
     display: flex;
-    flex-direction: column;
+    flex-direction: column-reverse;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border: 2px solid transparent;
     background: var(--bg-primary);
     transition:
@@ -3457,6 +3473,7 @@
   /* ----- Content area (scrollable) --------------------------------------- */
 
   .modal-content {
+    order: -1;
     flex: 1;
     overflow-x: hidden;
     overflow-y: auto;
@@ -3921,33 +3938,15 @@
   }
 
   .input-wrapper {
+    order: -2;
     flex-shrink: 0;
   }
 
-  /* Too little height for the composer's row and what sits above it (the
-     keyboard up on a phone held sideways, dialog-content's `cramped`, which
-     also drops the session dialog's header): the pane scrolls rather than
-     clip, anchored at its foot. The message box and Send stay in view, and a
-     queued message, the slash-command list, attachments or an error line
-     above them are a scroll away. `column-reverse` does the anchoring: a
-     scroller starts at a reversed column's main-start, the bottom, and holds
-     that edge while content above it grows or goes. The `order`s put the
-     rows back in their usual top-to-bottom order. The transcript keeps
-     whatever height is left (none, in the 48px the keyboard leaves), so its
-     own scroll position is untouched. */
+  /* In the 48px the keyboard leaves on a phone held sideways
+     (dialog-content's `cramped`) the composer's row needs every pixel, so
+     the drop-target border goes top and bottom. */
   :global([data-cramped]) .session-chat-pane {
-    flex-direction: column-reverse;
-    overflow-y: auto;
-    overscroll-behavior: contain;
     border-block-width: 0;
-  }
-
-  :global([data-cramped]) .input-wrapper {
-    order: -2;
-  }
-
-  :global([data-cramped]) .modal-content {
-    order: -1;
   }
 
   .queue-popover,

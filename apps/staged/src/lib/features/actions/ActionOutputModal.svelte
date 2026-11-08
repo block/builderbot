@@ -660,14 +660,15 @@
   }
 
   /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). Rows span
-     the full-screen dialog and clear its side insets (`--dialog-safe-left`
-     / `--dialog-safe-right`, see dialog-content). */
+     the full-screen dialog and clear its insets (`--dialog-safe-*`, see
+     dialog-content), the header the top one too. */
   @media (max-width: 768px),
     (pointer: coarse) and (max-device-width: 500px),
     (pointer: coarse) and (max-device-height: 500px) {
     .modal-header {
       border-radius: 0;
       padding: 12px;
+      padding-top: calc(12px + var(--dialog-safe-top, 0px));
       padding-left: calc(12px + var(--dialog-safe-left, 0px));
       padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }

@@ -428,8 +428,9 @@
   /* Too little height for two rows (the keyboard up on a phone held
      sideways, dialog-content's `cramped`): the message box and Send share
      one, and the other controls wait for the keyboard to close. Anything
-     else (attachments, an error line) keeps a full-width row of its own and
-     the dialog scrolls to it. */
+     else (attachments, an error line) keeps a full-width row of its own
+     above it, a scroll up in SessionChatPane, which keeps the message box's
+     row in view. */
   :global([data-cramped]) .chat-composer {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;

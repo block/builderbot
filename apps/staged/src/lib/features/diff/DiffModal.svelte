@@ -1982,13 +1982,13 @@
     width: 100vw;
     height: 100vh;
     height: 100dvh;
-    /* Clear of the status bar (viewport-fit=cover). The other insets go to
-       the drawer's rows, as in a full-screen dialog (see dialog-content):
-       the bottom one to its last row, so the file list scrolls behind the
-       home indicator, and the side ones to each row's inline padding, so
-       the rows run to the screen's edges and a swipe there still scrolls
-       the list. */
-    padding-top: env(safe-area-inset-top);
+    /* The screen's insets (viewport-fit=cover) go to the drawer's rows, as
+       in a full-screen dialog (see dialog-content): the top one to the
+       header, whose background runs up under the status bar; the bottom one
+       to its last row, so the file list scrolls behind the home indicator;
+       and the side ones to each row's inline padding, so the rows run to the
+       screen's edges and a swipe there still scrolls the list. */
+    --dialog-safe-top: env(safe-area-inset-top);
     --dialog-safe-bottom: env(safe-area-inset-bottom);
     --dialog-safe-left: env(safe-area-inset-left);
     --dialog-safe-right: env(safe-area-inset-right);
@@ -1999,8 +1999,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 44px;
+    min-height: calc(44px + var(--dialog-safe-top, 0px));
     padding: 8px 12px;
+    padding-top: calc(8px + var(--dialog-safe-top, 0px));
     padding-left: calc(12px + var(--dialog-safe-left, 0px));
     padding-right: calc(12px + var(--dialog-safe-right, 0px));
     border-bottom: 1px solid var(--border-subtle);

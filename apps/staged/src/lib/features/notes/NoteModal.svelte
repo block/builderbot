@@ -915,12 +915,15 @@
 />
 
 <style>
+  /* The first row of a full-screen dialog: clear of its top inset, the
+     status bar (`--dialog-safe-top`, see dialog-content). */
   .note-modal-header-grid {
     display: flex;
     align-items: stretch;
     justify-content: space-between;
     width: 100%;
     min-width: 0;
+    padding-top: var(--dialog-safe-top, 0px);
   }
 
   /* Fixed chat column: the preferred dialog width is the note width plus
@@ -1008,6 +1011,11 @@
      field). It is back once the keyboard closes. */
   :global([data-cramped]) > :global(.note-modal-chat-header:not(:focus-within)) {
     display: none;
+  }
+
+  /* ...so the top inset goes to the dialog itself, ahead of the chat. */
+  :global([data-cramped]:has(> .note-modal-chat-header:not(:focus-within))) {
+    padding-top: var(--dialog-safe-top, 0px);
   }
 
   .note-pane {

@@ -128,7 +128,7 @@
 
 <Dialog.Root {open} onOpenChange={(v) => !v && requestClose()}>
   <Dialog.Content
-    class="dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    class="session-dialog dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
     style={dialogWidth.style}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
@@ -230,14 +230,16 @@
     flex-shrink: 0;
   }
 
-  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). The side
-     insets of the full-screen dialog keep Close clear of the Dynamic Island
-     (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). The header
+     takes the full-screen dialog's insets: the top one runs its background
+     up under the status bar, and the side ones keep Close clear of the
+     Dynamic Island (`--dialog-safe-*`, see dialog-content). */
   @media (max-width: 768px),
     (pointer: coarse) and (max-device-width: 500px),
     (pointer: coarse) and (max-device-height: 500px) {
     .modal-header {
       padding: 12px;
+      padding-top: calc(12px + var(--dialog-safe-top, 0px));
       padding-left: calc(12px + var(--dialog-safe-left, 0px));
       padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }
@@ -248,5 +250,10 @@
      closes. */
   :global([data-cramped]) > .modal-header {
     display: none;
+  }
+
+  /* ...so the top inset goes to the dialog itself, ahead of the chat pane. */
+  :global(.session-dialog[data-cramped]) {
+    padding-top: var(--dialog-safe-top, 0px);
   }
 </style>

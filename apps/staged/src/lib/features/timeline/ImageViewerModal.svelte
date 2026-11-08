@@ -80,7 +80,7 @@
     showCloseButton={false}
   >
     <Dialog.Header
-      class="flex-row items-center justify-between gap-3 py-3 pl-[calc(--spacing(4)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(4)+var(--dialog-safe-right,0px))] border-b border-[var(--border-subtle)]"
+      class="flex-row items-center justify-between gap-3 pt-[calc(--spacing(3)+var(--dialog-safe-top,0px))] pb-3 pl-[calc(--spacing(4)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(4)+var(--dialog-safe-right,0px))] border-b border-[var(--border-subtle)]"
     >
       {#if referenceNav}
         <ReferenceNavControls nav={referenceNav} />

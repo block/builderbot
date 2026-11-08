@@ -1135,6 +1135,7 @@
        included (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
     .modal-header {
       padding: 12px 16px;
+      padding-top: calc(12px + var(--dialog-safe-top, 0px));
       padding-left: calc(16px + var(--dialog-safe-left, 0px));
       padding-right: calc(16px + var(--dialog-safe-right, 0px));
     }

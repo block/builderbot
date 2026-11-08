@@ -224,7 +224,9 @@
     width: 100%;
     padding: 12px 16px;
     /* Full-width rows (this, the editor, the footer) clear a full-screen
-       dialog's side insets, Close included (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
+       dialog's side insets, Close included, and this first row its top one
+       (`--dialog-safe-*`, see dialog-content). */
+    padding-top: calc(12px + var(--dialog-safe-top, 0px));
     padding-left: calc(16px + var(--dialog-safe-left, 0px));
     padding-right: calc(16px + var(--dialog-safe-right, 0px));
   }

@@ -216,11 +216,13 @@
     display: flex;
     flex-direction: row;
     align-items: center;
-    min-height: 42px;
+    min-height: calc(42px + var(--dialog-safe-top, 0px));
     flex-shrink: 0;
     padding: 8px 8px 8px 78px;
-    /* Close clears a full-screen dialog's side inset (`--dialog-safe-right`,
-       see dialog-content); the left padding already does. */
+    /* Clear of a full-screen dialog's top inset (the status bar) and, for
+       Close, its right one (`--dialog-safe-top` / `--dialog-safe-right`, see
+       dialog-content); the left padding already clears the left one. */
+    padding-top: calc(8px + var(--dialog-safe-top, 0px));
     padding-right: calc(8px + var(--dialog-safe-right, 0px));
     background: var(--bg-app-bar);
     border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);

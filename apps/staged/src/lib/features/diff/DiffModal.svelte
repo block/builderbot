@@ -67,6 +67,7 @@
     buildTree,
     buildGithubCommentUrl,
     compactTree,
+    cssCustomPropertyDeclarations,
     formatLineRange,
     pathsMatch,
     truncateText,
@@ -341,8 +342,16 @@
   let mobileDiffLastY = 0;
   let diffViewerScrollApi: DiffViewerScrollApi | null = $state(null);
   let diffViewerComponent: DiffViewerComponentHandle | null = $state(null);
-  let mobileDiffStyle = $derived(
-    `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
+  // The diff theme's CSS variables are scoped onto the diff-viewer container so
+  // the diff area reflects the chosen diff theme while the app chrome stays on
+  // its fixed light/dark mode. They live in this one Svelte-owned style string
+  // together with the phone pane-drag variables: Svelte applies a change to a
+  // bound `style` by assigning `cssText`, which replaces the whole inline
+  // style, so variables set on the element separately (an effect calling
+  // `style.setProperty`) were wiped by the first pointer move of a pane drag.
+  let diffViewerContainerStyle = $derived(
+    cssCustomPropertyDeclarations(preferences.diffThemeVars) +
+      `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
       `--mobile-diff-rest-offset: ${MOBILE_DIFF_REST_OFFSET}px;` +
       `--mobile-diff-edge-peek: ${MOBILE_DIFF_EDGE_PEEK}px;`
   );
@@ -1231,17 +1240,6 @@
     checkSearchInitialization();
   });
 
-  // Scope the diff theme's CSS variables onto the diff-viewer container so the
-  // diff area reflects the chosen diff theme while the app chrome stays on its
-  // fixed light/dark mode.
-  $effect(() => {
-    const el = diffViewerContainerEl;
-    if (!el) return;
-    for (const [prop, value] of Object.entries(preferences.diffThemeVars)) {
-      el.style.setProperty(prop, value);
-    }
-  });
-
   // Set up keyboard navigation for diff viewer and search
   $effect(() => {
     // Create search navigation handlers
@@ -1652,7 +1650,7 @@
     <div
       class="diff-viewer-container"
       class:mobile-diff-dragging={mobileDiffIsDragging}
-      style={mobileDiffStyle}
+      style={diffViewerContainerStyle}
       bind:this={diffViewerContainerEl}
       onpointerdown={handleMobileDiffPointerDown}
       onpointermove={handleMobileDiffPointerMove}

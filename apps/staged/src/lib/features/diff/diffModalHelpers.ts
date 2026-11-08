@@ -44,3 +44,19 @@ export function buildGithubCommentUrl(
 
   return null;
 }
+
+/**
+ * Serialises a map of CSS custom properties to inline-style declarations
+ * (`--prop: value;` each), in insertion order. Used to fold the diff theme's
+ * variables into the diff-viewer container's Svelte-owned `style` string:
+ * Svelte 5 applies a changed bound style by assigning `cssText`, which
+ * replaces the whole inline style, so anything set on the element separately
+ * (with `style.setProperty`) is lost the first time the bound string changes.
+ */
+export function cssCustomPropertyDeclarations(vars: Record<string, string>): string {
+  let declarations = '';
+  for (const [prop, value] of Object.entries(vars)) {
+    declarations += `${prop}: ${value};`;
+  }
+  return declarations;
+}

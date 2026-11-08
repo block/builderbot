@@ -240,6 +240,30 @@ describe('watchVisualViewport', () => {
     expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
   });
 
+  it('waits the same when the input stopped taking typing before it lost focus', async () => {
+    // The message box made non-editable while focused (contenteditable
+    // switched off as a send starts), or removed with focus: its `focusout`
+    // no longer comes from a text input, but the keyboard is still up.
+    useFakeTimeouts();
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    const editor = { ...element({ tagName: 'DIV' }), isContentEditable: true };
+    watchVisualViewport();
+    flushFrames();
+    fakeDocument.activeElement = editor;
+    viewport.height = 384;
+    viewport.dispatchEvent(new Event('resize'));
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+
+    editor.isContentEditable = false;
+    moveFocus(editor);
+    expect(vi.getTimerCount()).toBe(1);
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+
+    closeKeyboard();
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('re-measures a blur after BLUR_SETTLE_MS when no resize comes', async () => {
     // A hardware keyboard, or a blur with no keyboard on screen at all.
     useFakeTimeouts();

@@ -188,6 +188,7 @@
   import { viewport } from '../../shared/viewport.svelte';
   import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import { observeSizeChanges } from '../../shared/observeSizeChanges';
+  import { isImeKeydown } from '../../shared/imeKeydown';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -1873,7 +1874,7 @@
   function handleInputKeydown(e: KeyboardEvent) {
     // Multiline input: plain Enter inserts a newline; Cmd/Ctrl+Enter sends,
     // but not while it commits an IME composition (see ChatComposer).
-    if (e.isComposing) return;
+    if (isImeKeydown(e)) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleSend();

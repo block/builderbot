@@ -21,7 +21,7 @@ describe('createTouchPressFocusGuard', () => {
     expect(guard.mouseDown(false)).toBe(false);
   });
 
-  it('does not let a touch press whose mousedown was suppressed leak into a later press', () => {
+  it('a mouse press after a touch whose mousedown was suppressed keeps the default', () => {
     // The browser fired no compatibility mousedown for the touch, only the
     // click; a mouse press afterwards must move focus as usual.
     const guard = createTouchPressFocusGuard();
@@ -31,13 +31,13 @@ describe('createTouchPressFocusGuard', () => {
     expect(guard.mouseDown(false)).toBe(false);
   });
 
-  it('a mouse press after a touch press keeps the default', () => {
+  it('a stale touch press, ended by neither click nor pointercancel, cancels once', () => {
+    // The next mousedown comes with no pointerdown of its own (a VoiceOver
+    // activation, say): the stale touch cancels it, and nothing after.
     const guard = createTouchPressFocusGuard();
     guard.pointerDown('touch');
-    expect(guard.mouseDown(false)).toBe(true);
-    guard.reset();
 
-    guard.pointerDown('mouse');
+    expect(guard.mouseDown(false)).toBe(true);
     expect(guard.mouseDown(false)).toBe(false);
   });
 
@@ -86,6 +86,16 @@ describe('createCompositionSendGate', () => {
 
   it('a composition that ends with no press waiting sends nothing', () => {
     const gate = createCompositionSendGate();
+    expect(gate.compositionEnded()).toBe(false);
+  });
+
+  it('a composition dropped without ending takes the waiting press with it', () => {
+    // The box's content replaced mid-composition (a failed send putting the
+    // draft back): no compositionend comes, and a later composition's end
+    // must not send.
+    const gate = createCompositionSendGate();
+    gate.press(true);
+    gate.cancel();
     expect(gate.compositionEnded()).toBe(false);
   });
 

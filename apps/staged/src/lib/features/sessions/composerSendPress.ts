@@ -15,6 +15,8 @@ export interface TouchPressFocusGuard {
    * the on-screen keyboard) in the message box. Only the compatibility
    * mousedown of a touch or pen press is cancelled, and not while the box
    * holds an IME or dictation composition: moving focus is what commits it.
+   * On Android, Gboard keeps the word being typed open as a composition, so
+   * there a Send usually lets focus go and the keyboard drop, by design.
    */
   mouseDown(composing: boolean): boolean;
   /** `click` or `pointercancel`: the press is over. */
@@ -30,7 +32,9 @@ export interface TouchPressFocusGuard {
  * type is all `pointerdown` contributes, and it is dropped as soon as the
  * press ends (its click, or a pointercancel when the touch became a scroll),
  * so a press whose mousedown never came cannot leak into a later mouse press
- * or a keyboard / VoiceOver activation. The click itself is never blocked.
+ * or a keyboard / VoiceOver activation. A press that ended with neither
+ * (none is known to) cancels at most the next mousedown. The click itself is
+ * never blocked.
  */
 export function createTouchPressFocusGuard(): TouchPressFocusGuard {
   let touchPress = false;
@@ -54,6 +58,8 @@ export interface CompositionSendGate {
   press(composing: boolean): boolean;
   /** The composition ended: true when a press is waiting and should send now. */
   compositionEnded(): boolean;
+  /** The composition was dropped without ending (the box's content replaced). */
+  cancel(): void;
 }
 
 /**
@@ -78,6 +84,9 @@ export function createCompositionSendGate(): CompositionSendGate {
       const send = waiting;
       waiting = false;
       return send;
+    },
+    cancel() {
+      waiting = false;
     },
   };
 }

@@ -14,12 +14,16 @@
 //
 // The state follows focus too (see viewportGeometry.ts): it is the visual
 // viewport only while a text input has focus, so focus changes re-measure.
-// Focus arriving in a text input (`focusin`) re-measures at once. A text
-// input losing focus (its `focusout`) arms a re-measure that waits for the
-// visual viewport's next `resize` — the keyboard going away — or
-// BLUR_SETTLE_MS, whichever comes first; focus arriving in a text input
-// meanwhile cancels it. Focus moving between elements that take no typing
-// changes nothing, as no keyboard comes or goes.
+// Focus arriving in a text input (`focusin`) re-measures at once. Focus
+// leaving one arms a re-measure that waits for the visual viewport's next
+// `resize` — the keyboard going away — or BLUR_SETTLE_MS, whichever comes
+// first; focus arriving in a text input meanwhile cancels it. "Leaving one"
+// is any `focusout` while the last measurement saw a text input focused,
+// rather than a test of the event's target, which may have stopped taking
+// typing by the time it loses focus (a contenteditable made non-editable
+// while focused, an input disabled or removed with focus). Focus moving
+// between elements that take no typing changes nothing, as no keyboard comes
+// or goes.
 //
 // iOS moves focus off the input on the synthetic `mousedown` of a tap and
 // hit-tests the `click` again at the same point afterwards. Re-measuring on
@@ -70,6 +74,8 @@ let subscriberCount = 0;
 let initialSyncFrame = 0;
 /** Fallback timer for a blur's re-measure; nonzero while one is pending. */
 let blurSettleTimer: ReturnType<typeof setTimeout> | 0 = 0;
+/** Whether the last measurement saw a text input focused (a keyboard may be up). */
+let measuredTextInput = false;
 
 function measure(vv: VisualViewport, keepScroll: boolean): ViewportGeometry {
   return computeViewportGeometry({
@@ -87,6 +93,7 @@ function measure(vv: VisualViewport, keepScroll: boolean): ViewportGeometry {
 function syncVisualViewport() {
   const vv = trackedViewport;
   if (!vv) return;
+  measuredTextInput = isTextInput(document.activeElement);
   const keepScroll = shouldKeepDocumentScroll();
   let geometry = measure(vv, keepScroll);
   if (!keepScroll) {
@@ -136,9 +143,10 @@ function handleFocusIn(): void {
   syncVisualViewport();
 }
 
-function handleFocusOut(event: FocusEvent): void {
-  // Only a text input losing focus can take the keyboard away; wait for it.
-  if (!isTextInput(event.target as Element | null)) return;
+function handleFocusOut(): void {
+  // Only focus leaving a text input can take the keyboard away; wait for it.
+  // Judged by what was measured, not by the event's target (see the top).
+  if (!measuredTextInput) return;
   if (!blurSettleTimer) blurSettleTimer = setTimeout(settleBlur, BLUR_SETTLE_MS);
 }
 
@@ -172,6 +180,7 @@ export function watchVisualViewport(): () => void {
       cancelAnimationFrame(initialSyncFrame);
       initialSyncFrame = 0;
       cancelBlurSettle();
+      measuredTextInput = false;
       trackedViewport?.removeEventListener('resize', handleViewportResize);
       trackedViewport?.removeEventListener('scroll', handleViewportScroll);
       document.removeEventListener('focusin', handleFocusIn);

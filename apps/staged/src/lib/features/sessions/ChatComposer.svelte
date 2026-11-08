@@ -157,6 +157,9 @@
   // after all, which commits the composition, and the send waits for its
   // `compositionend` (createCompositionSendGate) so the committed text is in
   // the draft it sends rather than landing in the box after it was cleared.
+  // On Android, Gboard keeps the word being typed open as a composition, so
+  // a Send there usually lets the keyboard drop: by design, rather than
+  // committing the composition by hand; the message is still sent once.
   let composing = $state(false);
   const sendPress = createTouchPressFocusGuard();
   const sendGate = createCompositionSendGate();
@@ -168,7 +171,11 @@
 
   function handleSendClick() {
     sendPress.reset();
-    if (sendGate.press(composing)) onSend?.();
+    if (!sendGate.press(composing)) return;
+    // Sending now: a send still deferred from an earlier press must not
+    // follow it.
+    clearTimeout(deferredSendTimer);
+    onSend?.();
   }
 
   function handleCompositionEnd() {
@@ -178,6 +185,14 @@
     clearTimeout(deferredSendTimer);
     deferredSendTimer = setTimeout(() => onSend?.(), 0);
   }
+
+  // A composition the box dropped without a `compositionend` (its content
+  // replaced, e.g. a failed send putting the draft back) drops a press
+  // waiting on it too, so a later composition's end doesn't send. A real end
+  // has already consulted the gate, synchronously, by the time this runs.
+  $effect(() => {
+    if (!composing) sendGate.cancel();
+  });
 
   onDestroy(() => clearTimeout(deferredSendTimer));
 

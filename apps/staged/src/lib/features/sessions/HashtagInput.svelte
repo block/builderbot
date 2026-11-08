@@ -34,6 +34,7 @@
   import { readReferenceClipboard, writeReferenceClipboard } from './referenceClipboard';
   import { placeHashtagDropdown } from './hashtagDropdownPlacement';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
+  import { isImeKeydown } from '../../shared/imeKeydown';
   import { portal } from '../../shared/portal';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import { visibleViewportRect } from '../../shared/visibleViewportRect';
@@ -285,6 +286,9 @@
     const { fragment, unresolved } = hashtagContentFragment(val, itemsById);
     editorEl.replaceChildren(fragment);
     hasUnresolvedTokens = unresolved;
+    // Any composition went with the replaced text, and its `compositionend`
+    // may never come; nothing is left to commit, so don't report an end.
+    composing = false;
   }
 
   function extractValue(): string {
@@ -450,7 +454,7 @@
   function handleKeydown(e: KeyboardEvent) {
     // Keys during an IME composition (Enter to commit it, arrows to pick a
     // candidate, Escape to cancel it) belong to the IME, not the dropdown.
-    if (e.isComposing || composing) {
+    if (composing || isImeKeydown(e)) {
       onkeydown?.(e);
       return;
     }

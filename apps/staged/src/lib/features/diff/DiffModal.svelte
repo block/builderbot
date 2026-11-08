@@ -34,7 +34,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import { onBranchSessionStatus } from '../../services/branchEventService';
   import { preferences } from '../settings/preferences.svelte';
-  import { createDiffViewerState } from './diffViewerState.svelte';
+  import { createDiffViewerState, fileSummaryPath } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import { createSearchState } from '@builderbot/diff-viewer/state';
   import {
@@ -68,7 +68,7 @@
     buildGithubCommentUrl,
     compactTree,
     formatLineRange,
-    pathsMatch,
+    resolveCommentFilePath,
     truncateText,
     type FileEntry,
     type TreeNode,
@@ -846,6 +846,7 @@
       ? 'Loading changes...'
       : undefined
   );
+  let diffFilePaths = $derived(new Set(diffViewer.state.files.map(fileSummaryPath)));
   let rawComments = $derived(reviewHandle?.state.comments ?? []);
 
   /** Normalize comment paths so they match the file list used by the diff viewer.
@@ -1078,15 +1079,11 @@
     await reviewHandle?.removeReferenceFile(path);
   }
 
-  /** Resolve a comment's path to a file-list path.
-   *  Falls back to the comment's own path if no match is found. */
+  /** Resolve a comment's path to a file-list path: exact match first, then the
+   *  repo subpath fallback. Falls back to the comment's own path if neither
+   *  finds exactly one file. */
   function resolveCommentPath(commentPath: string): string {
-    const files = diffViewer.state.files;
-    for (const f of files) {
-      const fp = f.after ?? f.before ?? '';
-      if (pathsMatch(commentPath, fp)) return fp;
-    }
-    return commentPath;
+    return resolveCommentFilePath(commentPath, diffFilePaths, subpath);
   }
 
   async function handleSelectComment(comment: Comment) {

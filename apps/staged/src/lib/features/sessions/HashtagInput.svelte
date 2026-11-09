@@ -38,6 +38,7 @@
   } from './hashtagEditorContent';
   import { readReferenceClipboard, writeReferenceClipboard } from './referenceClipboard';
   import { placeHashtagDropdown } from './hashtagDropdownPlacement';
+  import { activeDescendantId, listboxOptionId } from '../../shared/listboxIds';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { portal } from '../../shared/portal';
@@ -91,6 +92,7 @@
     oncompositionend,
   }: Props = $props();
 
+  const uid = $props.id();
   let editorEl: HTMLDivElement | undefined = $state();
   let showDropdown = $state(false);
   let filterText = $state('');
@@ -168,6 +170,22 @@
   });
 
   let filteredItems = $derived.by(() => filteredSections.flatMap((section) => section.items));
+
+  // ARIA combobox over the contenteditable: the editor keeps the focus and the
+  // # dropdown is a listbox of options that take none, so the editor names the
+  // highlighted option through aria-activedescendant. Options are numbered
+  // across sections in the order selectedIndex counts (section.startIndex + i).
+  // The reference goes with the listbox: closed, or showing only "No matching
+  // items", there is none.
+  const listboxId = `${uid}-listbox`;
+  let listboxOpen = $derived(showDropdown && filteredItems.length > 0);
+  let activeOptionId = $derived(
+    activeDescendantId(listboxId, {
+      open: listboxOpen,
+      count: filteredItems.length,
+      selectedIndex,
+    })
+  );
 
   function hashtagSectionKey(item: HashtagItem): string {
     if (item.type === 'project-note') return 'project-notes';
@@ -593,13 +611,18 @@
   <div class="hashtag-input-container">
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
+    <!-- The contenteditable is focusable without a tabindex. -->
+    <!-- svelte-ignore a11y_aria_activedescendant_has_tabindex -->
     <div
       bind:this={editorEl}
       class="hashtag-editor {className}"
       class:is-empty={!value}
       contenteditable={disabled ? 'false' : 'true'}
-      role="textbox"
-      aria-multiline="true"
+      role="combobox"
+      aria-expanded={listboxOpen}
+      aria-autocomplete="list"
+      aria-controls={listboxOpen ? listboxId : undefined}
+      aria-activedescendant={activeOptionId}
       data-placeholder={placeholder}
       style="min-height: var(--hashtag-input-min-height, {Number(rows) * 1.5}em)"
       oninput={handleInput}
@@ -614,11 +637,19 @@
 
     <!-- Dropdown -->
     {#if showDropdown && filteredItems.length > 0}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- The listbox and its options take no focus: the editor keeps it and
+           names the highlighted option (ARIA combobox pattern). -->
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
       <!-- Portaled to #portal-root so position:fixed escapes the dialog's transformed
            containing block; pointerdown is stopped so selecting an item doesn't
-           trip bits-ui's dismiss-on-interact-outside and close the dialog. -->
+           trip bits-ui's dismiss-on-interact-outside and close the dialog.
+           The highlight follows mousemove, not mouseenter: ArrowDown's
+           scrollIntoView can move another item under a pointer that hasn't
+           moved, and that item's mouseenter would snap the highlight back. -->
       <div
+        id={listboxId}
+        role="listbox"
+        aria-label="Hashtag suggestions"
         class="hashtag-dropdown"
         class:above={dropdownPosition === 'above'}
         class:below={dropdownPosition === 'below'}
@@ -641,15 +672,18 @@
             {#each section.items as item, i}
               {@const Icon = dropdownIconMap[item.type]}
               {@const itemIndex = section.startIndex + i}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_interactive_supports_focus -->
               <div
+                id={listboxOptionId(listboxId, itemIndex)}
+                role="option"
+                aria-selected={itemIndex === selectedIndex}
                 class="hashtag-dropdown-item"
                 class:selected={itemIndex === selectedIndex}
                 onmousedown={(e) => {
                   e.preventDefault();
                   selectItem(item);
                 }}
-                onmouseenter={() => (selectedIndex = itemIndex)}
+                onmousemove={() => (selectedIndex = itemIndex)}
               >
                 <span class="hashtag-item-icon {item.type}-icon">
                   {#if Icon}

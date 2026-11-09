@@ -29,6 +29,7 @@
   import { portal } from '../../shared/portal';
   import { visibleViewportRect } from '../../shared/visibleViewportRect';
   import { placeHashtagDropdown } from '../sessions/hashtagDropdownPlacement';
+  import { activeDescendantId, listboxOptionId } from '../../shared/listboxIds';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import * as badge from '../../shared/badgeColors';
@@ -62,6 +63,7 @@
   let isSearching = $state(false);
   let directFetchRepo = $state<GitHubRepo | null>(null);
   let dropdownOpen = $state(false);
+  const uid = $props.id();
 
   /** The dropdown's tallest, as `.repo-dropdown`'s max-height was. */
   const DROPDOWN_MAX_HEIGHT_PX = 280;
@@ -183,6 +185,20 @@
     );
     return q ? base.filter((r) => matchesRepoSearch(r.githubRepo, r.subpath, q)) : base;
   });
+
+  // ARIA combobox: the field keeps the focus and the dropdown is a listbox of
+  // options that take none, so the field names the highlighted option through
+  // aria-activedescendant. Options are numbered in DOM order (recent repos
+  // first), the order selectedIndex counts in. The reference is dropped
+  // whenever the dropdown is closed or nothing is highlighted.
+  const listboxId = `${uid}-listbox`;
+  const repoItemsShown = $derived(!loading && !error && !isSearching);
+  const optionCount = $derived(
+    filteredRecentRepos.length + (repoItemsShown ? displayItems.length : 0)
+  );
+  const activeOptionId = $derived(
+    activeDescendantId(listboxId, { open: dropdownOpen, count: optionCount, selectedIndex })
+  );
 
   const dark = $derived(darkMode.value);
 
@@ -362,20 +378,33 @@
       {disabled}
       oninput={handleInput}
       onfocus={handleFocus}
+      role="combobox"
+      aria-expanded={dropdownOpen}
+      aria-autocomplete="list"
+      aria-controls={dropdownOpen ? listboxId : undefined}
+      aria-activedescendant={activeOptionId}
       class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-base"
     />
   </div>
 
   {#if dropdownOpen}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- The listbox takes no focus: the field keeps it and names the
+         highlighted option (ARIA combobox pattern). -->
+    <!-- svelte-ignore a11y_interactive_supports_focus -->
     <!-- Portaled to #portal-root so position:fixed escapes the dialog's
          transformed containing block and the form's scroll clip. pointerdown
          is stopped so a tap on an item doesn't trip bits-ui's
          dismiss-on-interact-outside and close the dialog; mousedown is
          cancelled so the field keeps the focus: on iOS the focus would
          otherwise leave on the tap's mousedown, the focusout would close the
-         dropdown, and the click would land on nothing. -->
+         dropdown, and the click would land on nothing.
+         The highlight follows mousemove, not mouseenter: ArrowDown's
+         scrollIntoView can move another item under a pointer that hasn't
+         moved, and that item's mouseenter would snap the highlight back. -->
     <div
+      id={listboxId}
+      role="listbox"
+      aria-label="Repositories"
       class="repo-dropdown"
       class:above={dropdownAbove}
       style={dropdownStyle}
@@ -389,10 +418,13 @@
         {#each filteredRecentRepos as recent, i}
           {@const hue = recentHue(recent)}
           <button
+            id={listboxOptionId(listboxId, i)}
+            role="option"
+            aria-selected={i === selectedIndex}
             class="repo-item recent"
             class:selected={i === selectedIndex}
             tabindex="-1"
-            onmouseenter={() => (selectedIndex = i)}
+            onmousemove={() => (selectedIndex = i)}
             style="--recent-bg: {badge.badgeBg(hue, dark)}; --recent-bg-hover: {badge.badgeBgHover(
               hue,
               dark
@@ -456,10 +488,13 @@
             {@const repo = item.data as GitHubRepo}
             {@const itemIndex = filteredRecentRepos.length + i}
             <button
+              id={listboxOptionId(listboxId, itemIndex)}
+              role="option"
+              aria-selected={itemIndex === selectedIndex}
               class="repo-item"
               class:selected={itemIndex === selectedIndex}
               tabindex="-1"
-              onmouseenter={() => (selectedIndex = itemIndex)}
+              onmousemove={() => (selectedIndex = itemIndex)}
               onclick={() => handleSelect({ nameWithOwner: repo.nameWithOwner })}
             >
               <div class="repo-icon">

@@ -113,7 +113,10 @@ pub(crate) async fn add_project_repo_impl(
         if project.location == store::ProjectLocation::Remote {
             match claim_remote_workspace(&store, &project)? {
                 RemoteWorkspace::Provision(claim) => (
-                    Some(branches::infer_workspace_name(&repo.branch_name)),
+                    Some(branches::infer_workspace_name(
+                        &project_id,
+                        &repo.branch_name,
+                    )),
                     Some(claim),
                 ),
                 RemoteWorkspace::Existing(ws_name) => {
@@ -448,7 +451,12 @@ mod tests {
             branch.workspace_status,
             Some(store::WorkspaceStatus::Starting)
         );
-        assert_eq!(branch.workspace_name.as_deref(), Some("stg-fix-login"));
+        let workspace_name = branch.workspace_name.as_deref().unwrap();
+        assert_eq!(
+            workspace_name,
+            branches::infer_workspace_name(&project.id, "fix-login")
+        );
+        assert!(workspace_name.starts_with("fix-login-"), "{workspace_name}");
         assert_eq!(branch.base_branch, "origin/main");
         // The claim went with the add, so the project isn't left looking busy.
         assert!(!provisioning_projects()

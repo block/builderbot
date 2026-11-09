@@ -650,7 +650,7 @@
                       }}
                     />
                   </label>
-                  <label class="badge-field">
+                  <label class="badge-field badge-field-hue">
                     <span class="badge-field-label">Hue</span>
                     <input
                       class="badge-hue-slider"
@@ -1294,6 +1294,31 @@
 
     .panel-body:not(.detail-open) .context-item.selected {
       background: transparent;
+    }
+
+    /* The badge row's fixed 200px slider doesn't fit a phone beside the
+       short-name field and the preview (about 430px of content in a 330px
+       row on a 402px screen; the row has no wrap, so it ran past the card).
+       The Hue field takes a line of its own under the other two, and its
+       slider stretches to the row's width. */
+    .badge-editor-row {
+      flex-wrap: wrap;
+    }
+
+    .badge-editor-preview {
+      margin-left: auto;
+    }
+
+    .badge-field-hue {
+      order: 1;
+      flex: 1 1 100%;
+      min-width: 0;
+    }
+
+    .badge-field-hue .badge-hue-slider {
+      width: auto;
+      flex: 1 1 auto;
+      min-width: 0;
     }
   }
 </style>

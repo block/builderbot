@@ -113,6 +113,7 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { pullStateStore } from '../../stores/pullState.svelte';
   import { pushStateStore } from '../../stores/pushState.svelte';
+  import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
     onBranchGitStateUpdated,
     onBranchSetupProgress,
@@ -2196,6 +2197,7 @@
               pendingItems={getPendingSessionItems(branch.id)}
               {prunedSessionIds}
               {error}
+              transferring={projectsDataStore.isProjectTransferring(branch.projectId)}
               gitActionDisabledReason={branchIdentityWarning}
               onRetry={() => loadTimeline()}
               deletingItems={timelineDeletingItems}

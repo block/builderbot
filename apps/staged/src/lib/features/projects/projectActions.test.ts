@@ -4,6 +4,7 @@ import type {
   Project,
   ProjectRepo,
   ProjectTransferPreflight,
+  ProjectTransferPreflightEvent,
   ProjectTransferRepoPreflight,
   ProjectTransferResult,
 } from '../../types';
@@ -102,6 +103,7 @@ function repoPreflight(
     lfsMissing: 0,
     lfsMissingBytes: 0,
     hasUncommittedChanges: false,
+    scanning: false,
     blockers: [],
     warnings: [],
     ...overrides,
@@ -120,6 +122,7 @@ function preflight(overrides: Partial<ProjectTransferPreflight> = {}): ProjectTr
     warnings: [],
     canTransfer: true,
     hasUncommittedChanges: false,
+    scanning: false,
     ...overrides,
   };
 }
@@ -156,7 +159,8 @@ function transferResult(overrides: Partial<ProjectTransferResult> = {}): Project
 // ── Mock plumbing ──
 
 let deleteProject: ReturnType<typeof vi.fn>;
-let getProjectTransferPreflight: ReturnType<typeof vi.fn>;
+let startProjectTransferPreflight: ReturnType<typeof vi.fn>;
+let cancelProjectTransferPreflight: ReturnType<typeof vi.fn>;
 let transferProject: ReturnType<typeof vi.fn>;
 let cancelProjectTransfer: ReturnType<typeof vi.fn>;
 let projectTransferStarted: ReturnType<typeof vi.fn>;
@@ -200,6 +204,42 @@ async function importActions() {
   return projectActions;
 }
 
+// ── The streamed preflight scan ──
+//
+// requestTransferProject listens for `project-transfer-preflight`, then
+// starts a scan under a fresh id; the backend answers with partial preflights
+// and one final `done` event. The fake here hands the listener's callback to
+// the test, records the scan id, and by default finishes the scan with
+// `scanResult` on the next macrotask.
+
+let scanListener: ((event: ProjectTransferPreflightEvent) => void) | null;
+let scanUnlisten: ReturnType<typeof vi.fn>;
+let lastScanId: string | null;
+/** How a started scan ends by itself; `hold` leaves it to the test. */
+let scanResult: { preflight: ProjectTransferPreflight } | { error: string } | 'hold';
+
+function scanEvent(
+  overrides: Partial<ProjectTransferPreflightEvent>
+): ProjectTransferPreflightEvent {
+  return {
+    projectId: 'p1',
+    scanId: lastScanId ?? 'none',
+    preflight: null,
+    done: false,
+    cancelled: false,
+    error: null,
+    ...overrides,
+  };
+}
+
+function emitScan(overrides: Partial<ProjectTransferPreflightEvent>): void {
+  scanListener?.(scanEvent(overrides));
+}
+
+function scanResolves(pf: ProjectTransferPreflight): void {
+  scanResult = { preflight: pf };
+}
+
 function deferredWrite() {
   let resolve!: () => void;
   let reject!: (reason: unknown) => void;
@@ -222,7 +262,22 @@ beforeEach(() => {
   vi.stubGlobal('$state', (initial: unknown) => initial);
 
   deleteProject = vi.fn().mockResolvedValue(undefined);
-  getProjectTransferPreflight = vi.fn().mockResolvedValue(preflight());
+  scanListener = null;
+  lastScanId = null;
+  scanResult = { preflight: preflight() };
+  scanUnlisten = vi.fn(() => {
+    scanListener = null;
+  });
+  startProjectTransferPreflight = vi.fn(async (_projectId: string, scanId: string) => {
+    lastScanId = scanId;
+    const result = scanResult;
+    if (result === 'hold') return;
+    setTimeout(() => {
+      if ('error' in result) emitScan({ scanId, done: true, error: result.error });
+      else emitScan({ scanId, done: true, preflight: result.preflight });
+    }, 0);
+  });
+  cancelProjectTransferPreflight = vi.fn(async () => true);
   transferProject = vi.fn().mockResolvedValue(transferResult());
   cancelProjectTransfer = vi.fn().mockResolvedValue(true);
   projectTransferStarted = vi.fn((projectId: string, direction: string) => {
@@ -269,9 +324,24 @@ beforeEach(() => {
     deleteProject,
     hasUnpushedCommits,
     setProjectStatusOverride,
-    getProjectTransferPreflight,
+    startProjectTransferPreflight,
+    cancelProjectTransferPreflight,
     transferProject,
     cancelProjectTransfer,
+  }));
+  vi.doMock('../../transport', () => ({
+    listenToEvent: vi.fn(
+      (
+        _event: string,
+        callback: (event: ProjectTransferPreflightEvent) => void,
+        opts?: { onEstablished?: () => void }
+      ) => {
+        scanListener = callback;
+        // The real transport confirms the registration asynchronously.
+        setTimeout(() => opts?.onEstablished?.(), 0);
+        return scanUnlisten;
+      }
+    ),
   }));
   vi.doMock('../settings/preferences.svelte', () => ({
     setTransferUncommittedChanges,
@@ -331,6 +401,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.doUnmock('../../api/commands');
+  vi.doUnmock('../../transport');
   vi.doUnmock('../settings/preferences.svelte');
   vi.doUnmock('../layout/navigation.svelte');
   vi.doUnmock('../../stores/projectsData.svelte');
@@ -1004,11 +1075,8 @@ describe('navigation on delete', () => {
 });
 
 describe('requestTransferProject', () => {
-  it('opens the dialog loading, then lands the preflight', async () => {
-    let resolvePreflight!: (value: ProjectTransferPreflight) => void;
-    getProjectTransferPreflight.mockReturnValue(
-      new Promise<ProjectTransferPreflight>((resolve) => (resolvePreflight = resolve))
-    );
+  it('opens the dialog loading, then streams the scan into it', async () => {
+    scanResult = 'hold';
     // The repos are fetched for the progress banner; the dialog labels rows
     // from the preflight, so a cold project's hydration doesn't hold it back.
     ensureProjectHydrated.mockReturnValue(new Promise(() => {}));
@@ -1021,9 +1089,28 @@ describe('requestTransferProject', () => {
       status: 'loading',
     });
     expect(ensureProjectHydrated).toHaveBeenCalledWith('p1');
-    expect(getProjectTransferPreflight).toHaveBeenCalledWith('p1');
+    // The scan starts only once the listener is in place.
+    expect(startProjectTransferPreflight).not.toHaveBeenCalled();
+    await tick();
+    expect(startProjectTransferPreflight).toHaveBeenCalledWith('p1', expect.any(String));
 
-    resolvePreflight(preflight());
+    // The first partial: the rows, still being read.
+    const partial = preflight({ repos: [repoPreflight({ scanning: true })], scanning: true });
+    emitScan({ preflight: partial });
+    expect(actions.pendingTransfer).toEqual({
+      project: project(),
+      direction: 'toRemote',
+      status: 'ready',
+      preflight: partial,
+    });
+
+    // Another dialog's scan is not this one's.
+    emitScan({ scanId: 'other', preflight: preflight({ canTransfer: false }), done: true });
+    expect(
+      actions.pendingTransfer?.status === 'ready' && actions.pendingTransfer.preflight
+    ).toEqual(partial);
+
+    emitScan({ preflight: preflight(), done: true });
     await request;
     expect(actions.pendingTransfer).toEqual({
       project: project(),
@@ -1031,11 +1118,13 @@ describe('requestTransferProject', () => {
       status: 'ready',
       preflight: preflight(),
     });
+    expect(scanUnlisten).toHaveBeenCalled();
+    expect(cancelProjectTransferPreflight).not.toHaveBeenCalled();
     expect(transferProject).not.toHaveBeenCalled();
   });
 
   it('offers the other location for a remote project', async () => {
-    getProjectTransferPreflight.mockResolvedValue(
+    scanResolves(
       preflight({ from: 'remote', to: 'local', direction: 'toLocal', workspaceName: 'ws' })
     );
     const actions = await importActions();
@@ -1043,8 +1132,8 @@ describe('requestTransferProject', () => {
     expect(actions.pendingTransfer?.direction).toBe('toLocal');
   });
 
-  it('shows a failed preflight in the dialog', async () => {
-    getProjectTransferPreflight.mockRejectedValue(new Error('sq exploded'));
+  it('shows a failed scan in the dialog', async () => {
+    scanResult = { error: 'sq exploded' };
     const actions = await importActions();
     await actions.requestTransferProject(project());
     expect(actions.pendingTransfer).toEqual({
@@ -1055,15 +1144,32 @@ describe('requestTransferProject', () => {
     });
   });
 
-  it('drops a preflight that lands after the dialog was closed', async () => {
-    let resolvePreflight!: (value: ProjectTransferPreflight) => void;
-    getProjectTransferPreflight.mockReturnValue(
-      new Promise<ProjectTransferPreflight>((resolve) => (resolvePreflight = resolve))
-    );
+  it('shows a scan that could not start in the dialog', async () => {
+    startProjectTransferPreflight.mockRejectedValue(new Error('no store'));
+    const actions = await importActions();
+    await actions.requestTransferProject(project());
+    expect(actions.pendingTransfer).toEqual({
+      project: project(),
+      direction: 'toRemote',
+      status: 'error',
+      error: 'no store',
+    });
+    expect(scanUnlisten).toHaveBeenCalled();
+  });
+
+  it('stops the scan when the dialog is closed and drops what lands after', async () => {
+    scanResult = 'hold';
     const actions = await importActions();
     const request = actions.requestTransferProject(project());
+    await tick();
+    const scanId = lastScanId;
     actions.cancelPendingTransfer();
-    resolvePreflight(preflight());
+    expect(cancelProjectTransferPreflight).toHaveBeenCalledWith(scanId);
+    expect(scanUnlisten).toHaveBeenCalled();
+    // The backend's final event for a stopped scan reaches no listener; a
+    // late one on a listener that somehow stayed is dropped all the same.
+    scanListener = null;
+    emitScan({ scanId: scanId!, preflight: preflight(), done: true, cancelled: true });
     await request;
     expect(actions.pendingTransfer).toBeNull();
   });
@@ -1076,13 +1182,13 @@ describe('requestTransferProject', () => {
     storeState.transferringProjects.set('p1', 'toRemote');
     await actions.requestTransferProject(project());
     expect(actions.pendingTransfer).toBeNull();
-    expect(getProjectTransferPreflight).not.toHaveBeenCalled();
+    expect(startProjectTransferPreflight).not.toHaveBeenCalled();
   });
 });
 
 describe('confirmPendingTransfer', () => {
   async function readyActions(pf: ProjectTransferPreflight) {
-    getProjectTransferPreflight.mockResolvedValue(pf);
+    scanResolves(pf);
     const actions = await importActions();
     await actions.requestTransferProject(project());
     expect(actions.pendingTransfer?.status).toBe('ready');
@@ -1109,6 +1215,29 @@ describe('confirmPendingTransfer', () => {
       description: undefined,
     });
     expect(toastWarning).not.toHaveBeenCalled();
+  });
+
+  it('stops a scan still going and starts the transfer at once', async () => {
+    scanResult = 'hold';
+    const actions = await importActions();
+    const request = actions.requestTransferProject(project());
+    await tick();
+    const scanId = lastScanId;
+    emitScan({
+      preflight: preflight({ repos: [repoPreflight({ scanning: true })], scanning: true }),
+    });
+    expect(actions.pendingTransfer?.status).toBe('ready');
+
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
+
+    expect(cancelProjectTransferPreflight).toHaveBeenCalledWith(scanId);
+    expect(transferProject).toHaveBeenCalledWith('p1', 'toRemote', false, false);
+    // A row still being read may turn out to have uncommitted changes, so the
+    // checkbox was asked and its answer remembered.
+    expect(setTransferUncommittedChanges).toHaveBeenCalledWith(false);
+    expect(actions.pendingTransfer).toBeNull();
+    await request;
+    expect(actions.pendingTransfer).toBeNull();
   });
 
   it('remembers the checkbox only when it was shown', async () => {
@@ -1247,7 +1376,7 @@ describe('confirmPendingTransfer', () => {
   });
 
   it('sends the direction the dialog of a remote project showed', async () => {
-    getProjectTransferPreflight.mockResolvedValue(
+    scanResolves(
       preflight({ from: 'remote', to: 'local', direction: 'toLocal', workspaceName: 'ws' })
     );
     const actions = await importActions();

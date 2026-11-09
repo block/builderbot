@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
+use super::follow_ups::held_work_note;
 use super::kick::{kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource};
 use super::retry::{
     queued_start_retry, QueuedStartAttempts, QueuedStartRetry, MAX_QUEUED_START_ATTEMPTS,
@@ -1137,4 +1138,45 @@ fn dead_owner_recovery_leaves_a_blox_turn_disconnected() {
         ended.completion_reason,
         Some(store::CompletionReason::AppQuit)
     );
+}
+
+/// A failed transfer says what was queued waiting for it, in its error.
+#[test]
+fn held_work_note_counts_queued_sessions_and_replies_across_the_project() {
+    let (store, branch) = store_with_branch();
+    let project_id = branch.project_id.clone();
+    assert_eq!(held_work_note(&store, &project_id), None);
+
+    let second = store::Branch::new(&project_id, "second", "main");
+    store.create_branch(&second).unwrap();
+    store
+        .create_session(&session(&branch.id, "queued one", SessionStatus::Queued))
+        .unwrap();
+    assert_eq!(
+        held_work_note(&store, &project_id).as_deref(),
+        Some(
+            "1 session queued for the transfer is still queued; start them from the timeline, \
+             or transfer again."
+        )
+    );
+
+    let finished = session(&second.id, "finished", SessionStatus::Running);
+    store.create_session(&finished).unwrap();
+    store
+        .update_session_status(&finished.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    store
+        .add_queued_session_message_held_for_transfer(&finished.id, "reply", &[], Some(&second.id))
+        .unwrap();
+    store
+        .add_queued_session_message_held_for_transfer(&finished.id, "again", &[], Some(&second.id))
+        .unwrap();
+    assert_eq!(
+        held_work_note(&store, &project_id).as_deref(),
+        Some(
+            "1 session and 2 replies queued for the transfer are still queued; start them from \
+             the timeline, or transfer again."
+        )
+    );
+    assert_eq!(held_work_note(&store, "no-such-project"), None);
 }

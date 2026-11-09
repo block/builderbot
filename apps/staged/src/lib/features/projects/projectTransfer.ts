@@ -109,17 +109,26 @@ export function lfsSummary(row: ProjectTransferRepoPreflight): string | null {
 /**
  * Whether the dialog asks about uncommitted changes. Besides the repos known
  * to have some, an `unknown` repo (a workspace the transfer resumes first)
- * may turn out to, and the user's answer must still apply to it.
+ * or one still being scanned may turn out to, and the user's answer must
+ * still apply to it.
  */
 export function asksAboutUncommitted(preflight: ProjectTransferPreflight): boolean {
-  return preflight.hasUncommittedChanges || preflight.repos.some(isUnknown);
+  return preflight.hasUncommittedChanges || preflight.repos.some(notYetRead);
 }
 
 /** Whether the dialog only knows "may have" uncommitted changes: none seen,
- *  but some repo can't be inspected until the transfer resumes it. */
+ *  but some repo hasn't been read yet (its scan is still going, or it can't
+ *  be inspected until the transfer resumes it). */
 export function uncommittedOnlyPossible(preflight: ProjectTransferPreflight): boolean {
-  return !preflight.hasUncommittedChanges && preflight.repos.some(isUnknown);
+  return !preflight.hasUncommittedChanges && preflight.repos.some(notYetRead);
 }
+
+/** The label on a session or reply held back while its project transfers. */
+export const QUEUED_FOR_TRANSFER_LABEL = 'Queued until the transfer completes';
+
+/** The confirmation shown when Transfer is clicked before the scan is done. */
+export const SCAN_UNFINISHED_CONFIRMATION =
+  "The scan of what will be left behind hasn't finished; files not yet listed may be lost on the remote. Transfer anyway?";
 
 /**
  * Whether the dialog asks about ignored files: only when some repo has some
@@ -142,8 +151,8 @@ export function ignoredTransferBlocked(preflight: ProjectTransferPreflight): str
   return `${whose} ignored files are too large to transfer, so they can't move this time.`;
 }
 
-function isUnknown(row: { state: ProjectTransferRepoState }): boolean {
-  return row.state === 'unknown';
+function notYetRead(row: { state: ProjectTransferRepoState; scanning: boolean }): boolean {
+  return row.state === 'unknown' || row.scanning;
 }
 
 export function plural(count: number, singular: string, pluralForm = `${singular}s`): string {

@@ -31,6 +31,7 @@ mod orchestrator;
 #[cfg(test)]
 mod orchestrator_tests;
 mod preflight;
+pub(crate) mod preflight_scan;
 mod recovery;
 mod registry;
 mod scripts;
@@ -53,6 +54,9 @@ pub use orchestrator::{
 };
 pub use preflight::{
     ProjectTransferPreflight, RepoPreflight, RepoTransferState, TransferDirection, TransferIssue,
+};
+pub(crate) use preflight_scan::{
+    cancel_project_transfer_preflight_impl, start_project_transfer_preflight_impl,
 };
 pub use registry::{
     ensure_branch_not_transferring, ensure_project_not_transferring,

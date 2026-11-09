@@ -15,10 +15,12 @@ use super::backups;
 use super::commands::{preflight_for, runs_prerun, settle};
 use super::host::{BloxUnavailable, TransferHost, WorkspaceState};
 use super::orchestrator::{
-    run_transfer, ProjectTransferResult, TransferOptions, TransferPhase, TransferProgress,
+    run_transfer, ProjectTransferResult, SerialLegs, TransferOptions, TransferPhase,
+    TransferProgress,
 };
 use super::preflight::{
-    ProjectTransferPreflight, RepoTransferState, TransferDirection, TransferIssue,
+    inspect_after_resuming, PreflightObserver, ProjectTransferPreflight, RepoTransferState,
+    TransferDirection, TransferIssue,
 };
 use super::recovery::{self, Recovered};
 use super::registry;
@@ -119,6 +121,7 @@ struct FaultyEndpoint {
     inner: LocalEndpoint,
     side: Side,
     faults: Arc<Mutex<Faults>>,
+    script_hook: Option<Arc<dyn Fn(Side, &str) + Send + Sync>>,
 }
 
 impl TransferEndpoint for FaultyEndpoint {
@@ -127,6 +130,9 @@ impl TransferEndpoint for FaultyEndpoint {
     }
 
     fn run_script(&self, script: &str, args: &[String]) -> Result<ScriptOutput, TransferError> {
+        if let Some(hook) = &self.script_hook {
+            hook(self.side, script);
+        }
         let hit =
             self.faults.lock().unwrap().hit(
                 |f| matches!(f, Fault::Script(side, s, _) if *side == self.side && *s == script),
@@ -212,6 +218,9 @@ struct FakeHost {
     script_vars: Mutex<Vec<(String, String)>>,
     /// The ignored files' cap, when a test lowers it.
     ignored_cap: Mutex<Option<u64>>,
+    /// Called at the start of every script run, at either end, on the
+    /// thread running it.
+    script_hook: Mutex<Option<Arc<dyn Fn(Side, &str) + Send + Sync>>>,
 }
 
 impl FakeHost {
@@ -231,6 +240,7 @@ impl FakeHost {
             bootstrap: Mutex::default(),
             script_vars: Mutex::default(),
             ignored_cap: Mutex::default(),
+            script_hook: Mutex::default(),
         };
         for repo in repos {
             let origin = host.origin(repo);
@@ -330,7 +340,13 @@ impl FakeHost {
             inner,
             side,
             faults: Arc::clone(&self.faults),
+            script_hook: self.script_hook.lock().unwrap().clone(),
         }
+    }
+
+    /// Run `hook` at the start of every script run from now on.
+    fn on_every_script(&self, hook: impl Fn(Side, &str) + Send + Sync + 'static) {
+        *self.script_hook.lock().unwrap() = Some(Arc::new(hook));
     }
 }
 
@@ -656,7 +672,7 @@ impl Fixture {
     fn transfer_with(
         &self,
         include_uncommitted: bool,
-        hook: &dyn Fn(&TransferProgress),
+        hook: &(dyn Fn(&TransferProgress) + Sync),
     ) -> Transfer {
         let options = TransferOptions {
             include_uncommitted,
@@ -669,7 +685,7 @@ impl Fixture {
     fn transfer_options(
         &self,
         options: TransferOptions,
-        hook: &dyn Fn(&TransferProgress),
+        hook: &(dyn Fn(&TransferProgress) + Sync),
     ) -> Transfer {
         self.transfer_as(self.direction(), options, hook)
     }
@@ -687,7 +703,7 @@ impl Fixture {
         &self,
         direction: TransferDirection,
         options: TransferOptions,
-        hook: &dyn Fn(&TransferProgress),
+        hook: &(dyn Fn(&TransferProgress) + Sync),
     ) -> Transfer {
         let transfer_id = uuid::Uuid::new_v4().to_string();
         let branch_ids = self.branches.iter().map(|b| b.id.clone()).collect();
@@ -1438,6 +1454,102 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
     assert_eq!(codes(&preflight.repos[0].blockers), vec!["session_running"]);
 }
 
+/// The preflight comes in steps: first the project-level checks with every
+/// checkout still to read, then each checkout's status and content parts as
+/// they land, in any order; the last step reads the same as a one-shot run.
+#[test]
+fn preflight_streams_each_checkout_as_its_parts_land() {
+    let f = Fixture::new(&[(WIDGETS, "feature"), (GADGETS, "gizmo")]);
+    let widgets = f.worktree(0);
+    write(&widgets, "ahead.txt", "one\n");
+    commit(&widgets, "ahead");
+    make_a_mess(&widgets);
+    fs::write(
+        f.host.clone_of(WIDGETS).join(".git/info/exclude"),
+        "node_modules/\n",
+    )
+    .unwrap();
+    write(&widgets, "node_modules/a/index.js", "x\n");
+
+    let steps: Mutex<Vec<ProjectTransferPreflight>> = Mutex::new(Vec::new());
+    let on_partial = |p: &ProjectTransferPreflight| steps.lock().unwrap().push(p.clone());
+    let inspection = inspect_after_resuming(
+        &f.store,
+        &f.host,
+        &f.project.id,
+        &Default::default(),
+        &PreflightObserver {
+            on_partial: &on_partial,
+            cancelled: &|| false,
+        },
+    )
+    .unwrap();
+    let steps = steps.into_inner().unwrap();
+
+    // One step before any read, then one per part per checkout.
+    assert_eq!(steps.len(), 1 + 2 * 2, "{:?}", steps.len());
+    let first = &steps[0];
+    assert!(first.scanning);
+    assert!(first.repos.iter().all(|r| r.scanning));
+    assert!(first.can_transfer, "nothing known yet blocks it");
+    assert!(!first.has_uncommitted_changes);
+    // Each step knows at least as much as the one before.
+    for pair in steps.windows(2) {
+        let (before, after) = (&pair[0], &pair[1]);
+        for (b, a) in before.repos.iter().zip(&after.repos) {
+            assert!(b.scanning || !a.scanning, "a row read stays read");
+            assert!(a.staged >= b.staged && a.ignored_files >= b.ignored_files);
+        }
+    }
+    let last = steps.last().unwrap();
+    assert!(!last.scanning);
+    assert!(last.repos.iter().all(|r| !r.scanning));
+    assert!(last.has_uncommitted_changes);
+    let widgets = &last.repos[0];
+    assert_eq!(widgets.state, RepoTransferState::Carry);
+    assert_eq!(widgets.unpushed_commits, 1);
+    assert_eq!(widgets.ignored_dirs, 1);
+    assert_eq!(last.repos[1].state, RepoTransferState::Carry);
+    assert!(!last.repos[1].has_uncommitted_changes);
+
+    // The same as read in one go.
+    let one_shot = f.preflight();
+    assert_eq!(
+        serde_json::to_value(last).unwrap(),
+        serde_json::to_value(&one_shot).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&inspection.preflight).unwrap(),
+        serde_json::to_value(&one_shot).unwrap()
+    );
+    assert_eq!(
+        inspection.branches[0].source_dir.as_deref(),
+        Some(f.worktree(0).to_str().unwrap())
+    );
+}
+
+/// Asked to stop, the inspection reads no more checkouts and fails as
+/// cancelled, the same way a cancelled transfer does.
+#[test]
+fn a_cancelled_preflight_stops_reading_and_says_so() {
+    let f = Fixture::new(&[(WIDGETS, "feature"), (GADGETS, "gizmo")]);
+    let steps = Mutex::new(0usize);
+    let on_partial = |_: &ProjectTransferPreflight| *steps.lock().unwrap() += 1;
+    let cancelled = || *steps.lock().unwrap() >= 1;
+    let result = inspect_after_resuming(
+        &f.store,
+        &f.host,
+        &f.project.id,
+        &Default::default(),
+        &PreflightObserver {
+            on_partial: &on_partial,
+            cancelled: &cancelled,
+        },
+    );
+    assert_eq!(result.err(), Some(TransferError::Cancelled.to_string()));
+    assert_eq!(*steps.lock().unwrap(), 1, "no checkout was read");
+}
+
 /// A dialog left open while another window moved the project asks for the
 /// direction it showed. That is refused before anything happens, so the
 /// project isn't moved straight back and what the other transfer made stays.
@@ -1606,6 +1718,144 @@ fn a_branch_without_a_project_repo_counts_against_the_primary_one() {
     );
 }
 
+/// Sessions queued on a branch, and replies held for its sessions, don't
+/// block a transfer: they wait for it, move with the branch, and are what
+/// the transfer's after-work drains. When it fails, its error says they are
+/// still there.
+#[test]
+fn queued_sessions_and_held_replies_wait_for_the_transfer_and_move_with_it() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let branch_id = f.branches[0].id.clone();
+    let queued = Session::new_queued("start later").with_branch(&branch_id);
+    f.store.create_session(&queued).unwrap();
+    let finished = Session::new_running("done", &f.worktree(0)).with_branch(&branch_id);
+    f.store.create_session(&finished).unwrap();
+    f.store
+        .update_session_status(
+            &finished.id,
+            crate::store::SessionStatus::Completed,
+            None,
+            None,
+        )
+        .unwrap();
+    let held = f
+        .store
+        .add_queued_session_message_held_for_transfer(
+            &finished.id,
+            "and then this",
+            &[],
+            Some(&branch_id),
+        )
+        .unwrap();
+
+    let preflight = f.preflight();
+    assert!(preflight.can_transfer, "{:?}", preflight.repos[0].blockers);
+    assert!(codes(&preflight.repos[0].blockers).is_empty());
+
+    // A failure leaves them queued, and says so.
+    f.host.arm(Fault::Script(Side::Workspace, APPLY_SCRIPT, 1));
+    let failed = f.transfer(true);
+    let err = failed.result.unwrap_err();
+    assert!(
+        err.ends_with(
+            "1 session and 1 reply queued for the transfer are still queued; start them from the \
+             timeline, or transfer again."
+        ),
+        "{err}"
+    );
+    let still_queued = f.store.get_session(&queued.id).unwrap().unwrap();
+    assert_eq!(still_queued.status, crate::store::SessionStatus::Queued);
+    assert_eq!(
+        f.store
+            .session_ids_with_queued_messages_for_branch(&branch_id)
+            .unwrap(),
+        vec![finished.id.clone()]
+    );
+
+    // A success moves them with the branch: the queued row is the branch's
+    // to start at the destination, the reply is there to be drained.
+    let result = f.transfer(true).result.expect("to remote");
+    assert_eq!(result.location, ProjectLocation::Remote);
+    let moved = f.store.get_session(&queued.id).unwrap().unwrap();
+    assert_eq!(moved.status, crate::store::SessionStatus::Queued);
+    assert_eq!(moved.branch_id.as_deref(), Some(branch_id.as_str()));
+    assert_eq!(
+        f.store
+            .session_ids_with_queued_messages_for_branch(&branch_id)
+            .unwrap(),
+        vec![finished.id.clone()]
+    );
+    let replies = f.store.list_queued_session_messages(&finished.id).unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].id, held.id);
+    assert_eq!(
+        replies[0].status,
+        crate::store::QueuedSessionMessageStatus::Queued
+    );
+}
+
+/// The legs of a multi-repo transfer run at once: each repository's
+/// snapshot starts while the other's is still running. (Each leg's
+/// snapshot waits here for the other's to start; one leg after another
+/// would wait for the whole timeout, then fail.)
+#[test]
+fn the_legs_of_a_transfer_run_at_once() {
+    use std::sync::Condvar;
+    use std::time::Duration;
+
+    fn install_barrier(f: &Fixture, side: Side, overlapped: &Arc<Mutex<Option<bool>>>) {
+        let gate = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let overlapped = Arc::clone(overlapped);
+        f.host.on_every_script(move |at, script| {
+            if at != side || script != SNAPSHOT_SCRIPT {
+                return;
+            }
+            let (count, cv) = &*gate;
+            let mut started = count.lock().unwrap();
+            *started += 1;
+            let (guard, timed_out) = cv
+                .wait_timeout_while(started, Duration::from_secs(20), |n| *n < 2)
+                .unwrap();
+            drop(guard);
+            cv.notify_all();
+            let mut overlapped = overlapped.lock().unwrap();
+            *overlapped = Some(overlapped.unwrap_or(true) && !timed_out.timed_out());
+        });
+    }
+
+    let f = two_repo_project();
+    let overlapped = Arc::new(Mutex::new(None));
+    install_barrier(&f, Side::Local, &overlapped);
+    let to_remote = f.transfer(true);
+    to_remote.result.expect("to remote");
+    assert_eq!(*overlapped.lock().unwrap(), Some(true), "to remote");
+    assert_eq!(f.bundles(&to_remote.transfer_id), 2);
+
+    // Events from both legs come out interleaved, each saying whose it is.
+    let carrying: Vec<&TransferProgress> = to_remote
+        .events
+        .iter()
+        .filter(|e| matches!(e.phase, TransferPhase::Snapshotting | TransferPhase::Moving))
+        .collect();
+    assert!(carrying.iter().all(|e| e.branch_id.is_some()));
+    assert_eq!(
+        carrying
+            .iter()
+            .filter_map(|e| e.branch_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2
+    );
+
+    // And back: the snapshots run in the workspace.
+    let overlapped = Arc::new(Mutex::new(None));
+    install_barrier(&f, Side::Workspace, &overlapped);
+    let to_local = f.transfer(true);
+    to_local.result.expect("to local");
+    assert_eq!(*overlapped.lock().unwrap(), Some(true), "to local");
+    assert_eq!(f.bundles(&to_local.transfer_id), 2);
+}
+
 // ---------------------------------------------------------------------------
 // Rollback
 // ---------------------------------------------------------------------------
@@ -1623,8 +1873,10 @@ enum Trigger {
 struct Case {
     name: &'static str,
     trigger: Trigger,
-    /// Bundles kept on this machine.
-    bundles: usize,
+    /// Bundles kept on this machine. A range where the legs run at once:
+    /// the other leg may or may not have made its bundle before the
+    /// trigger stopped it.
+    bundles: std::ops::RangeInclusive<usize>,
 }
 
 fn arm(f: &Fixture, trigger: Trigger) {
@@ -1675,11 +1927,12 @@ fn fail_with(f: &Fixture, case: &Case) -> Transfer {
         "{}",
         case.name
     );
-    assert_eq!(
-        f.bundles(&transfer.transfer_id),
-        case.bundles,
-        "{}: bundles",
-        case.name
+    let bundles = f.bundles(&transfer.transfer_id);
+    assert!(
+        case.bundles.contains(&bundles),
+        "{}: {bundles} bundles, expected {:?}",
+        case.name,
+        case.bundles
     );
     if let Some(manifest) = f.manifest(&transfer.transfer_id) {
         assert_eq!(manifest.status, "rolledBack", "{}", case.name);
@@ -1788,12 +2041,14 @@ fn assert_to_local_rolls_back(case: Case) {
 #[test]
 fn a_cancelled_transfer_to_remote_rolls_back_from_every_phase() {
     for (phase, bundles) in [
-        (TransferPhase::Checking, 0),
-        (TransferPhase::PreparingDestination, 0),
-        (TransferPhase::Snapshotting, 0),
-        (TransferPhase::Moving, 1),
-        (TransferPhase::Applying, 1),
-        (TransferPhase::Committing, 2),
+        (TransferPhase::Checking, 0..=0),
+        (TransferPhase::PreparingDestination, 0..=0),
+        // The first leg to snapshot is stopped before it does; the other
+        // sees the cancel at its own snapshot.
+        (TransferPhase::Snapshotting, 0..=0),
+        (TransferPhase::Moving, 1..=2),
+        (TransferPhase::Applying, 1..=2),
+        (TransferPhase::Committing, 2..=2),
     ] {
         assert_to_remote_rolls_back(Case {
             name: "cancel",
@@ -1810,57 +2065,57 @@ fn a_failed_transfer_to_remote_rolls_back_from_every_phase() {
         Case {
             name: "blox unavailable",
             trigger: Trigger::BloxUnavailable,
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "inspect",
             trigger: Trigger::Fault(Fault::Script(Local, PREFLIGHT_SCRIPT, 1)),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "start workspace",
             trigger: Trigger::Fault(Fault::StartWorkspace),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "clone second repo",
             trigger: Trigger::Fault(Fault::Script(Workspace, CLONE_SCRIPT, 2)),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "origin tips",
             trigger: Trigger::Fault(Fault::Script(Workspace, ORIGIN_TIPS_SCRIPT, 1)),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "second snapshot",
             trigger: Trigger::Fault(Fault::Script(Local, SNAPSHOT_SCRIPT, 2)),
-            bundles: 1,
+            bundles: 1..=1,
         },
         Case {
             name: "upload",
             trigger: Trigger::Fault(Fault::PutFile(Workspace)),
-            bundles: 1,
+            bundles: 1..=2,
         },
         Case {
             name: "first apply",
             trigger: Trigger::Fault(Fault::Script(Workspace, APPLY_SCRIPT, 1)),
-            bundles: 1,
+            bundles: 1..=2,
         },
         Case {
             name: "second apply",
             trigger: Trigger::Fault(Fault::Script(Workspace, APPLY_SCRIPT, 2)),
-            bundles: 2,
+            bundles: 2..=2,
         },
         Case {
             name: "panic in the second apply",
             trigger: Trigger::Fault(Fault::Panic(Workspace, APPLY_SCRIPT, 2)),
-            bundles: 2,
+            bundles: 2..=2,
         },
         Case {
             name: "session at commit",
             trigger: Trigger::SessionAtCommit,
-            bundles: 2,
+            bundles: 2..=2,
         },
     ] {
         assert_to_remote_rolls_back(case);
@@ -1870,12 +2125,12 @@ fn a_failed_transfer_to_remote_rolls_back_from_every_phase() {
 #[test]
 fn a_cancelled_transfer_to_local_rolls_back_from_every_phase() {
     for (phase, bundles) in [
-        (TransferPhase::Checking, 0),
-        (TransferPhase::PreparingDestination, 0),
-        (TransferPhase::Snapshotting, 0),
-        (TransferPhase::Moving, 0),
-        (TransferPhase::Applying, 1),
-        (TransferPhase::Committing, 2),
+        (TransferPhase::Checking, 0..=0),
+        (TransferPhase::PreparingDestination, 0..=0),
+        (TransferPhase::Snapshotting, 0..=0),
+        (TransferPhase::Moving, 0..=1),
+        (TransferPhase::Applying, 1..=2),
+        (TransferPhase::Committing, 2..=2),
     ] {
         assert_to_local_rolls_back(Case {
             name: "cancel",
@@ -1892,52 +2147,52 @@ fn a_failed_transfer_to_local_rolls_back_from_every_phase() {
         Case {
             name: "inspect",
             trigger: Trigger::Fault(Fault::Script(Workspace, PREFLIGHT_SCRIPT, 1)),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "local clone",
             trigger: Trigger::Fault(Fault::EnsureClone),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "second origin tips",
             trigger: Trigger::Fault(Fault::Script(Local, ORIGIN_TIPS_SCRIPT, 2)),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "snapshot",
             trigger: Trigger::Fault(Fault::Script(Workspace, SNAPSHOT_SCRIPT, 1)),
-            bundles: 0,
+            bundles: 0..=0,
         },
         Case {
             name: "download",
             trigger: Trigger::Fault(Fault::GetFile(Workspace)),
-            bundles: 0,
+            bundles: 0..=1,
         },
         Case {
             name: "land the branch",
             trigger: Trigger::Fault(Fault::Script(Local, APPLY_SCRIPT, 1)),
-            bundles: 1,
+            bundles: 1..=2,
         },
         Case {
             name: "finish in the worktree",
             trigger: Trigger::Fault(Fault::Script(Local, APPLY_SCRIPT, 2)),
-            bundles: 1,
+            bundles: 1..=2,
         },
         Case {
             name: "panic in the worktree",
             trigger: Trigger::Fault(Fault::Panic(Local, APPLY_SCRIPT, 2)),
-            bundles: 1,
+            bundles: 1..=2,
         },
         Case {
             name: "second repo",
             trigger: Trigger::Fault(Fault::Script(Local, APPLY_SCRIPT, 3)),
-            bundles: 2,
+            bundles: 2..=2,
         },
         Case {
             name: "session at commit",
             trigger: Trigger::SessionAtCommit,
-            bundles: 2,
+            bundles: 2..=2,
         },
     ] {
         assert_to_local_rolls_back(case);
@@ -2229,7 +2484,9 @@ fn a_panic_after_the_switch_leaves_the_project_at_its_destination() {
     let project = f.store.get_project(&f.project.id).unwrap().unwrap();
     assert_eq!(project.location, ProjectLocation::Remote);
     assert_eq!(f.host.workspaces(), vec![f.workspace()]);
-    assert!(worktrees.iter().all(|wt| wt.is_dir()), "not removed yet");
+    // The leg that panicked left its worktree; the other, running at the
+    // same time, may have finished removing its own.
+    assert!(worktrees.iter().any(|wt| wt.is_dir()), "not removed yet");
     let manifest = f.manifest(&transfer.transfer_id).expect("manifest");
     assert_eq!(manifest.status, backups::COMPLETED);
     assert!(
@@ -2282,6 +2539,8 @@ fn branch_ids_of(f: &Fixture) -> Vec<String> {
 #[test]
 fn a_transfer_to_remote_cut_off_before_the_switch_is_undone_at_the_next_start() {
     let f = two_repo_project();
+    // One leg after another, so that there is a moment between the repos.
+    let _serial = SerialLegs::for_this_thread();
     let worktrees = [f.worktree(0), f.worktree(1)];
     let sources: Vec<_> = worktrees.iter().map(|wt| source_fingerprint(wt)).collect();
     let checked = Mutex::new(false);

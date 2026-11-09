@@ -371,6 +371,8 @@ fn an_ignored_file_gone_or_new_after_the_backup_keeps_the_source() {
 #[test]
 fn a_rolled_back_transfer_to_local_takes_its_info_exclude_entries_back_out() {
     let f = two_repo_project();
+    // One leg after another: the first must finish before the second fails.
+    let _serial = SerialLegs::for_this_thread();
     f.transfer_options(with_ignored(), &|_| {})
         .result
         .expect("to remote");

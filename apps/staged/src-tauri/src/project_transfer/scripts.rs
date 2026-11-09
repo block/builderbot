@@ -592,7 +592,12 @@ pub const CLONE_SCRIPT: &str = concat!(
 
 /// Inspect checkouts before a transfer, without writing to any of them.
 ///
-/// Arguments: pairs of `dir branch`, one per repository. For each pair it
+/// Arguments: `$1` the part to run (`all`, `status` or `content`; see
+/// [`PreflightPart`]), then pairs of `dir branch`, one per repository. The
+/// `status` part prints everything up to `upstream` and the `warning=`s;
+/// the `content` part the `ignored_files`/`ignored_bytes` and `lfs_*` lines;
+/// both print the checkout's identity (`repo`, `branch`, `head_ref`,
+/// `head`, or `missing`/`not_a_checkout`). For each pair it
 /// prints `repo=<index>` and then what it found: `missing=1` (no such
 /// directory) or `not_a_checkout=1` and nothing else; otherwise `head_ref`
 /// (or `detached=1`), `head` (absent on an unborn branch), any
@@ -621,6 +626,10 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     prelude!(),
     lfs_prelude!(),
     ignored_prelude!(),
+    // `$1` picks the part to run (see [`PreflightPart`]); each part prints
+    // the checkout's identity, so parts run apart can be matched up.
+    "mode=$1\n",
+    "shift\n",
     "i=0\n",
     "while [ $# -ge 2 ]; do\n",
     "  dir=$1 branch=$2\n",
@@ -631,6 +640,8 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "  top=$(G rev-parse --show-toplevel 2>/dev/null) && cd -- \"$top\" 2>/dev/null || { printf 'not_a_checkout=1\\n'; continue; }\n",
     "  if head_ref=$(G symbolic-ref -q HEAD); then printf 'head_ref=%s\\n' \"${head_ref#refs/heads/}\"; else printf 'detached=1\\n'; fi\n",
     "  head=$(G rev-parse -q --verify 'HEAD^{commit}') && printf 'head=%s\\n' \"$head\"\n",
+    "  counts=''\n",
+    "  if [ \"$mode\" != content ]; then\n",
     "  for marker in MERGE_HEAD:merge CHERRY_PICK_HEAD:cherry-pick REVERT_HEAD:revert BISECT_LOG:bisect rebase-merge:rebase rebase-apply:rebase; do\n",
     "    [ -e \"$(G rev-parse --git-path \"${marker%%:*}\")\" ] && printf 'operation=%s\\n' \"${marker#*:}\"\n",
     "  done\n",
@@ -654,7 +665,16 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "    *untracked=0*) ;;\n",
     "    *) printf 'untracked_bytes=%s\\n' \"$(G ls-files -z --others --exclude-standard | xargs -0 ls -lnd -- 2>/dev/null | awk '{ s += $5 } END { print s + 0 }')\" ;;\n",
     "  esac\n",
-    // Not `set --`: the loop is walking the arguments.
+    "  printf 'repo_kib=%s\\n' \"$(G count-objects -v 2>/dev/null | awk '$1 == \"size:\" || $1 == \"size-pack:\" { s += $2 } END { print s + 0 }')\"\n",
+    "  if [ -n \"${head:-}\" ]; then\n",
+    "    printf 'unpushed=%s\\n' \"$(G rev-list --count HEAD --not --remotes 2>/dev/null)\"\n",
+    "    up=$(G rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) && printf 'upstream=%s\\n' \"$up\"\n",
+    "  fi\n",
+    "  [ -f .gitmodules ] && printf 'warning=submodules\\n'\n",
+    "  fi\n",
+    "  if [ \"$mode\" = status ]; then head=''; continue; fi\n",
+    // The ignored files, listed only when the status part counted some —
+    // or when this part runs on its own, with no count to go by.
     "  if [ \"$(printf '%s\\n' \"$counts\" | sed -n 's/^ignored=//p')\" != 0 ]; then\n",
     // A listing that fails says so, as the archive that backs them up
     // would fail the same way.
@@ -664,11 +684,6 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "    else\n",
     "      printf 'ignored_unlisted=1\\n'\n",
     "    fi\n",
-    "  fi\n",
-    "  printf 'repo_kib=%s\\n' \"$(G count-objects -v 2>/dev/null | awk '$1 == \"size:\" || $1 == \"size-pack:\" { s += $2 } END { print s + 0 }')\"\n",
-    "  if [ -n \"${head:-}\" ]; then\n",
-    "    printf 'unpushed=%s\\n' \"$(G rev-list --count HEAD --not --remotes 2>/dev/null)\"\n",
-    "    up=$(G rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) && printf 'upstream=%s\\n' \"$up\"\n",
     "  fi\n",
     "  if [ -n \"${head:-}\" ] && { G grep -q --untracked -e 'filter=lfs' -- '*.gitattributes' 2>/dev/null || uses_lfs HEAD; } && lfs_d=$(lfs_dir); then\n",
     // The index stands in for W, which only a snapshot hashes: W's other
@@ -687,10 +702,38 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "    fi\n",
     "  fi\n",
     "  head=''\n",
-    "  [ -f .gitmodules ] && printf 'warning=submodules\\n'\n",
     "done\n",
     "exit 0\n",
 );
+
+/// Which part of [`PREFLIGHT_SCRIPT`] to run. The two parts each walk the
+/// working tree once (`git status`), so run apart, at the same time, a
+/// checkout is read in about half the time; the reports merge with
+/// [`ScriptReport::merge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightPart {
+    /// Both parts in one run. The engine runs the parts apart; the tests
+    /// read whole checkouts.
+    #[cfg_attr(not(test), allow(dead_code))]
+    All,
+    /// The branch, its `HEAD`, operations in progress, the counts of staged,
+    /// unstaged, untracked, conflicted and ignored entries, the untracked
+    /// bytes, the repository size, unpushed commits and the upstream.
+    Status,
+    /// What the files hold: the ignored files' count and size, and the LFS
+    /// objects.
+    Content,
+}
+
+impl PreflightPart {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Status => "status",
+            Self::Content => "content",
+        }
+    }
+}
 
 /// Remove a transfer's temporary refs, and optionally its scratch directory.
 ///
@@ -731,6 +774,18 @@ impl ScriptReport {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// No part has landed yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Add `other`'s entries after this report's: one checkout's report, from
+    /// the parts of [`PREFLIGHT_SCRIPT`] run apart. A key both print (the
+    /// checkout's identity) reads as this report has it.
+    pub fn merge(&mut self, other: ScriptReport) {
+        self.entries.extend(other.entries);
     }
 
     /// Every value for `key`, in order.
@@ -1131,11 +1186,23 @@ pub fn origin_tips_args(repo_dir: &str, branches: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Arguments for [`PREFLIGHT_SCRIPT`].
+/// Arguments for [`PREFLIGHT_SCRIPT`], both parts in one run.
+#[cfg(test)]
 pub fn preflight_args<'a>(checkouts: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
-    checkouts
-        .into_iter()
-        .flat_map(|(dir, branch)| [dir.to_string(), branch.to_string()])
+    preflight_part_args(PreflightPart::All, checkouts)
+}
+
+/// Arguments for one part of [`PREFLIGHT_SCRIPT`].
+pub fn preflight_part_args<'a>(
+    part: PreflightPart,
+    checkouts: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<String> {
+    std::iter::once(part.as_str().to_string())
+        .chain(
+            checkouts
+                .into_iter()
+                .flat_map(|(dir, branch)| [dir.to_string(), branch.to_string()]),
+        )
         .collect()
 }
 

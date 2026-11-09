@@ -477,6 +477,9 @@ export interface ProjectTransferRepoPreflight {
   lfsMissing: number;
   lfsMissingBytes: number;
   hasUncommittedChanges: boolean;
+  /** The checkout is still being read: the counts above are partial. Only
+   *  set on the partial results a streamed preflight emits. */
+  scanning: boolean;
   blockers: ProjectTransferIssue[];
   warnings: ProjectTransferIssue[];
 }
@@ -496,6 +499,23 @@ export interface ProjectTransferPreflight {
   canTransfer: boolean;
   /** Some repo has staged, unstaged or untracked changes. */
   hasUncommittedChanges: boolean;
+  /** Some repo is still being read (see ProjectTransferRepoPreflight.scanning). */
+  scanning: boolean;
+}
+
+/**
+ * Rust `PreflightScanEvent`, the `project-transfer-preflight` event a
+ * `start_project_transfer_preflight` scan emits: a partial preflight each
+ * time a checkout's read lands, then one with `done`. A cancelled scan ends
+ * with `done` and `cancelled`; a failed one with `done` and `error`.
+ */
+export interface ProjectTransferPreflightEvent {
+  projectId: string;
+  scanId: string;
+  preflight: ProjectTransferPreflight | null;
+  done: boolean;
+  cancelled: boolean;
+  error: string | null;
 }
 
 /** Rust `TransferPhase`, in the order a transfer reaches them. */

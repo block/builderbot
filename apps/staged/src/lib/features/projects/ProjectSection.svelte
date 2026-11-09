@@ -1004,7 +1004,7 @@
     class="branches-list"
     class:deleting
     class:transferring
-    inert={deleting || transferring}
+    inert={deleting}
     aria-busy={transferring || undefined}
   >
     {#each sortedBranches as branch (branch.id)}
@@ -1163,10 +1163,16 @@
     gap: 12px;
   }
 
-  .branches-list.deleting,
-  .branches-list.transferring {
+  .branches-list.deleting {
     opacity: 0.65;
     pointer-events: none;
+  }
+
+  /* A transferring project's branches stay usable: new sessions and replies
+     queue behind the transfer (the banner above says so), so the list is
+     only dimmed a little rather than taken out of reach. */
+  .branches-list.transferring {
+    opacity: 0.85;
   }
 
   @media (max-width: 720px) {

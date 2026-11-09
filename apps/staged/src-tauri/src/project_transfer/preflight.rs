@@ -1,14 +1,23 @@
 //! What a transfer would carry, and what stops it. Read-only: the checkouts
-//! are inspected with [`PREFLIGHT_SCRIPT`], one run per local worktree and
-//! one per workspace, and nothing is resumed, fetched or cloned.
+//! are inspected with [`PREFLIGHT_SCRIPT`], and nothing is resumed, fetched
+//! or cloned.
+//!
+//! The project-level checks (the store, Blox, the workspaces' states) come
+//! first and fast; then every checkout is read, in up to
+//! [`MAX_PARALLEL_SCANS`] runs of the script at once, each checkout in two
+//! parts ([`PreflightPart`]) that run apart. A [`PreflightObserver`] sees
+//! the preflight after the project-level checks and again as each part
+//! lands, with the rows still to be read marked `scanning`, so the dialog can
+//! show what is known so far — and can ask for the reading to stop.
 //!
 //! The orchestrator runs the same [`inspect`] once the transfer is
 //! registered, so the dialog and the transfer agree on what each branch
 //! carries; the snapshot script re-checks the repo-level blockers as it
 //! snapshots.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +26,12 @@ use crate::store::{
 };
 
 use super::host::{TransferHost, WorkspaceState};
-use super::scripts::{self, LfsCounts, ScriptReport, PREFLIGHT_SCRIPT};
+use super::scripts::{self, LfsCounts, PreflightPart, ScriptReport, PREFLIGHT_SCRIPT};
+use super::TransferError;
+
+/// How many runs of [`PREFLIGHT_SCRIPT`] go at once: enough to overlap the
+/// round trips to a workspace without flooding it.
+const MAX_PARALLEL_SCANS: usize = 4;
 
 /// Untracked content past this size gets a warning: it is carried in full.
 const LARGE_PAYLOAD_BYTES: u64 = 100 * 1024 * 1024;
@@ -144,6 +158,10 @@ pub struct RepoPreflight {
     pub has_uncommitted_changes: bool,
     pub blockers: Vec<TransferIssue>,
     pub warnings: Vec<TransferIssue>,
+    /// The checkout is still being read: the counts above are what has been
+    /// read so far (nothing, or the status part without the ignored files
+    /// and LFS objects). Only ever `true` in a partial result.
+    pub scanning: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +182,9 @@ pub struct ProjectTransferPreflight {
     /// Some repo has staged, unstaged or untracked changes: the dialog's
     /// "include uncommitted changes" checkbox is worth showing.
     pub has_uncommitted_changes: bool,
+    /// Some repo is still being read: a partial result, with more to come.
+    /// `can_transfer` is what is known so far.
+    pub scanning: bool,
 }
 
 impl ProjectTransferPreflight {
@@ -176,6 +197,34 @@ impl ProjectTransferPreflight {
         self.can_transfer =
             self.blockers.is_empty() && self.repos.iter().all(|r| r.blockers.is_empty());
         self.has_uncommitted_changes = self.repos.iter().any(|r| r.has_uncommitted_changes);
+        self.scanning = self.repos.iter().any(|r| r.scanning);
+    }
+}
+
+/// Watches an inspection as it runs.
+pub(super) struct PreflightObserver<'a> {
+    /// Called with the preflight as it stands: once the project-level checks
+    /// are done, and again as each part of each checkout is read. It is
+    /// final once nothing in it is `scanning`.
+    pub on_partial: &'a dyn Fn(&ProjectTransferPreflight),
+    /// Whether to stop reading checkouts. The inspection then fails as
+    /// cancelled, once the runs already going have finished.
+    pub cancelled: &'a (dyn Fn() -> bool + Sync),
+}
+
+fn ignore_partial(_: &ProjectTransferPreflight) {}
+
+fn never() -> bool {
+    false
+}
+
+impl PreflightObserver<'static> {
+    /// Sees nothing and never cancels.
+    pub fn none() -> Self {
+        Self {
+            on_partial: &ignore_partial,
+            cancelled: &never,
+        }
     }
 }
 
@@ -214,17 +263,25 @@ pub(super) fn inspect(
     host: &dyn TransferHost,
     project_id: &str,
 ) -> Result<Inspection, String> {
-    inspect_after_resuming(store, host, project_id, &BTreeMap::new())
+    inspect_after_resuming(
+        store,
+        host,
+        project_id,
+        &BTreeMap::new(),
+        &PreflightObserver::none(),
+    )
 }
 
 /// [`inspect`], once the transfer has tried to resume the source workspaces
 /// in `resumed` (with the error, when resuming failed): one of them that is
-/// still not running is a blocker rather than something to resume.
+/// still not running is a blocker rather than something to resume. `Err`
+/// also when `observer` cancels, with [`TransferError::Cancelled`]'s message.
 pub(super) fn inspect_after_resuming(
     store: &Store,
     host: &dyn TransferHost,
     project_id: &str,
     resumed: &BTreeMap<String, Option<String>>,
+    observer: &PreflightObserver<'_>,
 ) -> Result<Inspection, String> {
     let project = store
         .get_project(project_id)
@@ -251,6 +308,7 @@ pub(super) fn inspect_after_resuming(
         warnings: Vec::new(),
         can_transfer: true,
         has_uncommitted_changes: false,
+        scanning: false,
     };
 
     if repos.is_empty() {
@@ -307,6 +365,7 @@ pub(super) fn inspect_after_resuming(
             has_uncommitted_changes: false,
             blockers: Vec::new(),
             warnings: Vec::new(),
+            scanning: false,
         };
         if github_repo.is_empty() {
             row.blockers.push(TransferIssue::new(
@@ -349,24 +408,44 @@ pub(super) fn inspect_after_resuming(
     }
 
     let mut running_workspaces = Vec::new();
-    match direction {
-        TransferDirection::ToRemote => {
-            inspect_local_sources(store, host, &mut sources, &mut preflight)?
-        }
+    let (units, kind) = match direction {
+        TransferDirection::ToRemote => (
+            plan_local_scans(store, &sources, &mut preflight)?,
+            "worktree",
+        ),
         TransferDirection::ToLocal => {
-            running_workspaces =
-                inspect_remote_sources(host, resumed, &mut sources, &mut preflight);
-            plan_local_names(host, &sources, &mut preflight);
+            let (units, running) = plan_remote_scans(host, resumed, &mut sources, &mut preflight);
+            running_workspaces = running;
+            (units, "clone")
         }
-    }
-    let kind = match direction {
-        TransferDirection::ToRemote => "worktree",
-        TransferDirection::ToLocal => "workspace",
     };
-    for row in &mut preflight.repos {
-        ignored_cap_warning(row, host.ignored_files_cap(), kind);
+    for unit in &units {
+        preflight.repos[unit.row].scanning = true;
+    }
+    if direction == TransferDirection::ToLocal {
+        // Rows that won't be read (a workspace to resume first) still get
+        // their local name planned; the rows read get it as they land.
+        for (source, row) in sources.iter().zip(preflight.repos.iter_mut()) {
+            if !row.scanning {
+                plan_local_name(host, source, row);
+            }
+        }
     }
     preflight.finalize();
+    (observer.on_partial)(&preflight);
+
+    read_checkouts(
+        host,
+        direction,
+        kind,
+        units,
+        &mut sources,
+        &mut preflight,
+        observer,
+    );
+    if (observer.cancelled)() {
+        return Err(TransferError::Cancelled.to_string());
+    }
     Ok(Inspection {
         project,
         branches: sources,
@@ -467,6 +546,8 @@ fn project_session_running(store: &Store, project_id: &str) -> Result<bool, Stri
     Ok(false)
 }
 
+/// A running session blocks the transfer; queued ones don't — they wait
+/// for it (see `session_queue`), and start at the destination.
 fn session_blockers(store: &Store, branch: &Branch, row: &mut RepoPreflight) -> Result<(), String> {
     if store
         .has_running_session_for_branch(&branch.id)
@@ -480,29 +561,48 @@ fn session_blockers(store: &Store, branch: &Branch, row: &mut RepoPreflight) -> 
             ),
         ));
     }
-    if !store
-        .get_queued_sessions_for_branch(&branch.id)
-        .map_err(|e| e.to_string())?
-        .is_empty()
-    {
-        row.blockers.push(TransferIssue::new(
-            "session_queued",
-            format!(
-                "Sessions are queued on {}; let them run or cancel them first.",
-                branch.branch_name
-            ),
-        ));
-    }
     Ok(())
 }
 
-fn inspect_local_sources(
+/// Where a checkout is read from.
+enum ScanEnd {
+    /// This machine; the path is the worktree.
+    Local(PathBuf),
+    /// A running workspace.
+    Workspace(String),
+}
+
+/// One run of one part of [`PREFLIGHT_SCRIPT`] on one checkout.
+struct ScanUnit {
+    /// Index into [`ProjectTransferPreflight::repos`].
+    row: usize,
+    part: PreflightPart,
+    end: ScanEnd,
+    dir: String,
+    branch: String,
+}
+
+/// A checkout's reading as it stands: what the parts that have landed say,
+/// merged.
+struct Scan {
+    /// The row before any part landed: the project-level blockers. Each
+    /// landing rebuilds the row from it, so nothing is read twice.
+    base: RepoPreflight,
+    dir: String,
+    report: ScriptReport,
+    parts_left: usize,
+    /// The first part that could not run.
+    failed: Option<String>,
+}
+
+/// To remote: a unit per part for each branch's worktree.
+fn plan_local_scans(
     store: &Store,
-    host: &dyn TransferHost,
-    sources: &mut [BranchSource],
+    sources: &[BranchSource],
     preflight: &mut ProjectTransferPreflight,
-) -> Result<(), String> {
-    for (source, row) in sources.iter_mut().zip(preflight.repos.iter_mut()) {
+) -> Result<Vec<ScanUnit>, String> {
+    let mut units = Vec::new();
+    for (i, (source, row)) in sources.iter().zip(preflight.repos.iter_mut()).enumerate() {
         let workdir = store
             .get_workdir_for_branch(&source.branch.id)
             .map_err(|e| e.to_string())?;
@@ -516,44 +616,29 @@ fn inspect_local_sources(
             ));
             continue;
         };
-        let report = host
-            .local_endpoint(Path::new(&dir))
-            .and_then(|endpoint| {
-                endpoint
-                    .run_script(
-                        PREFLIGHT_SCRIPT,
-                        &scripts::preflight_args([(dir.as_str(), row.branch_name.as_str())]),
-                    )
-                    .map_err(|e| e.to_string())
-            })
-            .map(|output| scripts::sections(&output.stdout));
-        match report {
-            Ok(sections) => match sections.into_iter().next() {
-                Some(section) => {
-                    if read_checkout(row, &section, "worktree") {
-                        source.source_dir = Some(dir);
-                        source.repo_bytes = repo_bytes(&section);
-                    }
-                }
-                None => row
-                    .blockers
-                    .push(inspect_failed("the inspection printed nothing")),
-            },
-            Err(e) => row.blockers.push(inspect_failed(&e)),
+        for part in [PreflightPart::Status, PreflightPart::Content] {
+            units.push(ScanUnit {
+                row: i,
+                part,
+                end: ScanEnd::Local(PathBuf::from(&dir)),
+                dir: dir.clone(),
+                branch: row.branch_name.clone(),
+            });
         }
     }
-    Ok(())
+    Ok(units)
 }
 
-/// Inspect each source workspace that is running; returns those. One that is
-/// suspended, stopped or failed is for the transfer to resume — unless it is
-/// in `resumed` already, when it is a blocker.
-fn inspect_remote_sources(
+/// To local: a unit per part for each branch's clone in a running source
+/// workspace; returns the units and those workspaces. One that is
+/// suspended, stopped or failed is for the transfer to resume — unless it
+/// is in `resumed` already, when it is a blocker.
+fn plan_remote_scans(
     host: &dyn TransferHost,
     resumed: &BTreeMap<String, Option<String>>,
     sources: &mut [BranchSource],
     preflight: &mut ProjectTransferPreflight,
-) -> Vec<String> {
+) -> (Vec<ScanUnit>, Vec<String>) {
     let mut by_workspace: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, source) in sources.iter().enumerate() {
         match source
@@ -578,6 +663,7 @@ fn inspect_remote_sources(
     }
     preflight.workspace_name = by_workspace.keys().next().cloned();
 
+    let mut units = Vec::new();
     let mut running = Vec::new();
     for (workspace, indexes) in by_workspace {
         for &i in &indexes {
@@ -648,88 +734,182 @@ fn inspect_remote_sources(
         }
         running.push(workspace.clone());
 
-        let mut dirs = Vec::new();
         for &i in &indexes {
             match host.workspace_repo_dir(&workspace, &sources[i].github_repo) {
-                Ok(dir) => dirs.push((i, dir)),
+                Ok(dir) => {
+                    for part in [PreflightPart::Status, PreflightPart::Content] {
+                        units.push(ScanUnit {
+                            row: i,
+                            part,
+                            end: ScanEnd::Workspace(workspace.clone()),
+                            dir: dir.clone(),
+                            branch: preflight.repos[i].branch_name.clone(),
+                        });
+                    }
+                }
                 Err(e) => preflight.repos[i].blockers.push(inspect_failed(&e)),
             }
         }
-        let args = scripts::preflight_args(
-            dirs.iter()
-                .map(|(i, dir)| (dir.as_str(), preflight.repos[*i].branch_name.as_str())),
-        );
-        let output = host
-            .workspace_endpoint(&workspace)
-            .run_script(PREFLIGHT_SCRIPT, &args)
-            .map(|output| scripts::sections(&output.stdout));
-        match output {
-            Ok(sections) => {
-                for (n, (i, dir)) in dirs.into_iter().enumerate() {
-                    let row = &mut preflight.repos[i];
-                    match sections.get(n) {
-                        Some(section) => {
-                            if read_checkout(row, section, "clone") {
-                                sources[i].source_dir = Some(dir);
-                                sources[i].repo_bytes = repo_bytes(section);
-                            }
-                        }
-                        None => row
-                            .blockers
-                            .push(inspect_failed("the inspection stopped early")),
-                    }
-                }
-            }
-            Err(e) => {
-                for (i, _) in dirs {
-                    preflight.repos[i]
-                        .blockers
-                        .push(inspect_failed(&e.to_string()));
-                }
-            }
-        }
     }
-    running
+    (units, running)
 }
 
-/// Plan the local name of every branch to carry, and say when it differs.
-fn plan_local_names(
+/// Run `units`, up to [`MAX_PARALLEL_SCANS`] at once, and fill each row in
+/// as its parts land — rebuilding the row from what it was before the first
+/// part, so a row read in two steps ends up as one read in one — telling
+/// `observer` after each. Stops taking units once `observer` cancels; the
+/// rows not read stay `scanning`.
+#[allow(clippy::too_many_arguments)]
+fn read_checkouts(
     host: &dyn TransferHost,
-    sources: &[BranchSource],
+    direction: TransferDirection,
+    kind: &str,
+    units: Vec<ScanUnit>,
+    sources: &mut [BranchSource],
     preflight: &mut ProjectTransferPreflight,
+    observer: &PreflightObserver<'_>,
 ) {
-    for (source, row) in sources.iter().zip(preflight.repos.iter_mut()) {
-        if row.state == RepoTransferState::NothingToCarry {
-            continue;
+    if units.is_empty() {
+        return;
+    }
+    let mut scans: HashMap<usize, Scan> = HashMap::new();
+    for unit in &units {
+        scans
+            .entry(unit.row)
+            .or_insert_with(|| Scan {
+                base: RepoPreflight {
+                    scanning: false,
+                    ..preflight.repos[unit.row].clone()
+                },
+                dir: unit.dir.clone(),
+                report: ScriptReport::default(),
+                parts_left: 0,
+                failed: None,
+            })
+            .parts_left += 1;
+    }
+    let workers = units.len().min(MAX_PARALLEL_SCANS);
+    let queue = Mutex::new(VecDeque::from(units));
+    let (tx, rx) = mpsc::channel::<(usize, Result<ScriptReport, String>)>();
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let queue = &queue;
+            let cancelled = observer.cancelled;
+            s.spawn(move || {
+                while !cancelled() {
+                    let Some(unit) = queue.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let result = run_scan_unit(host, &unit);
+                    if tx.send((unit.row, result)).is_err() {
+                        break;
+                    }
+                }
+            });
         }
-        let Ok(clone) = host.local_clone_path(&source.github_repo) else {
-            continue;
-        };
-        if !clone.join(".git").exists() && !clone.join("HEAD").exists() {
-            continue;
-        }
-        match local_branch_name(
-            &clone,
-            &row.branch_name,
-            row.head.as_deref(),
-            &HashSet::new(),
-        ) {
-            Ok((name, _)) if name != row.branch_name => {
-                row.warnings.push(TransferIssue::new(
-                    "renamed",
-                    format!(
-                        "{} is already used in the local clone; it lands as {name}.",
-                        row.branch_name
-                    ),
-                ));
-                row.dest_branch_name = name;
+        drop(tx);
+        // Until every worker has dropped its sender.
+        for (row, result) in rx {
+            let scan = scans.get_mut(&row).expect("a scan per unit");
+            scan.parts_left -= 1;
+            match result {
+                Ok(report) => scan.report.merge(report),
+                Err(e) => {
+                    scan.failed.get_or_insert(e);
+                }
             }
-            Ok(_) => {}
-            Err(e) => log::warn!(
-                "[project_transfer] cannot plan the local name of {}: {e}",
-                row.branch_name
-            ),
+            rebuild_row(
+                host,
+                direction,
+                kind,
+                scan,
+                &mut sources[row],
+                &mut preflight.repos[row],
+            );
+            preflight.finalize();
+            (observer.on_partial)(preflight);
         }
+    });
+}
+
+/// One run of one part of the script, as the report of its one checkout.
+fn run_scan_unit(host: &dyn TransferHost, unit: &ScanUnit) -> Result<ScriptReport, String> {
+    let endpoint = match &unit.end {
+        ScanEnd::Local(dir) => host.local_endpoint(dir)?,
+        ScanEnd::Workspace(workspace) => host.workspace_endpoint(workspace),
+    };
+    let args = scripts::preflight_part_args(unit.part, [(unit.dir.as_str(), unit.branch.as_str())]);
+    let output = endpoint
+        .run_script(PREFLIGHT_SCRIPT, &args)
+        .map_err(|e| e.to_string())?;
+    scripts::sections(&output.stdout)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "the inspection printed nothing".to_string())
+}
+
+/// `row` as `scan`'s parts so far say, from the row as it was before any.
+fn rebuild_row(
+    host: &dyn TransferHost,
+    direction: TransferDirection,
+    kind: &str,
+    scan: &Scan,
+    source: &mut BranchSource,
+    row: &mut RepoPreflight,
+) {
+    let mut rebuilt = scan.base.clone();
+    rebuilt.scanning = scan.parts_left > 0;
+    if let Some(e) = &scan.failed {
+        rebuilt.blockers.push(inspect_failed(e));
+    }
+    let carries = !scan.report.is_empty() && read_checkout(&mut rebuilt, &scan.report, kind);
+    if carries {
+        source.source_dir = Some(scan.dir.clone());
+        source.repo_bytes = repo_bytes(&scan.report);
+    } else {
+        source.source_dir = None;
+        source.repo_bytes = 0;
+    }
+    ignored_cap_warning(&mut rebuilt, host.ignored_files_cap(), kind);
+    if direction == TransferDirection::ToLocal {
+        plan_local_name(host, source, &mut rebuilt);
+    }
+    *row = rebuilt;
+}
+
+/// Plan the local name of a branch to carry, and say when it differs.
+fn plan_local_name(host: &dyn TransferHost, source: &BranchSource, row: &mut RepoPreflight) {
+    if row.state == RepoTransferState::NothingToCarry {
+        return;
+    }
+    let Ok(clone) = host.local_clone_path(&source.github_repo) else {
+        return;
+    };
+    if !clone.join(".git").exists() && !clone.join("HEAD").exists() {
+        return;
+    }
+    match local_branch_name(
+        &clone,
+        &row.branch_name,
+        row.head.as_deref(),
+        &HashSet::new(),
+    ) {
+        Ok((name, _)) if name != row.branch_name => {
+            row.warnings.push(TransferIssue::new(
+                "renamed",
+                format!(
+                    "{} is already used in the local clone; it lands as {name}.",
+                    row.branch_name
+                ),
+            ));
+            row.dest_branch_name = name;
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!(
+            "[project_transfer] cannot plan the local name of {}: {e}",
+            row.branch_name
+        ),
     }
 }
 
@@ -986,6 +1166,7 @@ mod tests {
             has_uncommitted_changes: false,
             blockers: Vec::new(),
             warnings: Vec::new(),
+            scanning: false,
         }
     }
 

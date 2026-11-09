@@ -57,6 +57,7 @@
   import { reviewBadges } from './reviewBadges';
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
+  import { QUEUED_FOR_TRANSFER_LABEL } from '../projects/projectTransfer';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { canResumeRow, noteRowPhase, type SessionRowPhase } from './sessionRowState';
   import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
@@ -124,6 +125,11 @@
     onCancelQueuedPush?: () => void;
     /** Cancel a pull that is still waiting on the branch queue. */
     onCancelQueuedPull?: () => void;
+    /**
+     * The branch's project is being transferred: queued sessions wait for
+     * the transfer rather than the queue, and can't be started ahead of it.
+     */
+    transferring?: boolean;
     /** Push is queued behind in-flight branch work. */
     pushQueuedOrigin?: boolean;
     /** Pull is queued behind in-flight branch work. */
@@ -209,6 +215,7 @@
     onOpenPushSession,
     onCancelQueuedPush,
     onCancelQueuedPull,
+    transferring = false,
     pushQueuedOrigin = false,
     pullQueuedOrigin = false,
     branchSessionBusy = false,
@@ -379,6 +386,9 @@
   });
 
   /** A git action of the branch's own is running, holding the worktree or the queue. */
+  /** The meta on a queued row: what it is waiting for. */
+  let queuedMeta = $derived(transferring ? QUEUED_FOR_TRANSFER_LABEL : 'Queued');
+
   let gitActionRunning = $derived(
     pushingOrigin ||
       forcePushingOrigin ||
@@ -722,7 +732,7 @@
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-commit';
-        secondaryMeta = 'Queued';
+        secondaryMeta = queuedMeta;
       } else if (isPending || isRunning) {
         phase = 'running';
         type = 'pending-commit';
@@ -792,7 +802,7 @@
         );
       } else if (phase === 'queued') {
         type = 'queued-note';
-        secondaryMeta = 'Queued';
+        secondaryMeta = queuedMeta;
       } else if (phase === 'running') {
         type = 'generating-note';
         secondaryMeta = isDisconnected
@@ -860,7 +870,7 @@
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-review';
-        meta = 'Queued';
+        meta = queuedMeta;
       } else if (isRunning) {
         phase = 'running';
         type = 'generating-review';
@@ -1096,6 +1106,10 @@
   function canStartNow(item: DisplayItem): boolean {
     const kind = queuedKind(item);
     if (!kind || !item.sessionId || item.deleting || !onStartQueuedNow) return false;
+    // The worktree is on its way out (or not here yet) while the project
+    // moves; the backend refuses the start, and the row goes on its own once
+    // the transfer completes.
+    if (transferring) return false;
     // A provisioning row means the branch has no worktree yet, so nothing on it
     // can start — see `canStartQueuedSessionNow`.
     return canStartQueuedSessionNow({

@@ -214,6 +214,9 @@ fn after_transfer(
                 }
             });
         }
+        // What was queued while the project moved: replies to its sessions
+        // go first, then the branch queue starts what it can.
+        crate::session_queue::flush_follow_ups_for_branch(app_handle, store, &repo.branch_id);
         crate::session_queue::kick(
             app_handle,
             &repo.branch_id,
@@ -230,15 +233,20 @@ pub(super) fn runs_prerun(result: &ProjectTransferResult, repo: &RepoTransferRes
 
 /// Roll back, or mark for the user, each transfer a Staged that is no
 /// longer running left unfinished; see [`recovery`]. Run once at startup,
-/// before [`prune_backups`].
-pub(crate) fn recover_interrupted_transfers(store: &Store) {
-    let recovered = recovery::recover(store, &LiveHost, &recovery::is_running);
+/// before [`prune_backups`]. Returns the ids of the projects dealt with,
+/// whose queued work the caller sets going again.
+pub(crate) fn recover_interrupted_transfers(store: &Store) -> Vec<String> {
+    let recovered = recovery::recover_noting_projects(store, &LiveHost, &recovery::is_running);
     if !recovered.is_empty() {
         log::info!(
             "[project_transfer] dealt with {} interrupted transfers",
             recovered.len()
         );
     }
+    let mut projects: Vec<String> = recovered.into_iter().map(|(_, p, _)| p).collect();
+    projects.sort();
+    projects.dedup();
+    projects
 }
 
 /// Remove transfer backups past their retention. Run once at startup.

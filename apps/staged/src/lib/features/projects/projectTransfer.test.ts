@@ -53,6 +53,7 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     lfsMissing: 0,
     lfsMissingBytes: 0,
     hasUncommittedChanges: false,
+    scanning: false,
     blockers: [],
     warnings: [],
     ...overrides,
@@ -71,6 +72,7 @@ function preflight(overrides: Partial<ProjectTransferPreflight> = {}): ProjectTr
     warnings: [],
     canTransfer: true,
     hasUncommittedChanges: false,
+    scanning: false,
     ...overrides,
   };
 }
@@ -176,6 +178,14 @@ describe('labels', () => {
     expect(asksAboutUncommitted(unknown)).toBe(true);
     expect(uncommittedOnlyPossible(unknown)).toBe(true);
     expect(uncommittedOnlyPossible({ ...unknown, hasUncommittedChanges: true })).toBe(false);
+
+    // Nor can a checkout the scan is still reading.
+    const scanning = preflight({
+      repos: [repo(), repo({ branchId: 'b2', scanning: true })],
+      scanning: true,
+    });
+    expect(asksAboutUncommitted(scanning)).toBe(true);
+    expect(uncommittedOnlyPossible(scanning)).toBe(true);
   });
 
   it('formats sizes', () => {

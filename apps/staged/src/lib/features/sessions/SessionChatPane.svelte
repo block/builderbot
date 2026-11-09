@@ -111,6 +111,8 @@
   import { composerSendControl, composerSessionBlock } from './composerSendControl';
   import DisconnectedSessionAlert from './DisconnectedSessionAlert.svelte';
   import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
+  import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import { QUEUED_FOR_TRANSFER_LABEL } from '../projects/projectTransfer';
   import { isReconcileCancelNotice } from '../../shared/disconnectedSession';
   import {
     LIVE_DELIVERY_UNKNOWN,
@@ -446,6 +448,13 @@
 
   let isLive = $derived(session?.status === 'running');
   let isDisconnected = $derived(session?.status === 'disconnected');
+  /**
+   * The session's project is being transferred. A reply still goes: the
+   * backend holds it as a queued follow-up and sends it once the project has
+   * moved, so the queue shows it as waiting for the transfer and the manual
+   * Send is withheld meanwhile.
+   */
+  let transferring = $derived(!!projectId && projectsDataStore.isProjectTransferring(projectId));
   /** How often an open pane re-fetches a `disconnected` session, in case it
    *  missed the status event reconcile ends it with. */
   const DISCONNECTED_REFETCH_MS = 15_000;
@@ -1675,8 +1684,21 @@
     const acpConfigSelection: AcpConfigSelection | undefined =
       followupAcpConfigSelection ?? undefined;
     try {
-      await resumeSession(targetSessionId, text, imageIds, targetBranchId, acpConfigSelection);
+      const outcome = await resumeSession(
+        targetSessionId,
+        text,
+        imageIds,
+        targetBranchId,
+        acpConfigSelection
+      );
       if (session?.id !== targetSessionId) return true;
+      if (outcome.outcome === 'queuedForTransfer') {
+        // Held by the backend until the project's transfer completes; the
+        // session is still idle, so nothing starts polling. The queue shows
+        // the message, labelled as waiting for the transfer.
+        await refreshQueuedMessages();
+        return true;
+      }
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = {
@@ -1746,8 +1768,9 @@
 
   async function handleSendQueuedMessage(id: string) {
     if (isLive || sending || queueActionIds.has(id)) return;
-    // The backend doesn't claim queued follow-ups while disconnected.
-    if (isDisconnected) return;
+    // The backend doesn't claim queued follow-ups while disconnected, and
+    // holds them while the project transfers.
+    if (isDisconnected || transferring) return;
     queueActionIds = new Set(queueActionIds).add(id);
     beginComposerAction();
     try {
@@ -3346,7 +3369,12 @@
         <div class="queue-popover">
           {#each queuedMessages as msg (msg.id)}
             <div class="queue-item">
-              <span class="queue-item-label">{msg.status === 'sending' ? 'Sending' : 'Queued'}</span
+              <span class="queue-item-label"
+                >{msg.status === 'sending'
+                  ? 'Sending'
+                  : transferring
+                    ? QUEUED_FOR_TRANSFER_LABEL
+                    : 'Queued'}</span
               >
               <div class="queue-item-body">
                 <span class="queue-item-text">{msg.content}</span>
@@ -3367,7 +3395,7 @@
                   <span class="queue-item-error">{msg.lastError}</span>
                 {/if}
               </div>
-              {#if !isLive && !isDisconnected}
+              {#if !isLive && !isDisconnected && !transferring}
                 <Button
                   variant="accent"
                   size="xs"

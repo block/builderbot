@@ -27,6 +27,7 @@
 //! them out once it is gone.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use super::super::backups;
 use super::super::carry::{back_up_ignored, cleanup, unchanged, unchanged_all, CarryPlan};
@@ -50,15 +51,26 @@ impl Run<'_> {
         let tid = self.guard.transfer_id();
         match self.direction {
             TransferDirection::ToRemote => {
-                for leg in legs.iter_mut() {
-                    match self.remove_local_source(leg) {
-                        // Only once it is gone: the check that the worktree
-                        // is unchanged hashes its untracked files, which
-                        // these entries keep out of it.
-                        Ok(()) => warnings.extend(self.release_excludes(leg)),
-                        Err(issue) => warnings.push(issue),
-                    }
-                }
+                // Each worktree comes down on its own: its backup ref goes
+                // in its repository's clone, its ignored files into the
+                // transfer's own directory.
+                let left = Mutex::new(Vec::new());
+                let outcome = self.for_each_leg(
+                    legs,
+                    |_| true,
+                    |_, leg| {
+                        match self.remove_local_source(leg) {
+                            // Only once it is gone: the check that the worktree
+                            // is unchanged hashes its untracked files, which
+                            // these entries keep out of it.
+                            Ok(()) => left.lock().unwrap().extend(self.release_excludes(leg)),
+                            Err(issue) => left.lock().unwrap().push(issue),
+                        }
+                        Ok(())
+                    },
+                );
+                debug_assert!(outcome.is_ok(), "the work never fails");
+                warnings.extend(left.into_inner().unwrap());
                 // The bundles at the destination have served their purpose.
                 if let (Some(workspace), Some(dir)) = (
                     self.workspace_name.as_deref(),
@@ -182,36 +194,46 @@ impl Run<'_> {
         legs: &mut [Leg],
     ) -> Result<(), TransferIssue> {
         let mut changed = Vec::new();
-        let mut failures = Vec::new();
         let from_here = |leg: &Leg| {
             leg.source.workspace.as_deref() == Some(workspace)
                 && leg.plan.is_some()
                 && leg.outcome.is_some()
         };
-        let endpoint = self.host.workspace_endpoint(workspace);
-        for leg in legs.iter_mut().filter(|l| from_here(l)) {
+        // Each leg's backups on their own: the ref in its repository's
+        // local clone, the ignored files archived out of its own clone in
+        // the workspace.
+        let failed = Mutex::new(Vec::new());
+        let outcome = self.for_each_leg(legs, from_here, |_, leg| {
             let (Some(plan), Some(outcome)) = (&leg.plan, &leg.outcome) else {
-                continue;
+                return Ok(());
             };
+            let endpoint = self.host.workspace_endpoint(workspace);
             match self.keep_backup_ref(
                 Path::new(&plan.dest_dir),
                 &leg.row.branch_name,
                 &outcome.snapshot.snapshot,
             ) {
                 Ok(backup_ref) => leg.backup_ref = Some(backup_ref),
-                Err(e) => failures.push(format!("{}: {e}", leg.row.branch_name)),
+                Err(e) => failed
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}: {e}", leg.row.branch_name)),
             }
             match back_up_ignored(endpoint.as_ref(), plan, outcome.ignored.as_ref()) {
                 Ok(ignored) => {
                     leg.warnings.extend(skipped_warning(&ignored, plan));
                     leg.ignored_backup = Some(ignored);
                 }
-                Err(e) => failures.push(format!(
+                Err(e) => failed.lock().unwrap().push(format!(
                     "{}: couldn't back its ignored files up: {e}",
                     leg.row.branch_name
                 )),
             }
-        }
+            Ok(())
+        });
+        debug_assert!(outcome.is_ok(), "the work never fails");
+        let mut failures = failed.into_inner().unwrap();
+        let endpoint = self.host.workspace_endpoint(workspace);
         // Every check in one exec, as close to the delete as it can be, the
         // ignored files each backup holds included: every repository's, as
         // a file can change while a later one's is backed up.
@@ -288,10 +310,15 @@ impl Run<'_> {
     /// [`undo::roll_back`]. The bundles on this machine stay.
     pub(super) fn roll_back(&self) {
         self.emit(TransferPhase::RollingBack, None, None, None);
-        let recorded = self.journal.borrow().undo.clone();
+        let recorded = self
+            .journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .undo
+            .clone();
         let left = undo::roll_back(&recorded, self.host, self.guard.transfer_id());
         {
-            let mut journal = self.journal.borrow_mut();
+            let mut journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
             journal.warnings.extend(left);
             journal.forget_added_excludes();
         }

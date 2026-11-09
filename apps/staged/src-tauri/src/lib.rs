@@ -2064,11 +2064,6 @@ pub fn run() {
                 // Recovery has left every orphaned Blox turn `disconnected`;
                 // ask the workstations how each one ended.
                 session_runner::reconcile::reconcile_all();
-                session_queue::kick_all_with_queued_work(
-                    app.handle(),
-                    &store,
-                    session_queue::KickSource::Startup,
-                );
                 // Then the sessions the last quit ended, offered to the main
                 // window when it asks (see `launch_resume`). After the
                 // dead-owner recovery, so crash-orphaned rows are in the set.
@@ -2077,11 +2072,27 @@ pub fn run() {
             if let Some(path) = preferences_store_path_buf() {
                 preference_events::forward_to_web(app.handle(), path, event_tx.clone());
             }
-            // Transfers a previous run never finished, then old backups.
+            // Transfers a previous run never finished, then old backups —
+            // and only then the branch queues: a queue may hold rows that
+            // waited for a transfer, which must not start on a branch whose
+            // transfer is still being undone.
             let transfer_store = get_store(&app.state::<Mutex<Option<Arc<Store>>>>()).ok();
+            let transfer_app = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 if let Some(store) = &transfer_store {
-                    project_transfer::recover_interrupted_transfers(store);
+                    let projects = project_transfer::recover_interrupted_transfers(store);
+                    for project_id in &projects {
+                        session_queue::flush_follow_ups_for_project(
+                            &transfer_app,
+                            store,
+                            project_id,
+                        );
+                    }
+                    session_queue::kick_all_with_queued_work(
+                        &transfer_app,
+                        store,
+                        session_queue::KickSource::Startup,
+                    );
                 }
                 project_transfer::prune_backups(transfer_store.as_deref());
             });
@@ -2239,6 +2250,8 @@ pub fn run() {
             branches::rename_branch,
             branches::move_branch,
             project_transfer::commands::get_project_transfer_preflight,
+            project_transfer::preflight_scan::start_project_transfer_preflight,
+            project_transfer::preflight_scan::cancel_project_transfer_preflight,
             project_transfer::commands::transfer_project,
             project_transfer::commands::cancel_project_transfer,
             project_transfer::commands::list_transferring_projects,

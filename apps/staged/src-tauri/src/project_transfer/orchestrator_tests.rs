@@ -44,8 +44,6 @@ mod lfs;
 const WIDGETS: &str = "acme/widgets";
 const GADGETS: &str = "acme/gadgets";
 const SPROCKETS: &str = "acme/sprockets";
-/// What the workspace is named after the primary branch, `feature`.
-const WORKSPACE: &str = "stg-feature";
 
 // ---------------------------------------------------------------------------
 // The fake host
@@ -546,6 +544,14 @@ struct Transfer {
 }
 
 impl Fixture {
+    /// What a transfer names the workspace: after the primary branch, with
+    /// the hash of this fixture's project id. Not a constant, because the
+    /// id is fresh per fixture: the transfer registry is process-wide and
+    /// keyed by it, so tests sharing one id would refuse each other.
+    fn workspace(&self) -> String {
+        crate::branches::infer_workspace_name(&self.project.id, &self.branches[0].branch_name)
+    }
+
     /// A local project with a branch per `(repo, branch)`, each in its own
     /// worktree off `origin/main`, tracking nothing.
     fn new(repos: &[(&str, &str)]) -> Self {
@@ -880,11 +886,17 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
 
     // The database points at the workspace.
     assert_eq!(result.location, ProjectLocation::Remote);
-    assert_eq!(result.workspace_name.as_deref(), Some(WORKSPACE));
+    assert_eq!(
+        result.workspace_name.as_deref(),
+        Some(f.workspace().as_str())
+    );
     for branch in &f.branches {
         let branch = f.store.get_branch(&branch.id).unwrap().unwrap();
         assert_eq!(branch.branch_type, BranchType::Remote);
-        assert_eq!(branch.workspace_name.as_deref(), Some(WORKSPACE));
+        assert_eq!(
+            branch.workspace_name.as_deref(),
+            Some(f.workspace().as_str())
+        );
         assert_eq!(branch.workspace_status, Some(WorkspaceStatus::Running));
         assert!(f
             .store
@@ -892,7 +904,7 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
             .unwrap()
             .is_none());
     }
-    assert_eq!(f.host.calls(), vec![format!("start {WORKSPACE}")]);
+    assert_eq!(f.host.calls(), vec![format!("start {}", f.workspace())]);
 
     // Each workspace clone is the worktree it came from, unpushed commits,
     // tracking and uncommitted changes included.
@@ -909,7 +921,7 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
     assert!(!result.repos[0].uncommitted_left_behind);
     assert!(!f
         .host
-        .workspace_dir(WORKSPACE)
+        .workspace_dir(&f.workspace())
         .join(".staged-transfer")
         .join(&to_remote.transfer_id)
         .exists());
@@ -968,13 +980,16 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
     let expected: Vec<Observed> = vec![observe(&f.checkout(0)), observe(&f.checkout(1))];
     let preflight = f.preflight();
     assert!(preflight.can_transfer, "{:?}", preflight.blockers);
-    assert_eq!(preflight.workspace_name.as_deref(), Some(WORKSPACE));
+    assert_eq!(
+        preflight.workspace_name.as_deref(),
+        Some(f.workspace().as_str())
+    );
     assert_eq!(preflight.repos[0].untracked, 5);
 
     let workspace_guarded = Mutex::new(false);
     let to_local = f.transfer_with(true, &|progress| {
         if progress.phase == TransferPhase::Snapshotting {
-            assert!(registry::ensure_workspace_not_transferring(WORKSPACE).is_err());
+            assert!(registry::ensure_workspace_not_transferring(&f.workspace()).is_err());
             *workspace_guarded.lock().unwrap() = true;
         }
     });
@@ -1008,7 +1023,10 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
     assert!(f.host.workspaces().is_empty(), "the workspace is deleted");
     assert_eq!(
         f.host.calls(),
-        vec![format!("start {WORKSPACE}"), format!("delete {WORKSPACE}")]
+        vec![
+            format!("start {}", f.workspace()),
+            format!("delete {}", f.workspace())
+        ]
     );
 }
 
@@ -1073,7 +1091,10 @@ fn branches_with_nothing_to_carry_land_unprovisioned() {
     assert!(f.host.calls().is_empty(), "no workspace is started");
     let branch = f.store.get_branch(&f.branches[0].id).unwrap().unwrap();
     assert_eq!(branch.branch_type, BranchType::Remote);
-    assert_eq!(branch.workspace_name.as_deref(), Some(WORKSPACE));
+    assert_eq!(
+        branch.workspace_name.as_deref(),
+        Some(f.workspace().as_str())
+    );
     assert_eq!(
         branch.workspace_status,
         Some(WorkspaceStatus::Starting),
@@ -1124,7 +1145,7 @@ fn a_taken_local_name_lands_deduplicated_after_resuming_the_workspace() {
     let clone = f.host.clone_of(WIDGETS);
     git(&clone, &["branch", "feature", "origin/main"]);
     let theirs = rev(&clone, "refs/heads/feature");
-    f.host.set_state(WORKSPACE, WorkspaceState::Suspended);
+    f.host.set_state(&f.workspace(), WorkspaceState::Suspended);
 
     let preflight = f.preflight();
     assert!(preflight.can_transfer, "{:?}", preflight.blockers);
@@ -1136,7 +1157,10 @@ fn a_taken_local_name_lands_deduplicated_after_resuming_the_workspace() {
     let result = f.transfer(true).result.expect("to local");
     assert_eq!(result.repos[0].branch_name, "feature-2");
     assert_eq!(result.repos[0].previous_branch_name, "feature");
-    assert!(f.host.calls().contains(&format!("resume {WORKSPACE}")));
+    assert!(f
+        .host
+        .calls()
+        .contains(&format!("resume {}", f.workspace())));
     let branch = f.store.get_branch(&f.branches[0].id).unwrap().unwrap();
     assert_eq!(branch.branch_name, "feature-2");
     let repo = f.store.list_project_repos(&f.project.id).unwrap().remove(0);
@@ -1165,7 +1189,7 @@ fn a_stopped_workspace_is_resumed_or_else_blocks_the_transfer() {
         (WorkspaceState::Error, "workspace_error"),
         (WorkspaceState::Stopped, "workspace_stopped"),
     ] {
-        f.host.set_state(WORKSPACE, state);
+        f.host.set_state(&f.workspace(), state);
         let preflight = f.preflight();
         assert!(preflight.can_transfer, "{:?}", preflight.blockers);
         assert_eq!(codes(&preflight.warnings), vec![code]);
@@ -1180,7 +1204,7 @@ fn a_stopped_workspace_is_resumed_or_else_blocks_the_transfer() {
     assert!(err.contains("still stopped"), "{err}");
     assert!(err.contains("injected failure"), "{err}");
     assert_eq!(f.db_state(), db);
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
 
     // It comes back: carried like any other, then deleted.
     let result = f.transfer(true).result.expect("to local");
@@ -1189,7 +1213,7 @@ fn a_stopped_workspace_is_resumed_or_else_blocks_the_transfer() {
     assert_eq!(rev(&worktree, "HEAD"), head);
     assert!(worktree.join("remote-only.txt").exists());
     assert!(f.host.workspaces().is_empty());
-    let resume = format!("resume {WORKSPACE}");
+    let resume = format!("resume {}", f.workspace());
     assert_eq!(f.host.calls().iter().filter(|c| **c == resume).count(), 2);
 }
 
@@ -1277,7 +1301,7 @@ fn a_workspace_that_changed_after_its_snapshot_is_kept() {
     assert_eq!(temp_refs(&gadgets), "");
     assert!(!f
         .host
-        .workspace_dir(WORKSPACE)
+        .workspace_dir(&f.workspace())
         .join(".staged-transfer")
         .join(&to_local.transfer_id)
         .exists());
@@ -1459,7 +1483,7 @@ fn a_transfer_asked_for_in_a_direction_the_project_no_longer_goes_is_refused() {
     assert!(stale.events.is_empty(), "{:?}", stale.events);
     assert_eq!(f.db_state(), before);
     assert_eq!(f.host.calls(), calls);
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
     assert_eq!(transfers(), made);
     assert!(!registry::is_project_transferring(&f.project.id));
 
@@ -1689,7 +1713,7 @@ fn assert_to_local_rolls_back(case: Case) {
     }
     assert!(
         !f.host
-            .workspace_dir(WORKSPACE)
+            .workspace_dir(&f.workspace())
             .join(".staged-transfer")
             .join(&transfer.transfer_id)
             .exists(),
@@ -2079,9 +2103,9 @@ fn a_resume_honours_cancel_and_leaves_the_rows_running() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
     f.transfer(true).result.expect("to remote");
     let suspend = || {
-        f.host.set_state(WORKSPACE, WorkspaceState::Suspended);
+        f.host.set_state(&f.workspace(), WorkspaceState::Suspended);
         f.store
-            .update_workspace_status_by_workspace_name(WORKSPACE, &WorkspaceStatus::Suspended)
+            .update_workspace_status_by_workspace_name(&f.workspace(), &WorkspaceStatus::Suspended)
             .unwrap();
     };
     let status = || {
@@ -2091,7 +2115,7 @@ fn a_resume_honours_cancel_and_leaves_the_rows_running() {
             .unwrap()
             .workspace_status
     };
-    let resume = format!("resume {WORKSPACE}");
+    let resume = format!("resume {}", f.workspace());
 
     suspend();
     f.host.arm(Fault::ResumeHangs);
@@ -2161,7 +2185,7 @@ fn a_panic_after_the_switch_leaves_the_project_at_its_destination() {
     assert!(!phases.contains(&TransferPhase::RollingBack), "{phases:?}");
     let project = f.store.get_project(&f.project.id).unwrap().unwrap();
     assert_eq!(project.location, ProjectLocation::Remote);
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
     assert!(worktrees.iter().all(|wt| wt.is_dir()), "not removed yet");
     let manifest = f.manifest(&transfer.transfer_id).expect("manifest");
     assert_eq!(manifest.status, backups::COMPLETED);
@@ -2194,7 +2218,7 @@ fn a_panic_after_the_switch_leaves_the_project_at_its_destination() {
     for i in 0..f.branches.len() {
         assert!(f.worktree(i).is_dir());
     }
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()], "kept");
+    assert_eq!(f.host.workspaces(), vec![f.workspace()], "kept");
     assert_eq!(
         transfer.events.last().map(|e| e.phase),
         Some(TransferPhase::Completed)
@@ -2233,8 +2257,14 @@ fn a_transfer_to_remote_cut_off_before_the_switch_is_undone_at_the_next_start() 
                 let manifest = manifest().expect("written before the workspace");
                 assert_eq!(manifest.status, backups::CARRYING);
                 assert_eq!(manifest.owner_pid, Some(std::process::id()));
-                assert_eq!(manifest.workspace_name.as_deref(), Some(WORKSPACE));
-                assert_eq!(manifest.undo.workspace.as_deref(), Some(WORKSPACE));
+                assert_eq!(
+                    manifest.workspace_name.as_deref(),
+                    Some(f.workspace().as_str())
+                );
+                assert_eq!(
+                    manifest.undo.workspace.as_deref(),
+                    Some(f.workspace().as_str())
+                );
             }
             TransferPhase::Applying if progress.branch_id.as_deref() == Some(&f.branches[1].id) => {
                 let before = manifest().expect("manifest");
@@ -2310,11 +2340,7 @@ fn a_transfer_to_local_cut_off_before_the_switch_is_undone_at_the_next_start() {
         for checkout in &checkouts {
             assert_eq!(temp_refs(checkout), "", "{}", checkout.display());
         }
-        assert_eq!(
-            f.host.workspaces(),
-            vec![WORKSPACE.to_string()],
-            "the source"
-        );
+        assert_eq!(f.host.workspaces(), vec![f.workspace()], "the source");
         *checked.lock().unwrap() = true;
         registry::cancel(&progress.project_id);
     });
@@ -2352,7 +2378,7 @@ fn a_transfer_cut_off_after_the_switch_is_left_for_the_user() {
     );
     assert!(warning.contains(&manifest.undo.sources[0].dir), "{warning}");
     assert_eq!(f.host.calls(), calls, "nothing deleted");
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
     let marked = backups::read_manifest(&dir).unwrap();
     assert_eq!(marked.status, backups::COMPLETED);
     assert_eq!(marked.warnings, vec![warning.clone()]);
@@ -2373,7 +2399,10 @@ fn a_committed_transfer_whose_project_moved_back_is_not_undone() {
     first.result.expect("to remote");
     let dir = f.host.root.join("transfers").join(&first.transfer_id);
     let mut manifest = backups::read_manifest(&dir).unwrap();
-    assert_eq!(manifest.undo.workspace.as_deref(), Some(WORKSPACE));
+    assert_eq!(
+        manifest.undo.workspace.as_deref(),
+        Some(f.workspace().as_str())
+    );
     // As if Staged had died while the worktrees came down.
     manifest.status = backups::COMMITTED.to_string();
     manifest.owner_pid = Some(dead_pid());
@@ -2407,7 +2436,7 @@ fn a_committed_transfer_whose_project_moved_back_is_not_undone() {
         "{warning}"
     );
     assert_eq!(f.host.calls(), calls, "nothing deleted");
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
     assert!(gadgets.join("late.txt").exists());
     assert!(worktrees.iter().all(|wt| wt.is_dir()));
     assert_eq!(

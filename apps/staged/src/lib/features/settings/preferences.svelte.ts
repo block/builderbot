@@ -24,6 +24,7 @@ import { hydrateDialogWidths } from '../../components/ui/dialog/dialogWidth.svel
 import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
 import { darkMode } from '../../stores/isDark.svelte';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
+import { normalizeAgentEnvVars, type AgentEnvVar, type AgentEnvVars } from './agentEnvVars';
 import type { AcpConfigValueSelection, ProjectLocation } from '../../types';
 import {
   DEFAULT_PROJECT_STATUS_OPTIONS,
@@ -38,6 +39,7 @@ import {
 
 // Re-export so picker code can import the type alongside the actions.
 export type { AcpConfigPref, AcpConfigPrefPatch };
+export type { AgentEnvVar, AgentEnvVars };
 export type { ComposerSendMode };
 
 /**
@@ -77,6 +79,12 @@ const APP_MODE_STORE_KEY = 'app-mode';
 const RECENT_AGENTS_STORE_KEY = 'recent-agents';
 /** Per-provider last explicitly chosen model/effort selector values. */
 const ACP_CONFIG_PREFS_STORE_KEY = 'acp-config-prefs';
+/**
+ * Per-agent environment variables (Doctor settings), added to the agent
+ * process environment on launch (backend-read). Kept in sync with the Rust
+ * `AGENT_ENV_VARS_KEY`.
+ */
+const AGENT_ENV_VARS_STORE_KEY = 'agent-env-vars';
 /**
  * Agent/model/effort override for diagram sub-sessions (backend-read). Kept in
  * sync with the Rust `DIAGRAM_SUBSESSION_CONFIG_KEY`.
@@ -195,6 +203,13 @@ export const preferences = $state({
    * discovery options on restore, so stale ids fall back silently.
    */
   acpConfigPrefs: {} as Record<string, AcpConfigPref>,
+  /**
+   * Per-agent environment variables, keyed by agent id, in the order they
+   * are listed in Doctor settings. Enabled rows are added to the agent's
+   * process environment when it launches; disabled rows are kept but
+   * ignored. Read by the backend from the store file.
+   */
+  agentEnvVars: {} as AgentEnvVars,
   /**
    * Agent/model/effort override for the diagram-generation sub-session, or
    * `null` to inherit the invoking session's agent. Read by the backend from
@@ -337,6 +352,12 @@ const transferIgnoredFilesSync = syncedStoreValue(TRANSFER_IGNORED_FILES_STORE_K
   preferences.transferIgnoredFiles = value === true;
 });
 
+// Synced so the Doctor panel in one window shows a variable added in another,
+// and the backend reads one file whichever window wrote last.
+const agentEnvVarsSync = syncedStoreValue(AGENT_ENV_VARS_STORE_KEY, (value) => {
+  preferences.agentEnvVars = normalizeAgentEnvVars(value);
+});
+
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     projectStatusOptionsSync.dispose();
@@ -344,6 +365,7 @@ if (import.meta.hot) {
     newProjectLocationSync.dispose();
     transferUncommittedChangesSync.dispose();
     transferIgnoredFilesSync.dispose();
+    agentEnvVarsSync.dispose();
   });
 }
 
@@ -461,6 +483,9 @@ export async function initPreferences(): Promise<void> {
   await transferUncommittedChangesSync.start();
   // ...and its ignored-files answer
   await transferIgnoredFilesSync.start();
+
+  // Load and follow the per-agent environment variables
+  await agentEnvVarsSync.start();
 }
 
 // =============================================================================
@@ -640,6 +665,29 @@ export function setAcpConfigPref(providerId: string, patch: AcpConfigPrefPatch):
 /** The last explicitly chosen model/effort for a provider, if any. */
 export function getAcpConfigPref(providerId: string): AcpConfigPref | null {
   return preferences.acpConfigPrefs[providerId] ?? null;
+}
+
+// =============================================================================
+// Agent Environment Variable Actions
+// =============================================================================
+
+/**
+ * Replace the environment variables configured for an agent. Rows are stored
+ * as typed — a row with an invalid name is kept (and shown with its error)
+ * rather than dropped; the backend skips it on launch. An empty list removes
+ * the agent's entry so the store stays tidy.
+ */
+export function setAgentEnvVars(agentId: string, entries: AgentEnvVar[]): void {
+  const next: AgentEnvVars = { ...preferences.agentEnvVars };
+  if (entries.length === 0) delete next[agentId];
+  else next[agentId] = entries;
+  preferences.agentEnvVars = next;
+  agentEnvVarsSync.save(next);
+}
+
+/** The environment variables configured for an agent, in order. */
+export function getAgentEnvVars(agentId: string): AgentEnvVar[] {
+  return preferences.agentEnvVars[agentId] ?? [];
 }
 
 // =============================================================================

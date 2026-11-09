@@ -955,8 +955,12 @@ rendered PNG preview you may open as an optional final check."
                 // makes a safe harbour.
                 let mut config_options = config_options;
                 let mut fallback_provider_id = fallback_provider_id;
+                // Each sub-agent launches with the variables the user
+                // configured for it in Doctor settings, like a session would.
                 let driver = match AcpDriver::new(&provider_id) {
-                    Ok(driver) => driver,
+                    Ok(driver) => {
+                        driver.with_extra_env(crate::agent::env_vars::read_agent_env(&provider_id))
+                    }
                     // The configured diagram agent no longer resolves (e.g.
                     // uninstalled since it was chosen): fall back to the
                     // invoking session's agent up front rather than after a
@@ -977,7 +981,9 @@ falling back to the invoking session's agent"
                                     );
                                 }
                                 config_options = Vec::new();
-                                driver
+                                driver.with_extra_env(crate::agent::env_vars::read_agent_env(
+                                    &parent_provider,
+                                ))
                             }
                             Err(parent_error) => {
                                 mark_pikchr_child_session_error(
@@ -1002,7 +1008,11 @@ falling back to the invoking session's agent"
                 // failures as the hard errors they were.
                 let fallback_driver = fallback_provider_id.as_deref().and_then(|parent| {
                     match AcpDriver::new(parent) {
-                        Ok(driver) => Some(driver.with_mcp_servers(preview_mcp_server())),
+                        Ok(driver) => Some(
+                            driver
+                                .with_extra_env(crate::agent::env_vars::read_agent_env(parent))
+                                .with_mcp_servers(preview_mcp_server()),
+                        ),
                         Err(e) => {
                             log::warn!(
                                 "[pikchr_mcp] invoking session's agent unavailable as the \

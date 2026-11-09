@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub mod env_vars;
 pub mod writer;
 
 pub use acp_client::{discover_providers, AcpDriver, AcpProviderInfo, AgentDriver};

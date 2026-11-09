@@ -539,6 +539,8 @@
     `${sessionId}\0${assistantMarkdownContent}\0${pikchrToolSources.join('\0')}`
   );
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
+  // See the loader effect below: the chat never waits blank on this, so the cap is loose.
+  const SESSION_PIKCHR_LOAD_TIMEOUT_MS = 60_000;
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
   let mediaViewer = $state<MarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
@@ -2429,7 +2431,10 @@
 
     const loadKey = pikchrRendererLoadKey;
     let stale = false;
-    loadPikchrRenderer()
+    // The chat renders with the fenced source while the renderer loads, so
+    // unlike NoteModal nothing is held blank here: wait well past the default
+    // cap rather than latch the failed key on a slow load.
+    loadPikchrRenderer(SESSION_PIKCHR_LOAD_TIMEOUT_MS)
       .then((renderer) => {
         if (!stale && pikchrRendererLoadKey === loadKey) pikchrRenderer = renderer;
       })

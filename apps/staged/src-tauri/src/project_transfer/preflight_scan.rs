@@ -103,6 +103,10 @@ fn register_scan(scan_id: &str) -> Arc<AtomicBool> {
     cancel
 }
 
+/// How a scan reports to the dialog: `(preflight, done, error)` — the
+/// partial or final preflight, whether the scan is over, and its failure.
+type EmitScanEvent<'a> = dyn Fn(Option<&ProjectTransferPreflight>, bool, Option<String>) + 'a;
+
 /// Run the registered scan `scan_id`: `inspect` with an observer that
 /// `emit`s each partial (the preflight, not done, no error) and stops at
 /// `cancel`, then `emit` the end — done, with the final preflight, or with
@@ -113,7 +117,7 @@ fn run_scan(
     scan_id: &str,
     cancel: &AtomicBool,
     inspect: impl FnOnce(&PreflightObserver<'_>) -> Result<Inspection, String>,
-    emit: &dyn Fn(Option<&ProjectTransferPreflight>, bool, Option<String>),
+    emit: &EmitScanEvent<'_>,
 ) {
     let on_partial = |preflight: &ProjectTransferPreflight| {
         if !preflight.scanning {

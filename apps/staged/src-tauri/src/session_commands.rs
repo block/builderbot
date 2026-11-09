@@ -1427,7 +1427,7 @@ pub enum ResumeSessionOutcome {
     /// as a follow-up and goes once the project has moved (see
     /// `session_queue::follow_ups`).
     QueuedForTransfer {
-        message: store::QueuedSessionMessage,
+        message: Box<store::QueuedSessionMessage>,
     },
 }
 
@@ -1470,7 +1470,9 @@ pub(crate) async fn resume_or_queue_session_for_store(
                 "[session_queue] holding a reply to session {session_id} until branch {covered}'s \
                  transfer is over"
             );
-            return Ok(ResumeSessionOutcome::QueuedForTransfer { message });
+            return Ok(ResumeSessionOutcome::QueuedForTransfer {
+                message: Box::new(message),
+            });
         }
     }
     resume_session_for_store(

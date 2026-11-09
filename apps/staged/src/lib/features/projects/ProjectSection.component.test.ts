@@ -1,6 +1,7 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, ProjectNote } from '../../types';
+import type { ResumeSessionOutcome } from '../../commands';
 
 const { writer, loadDraftMock, commandMocks, eventHandlers, toastError } = vi.hoisted(() => ({
   writer: {
@@ -19,7 +20,7 @@ const { writer, loadDraftMock, commandMocks, eventHandlers, toastError } = vi.ho
         _prompt: string,
         _imageIds?: string[],
         _branchId?: string | null
-      ): Promise<void> => {}
+      ): Promise<ResumeSessionOutcome> => ({ outcome: 'started' })
     ),
     deleteProjectNote: vi.fn(async (_noteId: string): Promise<void> => {}),
     cancelSession: vi.fn(async (_sessionId: string): Promise<void> => {}),
@@ -244,7 +245,7 @@ beforeEach(() => {
   for (const mock of Object.values(commandMocks)) mock.mockReset();
   listNotes(completedNote);
   commandMocks.getProjectNoteBySession.mockImplementation(async () => null);
-  commandMocks.resumeSession.mockImplementation(async () => {});
+  commandMocks.resumeSession.mockImplementation(async () => ({ outcome: 'started' }));
   commandMocks.deleteProjectNote.mockImplementation(async () => {});
   commandMocks.cancelSession.mockImplementation(async () => {});
   commandMocks.listChildSessions.mockImplementation(async () => []);
@@ -373,7 +374,10 @@ describe('ProjectSection note rows', () => {
     listNotes(crashed);
     let finishResume!: () => void;
     commandMocks.resumeSession.mockImplementation(
-      () => new Promise<void>((resolve) => (finishResume = resolve))
+      () =>
+        new Promise<ResumeSessionOutcome>(
+          (resolve) => (finishResume = () => resolve({ outcome: 'started' }))
+        )
     );
     const releaseFetch = holdNoteFetch();
     const section = mountSection();

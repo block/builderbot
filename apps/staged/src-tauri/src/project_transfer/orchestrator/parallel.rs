@@ -117,7 +117,7 @@ impl Run<'_> {
                 });
             }
         });
-        if let Some(panic) = panicked.into_inner().unwrap().take() {
+        if let Some(panic) = panicked.into_inner().unwrap() {
             resume_unwind(panic);
         }
         let mut failures = failures.into_inner().unwrap();

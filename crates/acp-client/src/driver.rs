@@ -1334,6 +1334,11 @@ impl AcpDriver {
     }
 
     /// Set extra environment variables to pass to the agent process.
+    ///
+    /// They are applied after everything else the process inherits — the
+    /// captured snapshot, the inherited environment of a remote proxy, and
+    /// the rc files of the `$SHELL -ils` fallback — so a value set here wins
+    /// in every spawn path.
     pub fn with_extra_env(mut self, vars: Vec<(String, String)>) -> Self {
         self.extra_env = vars;
         self
@@ -1536,10 +1541,25 @@ fn shell_path_guard_for_agent_binary(binary_path: &Path) -> Option<String> {
     ))
 }
 
+/// The `exec` line written to the fallback login shell's stdin once its rc
+/// files have run.
+///
+/// `extra_env` is re-applied here, on the exec line itself, rather than only
+/// seeded into the shell's starting environment: the user's rc files run
+/// after that seed, so an `export ANTHROPIC_API_KEY=…` in `.zshrc` would
+/// otherwise shadow a per-session or Doctor-configured value in this spawn
+/// path alone. Exec'ing through `/usr/bin/env -- NAME='value' …` sets them
+/// after every rc file and before the binary starts, accepts any name the
+/// OS does (shell `export` rejects names such as `1FOO`), and `env` then
+/// replaces itself with the agent, so the process tree is unchanged. This is
+/// what keeps "extra env overrides the user's shell" true for every spawn
+/// path, matching the direct-spawn path where `Command::env` is applied over
+/// the snapshot.
 fn shell_exec_line(
     binary_path: &Path,
     acp_args: &[String],
     interpreter_env_snapshot: Option<&[(String, String)]>,
+    extra_env: &[(String, String)],
 ) -> String {
     let quoted_binary = shell_quote(&binary_path.to_string_lossy());
     let quoted_args = acp_args
@@ -1547,20 +1567,39 @@ fn shell_exec_line(
         .map(|a| shell_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
+    let exec = shell_exec_prefix(extra_env);
 
     if let Some(interpreter) =
         env_shebang_interpreter_from_snapshot(binary_path, interpreter_env_snapshot)
     {
         let quoted_interpreter = shell_quote(&interpreter.to_string_lossy());
         if quoted_args.is_empty() {
-            return format!("exec {quoted_interpreter} {quoted_binary}\n");
+            return format!("{exec} {quoted_interpreter} {quoted_binary}\n");
         }
-        return format!("exec {quoted_interpreter} {quoted_binary} {quoted_args}\n");
+        return format!("{exec} {quoted_interpreter} {quoted_binary} {quoted_args}\n");
     }
 
     let guard = shell_path_guard_for_agent_binary(binary_path).unwrap_or_default();
 
-    format!("{guard}exec {quoted_binary} {quoted_args}\n")
+    format!("{guard}{exec} {quoted_binary} {quoted_args}\n")
+}
+
+/// `exec`, or `exec /usr/bin/env -- NAME='value' …` when there is extra
+/// environment to apply after the shell's rc files (see [`shell_exec_line`]).
+/// Values are single-quoted, so any byte other than NUL is passed through
+/// verbatim; names never contain `=` (callers validate them), so each
+/// argument is unambiguously an assignment, and `--` keeps a leading `-` in
+/// a name from being read as an `env` option.
+fn shell_exec_prefix(extra_env: &[(String, String)]) -> String {
+    if extra_env.is_empty() {
+        return "exec".to_string();
+    }
+    let assignments = extra_env
+        .iter()
+        .map(|(name, value)| shell_quote(&format!("{name}={value}")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("exec /usr/bin/env -- {assignments}")
 }
 
 #[derive(Debug)]
@@ -2462,9 +2501,11 @@ impl AcpDriver {
             cmd.process_group(0);
         }
         // extra_env is applied last so per-session overrides always win: over
-        // the shell's clean environment (shell-spawn path), over the captured
-        // snapshot (local direct-spawn path), and over the inherited
-        // environment (remote spawns).
+        // the captured snapshot (local direct-spawn path) and over the
+        // inherited environment (remote spawns). On the shell-spawn path this
+        // only seeds the shell's starting environment, which its rc files may
+        // then overwrite, so `shell_exec_line` applies extra_env again on the
+        // exec line, after the rc files have run.
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
@@ -2566,6 +2607,7 @@ impl AcpDriver {
                     &self.binary_path,
                     &self.acp_args,
                     self.interpreter_env_snapshot.as_deref(),
+                    &self.extra_env,
                 );
                 stdin
                     .write_all(exec_line.as_bytes())
@@ -10755,7 +10797,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
         write_executable(&launcher, "#!/usr/bin/env node\n");
 
-        let line = shell_exec_line(&launcher, &[String::from("--stdio")], None);
+        let line = shell_exec_line(&launcher, &[String::from("--stdio")], None, &[]);
 
         assert!(
             line.starts_with(
@@ -10798,6 +10840,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &launcher,
             &[String::from("--stdio")],
             Some(home_snapshot.as_slice()),
+            &[],
         );
 
         assert_eq!(
@@ -10808,6 +10851,112 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 launcher.display()
             )
         );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn shell_exec_line_applies_extra_env_after_rc_files_via_env() {
+        let dir = unique_test_dir("acp-shell-extra-env");
+        let launcher = dir.join("agent-bin").join("agent");
+        write_executable(&launcher, "#!/bin/sh\n");
+
+        let extra_env = vec![
+            (String::from("ANTHROPIC_API_KEY"), String::from("sk-it's")),
+            (String::from("1FOO"), String::from("a b\nc")),
+            (String::from("-DASH"), String::new()),
+        ];
+        let line = shell_exec_line(&launcher, &[String::from("--stdio")], None, &extra_env);
+
+        // The assignments ride on the exec line itself, so they land after
+        // the login shell's rc files and shadow anything those exported.
+        assert_eq!(
+            line,
+            format!(
+                "exec /usr/bin/env -- 'ANTHROPIC_API_KEY=sk-it'\\''s' '1FOO=a b\nc' '-DASH=' '{}' '--stdio'\n",
+                launcher.display()
+            )
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn shell_exec_line_keeps_extra_env_on_the_interpreter_and_guard_paths() {
+        let dir = unique_test_dir("acp-shell-extra-env-interpreter");
+        let home_bin = dir.join("home-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("claude-agent-acp");
+        let home_node = home_bin.join("node");
+        write_executable(&home_node, "#!/bin/sh\n");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+        let extra_env = vec![(String::from("K"), String::from("v"))];
+
+        let home_snapshot = vec![(
+            String::from("PATH"),
+            join_path_entries(std::slice::from_ref(&home_bin)),
+        )];
+        let with_interpreter = shell_exec_line(
+            &launcher,
+            &[String::from("--stdio")],
+            Some(home_snapshot.as_slice()),
+            &extra_env,
+        );
+        assert_eq!(
+            with_interpreter,
+            format!(
+                "exec /usr/bin/env -- 'K=v' '{}' '{}' '--stdio'\n",
+                home_node.display(),
+                launcher.display()
+            )
+        );
+
+        let guarded = shell_exec_line(&launcher, &[String::from("--stdio")], None, &extra_env);
+        assert!(
+            guarded.starts_with("command -v 'node' >/dev/null 2>&1 || {"),
+            "the PATH guard should still run first: {guarded}"
+        );
+        assert!(
+            guarded.ends_with(&format!(
+                "; export PATH; }}; exec /usr/bin/env -- 'K=v' '{}' '--stdio'\n",
+                launcher.display()
+            )),
+            "extra env should be set on the exec after the guard: {guarded}"
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn login_shell_rc_exports_do_not_shadow_extra_env() {
+        // End to end through a real `sh -s`: an rc-style export runs before
+        // the exec line, as the user's .zshrc would, and the exec line's env
+        // assignment still wins because it is applied afterwards.
+        let dir = unique_test_dir("acp-shell-extra-env-e2e");
+        let printer = dir.join("print-key");
+        write_executable(&printer, "#!/bin/sh\nprintf '%s' \"$KEY\"\n");
+        let extra_env = vec![(String::from("KEY"), String::from("from extra env"))];
+        let exec_line = shell_exec_line(&printer, &[], None, &extra_env);
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-s")
+            .env_clear()
+            .env("KEY", "from extra env")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                let mut stdin = child.stdin.take().expect("stdin");
+                stdin.write_all(b"export KEY='from rc file'\n")?;
+                stdin.write_all(exec_line.as_bytes())?;
+                drop(stdin);
+                child.wait_with_output()
+            })
+            .expect("run sh -s");
+
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "from extra env");
 
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
     }

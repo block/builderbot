@@ -8,16 +8,22 @@
   without retyping it. A row the backend would skip on launch (a name that
   can't be set, a value with a NUL) shows its error inline and stays; enabled
   rows that share a name are all flagged, since only the last one takes
-  effect. Values are stored as typed in the local preferences file.
+  effect. A row named after something the launcher sets itself (PATH, …) gets
+  a warning instead — it is applied, and replaces Staged's value. Values are
+  masked on screen like a password, with a per-row reveal toggle, since the
+  usual content is an API key; they are still stored as typed in the local
+  preferences file.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
+  import Eye from '@lucide/svelte/icons/eye';
+  import EyeOff from '@lucide/svelte/icons/eye-off';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import { Button } from '$lib/components/ui/button';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { Input } from '$lib/components/ui/input';
-  import { agentEnvVarRowErrors, type AgentEnvVar } from './agentEnvVars';
+  import { agentEnvVarRowErrors, agentEnvVarRowWarnings, type AgentEnvVar } from './agentEnvVars';
   import { getAgentEnvVars, preferences, setAgentEnvVars } from './preferences.svelte';
 
   let { agentId }: { agentId: string } = $props();
@@ -26,9 +32,20 @@
   let entries = $derived(preferences.agentEnvVars[agentId] ?? []);
   // Per row, by position: duplicate detection needs the whole list.
   let rowErrors = $derived(agentEnvVarRowErrors(entries));
+  let rowWarnings = $derived(agentEnvVarRowWarnings(entries));
+  // Rows whose value is shown in clear, by position. Local UI state, not
+  // persisted: reopening the panel masks everything again. Kept by position
+  // to match the row keys, so a removal shifts the flags with the rows.
+  let revealed = $state<boolean[]>([]);
 
   function nameInputId(index: number): string {
     return `agent-env-${agentId}-${index}-name`;
+  }
+
+  function toggleRevealed(index: number) {
+    const next = revealed.slice();
+    next[index] = !next[index];
+    revealed = next;
   }
 
   function updateEntry(index: number, patch: Partial<AgentEnvVar>) {
@@ -43,6 +60,7 @@
       agentId,
       getAgentEnvVars(agentId).filter((_, i) => i !== index)
     );
+    revealed = revealed.filter((_, i) => i !== index);
   }
 
   async function addEntry() {
@@ -63,7 +81,11 @@
            removal shifts the rows up without losing anything. -->
       {#each entries as entry, index (index)}
         {@const error = rowErrors[index] ?? null}
+        {@const warning = error === null ? (rowWarnings[index] ?? null) : null}
         {@const errorId = `${nameInputId(index)}-error`}
+        {@const warningId = `${nameInputId(index)}-warning`}
+        {@const describedBy = error !== null ? errorId : warning !== null ? warningId : undefined}
+        {@const isRevealed = revealed[index] === true}
         <li class="env-var-row" class:disabled={!entry.enabled}>
           <div class="env-var-fields">
             <Checkbox
@@ -79,8 +101,8 @@
               placeholder="NAME"
               aria-label="Variable name"
               aria-invalid={error !== null}
-              aria-describedby={error !== null ? errorId : undefined}
-              class="env-var-name h-8 min-w-0 flex-1 font-mono text-xs"
+              aria-describedby={describedBy}
+              class="env-var-name h-8 min-w-0 flex-1 font-mono"
               autocapitalize="off"
               autocorrect="off"
               spellcheck={false}
@@ -88,18 +110,40 @@
               oninput={(e) => updateEntry(index, { name: e.currentTarget.value })}
             />
             <span class="env-var-equals" aria-hidden="true">=</span>
-            <Input
-              type="text"
-              placeholder="value"
-              aria-label="Variable value"
-              aria-describedby={error !== null ? errorId : undefined}
-              class="env-var-value h-8 min-w-0 flex-[2] font-mono text-xs"
-              autocapitalize="off"
-              autocorrect="off"
-              spellcheck={false}
-              value={entry.value}
-              oninput={(e) => updateEntry(index, { value: e.currentTarget.value })}
-            />
+            <!-- Masked by default: the usual value is an API key, and the
+                 panel is open during screen-shares and recordings. The
+                 toggle only changes what the screen shows; the value is
+                 stored and sent as typed. -->
+            <div class="env-var-value-wrap">
+              <Input
+                type={isRevealed ? 'text' : 'password'}
+                placeholder="value"
+                aria-label="Variable value"
+                aria-describedby={describedBy}
+                class="env-var-value h-8 min-w-0 w-full pr-8 font-mono"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck={false}
+                value={entry.value}
+                oninput={(e) => updateEntry(index, { value: e.currentTarget.value })}
+              />
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                class="env-var-reveal"
+                title={isRevealed ? 'Hide value' : 'Show value'}
+                aria-label={isRevealed ? 'Hide value' : 'Show value'}
+                aria-pressed={isRevealed}
+                onclick={() => toggleRevealed(index)}
+              >
+                {#if isRevealed}
+                  <EyeOff size={13} />
+                {:else}
+                  <Eye size={13} />
+                {/if}
+              </Button>
+            </div>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -113,6 +157,9 @@
           </div>
           {#if error !== null}
             <p id={errorId} class="env-var-error" role="alert">{error}</p>
+          {:else if warning !== null}
+            <!-- Advisory only: the row is applied as written. -->
+            <p id={warningId} class="env-var-warning">{warning}</p>
           {/if}
         </li>
       {/each}
@@ -125,9 +172,9 @@
       Add variable
     </Button>
     <span class="field-description">
-      Set for the agent when it starts. Unchecked rows are kept but not set. Values are stored
-      unencrypted in the local preferences file. Local sessions only: remote Blox sessions don’t
-      receive them.
+      Set for the agent when it starts, over anything the shell sets. Unchecked rows are kept but
+      not set. Values are stored unencrypted in the local preferences file. Local sessions only:
+      remote Blox sessions don’t receive them.
     </span>
   </div>
 </div>
@@ -182,12 +229,35 @@
     color: var(--text-faint);
   }
 
-  .env-var-error {
+  .env-var-value-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    flex: 2;
+  }
+
+  /* The reveal toggle sits inside the value field's right padding. */
+  .env-var-value-wrap > :global(.env-var-reveal) {
+    position: absolute;
+    right: 2px;
+    color: var(--text-muted);
+  }
+
+  .env-var-error,
+  .env-var-warning {
     margin: 0;
     /* Under the name field: past the checkbox and its gap. */
     padding-left: 24px;
     font-size: var(--size-xs);
+  }
+
+  .env-var-error {
     color: var(--destructive, var(--color-danger, #f85149));
+  }
+
+  .env-var-warning {
+    color: var(--ui-warning);
   }
 
   .env-var-actions {

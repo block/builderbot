@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   DUPLICATE_NAME_ERROR,
+  LAUNCHER_RESERVED_NAMES,
   agentEnvVarRowErrors,
+  agentEnvVarRowWarnings,
   duplicateEnabledNames,
+  launcherReservedNameWarning,
   normalizeAgentEnvVars,
   validateEnvVar,
   validateEnvVarName,
@@ -42,14 +45,39 @@ describe('normalizeAgentEnvVars', () => {
     });
   });
 
-  it('drops an agent whose list is malformed without touching the others', () => {
+  it('drops an agent whose list is not a list without touching the others', () => {
     expect(
       normalizeAgentEnvVars({
         claude: { name: 'A', value: '1' },
-        codex: [{ value: 'no name' }],
+        codex: 'FOO=bar',
         goose: [{ name: 'A', value: '1', enabled: true }],
       })
     ).toEqual({ goose: [{ name: 'A', value: '1', enabled: true }] });
+  });
+
+  it('skips only the malformed entries of a list and keeps the rest', () => {
+    // A hand-edited file or an older shape must not cost the user the whole
+    // list: `setAgentEnvVars` writes this record back, so a dropped list
+    // would be erased from disk the next time any agent is edited.
+    expect(
+      normalizeAgentEnvVars({
+        claude: [
+          { name: 'KEEP_FIRST', value: '1', enabled: true },
+          { value: 'no name' },
+          null,
+          'FOO=bar',
+          ['NOT', 'AN', 'OBJECT'],
+          { name: 42, value: 'numeric name' },
+          { name: 'KEEP_LAST', value: 2, enabled: 'yes' },
+        ],
+      })
+    ).toEqual({
+      claude: [
+        { name: 'KEEP_FIRST', value: '1', enabled: true },
+        { name: 'KEEP_LAST', value: '', enabled: true },
+      ],
+    });
+    expect(normalizeAgentEnvVars({ claude: [{ value: 'no name' }] })).toEqual({ claude: [] });
   });
 });
 
@@ -145,6 +173,47 @@ describe('agentEnvVarRowErrors', () => {
       DUPLICATE_NAME_ERROR,
       DUPLICATE_NAME_ERROR,
       'Values can’t contain NUL',
+    ]);
+  });
+});
+
+describe('launcherReservedNameWarning', () => {
+  it('warns on an enabled, valid row named after something the launcher sets', () => {
+    for (const name of LAUNCHER_RESERVED_NAMES) {
+      expect(launcherReservedNameWarning(v(name, '/opt/bin'))).toContain(name);
+    }
+    expect(launcherReservedNameWarning(v('PATH', ''))).toMatch(/Replaces the PATH/);
+  });
+
+  it('stays quiet for other names, disabled rows and rows the backend skips', () => {
+    expect(launcherReservedNameWarning(v('ANTHROPIC_API_KEY', 'sk'))).toBeNull();
+    expect(launcherReservedNameWarning(v('path', '/opt/bin'))).toBeNull();
+    expect(launcherReservedNameWarning(v('PATH', '/opt/bin', false))).toBeNull();
+    expect(launcherReservedNameWarning(v('PATH', 'a\0b'))).toBeNull();
+  });
+});
+
+describe('agentEnvVarRowWarnings', () => {
+  it('reports by position, independently of the row errors', () => {
+    const entries = [
+      v('PATH', '/a'),
+      v('OK', '1'),
+      v('GOOSE_SEARCH_PATHS', '[]', false),
+      v('PATH', '/b'),
+    ];
+    expect(agentEnvVarRowWarnings(entries)).toEqual([
+      'Replaces the PATH Staged sets for this agent',
+      null,
+      null,
+      'Replaces the PATH Staged sets for this agent',
+    ]);
+    // Both PATH rows are also duplicates; the component shows the error and
+    // hides the warning, but the helper stays position-for-position.
+    expect(agentEnvVarRowErrors(entries)).toEqual([
+      DUPLICATE_NAME_ERROR,
+      null,
+      null,
+      DUPLICATE_NAME_ERROR,
     ]);
   });
 });

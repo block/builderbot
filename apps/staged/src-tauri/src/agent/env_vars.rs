@@ -20,6 +20,18 @@
 //! preferences ever leave the local machine (sync, export, remote sessions).
 //! The variables apply to local launches only: a remote session's extra
 //! environment reaches the `sq blox acp` proxy, not the workstation agent.
+//!
+//! # Precedence
+//!
+//! The driver applies `extra_env` last in every local spawn path: over the
+//! captured shell snapshot when it spawns the binary directly, and on the
+//! `exec` line (via `/usr/bin/env`) when it falls back to `$SHELL -ils`, so
+//! an `export` in the user's rc files can't shadow a Doctor value there
+//! either. The flip side is that a row named after something the launcher
+//! itself sets — `PATH`, `GOOSE_SEARCH_PATHS` (see
+//! `acp_tools::apply_managed_tools_env`) — replaces Staged's value for that
+//! agent and everything it spawns. The Doctor UI warns on those names
+//! (`LAUNCHER_RESERVED_NAMES` in the frontend) but doesn't refuse them.
 
 use serde::Deserialize;
 
@@ -87,7 +99,8 @@ pub(crate) fn enabled_env_pairs(entries: &[AgentEnvVar]) -> Vec<(String, String)
 
 /// Merge the user's per-agent variables with a session's own extra variables
 /// into the list handed to the driver's `with_extra_env`, which applies them
-/// after the inherited (shell snapshot) environment so both override it.
+/// after the inherited environment in every spawn path (see the module
+/// docs) so both override it.
 /// Staged's per-session variables come last: a commit session's
 /// `GIT_AUTHOR_DATE`, say, is a requirement of that session, not a default
 /// the user should be able to shadow from Doctor settings.

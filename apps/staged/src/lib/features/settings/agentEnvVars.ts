@@ -63,3 +63,60 @@ export function validateEnvVarName(name: string): string | null {
   if (name.includes('\0')) return 'Names can’t contain NUL';
   return null;
 }
+
+/**
+ * Why `value` can't be passed to a process, or `null` when it can. The
+ * backend skips a row whose value holds a NUL byte (the OS can't represent
+ * it); a text input can't produce one, but pasted or imported settings can.
+ */
+export function validateEnvVarValue(value: string): string | null {
+  if (value.includes('\0')) return 'Values can’t contain NUL';
+  return null;
+}
+
+/**
+ * Why the backend would skip `entry` on launch, or `null` when it would set
+ * it. The one predicate behind the inline row errors, so every condition in
+ * the backend's `enabled_env_pairs` filter has a message here.
+ */
+export function validateEnvVar(entry: Pick<AgentEnvVar, 'name' | 'value'>): string | null {
+  return validateEnvVarName(entry.name) ?? validateEnvVarValue(entry.value);
+}
+
+export const DUPLICATE_NAME_ERROR = 'Duplicate name: the last row wins';
+
+/**
+ * Names set by more than one enabled row in `entries`. Only rows the backend
+ * would apply count — enabled, with a valid name and value — since a disabled
+ * or skipped row never shadows another. Names are compared exactly, as the
+ * backend does; environment variable names are case-sensitive.
+ */
+export function duplicateEnabledNames(entries: readonly AgentEnvVar[]): Set<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.enabled || validateEnvVar(entry) !== null) continue;
+    if (seen.has(entry.name)) duplicates.add(entry.name);
+    seen.add(entry.name);
+  }
+  return duplicates;
+}
+
+/**
+ * The error to show under each row of `entries`, by position; `null` for a
+ * row with nothing wrong. A row just added is blank by design, so an empty
+ * name is only reported once something else is wrong with it or the row
+ * would otherwise look complete (a value with no name). Every enabled row
+ * that shares its name with another is marked, not only the later one, since
+ * the user can't tell from a single row which one the backend keeps.
+ */
+export function agentEnvVarRowErrors(entries: readonly AgentEnvVar[]): (string | null)[] {
+  const duplicates = duplicateEnabledNames(entries);
+  return entries.map((entry) => {
+    if (entry.name.length === 0 && entry.value.length === 0) return null;
+    const error = validateEnvVar(entry);
+    if (error !== null) return error;
+    if (entry.enabled && duplicates.has(entry.name)) return DUPLICATE_NAME_ERROR;
+    return null;
+  });
+}

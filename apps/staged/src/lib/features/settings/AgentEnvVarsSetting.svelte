@@ -5,8 +5,10 @@
   One row per variable: an enabled checkbox, name, value and delete. Rows
   render in stored order and new ones append. Unchecking a row keeps it but
   leaves it out of the agent's environment, so a variable can be switched off
-  without retyping it. A name that can't be set as a variable shows its error
-  inline; the row stays, and the backend skips it on launch.
+  without retyping it. A row the backend would skip on launch (a name that
+  can't be set, a value with a NUL) shows its error inline and stays; enabled
+  rows that share a name are all flagged, since only the last one takes
+  effect. Values are stored as typed in the local preferences file.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -15,13 +17,15 @@
   import { Button } from '$lib/components/ui/button';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { Input } from '$lib/components/ui/input';
-  import { validateEnvVarName, type AgentEnvVar } from './agentEnvVars';
+  import { agentEnvVarRowErrors, type AgentEnvVar } from './agentEnvVars';
   import { getAgentEnvVars, preferences, setAgentEnvVars } from './preferences.svelte';
 
   let { agentId }: { agentId: string } = $props();
 
   // Read through `preferences` so a change from another window shows here.
   let entries = $derived(preferences.agentEnvVars[agentId] ?? []);
+  // Per row, by position: duplicate detection needs the whole list.
+  let rowErrors = $derived(agentEnvVarRowErrors(entries));
 
   function nameInputId(index: number): string {
     return `agent-env-${agentId}-${index}-name`;
@@ -47,16 +51,6 @@
     await tick();
     document.getElementById(nameInputId(current.length))?.focus();
   }
-
-  /**
-   * The error to show for a row, if any. A row just added is blank by design,
-   * so an empty name is only reported once something else is wrong with it
-   * or the row would otherwise look complete (a value with no name).
-   */
-  function rowError(entry: AgentEnvVar): string | null {
-    if (entry.name.length === 0 && entry.value.length === 0) return null;
-    return validateEnvVarName(entry.name);
-  }
 </script>
 
 <div class="agent-env-vars">
@@ -68,7 +62,7 @@
            and the controlled inputs below take their values from state, so a
            removal shifts the rows up without losing anything. -->
       {#each entries as entry, index (index)}
-        {@const error = rowError(entry)}
+        {@const error = rowErrors[index] ?? null}
         {@const errorId = `${nameInputId(index)}-error`}
         <li class="env-var-row" class:disabled={!entry.enabled}>
           <div class="env-var-fields">
@@ -98,6 +92,7 @@
               type="text"
               placeholder="value"
               aria-label="Variable value"
+              aria-describedby={error !== null ? errorId : undefined}
               class="env-var-value h-8 min-w-0 flex-[2] font-mono text-xs"
               autocapitalize="off"
               autocorrect="off"
@@ -130,7 +125,9 @@
       Add variable
     </Button>
     <span class="field-description">
-      Set for the agent when it starts. Unchecked rows are kept but not set.
+      Set for the agent when it starts. Unchecked rows are kept but not set. Values are stored
+      unencrypted in the local preferences file. Local sessions only: remote Blox sessions don’t
+      receive them.
     </span>
   </div>
 </div>

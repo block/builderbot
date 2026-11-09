@@ -7,6 +7,19 @@
 //! into the `KEY=VALUE` pairs a local agent launch adds to the process
 //! environment. Disabled rows and rows whose name isn't a usable variable
 //! name are ignored; a missing or malformed key reads as "no variables".
+//!
+//! # Storage
+//!
+//! Values are stored in plaintext in `preferences.json`, alongside every
+//! other preference, by design: the obvious use is API keys, but the file is
+//! already private to the local user, the agent reads the value out of its
+//! own environment regardless, and the preferences file is also served to
+//! web-UI clients. Encrypting it here would only move the problem to key
+//! management without changing who can read the secret. The Doctor UI says
+//! so in the field description, so the user chooses knowing this. Revisit if
+//! preferences ever leave the local machine (sync, export, remote sessions).
+//! The variables apply to local launches only: a remote session's extra
+//! environment reaches the `sq blox acp` proxy, not the workstation agent.
 
 use serde::Deserialize;
 
@@ -16,6 +29,7 @@ pub(crate) const AGENT_ENV_VARS_KEY: &str = "agent-env-vars";
 
 /// One configured variable for an agent. `enabled` lets a row be switched
 /// off without being deleted; an entry written without it reads as enabled.
+/// `value` is held and persisted as plaintext (see the module docs).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentEnvVar {

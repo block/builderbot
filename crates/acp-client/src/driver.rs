@@ -1555,6 +1555,12 @@ fn shell_path_guard_for_agent_binary(binary_path: &Path) -> Option<String> {
 /// what keeps "extra env overrides the user's shell" true for every spawn
 /// path, matching the direct-spawn path where `Command::env` is applied over
 /// the snapshot.
+///
+/// Only the variable names appear in the line's text. The values come
+/// across from the mangled seeds of [`shell_extra_env_seeds`], which the
+/// caller puts in the shell's starting environment, because an interactive
+/// shell records what it reads from stdin in the user's history file (see
+/// [`shell_exec_prefix`]).
 fn shell_exec_line(
     binary_path: &Path,
     acp_args: &[String],
@@ -1584,22 +1590,71 @@ fn shell_exec_line(
     format!("{guard}{exec} {quoted_binary} {quoted_args}\n")
 }
 
-/// `exec`, or `exec /usr/bin/env -- NAME='value' …` when there is extra
-/// environment to apply after the shell's rc files (see [`shell_exec_line`]).
-/// Values are single-quoted, so any byte other than NUL is passed through
-/// verbatim; names never contain `=` (callers validate them), so each
-/// argument is unambiguously an assignment, and `--` keeps a leading `-` in
-/// a name from being read as an `env` option.
+/// `exec`, or the sequence that applies `extra_env` after the shell's rc
+/// files when there is any (see [`shell_exec_line`]):
+///
+/// ```sh
+/// set -- 'NAME='"$__STAGED_EXTRA_ENV_0" …; unset __STAGED_EXTRA_ENV_0 …; exec /usr/bin/env -- "$@"
+/// ```
+///
+/// Only the names are written into the line. The fallback shell is
+/// `$SHELL -ils`, and an interactive zsh or bash records every line it reads
+/// from stdin in the user's history file — immediately under
+/// `INC_APPEND_HISTORY`/`SHARE_HISTORY`, and bash's `exec` builtin saves
+/// history before it replaces the process — so a value on the line, usually
+/// an API key, would end up in `~/.zsh_history`. Instead the values travel
+/// in the shell's starting environment under the mangled names from
+/// [`shell_extra_env_seeds`] (the caller seeds them with `Command::env`
+/// alongside the real names, which the rc files may re-export; nothing in an
+/// rc file has a reason to touch the mangled ones), and the line copies each
+/// across by expanding `$__STAGED_EXTRA_ENV_<i>`.
+///
+/// The copies go through the positional parameters so the seeds can be
+/// `unset` before the exec and don't leak into the agent's environment:
+/// `set --` is shell-local and never exported, `unset` then drops the seeds,
+/// and `"$@"` hands the `NAME=value` words to `env` intact. That is plain
+/// POSIX sh — no `env -u` (which not every `env` has) and nothing zsh- or
+/// bash-specific. Each name is single-quoted so any byte other than NUL
+/// passes through and bash's history expansion can't fire on a `!`; the
+/// expansion is double-quoted so an empty or whitespace value stays one word;
+/// names never contain `=` (callers validate them), so each word is
+/// unambiguously an assignment; and `--` keeps a leading `-` in a name from
+/// being read as an `env` option.
 fn shell_exec_prefix(extra_env: &[(String, String)]) -> String {
     if extra_env.is_empty() {
         return "exec".to_string();
     }
-    let assignments = extra_env
+    let seeds = shell_extra_env_seeds(extra_env);
+    let words = extra_env
         .iter()
-        .map(|(name, value)| shell_quote(&format!("{name}={value}")))
+        .zip(&seeds)
+        .map(|((name, _), (seed, _))| format!("{}\"${seed}\"", shell_quote(&format!("{name}="))))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("exec /usr/bin/env -- {assignments}")
+    let seed_names = seeds
+        .iter()
+        .map(|(seed, _)| seed.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("set -- {words}; unset {seed_names}; exec /usr/bin/env -- \"$@\"")
+}
+
+/// The mangled copies of `extra_env` to seed into the fallback shell's
+/// starting environment for the exec line to copy across (see
+/// [`shell_exec_prefix`]): `__STAGED_EXTRA_ENV_<i>` for the i-th entry, in
+/// order, each holding that entry's value. The prefix grows an underscore
+/// until no entry's own name starts with it, so a user variable can never
+/// share a name with a seed.
+fn shell_extra_env_seeds(extra_env: &[(String, String)]) -> Vec<(String, String)> {
+    let mut prefix = String::from("__STAGED_EXTRA_ENV_");
+    while extra_env.iter().any(|(name, _)| name.starts_with(&prefix)) {
+        prefix.push('_');
+    }
+    extra_env
+        .iter()
+        .enumerate()
+        .map(|(i, (_, value))| (format!("{prefix}{i}"), value.clone()))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -2508,6 +2563,15 @@ impl AcpDriver {
         // exec line, after the rc files have run.
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
+        }
+        if use_shell_spawn {
+            // The exec line copies the values across from these mangled
+            // seeds rather than carrying them in its text, which the
+            // interactive shell writes to the user's history file (see
+            // `shell_exec_prefix`). The line unsets them before the exec.
+            for (k, v) in shell_extra_env_seeds(&self.extra_env) {
+                cmd.env(k, v);
+            }
         }
         let spawn_error = |e: std::io::Error| {
             format!(
@@ -8771,10 +8835,11 @@ mod tests {
         resolve_session_config_option_selection, resolve_spawn_working_dir, run_prompt_turn,
         sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
         sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
-        setup_acp_session, shell_exec_line, shell_quote, task_tracking_mode_from_initialize,
-        unattended_mode_switch, AcpAuthenticationMethodCategory, AcpAuthenticationRequired,
-        AcpAuthenticationSelection, AcpDriver, AcpEventMetadata, AcpNotificationHandler,
-        AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        setup_acp_session, shell_exec_line, shell_extra_env_seeds, shell_quote,
+        task_tracking_mode_from_initialize, unattended_mode_switch,
+        AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
+        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
+        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
         AcpSessionConfigOptionSelection, AcpSessionSetup, AcpSessionSetupContext,
         AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification, AsyncTaskState,
         AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
@@ -10869,16 +10934,72 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let line = shell_exec_line(&launcher, &[String::from("--stdio")], None, &extra_env);
 
         // The assignments ride on the exec line itself, so they land after
-        // the login shell's rc files and shadow anything those exported.
+        // the login shell's rc files and shadow anything those exported. Only
+        // the names are in the text; the values come from the mangled seeds.
         assert_eq!(
             line,
             format!(
-                "exec /usr/bin/env -- 'ANTHROPIC_API_KEY=sk-it'\\''s' '1FOO=a b\nc' '-DASH=' '{}' '--stdio'\n",
+                concat!(
+                    "set -- 'ANTHROPIC_API_KEY='\"$__STAGED_EXTRA_ENV_0\" '1FOO='\"$__STAGED_EXTRA_ENV_1\" ",
+                    "'-DASH='\"$__STAGED_EXTRA_ENV_2\"; ",
+                    "unset __STAGED_EXTRA_ENV_0 __STAGED_EXTRA_ENV_1 __STAGED_EXTRA_ENV_2; ",
+                    "exec /usr/bin/env -- \"$@\" '{}' '--stdio'\n"
+                ),
                 launcher.display()
             )
         );
+        assert!(
+            !line.contains("sk-it") && !line.contains("a b"),
+            "values must never appear in the exec line text: {line}"
+        );
+        assert_eq!(
+            shell_extra_env_seeds(&extra_env),
+            vec![
+                (
+                    String::from("__STAGED_EXTRA_ENV_0"),
+                    String::from("sk-it's")
+                ),
+                (String::from("__STAGED_EXTRA_ENV_1"), String::from("a b\nc")),
+                (String::from("__STAGED_EXTRA_ENV_2"), String::new()),
+            ]
+        );
 
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn shell_extra_env_seeds_never_collide_with_a_user_variable() {
+        let extra_env = vec![
+            (String::from("__STAGED_EXTRA_ENV_0"), String::from("mine")),
+            (
+                String::from("__STAGED_EXTRA_ENV__1"),
+                String::from("also mine"),
+            ),
+            (String::from("KEY"), String::from("v")),
+        ];
+        let seeds = shell_extra_env_seeds(&extra_env);
+        assert_eq!(
+            seeds
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "__STAGED_EXTRA_ENV___0",
+                "__STAGED_EXTRA_ENV___1",
+                "__STAGED_EXTRA_ENV___2"
+            ]
+        );
+        for (seed, _) in &seeds {
+            assert!(
+                extra_env.iter().all(|(name, _)| name != seed),
+                "seed {seed} collides with a user variable"
+            );
+        }
+        assert!(shell_extra_env_seeds(&[]).is_empty());
+        assert_eq!(
+            shell_exec_line(Path::new("/x/agent"), &[], None, &[]),
+            "exec '/x/agent' \n"
+        );
     }
 
     #[test]
@@ -10906,7 +11027,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(
             with_interpreter,
             format!(
-                "exec /usr/bin/env -- 'K=v' '{}' '{}' '--stdio'\n",
+                "set -- 'K='\"$__STAGED_EXTRA_ENV_0\"; unset __STAGED_EXTRA_ENV_0; exec /usr/bin/env -- \"$@\" '{}' '{}' '--stdio'\n",
                 home_node.display(),
                 launcher.display()
             )
@@ -10919,7 +11040,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         );
         assert!(
             guarded.ends_with(&format!(
-                "; export PATH; }}; exec /usr/bin/env -- 'K=v' '{}' '--stdio'\n",
+                "; export PATH; }}; set -- 'K='\"$__STAGED_EXTRA_ENV_0\"; unset __STAGED_EXTRA_ENV_0; exec /usr/bin/env -- \"$@\" '{}' '--stdio'\n",
                 launcher.display()
             )),
             "extra env should be set on the exec after the guard: {guarded}"
@@ -10935,14 +11056,16 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         // assignment still wins because it is applied afterwards.
         let dir = unique_test_dir("acp-shell-extra-env-e2e");
         let printer = dir.join("print-key");
-        write_executable(&printer, "#!/bin/sh\nprintf '%s' \"$KEY\"\n");
+        write_executable(&printer, PRINT_KEY_AND_ENV);
         let extra_env = vec![(String::from("KEY"), String::from("from extra env"))];
         let exec_line = shell_exec_line(&printer, &[], None, &extra_env);
 
         let output = std::process::Command::new("/bin/sh")
             .arg("-s")
             .env_clear()
+            .env("PATH", "/usr/bin:/bin")
             .env("KEY", "from extra env")
+            .envs(shell_extra_env_seeds(&extra_env))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -10956,9 +11079,136 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             })
             .expect("run sh -s");
 
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "from extra env");
+        assert_agent_saw_override(&output.stdout, "from extra env");
 
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    /// An "agent" that prints the variable under test on its first line and
+    /// then its whole environment, so a test can check both the override and
+    /// that the mangled seeds were unset before the exec.
+    const PRINT_KEY_AND_ENV: &str = "#!/bin/sh\nprintf '%s\\n' \"$KEY\"\n/usr/bin/env\n";
+
+    fn assert_agent_saw_override(stdout: &[u8], expected: &str) {
+        let stdout = String::from_utf8_lossy(stdout);
+        let mut lines = stdout.lines();
+        assert_eq!(
+            lines.next(),
+            Some(expected),
+            "agent did not see the override: {stdout}"
+        );
+        assert!(
+            lines.all(|line| !line.starts_with("__STAGED_EXTRA_ENV")),
+            "mangled seeds leaked into the agent's environment: {stdout}"
+        );
+    }
+
+    /// `zsh`/`bash` as the driver would spawn them, if installed.
+    fn installed_shell(name: &str) -> Option<PathBuf> {
+        ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+            .iter()
+            .map(|dir| Path::new(dir).join(name))
+            .find(|path| path.is_file())
+    }
+
+    #[test]
+    fn interactive_login_shells_record_no_extra_env_values_in_history() {
+        // The driver's fallback is `$SHELL -ils`: interactive, so the shell
+        // writes what it reads from stdin to the user's history file. Run the
+        // real exec line through zsh and bash that way, with an rc file that
+        // re-exports the same name, and check that the agent still sees the
+        // override while the value itself never reaches any file under HOME.
+        let secret = "sk-live-do-not-record-7f3a";
+        let extra_env = vec![(String::from("KEY"), secret.to_string())];
+        let mut shells_run = 0;
+
+        for (shell, rc_file, rc_contents) in [
+            (
+                "zsh",
+                ".zshrc",
+                // INC_APPEND_HISTORY writes each line as it is read, the
+                // worst case for a secret on the exec line (oh-my-zsh's
+                // default); HISTFILE is pinned since /etc/zshrc may set it.
+                "export KEY='from rc file'\nHISTFILE=$HOME/.zsh_history\nSAVEHIST=100\nHISTSIZE=100\nsetopt INC_APPEND_HISTORY\n",
+            ),
+            (
+                "bash",
+                // A login bash reads .bash_profile, not .bashrc.
+                ".bash_profile",
+                "export KEY='from rc file'\nHISTFILE=$HOME/.bash_history\n",
+            ),
+        ] {
+            let Some(shell_path) = installed_shell(shell) else {
+                eprintln!("skipping {shell}: not installed");
+                continue;
+            };
+            let dir = unique_test_dir(&format!("acp-shell-history-{shell}"));
+            let home = dir.join("home");
+            std::fs::create_dir_all(&home).expect("create home");
+            std::fs::write(home.join(rc_file), rc_contents).expect("write rc file");
+            let printer = dir.join("print-key");
+            write_executable(&printer, PRINT_KEY_AND_ENV);
+            let exec_line = shell_exec_line(&printer, &[], None, &extra_env);
+
+            let output = std::process::Command::new(&shell_path)
+                .args(["-i", "-l", "-s"])
+                .current_dir(&dir)
+                .env_clear()
+                .env("HOME", &home)
+                .env("ZDOTDIR", &home)
+                .env("HISTFILE", home.join("history-from-env"))
+                .env("PATH", "/usr/bin:/bin")
+                .env("TERM", "dumb")
+                .env("SHELL", &shell_path)
+                .envs(extra_env.iter().cloned())
+                .envs(shell_extra_env_seeds(&extra_env))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write as _;
+                    let mut stdin = child.stdin.take().expect("stdin");
+                    stdin.write_all(exec_line.as_bytes())?;
+                    drop(stdin);
+                    child.wait_with_output()
+                })
+                .unwrap_or_else(|e| panic!("run {shell} -ils: {e}"));
+
+            assert_agent_saw_override(&output.stdout, secret);
+
+            // Every file the shell left under HOME: the history file it
+            // actually used (zsh's /etc/zshrc may override HISTFILE) and
+            // anything else it wrote.
+            let mut recorded_exec_line = false;
+            for entry in std::fs::read_dir(&home).expect("read home") {
+                let path = entry.expect("dir entry").path();
+                if !path.is_file() || path.file_name() == Some(std::ffi::OsStr::new(rc_file)) {
+                    continue;
+                }
+                let contents = std::fs::read(&path).expect("read file under home");
+                let text = String::from_utf8_lossy(&contents);
+                assert!(
+                    !text.contains(secret),
+                    "{shell} wrote the secret to {}: {text}",
+                    path.display()
+                );
+                recorded_exec_line |= text.contains("exec /usr/bin/env");
+            }
+            assert!(
+                recorded_exec_line,
+                "{shell} -ils recorded no history under {}, so this test proved nothing; stderr: {}",
+                home.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            std::fs::remove_dir_all(dir).expect("cleanup test dir");
+            shells_run += 1;
+        }
+
+        if shells_run == 0 {
+            eprintln!("neither zsh nor bash is installed; history check skipped");
+        }
     }
 
     #[test]

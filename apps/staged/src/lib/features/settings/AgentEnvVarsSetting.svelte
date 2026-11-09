@@ -12,10 +12,13 @@
   a warning instead — it is applied, and replaces Staged's value. Values are
   masked on screen like a password, with a per-row reveal toggle, since the
   usual content is an API key; they are still stored as typed in the local
-  preferences file.
+  preferences file. The reveal flags are positional, so when the list changes
+  length from outside this component (another window editing the same agent)
+  they are all cleared rather than left pointing at whichever row now sits at
+  that index.
 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Eye from '@lucide/svelte/icons/eye';
   import EyeOff from '@lucide/svelte/icons/eye-off';
   import Plus from '@lucide/svelte/icons/plus';
@@ -37,6 +40,21 @@
   // persisted: reopening the panel masks everything again. Kept by position
   // to match the row keys, so a removal shifts the flags with the rows.
   let revealed = $state<boolean[]>([]);
+  // The list length this component last produced or saw. `entries` can also
+  // change under us through the synced store when another window edits the
+  // same agent; a positional flag would then stay on its index and reveal a
+  // different row's value. Local add/remove set this before saving, so only
+  // a length change from outside clears the reveals. A reorder can't happen:
+  // the UI only appends and removes. Read untracked: this is a starting
+  // point, not a derived value.
+  let knownLength = untrack(() => entries.length);
+
+  $effect(() => {
+    if (entries.length !== knownLength) {
+      knownLength = entries.length;
+      revealed = [];
+    }
+  });
 
   function nameInputId(index: number): string {
     return `agent-env-${agentId}-${index}-name`;
@@ -56,15 +74,15 @@
   }
 
   function removeEntry(index: number) {
-    setAgentEnvVars(
-      agentId,
-      getAgentEnvVars(agentId).filter((_, i) => i !== index)
-    );
+    const next = getAgentEnvVars(agentId).filter((_, i) => i !== index);
+    knownLength = next.length;
     revealed = revealed.filter((_, i) => i !== index);
+    setAgentEnvVars(agentId, next);
   }
 
   async function addEntry() {
     const current = getAgentEnvVars(agentId);
+    knownLength = current.length + 1;
     setAgentEnvVars(agentId, [...current, { name: '', value: '', enabled: true }]);
     await tick();
     document.getElementById(nameInputId(current.length))?.focus();

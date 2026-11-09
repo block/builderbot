@@ -6,7 +6,8 @@
 //! mirroring `branch-prefix` and `diagram-subsession-config` — and turns it
 //! into the `KEY=VALUE` pairs a local agent launch adds to the process
 //! environment. Disabled rows and rows whose name isn't a usable variable
-//! name are ignored; a missing or malformed key reads as "no variables".
+//! name are ignored; a missing or malformed key reads as "no variables", and
+//! a malformed entry is skipped on its own, as the frontend skips it.
 //!
 //! # Storage
 //!
@@ -33,8 +34,6 @@
 //! agent and everything it spawns. The Doctor UI warns on those names
 //! (`LAUNCHER_RESERVED_NAMES` in the frontend) but doesn't refuse them.
 
-use serde::Deserialize;
-
 /// Preferences-store key: `Record<agentId, AgentEnvVar[]>`. Kept in sync with
 /// `AGENT_ENV_VARS_STORE_KEY` in the frontend preferences store.
 pub(crate) const AGENT_ENV_VARS_KEY: &str = "agent-env-vars";
@@ -42,18 +41,37 @@ pub(crate) const AGENT_ENV_VARS_KEY: &str = "agent-env-vars";
 /// One configured variable for an agent. `enabled` lets a row be switched
 /// off without being deleted; an entry written without it reads as enabled.
 /// `value` is held and persisted as plaintext (see the module docs).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentEnvVar {
     pub(crate) name: String,
-    #[serde(default)]
     pub(crate) value: String,
-    #[serde(default = "default_enabled")]
     pub(crate) enabled: bool,
 }
 
-fn default_enabled() -> bool {
-    true
+impl AgentEnvVar {
+    /// One stored entry, or `None` when it isn't an object with a string
+    /// `name`. Reads the other fields the way `normalizeAgentEnvVars` in the
+    /// frontend does — a missing or non-string `value` as empty, a missing or
+    /// non-boolean `enabled` as enabled — so both sides agree on which rows
+    /// exist.
+    fn from_json(entry: &serde_json::Value) -> Option<Self> {
+        let object = entry.as_object()?;
+        let name = object.get("name")?.as_str()?.to_string();
+        let value = object
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let enabled = object
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        Some(Self {
+            name,
+            value,
+            enabled,
+        })
+    }
 }
 
 /// Whether `name` can be set as an environment variable: non-empty, with no
@@ -67,17 +85,39 @@ pub(crate) fn is_valid_env_var_name(name: &str) -> bool {
 }
 
 /// The configured entries for `provider_id` from a parsed `preferences.json`.
-/// A missing key, an agent with no list, or a malformed list reads as empty;
-/// one malformed entry drops the whole list for that agent rather than
-/// guessing at it.
+/// A missing key, an agent with no list, or a value that isn't a list reads
+/// as empty. Within a list, each entry is read on its own: one that isn't an
+/// object with a string `name` is skipped, with a warning in the log, and the
+/// rest are kept. This matches `normalizeAgentEnvVars` in the frontend, so
+/// the rows the user sees as enabled in Doctor are the rows that get applied;
+/// dropping the whole list on one bad entry would silently launch the agent
+/// without variables the UI shows as valid.
 pub(crate) fn agent_env_vars_from_preferences(
     json: &serde_json::Value,
     provider_id: &str,
 ) -> Vec<AgentEnvVar> {
-    json.get(AGENT_ENV_VARS_KEY)
+    let Some(entries) = json
+        .get(AGENT_ENV_VARS_KEY)
         .and_then(|by_agent| by_agent.get(provider_id))
-        .and_then(|entries| serde_json::from_value(entries.clone()).ok())
-        .unwrap_or_default()
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let parsed = AgentEnvVar::from_json(entry);
+            if parsed.is_none() {
+                // Index only: the entry may hold a secret in some other field.
+                log::warn!(
+                    "Skipping malformed environment variable entry {index} for agent {provider_id}: \
+                     expected an object with a string name"
+                );
+            }
+            parsed
+        })
+        .collect()
 }
 
 /// The `KEY=VALUE` pairs to apply from `entries`, in order: enabled rows with a
@@ -179,6 +219,30 @@ mod tests {
         assert!(agent_env_vars_from_preferences(&bad_entry, "claude").is_empty());
         let wrong_type = json!({ "agent-env-vars": ["FOO=bar"] });
         assert!(agent_env_vars_from_preferences(&wrong_type, "claude").is_empty());
+    }
+
+    #[test]
+    fn skips_only_the_malformed_entries_and_keeps_the_rest() {
+        // Mirrors the `normalizeAgentEnvVars` frontend test: one bad entry
+        // must not drop the agent's whole list, or rows the UI shows as valid
+        // would silently go unapplied.
+        let json = json!({
+            "agent-env-vars": {
+                "claude": [
+                    { "name": "A", "value": "1" },
+                    { "value": "no name" },
+                    "FOO=bar",
+                    null,
+                    { "name": 5, "value": "numeric name" },
+                    { "name": "B", "value": 5, "enabled": "yes" },
+                    { "name": "C", "enabled": false }
+                ]
+            }
+        });
+        assert_eq!(
+            agent_env_vars_from_preferences(&json, "claude"),
+            vec![var("A", "1", true), var("B", "", true), var("C", "", false)]
+        );
     }
 
     #[test]

@@ -53,6 +53,36 @@ fn agent_env_is_keyed_by_the_provider_id_behind_the_check() {
     }
 }
 
+/// All overlays are derived from one parsed `preferences.json`: each agent
+/// check gets its own enabled rows, an agent with none (or with only
+/// disabled rows) is left out, and nothing is re-read per agent.
+#[test]
+fn agent_env_overlays_come_from_one_parsed_preferences_value() {
+    let preferences = serde_json::json!({
+        "agent-env-vars": {
+            "claude": [
+                { "name": "ANTHROPIC_API_KEY", "value": "k", "enabled": true },
+                { "name": "OFF", "value": "x", "enabled": false }
+            ],
+            "codex": [
+                { "name": "OPENAI_API_KEY", "value": "o", "enabled": false }
+            ],
+            "not-an-agent": [
+                { "name": "IGNORED", "value": "i", "enabled": true }
+            ]
+        }
+    });
+    let overlays = agent_env_overlays_from(&preferences);
+    assert_eq!(
+        overlays,
+        vec![(
+            "ai-agent-claude".to_string(),
+            vec![("ANTHROPIC_API_KEY".to_string(), "k".to_string())]
+        )]
+    );
+    assert!(agent_env_overlays_from(&serde_json::json!({})).is_empty());
+}
+
 /// Fixes and updates for the two bridge checks route to the managed
 /// installer exactly when this build manages bridges; every other check
 /// keeps the doctor crate's regular fix commands.

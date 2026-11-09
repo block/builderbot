@@ -28,11 +28,11 @@
 //! captured shell snapshot when it spawns the binary directly, and on the
 //! `exec` line (via `/usr/bin/env`) when it falls back to the login shell —
 //! `$SHELL -ils` by default, or `$SHELL -l -c` running that same line
-//! through `/bin/sh -c` for a shell known not to be POSIX (fish, nu, …; the
-//! line travels in an environment variable, never quoted into the command)
-//! — so an `export` in the user's rc files can't shadow a Doctor value there
-//! either. The flip side
-//! is that a row named after something the launcher
+//! through `/bin/sh -c` for a shell known not to be POSIX (fish, xonsh, the
+//! C shells; the line travels in an environment variable, never quoted into
+//! the command) — so an `export` in the user's rc files can't shadow a Doctor
+//! value there either. The flip side is that a row named after something the
+//! launcher
 //! itself sets — `PATH`, `GOOSE_SEARCH_PATHS` (see
 //! `acp_tools::apply_managed_tools_env`) — replaces Staged's value for that
 //! agent and everything it spawns. The Doctor UI warns on those names
@@ -173,22 +173,38 @@ pub(crate) fn merge_agent_env(
     merged
 }
 
+/// Read and parse `preferences.json` once. `None` on any failure — no store
+/// path, missing file, unparseable JSON — which every caller treats as "no
+/// variables configured", so the agent launches as before. Callers that need
+/// several agents' variables (Doctor's overlays) read once and derive each
+/// list from the same value, so they all describe one snapshot of the file
+/// even if the UI writes it mid-way.
+pub(crate) fn read_preferences() -> Option<serde_json::Value> {
+    let path = crate::preferences_store_path_buf()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&contents).ok()
+}
+
+/// The enabled variables configured for `provider_id` in a parsed
+/// `preferences.json`, as `KEY=VALUE` pairs ready for the driver.
+pub(crate) fn agent_env_from_preferences(
+    json: &serde_json::Value,
+    provider_id: &str,
+) -> Vec<(String, String)> {
+    enabled_env_pairs(&agent_env_vars_from_preferences(json, provider_id))
+}
+
 /// Read the enabled variables configured for `provider_id` from the
 /// preferences store. Any failure — missing file, unparseable JSON, absent or
 /// malformed key — yields no variables, so the agent launches as before.
 /// Called at session launch, for pikchr sub-agents, and by Doctor for the
-/// agent's checks and login fix.
+/// agent's login fix; Doctor's check overlays go through
+/// [`read_preferences`] and [`agent_env_from_preferences`] instead so every
+/// agent's list comes from one read.
 pub(crate) fn read_agent_env(provider_id: &str) -> Vec<(String, String)> {
-    let Some(path) = crate::preferences_store_path_buf() else {
-        return Vec::new();
-    };
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return Vec::new();
-    };
-    enabled_env_pairs(&agent_env_vars_from_preferences(&json, provider_id))
+    read_preferences()
+        .map(|json| agent_env_from_preferences(&json, provider_id))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

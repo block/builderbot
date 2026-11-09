@@ -106,12 +106,25 @@ pub(super) fn agent_env_for_check(check_id: &str) -> Vec<(String, String)> {
 }
 
 /// Every agent check's variables for [`run_checks_options`], keyed by check
-/// id; agents with no enabled variables are left out.
+/// id; agents with no enabled variables are left out. `preferences.json` is
+/// read and parsed once and every overlay derived from that value, so the
+/// overlays describe one consistent snapshot of the file rather than one
+/// read per agent that a UI write could land between.
 fn agent_env_overlays() -> Vec<(String, Vec<(String, String)>)> {
+    crate::agent::env_vars::read_preferences()
+        .map(|preferences| agent_env_overlays_from(&preferences))
+        .unwrap_or_default()
+}
+
+/// [`agent_env_overlays`] for an already parsed `preferences.json`.
+fn agent_env_overlays_from(
+    preferences: &serde_json::Value,
+) -> Vec<(String, Vec<(String, String)>)> {
     doctor::agents::AI_AGENT_CHECKS
         .iter()
         .filter_map(|info| {
-            let vars = agent_env_for_check(info.id);
+            let provider_id = provider_id_for_check(info.id)?;
+            let vars = crate::agent::env_vars::agent_env_from_preferences(preferences, provider_id);
             (!vars.is_empty()).then(|| (info.id.to_string(), vars))
         })
         .collect()

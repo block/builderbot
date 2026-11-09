@@ -1670,7 +1670,19 @@ fn shell_extra_env_seeds(extra_env: &[(String, String)]) -> Vec<(String, String)
 /// what every login shell got before this dispatch existed. fish is the one
 /// verified end to end; the rest are a best effort for shells that never
 /// worked on the stdin path either.
-const NON_POSIX_LOGIN_SHELLS: &[&str] = &["fish", "nu", "xonsh", "elvish", "tcsh", "csh"];
+///
+/// The list is limited to shells that accept `-c` and expand `$VAR` inside a
+/// double-quoted string, which the fixed wrapper
+/// `exec /bin/sh -c "$__STAGED_EXEC_LINE"` relies on: fish, xonsh (in
+/// subprocess mode) and the C shells all do. nu and elvish are deliberately
+/// left out — in both a plain `"..."` is literal (nushell interpolates only
+/// `$"..."` and reads the environment as `$env.X`; elvish uses `$E:X` and
+/// never expands inside quotes), so `/bin/sh` would receive the literal text
+/// `$__STAGED_EXEC_LINE`, expand it to nothing, and the agent would never
+/// start while the spawn log claimed the wrapper path was taken. On the stdin
+/// path they fail at `-s` with the shell's own error instead, which points a
+/// maintainer at the right layer. elvish also has no `-l`.
+const NON_POSIX_LOGIN_SHELLS: &[&str] = &["fish", "xonsh", "tcsh", "csh"];
 
 /// The C shells accept `-l` only on its own ("Unknown option: `-l'" next to
 /// `-c`), so they are spawned with `-c` alone; `~/.tcshrc`/`~/.cshrc` still
@@ -11314,10 +11326,11 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let extra_env = vec![(String::from("K"), String::from("v"))];
 
         // POSIX shells, renamed or versioned copies of them (`bash5`,
-        // `zsh-5.9`), an unknown basename, an oddly cased one, and a `$SHELL`
-        // that doesn't exist all take the stdin path: the pre-existing
-        // behaviour, which the spawn then reports against the logged shell
-        // path if the file isn't there.
+        // `zsh-5.9`), an unknown basename, an oddly cased one, a `$SHELL`
+        // that doesn't exist, and the non-POSIX shells the wrapper can't
+        // work for all take the stdin path: the pre-existing behaviour,
+        // which the spawn then reports against the logged shell path if the
+        // file isn't there.
         for shell in [
             "/bin/sh",
             "/bin/bash",
@@ -11332,6 +11345,12 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             "/usr/local/bin/yash",
             "/bin/Bash",
             "/nonexistent/dir/no-such-shell",
+            // Non-POSIX shells that can't expand the wrapper (a double-quoted
+            // string is literal in both) are deliberately not on the list, so
+            // they take the stdin path too and fail at `-s` with their own
+            // error rather than a misleading "wrapper" log line.
+            "/usr/local/bin/nu",
+            "/usr/bin/elvish",
         ] {
             let exec = LoginShellExec::for_shell(Path::new(shell), line, &extra_env);
             assert_eq!(exec, LoginShellExec::Stdin, "{shell}");
@@ -11365,12 +11384,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
         // The other listed non-POSIX shells take the same wrapper; the C
         // shells without `-l`, which they refuse next to `-c`.
-        for shell in [
-            "/usr/local/bin/nu",
-            "/opt/homebrew/bin/xonsh",
-            "/usr/bin/elvish",
-            "fish",
-        ] {
+        for shell in ["/opt/homebrew/bin/xonsh", "fish"] {
             let exec = LoginShellExec::for_shell(Path::new(shell), line, &extra_env);
             assert_eq!(exec.args(), vec!["-l", "-c", wrapper], "{shell}");
             assert_eq!(exec.seed(), fish.seed(), "{shell}");

@@ -110,6 +110,8 @@
     pushing?: boolean;
     /** Push is waiting on the branch queue, so its button cancels instead. */
     pushQueued?: boolean;
+    /** A deferred push is armed (set with `pushQueued`); the button cancels it. */
+    pushDeferred?: boolean;
     /** Force push is waiting on the branch queue, so its button cancels instead. */
     forcePushQueued?: boolean;
     /** Pull is waiting on the branch queue, so its button cancels instead. */
@@ -160,6 +162,7 @@
     resettingToOrigin = false,
     pushing = false,
     pushQueued = false,
+    pushDeferred = false,
     forcePushQueued = false,
     pullQueued = false,
     onViewDiffClick,
@@ -224,7 +227,13 @@
   let pullTitle = $derived(pullDisabledReason ?? (pullQueued ? 'Cancel queued pull' : 'Pull'));
   let pushTitle = $derived(
     pushDisabledReason ??
-      (pushQueued ? 'Cancel queued push' : pushing ? 'View push session' : 'Push')
+      (pushDeferred
+        ? 'Cancel deferred push'
+        : pushQueued
+          ? 'Cancel queued push'
+          : pushing
+            ? 'View push session'
+            : 'Push')
   );
   let forcePushTitle = $derived(
     forcePushDisabledReason ??

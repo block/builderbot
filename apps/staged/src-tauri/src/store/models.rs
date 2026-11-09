@@ -291,8 +291,59 @@ pub struct Branch {
     /// Whether the branch has completed its initial setup (worktree created
     /// and prerun actions have had the opportunity to run).
     pub setup_complete: bool,
+    /// A push armed to run once the branch and its project are idle
+    /// ("Push after current work"). `None` when nothing is armed.
+    pub deferred_push: Option<DeferredPush>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A push armed to run once the branch and its project have nothing running,
+/// disconnected or queued: "Push after current work" and its force and
+/// `--no-verify` variants.
+///
+/// Persisted on the branch row (`branches.deferred_push`) as one of four
+/// names, so the store does not depend on `prs::PushVariant`; `prs` maps
+/// between the two. Arming again overwrites the variant; cancelling clears it;
+/// a branch delete drops it with the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredPush {
+    /// Force push (`--force-with-lease`).
+    pub force: bool,
+    /// Skip git's `pre-push` hook (`--no-verify`).
+    pub no_verify: bool,
+    /// When it was armed (milliseconds since epoch).
+    pub requested_at: i64,
+}
+
+impl DeferredPush {
+    /// The name the `branches.deferred_push` column stores, and the frontend
+    /// reads: `push`, `force`, `push-no-verify` or `force-no-verify`.
+    pub fn as_column_name(&self) -> &'static str {
+        match (self.force, self.no_verify) {
+            (false, false) => "push",
+            (true, false) => "force",
+            (false, true) => "push-no-verify",
+            (true, true) => "force-no-verify",
+        }
+    }
+
+    /// The inverse of [`Self::as_column_name`]; `None` for an unknown name.
+    pub fn parse(name: &str, requested_at: i64) -> Option<Self> {
+        let (force, no_verify) = match name {
+            "push" => (false, false),
+            "force" => (true, false),
+            "push-no-verify" => (false, true),
+            "force-no-verify" => (true, true),
+            _ => return None,
+        };
+        Some(Self {
+            force,
+            no_verify,
+            requested_at,
+        })
+    }
 }
 
 impl Branch {
@@ -320,6 +371,7 @@ impl Branch {
             pr_head_sha: None,
             pr_title: None,
             setup_complete: false,
+            deferred_push: None,
             created_at: now,
             updated_at: now,
         }
@@ -354,6 +406,7 @@ impl Branch {
             pr_head_sha: None,
             pr_title: None,
             setup_complete: false,
+            deferred_push: None,
             created_at: now,
             updated_at: now,
         }

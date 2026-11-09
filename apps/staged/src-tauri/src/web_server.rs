@@ -3915,6 +3915,29 @@ pub(crate) async fn dispatch(
             .await?;
             Ok(serde_json::to_value(response).unwrap())
         }
+        "defer_branch_push" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
+            let force: Option<bool> = opt_arg(&args, "force")?;
+            let no_verify: Option<bool> = opt_arg(&args, "noVerify")?;
+            let response = detached(crate::prs::defer_branch_push_for_branch(
+                store,
+                Arc::clone(session_registry),
+                app_handle.clone(),
+                branch_id,
+                provider,
+                crate::prs::PushVariant::from_request(force, no_verify),
+            ))
+            .await?;
+            Ok(serde_json::to_value(response).unwrap())
+        }
+        "cancel_deferred_push" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            crate::prs::cancel_deferred_push_for_branch(&store, &branch_id)?;
+            Ok(Value::Null)
+        }
         "rebase_branch" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;

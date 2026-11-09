@@ -119,6 +119,8 @@ pub(crate) fn to_branch_with_workdir(
         pr_head_sha: branch.pr_head_sha,
         pr_title: branch.pr_title,
         setup_complete: branch.setup_complete,
+        deferred_push: branch.deferred_push.map(|d| d.as_column_name()),
+        deferred_push_requested_at: branch.deferred_push.map(|d| d.requested_at),
         worktree_path: workdir_path,
         created_at: branch.created_at,
         updated_at: branch.updated_at,

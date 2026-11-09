@@ -51,6 +51,8 @@ function branch(overrides: Partial<Branch> = {}): Branch {
     prFetchedAt: null,
     prHeadSha: null,
     prTitle: null,
+    deferredPush: null,
+    deferredPushRequestedAt: null,
     ...overrides,
   };
 }

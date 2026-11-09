@@ -18,6 +18,7 @@
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import Search from '@lucide/svelte/icons/search';
   import ShieldOff from '@lucide/svelte/icons/shield-off';
+  import X from '@lucide/svelte/icons/x';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -48,7 +49,13 @@
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
   import { derivePrPushAction } from './prButtonGitState';
-  import { buildPrMenu, type PrMenuItem, type PrMenuItemId } from './prButtonMenu';
+  import {
+    buildPrMenu,
+    deferredPushLabel,
+    deferredPushName,
+    type PrMenuItem,
+    type PrMenuItemId,
+  } from './prButtonMenu';
   import { altKey, trackAltKey } from '../actions/altKey.svelte';
   import type { IconComponent } from '../actions/lucideIcons';
   import { describePrRejectionReason } from './prDetection';
@@ -70,6 +77,12 @@
     hasCodeChanges: boolean;
     timeline: BranchTimelineData | null;
     showButton?: boolean;
+    /**
+     * Whether the branch or its project has sessions in flight — what a
+     * deferred push ("Push after current work") waits for, so the menu only
+     * offers one while this is true.
+     */
+    workInFlight?: boolean;
     onOpenSession?: (sessionId: string) => void;
   }
 
@@ -80,6 +93,7 @@
     hasCodeChanges,
     timeline,
     showButton = true,
+    workInFlight = false,
     onOpenSession,
   }: Props = $props();
 
@@ -179,6 +193,9 @@
   let showForcePushDialog = $state(false);
   // Whether the force push the dialog confirms skips the pre-push hook.
   let forcePushNoVerify = $state(false);
+  // Whether the force push the dialog confirms is deferred to after the
+  // current work rather than run now.
+  let forcePushDeferred = $state(false);
 
   // Off screen (home shown over the project, or parked under settings / the
   // diff view), these alerts would stay open on top. Only the dialogs close; the push / PR error state they describe is
@@ -780,19 +797,79 @@
     }
   }
 
-  function openForcePushDialog(noVerify: boolean) {
+  function openForcePushDialog({
+    noVerify,
+    deferred = false,
+  }: {
+    noVerify: boolean;
+    deferred?: boolean;
+  }) {
     forcePushNoVerify = noVerify;
+    forcePushDeferred = deferred;
     showForcePushDialog = true;
   }
 
   function handleForcePushConfirm() {
     showForcePushDialog = false;
-    handlePush(true, forcePushNoVerify);
+    if (forcePushDeferred) {
+      deferPush(true, forcePushNoVerify);
+    } else {
+      handlePush(true, forcePushNoVerify);
+    }
   }
 
   function handleForcePushCancel() {
     showForcePushDialog = false;
-    pushStateStore.clearPushState(branch.id);
+    // A deferred force push has no push state yet; a rejected push's does
+    // get cleared, so the button stops offering the retry.
+    if (!forcePushDeferred) pushStateStore.clearPushState(branch.id);
+  }
+
+  // =========================================================================
+  // Deferred push ("Push after current work")
+  // =========================================================================
+
+  /**
+   * Arm a push to run once the branch and its project are idle. When they
+   * already are — the work finished between the menu rendering and the click —
+   * the backend pushes right away instead, and the button follows that push as
+   * it would one of its own.
+   *
+   * The armed flag is set on the branch locally too, so the Cancel row and the
+   * footer row show before the `branch-changed` refetch lands.
+   */
+  function deferPush(force: boolean, noVerify: boolean) {
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+    commands
+      .deferBranchPush(branch.id, provider, force, noVerify)
+      .then((response) => {
+        if (response.armed) {
+          branch.deferredPush = deferredPushName(force, noVerify);
+          branch.deferredPushRequestedAt = Date.now();
+        } else if (response.push) {
+          pushStateStore.setPushLaunch(branch.id, response.push, force, noVerify);
+        }
+      })
+      .catch((e) =>
+        toast.error('Could not schedule push', {
+          description: e instanceof Error ? e.message : String(e),
+        })
+      );
+  }
+
+  function cancelDeferredPush() {
+    commands
+      .cancelDeferredPush(branch.id)
+      .then(() => {
+        branch.deferredPush = null;
+        branch.deferredPushRequestedAt = null;
+      })
+      .catch((e) =>
+        toast.error('Could not cancel deferred push', {
+          description: e instanceof Error ? e.message : String(e),
+        })
+      );
   }
 
   // Retry repeats the failed push as it was asked for: a force push that
@@ -812,7 +889,7 @@
     if (pushState === 'error') {
       if (pushRejectedNonFastForward) {
         // The force push keeps whether the rejected push skipped the hook.
-        openForcePushDialog(pushNoVerify);
+        openForcePushDialog({ noVerify: pushNoVerify });
       } else {
         showPushErrorDialog = true;
       }
@@ -830,7 +907,7 @@
       const wantsForcePush = pushAction === 'forcePush' || altKey.held;
       if (wantsForcePush && !altKey.held) {
         // Force push without an explicit alt override — confirm first.
-        openForcePushDialog(false);
+        openForcePushDialog({ noVerify: false });
       } else {
         handlePush(wantsForcePush);
       }
@@ -911,9 +988,15 @@
       pushAction,
       prNumber: branch.prNumber,
       altHeld: altKey.held,
+      workInFlight,
+      deferredPush: branch.deferredPush,
     })
   );
   let showPrMenu = $derived(prMenuEntries.length > 0);
+  // The Cancel row's tooltip names what is armed.
+  let cancelDeferredPushTitle = $derived(
+    branch.deferredPush ? `Cancel: ${deferredPushLabel(branch.deferredPush)}` : undefined
+  );
 
   const prMenuActions: Record<
     PrMenuItemId,
@@ -933,8 +1016,38 @@
     forcePushNoVerify: {
       icon: ShieldOff,
       title: 'Force push without running the pre-push hook (git push --no-verify).',
-      run: (item) => (item.confirm ? openForcePushDialog(true) : handlePush(true, true)),
+      run: (item) =>
+        item.confirm ? openForcePushDialog({ noVerify: true }) : handlePush(true, true),
     },
+    deferPush: {
+      icon: Clock,
+      title: 'Push once the branch and project sessions have finished.',
+      run: () => deferPush(false, false),
+    },
+    deferForcePush: {
+      icon: Clock,
+      title: 'Force push once the branch and project sessions have finished.',
+      run: (item) =>
+        item.confirm
+          ? openForcePushDialog({ noVerify: false, deferred: true })
+          : deferPush(true, false),
+    },
+    deferPushNoVerify: {
+      icon: Clock,
+      title:
+        'Push once the branch and project sessions have finished, without running the pre-push hook (git push --no-verify).',
+      run: () => deferPush(false, true),
+    },
+    deferForcePushNoVerify: {
+      icon: Clock,
+      title:
+        'Force push once the branch and project sessions have finished, without running the pre-push hook (git push --no-verify).',
+      run: (item) =>
+        item.confirm
+          ? openForcePushDialog({ noVerify: true, deferred: true })
+          : deferPush(true, true),
+    },
+    cancelDeferredPush: { icon: X, run: cancelDeferredPush },
     viewPr: { icon: ExternalLink, run: openPr },
     copyPrUrl: { icon: Copy, run: copyPrUrl },
   };
@@ -1058,7 +1171,10 @@
               <DropdownMenu.Separator />
             {:else}
               {@const action = prMenuActions[entry.id]}
-              <DropdownMenu.Item title={action.title} onSelect={() => action.run(entry)}>
+              <DropdownMenu.Item
+                title={entry.id === 'cancelDeferredPush' ? cancelDeferredPushTitle : action.title}
+                onSelect={() => action.run(entry)}
+              >
                 <action.icon size={14} />
                 {entry.label}
               </DropdownMenu.Item>
@@ -1234,18 +1350,29 @@
         <!-- "Rejected" only once a push has actually been rejected: the
              diverged-branch button and the menu open this before any push. -->
         <AlertDialog.Title
-          >{pushState === 'error' ? 'Push Rejected' : 'Force Push'}</AlertDialog.Title
+          >{pushState === 'error'
+            ? 'Push Rejected'
+            : forcePushDeferred
+              ? 'Force Push After Current Work'
+              : 'Force Push'}</AlertDialog.Title
         >
         <AlertDialog.Description>
           {pushTargetRef(branch, timeline?.gitState)} has commits that would be lost. Do you want to force
-          push? This will overwrite {pushTargetRef(branch, timeline?.gitState)} with your local version.{#if forcePushNoVerify}
+          push? This will overwrite {pushTargetRef(branch, timeline?.gitState)} with your local version{#if forcePushDeferred}
+            once the current branch and project sessions finish{/if}.{#if forcePushNoVerify}
             The pre-push hook won't run.{/if}
         </AlertDialog.Description>
       </AlertDialog.Header>
       <AlertDialog.Footer>
         <AlertDialog.Cancel onclick={handleForcePushCancel}>Cancel</AlertDialog.Cancel>
         <AlertDialog.Action variant="destructive" onclick={handleForcePushConfirm}>
-          {forcePushNoVerify ? 'Force Push Without Verifying' : 'Force Push'}
+          {forcePushDeferred
+            ? forcePushNoVerify
+              ? 'Force Push After Current Work Without Verifying'
+              : 'Force Push After Current Work'
+            : forcePushNoVerify
+              ? 'Force Push Without Verifying'
+              : 'Force Push'}
         </AlertDialog.Action>
       </AlertDialog.Footer>
     </AlertDialog.Content>

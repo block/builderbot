@@ -32,6 +32,7 @@ import type {
   Comment,
   ControlAuthorizationRequest,
   ControlGrantSummary,
+  DeferredPushResponse,
   DiffFilesResponse,
   File,
   FileDiff,
@@ -2097,6 +2098,30 @@ export function pushBranch(
     force: force ?? null,
     noVerify: noVerify ?? null,
   });
+}
+
+/** "Push after current work": arm a push (force / `noVerify` as `pushBranch`)
+ *  to run once the branch and its project have no session running, disconnected
+ *  or queued. If they are already idle the backend pushes right away and the
+ *  response carries that push instead of `armed`. Arming again replaces the
+ *  armed variant. */
+export function deferBranchPush(
+  branchId: string,
+  provider?: string,
+  force?: boolean,
+  noVerify?: boolean
+): Promise<DeferredPushResponse> {
+  return invokeCommand('defer_branch_push', {
+    branchId,
+    provider: provider ?? null,
+    force: force ?? null,
+    noVerify: noVerify ?? null,
+  });
+}
+
+/** Clear a branch's deferred push. */
+export function cancelDeferredPush(branchId: string): Promise<void> {
+  return invokeCommand('cancel_deferred_push', { branchId });
 }
 
 /** Post a single review comment to a GitHub PR. */

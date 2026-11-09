@@ -107,6 +107,10 @@ pub struct LaunchResumeState {
     offer: Mutex<Option<LaunchRecovery>>,
     offered_through: Mutex<Option<i64>>,
     last_run: Mutex<Option<LaunchResumeSummary>>,
+    /// Branches with a deferred push the startup pass skipped because the
+    /// offer names a session of theirs or of their project; kicked when the
+    /// offer is answered (see [`kick_deferred_pushes_at_launch`]).
+    deferred_push_holds: Mutex<Vec<String>>,
 }
 
 impl LaunchResumeState {
@@ -127,6 +131,17 @@ impl LaunchResumeState {
     pub(crate) fn take_handled(&self) -> Option<i64> {
         *self.offer.lock().unwrap() = None;
         self.offered_through.lock().unwrap().take()
+    }
+
+    /// The branches whose deferred push waits on the offer, taken once.
+    pub(crate) fn take_deferred_push_holds(&self) -> Vec<String> {
+        std::mem::take(&mut *self.deferred_push_holds.lock().unwrap())
+    }
+
+    /// The branches whose deferred push is waiting on the offer.
+    #[cfg(test)]
+    pub(crate) fn deferred_push_holds(&self) -> Vec<String> {
+        self.deferred_push_holds.lock().unwrap().clone()
     }
 }
 
@@ -244,6 +259,71 @@ pub(crate) fn detect_at_launch<R: tauri::Runtime>(app_handle: &tauri::AppHandle<
     }
 }
 
+/// Kick the branches left with a deferred push ("Push after current work")
+/// armed by the last run, except those the offer holds.
+///
+/// A branch whose own session, or whose project's session, the last quit
+/// interrupted is not kicked yet: the push would fire before the user
+/// resumes, and the resumed session's commits would go unpushed. Those
+/// branches are parked in the state and kicked when the offer is answered —
+/// after the resumed rows are back in place, so the drain's idle check sees
+/// them (`resume_interrupted_sessions`). Runs right after [`detect_at_launch`].
+pub(crate) fn kick_deferred_pushes_at_launch<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    store: &Store,
+) {
+    let armed = match store.branch_ids_with_deferred_push(None) {
+        Ok(ids) => ids,
+        Err(e) => {
+            log::warn!("[launch_resume] could not list branches with a deferred push: {e}");
+            return;
+        }
+    };
+    if armed.is_empty() {
+        return;
+    }
+    let state = app_handle.state::<LaunchResumeState>();
+    let offer = state.offer();
+    let mut held = Vec::new();
+    for branch_id in armed {
+        if offer
+            .as_ref()
+            .is_some_and(|offer| offer_holds_branch(offer, store, &branch_id))
+        {
+            log::info!(
+                "[launch_resume] deferred push on branch {branch_id} waits for the launch offer"
+            );
+            held.push(branch_id);
+        } else {
+            crate::session_queue::kick(
+                app_handle,
+                &branch_id,
+                crate::session_queue::KickSource::Startup,
+            );
+        }
+    }
+    *state.deferred_push_holds.lock().unwrap() = held;
+}
+
+/// Whether the offer names a session on `branch_id`, or a project session of
+/// its project.
+fn offer_holds_branch(offer: &LaunchRecovery, store: &Store, branch_id: &str) -> bool {
+    if offer
+        .repo_sessions
+        .iter()
+        .any(|s| s.branch_id.as_deref() == Some(branch_id))
+    {
+        return true;
+    }
+    let Ok(Some(branch)) = store.get_branch(branch_id) else {
+        return false;
+    };
+    offer
+        .project_sessions
+        .iter()
+        .any(|s| s.project_id.as_deref() == Some(branch.project_id.as_str()))
+}
+
 // =============================================================================
 // Commands
 // =============================================================================
@@ -280,7 +360,12 @@ pub fn resume_interrupted_sessions(
             log::warn!("[launch_resume] could not record the handled marker: {e}");
         }
     }
+    // The deferred pushes the startup pass held for this offer. On a
+    // dismissal nothing comes back, so they go now; otherwise after the run,
+    // once the resumed rows are in place for the drain's idle check.
+    let held_deferred_pushes = state.take_deferred_push_holds();
     if session_ids.is_empty() {
+        kick_held_deferred_pushes(&app_handle, held_deferred_pushes);
         return Ok(());
     }
     let deps = run::ResumeDeps {
@@ -292,9 +377,23 @@ pub fn resume_interrupted_sessions(
     };
     tauri::async_runtime::spawn(async move {
         let summary = run::run_launch_resume(deps, session_ids).await;
+        kick_held_deferred_pushes(&app_handle, held_deferred_pushes);
         if let Some(state) = app_handle.try_state::<LaunchResumeState>() {
             *state.last_run.lock().unwrap() = Some(summary);
         }
     });
     Ok(())
+}
+
+fn kick_held_deferred_pushes<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    branch_ids: Vec<String>,
+) {
+    for branch_id in branch_ids {
+        crate::session_queue::kick(
+            app_handle,
+            &branch_id,
+            crate::session_queue::KickSource::LaunchResume,
+        );
+    }
 }

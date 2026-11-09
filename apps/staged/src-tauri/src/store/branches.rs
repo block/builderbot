@@ -2,7 +2,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::models::{Branch, BranchType, WorkspaceStatus};
+use super::models::{Branch, BranchType, DeferredPush, WorkspaceStatus};
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
 /// The PR fields that carry domain state — everything
@@ -26,7 +26,7 @@ const BRANCH_COLUMNS: &str = "id, project_id, project_repo_id, branch_name, base
     branch_type, workspace_name, workspace_status,
     pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
     pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete,
-    created_at, updated_at, pr_title";
+    created_at, updated_at, pr_title, deferred_push, deferred_push_requested_at";
 
 impl Store {
     pub fn create_branch(&self, branch: &Branch) -> Result<(), StoreError> {
@@ -36,8 +36,8 @@ impl Store {
                 branch_type, workspace_name, workspace_status,
                 pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
                 pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete, created_at, updated_at,
-                pr_title)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                pr_title, deferred_push, deferred_push_requested_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 branch.id,
                 branch.project_id,
@@ -61,6 +61,8 @@ impl Store {
                 branch.created_at,
                 branch.updated_at,
                 branch.pr_title,
+                branch.deferred_push.map(|d| d.as_column_name()),
+                branch.deferred_push.map(|d| d.requested_at),
             ],
         ) {
             if is_duplicate_branch_error(&e) {
@@ -119,6 +121,52 @@ impl Store {
             project_id: Self::branch_project_id(&conn, id),
         });
         Ok(())
+    }
+
+    /// Arm (`Some`) or clear (`None`) the branch's deferred push.
+    ///
+    /// Publishes `Branch`, like the other branch setters: clients refetch the
+    /// branch list on it, which is what shows or hides the PR menu's Cancel
+    /// row and the timeline's footer row. No dedicated event.
+    pub fn set_branch_deferred_push(
+        &self,
+        id: &str,
+        deferred: Option<DeferredPush>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE branches SET deferred_push = ?1, deferred_push_requested_at = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![
+                deferred.map(|d| d.as_column_name()),
+                deferred.map(|d| d.requested_at),
+                now_timestamp(),
+                id
+            ],
+        )?;
+        self.publish_with(|| StoreChange::Branch {
+            branch_id: id.to_string(),
+            project_id: Self::branch_project_id(&conn, id),
+        });
+        Ok(())
+    }
+
+    /// Every branch with a deferred push armed, within `project_id` when
+    /// given. The startup pass and the project-session-ended kick read this.
+    pub fn branch_ids_with_deferred_push(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM branches
+             WHERE deferred_push IS NOT NULL AND (?1 IS NULL OR project_id = ?1)
+             ORDER BY id",
+        )?;
+        let branch_ids = stmt
+            .query_map(params![project_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(branch_ids)
     }
 
     pub fn update_branch_name(&self, id: &str, branch_name: &str) -> Result<(), StoreError> {
@@ -408,6 +456,8 @@ impl Store {
         let pr_mergeable: Option<i64> = row.get(12)?;
         let pr_draft: Option<i64> = row.get(13)?;
         let setup_complete: i64 = row.get(18)?;
+        let deferred_push_name: Option<String> = row.get(22)?;
+        let deferred_push_requested_at: Option<i64> = row.get(23)?;
         Ok(Branch {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -428,6 +478,9 @@ impl Store {
             pr_fetched_at: row.get(16)?,
             pr_head_sha: row.get(17)?,
             setup_complete: setup_complete != 0,
+            deferred_push: deferred_push_name.and_then(|name| {
+                DeferredPush::parse(&name, deferred_push_requested_at.unwrap_or_default())
+            }),
             created_at: row.get(19)?,
             updated_at: row.get(20)?,
             pr_title: row.get(21)?,

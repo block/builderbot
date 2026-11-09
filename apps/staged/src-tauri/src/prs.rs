@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -2413,6 +2414,274 @@ pub async fn push_branch(
     .await
 }
 
+// =============================================================================
+// Deferred push ("Push after current work")
+// =============================================================================
+//
+// A push armed on the branch row (`branches.deferred_push`, see
+// `store::DeferredPush`) that fires once the branch and its project are idle.
+// It is a flag rather than a queued push row because a queued row sits in the
+// branch FIFO — it would block work queued behind it, and the queue is blind to
+// project sessions. The fired push is an ordinary push pipeline, so the
+// per-variant dedupe, the prompts and the `push-completed` handling all apply.
+
+impl PushVariant {
+    /// The variant a deferred push was armed with.
+    fn of_deferred(deferred: &store::DeferredPush) -> Self {
+        Self {
+            force: deferred.force,
+            no_verify: deferred.no_verify,
+        }
+    }
+}
+
+/// What `defer_branch_push` did: armed the flag, or — the branch and project
+/// were already idle when it ran — pushed right away, in which case `push` is
+/// the push's start-or-queue response.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredPushResponse {
+    pub armed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push: Option<BranchPipelineResponse>,
+}
+
+/// Whether the branch and its project have nothing in flight: no branch
+/// session `running`, `disconnected` or `queued` (commit, note, review,
+/// pipeline, background hold or Blox turn alike), and no project-note session
+/// in any of those states.
+///
+/// "Fully idle" rather than "the sessions running at arm time" on purpose: a
+/// project session can enqueue branch work through the project MCP right
+/// before it ends, and the branch check catches that.
+fn branch_and_project_idle(store: &Arc<Store>, branch: &store::Branch) -> Result<bool, String> {
+    Ok(!branch_has_work_in_flight(store, &branch.id)?
+        && !store
+            .project_has_sessions_in_flight(&branch.project_id)
+            .map_err(|e| e.to_string())?)
+}
+
+/// Arm `variant` to push once the branch and its project are idle — or, when
+/// they already are, push now through `push`.
+///
+/// The check-and-set runs under the branch launch lock, so a session start
+/// racing it either lands before the check (the push is armed) or after (the
+/// push starts, and its own re-check queues it behind the new session). Pushing
+/// immediately closes the gap where work finishes between the menu rendering
+/// and the click, which would otherwise leave an armed flag nothing kicks.
+///
+/// Arming again overwrites the variant. `push` is injected so tests can drive
+/// the decision without a runner.
+pub(crate) async fn defer_branch_push_with<F, Fut>(
+    store: &Arc<Store>,
+    branch_id: &str,
+    variant: PushVariant,
+    push: F,
+) -> Result<DeferredPushResponse, String>
+where
+    F: FnOnce(PushVariant) -> Fut,
+    Fut: Future<Output = Result<BranchPipelineResponse, String>>,
+{
+    let armed = {
+        let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
+        let _guard = launch_lock.lock().unwrap();
+        let branch = store
+            .get_branch(branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+        if branch_and_project_idle(store, &branch)? {
+            false
+        } else {
+            store
+                .set_branch_deferred_push(
+                    branch_id,
+                    Some(store::DeferredPush {
+                        force: variant.force,
+                        no_verify: variant.no_verify,
+                        requested_at: store::now_timestamp(),
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+            true
+        }
+    };
+    if armed {
+        return Ok(DeferredPushResponse {
+            armed: true,
+            push: None,
+        });
+    }
+    let response = push(variant).await?;
+    Ok(DeferredPushResponse {
+        armed: false,
+        push: Some(response),
+    })
+}
+
+/// [`defer_branch_push_with`] whose immediate push is the ordinary
+/// start-or-queue push. `provider` only matters for that immediate push; a
+/// push fired later by the drain runs with the backend default, like a queued
+/// row's does.
+pub(crate) async fn defer_branch_push_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+    variant: PushVariant,
+) -> Result<DeferredPushResponse, String> {
+    let push_store = Arc::clone(&store);
+    let push_branch_id = branch_id.clone();
+    defer_branch_push_with(&store, &branch_id, variant, move |variant| {
+        start_or_queue_push_pipeline_for_branch(
+            push_store,
+            registry,
+            app_handle,
+            push_branch_id,
+            provider,
+            variant,
+        )
+    })
+    .await
+}
+
+/// Clear the branch's deferred push. A no-op when nothing is armed.
+pub(crate) fn cancel_deferred_push_for_branch(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<(), String> {
+    store
+        .set_branch_deferred_push(branch_id, None)
+        .map_err(|e| e.to_string())
+}
+
+/// The deferred push the branch would fire now: `Some` when one is armed and
+/// the branch and its project are idle.
+fn deferred_push_ready(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<Option<store::DeferredPush>, String> {
+    let Some(branch) = store.get_branch(branch_id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let Some(deferred) = branch.deferred_push else {
+        return Ok(None);
+    };
+    if !branch_and_project_idle(store, &branch)? {
+        return Ok(None);
+    }
+    Ok(Some(deferred))
+}
+
+/// Fire the branch's deferred push through `fire` if one is armed and the
+/// branch and project are idle. Returns whether a push was started.
+///
+/// The flag is cleared *before* the push starts, so the push's own terminal
+/// state (which kicks the branch again) cannot find it still armed and fire
+/// twice; a failure to start re-arms it — unless the branch is gone or was
+/// re-armed meanwhile — so the next kick retries. `fire` is injected so tests
+/// can observe the variant without a runner.
+pub(crate) async fn fire_deferred_push_with<F, Fut>(
+    store: &Arc<Store>,
+    branch_id: &str,
+    fire: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(PushVariant) -> Fut,
+    Fut: Future<Output = Result<BranchPipelineResponse, String>>,
+{
+    let Some(deferred) = deferred_push_ready(store, branch_id)? else {
+        return Ok(false);
+    };
+    store
+        .set_branch_deferred_push(branch_id, None)
+        .map_err(|e| e.to_string())?;
+    let variant = PushVariant::of_deferred(&deferred);
+    match fire(variant).await {
+        Ok(response) => {
+            log::info!(
+                "[session_queue] deferred push on branch {branch_id} fired as session {} ({:?}, force: {}, no_verify: {})",
+                response.session_id,
+                response.session_status,
+                variant.force,
+                variant.no_verify
+            );
+            Ok(true)
+        }
+        Err(e) => {
+            let still_clear = store
+                .get_branch(branch_id)
+                .map_err(|e| e.to_string())?
+                .is_some_and(|branch| branch.deferred_push.is_none());
+            if still_clear {
+                store
+                    .set_branch_deferred_push(branch_id, Some(deferred))
+                    .map_err(|e| e.to_string())?;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// [`fire_deferred_push_with`] whose push is the ordinary start-or-queue
+/// push. Called from the tail of `drain_branch_queue`, on the kicker's own
+/// task, when nothing queued could start; `provider` is the backend default,
+/// as for a queued row.
+pub(crate) async fn fire_deferred_push_if_idle(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+) -> Result<bool, String> {
+    let fire_store = Arc::clone(&store);
+    let fire_branch_id = branch_id.clone();
+    fire_deferred_push_with(&store, &branch_id, move |variant| {
+        start_or_queue_push_pipeline_for_branch(
+            fire_store,
+            registry,
+            app_handle,
+            fire_branch_id,
+            None,
+            variant,
+        )
+    })
+    .await
+}
+
+/// "Push after current work" and its variants: arm a push to run once the
+/// branch and its project are idle, or push now if they already are.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn defer_branch_push(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+    force: Option<bool>,
+    no_verify: Option<bool>,
+) -> Result<DeferredPushResponse, String> {
+    let store = get_store(&store)?;
+    defer_branch_push_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        provider,
+        PushVariant::from_request(force, no_verify),
+    )
+    .await
+}
+
+/// Clear a branch's deferred push.
+#[tauri::command(rename_all = "camelCase")]
+pub fn cancel_deferred_push(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    cancel_deferred_push_for_branch(&store, &branch_id)
+}
+
 /// Rebase a branch onto its base branch via a pipeline.
 ///
 /// When `target` is `None` or `"base"`, rebases onto `origin/{base_branch}`
@@ -3141,6 +3410,353 @@ mod tests {
             push.pipeline.unwrap().depends_on_session_id,
             Some(running.session_id)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Deferred push ("Push after current work")
+    // -----------------------------------------------------------------------
+
+    /// A running project-note session in `project_id`: the project-level
+    /// work a deferred push waits for, invisible to the branch queries.
+    fn start_running_project_note_session(store: &Arc<Store>, project_id: &str) -> String {
+        let session = store::Session::new_running("plan", Path::new("/tmp/staged-test"));
+        store.create_session(&session).unwrap();
+        let note = store::ProjectNote::new(project_id, "Plan", "").with_session(&session.id);
+        store.create_project_note(&note).unwrap();
+        session.id
+    }
+
+    fn end_session(store: &Arc<Store>, session_id: &str) {
+        store
+            .update_session_status(session_id, store::SessionStatus::Completed, None, None)
+            .unwrap();
+    }
+
+    fn deferred_push_of(store: &Arc<Store>, branch_id: &str) -> Option<store::DeferredPush> {
+        store.get_branch(branch_id).unwrap().unwrap().deferred_push
+    }
+
+    /// Arm `variant` with an immediate push that must not run.
+    async fn arm(store: &Arc<Store>, branch_id: &str, variant: PushVariant) {
+        let response = defer_branch_push_with(store, branch_id, variant, |variant| {
+            std::future::ready(Err(format!(
+                "the branch was busy; nothing should push now ({variant:?})"
+            )))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            response,
+            DeferredPushResponse {
+                armed: true,
+                push: None
+            }
+        );
+    }
+
+    /// Run the drain tail's firing step with a push that only records the
+    /// variant it was asked for.
+    async fn fire(store: &Arc<Store>, branch_id: &str) -> (bool, Vec<PushVariant>) {
+        let fired = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&fired);
+        let started = fire_deferred_push_with(store, branch_id, move |variant| {
+            recorder.lock().unwrap().push(variant);
+            std::future::ready(Ok(BranchPipelineResponse::running(format!(
+                "push-{}",
+                recorder.lock().unwrap().len()
+            ))))
+        })
+        .await
+        .unwrap();
+        let fired = fired.lock().unwrap().clone();
+        (started, fired)
+    }
+
+    /// (a) A deferred push does not fire while a branch session is running:
+    /// the flag stays armed, and the branch going idle is what fires it.
+    #[tokio::test]
+    async fn deferred_push_waits_for_the_branchs_running_session() {
+        let (store, branch) = setup_branch_store();
+        let note_session = {
+            start_running_note_session(&store, &branch.id);
+            store.get_running_sessions_for_branch(&branch.id).unwrap()[0]
+                .id
+                .clone()
+        };
+
+        arm(&store, &branch.id, PUSH).await;
+        let armed = deferred_push_of(&store, &branch.id).expect("armed");
+        assert_eq!(PushVariant::of_deferred(&armed), PUSH);
+        assert!(armed.requested_at > 0);
+
+        assert_eq!(fire(&store, &branch.id).await, (false, vec![]));
+        assert!(
+            deferred_push_of(&store, &branch.id).is_some(),
+            "still armed"
+        );
+
+        end_session(&store, &note_session);
+        assert_eq!(fire(&store, &branch.id).await, (true, vec![PUSH]));
+        assert_eq!(
+            deferred_push_of(&store, &branch.id),
+            None,
+            "cleared once fired"
+        );
+        // The push's own terminal state kicks the branch again: nothing left.
+        assert_eq!(fire(&store, &branch.id).await, (false, vec![]));
+    }
+
+    /// (b) A running project-note session holds the push too — the branch
+    /// queries cannot see it — and each of the four variants fires as armed,
+    /// exactly once, when the project goes idle.
+    #[tokio::test]
+    async fn deferred_push_waits_for_the_projects_own_sessions_and_fires_each_variant_once() {
+        for variant in [PUSH, FORCE_PUSH, NO_VERIFY_PUSH, NO_VERIFY_FORCE_PUSH] {
+            let (store, branch) = setup_branch_store();
+            let project_session = start_running_project_note_session(&store, &branch.project_id);
+            assert!(!store.has_running_session_for_branch(&branch.id).unwrap());
+
+            arm(&store, &branch.id, variant).await;
+            assert_eq!(
+                deferred_push_of(&store, &branch.id).map(|d| d.as_column_name()),
+                Some(match (variant.force, variant.no_verify) {
+                    (false, false) => "push",
+                    (true, false) => "force",
+                    (false, true) => "push-no-verify",
+                    (true, true) => "force-no-verify",
+                })
+            );
+            assert_eq!(
+                fire(&store, &branch.id).await,
+                (false, vec![]),
+                "{variant:?}"
+            );
+
+            end_session(&store, &project_session);
+            assert_eq!(
+                fire(&store, &branch.id).await,
+                (true, vec![variant]),
+                "{variant:?}"
+            );
+            assert_eq!(deferred_push_of(&store, &branch.id), None);
+            assert_eq!(
+                fire(&store, &branch.id).await,
+                (false, vec![]),
+                "{variant:?}"
+            );
+        }
+    }
+
+    /// A project session that is only queued, or disconnected, holds the push
+    /// like a running one.
+    #[tokio::test]
+    async fn deferred_push_waits_for_queued_and_disconnected_project_sessions() {
+        for status in [
+            store::SessionStatus::Queued,
+            store::SessionStatus::Disconnected,
+        ] {
+            let (store, branch) = setup_branch_store();
+            let project_session = start_running_project_note_session(&store, &branch.project_id);
+            store
+                .update_session_status(&project_session, status.clone(), None, None)
+                .unwrap();
+
+            arm(&store, &branch.id, PUSH).await;
+            assert_eq!(
+                fire(&store, &branch.id).await,
+                (false, vec![]),
+                "{status:?}"
+            );
+        }
+    }
+
+    /// (c) Arming on an idle branch pushes right away instead: the window
+    /// between the menu rendering and the click would otherwise leave a flag
+    /// nothing kicks.
+    #[tokio::test]
+    async fn deferring_on_an_idle_branch_pushes_immediately_without_arming() {
+        let (store, branch) = setup_branch_store();
+        let pushed = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&pushed);
+        let response = defer_branch_push_with(&store, &branch.id, NO_VERIFY_FORCE_PUSH, {
+            move |variant| {
+                recorder.lock().unwrap().push(variant);
+                std::future::ready(Ok(BranchPipelineResponse::running("push-now".to_string())))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response,
+            DeferredPushResponse {
+                armed: false,
+                push: Some(BranchPipelineResponse::running("push-now".to_string())),
+            }
+        );
+        assert_eq!(*pushed.lock().unwrap(), vec![NO_VERIFY_FORCE_PUSH]);
+        assert_eq!(deferred_push_of(&store, &branch.id), None);
+    }
+
+    /// (d) A queued push of the same variant is work in flight, so the
+    /// deferred push waits behind it rather than stacking a second push; and
+    /// the queue's own dedupe still folds repeat requests onto the queued row.
+    #[tokio::test]
+    async fn deferred_push_waits_behind_a_queued_push_instead_of_stacking() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+        let queued = queue_push(&store, &branch.id, PUSH).expect("queued behind the note");
+
+        arm(&store, &branch.id, PUSH).await;
+        assert_eq!(queue_push(&store, &branch.id, PUSH), Some(queued.clone()));
+
+        // The note ends; the queued push is still ahead.
+        for session in store.get_running_sessions_for_branch(&branch.id).unwrap() {
+            end_session(&store, &session.id);
+        }
+        assert_eq!(fire(&store, &branch.id).await, (false, vec![]));
+        assert!(deferred_push_of(&store, &branch.id).is_some());
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            1,
+            "no second push row"
+        );
+
+        // The queued push runs and ends (or is cancelled): now the branch is idle.
+        store
+            .update_session_status(&queued, store::SessionStatus::Cancelled, None, None)
+            .unwrap();
+        assert_eq!(fire(&store, &branch.id).await, (true, vec![PUSH]));
+    }
+
+    /// A push that fails to start leaves the flag armed for the next kick —
+    /// unless the user re-armed something else meanwhile, or the branch is gone.
+    #[tokio::test]
+    async fn deferred_push_that_fails_to_start_stays_armed() {
+        let (store, branch) = setup_branch_store();
+        let project_session = start_running_project_note_session(&store, &branch.project_id);
+        arm(&store, &branch.id, FORCE_PUSH).await;
+        end_session(&store, &project_session);
+
+        let err = fire_deferred_push_with(&store, &branch.id, |_| {
+            std::future::ready(Err::<BranchPipelineResponse, _>("no remote".to_string()))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err, "no remote");
+        assert_eq!(
+            deferred_push_of(&store, &branch.id).map(|d| PushVariant::of_deferred(&d)),
+            Some(FORCE_PUSH)
+        );
+
+        // Re-armed with another variant while the start was failing: kept.
+        let err = fire_deferred_push_with(&store, &branch.id, |_| async {
+            store
+                .set_branch_deferred_push(
+                    &branch.id,
+                    Some(store::DeferredPush {
+                        force: false,
+                        no_verify: true,
+                        requested_at: 1,
+                    }),
+                )
+                .unwrap();
+            Err::<BranchPipelineResponse, _>("no remote".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err, "no remote");
+        assert_eq!(
+            deferred_push_of(&store, &branch.id).map(|d| PushVariant::of_deferred(&d)),
+            Some(NO_VERIFY_PUSH)
+        );
+    }
+
+    /// Arming again replaces the variant; cancelling clears it; a branch with
+    /// nothing armed cancels to nothing.
+    #[tokio::test]
+    async fn deferred_push_is_replaced_by_rearming_and_cleared_by_cancel() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        arm(&store, &branch.id, PUSH).await;
+        arm(&store, &branch.id, NO_VERIFY_FORCE_PUSH).await;
+        assert_eq!(
+            deferred_push_of(&store, &branch.id).map(|d| PushVariant::of_deferred(&d)),
+            Some(NO_VERIFY_FORCE_PUSH)
+        );
+
+        cancel_deferred_push_for_branch(&store, &branch.id).unwrap();
+        assert_eq!(deferred_push_of(&store, &branch.id), None);
+        cancel_deferred_push_for_branch(&store, &branch.id).unwrap();
+
+        // Cancelled: a kick finds nothing to fire even once idle.
+        for session in store.get_running_sessions_for_branch(&branch.id).unwrap() {
+            end_session(&store, &session.id);
+        }
+        assert_eq!(fire(&store, &branch.id).await, (false, vec![]));
+    }
+
+    /// The flag round-trips through the store, on create and on update, and
+    /// lists per project.
+    #[test]
+    fn deferred_push_round_trips_through_the_branch_row() {
+        let (store, branch) = setup_branch_store();
+        let other_project = store::Project::new("other/repo");
+        store.create_project(&other_project).unwrap();
+        let mut created_armed = store::Branch::new(&other_project.id, "armed-on-create", "main");
+        created_armed.deferred_push = Some(store::DeferredPush {
+            force: true,
+            no_verify: true,
+            requested_at: 1234,
+        });
+        store.create_branch(&created_armed).unwrap();
+
+        assert_eq!(
+            store
+                .get_branch(&created_armed.id)
+                .unwrap()
+                .unwrap()
+                .deferred_push,
+            created_armed.deferred_push
+        );
+        assert_eq!(deferred_push_of(&store, &branch.id), None);
+
+        let armed = store::DeferredPush {
+            force: false,
+            no_verify: true,
+            requested_at: 99,
+        };
+        store
+            .set_branch_deferred_push(&branch.id, Some(armed))
+            .unwrap();
+        assert_eq!(deferred_push_of(&store, &branch.id), Some(armed));
+        assert_eq!(store.branch_ids_with_deferred_push(None).unwrap().len(), 2);
+        assert_eq!(
+            store
+                .branch_ids_with_deferred_push(Some(&branch.project_id))
+                .unwrap(),
+            vec![branch.id.clone()]
+        );
+
+        store.set_branch_deferred_push(&branch.id, None).unwrap();
+        assert_eq!(deferred_push_of(&store, &branch.id), None);
+        assert_eq!(
+            store
+                .branch_ids_with_deferred_push(Some(&branch.project_id))
+                .unwrap(),
+            Vec::<String>::new()
+        );
+
+        for name in ["push", "force", "push-no-verify", "force-no-verify"] {
+            let parsed = store::DeferredPush::parse(name, 7).unwrap();
+            assert_eq!(parsed.as_column_name(), name);
+            assert_eq!(parsed.requested_at, 7);
+        }
+        assert_eq!(store::DeferredPush::parse("later", 7), None);
     }
 
     /// A mock app whose web broadcast channel is managed, so a test can read

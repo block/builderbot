@@ -149,6 +149,8 @@ function remoteBranch(workspaceStatus: WorkspaceStatus): Branch {
     prFetchedAt: null,
     prHeadSha: null,
     prTitle: null,
+    deferredPush: null,
+    deferredPushRequestedAt: null,
   };
 }
 

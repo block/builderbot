@@ -5,11 +5,13 @@
  * component maps each `id` to an icon and a handler; icons stay out of here so
  * tests need no icon mocks. The chevron shows whenever the list is non-empty.
  *
- * Entries come in sections, joined by separators: creating a PR, pushing, and
- * links to the PR. Each section is its own function, so a new push action
- * extends `pushItems` (and its inputs) without touching the others.
+ * Entries come in sections, joined by separators: creating a PR, pushing now,
+ * pushing later ("after current work"), and links to the PR. Each section is
+ * its own function, so a new push action extends `pushItems` (and its inputs)
+ * without touching the others.
  */
 
+import type { DeferredPushName } from '../../types';
 import type { PrState } from '../../stores/prState.svelte';
 import type { PushState } from '../../stores/pushState.svelte';
 import type { PrPushAction } from './prButtonGitState';
@@ -19,6 +21,11 @@ export type PrMenuItemId =
   | 'detectExistingPr'
   | 'pushNoVerify'
   | 'forcePushNoVerify'
+  | 'deferPush'
+  | 'deferForcePush'
+  | 'deferPushNoVerify'
+  | 'deferForcePushNoVerify'
+  | 'cancelDeferredPush'
   | 'viewPr'
   | 'copyPrUrl';
 
@@ -44,10 +51,22 @@ export interface PrMenuInput {
   prNumber: number | null;
   /** Whether Option is held right now, which swaps in the force variants. */
   altHeld: boolean;
+  /**
+   * Whether the branch or its project has sessions in flight — what a deferred
+   * push waits for, so the "after current work" rows only show while true.
+   */
+  workInFlight: boolean;
+  /** The deferred push armed on the branch, which the menu offers to cancel. */
+  deferredPush: DeferredPushName | null;
 }
 
 export function buildPrMenu(input: PrMenuInput): PrMenuEntry[] {
-  const sections = [createPrItems(input), pushItems(input), prLinkItems(input)];
+  const sections = [
+    createPrItems(input),
+    pushItems(input),
+    deferredPushItems(input),
+    prLinkItems(input),
+  ];
   const entries: PrMenuEntry[] = [];
   for (const section of sections) {
     if (section.length === 0) continue;
@@ -114,6 +133,72 @@ function pushItems({
     case 'none':
       return [];
   }
+}
+
+/** The push a deferred-push name stands for. */
+export function deferredPushVariant(name: DeferredPushName): { force: boolean; noVerify: boolean } {
+  return {
+    force: name === 'force' || name === 'force-no-verify',
+    noVerify: name === 'push-no-verify' || name === 'force-no-verify',
+  };
+}
+
+/** The inverse of `deferredPushVariant`. */
+export function deferredPushName(force: boolean, noVerify: boolean): DeferredPushName {
+  if (force) return noVerify ? 'force-no-verify' : 'force';
+  return noVerify ? 'push-no-verify' : 'push';
+}
+
+/** A deferred push's label, as the menu and the timeline's footer row show it. */
+export function deferredPushLabel(name: DeferredPushName): string {
+  const { force, noVerify } = deferredPushVariant(name);
+  return `${force ? 'Force push' : 'Push'} after current work${noVerify ? ' without verifying' : ''}`;
+}
+
+/**
+ * "Push after current work": a push that fires once the branch and its project
+ * are idle. Two rows, one per hook flavour, each Option-swapping to its force
+ * variant, as the immediate no-verify row does; in the diverged state the
+ * force variants show directly and confirm (unless Option is held), like the
+ * button. Offered in the in-sync state too: being in sync while work is in
+ * flight is the main use case. While one is armed, the section is just its
+ * Cancel row, in every state — the flag can coexist with a queued or running
+ * push. The timeline's footer row is the other undo, which is why the plain
+ * variants need no confirm.
+ */
+function deferredPushItems({
+  prState,
+  prStatusState,
+  pushState,
+  pushAction,
+  altHeld,
+  workInFlight,
+  deferredPush,
+}: PrMenuInput): PrMenuItem[] {
+  if (deferredPush) return [{ id: 'cancelDeferredPush', label: 'Cancel deferred push' }];
+  if (
+    prState !== 'created' ||
+    prStatusState === 'MERGED' ||
+    pushState !== 'idle' ||
+    !workInFlight
+  ) {
+    return [];
+  }
+  const force: PrMenuItem[] = [
+    { id: 'deferForcePush', label: deferredPushLabel('force') },
+    { id: 'deferForcePushNoVerify', label: deferredPushLabel('force-no-verify') },
+  ];
+  if (pushAction === 'forcePush') {
+    return altHeld
+      ? force
+      : force.map((item) => ({ ...item, label: `${item.label}…`, confirm: true }));
+  }
+  return altHeld
+    ? force
+    : [
+        { id: 'deferPush', label: deferredPushLabel('push') },
+        { id: 'deferPushNoVerify', label: deferredPushLabel('push-no-verify') },
+      ];
 }
 
 /** View PR (unless the button already opens it) and Copy PR URL. */

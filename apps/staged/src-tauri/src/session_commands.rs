@@ -6017,6 +6017,31 @@ pub(crate) async fn drain_branch_queue(
         }
     }
 
+    // Nothing queued could start. A deferred push ("Push after current work")
+    // armed on the branch fires here, once the branch and its project are
+    // idle: this tail is the one place every event that can unblock a branch
+    // reaches (see `session_queue::kick`), and the gates above — quitting,
+    // provisioning, transferring — apply to it for free. The start takes the
+    // launch lock itself, so no lock is held across it. A start that fails
+    // leaves the flag armed for the next kick.
+    if !started_any {
+        match crate::prs::fire_deferred_push_if_idle(
+            Arc::clone(&store),
+            Arc::clone(&registry),
+            app_handle.clone(),
+            branch_id.clone(),
+        )
+        .await
+        {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "[session_queue] deferred push on branch {branch_id} failed to start; it stays \
+                 armed for the next kick: {e}"
+            ),
+        }
+    }
+
     Ok(started_any)
 }
 

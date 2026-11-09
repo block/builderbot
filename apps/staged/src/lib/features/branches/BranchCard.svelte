@@ -114,6 +114,7 @@
   import { pullStateStore } from '../../stores/pullState.svelte';
   import { pushStateStore } from '../../stores/pushState.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
   import {
     onBranchGitStateUpdated,
     onBranchSetupProgress,
@@ -397,6 +398,16 @@
    */
   let branchSessionBusy = $derived(
     (timeline ? hasActiveSessions(timeline) : false) || gitPipelineInFlight
+  );
+  /**
+   * What a deferred push ("Push after current work") waits for: work on the
+   * branch, or any session in the project. `runningSessions` holds every
+   * session in the project, branch ones included, so the project check is a
+   * superset of the timeline's; the OR keeps the git actions `branchSessionBusy`
+   * folds in.
+   */
+  let workInFlight = $derived(
+    branchSessionBusy || projectStateStore.hasRunningSessions(branch.projectId)
   );
 
   /** Timeline label the backend gives a queued rebase/squash pipeline session. */
@@ -1360,6 +1371,22 @@
     }
   }
 
+  /**
+   * Clear the deferred push ("Push after current work") from its footer row.
+   * Unlike a queued push there is no session to cancel: the flag on the branch
+   * is all there is, and clearing it locally hides the row before the
+   * `branch-changed` refetch lands.
+   */
+  function cancelDeferredPush() {
+    commands
+      .cancelDeferredPush(branch.id)
+      .then(() => {
+        branch.deferredPush = null;
+        branch.deferredPushRequestedAt = null;
+      })
+      .catch((e) => notifyError('Could not cancel deferred push', e));
+  }
+
   function openPushSession() {
     if (pushSessionId && pushSessionId !== '__pending__') {
       sessionMgr.openSessionId = pushSessionId;
@@ -2164,6 +2191,7 @@
       {hasCodeChanges}
       {timeline}
       showButton={false}
+      {workInFlight}
       onOpenSession={(sid) => {
         sessionMgr.openSessionId = sid;
       }}
@@ -2258,6 +2286,8 @@
                 : undefined}
               onCancelQueuedPush={cancelQueuedPush}
               onCancelQueuedPull={cancelQueuedPull}
+              onCancelDeferredPush={cancelDeferredPush}
+              deferredPush={branch.deferredPush}
               {forcePushingOrigin}
               {pushQueuedOrigin}
               {pullQueuedOrigin}

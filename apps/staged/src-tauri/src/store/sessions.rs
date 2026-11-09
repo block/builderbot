@@ -848,6 +848,25 @@ impl Store {
         Ok(count > 0)
     }
 
+    /// Whether any of the project's own sessions is in flight.
+    ///
+    /// Project-note sessions have no `branch_id` and reach the project only
+    /// through `project_notes.session_id`, so the branch queries above cannot
+    /// see them. `queued` counts along with `running` and `disconnected`: a
+    /// deferred push ("Push after current work") waits for all three, so work
+    /// the project agent has lined up still runs before the push.
+    pub fn project_has_sessions_in_flight(&self, project_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions s
+             INNER JOIN project_notes pn ON pn.session_id = s.id
+             WHERE pn.project_id = ?1 AND s.status IN ('running', 'disconnected', 'queued')",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Resolve the branch that owns a session.
     ///
     /// Project-note sessions and Pikchr child sessions do not belong to a

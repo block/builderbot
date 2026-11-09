@@ -1467,3 +1467,79 @@ fn test_control_grants_migration_creates_the_table_and_cascades_on_project() {
 
     cleanup_db(&path);
 }
+
+/// 0044 adds the deferred-push columns to `branches`; existing rows read as
+/// not armed, and a fresh store round-trips the flag.
+#[test]
+fn test_branch_deferred_push_migration_leaves_existing_branches_unarmed() {
+    let path = temp_db_path("branch-deferred-push");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 43;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- Only the table 0044 adds its columns to.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
+        INSERT INTO branches (id, project_id) VALUES ('a', 'p'), ('b', 'p');
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 44);
+    assert!(column_exists(&conn, "branches", "deferred_push"));
+    assert!(column_exists(
+        &conn,
+        "branches",
+        "deferred_push_requested_at"
+    ));
+
+    let unarmed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM branches
+             WHERE deferred_push IS NULL AND deferred_push_requested_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unarmed, 2);
+    drop(conn);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_fresh_store_has_the_deferred_push_columns() {
+    let path = temp_db_path("fresh-deferred-push");
+    let store = Store::new(&path).unwrap();
+    let project = super::Project::new("owner/repo");
+    store.create_project(&project).unwrap();
+    let branch = super::Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let armed = super::DeferredPush {
+        force: true,
+        no_verify: false,
+        requested_at: 42,
+    };
+    store
+        .set_branch_deferred_push(&branch.id, Some(armed))
+        .unwrap();
+    assert_eq!(
+        store.get_branch(&branch.id).unwrap().unwrap().deferred_push,
+        Some(armed)
+    );
+    drop(store);
+
+    cleanup_db(&path);
+}

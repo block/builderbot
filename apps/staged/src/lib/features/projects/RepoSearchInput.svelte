@@ -30,6 +30,7 @@
   import { visibleViewportRect } from '../../shared/visibleViewportRect';
   import { placeHashtagDropdown } from '../sessions/hashtagDropdownPlacement';
   import { activeDescendantId, listboxOptionId } from '../../shared/listboxIds';
+  import { isImeKeydown } from '../../shared/imeKeydown';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import * as badge from '../../shared/badgeColors';
@@ -323,7 +324,11 @@
   // the items (as in HashtagInput) rather than the focus, which the
   // dialog's focus trap would pull back from the portaled dropdown.
   function handleKeydown(e: KeyboardEvent) {
-    if (!dropdownOpen) return;
+    // A key the IME is handling (Enter committing a composition, arrows picking
+    // a candidate, Escape cancelling it) is the IME's, not the dropdown's, as in
+    // HashtagInput. Safari's committing Enter has isComposing false but
+    // keyCode 229; without this it picked the highlighted repo mid-composition.
+    if (!dropdownOpen || isImeKeydown(e)) return;
 
     if (e.key === 'Escape') {
       e.preventDefault();

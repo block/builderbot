@@ -1732,6 +1732,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     .await?;
             Ok(serde_json::to_value(preflight).unwrap())
         }
+        "start_project_transfer_preflight" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let scan_id: String = arg(&args, "scanId")?;
+            crate::project_transfer::start_project_transfer_preflight_impl(
+                store,
+                app_handle.clone(),
+                project_id,
+                scan_id,
+            )
+            .await?;
+            Ok(serde_json::Value::Null)
+        }
+        "cancel_project_transfer_preflight" => {
+            let scan_id: String = arg(&args, "scanId")?;
+            Ok(serde_json::Value::Bool(
+                crate::project_transfer::cancel_project_transfer_preflight_impl(&scan_id),
+            ))
+        }
         "transfer_project" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
@@ -3410,7 +3429,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // `disconnected` row. Detached, so a client that goes mid-resume
             // can't leave the row claimed with no run behind it.
             detached(async move {
-                session_commands::resume_session_for_store(
+                let outcome = session_commands::resume_or_queue_session_for_store(
                     store,
                     session_registry,
                     action_executor,
@@ -3421,10 +3440,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     image_ids,
                     branch_id,
                     acp_config_selection,
-                    None,
                 )
                 .await?;
-                Ok(Value::Null)
+                Ok(serde_json::to_value(outcome).unwrap())
             })
             .await
         }
@@ -4379,7 +4397,7 @@ mod tests {
     fn web_resume_session_shares_the_tauri_body() {
         let arm = dispatch_arm_body(include_str!("web_server.rs"), "resume_session");
         assert!(
-            arm.contains("session_commands::resume_session_for_store("),
+            arm.contains("session_commands::resume_or_queue_session_for_store("),
             "the web `resume_session` arm must call the shared body: {arm}"
         );
         assert!(
@@ -4406,6 +4424,7 @@ mod tests {
             "pull_or_queue_branch_for_branch(",
             "start_queued_session_now_for_branch(",
             "resume_session_for_store(",
+            "resume_or_queue_session_for_store(",
         ];
         /// Arms whose bodies run through `detached`.
         const DETACHED: &[&str] = &[

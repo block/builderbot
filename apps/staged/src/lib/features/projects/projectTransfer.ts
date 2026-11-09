@@ -7,7 +7,10 @@
  */
 
 import type {
+  Branch,
+  Project,
   ProjectLocation,
+  ProjectRepo,
   ProjectTransferDirection,
   ProjectTransferIssue,
   ProjectTransferPhase,
@@ -20,6 +23,74 @@ import type {
 /** Where a transfer from `location` goes. */
 export function transferDirectionFrom(location: ProjectLocation): ProjectTransferDirection {
   return location === 'local' ? 'toRemote' : 'toLocal';
+}
+
+/**
+ * The preflight the dialog opens with, before the backend's scan has said
+ * anything: a row per branch the frontend already knows, each still being
+ * checked, with nothing yet to block the transfer — so the rows and a live
+ * Transfer button are there from the first frame (confirming then asks
+ * first, as any mid-scan confirm does). The scan's first step, from the
+ * backend's store alone, replaces it within milliseconds; Blox's answers
+ * and each checkout's counts follow. Null when the branches aren't known
+ * yet (or there are none), when the dialog shows its loading state instead.
+ */
+export function placeholderPreflight(
+  project: Project,
+  branches: Branch[],
+  repos: ProjectRepo[]
+): ProjectTransferPreflight | null {
+  if (branches.length === 0) return null;
+  const direction = transferDirectionFrom(project.location);
+  const reposById = new Map(repos.map((repo) => [repo.id, repo]));
+  const rows = branches.map((branch): ProjectTransferRepoPreflight => {
+    // Like the backend: the branch's project repo, or the project's own.
+    const repo = branch.projectRepoId ? reposById.get(branch.projectRepoId) : undefined;
+    return {
+      branchId: branch.id,
+      projectRepoId: branch.projectRepoId,
+      githubRepo: repo?.githubRepo ?? project.githubRepo ?? '',
+      subpath: repo?.subpath ?? null,
+      branchName: branch.branchName,
+      destBranchName: branch.branchName,
+      state: 'nothingToCarry',
+      head: null,
+      upstream: null,
+      unpushedCommits: 0,
+      staged: 0,
+      unstaged: 0,
+      untracked: 0,
+      conflicted: 0,
+      untrackedBytes: 0,
+      ignoredFiles: 0,
+      ignoredBytes: 0,
+      ignoredDirs: 0,
+      lfsPresent: 0,
+      lfsPresentBytes: 0,
+      lfsMissing: 0,
+      lfsMissingBytes: 0,
+      hasUncommittedChanges: false,
+      scanning: true,
+      blockers: [],
+      warnings: [],
+    };
+  });
+  return {
+    projectId: project.id,
+    from: project.location,
+    to: project.location === 'local' ? 'remote' : 'local',
+    direction,
+    workspaceName:
+      direction === 'toLocal'
+        ? (branches.find((branch) => branch.workspaceName)?.workspaceName ?? null)
+        : null,
+    repos: rows,
+    blockers: [],
+    warnings: [],
+    canTransfer: true,
+    hasUncommittedChanges: false,
+    scanning: true,
+  };
 }
 
 /** The menu item / dialog title: "Transfer to Blox" or "Transfer to local". */
@@ -109,17 +180,26 @@ export function lfsSummary(row: ProjectTransferRepoPreflight): string | null {
 /**
  * Whether the dialog asks about uncommitted changes. Besides the repos known
  * to have some, an `unknown` repo (a workspace the transfer resumes first)
- * may turn out to, and the user's answer must still apply to it.
+ * or one still being scanned may turn out to, and the user's answer must
+ * still apply to it.
  */
 export function asksAboutUncommitted(preflight: ProjectTransferPreflight): boolean {
-  return preflight.hasUncommittedChanges || preflight.repos.some(isUnknown);
+  return preflight.hasUncommittedChanges || preflight.repos.some(notYetRead);
 }
 
 /** Whether the dialog only knows "may have" uncommitted changes: none seen,
- *  but some repo can't be inspected until the transfer resumes it. */
+ *  but some repo hasn't been read yet (its scan is still going, or it can't
+ *  be inspected until the transfer resumes it). */
 export function uncommittedOnlyPossible(preflight: ProjectTransferPreflight): boolean {
-  return !preflight.hasUncommittedChanges && preflight.repos.some(isUnknown);
+  return !preflight.hasUncommittedChanges && preflight.repos.some(notYetRead);
 }
+
+/** The label on a session or reply held back while its project transfers. */
+export const QUEUED_FOR_TRANSFER_LABEL = 'Queued until the transfer completes';
+
+/** The confirmation shown when Transfer is clicked before the scan is done. */
+export const SCAN_UNFINISHED_CONFIRMATION =
+  "The scan of what will be left behind hasn't finished; files not yet listed may be lost on the remote. Transfer anyway?";
 
 /**
  * Whether the dialog asks about ignored files: only when some repo has some
@@ -142,8 +222,8 @@ export function ignoredTransferBlocked(preflight: ProjectTransferPreflight): str
   return `${whose} ignored files are too large to transfer, so they can't move this time.`;
 }
 
-function isUnknown(row: { state: ProjectTransferRepoState }): boolean {
-  return row.state === 'unknown';
+function notYetRead(row: { state: ProjectTransferRepoState; scanning: boolean }): boolean {
+  return row.state === 'unknown' || row.scanning;
 }
 
 export function plural(count: number, singular: string, pluralForm = `${singular}s`): string {

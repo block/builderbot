@@ -709,6 +709,9 @@ pub(crate) fn workspace_status_written<R: tauri::Runtime>(
     status: &store::WorkspaceStatus,
 ) {
     if changed && *status == store::WorkspaceStatus::Running {
+        // The replies held for a transfer that landed the branch while its
+        // workspace was still starting go first: they wait on this too.
+        crate::session_queue::flush_follow_ups(app_handle, branch_id);
         crate::session_queue::kick(
             app_handle,
             branch_id,
@@ -1711,6 +1714,9 @@ pub(crate) fn create_and_link_worktree<R: tauri::Runtime>(
         }
     }
 
+    // The replies held for a transfer that landed the branch without a
+    // worktree wait on this too.
+    crate::session_queue::flush_follow_ups(app_handle, &branch.id);
     crate::session_queue::kick(
         app_handle,
         &branch.id,
@@ -4638,6 +4644,8 @@ mod upstream_tracking_tests {
         )
         .unwrap();
         assert_eq!(kicker.kicked_branches(), vec![branch.id.clone()]);
+        // And asks for the replies held while the branch had no worktree.
+        assert_eq!(kicker.flushed(), vec![branch.id.clone()]);
 
         // The fast path — the worktree already exists — provisions nothing,
         // so it kicks nothing.
@@ -4650,6 +4658,31 @@ mod upstream_tracking_tests {
         )
         .unwrap();
         assert_eq!(kicker.kicked_branches(), vec![branch.id.clone()]);
+        assert_eq!(kicker.flushed(), vec![branch.id.clone()]);
+    }
+
+    /// A workspace reaching `Running` asks for the replies held while it
+    /// was starting, as it kicks; any other write does neither.
+    #[test]
+    fn a_workspace_coming_up_flushes_held_follow_ups_and_kicks() {
+        let app = mock_app();
+        let kicker = Arc::new(crate::session_queue::BranchQueueKicker::recording());
+        app.manage(Arc::clone(&kicker));
+
+        workspace_status_written(app.handle(), "b", false, &store::WorkspaceStatus::Running);
+        workspace_status_written(app.handle(), "b", true, &store::WorkspaceStatus::Starting);
+        assert!(kicker.kicked().is_empty());
+        assert!(kicker.flushed().is_empty());
+
+        workspace_status_written(app.handle(), "b", true, &store::WorkspaceStatus::Running);
+        assert_eq!(kicker.flushed(), vec!["b".to_string()]);
+        assert_eq!(
+            kicker.kicked(),
+            vec![(
+                "b".to_string(),
+                crate::session_queue::KickSource::WorkspaceRunning
+            )]
+        );
     }
 
     /// The ordinary case: a branch that exists on origin, with no collision,

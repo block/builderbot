@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
-use super::kick::{kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource};
+use super::follow_ups::{held_follow_ups_ready, held_work_note};
+use super::kick::{
+    flush_follow_ups, kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource,
+};
 use super::retry::{
     queued_start_retry, QueuedStartAttempts, QueuedStartRetry, MAX_QUEUED_START_ATTEMPTS,
     QUEUED_START_RETRY_DELAYS,
@@ -1137,4 +1140,122 @@ fn dead_owner_recovery_leaves_a_blox_turn_disconnected() {
         ended.completion_reason,
         Some(store::CompletionReason::AppQuit)
     );
+}
+
+/// A failed transfer says what was queued waiting for it, in its error.
+#[test]
+fn held_work_note_counts_queued_sessions_and_replies_across_the_project() {
+    let (store, branch) = store_with_branch();
+    let project_id = branch.project_id.clone();
+    assert_eq!(held_work_note(&store, &project_id), None);
+
+    let second = store::Branch::new(&project_id, "second", "main");
+    store.create_branch(&second).unwrap();
+    store
+        .create_session(&session(&branch.id, "queued one", SessionStatus::Queued))
+        .unwrap();
+    assert_eq!(
+        held_work_note(&store, &project_id).as_deref(),
+        Some("1 session queued for the transfer is going ahead where the project is.")
+    );
+
+    let finished = session(&second.id, "finished", SessionStatus::Running);
+    store.create_session(&finished).unwrap();
+    store
+        .update_session_status(&finished.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    store
+        .add_queued_session_message_held_for_transfer(&finished.id, "reply", &[], Some(&second.id))
+        .unwrap();
+    store
+        .add_queued_session_message_held_for_transfer(&finished.id, "again", &[], Some(&second.id))
+        .unwrap();
+    assert_eq!(
+        held_work_note(&store, &project_id).as_deref(),
+        Some(
+            "1 session and 2 replies queued for the transfer are going ahead where the project is."
+        )
+    );
+    assert_eq!(held_work_note(&store, "no-such-project"), None);
+}
+
+/// A session that finished on `branch`, holding one reply for a transfer.
+fn hold_a_reply(store: &Store, branch: &store::Branch) -> Session {
+    let finished = session(&branch.id, "finished", SessionStatus::Running);
+    store.create_session(&finished).unwrap();
+    store
+        .update_session_status(&finished.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    store
+        .add_queued_session_message_held_for_transfer(&finished.id, "reply", &[], Some(&branch.id))
+        .unwrap();
+    finished
+}
+
+/// The flush's provisioning gate, the drain's: a reply held for a transfer
+/// that landed the branch with nowhere to run yet waits, rather than being
+/// sent into a worktree that isn't there or a workspace that isn't up and
+/// stranded with the error; a branch that is gone has nothing to send.
+#[test]
+fn held_follow_ups_wait_while_the_branch_provisions() {
+    // Local: no worktree, then one.
+    let (store, branch) = store_with_branch();
+    let finished = hold_a_reply(&store, &branch);
+    assert_eq!(
+        held_follow_ups_ready(&store, &branch.id).unwrap(),
+        Vec::<String>::new()
+    );
+    store
+        .create_workdir(
+            &store::Workdir::new(&branch.project_id, "/tmp/feature").with_branch(&branch.id),
+        )
+        .unwrap();
+    assert_eq!(
+        held_follow_ups_ready(&store, &branch.id).unwrap(),
+        vec![finished.id.clone()]
+    );
+    assert_eq!(
+        held_follow_ups_ready(&store, "no-such-branch").unwrap(),
+        Vec::<String>::new()
+    );
+
+    // Remote: the workspace starting, then running.
+    let store = Arc::new(Store::in_memory().unwrap());
+    let mut project = store::Project::new("test-owner/test-repo");
+    project.location = store::ProjectLocation::Remote;
+    store.create_project(&project).unwrap();
+    let mut remote = store::Branch::new_remote(&project.id, "feature", "main", "stg-feature");
+    remote.workspace_status = Some(store::WorkspaceStatus::Starting);
+    store.create_branch(&remote).unwrap();
+    let finished = hold_a_reply(&store, &remote);
+    assert_eq!(
+        held_follow_ups_ready(&store, &remote.id).unwrap(),
+        Vec::<String>::new()
+    );
+    store
+        .update_branch_workspace_status(&remote.id, &store::WorkspaceStatus::Running)
+        .unwrap();
+    assert_eq!(
+        held_follow_ups_ready(&store, &remote.id).unwrap(),
+        vec![finished.id]
+    );
+}
+
+/// The provisioning paths ask for the held follow-ups through the kicker,
+/// as they kick: with one managed the request reaches it, without one it
+/// is dropped like a kick.
+#[test]
+fn flushing_held_follow_ups_goes_through_the_managed_kicker() {
+    let app = mock_app();
+    flush_follow_ups(app.handle(), "branch-1");
+
+    let kicker = Arc::new(BranchQueueKicker::recording());
+    let app = app_with_kicker(&kicker);
+    flush_follow_ups(app.handle(), "branch-1");
+    flush_follow_ups(app.handle(), "branch-2");
+    assert_eq!(
+        kicker.flushed(),
+        vec!["branch-1".to_string(), "branch-2".to_string()]
+    );
+    assert!(kicker.kicked().is_empty(), "a flush is not a kick");
 }

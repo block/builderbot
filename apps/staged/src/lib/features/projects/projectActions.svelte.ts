@@ -19,7 +19,13 @@
 import { tick } from 'svelte';
 import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
-import type { Project, ProjectTransferDirection, ProjectTransferPreflight } from '../../types';
+import type {
+  Project,
+  ProjectTransferDirection,
+  ProjectTransferPreflight,
+  ProjectTransferPreflightEvent,
+} from '../../types';
+import { listenToEvent } from '../../transport';
 import { projectDisplayName } from '../../shared/utils';
 import {
   goHome,
@@ -43,6 +49,7 @@ import {
   isTransferCancelledError,
   isTransferStaleError,
   issueMessage,
+  placeholderPreflight,
   transferDestinationLabel,
   transferDirectionFrom,
   transferResultWarnings,
@@ -73,6 +80,8 @@ class ProjectActionsController {
   /** Bumped per dialog open and close, so a late preflight can't land on a
    *  dialog that was closed or reopened for another project. */
   private transferRequest = 0;
+  /** The streaming preflight scan behind the open transfer dialog, if any. */
+  private activeScan: { scanId: string; finish: () => void } | null = null;
 
   /** Each project's queue tail resolves to its last successfully persisted status. */
   private readonly statusOverrideWrites = new Map<
@@ -198,9 +207,14 @@ class ProjectActionsController {
   }
 
   /**
-   * Open the transfer dialog for a project and fetch its preflight: what each
-   * branch would carry and what stops the transfer. Resolves once the
-   * preflight has landed (or failed) in the dialog.
+   * Open the transfer dialog for a project and scan its preflight: what each
+   * branch would carry and what stops the transfer. The dialog opens with
+   * the branches already known here, each "Checking…", and the Transfer
+   * button live from the first frame (confirming mid-scan asks first, since
+   * files not yet listed may be lost). The scan streams into it: the
+   * backend's store view first, then what Blox says of the workspaces, then
+   * each row's counts as its checkout is read. Resolves once the scan has
+   * finished, failed or been stopped by a confirm or cancel.
    */
   async requestTransferProject(project: Project): Promise<void> {
     if (
@@ -210,25 +224,99 @@ class ProjectActionsController {
       return;
     }
     const request = ++this.transferRequest;
+    this.stopActiveScan();
     const direction = transferDirectionFrom(project.location);
-    this._pendingTransfer = { project, direction, status: 'loading' };
-    // The dialog labels rows from the preflight, but the progress banner
-    // names repos from the project's own, so fetch them meanwhile (deduped
-    // like the remove flow's). Never rejects, and the dialog doesn't wait.
+    // The branches this store knows are enough to open with; the scan's
+    // steps replace them. A project whose branches haven't loaded yet opens
+    // loading instead, for the few milliseconds until the scan's first step.
+    const placeholder = placeholderPreflight(
+      project,
+      projectsDataStore.branchesByProject.get(project.id) ?? [],
+      projectsDataStore.reposByProject.get(project.id) ?? []
+    );
+    this._pendingTransfer = placeholder
+      ? { project, direction, status: 'ready', preflight: placeholder }
+      : { project, direction, status: 'loading' };
+    // The progress banner names repos from the project's own, so fetch them
+    // meanwhile (deduped like the remove flow's). Never rejects, and the
+    // dialog doesn't wait.
     void projectsDataStore.ensureProjectHydrated(project.id);
-    try {
-      const preflight = await commands.getProjectTransferPreflight(project.id);
-      if (request !== this.transferRequest) return;
-      this._pendingTransfer = {
-        project,
-        direction: preflight.direction,
-        status: 'ready',
-        preflight,
+
+    const scanId = crypto.randomUUID();
+    const current = () => request === this.transferRequest;
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      let unlisten: (() => void) | null = null;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (this.activeScan?.scanId === scanId) this.activeScan = null;
+        unlisten?.();
+        resolve();
       };
-    } catch (e) {
-      if (request !== this.transferRequest) return;
-      this._pendingTransfer = { project, direction, status: 'error', error: errorMessage(e) };
-    }
+      const fail = (error: unknown) => {
+        if (current()) {
+          this._pendingTransfer = {
+            project,
+            direction,
+            status: 'error',
+            error: errorMessage(error),
+          };
+        }
+        finish();
+      };
+      unlisten = listenToEvent<ProjectTransferPreflightEvent>(
+        'project-transfer-preflight',
+        (event) => {
+          if (event.scanId !== scanId) return;
+          if (!current()) {
+            finish();
+            return;
+          }
+          if (event.preflight) {
+            this._pendingTransfer = {
+              project,
+              direction: event.preflight.direction,
+              status: 'ready',
+              preflight: event.preflight,
+            };
+          }
+          if (!event.done) return;
+          // A cancelled scan was stopped by this controller (confirm or
+          // cancel), so the dialog's state is already settled.
+          if (event.error && !event.cancelled) {
+            this._pendingTransfer = { project, direction, status: 'error', error: event.error };
+          }
+          finish();
+        },
+        {
+          // Start only once the listener is in place, so the first partial
+          // (or a quick failure) can't slip past it.
+          onEstablished: () => {
+            if (!current()) {
+              finish();
+              return;
+            }
+            this.activeScan = { scanId, finish };
+            commands.startProjectTransferPreflight(project.id, scanId).catch(fail);
+          },
+          onRegistrationFailed: fail,
+        }
+      );
+    });
+  }
+
+  /** Stop the dialog's streaming scan, if one is still going. */
+  private stopActiveScan(): void {
+    const scan = this.activeScan;
+    if (!scan) return;
+    this.activeScan = null;
+    // Settles requestTransferProject: the backend's final event for a
+    // stopped scan has nothing left to tell the dialog.
+    scan.finish();
+    commands.cancelProjectTransferPreflight(scan.scanId).catch((e) => {
+      console.error('Failed to cancel the transfer preflight scan:', e);
+    });
   }
 
   /**
@@ -257,6 +345,10 @@ class ProjectActionsController {
     const { project, preflight } = pending;
     this._pendingTransfer = null;
     this.transferRequest += 1;
+    // A scan still going is stopped rather than finished: the transfer reads
+    // the checkouts again itself, and the user has already accepted that
+    // files not yet listed may be lost.
+    this.stopActiveScan();
     const asked = asksAboutUncommitted(preflight);
     if (asked) {
       setTransferUncommittedChanges(includeUncommitted);
@@ -275,6 +367,7 @@ class ProjectActionsController {
   cancelPendingTransfer(): void {
     this._pendingTransfer = null;
     this.transferRequest += 1;
+    this.stopActiveScan();
   }
 
   /**

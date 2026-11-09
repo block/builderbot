@@ -1552,6 +1552,82 @@ fn test_delete_queued_session_message_releases_claimed_images() {
     );
 }
 
+/// A reply to a session whose project is being transferred is held whatever
+/// the session's status, and is what a drain on the branch finds — unless
+/// the session is running, when its own turn's end drains it.
+#[test]
+fn test_held_queued_session_messages_are_listed_per_branch_for_sessions_not_running() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let other = Branch::new(&project.id, "other", "main");
+    store.create_branch(&other).unwrap();
+
+    let finished = Session::new_running("done", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&finished).unwrap();
+    store
+        .update_session_status(&finished.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    let running = Session::new_running("busy", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&running).unwrap();
+    let elsewhere = Session::new_running("elsewhere", Path::new("/tmp")).with_branch(&other.id);
+    store.create_session(&elsewhere).unwrap();
+    store
+        .update_session_status(&elsewhere.id, SessionStatus::Completed, None, None)
+        .unwrap();
+
+    let held = store
+        .add_queued_session_message_held_for_transfer(&finished.id, "later", &[], Some(&branch.id))
+        .unwrap();
+    assert_eq!(held.status, QueuedSessionMessageStatus::Queued);
+    store
+        .add_queued_session_message(&running.id, "after this turn", &[], Some(&branch.id))
+        .unwrap();
+    store
+        .add_queued_session_message_held_for_transfer(&elsewhere.id, "other branch", &[], None)
+        .unwrap();
+    assert_eq!(
+        store
+            .add_queued_session_message_held_for_transfer("missing", "x", &[], None)
+            .unwrap_err()
+            .to_string(),
+        "Session not found: missing"
+    );
+
+    assert_eq!(
+        store
+            .session_ids_with_queued_messages_for_branch(&branch.id)
+            .unwrap(),
+        vec![finished.id.clone()],
+        "the running session's follow-up waits for its turn"
+    );
+    assert_eq!(
+        store
+            .count_queued_session_messages_for_branch(&branch.id)
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store
+            .count_queued_session_messages_for_branch(&other.id)
+            .unwrap(),
+        1
+    );
+
+    // Drained like any other: claimed oldest-first, then sent.
+    let claimed = store
+        .claim_oldest_queued_session_message(&finished.id)
+        .unwrap()
+        .expect("claimable");
+    assert_eq!(claimed.id, held.id);
+    assert!(store
+        .session_ids_with_queued_messages_for_branch(&branch.id)
+        .unwrap()
+        .is_empty());
+}
+
 #[test]
 fn test_add_queued_session_message_requires_running_session() {
     let store = Store::in_memory().unwrap();

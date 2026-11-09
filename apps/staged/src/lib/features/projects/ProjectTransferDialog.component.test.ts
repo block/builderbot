@@ -1,7 +1,14 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Project, ProjectTransferPreflight, ProjectTransferRepoPreflight } from '../../types';
+import type {
+  Branch,
+  Project,
+  ProjectRepo,
+  ProjectTransferPreflight,
+  ProjectTransferRepoPreflight,
+} from '../../types';
 import type { PendingTransfer } from './projectActions.svelte';
+import { placeholderPreflight } from './projectTransfer';
 
 // The dialog is driven by projectActions.pendingTransfer; the test owns that
 // state and watches the confirm/cancel calls. Dialog chrome is stubbed to
@@ -18,6 +25,22 @@ const { actions, prefs } = vi.hoisted(() => ({
 vi.mock('$lib/components/ui/dialog', () =>
   import('../sessions/testStubs/dialogMock').then((m) => m.dialogModuleMock())
 );
+// The mid-scan confirmation is an AlertDialog; its chrome passes children
+// through and its two buttons are plain buttons, so the test can click them.
+vi.mock('$lib/components/ui/alert-dialog', async () => {
+  const { default: Passthrough } = await import('../sessions/testStubs/PassthroughStub.svelte');
+  const { default: ButtonStub } = await import('../sessions/testStubs/ButtonStub.svelte');
+  return {
+    Root: Passthrough,
+    Content: Passthrough,
+    Header: Passthrough,
+    Footer: Passthrough,
+    Title: Passthrough,
+    Description: Passthrough,
+    Action: ButtonStub,
+    Cancel: ButtonStub,
+  };
+});
 // `pendingTransfer` is $state-backed, as the real controller's is, so a test
 // can move the mounted dialog through loading → ready, a close and a reopen.
 vi.mock('./projectActions.svelte', async () => {
@@ -71,6 +94,7 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     lfsMissing: 0,
     lfsMissingBytes: 0,
     hasUncommittedChanges: false,
+    scanning: false,
     blockers: [],
     warnings: [],
     ...overrides,
@@ -89,6 +113,7 @@ function preflight(overrides: Partial<ProjectTransferPreflight> = {}): ProjectTr
     warnings: [],
     canTransfer: true,
     hasUncommittedChanges: false,
+    scanning: false,
     ...overrides,
   };
 }
@@ -96,6 +121,50 @@ function preflight(overrides: Partial<ProjectTransferPreflight> = {}): ProjectTr
 function ready(pf: ProjectTransferPreflight, forProject: Project = project): PendingTransfer {
   return { project: forProject, direction: pf.direction, status: 'ready', preflight: pf };
 }
+
+/** A branch as the projects store knows it, for the dialog's placeholder. */
+function knownBranch(overrides: Partial<Branch> = {}): Branch {
+  return {
+    id: 'b1',
+    projectId: 'p1',
+    projectRepoId: 'r1',
+    branchName: 'feature',
+    baseBranch: 'main',
+    prNumber: null,
+    branchType: 'local',
+    workspaceName: null,
+    workstationId: null,
+    workspaceStatus: null,
+    setupComplete: true,
+    worktreePath: '/wt/b1',
+    createdAt: 0,
+    updatedAt: 0,
+    prState: null,
+    prChecksStatus: null,
+    prReviewDecision: null,
+    prMergeable: null,
+    prDraft: null,
+    prUrl: null,
+    prUpdatedAt: null,
+    prFetchedAt: null,
+    prHeadSha: null,
+    prTitle: null,
+    ...overrides,
+  };
+}
+
+const knownRepo: ProjectRepo = {
+  id: 'r1',
+  projectId: 'p1',
+  githubRepo: 'org/alpha',
+  branchName: 'feature',
+  subpath: null,
+  isPrimary: true,
+  reason: null,
+  headRepo: null,
+  createdAt: 0,
+  updatedAt: 0,
+};
 
 const dirty = () =>
   preflight({
@@ -152,6 +221,59 @@ describe('ProjectTransferDialog', () => {
     expect(submitButton().disabled).toBe(true);
     expect(submitButton().textContent).toContain('Transfer to Blox');
     expect(checkbox()).toBeNull();
+    unmount(dialog);
+  });
+
+  it('shows the branches it knows as Checking… with Transfer live before the scan has said anything', async () => {
+    // What projectActions opens the dialog with, from the projects store
+    // alone: no preflight event has arrived, or even been asked for.
+    const remote: Project = { ...project, location: 'remote' };
+    const placeholder = placeholderPreflight(
+      remote,
+      [
+        knownBranch({ branchType: 'remote', workspaceName: 'stg-feature', worktreePath: null }),
+        knownBranch({
+          id: 'b2',
+          projectRepoId: null,
+          branchName: 'gizmo',
+          branchType: 'remote',
+          workspaceName: 'stg-feature',
+          worktreePath: null,
+        }),
+      ],
+      [knownRepo]
+    );
+    expect(placeholder).not.toBeNull();
+    const dialog = mountDialog(ready(placeholder!, remote));
+    await settle();
+    expect(document.body.textContent).not.toContain('Checking what would move');
+    const rows = rowTexts();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain('feature');
+    expect(rows[0]).toContain('Checking…');
+    expect(rows[1]).toContain('gizmo');
+    expect(rows[1]).toContain('Checking…');
+    expect(document.body.textContent).toContain('Still checking what would be left behind');
+    expect(document.body.textContent).toContain('Transfer uncommitted changes, if there are any');
+    expect(submitButton().textContent).toContain('Transfer to local');
+    expect(submitButton().disabled).toBe(false);
+
+    // Transfer now goes through the mid-scan confirmation, like any confirm
+    // before the scan is done.
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      "The scan of what will be left behind hasn't finished; files not yet listed may be lost on the remote. Transfer anyway?"
+    );
+    [...document.querySelectorAll('button')]
+      .find((b) => b.textContent?.trim() === 'Transfer anyway')!
+      .click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
     unmount(dialog);
   });
 
@@ -518,6 +640,88 @@ describe('ProjectTransferDialog', () => {
       includeUncommitted: true,
       includeIgnored: false,
     });
+    unmount(dialog);
+  });
+
+  it('shows the rows as the scan reads them and lets Transfer go once confirmed', async () => {
+    const scanning = preflight({
+      repos: [repo({ scanning: true }), repo({ branchId: 'b2', githubRepo: 'org/beta' })],
+      scanning: true,
+    });
+    const dialog = mountDialog(ready(scanning));
+    await settle();
+    const rows = rowTexts();
+    expect(rows[0]).toContain('Checking…');
+    expect(rows[0]).not.toContain('unpushed');
+    expect(rows[1]).toContain('2 unpushed commits');
+    expect(document.body.textContent).toContain('Still checking what would be left behind');
+    // A row still being read may have uncommitted changes nobody has counted.
+    expect(document.body.textContent).toContain('Transfer uncommitted changes, if there are any');
+    expect(submitButton().disabled).toBe(false);
+    expect(document.body.textContent).not.toContain('Transfer anyway');
+
+    // Transfer mid-scan asks first, in these exact words.
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      "The scan of what will be left behind hasn't finished; files not yet listed may be lost on the remote. Transfer anyway?"
+    );
+    const button = (label: string) =>
+      [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === label)!;
+
+    // Backing out keeps the dialog, and the scan, going.
+    button('Keep checking').click();
+    await settle();
+    expect(document.body.textContent).not.toContain('Transfer anyway');
+    expect(actions.confirmPendingTransfer).not.toHaveBeenCalled();
+    expect(actions.cancelPendingTransfer).not.toHaveBeenCalled();
+
+    submitButton().click();
+    await settle();
+    button('Transfer anyway').click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
+    expect(document.body.textContent).not.toContain('Transfer anyway');
+
+    // Once the scan lands, Transfer goes straight through.
+    actions.confirmPendingTransfer.mockClear();
+    actions.pendingTransfer = ready(
+      preflight({ repos: scanning.repos.map((r) => ({ ...r, scanning: false })) })
+    );
+    await settle();
+    expect(document.body.textContent).not.toContain('Still checking');
+    expect(rowTexts()[0]).toContain('2 unpushed commits');
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain('Transfer anyway');
+    unmount(dialog);
+  });
+
+  it('keeps Transfer disabled while the scan runs if something blocks it', async () => {
+    const dialog = mountDialog(
+      ready(
+        preflight({
+          canTransfer: false,
+          scanning: true,
+          repos: [
+            repo({
+              scanning: true,
+              blockers: [{ code: 'session_running', message: 'A session is running on feature.' }],
+            }),
+          ],
+        })
+      )
+    );
+    await settle();
+    expect(submitButton().disabled).toBe(true);
+    submitButton().click();
+    await settle();
+    expect(document.body.textContent).not.toContain('Transfer anyway');
     unmount(dialog);
   });
 

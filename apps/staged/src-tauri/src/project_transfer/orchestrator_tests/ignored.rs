@@ -371,6 +371,8 @@ fn an_ignored_file_gone_or_new_after_the_backup_keeps_the_source() {
 #[test]
 fn a_rolled_back_transfer_to_local_takes_its_info_exclude_entries_back_out() {
     let f = two_repo_project();
+    // One leg after another: the first must finish before the second fails.
+    let _serial = SerialLegs::for_this_thread();
     f.transfer_options(with_ignored(), &|_| {})
         .result
         .expect("to remote");
@@ -575,6 +577,77 @@ fn a_transfer_back_to_remote_takes_out_the_entries_its_transfer_to_local_added()
         f.manifest(&again.transfer_id).unwrap().repos[0].added_excludes,
         None
     );
+}
+
+/// With two repositories, the transfer to local records both repos'
+/// entries in the one manifest, and the transfer back removes the two
+/// worktrees at once; each release rewrites that shared manifest and reads
+/// every record in it, so the releases run one after another, and neither
+/// writes back a record the other has just cleared: both clones' entries
+/// come out and both records are released.
+#[test]
+fn a_transfer_back_to_remote_releases_every_repos_excludes_once() {
+    let f = two_repo_project();
+    let entry = "/only-in-the-workspace.txt";
+    let excludes = [
+        f.host.clone_of(WIDGETS).join(".git/info/exclude"),
+        f.host.clone_of(GADGETS).join(".git/info/exclude"),
+    ];
+    let lines = |exclude: &Path| -> Vec<String> {
+        fs::read_to_string(exclude)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    f.transfer_options(with_ignored(), &|_| {})
+        .result
+        .expect("to remote");
+    for i in 0..2 {
+        let checkout = f.checkout(i);
+        let mut rules = fs::read_to_string(checkout.join(".git/info/exclude")).unwrap_or_default();
+        rules.push_str("only-in-the-workspace.txt\n");
+        fs::write(checkout.join(".git/info/exclude"), rules).unwrap();
+        write(&checkout, "only-in-the-workspace.txt", "pen\n");
+    }
+
+    let to_local = f.transfer_options(with_ignored(), &|_| {});
+    to_local.result.expect("to local");
+    let worktrees = [f.worktree(0), f.worktree(1)];
+    for (i, exclude) in excludes.iter().enumerate() {
+        assert!(
+            lines(exclude).iter().any(|l| l == entry),
+            "{:?}",
+            lines(exclude)
+        );
+        let record = f.manifest(&to_local.transfer_id).unwrap().repos[i]
+            .added_excludes
+            .clone()
+            .expect("each repo's entries are recorded");
+        assert_eq!(record.worktree, worktrees[i]);
+        assert_eq!(record.lines, vec![entry.to_string()]);
+    }
+
+    let back = f
+        .transfer_options(with_ignored(), &|_| {})
+        .result
+        .expect("back to remote");
+
+    assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+    for (i, exclude) in excludes.iter().enumerate() {
+        assert!(!worktrees[i].exists(), "an unchanged worktree is removed");
+        let now = lines(exclude);
+        assert!(!now.iter().any(|l| l == entry), "{now:?}");
+        assert_eq!(
+            f.manifest(&to_local.transfer_id).unwrap().repos[i].added_excludes,
+            None,
+            "repo {i} released"
+        );
+        assert_eq!(
+            read(&f.checkout(i), "only-in-the-workspace.txt").as_deref(),
+            Some("pen\n")
+        );
+    }
 }
 
 /// An ignored file only the workspace ignored, at a path another worktree of

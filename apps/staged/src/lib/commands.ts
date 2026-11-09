@@ -327,6 +327,22 @@ export function getProjectTransferPreflight(projectId: string): Promise<ProjectT
 }
 
 /**
+ * Start a preflight scan that streams `project-transfer-preflight` events
+ * (see ProjectTransferPreflightEvent) under `scanId`, a fresh id the caller
+ * picks so it can tell its scan's events from another dialog's. Resolves as
+ * soon as the scan is running; listen before calling so no event is missed.
+ */
+export function startProjectTransferPreflight(projectId: string, scanId: string): Promise<void> {
+  return invokeCommand('start_project_transfer_preflight', { projectId, scanId });
+}
+
+/** Stop a streaming preflight scan. Resolves whether one was running; a
+ *  stopped scan still emits its final event, with `cancelled`. */
+export function cancelProjectTransferPreflight(scanId: string): Promise<boolean> {
+  return invokeCommand('cancel_project_transfer_preflight', { scanId });
+}
+
+/**
  * Move a project to its other location, emitting `project-transfer-progress`
  * as it goes. Resolves once the project has switched; rejects with everything
  * undone. `direction` is the one the preflight showed: a project that has
@@ -1433,6 +1449,14 @@ export function startSession(
   });
 }
 
+/**
+ * Rust `ResumeSessionOutcome`: the follow-up started a new turn, or the
+ * session's project is being transferred and the backend held the message as
+ * a queued follow-up it sends once the transfer completes.
+ */
+export type ResumeSessionOutcome =
+  { outcome: 'started' } | { outcome: 'queuedForTransfer'; message: QueuedSessionMessage };
+
 /** Send a follow-up message to an existing session.
  *  The backend uses the provider that originally created the session. */
 export function resumeSession(
@@ -1441,7 +1465,7 @@ export function resumeSession(
   imageIds?: string[],
   branchId?: string | null,
   acpConfigSelection?: AcpConfigSelection
-): Promise<void> {
+): Promise<ResumeSessionOutcome> {
   return invokeCommand('resume_session', {
     sessionId,
     prompt,

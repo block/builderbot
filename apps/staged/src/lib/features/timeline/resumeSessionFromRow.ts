@@ -1,5 +1,6 @@
 import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
+import { QUEUED_FOR_TRANSFER_LABEL } from '../projects/projectTransfer';
 import { RESUME_ROW_PROMPT } from './sessionRowState';
 
 /**
@@ -36,7 +37,15 @@ export async function resumeSessionFromRow(
   resumesInFlight.add(sessionId);
   try {
     try {
-      await commands.resumeSession(sessionId, RESUME_ROW_PROMPT, undefined, branchId);
+      const outcome = await commands.resumeSession(
+        sessionId,
+        RESUME_ROW_PROMPT,
+        undefined,
+        branchId
+      );
+      // The project is being transferred: the backend holds the resume as a
+      // queued follow-up and sends it once the project has moved.
+      if (outcome.outcome === 'queuedForTransfer') toast.info(QUEUED_FOR_TRANSFER_LABEL);
     } catch (e) {
       console.error('Failed to resume session:', e);
       toast.error('Resume failed', {

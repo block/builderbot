@@ -16,13 +16,28 @@
 //! result [`TransferStopped::AfterSwitch`] carries when it panics part way.
 //!
 //! Synchronous, for the blocking pool; [`super::commands`] wraps it.
+//!
+//! The legs — one per branch, each on its own repository — are independent
+//! of each other once the destination exists: the per-leg steps (cloning or
+//! fetching at the destination, snapshotting, moving, applying, backing up)
+//! run up to [`MAX_PARALLEL_LEGS`] at a time, legs on the same repository
+//! one after another since they share a clone and its index (see
+//! [`Run::for_each_leg`]). What touches shared state stays sequential: the
+//! inspection, starting and deleting the workspace, the database switch,
+//! and the unchanged check right before the source comes down.
 
+mod parallel;
 mod teardown;
 
-use std::cell::{Cell, RefCell};
+#[cfg(test)]
+pub(crate) use parallel::SerialLegs;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -194,7 +209,7 @@ pub(super) fn run_transfer(
     host: &dyn TransferHost,
     guard: &TransferGuard,
     options: TransferOptions,
-    on_progress: &dyn Fn(&TransferProgress),
+    on_progress: &(dyn Fn(&TransferProgress) + Sync),
 ) -> Result<ProjectTransferResult, TransferStopped> {
     let TransferOptions {
         include_uncommitted,
@@ -212,7 +227,7 @@ pub(super) fn run_transfer(
         direction,
         transfer_dir: host.transfers_dir()?.join(guard.transfer_id()),
         workspace_name: None,
-        journal: RefCell::new(TransferManifest {
+        journal: Mutex::new(TransferManifest {
             transfer_id: guard.transfer_id().to_string(),
             project_id: project.id.clone(),
             direction: direction.as_str().to_string(),
@@ -223,8 +238,10 @@ pub(super) fn run_transfer(
             owner_pid: Some(std::process::id()),
             ..TransferManifest::default()
         }),
-        journaled: Cell::new(false),
-        switched: Cell::new(None),
+        journaled: AtomicBool::new(false),
+        switched: Mutex::new(None),
+        abort: AtomicBool::new(false),
+        emitting: Mutex::new(()),
     };
     match catch_unwind(AssertUnwindSafe(|| run.execute())) {
         Ok(Ok(result)) => {
@@ -236,7 +253,12 @@ pub(super) fn run_transfer(
         Err(panic) => {
             let what = panic_message(panic.as_ref());
             run.clear_poisoned_launch_locks();
-            let Some(mut result) = run.switched.take() else {
+            let switched = run
+                .switched
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            let Some(mut result) = switched else {
                 let message = format!("The transfer stopped unexpectedly: {what}");
                 return Err(TransferStopped::Failed(run.fail(message)));
             };
@@ -312,18 +334,25 @@ struct Run<'a> {
     guard: &'a TransferGuard,
     include_uncommitted: bool,
     include_ignored: bool,
-    on_progress: &'a dyn Fn(&TransferProgress),
+    on_progress: &'a (dyn Fn(&TransferProgress) + Sync),
     direction: TransferDirection,
     transfer_dir: PathBuf,
     workspace_name: Option<String>,
     /// The manifest as it stands, [`Undo`] list included: written before
-    /// the transfer first makes anything, and again with each change.
-    journal: RefCell<TransferManifest>,
+    /// the transfer first makes anything, and again with each change. Legs
+    /// running at once record into it in turn.
+    journal: Mutex<TransferManifest>,
     /// Whether the manifest has been written.
-    journaled: Cell<bool>,
+    journaled: AtomicBool,
     /// Once the database has switched, the result as it switched: what a
     /// panic while the source comes down reports.
-    switched: Cell<Option<ProjectTransferResult>>,
+    switched: Mutex<Option<ProjectTransferResult>>,
+    /// Set once a leg has failed, so the legs still running stop at their
+    /// next checkpoint the way a cancel stops them.
+    abort: AtomicBool,
+    /// Held while a progress event is reported and delivered, so the
+    /// registry and the listeners see the legs' events in one order.
+    emitting: Mutex<()>,
 }
 
 fn path_str(path: &Path) -> Result<String, String> {
@@ -371,8 +400,14 @@ impl Run<'_> {
             detail,
             bytes,
         };
+        let _one_at_a_time = self.emitting.lock().unwrap_or_else(|e| e.into_inner());
         self.guard.report(&progress);
         (self.on_progress)(&progress);
+    }
+
+    /// Whether to stop: the transfer was cancelled, or another leg failed.
+    fn stopping(&self) -> bool {
+        self.guard.is_cancelled() || self.abort.load(Ordering::SeqCst)
     }
 
     /// Report `phase`, then stop here if the transfer was cancelled.
@@ -383,7 +418,7 @@ impl Run<'_> {
         detail: Option<String>,
     ) -> Result<(), TransferError> {
         self.emit(phase, leg, detail, None);
-        if self.guard.is_cancelled() {
+        if self.stopping() {
             Err(TransferError::Cancelled)
         } else {
             Ok(())
@@ -391,8 +426,17 @@ impl Run<'_> {
     }
 
     fn execute(&mut self) -> Result<ProjectTransferResult, Failure> {
+        let started = Instant::now();
+        let timed = |what: &str, since: Instant| {
+            log::info!(
+                "[project_transfer] transfer {}: {what} took {:.1?}",
+                self.guard.transfer_id(),
+                since.elapsed()
+            );
+        };
         self.checkpoint(TransferPhase::Checking, None, None)?;
         let inspection = self.inspect()?;
+        timed("the inspection", started);
         self.guard
             .cover_branches(inspection.branches.iter().map(|b| b.branch.id.as_str()));
         self.guard.cover_workspaces(
@@ -402,7 +446,7 @@ impl Run<'_> {
                 .filter_map(|b| b.workspace.as_deref()),
         );
         self.check_sessions(&inspection)?;
-        self.journal.borrow_mut().workspace_name = inspection.preflight.workspace_name.clone();
+        self.journal.lock().unwrap().workspace_name = inspection.preflight.workspace_name.clone();
 
         let mut legs: Vec<Leg> = inspection
             .branches
@@ -426,32 +470,46 @@ impl Run<'_> {
             })
             .collect();
 
+        let preparing = Instant::now();
         match self.direction {
             TransferDirection::ToRemote => self.prepare_workspace(&inspection, &mut legs)?,
             TransferDirection::ToLocal => self.prepare_clones(&inspection, &mut legs)?,
         }
-        for (i, leg) in legs.iter_mut().enumerate() {
-            if leg.carry {
+        timed("preparing the destination", preparing);
+
+        // Each leg snapshots, moves and lands on its own; the legs run at
+        // once, and the first to fail stops the rest.
+        let carrying = Instant::now();
+        self.for_each_leg(
+            &mut legs,
+            |l| l.carry,
+            |i, leg| {
                 self.carry(i, leg)?;
                 let repo = self.manifest_repo(leg);
-                self.journal.borrow_mut().repos.extend(repo);
-                self.save_journal()?;
-            }
-        }
+                let mut journal = self.journal.lock().unwrap();
+                journal.repos.extend(repo);
+                self.save_journal_locked(&mut journal)?;
+                Ok(())
+            },
+        )?;
+        timed("carrying the branches", carrying);
 
         self.checkpoint(TransferPhase::Committing, None, None)?;
         // Made first, so that nothing between the switch and noting it can
         // panic.
         let switched = self.result(&inspection, legs.clone(), Vec::new());
         self.commit(&inspection, &legs)?;
-        self.switched.set(Some(switched));
+        *self.switched.lock().unwrap() = Some(switched);
         self.close_journal(backups::COMMITTED, None, None);
         // The rows describe the destination now, and setup may provision them
         // while the source comes down.
         self.guard.release_branches();
 
+        let tearing_down = Instant::now();
         let warnings = self.tear_down(&inspection, &mut legs);
+        timed("removing the source", tearing_down);
         self.close_journal(backups::COMPLETED, Some(&legs), None);
+        timed("the whole transfer", started);
         Ok(self.result(&inspection, legs, warnings))
     }
 
@@ -460,7 +518,18 @@ impl Run<'_> {
     /// checkouts can be read. One that won't come back blocks the transfer.
     fn inspect(&self) -> Result<Inspection, Failure> {
         let project_id = self.guard.project_id();
-        let mut inspection = preflight::inspect(self.store, self.host, project_id)?;
+        let cancelled = || self.guard.is_cancelled();
+        let observer = preflight::PreflightObserver {
+            on_partial: &|_| {},
+            cancelled: &cancelled,
+        };
+        let mut inspection = preflight::inspect_after_resuming(
+            self.store,
+            self.host,
+            project_id,
+            &BTreeMap::new(),
+            &observer,
+        )?;
         let to_resume: BTreeSet<String> = inspection
             .branches
             .iter()
@@ -499,8 +568,9 @@ impl Run<'_> {
                     break;
                 }
             }
-            inspection =
-                preflight::inspect_after_resuming(self.store, self.host, project_id, &resumed)?;
+            inspection = preflight::inspect_after_resuming(
+                self.store, self.host, project_id, &resumed, &observer,
+            )?;
         }
         let preflight = &inspection.preflight;
         if !preflight.can_transfer {
@@ -541,14 +611,12 @@ impl Run<'_> {
         for source in &inspection.branches {
             let lock = crate::session_commands::branch_session_launch_lock_for(&source.branch.id);
             let _guard = lock.lock().unwrap();
+            // Queued sessions wait for the transfer (every start on a
+            // covered branch queues) and are kicked once it is over.
             let running = self
                 .store
                 .has_running_session_for_branch(&source.branch.id)?;
-            let queued = !self
-                .store
-                .get_queued_sessions_for_branch(&source.branch.id)?
-                .is_empty();
-            if running || queued {
+            if running {
                 return Err(format!(
                     "A session started on {}; stop it before transferring.",
                     source.branch.branch_name
@@ -602,7 +670,7 @@ impl Run<'_> {
 
         // Recorded before the start: a start that fails half way can still
         // have created it.
-        self.journal.borrow_mut().workspace_name = Some(workspace.clone());
+        self.journal.lock().unwrap().workspace_name = Some(workspace.clone());
         self.record(|undo| undo.workspace = Some(workspace.clone()))?;
         let base = crate::branches::normalize_branch_ref(&legs[primary].source.branch.base_branch);
         let started = self.host.start_workspace(
@@ -622,54 +690,75 @@ impl Run<'_> {
         self.guard_not_cancelled()?;
         started?;
 
-        let endpoint = self.host.workspace_endpoint(&workspace);
-        for leg in legs.iter_mut().filter(|l| l.carry) {
-            self.checkpoint(
-                TransferPhase::PreparingDestination,
-                Some(leg),
-                Some(format!("Cloning {}", leg.source.github_repo)),
-            )?;
-            let dir = self
-                .host
-                .workspace_repo_dir(&workspace, &leg.source.github_repo)?;
-            run_step_sized(
-                endpoint.as_ref(),
-                "clone",
-                CLONE_SCRIPT,
-                &[
-                    dir.clone(),
-                    self.host.workspace_clone_url(&leg.source.github_repo),
-                ],
-                leg.source.repo_bytes,
-            )?;
-            self.host.configure_workspace_clone(&workspace, &dir);
-            let names = origin_tip_names(leg);
-            let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            leg.exclude_tips = origin_tips(endpoint.as_ref(), &dir, &names)?.tips;
-            leg.dest_dir = Some(dir);
-        }
-        Ok(())
+        // Each repository clones into its own directory: the clones, mostly
+        // waiting on the network, go at once.
+        let workspace = &workspace;
+        self.for_each_leg(
+            legs,
+            |l| l.carry,
+            |_, leg| {
+                self.checkpoint(
+                    TransferPhase::PreparingDestination,
+                    Some(leg),
+                    Some(format!("Cloning {}", leg.source.github_repo)),
+                )?;
+                let endpoint = self.host.workspace_endpoint(workspace);
+                let dir = self
+                    .host
+                    .workspace_repo_dir(workspace, &leg.source.github_repo)?;
+                run_step_sized(
+                    endpoint.as_ref(),
+                    "clone",
+                    CLONE_SCRIPT,
+                    &[
+                        dir.clone(),
+                        self.host.workspace_clone_url(&leg.source.github_repo),
+                    ],
+                    leg.source.repo_bytes,
+                )?;
+                self.host.configure_workspace_clone(workspace, &dir);
+                let names = origin_tip_names(leg);
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                leg.exclude_tips = origin_tips(endpoint.as_ref(), &dir, &names)?.tips;
+                leg.dest_dir = Some(dir);
+                Ok(())
+            },
+        )
     }
 
     /// To local: make sure each repo to carry has its shared clone, fetch
     /// what origin has, and pick the branch's local name.
     fn prepare_clones(&mut self, inspection: &Inspection, legs: &mut [Leg]) -> Result<(), Failure> {
+        // Each repository's clone is made and fetched on its own — the slow,
+        // network-bound part — at once with the others'.
+        self.for_each_leg(
+            legs,
+            |l| l.carry,
+            |_, leg| {
+                self.checkpoint(
+                    TransferPhase::PreparingDestination,
+                    Some(leg),
+                    Some(format!(
+                        "Preparing the local clone of {}",
+                        leg.source.github_repo
+                    )),
+                )?;
+                let clone = self.host.ensure_local_clone(&leg.source.github_repo)?;
+                let clone_dir = path_str(&clone)?;
+                let endpoint = self.host.local_endpoint(&clone)?;
+                let names = origin_tip_names(leg);
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                leg.exclude_tips = origin_tips(endpoint.as_ref(), &clone_dir, &names)?.tips;
+                leg.dest_dir = Some(clone_dir);
+                Ok(())
+            },
+        )?;
+
+        // Then the names, one leg after another: each depends on what the
+        // legs before it on the same clone were given.
         let mut chosen: HashMap<PathBuf, HashSet<String>> = HashMap::new();
         for leg in legs.iter_mut().filter(|l| l.carry) {
-            self.checkpoint(
-                TransferPhase::PreparingDestination,
-                Some(leg),
-                Some(format!(
-                    "Preparing the local clone of {}",
-                    leg.source.github_repo
-                )),
-            )?;
-            let clone = self.host.ensure_local_clone(&leg.source.github_repo)?;
-            let clone_dir = path_str(&clone)?;
-            let endpoint = self.host.local_endpoint(&clone)?;
-            let names = origin_tip_names(leg);
-            let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            let tips = origin_tips(endpoint.as_ref(), &clone_dir, &names)?.tips;
+            let clone = PathBuf::from(leg.dest_dir.as_deref().ok_or("no clone prepared")?);
 
             // Names the project's other branches hold on the same repo, or
             // that this transfer already gave out in the same clone.
@@ -697,16 +786,13 @@ impl Run<'_> {
                 }
             })?;
             chosen.entry(clone).or_default().insert(name.clone());
-
-            leg.exclude_tips = tips;
             leg.dest_branch = name;
-            leg.dest_dir = Some(clone_dir);
         }
         Ok(())
     }
 
     fn guard_not_cancelled(&self) -> Result<(), TransferError> {
-        if self.guard.is_cancelled() {
+        if self.stopping() {
             Err(TransferError::Cancelled)
         } else {
             Ok(())
@@ -715,7 +801,7 @@ impl Run<'_> {
 
     /// Snapshot one branch, move it, land it — and, locally, give it its
     /// worktree and finish there.
-    fn carry(&mut self, index: usize, leg: &mut Leg) -> Result<(), Failure> {
+    fn carry(&self, index: usize, leg: &mut Leg) -> Result<(), Failure> {
         let source_dir = leg
             .source
             .source_dir
@@ -885,7 +971,8 @@ impl Run<'_> {
         // A retry lands what the first attempt recorded.
         if self
             .journal
-            .borrow()
+            .lock()
+            .unwrap()
             .undo
             .branch_configs
             .iter()
@@ -934,15 +1021,17 @@ impl Run<'_> {
     /// Change the undo list and write it to the manifest, before making what
     /// the change describes.
     fn record(&self, change: impl FnOnce(&mut Undo)) -> Result<(), String> {
-        change(&mut self.journal.borrow_mut().undo);
-        self.save_journal()
+        let mut journal = self.journal.lock().unwrap();
+        change(&mut journal.undo);
+        self.save_journal_locked(&mut journal)
     }
 
-    fn save_journal(&self) -> Result<(), String> {
-        let mut manifest = self.journal.borrow_mut();
+    /// Write the manifest as `manifest` has it, under its lock so that two
+    /// legs recording at once each write a manifest holding both records.
+    fn save_journal_locked(&self, manifest: &mut TransferManifest) -> Result<(), String> {
         manifest.keep_until_removed = manifest.holds_left_behind_changes();
-        backups::write_manifest(&self.transfer_dir, &manifest)?;
-        self.journaled.set(true);
+        backups::write_manifest(&self.transfer_dir, manifest)?;
+        self.journaled.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -955,18 +1044,16 @@ impl Run<'_> {
         legs: Option<&[Leg]>,
         warning: Option<String>,
     ) {
-        if !self.journaled.get() {
+        if !self.journaled.load(Ordering::SeqCst) {
             return;
         }
-        {
-            let mut manifest = self.journal.borrow_mut();
-            manifest.status = status.to_string();
-            if let Some(legs) = legs {
-                manifest.repos = legs.iter().filter_map(|l| self.manifest_repo(l)).collect();
-            }
-            manifest.warnings.extend(warning);
+        let mut manifest = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        manifest.status = status.to_string();
+        if let Some(legs) = legs {
+            manifest.repos = legs.iter().filter_map(|l| self.manifest_repo(l)).collect();
         }
-        if let Err(e) = self.save_journal() {
+        manifest.warnings.extend(warning);
+        if let Err(e) = self.save_journal_locked(&mut manifest) {
             log::warn!("[project_transfer] {e}");
         }
     }
@@ -985,9 +1072,19 @@ impl Run<'_> {
         }
     }
 
-    /// Roll back, report the failure, and hand back its message.
+    /// Roll back, report the failure, and hand back its message — with what
+    /// was queued for the transfer to finish, so the user knows it goes
+    /// ahead where the project still is. The command sets it going
+    /// (`session_queue::release_held_work`) once the guard has dropped,
+    /// which is what the queued work waits on; it can't happen here, under
+    /// the guard.
     fn fail(&self, message: String) -> String {
         self.roll_back();
+        let message =
+            match crate::session_queue::held_work_note(self.store, self.guard.project_id()) {
+                Some(note) => format!("{message} {note}"),
+                None => message,
+            };
         log::warn!(
             "[project_transfer] transfer {} of {} failed: {message}",
             self.guard.transfer_id(),

@@ -37,11 +37,25 @@ pub enum Recovered {
 /// Find every unfinished transfer under `host`'s transfers directory that
 /// `is_running` says no one is still running, and roll it back or mark it.
 /// Returns each, by transfer id.
+#[cfg(test)]
 pub fn recover(
     store: &Store,
     host: &dyn TransferHost,
     is_running: &dyn Fn(&TransferManifest) -> bool,
 ) -> Vec<(String, Recovered)> {
+    recover_noting_projects(store, host, is_running)
+        .into_iter()
+        .map(|(tid, _, outcome)| (tid, outcome))
+        .collect()
+}
+
+/// [`recover`], with each transfer's project id: the project whose queued
+/// sessions and follow-ups waited on the transfer and now wait on nothing.
+pub fn recover_noting_projects(
+    store: &Store,
+    host: &dyn TransferHost,
+    is_running: &dyn Fn(&TransferManifest) -> bool,
+) -> Vec<(String, String, Recovered)> {
     let Ok(transfers_dir) = host.transfers_dir() else {
         return Vec::new();
     };
@@ -61,7 +75,7 @@ pub fn recover(
             continue;
         }
         let outcome = recover_one(store, host, &dir, manifest.clone());
-        recovered.push((manifest.transfer_id, outcome));
+        recovered.push((manifest.transfer_id, manifest.project_id, outcome));
     }
     recovered
 }

@@ -9,6 +9,7 @@
 <script lang="ts">
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import Spinner from '../../shared/Spinner.svelte';
   import type { ProjectTransferRepoPreflight } from '../../types';
   import {
     carriesIgnoredFiles,
@@ -56,7 +57,12 @@
   </div>
 
   <div class="repo-stats">
-    {#if row.state === 'nothingToCarry'}
+    {#if row.scanning}
+      <span class="scanning" role="status">
+        <Spinner size={11} />
+        Checking…
+      </span>
+    {:else if row.state === 'nothingToCarry'}
       <span>Nothing to carry</span>
     {:else if row.state === 'unknown'}
       <span>Checked once the workspace resumes</span>
@@ -156,6 +162,12 @@
     gap: 4px 12px;
     color: var(--text-muted);
     font-size: var(--size-xs);
+  }
+
+  .repo-stats .scanning {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .repo-stats .upstream {

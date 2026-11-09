@@ -125,32 +125,51 @@ pub(crate) async fn transfer_project_impl(
             run_transfer(&store, &LiveHost, &guard, options, &emit)
         })
         .await
-        .map_err(|e| format!("The transfer stopped unexpectedly: {e}"))?
+    };
+    // The guard has dropped either way — unwound, if the task panicked
+    // outside the run's own catch — so what was queued for the transfer
+    // waits on nothing now.
+    let release = || crate::session_queue::release_held_work(&app_handle, &store, &branch_ids);
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            release();
+            return Err(format!("The transfer stopped unexpectedly: {e}"));
+        }
     };
 
-    settle(outcome, |result| {
-        after_transfer(
-            &store,
-            &app_handle,
-            &executor,
-            &act_registry,
-            project.location,
-            result,
-        )
-    })
+    settle(
+        outcome,
+        |result| {
+            after_transfer(
+                &store,
+                &app_handle,
+                &executor,
+                &act_registry,
+                project.location,
+                result,
+            )
+        },
+        release,
+    )
 }
 
 /// What a run comes to for the caller: its result, once `after_switch` has
 /// run on it, whenever the project moved — including a run that stopped
-/// unexpectedly after the switch, whose result says so in a warning.
+/// unexpectedly after the switch, whose result says so in a warning — or
+/// its error, once `after_failure` has run, when it did not.
 pub(super) fn settle(
     outcome: Result<ProjectTransferResult, TransferStopped>,
     after_switch: impl FnOnce(&ProjectTransferResult),
+    after_failure: impl FnOnce(),
 ) -> Result<ProjectTransferResult, String> {
     let result = match outcome {
         Ok(result) => result,
         Err(TransferStopped::AfterSwitch(result)) => *result,
-        Err(TransferStopped::Failed(message)) => return Err(message),
+        Err(TransferStopped::Failed(message)) => {
+            after_failure();
+            return Err(message);
+        }
     };
     after_switch(&result);
     Ok(result)
@@ -214,6 +233,12 @@ fn after_transfer(
                 }
             });
         }
+        // What was queued while the project moved: the replies held for its
+        // sessions, and the branch queue, each set going on its own task —
+        // neither waits for the other, as a reply to an idle session and a
+        // queued start never did. Either waits again on a branch still
+        // provisioning, for the kick that sends.
+        crate::session_queue::flush_follow_ups_for_branch(app_handle, store, &repo.branch_id);
         crate::session_queue::kick(
             app_handle,
             &repo.branch_id,
@@ -230,15 +255,20 @@ pub(super) fn runs_prerun(result: &ProjectTransferResult, repo: &RepoTransferRes
 
 /// Roll back, or mark for the user, each transfer a Staged that is no
 /// longer running left unfinished; see [`recovery`]. Run once at startup,
-/// before [`prune_backups`].
-pub(crate) fn recover_interrupted_transfers(store: &Store) {
-    let recovered = recovery::recover(store, &LiveHost, &recovery::is_running);
+/// before [`prune_backups`]. Returns the ids of the projects dealt with,
+/// whose queued work the caller sets going again.
+pub(crate) fn recover_interrupted_transfers(store: &Store) -> Vec<String> {
+    let recovered = recovery::recover_noting_projects(store, &LiveHost, &recovery::is_running);
     if !recovered.is_empty() {
         log::info!(
             "[project_transfer] dealt with {} interrupted transfers",
             recovered.len()
         );
     }
+    let mut projects: Vec<String> = recovered.into_iter().map(|(_, p, _)| p).collect();
+    projects.sort();
+    projects.dedup();
+    projects
 }
 
 /// Remove transfer backups past their retention. Run once at startup.

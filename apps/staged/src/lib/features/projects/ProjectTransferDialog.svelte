@@ -5,8 +5,10 @@
   Mounted once in App.svelte and driven by projectActions.pendingTransfer, so
   every transfer entry point (sidebar and landing-grid context menus,
   ProjectHome's top bar) shares one flow. A Dialog rather than an AlertDialog:
-  it opens at once and shows the preflight loading, then one row per branch
-  with what it carries. Blockers disable Transfer and say why. When a repo has
+  it opens at once with one row per branch, each "Checking…" until the scan
+  has read its checkout (or loading, for the moment before the branches are
+  known), and Transfer live from the first frame — confirming before the scan
+  is done asks first. Blockers disable Transfer and say why. When a repo has
   uncommitted changes, or may have (a workspace the transfer resumes first),
   a checkbox (defaulting to the last answer) chooses whether they move or
   stay behind in the backup. When a repo has ignored files outside ignored
@@ -29,6 +31,7 @@
   import { preferences } from '../settings/preferences.svelte';
   import { projectActions } from './projectActions.svelte';
   import ProjectTransferRepoRow from './ProjectTransferRepoRow.svelte';
+  import ProjectTransferScanConfirm from './ProjectTransferScanConfirm.svelte';
   import {
     asksAboutIgnored,
     asksAboutUncommitted,
@@ -44,6 +47,8 @@
 
   let pending = $derived(projectActions.pendingTransfer);
   let preflight = $derived(pending?.status === 'ready' ? pending.preflight : null);
+  /** The scan is still reading some checkout, so the rows are partial. */
+  let scanning = $derived(preflight?.scanning ?? false);
   let title = $derived(pending ? transferActionLabel(pending.direction) : '');
   let repoBlocked = $derived(preflight?.repos.some((repo) => repo.blockers.length > 0) ?? false);
   let asksUncommitted = $derived(preflight ? asksAboutUncommitted(preflight) : false);
@@ -83,14 +88,30 @@
   /** What the transfer would actually do with ignored files, for the rows. */
   let carryIgnored = $derived(asksIgnored && ignoredBlocked === null && includeIgnored);
 
+  // Transfer clicked while the scan was still going: confirmed first, since
+  // what the scan hasn't listed yet may be lost. Closes with the dialog.
+  let confirmingScan = $state(false);
+  $effect(() => {
+    if (!pending || !scanning) confirmingScan = false;
+  });
+
   function close() {
     projectActions.cancelPendingTransfer();
+  }
+
+  function confirm() {
+    confirmingScan = false;
+    void projectActions.confirmPendingTransfer({ includeUncommitted, includeIgnored });
   }
 
   function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     if (!preflight?.canTransfer) return;
-    void projectActions.confirmPendingTransfer({ includeUncommitted, includeIgnored });
+    if (scanning) {
+      confirmingScan = true;
+      return;
+    }
+    confirm();
   }
 </script>
 
@@ -150,6 +171,15 @@
                 <ProjectTransferRepoRow {row} includeIgnored={carryIgnored} />
               {/each}
             </ul>
+          {/if}
+
+          {#if scanning}
+            <p class="loading" role="status">
+              <Spinner size={14} />
+              <span
+                >Still checking what would be left behind… You can transfer before it finishes.</span
+              >
+            </p>
           {/if}
 
           {#if asksUncommitted}
@@ -240,6 +270,14 @@
     {/if}
   </Dialog.Content>
 </Dialog.Root>
+
+{#if confirmingScan}
+  <ProjectTransferScanConfirm
+    open={confirmingScan}
+    onConfirm={confirm}
+    onCancel={() => (confirmingScan = false)}
+  />
+{/if}
 
 <style>
   .modal-header {

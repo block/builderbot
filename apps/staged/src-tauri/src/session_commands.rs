@@ -1400,9 +1400,9 @@ pub async fn resume_session(
     image_ids: Option<Vec<String>>,
     branch_id: Option<String>,
     acp_config_selection: Option<store::AcpConfigSelection>,
-) -> Result<(), String> {
+) -> Result<ResumeSessionOutcome, String> {
     let store = get_store(&store)?;
-    resume_session_for_store(
+    resume_or_queue_session_for_store(
         store,
         Arc::clone(&registry),
         Arc::clone(&action_executor),
@@ -1413,9 +1413,83 @@ pub async fn resume_session(
         image_ids,
         branch_id,
         acp_config_selection,
+    )
+    .await
+}
+
+/// What a resume asked for by the user did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum ResumeSessionOutcome {
+    /// The session is running again with the prompt.
+    Started,
+    /// The session's project is being transferred, so the prompt was queued
+    /// as a follow-up and goes once the project has moved (see
+    /// `session_queue::follow_ups`).
+    QueuedForTransfer {
+        message: Box<store::QueuedSessionMessage>,
+    },
+}
+
+/// [`resume_session_for_store`], unless the session's branch is being
+/// transferred — then the prompt is queued as a follow-up instead of
+/// refused. The check and the insert happen under the branch's launch lock,
+/// which the transfer's flush of held follow-ups takes too, so a follow-up
+/// queued as the transfer ends is either flushed by it or never queued.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resume_or_queue_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    prompt: String,
+    image_ids: Option<Vec<String>>,
+    branch_id: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
+) -> Result<ResumeSessionOutcome, String> {
+    let session = store
+        .get_session(&session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    let covered = session.branch_id.clone().or_else(|| branch_id.clone());
+    if let Some(covered) = covered.as_deref() {
+        let launch_lock = branch_session_launch_lock_for(covered);
+        let _guard = launch_lock.lock().unwrap();
+        if crate::project_transfer::is_branch_transferring(covered) {
+            let message = store
+                .add_queued_session_message_held_for_transfer(
+                    &session_id,
+                    &prompt,
+                    &image_ids.unwrap_or_default(),
+                    Some(covered),
+                )
+                .map_err(|e| e.to_string())?;
+            log::info!(
+                "[session_queue] holding a reply to session {session_id} until branch {covered}'s \
+                 transfer is over"
+            );
+            return Ok(ResumeSessionOutcome::QueuedForTransfer {
+                message: Box::new(message),
+            });
+        }
+    }
+    resume_session_for_store(
+        store,
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        session_id,
+        prompt,
+        image_ids,
+        branch_id,
+        acp_config_selection,
         None,
     )
     .await
+    .map(|()| ResumeSessionOutcome::Started)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1438,6 +1512,11 @@ pub(crate) async fn resume_session_for_store(
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
     if session.status == store::SessionStatus::Disconnected {
         return Err(SESSION_DISCONNECTED_ERROR.to_string());
+    }
+    // The transfer snapshots and removes the branch's checkout; a queued
+    // follow-up drained now is released with this, to go after it.
+    if let Some(covered) = session.branch_id.as_deref().or(branch_id.as_deref()) {
+        crate::project_transfer::ensure_branch_not_transferring(covered)?;
     }
 
     let plan = prepare_resume(&store, &session, branch_id, acp_config_selection).await?;
@@ -4130,9 +4209,12 @@ fn branch_session_start_waits_for_provisioning(
 
 /// Whether `branch` has nowhere to run a session yet: a local branch with no
 /// worktree, or a remote one whose workspace is not `Running`. Its queued rows
-/// wait for the kick provisioning sends when it lands
-/// (`create_and_link_worktree`, `workspace_status_written`).
-fn branch_waits_for_provisioning(store: &Store, branch: &store::Branch) -> Result<bool, String> {
+/// and the follow-ups held for it wait for the kick provisioning sends when
+/// it lands (`create_and_link_worktree`, `workspace_status_written`).
+pub(crate) fn branch_waits_for_provisioning(
+    store: &Store,
+    branch: &store::Branch,
+) -> Result<bool, String> {
     match branch.branch_type {
         store::BranchType::Local => store
             .get_workdir_for_branch(&branch.id)
@@ -5288,8 +5370,11 @@ pub async fn start_or_queue_branch_session_for_store(
 
     let (target, created) = {
         let _guard = launch_lock.lock().unwrap();
-        crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
-        if should_queue_branch_session_start(&store, &branch_id, &session_type)? {
+        // A branch whose project is being transferred takes no start: the
+        // row queues, and the transfer kicks the branch once it is over.
+        if crate::project_transfer::is_branch_transferring(&branch_id)
+            || should_queue_branch_session_start(&store, &branch_id, &session_type)?
+        {
             return insert_queued_branch_session(
                 &store,
                 &branch_id,
@@ -5362,7 +5447,7 @@ pub fn queue_branch_session_for_store(
     let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
     let launch_lock = branch_session_launch_lock_for(&branch_id);
     let _guard = launch_lock.lock().unwrap();
-    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
+    // Queued is where a start on a branch being transferred goes anyway.
     insert_queued_branch_session(
         &store,
         &branch_id,

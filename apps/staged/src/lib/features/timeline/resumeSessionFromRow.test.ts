@@ -1,19 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { resumeSession, toastError } = vi.hoisted(() => ({
+import type { ResumeSessionOutcome } from '../../commands';
+
+const { resumeSession, toastError, toastInfo } = vi.hoisted(() => ({
   resumeSession: vi.fn(
     async (
       _sessionId: string,
       _prompt: string,
       _imageIds?: string[],
       _branchId?: string | null
-    ): Promise<void> => {}
+    ): Promise<{ outcome: 'started' } | { outcome: 'queuedForTransfer'; message: unknown }> => ({
+      outcome: 'started',
+    })
   ),
   toastError: vi.fn(),
+  toastInfo: vi.fn(),
 }));
 
 vi.mock('../../api/commands', () => ({ resumeSession }));
-vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
+vi.mock('svelte-sonner', () => ({ toast: { error: toastError, info: toastInfo } }));
 
 import { resumeSessionFromRow } from './resumeSessionFromRow';
 
@@ -23,8 +28,8 @@ function holdNextResume(): { release: () => void; fail: (e: Error) => void } {
   let fail!: (e: Error) => void;
   resumeSession.mockImplementationOnce(
     () =>
-      new Promise<void>((resolve, reject) => {
-        release = resolve;
+      new Promise<ResumeSessionOutcome>((resolve, reject) => {
+        release = () => resolve({ outcome: 'started' });
         fail = reject;
       })
   );
@@ -33,8 +38,9 @@ function holdNextResume(): { release: () => void; fail: (e: Error) => void } {
 
 beforeEach(() => {
   resumeSession.mockReset();
-  resumeSession.mockImplementation(async () => {});
+  resumeSession.mockImplementation(async () => ({ outcome: 'started' }));
   toastError.mockReset();
+  toastInfo.mockReset();
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
@@ -47,6 +53,16 @@ describe('resumeSessionFromRow', () => {
       undefined,
       'branch-1'
     );
+  });
+
+  it('says the resume is queued when the project is being transferred', async () => {
+    resumeSession.mockResolvedValueOnce({ outcome: 'queuedForTransfer', message: {} });
+    const refreshed = vi.fn();
+    await expect(resumeSessionFromRow('session-1', 'branch-1', refreshed)).resolves.toBe(true);
+    expect(toastInfo).toHaveBeenCalledWith('Queued until the transfer completes');
+    expect(toastError).not.toHaveBeenCalled();
+    // The row re-reads either way: the queued follow-up shows on it.
+    expect(refreshed).toHaveBeenCalled();
   });
 
   it('drops a repeat click while the session is resuming, without a toast', async () => {

@@ -7,12 +7,38 @@ use super::models::{QueuedSessionMessage, QueuedSessionMessageStatus, SessionSta
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
+    /// Queue a follow-up for a `running` session, to go once its turn ends.
     pub fn add_queued_session_message(
         &self,
         session_id: &str,
         content: &str,
         image_ids: &[String],
         branch_id: Option<&str>,
+    ) -> Result<QueuedSessionMessage, StoreError> {
+        self.insert_queued_session_message(session_id, content, image_ids, branch_id, true)
+    }
+
+    /// Queue a follow-up for a session whatever its status: one on a branch
+    /// whose project is being transferred, which can't be resumed until the
+    /// transfer is over and is then drained like any other queued follow-up
+    /// (see `session_queue::follow_ups`).
+    pub fn add_queued_session_message_held_for_transfer(
+        &self,
+        session_id: &str,
+        content: &str,
+        image_ids: &[String],
+        branch_id: Option<&str>,
+    ) -> Result<QueuedSessionMessage, StoreError> {
+        self.insert_queued_session_message(session_id, content, image_ids, branch_id, false)
+    }
+
+    fn insert_queued_session_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        image_ids: &[String],
+        branch_id: Option<&str>,
+        require_running: bool,
     ) -> Result<QueuedSessionMessage, StoreError> {
         let message = QueuedSessionMessage::new(session_id, branch_id, content, image_ids);
         let image_ids_json = image_ids_json(image_ids);
@@ -26,7 +52,7 @@ impl Store {
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              WHERE EXISTS (
                  SELECT 1 FROM sessions
-                 WHERE id = ?2 AND status = ?13
+                 WHERE id = ?2 AND (status = ?13 OR NOT ?14)
              )",
             params![
                 message.id,
@@ -42,6 +68,7 @@ impl Store {
                 message.owner_pid,
                 message.sent_message_id,
                 SessionStatus::Running.as_str(),
+                require_running,
             ],
         )?;
         if rows == 0 {
@@ -90,6 +117,48 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![session_id], Self::row_to_queued_session_message)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// The sessions on `branch_id` that are not running (nor `disconnected`)
+    /// and have a follow-up queued: what a drain can send now. Oldest
+    /// follow-up first.
+    pub fn session_ids_with_queued_messages_for_branch(
+        &self,
+        branch_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT q.session_id
+             FROM queued_session_messages q
+             INNER JOIN sessions s ON s.id = q.session_id
+             WHERE s.branch_id = ?1
+               AND q.status = 'queued'
+               AND q.sent_message_id IS NULL
+               AND s.status NOT IN ('running', 'disconnected')
+             GROUP BY q.session_id
+             ORDER BY MIN(q.created_at) ASC, q.session_id ASC",
+        )?;
+        let ids = stmt
+            .query_map(params![branch_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    /// How many queued follow-ups the sessions on `branch_id` hold.
+    pub fn count_queued_session_messages_for_branch(
+        &self,
+        branch_id: &str,
+    ) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM queued_session_messages q
+             INNER JOIN sessions s ON s.id = q.session_id
+             WHERE s.branch_id = ?1 AND q.status = 'queued' AND q.sent_message_id IS NULL",
+            params![branch_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     pub fn list_sending_queued_session_messages(

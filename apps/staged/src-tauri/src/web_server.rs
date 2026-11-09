@@ -1072,8 +1072,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                         });
                     }
                     crate::store::ProjectLocation::Remote => {
-                        let workspace_name =
-                            crate::branches::infer_workspace_name(&inferred_branch_name);
+                        let workspace_name = crate::branches::infer_workspace_name(
+                            &project.id,
+                            &inferred_branch_name,
+                        );
                         let mut branch = crate::store::Branch::new_remote(
                             &project.id,
                             &inferred_branch_name,

@@ -172,7 +172,10 @@ pub(crate) fn resolve_project_workspace_name(
         return Ok(name.to_string());
     }
 
-    Ok(infer_workspace_name(&infer_branch_name(&project.name)))
+    Ok(infer_workspace_name(
+        &project.id,
+        &infer_branch_name(&project.name),
+    ))
 }
 
 /// Reject unsafe workspace-relative paths.
@@ -1235,18 +1238,51 @@ pub(crate) fn infer_prefixed_branch_name(project_name: &str) -> String {
 /// The longest workspace name Staged picks, in bytes.
 pub(crate) const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
 
-/// A workspace name for `branch_name`: `stg-` and the branch name reduced the
-/// way [`infer_branch_name`] reduces a project name — lowercase ASCII letters,
-/// digits and single `-`s, everything else dropped — then cut to
-/// [`WORKSPACE_NAME_MAX_LENGTH`]. Blox itself only refuses spaces and names
-/// over 63 bytes, but a git branch can be called anything, and the name also
-/// ends up in hostnames, paths and shell commands.
-pub(crate) fn infer_workspace_name(branch_name: &str) -> String {
+/// Hex digits in the suffix that keeps cut-down workspace names apart.
+const WORKSPACE_NAME_HASH_LENGTH: usize = 6;
+
+/// A workspace name for `branch_name` in project `project_id`: `stg-` and the
+/// branch name reduced the way [`infer_branch_name`] reduces a project name —
+/// lowercase ASCII letters, digits and single `-`s, everything else dropped.
+/// Blox itself only refuses spaces and names over 63 bytes, but a git branch
+/// can be called anything, and the name also ends up in hostnames, paths and
+/// shell commands.
+///
+/// A name that fits in [`WORKSPACE_NAME_MAX_LENGTH`] is used as it is. A
+/// longer one is cut down and given a `-` plus [`WORKSPACE_NAME_HASH_LENGTH`]
+/// hex digits of a SHA-256 over the project id and the full branch name, so
+/// branches that only differ past the cut (`…-pr-1`, `…-pr-2`, `…-pr-3`) no
+/// longer land on one workstation. The suffix is a pure function of its
+/// inputs, so the same project always resolves to the same name; callers
+/// still prefer a name already stored on a branch over re-deriving it.
+pub(crate) fn infer_workspace_name(project_id: &str, branch_name: &str) -> String {
     let safe = normalize_branch_component(branch_name);
     if safe.is_empty() {
         return "stg-feature".to_string();
     }
-    truncate_workspace_name(&format!("stg-{safe}"), WORKSPACE_NAME_MAX_LENGTH)
+    let full = format!("stg-{safe}");
+    if full.len() <= WORKSPACE_NAME_MAX_LENGTH {
+        return full;
+    }
+    let hash = workspace_name_hash(project_id, branch_name);
+    let kept = truncate_workspace_name(&full, WORKSPACE_NAME_MAX_LENGTH - hash.len() - 1);
+    format!("{kept}-{hash}")
+}
+
+/// [`WORKSPACE_NAME_HASH_LENGTH`] lowercase hex digits of SHA-256 over
+/// `project_id`, a newline and `branch_name`.
+fn workspace_name_hash(project_id: &str, branch_name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(branch_name.as_bytes());
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()[..WORKSPACE_NAME_HASH_LENGTH]
+        .to_string()
 }
 
 /// `name` cut to at most `max` bytes, never inside a character, without a
@@ -3670,36 +3706,128 @@ mod tests {
         assert_eq!(apply_branch_prefix(None, "my-project"), "my-project");
     }
 
+    const PROJECT: &str = "0140b9fd-3ce1-43d9-ae5d-9050d73c5bfc";
+
+    /// Lowercase ASCII letters, digits and single `-`s, within the limit,
+    /// prefixed `stg-` and not ending on a `-`: what Blox, hostnames, paths
+    /// and shell commands all take.
+    fn assert_valid_workspace_name(name: &str, from: &str) {
+        assert!(name.len() <= WORKSPACE_NAME_MAX_LENGTH, "{from}: {name}");
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "{from}: {name}"
+        );
+        assert!(
+            name.starts_with("stg-") && !name.ends_with('-'),
+            "{from}: {name}"
+        );
+        assert!(!name.contains("--"), "{from}: {name}");
+    }
+
     #[test]
-    fn infer_workspace_name_keeps_ascii_names_as_they_were() {
-        assert_eq!(infer_workspace_name("feature"), "stg-feature");
+    fn infer_workspace_name_keeps_short_ascii_names_as_they_were() {
+        assert_eq!(infer_workspace_name(PROJECT, "feature"), "stg-feature");
         assert_eq!(
-            infer_workspace_name("alice/my-project"),
+            infer_workspace_name(PROJECT, "alice/my-project"),
             "stg-alice-my-project"
         );
-        assert_eq!(infer_workspace_name("--a//b--"), "stg-a-b");
-        assert_eq!(infer_workspace_name(""), "stg-feature");
+        assert_eq!(infer_workspace_name(PROJECT, "--a//b--"), "stg-a-b");
+        assert_eq!(infer_workspace_name(PROJECT, ""), "stg-feature");
+        // Exactly the limit still fits without a suffix.
+        let exact = "a".repeat(WORKSPACE_NAME_MAX_LENGTH - 4);
         assert_eq!(
-            infer_workspace_name("a-very-long-branch-name-that-goes-on"),
-            "stg-a-very-long-branch-name-that"
+            infer_workspace_name(PROJECT, &exact),
+            format!("stg-{exact}")
         );
-        // Never ends on the `-` the cut left.
+        // Project id plays no part while the name fits: siblings on short,
+        // identical branch names still share a workspace, as before.
         assert_eq!(
-            infer_workspace_name("abcdefghijklmnopqrstuvwxyza-bc"),
-            "stg-abcdefghijklmnopqrstuvwxyza"
+            infer_workspace_name("other-project", "feature"),
+            "stg-feature"
         );
+    }
+
+    #[test]
+    fn infer_workspace_name_suffixes_long_names_with_a_hash() {
+        let name = infer_workspace_name(PROJECT, "a-very-long-branch-name-that-goes-on");
+        assert_valid_workspace_name(&name, "long");
+        assert_eq!(name.len(), WORKSPACE_NAME_MAX_LENGTH);
+        // 4 (`stg-`) + 21 kept + 1 (`-`) + 6 hex.
+        assert!(name.starts_with("stg-a-very-long-branch-na-"), "{name}");
+        let hash = &name[name.len() - 6..];
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
+        // One over the limit gets the suffix too.
+        let over = "a".repeat(WORKSPACE_NAME_MAX_LENGTH - 3);
+        let name = infer_workspace_name(PROJECT, &over);
+        assert_valid_workspace_name(&name, "over");
+        assert!(
+            name.starts_with(&format!("stg-{}-", "a".repeat(21))),
+            "{name}"
+        );
+        // Never ends on a `-` the cut left before the suffix.
+        let name = infer_workspace_name(PROJECT, "abcdefghijklmnopqrstu-vwxyza-bc");
+        assert_valid_workspace_name(&name, "cut on hyphen");
+        assert!(name.starts_with("stg-abcdefghijklmnopqrstu-"), "{name}");
+        assert_eq!(name.len(), 4 + 21 + 1 + 6);
+    }
+
+    /// The bug: three projects with branches `…-pr-1`, `…-pr-2`, `…-pr-3`
+    /// all resolved to `stg-agent-flows-point-nowhere-pr` and shared one
+    /// workstation.
+    #[test]
+    fn infer_workspace_name_tells_apart_branches_that_differ_past_the_cut() {
+        let names: Vec<String> = (1..=3)
+            .map(|n| {
+                infer_workspace_name(
+                    &format!("project-{n}"),
+                    &format!("agent-flows-point-nowhere-pr-{n}"),
+                )
+            })
+            .collect();
+        for name in &names {
+            assert_valid_workspace_name(name, "pr");
+            assert!(name.starts_with("stg-agent-flows-point-now-"), "{name}");
+        }
+        assert_ne!(names[0], names[1]);
+        assert_ne!(names[1], names[2]);
+        assert_ne!(names[0], names[2]);
+        // Even inside one project, two long branches that only differ past
+        // the cut stay apart.
+        assert_ne!(
+            infer_workspace_name(PROJECT, "agent-flows-point-nowhere-pr-1"),
+            infer_workspace_name(PROJECT, "agent-flows-point-nowhere-pr-2"),
+        );
+        // And so do two projects on the same long branch name.
+        assert_ne!(
+            infer_workspace_name("project-a", "agent-flows-point-nowhere-pr-1"),
+            infer_workspace_name("project-b", "agent-flows-point-nowhere-pr-1"),
+        );
+    }
+
+    #[test]
+    fn infer_workspace_name_is_deterministic() {
+        let a = infer_workspace_name(PROJECT, "agent-flows-point-nowhere-pr-1");
+        let b = infer_workspace_name(PROJECT, "agent-flows-point-nowhere-pr-1");
+        assert_eq!(a, b);
+        // Pinned so a change to the hash input or width is a deliberate one:
+        // existing projects re-deriving their name must keep landing here.
+        assert_eq!(a, "stg-agent-flows-point-now-2f4639");
     }
 
     #[test]
     fn infer_workspace_name_reduces_any_branch_name_to_lowercase_ascii() {
         assert_eq!(
-            infer_workspace_name("MT/Fix_Thing.v2"),
+            infer_workspace_name(PROJECT, "MT/Fix_Thing.v2"),
             "stg-mt-fix-thing-v2"
         );
-        assert_eq!(infer_workspace_name("café/naïve"), "stg-caf-nave");
+        assert_eq!(infer_workspace_name(PROJECT, "café/naïve"), "stg-caf-nave");
         // Nothing left: the default.
-        assert_eq!(infer_workspace_name("日本語/ブランチ"), "stg-feature");
-        assert_eq!(infer_workspace_name("🚀"), "stg-feature");
+        assert_eq!(
+            infer_workspace_name(PROJECT, "日本語/ブランチ"),
+            "stg-feature"
+        );
+        assert_eq!(infer_workspace_name(PROJECT, "🚀"), "stg-feature");
     }
 
     /// A long branch name with a multibyte character across byte 32 used to
@@ -3716,28 +3844,20 @@ mod tests {
             format!("{}-{}", "分支".repeat(20), "x".repeat(40)),
             "🚀".repeat(16),
         ] {
-            let inferred = infer_workspace_name(&name);
-            assert!(
-                inferred.len() <= WORKSPACE_NAME_MAX_LENGTH,
-                "{name}: {inferred}"
-            );
-            assert!(
-                inferred
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
-                "{name}: {inferred}"
-            );
-            assert!(
-                inferred.starts_with("stg-") && !inferred.ends_with('-'),
-                "{inferred}"
-            );
+            let inferred = infer_workspace_name(PROJECT, &name);
+            assert_valid_workspace_name(&inferred, &name);
         }
-        // `é` is dropped, so the cut lands on the `-` after the `a`s.
-        assert_eq!(
-            infer_workspace_name(&format!("{ascii}é-and-more")),
-            format!("stg-{ascii}")
+        // `é` is dropped; the kept part stops at 21 `a`s before the suffix.
+        let inferred = infer_workspace_name(PROJECT, &format!("{ascii}é-and-more"));
+        assert!(
+            inferred.starts_with(&format!("stg-{}-", "a".repeat(21))),
+            "{inferred}"
         );
-        assert_eq!(infer_workspace_name(&"ü".repeat(40)), "stg-feature");
+        assert_eq!(inferred.len(), WORKSPACE_NAME_MAX_LENGTH);
+        assert_eq!(
+            infer_workspace_name(PROJECT, &"ü".repeat(40)),
+            "stg-feature"
+        );
     }
 
     #[test]

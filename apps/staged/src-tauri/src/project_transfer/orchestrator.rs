@@ -556,10 +556,10 @@ impl Run<'_> {
     }
 
     /// A free workspace name, from the primary branch's.
-    fn pick_workspace_name(&self, seed: &str) -> Result<String, Failure> {
+    fn pick_workspace_name(&self, project_id: &str, seed: &str) -> Result<String, Failure> {
         use crate::branches::WORKSPACE_NAME_MAX_LENGTH as MAX;
         use crate::branches::{infer_workspace_name, truncate_workspace_name};
-        let base = infer_workspace_name(seed);
+        let base = infer_workspace_name(project_id, seed);
         for n in 1..=20 {
             let name = if n == 1 {
                 base.clone()
@@ -594,7 +594,7 @@ impl Run<'_> {
             .or((!legs.is_empty()).then_some(0))
             .map(|i| legs[i].row.branch_name.clone())
             .unwrap_or_else(|| crate::branches::infer_branch_name(&inspection.project.name));
-        let workspace = self.pick_workspace_name(&seed)?;
+        let workspace = self.pick_workspace_name(&inspection.project.id, &seed)?;
         self.workspace_name = Some(workspace.clone());
         let Some(primary) = primary else {
             return Ok(());

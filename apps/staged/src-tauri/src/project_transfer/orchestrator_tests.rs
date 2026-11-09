@@ -1476,7 +1476,8 @@ fn a_transfer_asked_for_in_a_direction_the_project_no_longer_goes_is_refused() {
 }
 
 /// A long branch name with a multibyte character across byte 32 names the
-/// workspace it goes to: that used to panic, failing the transfer.
+/// workspace it goes to: that used to panic, failing the transfer. The name
+/// is the one every other launch derives — cut down, ASCII, hash-suffixed.
 #[test]
 fn a_long_unicode_branch_name_names_its_workspace_in_ascii() {
     let branch = format!("{}é-über/naïve", "a".repeat(27));
@@ -1485,7 +1486,13 @@ fn a_long_unicode_branch_name_names_its_workspace_in_ascii() {
 
     let result = f.transfer(true).result.expect("to remote");
 
-    let workspace = format!("stg-{}", "a".repeat(27));
+    let workspace = crate::branches::infer_workspace_name(&f.project.id, &branch);
+    assert!(
+        workspace.starts_with(&format!("stg-{}-", "a".repeat(21))),
+        "{workspace}"
+    );
+    assert_eq!(workspace.len(), crate::branches::WORKSPACE_NAME_MAX_LENGTH);
+    assert!(workspace.is_ascii(), "{workspace}");
     assert_eq!(result.workspace_name.as_deref(), Some(workspace.as_str()));
     assert_eq!(f.host.workspaces(), vec![workspace]);
     assert_eq!(result.repos[0].branch_name, branch);

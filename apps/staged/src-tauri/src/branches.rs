@@ -1240,7 +1240,7 @@ pub(crate) const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
 
 /// Hex digits in the suffix that keeps workspace names apart across projects
 /// and across branches that only differ past the cut.
-const WORKSPACE_NAME_HASH_LENGTH: usize = 6;
+pub(crate) const WORKSPACE_NAME_HASH_LENGTH: usize = 6;
 
 /// A workspace name for `branch_name` in project `project_id`: the branch
 /// name reduced the way [`infer_branch_name`] reduces a project name —
@@ -1258,33 +1258,61 @@ const WORKSPACE_NAME_HASH_LENGTH: usize = 6;
 /// name already stored on a branch over re-deriving it. Names picked before
 /// this scheme start with `stg-`; nothing matches on that prefix, every
 /// lookup goes by the stored name.
+///
+/// This is [`infer_workspace_name_nth`] at ordinal 0.
 pub(crate) fn infer_workspace_name(project_id: &str, branch_name: &str) -> String {
+    infer_workspace_name_nth(project_id, branch_name, 0)
+}
+
+/// The `ordinal`th candidate workspace name for `branch_name` in project
+/// `project_id`, for a caller that found the earlier ones taken. Ordinal 0
+/// is exactly [`infer_workspace_name`]; every later ordinal folds itself into
+/// the hash input, so each candidate has the same `{readable}-{hash}` shape
+/// and the same readable part, and only the hash differs. The readable part
+/// is never cut shorter to make room, as appending `-2` to a name that is
+/// already [`WORKSPACE_NAME_MAX_LENGTH`] bytes would have to.
+pub(crate) fn infer_workspace_name_nth(
+    project_id: &str,
+    branch_name: &str,
+    ordinal: u32,
+) -> String {
     let safe = normalize_branch_component(branch_name);
     let safe = if safe.is_empty() { "feature" } else { &safe };
-    let hash = workspace_name_hash(project_id, branch_name);
+    let hash = workspace_name_hash(project_id, branch_name, ordinal);
     let kept = truncate_workspace_name(safe, WORKSPACE_NAME_MAX_LENGTH - hash.len() - 1);
     format!("{kept}-{hash}")
 }
 
 /// [`WORKSPACE_NAME_HASH_LENGTH`] lowercase hex digits of SHA-256 over
-/// `project_id`, a newline and `branch_name`.
-fn workspace_name_hash(project_id: &str, branch_name: &str) -> String {
+/// `project_id`, a newline and `branch_name`, followed for a non-zero
+/// `ordinal` by another newline and the ordinal in decimal. Ordinal 0 adds
+/// nothing, so names derived before ordinals existed are unchanged.
+fn workspace_name_hash(project_id: &str, branch_name: &str, ordinal: u32) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
     let mut hasher = Sha256::new();
     hasher.update(project_id.as_bytes());
     hasher.update(b"\n");
     hasher.update(branch_name.as_bytes());
+    if ordinal != 0 {
+        hasher.update(b"\n");
+        hasher.update(ordinal.to_string().as_bytes());
+    }
     let digest = hasher.finalize();
+    // Two hex digits per byte: only the leading bytes are needed.
     digest
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()[..WORKSPACE_NAME_HASH_LENGTH]
+        .take(WORKSPACE_NAME_HASH_LENGTH.div_ceil(2))
+        .fold(String::new(), |mut hex, b| {
+            let _ = write!(hex, "{b:02x}");
+            hex
+        })[..WORKSPACE_NAME_HASH_LENGTH]
         .to_string()
 }
 
 /// `name` cut to at most `max` bytes, never inside a character, without a
 /// trailing `-`.
-pub(crate) fn truncate_workspace_name(name: &str, max: usize) -> String {
+fn truncate_workspace_name(name: &str, max: usize) -> String {
     let mut end = name.len().min(max);
     while !name.is_char_boundary(end) {
         end -= 1;
@@ -3722,16 +3750,16 @@ mod tests {
         assert!(!name.contains("--"), "{from}: {name}");
         let (readable, hash) = name.rsplit_once('-').expect(name);
         assert!(!readable.is_empty(), "{from}: {name}");
-        assert_eq!(hash.len(), 6, "{from}: {name}");
+        assert_eq!(hash.len(), WORKSPACE_NAME_HASH_LENGTH, "{from}: {name}");
         assert!(
             hash.bytes().all(|b| b.is_ascii_hexdigit()),
             "{from}: {name}"
         );
     }
 
-    /// `{readable}-` plus the six hex digits for `branch` in [`PROJECT`].
+    /// `{readable}-` plus the hex digits for `branch` in [`PROJECT`].
     fn expected(readable: &str, branch: &str) -> String {
-        format!("{readable}-{}", workspace_name_hash(PROJECT, branch))
+        format!("{readable}-{}", workspace_name_hash(PROJECT, branch, 0))
     }
 
     #[test]
@@ -3830,6 +3858,40 @@ mod tests {
         // existing projects re-deriving their name must keep landing here.
         assert_eq!(a, "agent-flows-point-nowhere-2f4639");
         assert_eq!(infer_workspace_name(PROJECT, "feature"), "feature-d7e6f9");
+    }
+
+    /// A caller that finds the derived name taken asks for the next
+    /// ordinal: same readable part, same shape, a different hash. Ordinal 0
+    /// is the plain derivation, so stored names and pinned values hold.
+    #[test]
+    fn infer_workspace_name_nth_keeps_the_shape_across_ordinals() {
+        for branch in ["feature", "agent-flows-point-nowhere-pr-1", "", "🚀"] {
+            assert_eq!(
+                infer_workspace_name_nth(PROJECT, branch, 0),
+                infer_workspace_name(PROJECT, branch)
+            );
+            let base = infer_workspace_name(PROJECT, branch);
+            let (readable, _) = base.rsplit_once('-').unwrap();
+            let names: Vec<String> = (0..20)
+                .map(|n| infer_workspace_name_nth(PROJECT, branch, n))
+                .collect();
+            for name in &names {
+                assert_valid_workspace_name(name, branch);
+                assert!(name.starts_with(&format!("{readable}-")), "{name}");
+                assert_eq!(name.len(), readable.len() + 1 + WORKSPACE_NAME_HASH_LENGTH);
+            }
+            let distinct: std::collections::HashSet<&String> = names.iter().collect();
+            assert_eq!(distinct.len(), names.len(), "{branch}: {names:?}");
+        }
+        // Pinned: the base is unchanged and the next candidate is not `-2`.
+        assert_eq!(
+            infer_workspace_name_nth(PROJECT, "agent-flows-point-nowhere-pr-1", 0),
+            "agent-flows-point-nowhere-2f4639"
+        );
+        let second = infer_workspace_name_nth(PROJECT, "agent-flows-point-nowhere-pr-1", 1);
+        assert!(second.starts_with("agent-flows-point-nowhere-"), "{second}");
+        assert_eq!(second.len(), WORKSPACE_NAME_MAX_LENGTH);
+        assert_ne!(second, "agent-flows-point-nowhere-2f4639");
     }
 
     #[test]

@@ -1523,6 +1523,49 @@ fn a_long_unicode_branch_name_names_its_workspace_in_ascii() {
     assert!(f.checkout(0).join("notes.txt").is_file());
 }
 
+/// When the derived name is taken, the transfer moves on to the next
+/// ordinal's name, which keeps the `{readable}-{hash}` shape. Appending `-2`
+/// used to eat into the hash once a long branch name had the base at the
+/// length limit (`…-2f46-2`, `…-2f4-10`).
+#[test]
+fn a_taken_workspace_name_falls_through_to_the_next_ordinal_in_full_shape() {
+    use crate::branches::{
+        infer_workspace_name_nth, WORKSPACE_NAME_HASH_LENGTH, WORKSPACE_NAME_MAX_LENGTH,
+    };
+    let branch = "agent-flows-point-nowhere-pr-1";
+    let f = Fixture::new(&[(WIDGETS, branch)]);
+    let candidates: Vec<String> = (0..3)
+        .map(|n| infer_workspace_name_nth(&f.project.id, branch, n))
+        .collect();
+    // Someone else holds the first two.
+    f.host.set_state(&candidates[0], WorkspaceState::Running);
+    f.host.set_state(&candidates[1], WorkspaceState::Suspended);
+
+    let result = f.transfer(true).result.expect("to remote");
+
+    assert_eq!(
+        result.workspace_name.as_deref(),
+        Some(candidates[2].as_str())
+    );
+    assert_eq!(f.host.workspaces(), vec![candidates[2].clone()]);
+    for name in &candidates {
+        assert_eq!(name.len(), WORKSPACE_NAME_MAX_LENGTH, "{name}");
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "{name}"
+        );
+        assert!(!name.contains("--") && !name.ends_with('-'), "{name}");
+        let hash = name.strip_prefix("agent-flows-point-nowhere-").expect(name);
+        assert_eq!(hash.len(), WORKSPACE_NAME_HASH_LENGTH, "{name}");
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
+    }
+    assert_ne!(candidates[0], candidates[1]);
+    assert_ne!(candidates[1], candidates[2]);
+    assert_ne!(candidates[0], candidates[2]);
+    assert_eq!(result.repos[0].branch_name, branch);
+}
+
 #[test]
 fn a_remote_project_needs_one_branch_per_repository() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);

@@ -3783,6 +3783,7 @@ pub(crate) async fn dispatch(
             let content: String = arg(&args, "content")?;
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
+            session_commands::ensure_session_chat_writable(&store, &session_id)?;
             let message = store
                 .add_queued_session_message(
                     &session_id,
@@ -5040,6 +5041,23 @@ mod tests {
             !arm.contains("update_written_note("),
             "the web `update_note` arm must not save around the shared body: {arm}"
         );
+    }
+
+    /// Queueing a chat message for a hidden child note's session is refused
+    /// on the web path as on the desktop one: the arm runs the shared gate
+    /// before the insert.
+    #[test]
+    fn web_queue_session_message_gates_hidden_child_note_chats() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "queue_session_message");
+        let gate = arm
+            .find("session_commands::ensure_session_chat_writable(")
+            .unwrap_or_else(|| {
+                panic!("the web `queue_session_message` arm must run the chat gate: {arm}")
+            });
+        let insert = arm
+            .find("add_queued_session_message(")
+            .unwrap_or_else(|| panic!("the web `queue_session_message` arm must queue: {arm}"));
+        assert!(gate < insert, "the gate must run before the insert: {arm}");
     }
 
     /// A web resume goes through the desktop command's body, `prepare_resume`

@@ -9,7 +9,7 @@ vi.mock('$lib/components/ui/context-menu', async () => {
   const { default: Passthrough } = await import('../sessions/testStubs/PassthroughStub.svelte');
   return { Item: Passthrough };
 });
-vi.mock('../settings/sq.svelte', () => ({ sqState: sq }));
+vi.mock('../settings/sq.svelte', () => ({ bloxAvailable: () => sq.loaded && sq.available }));
 vi.mock('../../stores/projectsData.svelte', () => ({
   projectsDataStore: {
     reposByProject: new Map(),

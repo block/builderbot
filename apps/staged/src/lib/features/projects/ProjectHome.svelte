@@ -45,7 +45,7 @@
   import { projectActions } from './projectActions.svelte';
   import ProjectTransferBanner from './ProjectTransferBanner.svelte';
   import { transferActionLabel, transferDirectionFrom } from './projectTransfer';
-  import { sqState } from '../settings/sq.svelte';
+  import { bloxAvailable } from '../settings/sq.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
@@ -350,10 +350,7 @@
   // Transfer offers the other location; a project with no repo has nothing to
   // move, and without the `sq` CLI neither direction can reach Blox.
   let selectedProjectTransferLabel = $derived(
-    selectedProject &&
-      sqState.loaded &&
-      sqState.available &&
-      (repoCountsByProject.get(selectedProject.id) ?? 0) > 0
+    selectedProject && bloxAvailable() && (repoCountsByProject.get(selectedProject.id) ?? 0) > 0
       ? transferActionLabel(transferDirectionFrom(selectedProject.location))
       : null
   );

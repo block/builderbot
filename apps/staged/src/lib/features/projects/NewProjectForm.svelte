@@ -23,7 +23,7 @@
   import type { RepoSelection } from '../../shared/githubUrl';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import type { PullRequest } from '../../types';
-  import { sqState } from '../settings/sq.svelte';
+  import { bloxAvailable, sqState } from '../settings/sq.svelte';
   import { preferences, setNewProjectLocation } from '../settings/preferences.svelte';
 
   interface Props {
@@ -79,11 +79,11 @@
     repoConfigApi.selectRepo(initialRepo);
   });
 
-  let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);
+  let remoteProjectsAvailable = $derived(bloxAvailable());
   let effectiveLocation = $derived(remoteProjectsAvailable ? location : 'local');
 
   $effect(() => {
-    if (sqState.loaded && !sqState.available && location === 'remote') {
+    if (sqState.loaded && !remoteProjectsAvailable && location === 'remote') {
       location = 'local';
     }
   });

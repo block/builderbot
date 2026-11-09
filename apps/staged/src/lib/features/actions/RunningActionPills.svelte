@@ -83,7 +83,7 @@
     <Button
       variant="ghost"
       class={[
-        'h-auto whitespace-nowrap rounded-full border px-3 py-1.5 gap-1.5 text-xs text-foreground [&_svg]:!size-3',
+        'touch-hit h-auto whitespace-nowrap rounded-full border px-3 py-1.5 gap-1.5 text-xs text-foreground [&_svg]:!size-3',
         outline
           ? 'bg-transparent border-[var(--card-border-hover)] hover:bg-[var(--card-bg-strong)] hover:border-[var(--accent)]'
           : 'bg-[var(--bg-elevated)] border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:border-[var(--border-focus)]',
@@ -134,6 +134,14 @@
     align-items: center;
     gap: 4px;
     overflow: hidden;
+  }
+
+  /* The clip would cut the pill's 44 px touch area (touch-hit) back to the
+     pill. The slide transition sets its own clip while it plays. */
+  @media (pointer: coarse) {
+    .running-action-container {
+      overflow: visible;
+    }
   }
 
   .running-action-container.fading {

@@ -912,10 +912,15 @@
     overflow: hidden;
     background-color: var(--bg-chrome);
     /* index.html sets viewport-fit=cover, so the page runs under the notch
-       and the home indicator wherever there are any; keep the panes clear of
-       them. The TopBar pads the top inset itself so its background fills the
-       status bar. Every inset is 0 on desktop. */
-    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+       and the home indicator wherever there are any. Surfaces run to the
+       screen's edges and only their content is inset: the TopBar pads the
+       top inset itself so its background fills the status bar, and each
+       pane's content pads the bottom inset (ProjectsList, ProjectHome,
+       SplashScreen, ReposListView, ProjectsSidebar, SettingsPage,
+       DiffModal) so it scrolls behind the home indicator and its end can
+       still scroll clear of it. The side insets (landscape, around the
+       Dynamic Island) stay here. Every inset is 0 on desktop. */
+    padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
   }
 
   /* One grid cell shared by the workspace and the detail host over it, so

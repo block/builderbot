@@ -67,13 +67,22 @@
     buildTree,
     buildGithubCommentUrl,
     compactTree,
+    cssCustomPropertyDeclarations,
     formatLineRange,
     resolveCommentFilePath,
     truncateText,
     type FileEntry,
     type TreeNode,
   } from './diffModalHelpers';
+  import {
+    createVelocityTracker,
+    startFling,
+    type FlingHandle,
+    type PointerSample,
+    type Velocity,
+  } from './flingScroll';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
+  import { Portal } from 'bits-ui';
   import { openDiffRoute } from '../layout/navigation.svelte';
   import {
     disabledReferenceNav,
@@ -83,6 +92,8 @@
     type ReferenceDiffContext,
     type ReferenceHistoryEntry,
   } from '../references/referenceHistory.svelte';
+  import { MOBILE_LAYOUT_QUERY } from '../../shared/viewport.svelte';
+  import { visibleViewport, watchVisualViewport } from '../../shared/visualViewport.svelte';
 
   // ==========================================================================
   // Props
@@ -149,7 +160,6 @@
   type ReviewHandle = ReturnType<typeof createReviewState>;
   let reviewHandle = $state<ReviewHandle | null>(null);
 
-  const SMALL_DIFF_BREAKPOINT = 700;
   const MOBILE_DIFF_REST_OFFSET = 20;
   const MOBILE_DIFF_EDGE_PEEK = 28;
   const MOBILE_DIFF_REVEAL_HIT_WIDTH = 28;
@@ -159,6 +169,7 @@
     scrollByX: (side: 'before' | 'after', deltaX: number) => void;
     scrollByXBoth: (deltaX: number) => void;
     canScrollX: (side: 'before' | 'after') => boolean;
+    scrollPosition: (side: 'before' | 'after') => { x: number; y: number };
   };
 
   type DiffViewerComponentHandle = {
@@ -315,8 +326,35 @@
   let commentJumpToken = 0;
   let jumpToLine = $state<{ lineIndex: number; token: number } | null>(null);
   let lineJumpToken = 0;
-  let isSmallDiffViewport = $state(false);
+  // The mobile layout (MOBILE_LAYOUT_QUERY): the file list becomes a drawer
+  // and the diff a sliding pane. Read at once so a phone doesn't paint the
+  // desktop layout first.
+  let isSmallDiffViewport = $state(
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia(MOBILE_LAYOUT_QUERY).matches
+      : false
+  );
   let showMobileSidebar = $state(false);
+
+  // The phone's file drawer follows the visual viewport while it is open, as
+  // a full-screen dialog does (see dialog-content): with the keyboard up for
+  // the file filter it shrinks to the part of the screen above the keyboard
+  // instead of keeping its bottom rows (and the list's end) under it.
+  $effect(() => {
+    if (isSmallDiffViewport && showMobileSidebar) return watchVisualViewport();
+  });
+  const mobileSidebarStyle = $derived.by(() => {
+    const { top, height, keyboardOpen } = visibleViewport;
+    if (height === null) return undefined;
+    return [
+      'position:fixed',
+      'left:0',
+      'right:0',
+      `top:${top}px`,
+      `height:${height}px`,
+      ...(keyboardOpen ? ['--dialog-safe-bottom:0px'] : []),
+    ].join(';');
+  });
   let diffDetailEl: HTMLDivElement | null = $state(null);
   let diffViewerContainerEl: HTMLDivElement | null = $state(null);
   let mobileDiffDragX = $state(0);
@@ -332,10 +370,22 @@
   let mobileDiffScrollSide: 'before' | 'after' = 'after';
   let mobileDiffMarkdownScrollEl: HTMLElement | null = null;
   let mobileDiffLastY = 0;
+  // The finger's recent path, for the fling a lift at speed starts, and the
+  // fling in progress (flingScroll.ts).
+  const mobileDiffVelocity = createVelocityTracker();
+  let mobileDiffFling: FlingHandle | null = null;
   let diffViewerScrollApi: DiffViewerScrollApi | null = $state(null);
   let diffViewerComponent: DiffViewerComponentHandle | null = $state(null);
-  let mobileDiffStyle = $derived(
-    `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
+  // The diff theme's CSS variables are scoped onto the diff-viewer container so
+  // the diff area reflects the chosen diff theme while the app chrome stays on
+  // its fixed light/dark mode. They live in this one Svelte-owned style string
+  // together with the phone pane-drag variables: Svelte applies a change to a
+  // bound `style` by assigning `cssText`, which replaces the whole inline
+  // style, so variables set on the element separately (an effect calling
+  // `style.setProperty`) were wiped by the first pointer move of a pane drag.
+  let diffViewerContainerStyle = $derived(
+    cssCustomPropertyDeclarations(preferences.diffThemeVars) +
+      `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
       `--mobile-diff-rest-offset: ${MOBILE_DIFF_REST_OFFSET}px;` +
       `--mobile-diff-edge-peek: ${MOBILE_DIFF_EDGE_PEEK}px;`
   );
@@ -1221,17 +1271,6 @@
     checkSearchInitialization();
   });
 
-  // Scope the diff theme's CSS variables onto the diff-viewer container so the
-  // diff area reflects the chosen diff theme while the app chrome stays on its
-  // fixed light/dark mode.
-  $effect(() => {
-    const el = diffViewerContainerEl;
-    if (!el) return;
-    for (const [prop, value] of Object.entries(preferences.diffThemeVars)) {
-      el.style.setProperty(prop, value);
-    }
-  });
-
   // Set up keyboard navigation for diff viewer and search
   $effect(() => {
     // Create search navigation handlers
@@ -1255,11 +1294,12 @@
   });
 
   onMount(() => {
-    const mediaQuery = window.matchMedia(`(max-width: ${SMALL_DIFF_BREAKPOINT}px)`);
+    const mediaQuery = window.matchMedia(MOBILE_LAYOUT_QUERY);
     const updateSmallDiffViewport = () => {
       isSmallDiffViewport = mediaQuery.matches;
       if (!isSmallDiffViewport) {
         showMobileSidebar = false;
+        stopMobileDiffFling();
         resetMobileDiffDrag();
       }
     };
@@ -1270,6 +1310,7 @@
     document.addEventListener('keyup', handleKeyup);
     document.addEventListener('click', handleClickOutsideDropdown);
     return () => {
+      stopMobileDiffFling();
       mediaQuery.removeEventListener('change', updateSmallDiffViewport);
       document.removeEventListener('keydown', handleKeydown);
       document.removeEventListener('keyup', handleKeyup);
@@ -1291,6 +1332,59 @@
     mobileDiffScrollSide = 'after';
     mobileDiffMarkdownScrollEl = null;
     mobileDiffDragX = 0;
+  }
+
+  // A fling is for the file it started on.
+  $effect(() => {
+    void currentDiff;
+    stopMobileDiffFling();
+  });
+
+  function stopMobileDiffFling() {
+    mobileDiffFling?.cancel();
+    mobileDiffFling = null;
+  }
+
+  function pointerSample(event: PointerEvent): PointerSample {
+    return { t: event.timeStamp, x: event.clientX, y: event.clientY };
+  }
+
+  // Coast on after a lift at speed, as a native scroller would, slowing
+  // every millisecond (flingScroll.ts) until the speed is spent or the
+  // content stops moving at an edge. The content moves against the finger,
+  // as it did during the drag. A finger landing anywhere on the viewer stops
+  // it (handleMobileDiffPointerDown), as do a wheel or trackpad scroll and
+  // switching files.
+  function startMobileDiffFling(
+    mode: MobileDiffGestureMode,
+    side: 'before' | 'after',
+    markdownScrollEl: HTMLElement | null,
+    velocity: Velocity
+  ) {
+    stopMobileDiffFling();
+    if (mode === 'vertical-scroll') {
+      mobileDiffFling = markdownScrollEl
+        ? startFling(-velocity.vy, (distance) => {
+            const before = markdownScrollEl.scrollTop;
+            markdownScrollEl.scrollTop += distance;
+            return markdownScrollEl.scrollTop !== before;
+          })
+        : startFling(-velocity.vy, (distance) => {
+            const api = diffViewerScrollApi;
+            if (!api) return false;
+            const before = api.scrollPosition(side).y;
+            api.scrollBy(side, distance);
+            return api.scrollPosition(side).y !== before;
+          });
+    } else if (mode === 'horizontal-scroll') {
+      mobileDiffFling = startFling(-velocity.vx, (distance) => {
+        const api = diffViewerScrollApi;
+        if (!api) return false;
+        const before = api.scrollPosition(side).x;
+        api.scrollByXBoth(distance);
+        return api.scrollPosition(side).x !== before;
+      });
+    }
   }
 
   function isMobileDiffInteractiveTarget(target: HTMLElement): boolean {
@@ -1342,6 +1436,8 @@
   function handleMobileDiffPointerDown(event: PointerEvent) {
     if (!isSmallDiffViewport) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    // A finger landing on a coasting pane stops it where it is.
+    stopMobileDiffFling();
 
     const target = event.target as HTMLElement;
     const canDragPane = isMobileDiffRevealTarget(target, event);
@@ -1365,10 +1461,13 @@
     mobileDiffCanScrollCode = canScrollCode;
     mobileDiffScrollSide = codeSide ?? 'after';
     mobileDiffMarkdownScrollEl = markdownScrollEl;
+    mobileDiffVelocity.reset();
+    mobileDiffVelocity.push(pointerSample(event));
   }
 
   function handleMobileDiffPointerMove(event: PointerEvent) {
     if (!isSmallDiffViewport || mobileDiffPointerId !== event.pointerId) return;
+    mobileDiffVelocity.push(pointerSample(event));
 
     const deltaX = event.clientX - mobileDiffStartX;
     const deltaY = event.clientY - mobileDiffStartY;
@@ -1433,11 +1532,40 @@
   }
 
   function handleMobileDiffPointerUp(event: PointerEvent) {
+    endMobileDiffPointer(event, true);
+  }
+
+  // The browser took the pointer: the gesture ends where it is, no fling.
+  function handleMobileDiffPointerCancel(event: PointerEvent) {
+    endMobileDiffPointer(event, false);
+  }
+
+  function endMobileDiffPointer(event: PointerEvent, fling: boolean) {
     if (mobileDiffPointerId !== event.pointerId) return;
     if (diffViewerContainerEl?.hasPointerCapture(event.pointerId)) {
       diffViewerContainerEl.releasePointerCapture(event.pointerId);
     }
+    const mode = mobileDiffGestureMode;
+    const side = mobileDiffScrollSide;
+    const markdownScrollEl = mobileDiffMarkdownScrollEl;
     resetMobileDiffDrag();
+    if (fling && (mode === 'vertical-scroll' || mode === 'horizontal-scroll')) {
+      // The speed over the last moves; a finger held still before it lifts
+      // gives none (see createVelocityTracker).
+      startMobileDiffFling(
+        mode,
+        side,
+        markdownScrollEl,
+        mobileDiffVelocity.velocity(event.timeStamp)
+      );
+    }
+    mobileDiffVelocity.reset();
+  }
+
+  // A trackpad or wheel scroll in a narrow desktop window takes over from a
+  // coast rather than adding to it.
+  function handleMobileDiffWheel() {
+    stopMobileDiffFling();
   }
 
   function handleMobileDiffMouseDownCapture(event: MouseEvent) {
@@ -1642,12 +1770,13 @@
     <div
       class="diff-viewer-container"
       class:mobile-diff-dragging={mobileDiffIsDragging}
-      style={mobileDiffStyle}
+      style={diffViewerContainerStyle}
       bind:this={diffViewerContainerEl}
       onpointerdown={handleMobileDiffPointerDown}
       onpointermove={handleMobileDiffPointerMove}
       onpointerup={handleMobileDiffPointerUp}
-      onpointercancel={handleMobileDiffPointerUp}
+      onpointercancel={handleMobileDiffPointerCancel}
+      onwheel={handleMobileDiffWheel}
       onmousedowncapture={handleMobileDiffMouseDownCapture}
     >
       <DiffViewer
@@ -1681,27 +1810,37 @@
     {/if}
   </div>
 
+  <!-- Portaled to the body: in the detail host (a `z-index: 1` stacking
+       context) the drawer sat under the shell's top bar, whose "Show changed
+       files" button then took the taps meant for the drawer's Close. -->
   {#if isSmallDiffViewport && showMobileSidebar}
-    <div class="mobile-sidebar-backdrop" role="dialog" aria-modal="true" aria-label="Changed files">
-      <div class="mobile-sidebar-dialog">
-        <div class="mobile-sidebar-header">
-          <span class="mobile-sidebar-title">Changed files</span>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
-            title="Close changed files"
-            aria-label="Close changed files"
-            onclick={() => (showMobileSidebar = false)}
-          >
-            <X size={14} />
-          </Button>
-        </div>
-        <div class="mobile-sidebar-body">
-          {@render fileSidebarContents()}
+    <Portal>
+      <div
+        class="mobile-sidebar-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Changed files"
+      >
+        <div class="mobile-sidebar-dialog" data-full-screen="" style={mobileSidebarStyle}>
+          <div class="mobile-sidebar-header">
+            <span class="mobile-sidebar-title">Changed files</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+              title="Close changed files"
+              aria-label="Close changed files"
+              onclick={() => (showMobileSidebar = false)}
+            >
+              <X size={14} />
+            </Button>
+          </div>
+          <div class="mobile-sidebar-body">
+            {@render fileSidebarContents()}
+          </div>
         </div>
       </div>
-    </div>
+    </Portal>
   {/if}
 
   {#if showNewSessionModal && branch}
@@ -1893,11 +2032,52 @@
    * Body layout
    * ====================================================================== */
 
+  /* The body runs to the screen's bottom edge (App.svelte's main leaves the
+     inset to the routes), and so do the surfaces in it: the diff panes and
+     the file sidebar. Only their content clears the home indicator, through
+     `--dialog-safe-bottom`, the same contract as a full-screen dialog's rows
+     (see dialog-content): the panes' code areas below, and whichever row
+     ends the sidebar. */
   .modal-body {
     display: flex;
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    --dialog-safe-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* The diff viewer scrolls its lines by transform over a viewport the size
+     of its code container, so padding the code area shrinks that viewport:
+     the last line and the horizontal scrollbar stop above the home
+     indicator, while the pane's own background fills the strip beneath. The
+     scrollbars are positioned in the code area's padding box, so they're
+     lifted to match. A markdown preview scrolls natively, and the same
+     padding ends its scroll. */
+  :global(.diff-viewer-container .code-area) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
+  }
+
+  :global(.diff-viewer-container .code-area > .scrollbar),
+  :global(.diff-viewer-container .code-area > .scrollbar-h) {
+    bottom: var(--dialog-safe-bottom, 0px);
+  }
+
+  /* The viewer's other states end at the screen's edge too: an image diff
+     (16px of padding, none above or below the slider), and the binary and
+     file-not-found notices, centred in what's left. These add to the
+     viewer's own padding, so they're scoped to the container: one class more
+     specific than its rules. */
+  .diff-viewer-container :global(.image-content) {
+    padding-bottom: calc(16px + var(--dialog-safe-bottom, 0px));
+  }
+
+  .diff-viewer-container :global(.image-content.slider-active) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
+  }
+
+  .diff-viewer-container :global(.empty-state),
+  .diff-viewer-container :global(.binary-notice) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
   }
 
   /* ========================================================================
@@ -1918,11 +2098,14 @@
     padding: 0;
   }
 
+  /* The side insets apply in the phone drawer only (unset in the sidebar). */
   .sidebar-scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    padding-left: var(--dialog-safe-left, 0px);
+    padding-right: var(--dialog-safe-right, 0px);
   }
 
   .sidebar-loading,
@@ -1932,6 +2115,8 @@
     align-items: center;
     gap: 8px;
     padding: 12px 16px;
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     font-size: var(--size-sm);
     color: var(--text-muted);
   }
@@ -1963,9 +2148,16 @@
     width: 100vw;
     height: 100vh;
     height: 100dvh;
-    /* Clear of the status bar and home indicator (viewport-fit=cover). */
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-      env(safe-area-inset-left);
+    /* The screen's insets (viewport-fit=cover) go to the drawer's rows, as
+       in a full-screen dialog (see dialog-content): the top one to the
+       header, whose background runs up under the status bar; the bottom one
+       to its last row, so the file list scrolls behind the home indicator;
+       and the side ones to each row's inline padding, so the rows run to the
+       screen's edges and a swipe there still scrolls the list. */
+    --dialog-safe-top: env(safe-area-inset-top);
+    --dialog-safe-bottom: env(safe-area-inset-bottom);
+    --dialog-safe-left: env(safe-area-inset-left);
+    --dialog-safe-right: env(safe-area-inset-right);
     background: var(--bg-chrome);
   }
 
@@ -1973,8 +2165,11 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 44px;
+    min-height: calc(44px + var(--dialog-safe-top, 0px));
     padding: 8px 12px;
+    padding-top: calc(8px + var(--dialog-safe-top, 0px));
+    padding-left: calc(12px + var(--dialog-safe-left, 0px));
+    padding-right: calc(12px + var(--dialog-safe-right, 0px));
     border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
   }
@@ -1991,6 +2186,12 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+
+  /* The file list when it ends the sidebar or the phone's drawer; otherwise
+     the commit session launcher under it pads the inset itself. */
+  .sidebar-scroll:last-child {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
   }
 
   :global(.diff-viewer-container .comment-editor) {
@@ -2030,7 +2231,10 @@
     background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
   }
 
-  @media (max-width: 700px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .context-label {
       max-width: 96px;
     }

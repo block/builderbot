@@ -246,6 +246,35 @@
     padding: 2px;
   }
 
+  /* On a touch screen each swatch gets a 30px box (the dot stays 12px, drawn
+     inside the padding), the delete button a 32px one, and the row may wrap
+     so they fit a phone. */
+  @media (pointer: coarse) {
+    .status-option-row {
+      flex-wrap: wrap;
+    }
+
+    .swatches {
+      gap: 4px;
+    }
+
+    .swatch {
+      width: 30px;
+      height: 30px;
+      padding: 7px;
+    }
+
+    .swatch.selected {
+      padding: 9px;
+    }
+
+    .status-option-actions :global(button),
+    .status-option-row > :global([data-slot='button']) {
+      min-width: 32px;
+      min-height: 32px;
+    }
+  }
+
   .status-option-actions {
     display: flex;
     align-items: center;

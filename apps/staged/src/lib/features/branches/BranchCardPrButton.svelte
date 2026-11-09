@@ -885,12 +885,16 @@
 </script>
 
 {#snippet prButton(props: Record<string, unknown>)}
-  <span {...props} class="inline-flex min-w-0 max-w-full">
+  <!-- The pair is one touch-hit-group (as the Rebase pair in
+       BranchCardHeaderInfo): both halves' 44 px areas sit under both boxes,
+       so a tap on the right end of "Create PR" presses it and not the
+       chevron whose area reaches over it. -->
+  <span {...props} class="touch-hit-group inline-flex min-w-0 max-w-full">
     <Button
       variant="outline"
       size="sm"
       class={[
-        'min-w-0 max-w-full !shrink gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
+        'touch-hit min-w-0 max-w-full !shrink gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
         prState === 'creating' && 'border-[var(--border-muted)]',
         (prState === 'error' || pushState === 'error') &&
           'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',
@@ -970,7 +974,7 @@
           <DropdownMenu.Trigger
             class={cn(
               buttonVariants({ variant: 'outline', size: 'sm' }),
-              'w-6 rounded-l-none px-0 [&_svg]:!size-3.5',
+              'touch-hit w-6 rounded-l-none px-0 [&_svg]:!size-3.5',
               detectingPr && 'border-[var(--border-muted)]'
             )}
             disabled={showPrDetectionDialog || detectingPr}

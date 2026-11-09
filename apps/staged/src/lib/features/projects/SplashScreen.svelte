@@ -316,12 +316,15 @@
     }
   }
 
+  /* The bottom row (this, or .splash-close): clear of the home indicator,
+     which App.svelte's main leaves to the panes' content. The decorative
+     tree behind it runs to the screen's edge. */
   .splash-actions {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 14px;
-    padding-bottom: 32px;
+    padding-bottom: calc(32px + env(safe-area-inset-bottom));
     z-index: 1;
   }
 
@@ -354,7 +357,7 @@
   }
 
   .splash-close {
-    padding-bottom: 32px;
+    padding-bottom: calc(32px + env(safe-area-inset-bottom));
     z-index: 1;
   }
 
@@ -379,7 +382,7 @@
     }
 
     .splash-actions {
-      padding-bottom: 20px;
+      padding-bottom: calc(20px + env(safe-area-inset-bottom));
     }
 
     .splash-actions :global(button) {

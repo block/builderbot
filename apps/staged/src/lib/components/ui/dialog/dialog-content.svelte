@@ -8,7 +8,7 @@
   import type { ComponentProps } from 'svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import XIcon from '@lucide/svelte/icons/x';
-  import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
+  import { SHORT_VIEWPORT_PX, viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import { visibleViewport, watchVisualViewport } from '$lib/shared/visualViewport.svelte';
   import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
   import { getWindowSync } from '$lib/transport';
@@ -46,34 +46,85 @@
 
   // Edge-to-edge geometry applied as inline style so it cleanly overrides any
   // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
-  // `max-h-[calc(100dvh-16dvh)]`) without specificity fights. Safe-area padding
-  // keeps the header/footer clear of notches and home indicators; with the
-  // keyboard up the footer sits on the keyboard instead, so the bottom inset
-  // goes. Tailwind v4 translate utilities use the individual `translate`
-  // property, so reset that alongside `transform` to prevent desktop centering
-  // from shifting the mobile panel offscreen. `top` and `height` track the
-  // visual viewport, pinning the footer to the keyboard's top edge. Rows
-  // pack at the top (`align-content: start`) instead of stretching over the
-  // full height, so a short form starts under the header rather than
-  // spreading down the screen to where the keyboard will open.
+  // `max-h-[calc(100dvh-16dvh)]`) without specificity fights. Tailwind v4
+  // translate utilities use the individual `translate` property, so reset that
+  // alongside `transform` to prevent desktop centering from shifting the
+  // mobile panel offscreen. Rows pack at the top (`align-content: start`)
+  // instead of stretching over the full height, so a short form starts under
+  // the header rather than spreading down the screen to where the keyboard
+  // will open.
+  //
+  // While the visual viewport is the whole layout viewport (`height ===
+  // null`: nothing takes typing, or a focused input has no keyboard over it)
+  // the dialog is anchored to all four edges, so its surface covers the whole
+  // layout viewport, under the home indicator included, whatever `100dvh`
+  // measures. While a keyboard (or the bar iOS shows over a hardware one)
+  // covers part of it, `top` and `height` track the visual viewport instead,
+  // pinning the last row to the keyboard's top edge.
+  //
+  // The surface reaches the screen's edges; only content is inset. The
+  // bottom padding stays the caller's (`p-6`, or none for `p-0` layouts) and
+  // the inset goes to whichever row ends the dialog — a footer,
+  // the chat composer, a scrolling body — through `--dialog-safe-bottom`, so
+  // that row's own background runs under the home indicator rather than the
+  // dialog's showing as a band beneath it, and a scrolling body scrolls
+  // behind it. It is 0 with the keyboard up, which covers the indicator.
+  // Outside a full-screen dialog the property is unset; read it as
+  // `var(--dialog-safe-bottom, 0px)`.
+  //
+  // The other insets work the same way. The top one (the status bar),
+  // `--dialog-safe-top`, goes to the first row's top padding, a header's
+  // background running up under the status bar. The side ones (a phone held
+  // sideways: the Dynamic Island and the rounded corners),
+  // `--dialog-safe-left` and `--dialog-safe-right`, go to each full-width
+  // row's inline padding, so its background runs to the screen's edges and
+  // a swipe there still scrolls it. The default padding (`p-6`) includes all
+  // three, as does the default Close button's position, so the two stay
+  // aligned; a caller that sets its own padding (`p-0` and rows that pad
+  // themselves) takes them on in those rows. All three are unset outside a
+  // full-screen dialog.
+  //
+  // Only colours, opacity and transforms transition. The base class's
+  // `duration-100` with no transition property would mean `transition: all`,
+  // animating `top` and `height` behind every keyboard move; a tap on the
+  // last row then landed or missed depending on whether a caller happened to
+  // narrow the property (NewSessionModal's `transition-colors` did).
+  //
+  // `cramped`: with too little visible to fit every row, the dialog scrolls
+  // rather than clip, and `data-cramped` lets its rows give way (the session
+  // dialog drops its header, puts Send beside the message box and scrolls
+  // its chat pane anchored at that row).
+  const cramped = $derived(
+    fullScreen &&
+      (visibleViewport.height !== null
+        ? visibleViewport.height < SHORT_VIEWPORT_PX
+        : viewport.shortWindow)
+  );
+
   const fullScreenStyle = $derived.by(() => {
     const { top, height, keyboardOpen } = visibleViewport;
+    const geometry =
+      height === null
+        ? ['top:0', 'bottom:0', 'height:auto']
+        : [`top:${top}px`, 'bottom:auto', `height:${height}px`];
     return [
       'position:fixed',
       'left:0',
       'right:0',
-      'bottom:auto',
-      `top:${top}px`,
+      ...geometry,
       'width:100%',
       'max-width:none',
-      `height:${height === null ? '100dvh' : `${height}px`}`,
       'max-height:none',
       'transform:none',
       'translate:none',
       'border-radius:0',
       'align-content:start',
-      'padding-top:env(safe-area-inset-top)',
-      `padding-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
+      '--dialog-safe-top:env(safe-area-inset-top)',
+      '--dialog-safe-left:env(safe-area-inset-left)',
+      '--dialog-safe-right:env(safe-area-inset-right)',
+      `--dialog-safe-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
+      'transition-property:color,background-color,border-color,outline-color,opacity,transform,translate,scale',
+      ...(cramped ? ['overflow-y:auto', 'overscroll-behavior:contain'] : []),
     ].join(';');
   });
 
@@ -155,7 +206,7 @@
     bind:ref
     data-slot="dialog-content"
     class={cn(
-      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl p-6 text-sm ring-1 duration-100 sm:max-w-md fixed z-(--z-index-overlay) w-full outline-none',
+      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl pt-[calc(--spacing(6)+var(--dialog-safe-top,0px))] pb-6 pl-[calc(--spacing(6)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(6)+var(--dialog-safe-right,0px))] text-sm ring-1 duration-100 sm:max-w-md fixed z-(--z-index-overlay) w-full outline-none',
       fullScreen
         ? 'data-open:slide-in-from-bottom data-closed:slide-out-to-bottom'
         : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 data-closed:zoom-out-95 data-open:zoom-in-95',
@@ -163,6 +214,7 @@
     )}
     style={contentStyle}
     data-full-screen={fullScreen ? '' : undefined}
+    data-cramped={cramped ? '' : undefined}
     onOpenAutoFocus={handleOpenAutoFocus}
     onCloseAutoFocus={handleCloseAutoFocus}
     onpointerdown={handlePointerDown}
@@ -174,7 +226,12 @@
     {#if showCloseButton}
       <DialogPrimitive.Close data-slot="dialog-close">
         {#snippet child({ props })}
-          <Button variant="ghost" class="absolute top-4 right-4" size="icon-sm" {...props}>
+          <Button
+            variant="ghost"
+            class="absolute top-[calc(--spacing(4)+var(--dialog-safe-top,0px))] right-[calc(--spacing(4)+var(--dialog-safe-right,0px))]"
+            size="icon-sm"
+            {...props}
+          >
             <XIcon />
             <span class="sr-only">Close</span>
           </Button>

@@ -71,7 +71,7 @@
       type="text"
       placeholder="Search..."
       onkeydown={handleKeydown}
-      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 md:text-base w-[200px]"
+      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-base w-[200px]"
     />
     {#if counterText}
       <span class="match-counter">{counterText}</span>

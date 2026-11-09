@@ -118,4 +118,12 @@
     align-items: center;
     overflow: hidden;
   }
+
+  /* The clip would cut the button's 44 px touch area (touch-hit) back to the
+     button. The slide transition sets its own clip while it plays. */
+  @media (pointer: coarse) {
+    .pinned-action-container {
+      overflow: visible;
+    }
+  }
 </style>

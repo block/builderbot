@@ -189,8 +189,11 @@
 {/if}
 
 <style>
+  /* Room for the handle, which the mobile layout doesn't render. A phone held
+     sideways is wider than 768px but takes that layout, with the dialog full
+     screen. */
   @media (min-width: 769px) {
-    :global([data-slot='dialog-content'].dialog-resize-gutter) {
+    :global([data-slot='dialog-content'].dialog-resize-gutter:not([data-full-screen])) {
       padding-right: 8px;
     }
   }

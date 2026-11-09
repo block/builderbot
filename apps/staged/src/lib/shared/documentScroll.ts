@@ -9,7 +9,7 @@
 // Every fixed element and hit target is then offset by that amount.
 
 import { isTextInput } from './textInput';
-import { isPinchZoomed } from './viewportGeometry';
+import { isPinchZoomed, KEYBOARD_MIN_INSET_PX } from './viewportGeometry';
 
 /** Scroll the window and `<body>` back to the origin; no writes if already there. */
 export function resetDocumentScroll(): void {
@@ -20,18 +20,48 @@ export function resetDocumentScroll(): void {
 }
 
 /**
+ * Whether the page's own scroll is what puts the focused input on screen:
+ * a pinch-zoomed page (panned by the user), or a text input outside the
+ * full-screen layout. A full-screen dialog fits itself above the keyboard
+ * instead (visualViewport.svelte.ts), and follows the visual viewport only
+ * when this is false.
+ */
+export function pageScrollRevealsInput(): boolean {
+  if (isPinchZoomed(window.visualViewport?.scale ?? 1)) return true;
+  const active = document.activeElement;
+  return isTextInput(active) && !active?.closest('[data-full-screen]');
+}
+
+/**
  * Whether the document's current scroll is meant to stay. Shared by this
  * guard and the full-screen layout's visual viewport tracking
  * (visualViewport.svelte.ts), so the two never undo each other's choice.
  */
 export function shouldKeepDocumentScroll(): boolean {
+  if (!pageScrollRevealsInput()) return false;
   // A pinch-zoomed page is panned by the user; leave it where they put it.
   if (isPinchZoomed(window.visualViewport?.scale ?? 1)) return true;
-  // Safari's scroll is what keeps a focused input above the keyboard. A
-  // full-screen dialog fits itself above the keyboard instead (see
-  // visualViewport.svelte.ts), so only its inputs give up the scroll.
-  const active = document.activeElement;
-  return isTextInput(active) && !active?.closest('[data-full-screen]');
+  // Safari's scroll is what keeps an input outside the full-screen layout
+  // above the keyboard, but it scrolls for one already clear of it too.
+  return !showsAboveKeyboardUnscrolled(document.activeElement as Element);
+}
+
+/**
+ * Whether `input` would show above the on-screen keyboard with the page
+ * unscrolled. Safari scrolls the page on focus even for an input well clear
+ * of the keyboard (5 px for the project list's search field), leaving the
+ * whole shell offset under it. Judged only once the keyboard is up: until
+ * then the scroll may be what is about to keep the input above it.
+ */
+function showsAboveKeyboardUnscrolled(input: Element): boolean {
+  const vv = window.visualViewport;
+  if (!vv) return false;
+  const layoutHeight = document.documentElement.clientHeight;
+  if (!(layoutHeight - vv.height >= KEYBOARD_MIN_INSET_PX)) return false;
+  // Where the input sits on the page, wherever the scroll put it.
+  const scrolled = window.scrollY + document.body.scrollTop;
+  const rect = input.getBoundingClientRect();
+  return rect.top + scrolled >= 0 && rect.bottom + scrolled <= vv.height;
 }
 
 /**
@@ -41,15 +71,19 @@ export function shouldKeepDocumentScroll(): boolean {
 export function guardDocumentScroll(): () => void {
   if (typeof window === 'undefined') return () => {};
   const body = document.body;
+  const vv = window.visualViewport;
   const onScroll = () => {
     if (!shouldKeepDocumentScroll()) resetDocumentScroll();
   };
   // Element scroll events do not bubble, so <body> needs its own listener;
-  // the window's covers the scrolling element.
+  // the window's covers the scrolling element. A scroll kept while the
+  // keyboard was still on its way is judged again once it is up.
   window.addEventListener('scroll', onScroll, { passive: true });
   body.addEventListener('scroll', onScroll, { passive: true });
+  vv?.addEventListener('resize', onScroll);
   return () => {
     window.removeEventListener('scroll', onScroll);
     body.removeEventListener('scroll', onScroll);
+    vv?.removeEventListener('resize', onScroll);
   };
 }

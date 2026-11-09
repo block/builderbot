@@ -7,10 +7,21 @@ import { computeViewportGeometry, LAYOUT_VIEWPORT_GEOMETRY } from './viewportGeo
 const typing = { textInputFocused: true };
 
 describe('computeViewportGeometry', () => {
-  it('covers the layout viewport when nothing is covering the page', () => {
+  it('keeps the layout viewport for a focused input with no keyboard over it', () => {
+    // A dialog's input focused programmatically: iOS shows no keyboard.
     expect(
       computeViewportGeometry({ height: 714, offsetTop: 0, scale: 1, layoutHeight: 714, ...typing })
-    ).toEqual({ top: 0, height: 714, keyboardOpen: false, zoomed: false });
+    ).toEqual(LAYOUT_VIEWPORT_GEOMETRY);
+    // Sub-pixel differences are rounding, not something covering the page.
+    expect(
+      computeViewportGeometry({
+        height: 713.5,
+        offsetTop: 0,
+        scale: 1,
+        layoutHeight: 714,
+        ...typing,
+      })
+    ).toEqual(LAYOUT_VIEWPORT_GEOMETRY);
   });
 
   it('follows the visual viewport down when Safari has scrolled the page for the keyboard', () => {
@@ -46,8 +57,7 @@ describe('computeViewportGeometry', () => {
   it('a visual viewport taller than the layout viewport is not a keyboard', () => {
     expect(
       computeViewportGeometry({ height: 754, offsetTop: 0, scale: 1, layoutHeight: 714, ...typing })
-        .keyboardOpen
-    ).toBe(false);
+    ).toEqual(LAYOUT_VIEWPORT_GEOMETRY);
   });
 
   it('falls back to the layout viewport while pinch-zoomed', () => {

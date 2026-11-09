@@ -449,7 +449,7 @@
               variant="outline"
               size="sm"
               class={[
-                'gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium text-foreground shadow-none hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5',
+                'gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium text-foreground shadow-none hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] mobile:h-10 mobile:px-2.5',
                 saveState === 'saved' &&
                   'cursor-default border-[var(--commit-bg-emphasis)] bg-[var(--commit-bg)] text-[var(--status-added)] hover:border-[var(--commit-bg-emphasis)] hover:bg-[var(--commit-bg)] hover:text-[var(--status-added)]',
                 saveState === 'error' &&
@@ -478,7 +478,7 @@
             <Button
               variant="destructive"
               size="sm"
-              class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
+              class="gap-1.5 px-3 text-[13px] font-medium mobile:h-10 mobile:px-2.5"
               onclick={handleStop}
               disabled={isCurrentlyStopping}
             >
@@ -490,7 +490,7 @@
           <Button
             variant="outline"
             size="sm"
-            class="gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5"
+            class="gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] mobile:h-10 mobile:px-2.5"
             onclick={onRunAgain}
           >
             <RotateCw size={14} />
@@ -501,7 +501,7 @@
           <Button
             variant="destructive"
             size="sm"
-            class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
+            class="gap-1.5 px-3 text-[13px] font-medium mobile:h-10 mobile:px-2.5"
             title="Remove this failed run"
             onclick={handleRemove}
           >
@@ -511,7 +511,7 @@
         <Button
           variant="ghost"
           size="icon-sm"
-          class="size-8 shrink-0 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:size-10 [&_svg]:!size-4"
+          class="size-8 shrink-0 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:size-10 [&_svg]:!size-4"
           title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
           aria-label="Close"
           onclick={onClose}
@@ -611,11 +611,15 @@
     gap: 8px;
   }
 
+  /* Ends the dialog: in a full-screen one the output scrolls behind the home
+     indicator and its last line can still scroll clear of it
+     (`--dialog-safe-bottom`, see dialog-content). */
   .modal-content {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
     padding: 16px;
+    padding-bottom: calc(16px + var(--dialog-safe-bottom, 0px));
     background: #1e1e1e;
   }
 
@@ -655,10 +659,18 @@
     color: #9ca3af;
   }
 
-  @media (max-width: 640px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). Rows span
+     the full-screen dialog and clear its insets (`--dialog-safe-*`, see
+     dialog-content), the header the top one too. */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .modal-header {
       border-radius: 0;
       padding: 12px;
+      padding-top: calc(12px + var(--dialog-safe-top, 0px));
+      padding-left: calc(12px + var(--dialog-safe-left, 0px));
+      padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }
 
     .header-actions {
@@ -667,6 +679,9 @@
 
     .modal-content {
       padding: 12px;
+      padding-bottom: calc(12px + var(--dialog-safe-bottom, 0px));
+      padding-left: calc(12px + var(--dialog-safe-left, 0px));
+      padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }
   }
 </style>

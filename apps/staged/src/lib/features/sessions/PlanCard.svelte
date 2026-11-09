@@ -103,6 +103,10 @@
     border-bottom: 1px solid var(--border-subtle);
     background: var(--bg-secondary);
     padding: 6px 16px;
+    /* A full-width row: clear of a full-screen dialog's side insets
+       (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     font-size: var(--size-xs);
   }
 

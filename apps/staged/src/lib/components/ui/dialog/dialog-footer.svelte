@@ -15,10 +15,16 @@
   } = $props();
 </script>
 
+<!-- The bottom padding keeps the buttons clear of the home indicator when
+     the footer ends a full-screen dialog (see dialog-content); it is 0
+     everywhere else. -->
 <div
   bind:this={ref}
   data-slot="dialog-footer"
-  class={cn('gap-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)}
+  class={cn(
+    'gap-2 flex flex-col-reverse gap-2 pb-[var(--dialog-safe-bottom,0px)] sm:flex-row sm:justify-end',
+    className
+  )}
   {...restProps}
 >
   {@render children?.()}

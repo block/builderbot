@@ -80,7 +80,7 @@
     showCloseButton={false}
   >
     <Dialog.Header
-      class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]"
+      class="flex-row items-center justify-between gap-3 pt-[calc(--spacing(3)+var(--dialog-safe-top,0px))] pb-3 pl-[calc(--spacing(4)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(4)+var(--dialog-safe-right,0px))] border-b border-[var(--border-subtle)]"
     >
       {#if referenceNav}
         <ReferenceNavControls nav={referenceNav} />
@@ -137,11 +137,17 @@
     flex-shrink: 0;
   }
 
+  /* Ends the dialog; keeps the image clear of the home indicator in a
+     full-screen one (`--dialog-safe-bottom`, see dialog-content). The PDF
+     frame below runs to the edge and scrolls itself. */
   .modal-body {
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 16px;
+    padding-bottom: calc(16px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     overflow: auto;
     min-height: 200px;
   }

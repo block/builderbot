@@ -12,7 +12,8 @@
     disabled
     items      — full list of HashtagItems (parent provides, scoped correctly)
     class      — pass-through for styling
-    rows       — approximate initial height in rows
+    rows       — approximate initial height in rows (the editor's minimum
+                 height; a host overrides it with --hashtag-input-min-height)
     onkeydown  — pass-through keydown handler (called after hashtag handling)
     oninput    — pass-through input handler
     onpaste    — pass-through paste handler (e.g. for image paste)
@@ -30,10 +31,16 @@
   import FileSearch from '@lucide/svelte/icons/file-search';
   import ImageLucide from '@lucide/svelte/icons/image';
   import { HASHTAG_TOKEN_RE, createExtractedValueBuilder } from './hashtagItems';
-  import { createBadgeElement, hashtagContentFragment } from './hashtagEditorContent';
+  import {
+    createBadgeElement,
+    hashtagContentFragment,
+    isLeftoverLineBreak,
+  } from './hashtagEditorContent';
   import { readReferenceClipboard, writeReferenceClipboard } from './referenceClipboard';
   import { placeHashtagDropdown } from './hashtagDropdownPlacement';
+  import { activeDescendantId, listboxOptionId } from '../../shared/listboxIds';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
+  import { isImeKeydown } from '../../shared/imeKeydown';
   import { portal } from '../../shared/portal';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import { visibleViewportRect } from '../../shared/visibleViewportRect';
@@ -64,6 +71,10 @@
     oninput?: (e: Event) => void;
     onpaste?: (e: ClipboardEvent) => void;
     textareaEl?: HTMLElement | null;
+    /** An IME or dictation composition is open in the editor. */
+    composing?: boolean;
+    /** The open composition ended (committed or cancelled). */
+    oncompositionend?: () => void;
   }
 
   let {
@@ -77,8 +88,11 @@
     oninput,
     onpaste,
     textareaEl = $bindable(null),
+    composing = $bindable(false),
+    oncompositionend,
   }: Props = $props();
 
+  const uid = $props.id();
   let editorEl: HTMLDivElement | undefined = $state();
   let showDropdown = $state(false);
   let filterText = $state('');
@@ -157,6 +171,24 @@
 
   let filteredItems = $derived.by(() => filteredSections.flatMap((section) => section.items));
 
+  // ARIA: the editor stays a multi-line textbox (plain Enter inserts a line;
+  // a combobox would announce it as a single-line field), with the # dropdown
+  // exposed through aria-haspopup="listbox", aria-autocomplete, aria-controls
+  // and aria-activedescendant, which ARIA 1.2 allows on a textbox. The editor
+  // keeps the focus and the options take none, so it names the highlighted
+  // option by id. Options are numbered across sections in the order
+  // selectedIndex counts (section.startIndex + i). The references go with the
+  // listbox: closed, or showing only "No matching items", there are none.
+  const listboxId = `${uid}-listbox`;
+  let listboxOpen = $derived(showDropdown && filteredItems.length > 0);
+  let activeOptionId = $derived(
+    activeDescendantId(listboxId, {
+      open: listboxOpen,
+      count: filteredItems.length,
+      selectedIndex,
+    })
+  );
+
   function hashtagSectionKey(item: HashtagItem): string {
     if (item.type === 'project-note') return 'project-notes';
     if (item.repoSlug) return `repo:${item.repoSlug}\u0000${item.repoSubpath ?? ''}`;
@@ -183,13 +215,32 @@
   let lastExtractedValue = '';
   let hasUnresolvedTokens = false;
 
-  // When value changes from outside, re-render the editor content
+  // When value changes from outside, re-render the editor content. The text a
+  // pending #-mention was being typed into goes with it, so the dropdown
+  // closes. If the editor has focus the caret goes to the end of the new
+  // content: replacing the contents leaves the selection wherever the removed
+  // nodes were, and a touch Send keeps the keyboard up in the box it clears
+  // (ChatComposer), or puts the draft back after a failed send, with typing
+  // carrying on there.
   $effect(() => {
     if (value !== lastExtractedValue && editorEl) {
+      const focused = document.activeElement === editorEl;
       renderContent(value);
       lastExtractedValue = value;
+      closeDropdown();
+      if (focused) focusAtEndSync(editorEl);
     }
   });
+
+  function handleCompositionStart() {
+    composing = true;
+  }
+
+  function handleCompositionEnd() {
+    if (!composing) return;
+    composing = false;
+    oncompositionend?.();
+  }
 
   // When items become available, re-render to resolve plain-text tokens into badges
   $effect(() => {
@@ -260,11 +311,19 @@
     const { fragment, unresolved } = hashtagContentFragment(val, itemsById);
     editorEl.replaceChildren(fragment);
     hasUnresolvedTokens = unresolved;
+    // Any composition went with the replaced text, and its `compositionend`
+    // may never come; nothing is left to commit, so don't report an end.
+    composing = false;
   }
 
+  // The line break a browser leaves after every line is deleted reads as
+  // empty, so the placeholder comes back. The DOM is left as it is: editing
+  // it in the input event would drop the native undo entry and can reset
+  // iOS's auto-capitalisation.
   function extractValue(): string {
     if (!editorEl) return '';
-    return extractFromNode(editorEl);
+    const extracted = extractFromNode(editorEl);
+    return isLeftoverLineBreak(extracted, editorEl.textContent ?? '') ? '' : extracted;
   }
 
   function extractFromNode(node: Node): string {
@@ -423,6 +482,12 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // Keys during an IME composition (Enter to commit it, arrows to pick a
+    // candidate, Escape to cancel it) belong to the IME, not the dropdown.
+    if (composing || isImeKeydown(e)) {
+      onkeydown?.(e);
+      return;
+    }
     if (showDropdown && filteredItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -534,6 +599,9 @@
   }
 
   function handleBlur(e: FocusEvent) {
+    // Leaving the editor ends any composition; don't wait on a
+    // `compositionend` the browser may not send.
+    handleCompositionEnd();
     if (wrapperEl && e.relatedTarget instanceof Node && wrapperEl.contains(e.relatedTarget)) {
       return;
     }
@@ -543,8 +611,13 @@
 
 <div class="hashtag-input-wrapper" bind:this={wrapperEl}>
   <div class="hashtag-input-container">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- The placeholder is painted by CSS from data-placeholder, which gives
+         the editor no accessible name, so the same text is its aria-label:
+         unlike aria-placeholder it takes part in the name computation and is
+         read whether or not the field is empty. -->
+    <!-- The contenteditable is focusable without a tabindex. -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
+    <!-- svelte-ignore a11y_aria_activedescendant_has_tabindex -->
     <div
       bind:this={editorEl}
       class="hashtag-editor {className}"
@@ -552,11 +625,18 @@
       contenteditable={disabled ? 'false' : 'true'}
       role="textbox"
       aria-multiline="true"
+      aria-label={placeholder || undefined}
+      aria-haspopup="listbox"
+      aria-autocomplete="list"
+      aria-controls={listboxOpen ? listboxId : undefined}
+      aria-activedescendant={activeOptionId}
       data-placeholder={placeholder}
-      style="min-height: {Number(rows) * 1.5}em"
+      style="min-height: var(--hashtag-input-min-height, {Number(rows) * 1.5}em)"
       oninput={handleInput}
       onkeydown={handleKeydown}
       onblur={handleBlur}
+      oncompositionstart={handleCompositionStart}
+      oncompositionend={handleCompositionEnd}
       oncopy={handleCopy}
       oncut={handleCut}
       onpaste={handlePaste}
@@ -564,11 +644,19 @@
 
     <!-- Dropdown -->
     {#if showDropdown && filteredItems.length > 0}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- The listbox and its options take no focus: the editor keeps it and
+           names the highlighted option (ARIA combobox pattern). -->
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
       <!-- Portaled to #portal-root so position:fixed escapes the dialog's transformed
            containing block; pointerdown is stopped so selecting an item doesn't
-           trip bits-ui's dismiss-on-interact-outside and close the dialog. -->
+           trip bits-ui's dismiss-on-interact-outside and close the dialog.
+           The highlight follows mousemove, not mouseenter: ArrowDown's
+           scrollIntoView can move another item under a pointer that hasn't
+           moved, and that item's mouseenter would snap the highlight back. -->
       <div
+        id={listboxId}
+        role="listbox"
+        aria-label="Hashtag suggestions"
         class="hashtag-dropdown"
         class:above={dropdownPosition === 'above'}
         class:below={dropdownPosition === 'below'}
@@ -591,15 +679,18 @@
             {#each section.items as item, i}
               {@const Icon = dropdownIconMap[item.type]}
               {@const itemIndex = section.startIndex + i}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_interactive_supports_focus -->
               <div
+                id={listboxOptionId(listboxId, itemIndex)}
+                role="option"
+                aria-selected={itemIndex === selectedIndex}
                 class="hashtag-dropdown-item"
                 class:selected={itemIndex === selectedIndex}
                 onmousedown={(e) => {
                   e.preventDefault();
                   selectItem(item);
                 }}
-                onmouseenter={() => (selectedIndex = itemIndex)}
+                onmousemove={() => (selectedIndex = itemIndex)}
               >
                 <span class="hashtag-item-icon {item.type}-icon">
                   {#if Icon}
@@ -615,8 +706,10 @@
         {/each}
       </div>
     {:else if showDropdown && filterText.length > 0}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- A status region, so the empty result is announced: with no options
+           there is no listbox for the editor to point at. -->
       <div
+        role="status"
         class="hashtag-dropdown"
         class:above={dropdownPosition === 'above'}
         class:below={dropdownPosition === 'below'}

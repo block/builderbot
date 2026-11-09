@@ -61,10 +61,11 @@
     aria-label={label}
     autocomplete="off"
     autocorrect="off"
+    autocapitalize="off"
     spellcheck="false"
     {onfocus}
     {onkeydown}
-    class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm"
+    class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm mobile:text-sm"
   />
   {#if showClear}
     <Button

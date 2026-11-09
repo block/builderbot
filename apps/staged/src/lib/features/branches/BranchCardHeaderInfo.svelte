@@ -85,7 +85,7 @@
       {@render capsule()}
     {/if}
     {#if parentAheadCount > 0 && onRebase}
-      <span class="inline-flex" transition:slide={{ axis: 'x', duration: 150 }}>
+      <span class="inline-flex touch-hit-group" transition:slide={{ axis: 'x', duration: 150 }}>
         <span
           class="inline-flex"
           title={rebaseDisabledReason ??
@@ -96,7 +96,8 @@
             size="xs"
             disabled={!!rebaseDisabledReason}
             onclick={onRebase}
-            class={cn('h-[22px]', onRebaseAndForcePush && 'rounded-r-none')}>Rebase</Button
+            class={cn('touch-hit h-[22px]', onRebaseAndForcePush && 'rounded-r-none')}
+            >Rebase</Button
           >
         </span>
         {#if onRebaseAndForcePush}
@@ -110,7 +111,7 @@
               <DropdownMenu.Trigger
                 class={cn(
                   buttonVariants({ variant: 'outline', size: 'xs' }),
-                  'h-[22px] w-[18px] rounded-l-none px-0'
+                  'touch-hit h-[22px] w-[18px] rounded-l-none px-0'
                 )}
                 disabled={!!rebaseDisabledReason}
                 aria-label="More rebase options"

@@ -32,7 +32,7 @@
     active    — whether the pane should load/poll
 -->
 <script lang="ts">
-  import { onDestroy, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { slide } from 'svelte/transition';
   import X from '@lucide/svelte/icons/x';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
@@ -186,7 +186,9 @@
   } from './acpTranscript';
   import PlanCard from './PlanCard.svelte';
   import { viewport } from '../../shared/viewport.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import { observeSizeChanges } from '../../shared/observeSizeChanges';
+  import { isImeKeydown } from '../../shared/imeKeydown';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -197,6 +199,7 @@
   import ToolCallCard from './tool-calls/ToolCallCard.svelte';
   import ToolCallHeader from './tool-calls/ToolCallHeader.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
+  import { revealWithin } from '../../shared/revealWithin';
   import '../../shared/markdown/diagramStyles.css';
   import {
     extractMarkdownDiagramFences,
@@ -912,9 +915,10 @@
 
   // The focus can wait out a full-screen dialog's enter animation, and the
   // pane may be parked or retargeted by then, so the open is re-checked when
-  // the focus lands rather than when it was asked for.
+  // the focus lands rather than when it was asked for. On a touch screen the
+  // composer is left for the user to tap (see autofocusOnOpen).
   function focusComposerWhileOpen(id: string) {
-    focusAfterDialogEnter(inputEl, (el) => {
+    autofocusOnOpen(inputEl, (el) => {
       if (!closed && active && sessionId === id) el.focus();
     });
   }
@@ -1870,7 +1874,9 @@
   // =========================================================================
 
   function handleInputKeydown(e: KeyboardEvent) {
-    // Multiline input: plain Enter inserts a newline; Cmd/Ctrl+Enter sends.
+    // Multiline input: plain Enter inserts a newline; Cmd/Ctrl+Enter sends,
+    // but not while it commits an IME composition (see ChatComposer).
+    if (isImeKeydown(e)) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleSend();
@@ -1950,11 +1956,19 @@
    * invisible, so a trackpad's 1 px events are coalesced into one capture.
    */
   const ANCHOR_RECAPTURE_PX = 4;
+  /**
+   * How close to the end still counts as at the bottom. `clientHeight` rounds
+   * a fractional box height and `scrollTop` may read truncated, so a box
+   * scrolled to its true bottom can read a pixel short of it (615.27 tall:
+   * restored to 2623 of a reported 2624); read as the user scrolling up, that
+   * would stop the transcript following the bottom.
+   */
+  const AT_BOTTOM_TOLERANCE_PX = 2;
 
   function handleScroll() {
     if (!messagesEl) return;
     const { scrollTop, scrollHeight, clientHeight } = messagesEl;
-    const atBottom = scrollHeight - scrollTop - clientHeight < 1;
+    const atBottom = scrollHeight - scrollTop - clientHeight < AT_BOTTOM_TOLERANCE_PX;
 
     if (scrollTop < lastScrollTop && !atBottom) {
       // Scroll position moved upward — user scrolled up (any input method)
@@ -2068,6 +2082,61 @@
       scrollToBottom(afterSlide);
     }
   }
+
+  // The note follow-up row appears below the messages once the turn that
+  // wrote the note ends. That isn't an append, and the row slides in inside
+  // the messages list rather than as a row of the box itself, so the
+  // observer above misses it too. It is followed like an append when it
+  // appears: `afterSlide` re-pins once the slide has played. Only the row
+  // appearing does this; whether the pane may scroll is read untracked.
+  let noteFollowupShown = $derived(!!noteFollowupLabel);
+  $effect(() => {
+    if (!noteFollowupShown) return;
+    untrack(() => {
+      if (!active || closed || parkedScroll || deferredRestore.pending) return;
+      scrollToBottomIfNear(true);
+    });
+  });
+
+  // Keep a transcript that follows the bottom at the bottom when its own box
+  // is resized: the full-screen dialog shrinking to the visual viewport as
+  // the on-screen keyboard opens (and growing back as it closes), the
+  // composer gaining a line, a window or dialog resize, the phone rotating.
+  // Shrinking the box leaves `scrollTop` alone and narrowing it reflows the
+  // messages taller; neither fires a scroll event, so neither `handleScroll`
+  // nor the append path would re-pin it and the newest messages would end
+  // up under the composer. A parked pane is left alone: its box is detached
+  // or, just reattached, waiting for `unpark`'s deferred restore, which this
+  // must not overwrite (observeSizeChanges already skips the 0×0 detached
+  // box itself).
+  //
+  // Rows the session's state adds below the messages (an error or
+  // end-of-session card, the disconnected alert) aren't appends, which is
+  // what the append path follows, so they're followed here as they're added:
+  // a card arriving with the keyboard up would otherwise sit below the
+  // composer until the box was next resized.
+  onMount(() => {
+    const el = messagesEl;
+    if (!el) return;
+    const follow = () => {
+      if (!active || closed || parkedScroll || deferredRestore.pending) return;
+      if (userScrolledUp) return;
+      el.scrollTop = el.scrollHeight;
+      noteScrollPosition(el);
+    };
+    const stopResize = observeSizeChanges(el, follow);
+    const rows =
+      typeof MutationObserver === 'undefined'
+        ? null
+        : new MutationObserver((records) => {
+            if (records.some((r) => [...r.addedNodes].some((n) => n.nodeType === 1))) follow();
+          });
+    rows?.observe(el, { childList: true });
+    return () => {
+      stopResize();
+      rows?.disconnect();
+    };
+  });
 
   /** LRU cache for rendered markdown, keyed by source string. Live-transcript
    *  re-renders mostly re-request unchanged content, and each render is a full
@@ -2303,7 +2372,7 @@
 
     // Scroll to first match if any
     if (matchElements.length > 0) {
-      scrollToMatch(matchElements[0]);
+      scrollToMatch(matchElements[0], messagesEl);
     }
     publishSearchState();
   }
@@ -2322,7 +2391,7 @@
 
     // Add current class to new match
     matchElements[currentMatchIndex].classList.add('search-match-current');
-    scrollToMatch(matchElements[currentMatchIndex]);
+    scrollToMatch(matchElements[currentMatchIndex], messagesEl);
     publishSearchState();
   }
 
@@ -2340,7 +2409,7 @@
 
     // Add current class to new match
     matchElements[currentMatchIndex].classList.add('search-match-current');
-    scrollToMatch(matchElements[currentMatchIndex]);
+    scrollToMatch(matchElements[currentMatchIndex], messagesEl);
     publishSearchState();
   }
 
@@ -2495,6 +2564,10 @@
     lastScrollTop = restored.scrollTop;
     scrollAnchor = restored.anchor;
     anchorScrollTop = restored.scrollTop;
+    // Back at the bottom it was following, so it follows again, whatever a
+    // scroll event read while the box was detached or not yet restored (the
+    // keyboard opening must re-pin it).
+    if (saved.atBottom) userScrolledUp = false;
   });
 
   /**
@@ -2937,7 +3010,7 @@
                     <Button
                       variant="ghost"
                       size="icon"
-                      class="message-copy-action absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
+                      class="message-copy-action touch-hit absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
                       title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       onclick={() => copyContent(group.message.content, group.message.id)}
@@ -2981,7 +3054,7 @@
                     <Button
                       variant="ghost"
                       size="icon"
-                      class="message-copy-action absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
+                      class="message-copy-action touch-hit absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
                       title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       onclick={() => copyContent(group.message.content, group.message.id)}
@@ -3198,6 +3271,7 @@
         checkRequested={checkNowPending}
         stopping={cancelling}
         {userScrolledUp}
+        reveal={(el) => revealWithin(el, messagesEl, { block: 'nearest' })}
         onCheckNow={handleCheckNow}
         onStop={handleCancel}
       />
@@ -3395,12 +3469,28 @@
   /* Modal shell                                                             */
   /* ======================================================================= */
 
+  /* When its rows don't all fit, the pane scrolls rather than clip,
+     anchored at its foot: the message box and Send stay in view, and what
+     sits above them (the plan, a queued message, the slash-command list,
+     attachments, an error line) is a scroll away. The keyboard up on a phone
+     held sideways leaves 48px (dialog-content's `cramped`); a long queue or
+     slash-command list can overflow a short window too. `column-reverse`
+     does the anchoring: a scroller starts at a reversed column's
+     main-start, the bottom, and holds that edge while content above it
+     grows or goes. The `order`s on the transcript and the input area put
+     the rows back in their usual top-to-bottom order. While everything fits
+     the transcript takes up the slack, so the rows sit just as in a plain
+     column. When it doesn't, the transcript keeps whatever height is left,
+     but never less than its own padding (24px in the mobile layout), and its
+     own scroll position is untouched. */
   .session-chat-pane {
     display: flex;
-    flex-direction: column;
+    flex-direction: column-reverse;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border: 2px solid transparent;
     background: var(--bg-primary);
     transition:
@@ -3415,6 +3505,8 @@
 
   .session-chat-pane.compact .modal-content {
     padding: 12px;
+    padding-left: calc(12px + var(--dialog-safe-left, 0px));
+    padding-right: calc(12px + var(--dialog-safe-right, 0px));
   }
 
   .session-chat-pane.compact .messages {
@@ -3428,6 +3520,7 @@
   /* ----- Content area (scrollable) --------------------------------------- */
 
   .modal-content {
+    order: -1;
     flex: 1;
     overflow-x: hidden;
     overflow-y: auto;
@@ -3439,6 +3532,11 @@
        second time. */
     overflow-anchor: none;
     padding: 16px;
+    /* The transcript spans a full-screen dialog's width, so a swipe over
+       the side insets still scrolls it; its content clears them
+       (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
+    padding-left: calc(16px + var(--dialog-safe-left, 0px));
+    padding-right: calc(16px + var(--dialog-safe-right, 0px));
     min-height: 0;
     background: var(--bg-primary);
   }
@@ -3644,6 +3742,18 @@
 
   .assistant-content-has-copy {
     padding-right: 28px;
+  }
+
+  /* The bubble clips (overflow: hidden): the copy button's touch area moves
+     in from the corner to stay whole. The assistant's starts at the button's
+     top, short of the message above. */
+  .human-bubble :global(.message-copy-action) {
+    --touch-hit-dx: calc(0.375rem - 13px);
+    --touch-hit-dy: calc(13px - 0.375rem);
+  }
+
+  .assistant-content :global(.message-copy-action) {
+    --touch-hit-dy: 13px;
   }
 
   .human-bubble:focus-within :global(.message-copy-action),
@@ -3875,7 +3985,15 @@
   }
 
   .input-wrapper {
+    order: -2;
     flex-shrink: 0;
+  }
+
+  /* In the 48px the keyboard leaves on a phone held sideways
+     (dialog-content's `cramped`) the composer's row needs every pixel, so
+     the drop-target border goes top and bottom. */
+  :global([data-cramped]) .session-chat-pane {
+    border-block-width: 0;
   }
 
   .queue-popover,
@@ -3884,6 +4002,8 @@
     flex-direction: column;
     gap: 0;
     margin: 0 14px;
+    margin-left: calc(14px + var(--dialog-safe-left, 0px));
+    margin-right: calc(14px + var(--dialog-safe-right, 0px));
     border: 1px solid var(--border-muted);
     border-bottom: none;
     border-radius: 10px 10px 0 0;
@@ -3955,12 +4075,16 @@
   /* ----- Pipeline stop area ---------------------------------------------- */
 
   /* Same chrome as .chat-composer: the error line (if any) above, the
-     button right-aligned beneath it. */
+     button right-aligned beneath it, and the same bottom inset, as it ends
+     the dialog in the composer's place. */
   .pipeline-stop-area {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 10px 14px;
+    padding-bottom: calc(10px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(14px + var(--dialog-safe-left, 0px));
+    padding-right: calc(14px + var(--dialog-safe-right, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
@@ -4106,13 +4230,14 @@
     font-weight: 600;
   }
 
-  @media (max-width: 700px) {
-    .modal-header {
-      padding: 12px;
-    }
-
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .modal-content {
       padding: 12px;
+      padding-left: calc(12px + var(--dialog-safe-left, 0px));
+      padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }
   }
 </style>

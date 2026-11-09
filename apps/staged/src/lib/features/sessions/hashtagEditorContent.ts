@@ -70,3 +70,16 @@ function appendTextNodes(parent: ParentNode, text: string) {
     if (lines[i]) parent.appendChild(document.createTextNode(lines[i]));
   }
 }
+
+/**
+ * Whether the editor holds only the line break a browser leaves behind when
+ * every line is deleted (`<br>`, or `<div><br></div>` once a line was
+ * added): `value` is what was extracted from it, `text` its text content.
+ * Nothing shows, so HashtagInput reads it as empty (and the placeholder comes
+ * back) while leaving the DOM alone. A newline the user typed in an empty
+ * editor extracts as two (the line and the one after it), or is in the text
+ * itself.
+ */
+export function isLeftoverLineBreak(value: string, text: string): boolean {
+  return value === '\n' && text.replaceAll(BADGE_CARET_ANCHOR, '') === '';
+}

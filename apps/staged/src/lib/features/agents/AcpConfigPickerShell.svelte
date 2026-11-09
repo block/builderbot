@@ -314,9 +314,21 @@
     white-space: nowrap;
   }
 
-  @media (max-width: 560px) {
+  /* Narrow windows and phones: the columns stack. (`grid-template-columns`
+     alone did nothing against the column auto-flow, so a phone got three
+     columns squeezed into one row with their labels clipped.) */
+  @media (max-width: 560px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .picker-column-grid {
-      grid-template-columns: 1fr;
+      display: grid;
+      grid-auto-flow: row;
+      grid-template-columns: minmax(0, 1fr);
+      max-width: 100%;
+    }
+
+    :global(.picker-column) {
+      max-width: 100%;
     }
 
     :global(.picker-column + .picker-column) {

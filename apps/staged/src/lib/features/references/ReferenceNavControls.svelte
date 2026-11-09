@@ -11,11 +11,11 @@
   let { nav }: Props = $props();
 </script>
 
-<div class="reference-nav-controls" aria-label="Reference history navigation">
+<div class="reference-nav-controls touch-hit-group" aria-label="Reference history navigation">
   <Button
     variant="ghost"
     size="icon-sm"
-    class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-4"
+    class="touch-hit size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-4"
     title="Back"
     aria-label="Back"
     disabled={!nav.canGoBack}
@@ -26,7 +26,7 @@
   <Button
     variant="ghost"
     size="icon-sm"
-    class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-4"
+    class="touch-hit size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-4"
     title="Forward"
     aria-label="Forward"
     disabled={!nav.canGoForward}

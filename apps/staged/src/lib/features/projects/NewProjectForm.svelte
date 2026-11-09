@@ -21,7 +21,7 @@
   import type { BranchSelection } from './RepoConfigForm.svelte';
   import { parseGitHubUrl } from '../../shared/githubUrl';
   import type { RepoSelection } from '../../shared/githubUrl';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import type { PullRequest } from '../../types';
   import { sqState } from '../settings/sq.svelte';
   import { preferences, setNewProjectLocation } from '../settings/preferences.svelte';
@@ -176,9 +176,10 @@
     }
   }
 
+  // On an iPhone or iPad the name field waits for a tap (see autofocusOnOpen).
   let nameInputRef = $state<HTMLInputElement | null>(null);
   $effect(() => {
-    focusAfterDialogEnter(nameInputRef);
+    autofocusOnOpen(nameInputRef);
   });
 
   function handleNameInput() {
@@ -209,7 +210,7 @@
       autocapitalize="sentences"
       spellcheck={false}
       oninput={handleNameInput}
-      class="min-h-[42px] rounded-[10px] bg-background px-3.5 py-2.5 text-base"
+      class="min-h-[42px] rounded-[10px] bg-background px-3.5 py-2.5"
       bind:ref={nameInputRef}
     />
   </div>
@@ -268,6 +269,21 @@
     gap: 14px;
   }
 
+  /* In a full-screen dialog (NewProjectModal on a phone) the form is the
+     dialog's scrolling row: the on-screen keyboard shrinks the dialog to
+     what is visible above it, and the rows that no longer fit (the repo
+     chips, Create, Cancel) are a scroll away instead of under the keyboard.
+     The dialog's grid gives this row the height left under the header
+     (`mobile:grid-rows-[auto_minmax(0,1fr)]`). Elsewhere (the splash
+     screen, the desktop dialog) the form stays content-sized. The repo
+     dropdown is portaled out of the form (RepoSearchInput), so the scroll
+     clip never cuts it off. */
+  :global([data-full-screen]) .new-project-form {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
   .form-group {
     display: flex;
     flex-direction: column;
@@ -284,10 +300,13 @@
     font-size: var(--size-xs);
   }
 
+  /* Last row of NewProjectModal; clear of the home indicator when that is
+     full screen (`--dialog-safe-bottom`, see dialog-content). 0 elsewhere. */
   .actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    padding-bottom: var(--dialog-safe-bottom, 0px);
   }
 
   @media (max-width: 640px) {

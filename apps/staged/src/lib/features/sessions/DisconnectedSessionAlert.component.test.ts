@@ -30,11 +30,13 @@ function render(initial: {
 }) {
   const onCheckNow = vi.fn();
   const onStop = vi.fn();
+  const reveal = vi.fn();
   const props = reactiveProps({
     checkRequested: false,
     stopping: false,
     userScrolledUp: false,
     ...initial,
+    reveal,
     onCheckNow,
     onStop,
   });
@@ -42,7 +44,7 @@ function render(initial: {
   document.body.appendChild(target);
   alert = mount(DisconnectedSessionAlert, { target, props });
   flushSync();
-  return { props, onCheckNow, onStop };
+  return { props, onCheckNow, onStop, reveal };
 }
 
 function button(label: string): HTMLButtonElement {
@@ -109,22 +111,10 @@ describe('DisconnectedSessionAlert', () => {
     expect(button('Check now').disabled).toBe(false);
   });
 
-  function spyScrollIntoView() {
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
-    return scrollIntoView;
-  }
-
-  afterEach(() => {
-    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
-  });
-
-  it('scrolls itself into view when it appears, and not for the background checks after', () => {
-    const scrollIntoView = spyScrollIntoView();
-    const { props } = render({ reconcile: reconcile('waiting') });
-    expect(scrollIntoView).toHaveBeenCalledTimes(1);
-    expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'nearest' });
-    expect(scrollIntoView.mock.contexts[0]).toBe(
+  it('brings itself into view when it appears, and not for the background checks after', () => {
+    const { props, reveal } = render({ reconcile: reconcile('waiting') });
+    expect(reveal).toHaveBeenCalledTimes(1);
+    expect(reveal).toHaveBeenLastCalledWith(
       document.querySelector('[data-testid="disconnected-session-alert"]')
     );
 
@@ -143,76 +133,73 @@ describe('DisconnectedSessionAlert', () => {
     props.reconcile = reconcile('stopping');
     flushSync();
     expect(statusLine()?.textContent?.trim()).toBe('Stopping the turn on the workstation…');
-    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(reveal).toHaveBeenCalledTimes(1);
   });
 
   it('follows its status line while the reader’s own Check now plays out', () => {
-    const scrollIntoView = spyScrollIntoView();
     const reason = { kind: 'unreachable' as const, message: 'sq: timed out' };
-    const { props } = render({ reconcile: reconcile('waiting', { reason }) });
-    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    const { props, reveal } = render({ reconcile: reconcile('waiting', { reason }) });
+    expect(reveal).toHaveBeenCalledTimes(1);
 
     button('Check now').click();
     props.checkRequested = true;
     flushSync();
     expect(statusLine()?.textContent?.trim()).toBe('Catching up with the workstation…');
-    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(reveal).toHaveBeenCalledTimes(2);
 
     // The backend's `checking` says what the pane already shows.
     props.checkRequested = false;
     props.reconcile = reconcile('checking');
     flushSync();
-    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(reveal).toHaveBeenCalledTimes(2);
 
     // Its outcome, the status line it grows, is brought into view too.
     props.reconcile = reconcile('waiting', {
       reason: { kind: 'suspended', message: 'sq: suspended' },
     });
     flushSync();
-    expect(scrollIntoView).toHaveBeenCalledTimes(3);
+    expect(reveal).toHaveBeenCalledTimes(3);
 
     // That settled the Check now: the next background check doesn't scroll.
     props.reconcile = reconcile('checking');
     flushSync();
     props.reconcile = reconcile('waiting', { reason });
     flushSync();
-    expect(scrollIntoView).toHaveBeenCalledTimes(3);
+    expect(reveal).toHaveBeenCalledTimes(3);
   });
 
   it('follows its status line while the reader’s own Stop plays out', () => {
-    const scrollIntoView = spyScrollIntoView();
-    const { props } = render({ reconcile: reconcile('waiting') });
-    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    const { props, reveal } = render({ reconcile: reconcile('waiting') });
+    expect(reveal).toHaveBeenCalledTimes(1);
 
     button('Stop').click();
     props.stopping = true;
     flushSync();
     props.reconcile = reconcile('stopping');
     flushSync();
-    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(reveal).toHaveBeenCalledTimes(2);
   });
 
   it('never scrolls a reader who has scrolled up the transcript', () => {
-    const scrollIntoView = spyScrollIntoView();
-    const { props } = render({ reconcile: reconcile('waiting'), userScrolledUp: true });
-    expect(scrollIntoView).not.toHaveBeenCalled();
+    const { props, reveal } = render({ reconcile: reconcile('waiting'), userScrolledUp: true });
+    expect(reveal).not.toHaveBeenCalled();
 
     button('Check now').click();
     props.checkRequested = true;
     flushSync();
     expect(statusLine()?.textContent?.trim()).toBe('Catching up with the workstation…');
-    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(reveal).not.toHaveBeenCalled();
 
     // Scrolling back down is not itself a reason to scroll; the action's
     // next change, now the reader follows the transcript, is.
     props.userScrolledUp = false;
     flushSync();
-    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(reveal).not.toHaveBeenCalled();
     props.checkRequested = false;
     props.reconcile = reconcile('waiting', {
       reason: { kind: 'suspended', message: 'sq: suspended' },
     });
     flushSync();
-    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(reveal).toHaveBeenCalledTimes(1);
   });
 });

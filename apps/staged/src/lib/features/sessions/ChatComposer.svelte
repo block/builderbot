@@ -23,7 +23,7 @@
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
   const controlBaseClass =
-    'min-h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:min-h-11 max-[640px]:justify-center';
+    'min-h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-11 mobile:justify-center';
 
   /** Styling for the agent config picker trigger rendered in the control row. */
   export const composerControlClass = `${controlBaseClass} px-4 py-1`;
@@ -35,7 +35,7 @@
 </script>
 
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { onDestroy, type Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -56,6 +56,7 @@
   import ComposerError from './ComposerError.svelte';
   import type { AttachmentPreview } from './attachmentPreview';
   import HashtagInput from './HashtagInput.svelte';
+  import { createCompositionSendGate, createTouchPressFocusGuard } from './composerSendPress';
   import type { HashtagItem } from '../../types';
 
   interface Props {
@@ -144,6 +145,57 @@
     if (value === 'queue' || value === 'send') onSendModeChange?.(value);
   }
 
+  // A touch press on Send leaves focus, and so the on-screen keyboard, in the
+  // message box, as in a messaging app: the next message can be typed straight
+  // away, and the full-screen dialog doesn't start resizing for a closing
+  // keyboard under the tap. Only the press's compatibility mousedown is
+  // cancelled (see createTouchPressFocusGuard); the click still fires. Mouse
+  // presses keep the default, and so does the split button's menu trigger,
+  // which moves focus into its menu as usual.
+  //
+  // While the box holds an IME or dictation composition the press moves focus
+  // after all, which commits the composition, and the send waits for its
+  // `compositionend` (createCompositionSendGate) so the committed text is in
+  // the draft it sends rather than landing in the box after it was cleared.
+  // On Android, Gboard keeps the word being typed open as a composition, so
+  // a Send there usually lets the keyboard drop: by design, rather than
+  // committing the composition by hand; the message is still sent once.
+  let composing = $state(false);
+  const sendPress = createTouchPressFocusGuard();
+  const sendGate = createCompositionSendGate();
+  let deferredSendTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function handleSendMouseDown(e: MouseEvent) {
+    if (sendPress.mouseDown(composing)) e.preventDefault();
+  }
+
+  function handleSendClick() {
+    sendPress.reset();
+    if (!sendGate.press(composing)) return;
+    // Sending now: a send still deferred from an earlier press must not
+    // follow it.
+    clearTimeout(deferredSendTimer);
+    onSend?.();
+  }
+
+  function handleCompositionEnd() {
+    if (!sendGate.compositionEnded()) return;
+    // WebKit fires the committing `input` after `compositionend`; send once
+    // it has reached the draft.
+    clearTimeout(deferredSendTimer);
+    deferredSendTimer = setTimeout(() => onSend?.(), 0);
+  }
+
+  // A composition the box dropped without a `compositionend` (its content
+  // replaced, e.g. a failed send putting the draft back) drops a press
+  // waiting on it too, so a later composition's end doesn't send. A real end
+  // has already consulted the gate, synchronously, by the time this runs.
+  $effect(() => {
+    if (!composing) sendGate.cancel();
+  });
+
+  onDestroy(() => clearTimeout(deferredSendTimer));
+
   function openImagePicker() {
     fileInputEl?.click();
   }
@@ -185,6 +237,8 @@
   <HashtagInput
     bind:textareaEl
     bind:value
+    bind:composing
+    oncompositionend={handleCompositionEnd}
     class="message-input"
     {placeholder}
     rows={1}
@@ -217,11 +271,14 @@
       </span>
     {/if}
     {#if sendControl.split}
-      <span class="inline-flex composer-send composer-send-split" title={sendTitle}>
+      <span class="inline-flex composer-send composer-send-split touch-hit-group" title={sendTitle}>
         <Button
           variant="accent"
-          class="composer-send-primary h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm max-[640px]:min-h-11"
-          onclick={onSend}
+          class="composer-send-primary touch-hit h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm mobile:min-h-11"
+          onpointerdown={(e) => sendPress.pointerDown(e.pointerType)}
+          onpointercancel={() => sendPress.reset()}
+          onmousedown={handleSendMouseDown}
+          onclick={handleSendClick}
           disabled={sendDisabled}
         >
           {@render sendLabel()}
@@ -230,7 +287,7 @@
           <DropdownMenu.Trigger
             class={cn(
               buttonVariants({ variant: 'accent' }),
-              'composer-send-menu-trigger -ml-px h-auto min-h-9 w-8 rounded-l-none px-0 max-[640px]:min-h-11'
+              'composer-send-menu-trigger touch-hit -ml-px h-auto min-h-9 w-8 rounded-l-none px-0 mobile:min-h-11'
             )}
             title="Change how messages are delivered"
             aria-label="Change how messages are delivered"
@@ -256,8 +313,11 @@
       <span class="inline-flex composer-send" title={sendTitle}>
         <Button
           variant="accent"
-          class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
-          onclick={onSend}
+          class="touch-hit h-auto min-h-9 gap-1.5 px-4 py-1 text-sm mobile:min-h-11"
+          onpointerdown={(e) => sendPress.pointerDown(e.pointerType)}
+          onpointercancel={() => sendPress.reset()}
+          onmousedown={handleSendMouseDown}
+          onclick={handleSendClick}
           disabled={sendDisabled}
         >
           {@render sendLabel()}
@@ -277,11 +337,18 @@
 {/snippet}
 
 <style>
+  /* The composer ends its dialog, so in a full-screen one its chrome runs
+     under the home indicator and to the screen's sides, and only the
+     controls are inset (`--dialog-safe-bottom`, `--dialog-safe-left` /
+     `--dialog-safe-right`, see dialog-content). */
   .chat-composer {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 10px 14px;
+    padding-bottom: calc(10px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(14px + var(--dialog-safe-left, 0px));
+    padding-right: calc(14px + var(--dialog-safe-right, 0px));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
@@ -356,6 +423,42 @@
 
   .composer-controls .composer-send {
     margin-left: auto;
+  }
+
+  /* Too little height for two rows (the keyboard up on a phone held
+     sideways, dialog-content's `cramped`): the message box and Send share
+     one, and the other controls wait for the keyboard to close. Anything
+     else (attachments, an error line) keeps a full-width row of its own
+     above it, a scroll up in SessionChatPane, which keeps the message box's
+     row in view. */
+  :global([data-cramped]) .chat-composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    padding-block: 5px;
+  }
+
+  :global([data-cramped]) .chat-composer > :global(*) {
+    grid-column: 1 / -1;
+  }
+
+  :global([data-cramped]) .chat-composer > :global(.hashtag-input-wrapper) {
+    grid-column: 1;
+  }
+
+  :global([data-cramped]) .chat-composer > .composer-controls {
+    grid-column: 2;
+  }
+
+  :global([data-cramped]) .composer-controls > :global(:not(.composer-send)) {
+    display: none;
+  }
+
+  /* Send matches the message box's height, so the row fits the 48px the
+     keyboard leaves (SessionChatPane keeps it in view); its touch area
+     stays 44px (`touch-hit`). */
+  :global([data-cramped]) .composer-send :global(button) {
+    min-height: 36px;
   }
 
   /* A hairline between the split button's two accent segments, exactly the

@@ -33,6 +33,14 @@ function element(props: Record<string, unknown>, inFullScreen = true) {
 
 const composer = element({ tagName: 'TEXTAREA' });
 
+/** A client rect for an element `pageTop` down the unscrolled page. */
+function pageRect(pageTop: number) {
+  return () => {
+    const top = pageTop - fakeWindow.scrollY - body.scrollTop;
+    return { top, bottom: top + 30 };
+  };
+}
+
 function flushFrames(): void {
   const pending = rafCallbacks;
   rafCallbacks = [];
@@ -84,17 +92,57 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+
+/** Fake only the timers the blur fallback uses; rAF stays the stub above. */
+function useFakeTimeouts(): void {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+}
+
+const BODY = { tagName: 'BODY' };
+
+/** A focus event reaching the document from `target`, as it would bubble. */
+function dispatchFocus(type: 'focusin' | 'focusout', target: unknown): void {
+  const event = new Event(type);
+  Object.defineProperty(event, 'target', { value: target });
+  fakeDocument.dispatchEvent(event);
+}
+
+/**
+ * Focus moving off `from`, as the browser reports it: `from`'s `focusout`
+ * while nothing has focus, then `to`'s `focusin`. Without `to`, focus goes
+ * to the body, which fires no `focusin` (what iOS does when a tap takes
+ * focus off the input: no viewport change yet).
+ */
+function moveFocus(from: unknown, to?: unknown): void {
+  fakeDocument.activeElement = BODY;
+  dispatchFocus('focusout', from);
+  if (!to) return;
+  fakeDocument.activeElement = to;
+  dispatchFocus('focusin', to);
+}
+
+/** The keyboard leaving: the visual viewport grows back to the layout viewport. */
+function closeKeyboard(): void {
+  viewport.height = 714;
+  viewport.offsetTop = 0;
+  viewport.dispatchEvent(new Event('resize'));
+}
+
+const KEYBOARD_GEOMETRY = { top: 0, height: 384, keyboardOpen: true, zoomed: false };
+const LAYOUT_GEOMETRY = { top: 0, height: null, keyboardOpen: false, zoomed: false };
 
 describe('watchVisualViewport', () => {
   it('holds the layout geometry until the deferred first read', async () => {
     const { visibleViewport, watchVisualViewport } = await importModule();
+    viewport.height = 384;
     watchVisualViewport();
-    expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
 
     flushFrames();
-    expect(visibleViewport).toEqual({ top: 0, height: 714, keyboardOpen: false, zoomed: false });
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
   });
 
   it('undoes the page scroll Safari adds for the keyboard and pins to what is left', async () => {
@@ -142,16 +190,159 @@ describe('watchVisualViewport', () => {
     expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
   });
 
-  it('re-measures when focus leaves the text input', async () => {
+  it('holds the keyboard geometry after a blur until the keyboard leaves', async () => {
+    // Tapping Send or Start: iOS takes focus off the input on the tap's
+    // mousedown and delivers the click afterwards at the same point. The
+    // layout must not move in between, or the click misses the button.
+    useFakeTimeouts();
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    watchVisualViewport();
+    flushFrames();
+    openKeyboardWithPageScroll();
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+
+    moveFocus(composer);
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+
+    closeKeyboard();
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+    // The resize settled the blur; the fallback has nothing left to do.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('waits the same when focus lands on something that takes no typing', async () => {
+    // A tap inside the dialog that focuses the dialog itself (tabindex=-1)
+    // or a button fires `focusin` right after the input's `focusout`; it
+    // neither re-measures nor arms a second wait.
+    useFakeTimeouts();
     const { visibleViewport, watchVisualViewport } = await importModule();
     watchVisualViewport();
     flushFrames();
     openKeyboardWithPageScroll();
 
-    fakeDocument.activeElement = { tagName: 'BUTTON' };
-    fakeDocument.dispatchEvent(new Event('focusout'));
+    const dialog = element({ tagName: 'DIV', role: 'dialog' });
+    moveFocus(composer, dialog);
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+    expect(vi.getTimerCount()).toBe(1);
+    moveFocus(dialog, element({ tagName: 'BUTTON' }));
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+    expect(vi.getTimerCount()).toBe(1);
 
-    expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
+    closeKeyboard();
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+  });
+
+  it('arms nothing when focus moves between elements that take no typing', async () => {
+    useFakeTimeouts();
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    const button = element({ tagName: 'BUTTON' });
+    fakeDocument.activeElement = button;
+    watchVisualViewport();
+    flushFrames();
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+
+    moveFocus(button, element({ tagName: 'A' }));
+    moveFocus(BODY);
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(fakeWindow.scrollTo).not.toHaveBeenCalled();
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+  });
+
+  it('waits the same when the input stopped taking typing before it lost focus', async () => {
+    // The message box made non-editable while focused (contenteditable
+    // switched off as a send starts), or removed with focus: its `focusout`
+    // no longer comes from a text input, but the keyboard is still up.
+    useFakeTimeouts();
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    const editor = { ...element({ tagName: 'DIV' }), isContentEditable: true };
+    watchVisualViewport();
+    flushFrames();
+    fakeDocument.activeElement = editor;
+    viewport.height = 384;
+    viewport.dispatchEvent(new Event('resize'));
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+
+    editor.isContentEditable = false;
+    moveFocus(editor);
+    expect(vi.getTimerCount()).toBe(1);
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+
+    closeKeyboard();
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('re-measures a blur after BLUR_SETTLE_MS when no resize comes', async () => {
+    // A hardware keyboard: only iOS's accessory bar covers the page, and the
+    // blur may come with no resize to wait for.
+    useFakeTimeouts();
+    const { BLUR_SETTLE_MS, visibleViewport, watchVisualViewport } = await importModule();
+    const field = element({ tagName: 'INPUT', type: 'text' });
+    fakeDocument.activeElement = field;
+    viewport.height = 660;
+    watchVisualViewport();
+    flushFrames();
+    expect(visibleViewport).toEqual({ top: 0, height: 660, keyboardOpen: false, zoomed: false });
+
+    const button = element({ tagName: 'BUTTON' });
+    moveFocus(field, button);
+    // Focus moving on while waiting does not push the deadline back.
+    vi.advanceTimersByTime(BLUR_SETTLE_MS - 100);
+    moveFocus(button, element({ tagName: 'A' }));
+    vi.advanceTimersByTime(99);
+    expect(visibleViewport.height).toBe(660);
+
+    vi.advanceTimersByTime(1);
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+  });
+
+  it('moving focus to another text input re-measures at once and drops the wait', async () => {
+    useFakeTimeouts();
+    const { BLUR_SETTLE_MS, visibleViewport, watchVisualViewport } = await importModule();
+    watchVisualViewport();
+    flushFrames();
+    openKeyboardWithPageScroll();
+
+    const search = element({ tagName: 'INPUT', type: 'search' });
+    moveFocus(composer, search);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+
+    // The keyboard stays up for the new input; nothing resets it later.
+    vi.advanceTimersByTime(BLUR_SETTLE_MS * 2);
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+  });
+
+  it('keeps undoing the page scroll during a pending blur without moving the layout', async () => {
+    useFakeTimeouts();
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    watchVisualViewport();
+    flushFrames();
+    openKeyboardWithPageScroll();
+    moveFocus(composer);
+    fakeWindow.scrollTo.mockClear();
+
+    fakeWindow.scrollY = 40;
+    viewport.offsetTop = 40;
+    viewport.dispatchEvent(new Event('scroll'));
+
+    expect(fakeWindow.scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(visibleViewport).toEqual(KEYBOARD_GEOMETRY);
+  });
+
+  it('the last unsubscribe cancels a pending blur', async () => {
+    useFakeTimeouts();
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    const unwatch = watchVisualViewport();
+    flushFrames();
+    openKeyboardWithPageScroll();
+    moveFocus(composer);
+    expect(vi.getTimerCount()).toBe(1);
+
+    unwatch();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
   });
 
   it('a button input takes no typing', async () => {
@@ -162,9 +353,22 @@ describe('watchVisualViewport', () => {
     flushFrames();
     expect(visibleViewport.height).toBeNull();
 
-    fakeDocument.activeElement = element({ tagName: 'INPUT', type: 'search' });
-    fakeDocument.dispatchEvent(new Event('focusin'));
+    const search = element({ tagName: 'INPUT', type: 'search' });
+    fakeDocument.activeElement = search;
+    dispatchFocus('focusin', search);
     expect(visibleViewport.height).toBe(484);
+  });
+
+  it('keeps the layout geometry for a focused input with no keyboard over it', async () => {
+    // A dialog focusing its input as it opens: iOS raises no keyboard for a
+    // focus outside a tap, so nothing switches to keyboard sizing.
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    fakeDocument.activeElement = composer;
+    watchVisualViewport();
+    flushFrames();
+    dispatchFocus('focusin', composer);
+
+    expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
   });
 
   it('follows a focused contenteditable', async () => {
@@ -186,7 +390,10 @@ describe('watchVisualViewport', () => {
     watchVisualViewport();
     flushFrames();
 
-    fakeDocument.activeElement = element({ tagName: 'INPUT', type: 'text' }, false);
+    fakeDocument.activeElement = element(
+      { tagName: 'INPUT', type: 'text', getBoundingClientRect: pageRect(600) },
+      false
+    );
     viewport.height = 384;
     viewport.offsetTop = 330;
     fakeWindow.scrollY = 330;
@@ -199,10 +406,30 @@ describe('watchVisualViewport', () => {
     // Back in the dialog's own composer, the dialog fits above the keyboard
     // again and the scroll goes.
     fakeDocument.activeElement = composer;
-    fakeDocument.dispatchEvent(new Event('focusin'));
+    dispatchFocus('focusin', composer);
 
     expect(fakeWindow.scrollTo).toHaveBeenCalledWith(0, 0);
     expect(visibleViewport).toEqual({ top: 0, height: 384, keyboardOpen: true, zoomed: false });
+  });
+
+  it('drops a page scroll an input outside the layout shows without', async () => {
+    // A search field near the top of the page, which Safari still scrolled
+    // 5 px for. The layout stays at the layout viewport's geometry.
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    watchVisualViewport();
+    flushFrames();
+
+    fakeDocument.activeElement = element(
+      { tagName: 'INPUT', type: 'search', getBoundingClientRect: pageRect(100) },
+      false
+    );
+    viewport.height = 384;
+    viewport.offsetTop = 5;
+    fakeWindow.scrollY = 5;
+    viewport.dispatchEvent(new Event('resize'));
+
+    expect(fakeWindow.scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
   });
 
   it('leaves a pinch-zoomed page where the user panned it', async () => {

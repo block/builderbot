@@ -128,7 +128,7 @@
 
 <Dialog.Root {open} onOpenChange={(v) => !v && requestClose()}>
   <Dialog.Content
-    class="dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    class="session-dialog dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
     style={dialogWidth.style}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
@@ -153,12 +153,12 @@
         onPrevious={previousMatch}
         onClose={closeSearch}
       />
-      <div class="header-actions">
+      <div class="header-actions touch-hit-group">
         {#if noteInfo?.content.trim() && onOpenNote}
           <Button
             variant="outline"
             size="sm"
-            class="h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:h-10"
+            class="touch-hit h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground mobile:h-10"
             onclick={() => onOpenNote?.(noteInfo!)}
           >
             View note
@@ -167,7 +167,7 @@
         <Button
           variant="ghost"
           size="icon"
-          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:size-10 [&_svg]:!size-4"
+          class="touch-hit size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground mobile:size-10 [&_svg]:!size-4"
           title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
           aria-label="Close"
           onclick={requestClose}
@@ -230,9 +230,30 @@
     flex-shrink: 0;
   }
 
-  @media (max-width: 700px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). The header
+     takes the full-screen dialog's insets: the top one runs its background
+     up under the status bar, and the side ones keep Close clear of the
+     Dynamic Island (`--dialog-safe-*`, see dialog-content). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .modal-header {
       padding: 12px;
+      padding-top: calc(12px + var(--dialog-safe-top, 0px));
+      padding-left: calc(12px + var(--dialog-safe-left, 0px));
+      padding-right: calc(12px + var(--dialog-safe-right, 0px));
     }
+  }
+
+  /* With the keyboard up on a phone held sideways only the composer's row
+     fits (dialog-content's `cramped`); the header is back once the keyboard
+     closes. */
+  :global([data-cramped]) > .modal-header {
+    display: none;
+  }
+
+  /* ...so the top inset goes to the dialog itself, ahead of the chat pane. */
+  :global(.session-dialog[data-cramped]) {
+    padding-top: var(--dialog-safe-top, 0px);
   }
 </style>

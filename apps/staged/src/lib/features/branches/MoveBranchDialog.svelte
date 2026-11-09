@@ -20,7 +20,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import Spinner from '../../shared/Spinner.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
@@ -58,7 +58,8 @@
       // Repos hydrate lazily, so the duplicate-repo check can't be trusted
       // until every candidate's repos have actually been fetched.
       void projectsDataStore.ensureProjectsHydrated();
-      void tick().then(() => focusAfterDialogEnter(searchElement));
+      // On an iPhone or iPad the search waits for a tap (see autofocusOnOpen).
+      void tick().then(() => autofocusOnOpen(searchElement));
     }
     wasOpen = open;
   });
@@ -139,7 +140,7 @@
       <Button
         variant="ghost"
         size="icon"
-        class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:size-10 [&_svg]:!size-[18px]"
+        class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground mobile:size-10 [&_svg]:!size-[18px]"
         title="Close"
         aria-label="Close"
         onclick={requestClose}
@@ -163,6 +164,9 @@
           disabled={moving}
           placeholder="Search projects…"
           autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           class="pl-8 bg-[var(--bg-primary)] focus-visible:ring-0 focus-visible:border-[var(--border-emphasis)]"
           onkeydown={handleSearchKeydown}
         />
@@ -202,7 +206,7 @@
         <Button
           type="button"
           variant="outline"
-          class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+          class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground mobile:h-11 mobile:flex-1 mobile:justify-center"
           onclick={requestClose}
           disabled={moving}
         >
@@ -211,7 +215,7 @@
         <Button
           type="submit"
           variant="accent"
-          class="gap-1.5 px-4 py-2 text-sm max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+          class="gap-1.5 px-4 py-2 text-sm mobile:h-11 mobile:flex-1 mobile:justify-center"
           disabled={!selected || !!invalidReason || checking || moving}
         >
           {#if moving}
@@ -317,21 +321,34 @@
     font-size: var(--size-xs);
   }
 
+  /* The dialog's last row; clear of the home indicator in a full-screen
+     dialog (`--dialog-safe-bottom`, see dialog-content). */
   .form-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
     margin-top: 4px;
+    padding-bottom: var(--dialog-safe-bottom, 0px);
     flex-shrink: 0;
   }
 
-  @media (max-width: 768px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
+    /* Full-width rows: clear of a full-screen dialog's side insets
+       (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
     .modal-header {
       padding: 12px 16px;
+      padding-top: calc(12px + var(--dialog-safe-top, 0px));
+      padding-left: calc(16px + var(--dialog-safe-left, 0px));
+      padding-right: calc(16px + var(--dialog-safe-right, 0px));
     }
 
     .modal-body {
       padding: 16px;
+      padding-left: calc(16px + var(--dialog-safe-left, 0px));
+      padding-right: calc(16px + var(--dialog-safe-right, 0px));
     }
 
     /* Full-screen on mobile: let the list take the leftover height instead of

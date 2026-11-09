@@ -247,7 +247,7 @@
     <Button
       variant="outline"
       type="button"
-      class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center"
+      class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground mobile:h-11 mobile:justify-center"
       onclick={openFilePicker}
     >
       <ImagePlus size={14} />
@@ -258,7 +258,7 @@
         variant="outline"
         size="icon"
         type="button"
-        class="size-9 text-muted-foreground shadow-none hover:text-foreground max-[768px]:size-11"
+        class="size-9 text-muted-foreground shadow-none hover:text-foreground mobile:size-11"
         title="Attach clipboard"
         aria-label="Attach clipboard"
         onclick={() => onAttachClipboard?.()}

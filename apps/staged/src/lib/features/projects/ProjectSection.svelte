@@ -1147,6 +1147,14 @@
     margin: 0;
   }
 
+  /* A taller New-note control on a touch screen (as in BranchTimeline's
+     footer-left-actions). */
+  @media (pointer: coarse) {
+    .project-session-footer :global(button) {
+      min-height: 36px;
+    }
+  }
+
   /* ── Branches list ───────────────────────────────────────────────────── */
 
   .branches-list {

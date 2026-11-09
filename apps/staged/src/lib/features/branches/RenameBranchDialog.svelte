@@ -9,7 +9,7 @@
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import Spinner from '../../shared/Spinner.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
 
   interface Props {
     open: boolean;
@@ -37,8 +37,10 @@
       draft = branchName;
       error = null;
       renaming = false;
+      // Focused and selected with a mouse and keyboard; on a touch screen
+      // the field waits for a tap (see autofocusOnOpen).
       void tick().then(() =>
-        focusAfterDialogEnter(inputElement, (el) => {
+        autofocusOnOpen(inputElement, (el) => {
           el.focus();
           el.select();
         })
@@ -99,6 +101,10 @@
           bind:ref={inputElement}
           bind:value={draft}
           disabled={renaming}
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           aria-invalid={error ? 'true' : undefined}
           oninput={() => (error = null)}
         />

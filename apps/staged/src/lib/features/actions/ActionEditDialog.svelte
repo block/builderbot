@@ -31,7 +31,7 @@
   import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Select from '$lib/components/ui/select';
   import Spinner from '../../shared/Spinner.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import type { ProjectAction } from '../../api/commands';
   import IconPicker from './IconPicker.svelte';
 
@@ -77,7 +77,8 @@
         : { name: '', command: '', actionType: 'run', pinned: defaultPinned, icon: null };
       error = null;
       saving = false;
-      void tick().then(() => focusAfterDialogEnter(nameElement));
+      // On an iPhone or iPad the name field waits for a tap (see autofocusOnOpen).
+      void tick().then(() => autofocusOnOpen(nameElement));
     }
     wasOpen = open;
   });
@@ -117,7 +118,9 @@
 </script>
 
 <Dialog.Root bind:open={() => open, (nextOpen) => (nextOpen ? (open = true) : requestClose())}>
-  <Dialog.Content class="sm:max-w-[460px] gap-4">
+  <!-- Full screen on a phone, the form is the dialog's scrolling row (see
+       the `[data-full-screen]` rule below). -->
+  <Dialog.Content class="sm:max-w-[460px] gap-4 mobile:grid-rows-[auto_minmax(0,1fr)]">
     <Dialog.Header>
       <Dialog.Title>{action ? 'Edit Action' : 'Add Action'}</Dialog.Title>
     </Dialog.Header>
@@ -194,10 +197,16 @@
       {/if}
 
       <Dialog.Footer>
-        <Button type="button" variant="outline" onclick={requestClose} disabled={saving}>
+        <Button
+          type="button"
+          variant="outline"
+          class="mobile:h-[44px]"
+          onclick={requestClose}
+          disabled={saving}
+        >
           Cancel
         </Button>
-        <Button type="submit" disabled={saving || !canSave}>
+        <Button type="submit" class="mobile:h-[44px]" disabled={saving || !canSave}>
           {#if saving}
             <Spinner size={14} />
             <span>Saving...</span>
@@ -218,6 +227,21 @@
     gap: 14px;
   }
 
+  /* With the on-screen keyboard up the dialog shrinks to what is visible
+     above it; the form scrolls so Save and Cancel stay reachable (as in
+     NewProjectForm). */
+  :global([data-full-screen]) .action-form {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* A scroller clips what overflows it sideways too, which cut the left
+       16 px off the checkbox's tap area below. The form takes that room
+       from the dialog's padding and gives it back as its own, so the rows
+       sit where they did and the area is inside the scroller. */
+    margin-inline: -16px;
+    padding-inline: 16px;
+  }
+
   .field {
     display: flex;
     flex-direction: column;
@@ -234,6 +258,19 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+
+  /* A 16 px inset round the checkbox on a phone: a 45 px tap area at the
+     app's 13 px rem, measured on the simulator. The Checkbox's
+     own `after:-inset-x-3 after:-inset-y-2` utilities draw the desktop
+     one; this rule is unlayered, so it wins over them without relying on
+     how Tailwind orders a `mobile:after:` utility against them. */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
+    .pinned-row :global([data-slot='checkbox'])::after {
+      inset: -16px;
+    }
   }
 
   .form-error {

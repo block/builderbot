@@ -1629,4 +1629,13 @@
     gap: 10px;
     flex: 1;
   }
+
+  /* Taller footer controls on a touch screen rather than `touch-hit` areas,
+     which would spill onto the last timeline row above. */
+  @media (pointer: coarse) {
+    .footer-left-actions :global(button) {
+      min-width: 36px;
+      min-height: 36px;
+    }
+  }
 </style>

@@ -833,7 +833,7 @@
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0"
+        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground mobile:size-10 mobile:p-0"
         title={selectedProjectTransferLabel}
         onclick={() => projectActions.requestTransferProject(selectedProject)}
         disabled={selectedProjectTransferring}
@@ -1076,7 +1076,10 @@
      it, "Suspended" is hidden visually (the pause icon shows the state and
      screen readers still read it), and Add Repo, disabled until the workspace
      is running, drops its label (its aria-label still names it). */
-  @media (max-width: 768px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
     .workspace-badge.suspended .status-label {
       position: absolute;
       width: 1px;
@@ -1194,11 +1197,14 @@
   }
 
   /* Projects list */
+  /* The bottom inset is the home indicator's (App.svelte's main leaves it to
+     the panes' content). */
   .projects-list {
     width: 100%;
     max-width: 900px;
     margin: 0 auto;
     padding: 16px;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -1230,6 +1236,7 @@
 
     .projects-list {
       padding: 12px;
+      padding-bottom: calc(12px + env(safe-area-inset-bottom));
       gap: 20px;
     }
   }

@@ -233,11 +233,17 @@
 </div>
 
 <style>
+  /* Ends DiffModal's file drawer on phones, which sets --dialog-safe-bottom
+     (and the side insets) to keep it clear of the home indicator and the
+     Dynamic Island; 0 in the desktop sidebar. */
   .composer {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 12px;
+    padding-bottom: calc(12px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(12px + var(--dialog-safe-left, 0px));
+    padding-right: calc(12px + var(--dialog-safe-right, 0px));
     border-top: 1px solid var(--border-subtle);
     background: color-mix(in srgb, var(--bg-chrome) 94%, var(--bg-hover));
   }

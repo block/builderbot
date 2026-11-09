@@ -2,8 +2,11 @@
   RepoSearchInput.svelte - Inline repo search with dropdown results
 
   Self-contained text input that fetches recent/user repos on mount
-  and shows an absolutely positioned dropdown when focused.
-  Used in NewProjectForm for the repository field.
+  and shows a dropdown when focused. The dropdown is portaled and fixed
+  (positioned from the field's rect, as HashtagInput's # dropdown is from
+  the caret): in a full-screen dialog the form is the dialog's scroller,
+  which would otherwise clip it to the form's overflow.
+  Used in NewProjectForm and AddRepoModal for the repository field.
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
@@ -22,7 +25,12 @@
   import { matchesRepoSearch } from '../../shared/repoSearch';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import { viewport } from '../../shared/viewport.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import { portal } from '../../shared/portal';
+  import { visibleViewportRect } from '../../shared/visibleViewportRect';
+  import { placeHashtagDropdown } from '../sessions/hashtagDropdownPlacement';
+  import { activeDescendantId, listboxOptionId } from '../../shared/listboxIds';
+  import { isImeKeydown } from '../../shared/imeKeydown';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import * as badge from '../../shared/badgeColors';
@@ -46,10 +54,81 @@
   let query = $state('');
   let inputEl: HTMLInputElement | null = $state(null);
   let wrapperEl: HTMLDivElement | null = $state(null);
+  let searchBoxEl: HTMLDivElement | null = $state(null);
+  let dropdownEl: HTMLDivElement | null = $state(null);
+  let dropdownStyle = $state('');
+  let dropdownAbove = $state(false);
+  /** The highlighted `.repo-item`, in DOM order; -1 for none. */
+  let selectedIndex = $state(-1);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let isSearching = $state(false);
   let directFetchRepo = $state<GitHubRepo | null>(null);
   let dropdownOpen = $state(false);
+  const uid = $props.id();
+
+  /** The dropdown's tallest, as `.repo-dropdown`'s max-height was. */
+  const DROPDOWN_MAX_HEIGHT_PX = 280;
+
+  // Place the dropdown from the field's rect on whichever side of it has
+  // room in the visible viewport: with the iOS keyboard up that is the part
+  // of the screen above the keyboard, and in a full-screen dialog the form
+  // scrolls under the field. The same placement the # dropdown uses.
+  function updateDropdownPosition() {
+    if (!searchBoxEl) return;
+    const rect = searchBoxEl.getBoundingClientRect();
+    const placement = placeHashtagDropdown(
+      { top: rect.top, bottom: rect.bottom, left: rect.left },
+      visibleViewportRect(),
+      { width: rect.width, maxHeight: DROPDOWN_MAX_HEIGHT_PX }
+    );
+    dropdownAbove = placement.side === 'above';
+    dropdownStyle =
+      `top:${placement.top}px; left:${placement.left}px;` +
+      ` width:${placement.width}px; max-height:${placement.maxHeight}px;` +
+      (placement.side === 'above' ? ' translate:0 -100%;' : '');
+  }
+
+  // While open, follow the field: the visual viewport (the keyboard coming
+  // up, the dialog re-pinning to it), any scroller around the field (the
+  // form in a full-screen dialog), the window, and the end of the dialog's
+  // entry animation, during which the field's rect is still scaled. Each
+  // is re-measured once more on the next frame, as the dialog moves on the
+  // same events.
+  $effect(() => {
+    if (!dropdownOpen) return;
+    let frame = 0;
+    const update = () => {
+      updateDropdownPosition();
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(updateDropdownPosition);
+    };
+    update();
+    const vv = window.visualViewport;
+    window.addEventListener('resize', update);
+    document.addEventListener('scroll', update, true);
+    document.addEventListener('animationend', update, true);
+    document.addEventListener('transitionend', update, true);
+    vv?.addEventListener('resize', update);
+    vv?.addEventListener('scroll', update);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', update);
+      document.removeEventListener('scroll', update, true);
+      document.removeEventListener('animationend', update, true);
+      document.removeEventListener('transitionend', update, true);
+      vv?.removeEventListener('resize', update);
+      vv?.removeEventListener('scroll', update);
+    };
+  });
+
+  function openDropdown() {
+    selectedIndex = -1;
+    dropdownOpen = true;
+  }
+
+  function dropdownItems(): HTMLElement[] {
+    return Array.from(dropdownEl?.querySelectorAll<HTMLElement>('.repo-item') ?? []);
+  }
 
   function isOwnerRepoFormat(input: string): boolean {
     const trimmed = input.trim();
@@ -108,6 +187,20 @@
     return q ? base.filter((r) => matchesRepoSearch(r.githubRepo, r.subpath, q)) : base;
   });
 
+  // ARIA combobox: the field keeps the focus and the dropdown is a listbox of
+  // options that take none, so the field names the highlighted option through
+  // aria-activedescendant. Options are numbered in DOM order (recent repos
+  // first), the order selectedIndex counts in. The reference is dropped
+  // whenever the dropdown is closed or nothing is highlighted.
+  const listboxId = `${uid}-listbox`;
+  const repoItemsShown = $derived(!loading && !error && !isSearching);
+  const optionCount = $derived(
+    filteredRecentRepos.length + (repoItemsShown ? displayItems.length : 0)
+  );
+  const activeOptionId = $derived(
+    activeDescendantId(listboxId, { open: dropdownOpen, count: optionCount, selectedIndex })
+  );
+
   const dark = $derived(darkMode.value);
 
   $effect(() => {
@@ -128,7 +221,8 @@
       // before we open the dropdown. Otherwise the trailing window-level
       // handleClickOutside (registered when this component mounted) sees a
       // target outside our wrapper and closes the dropdown we just opened.
-      setTimeout(() => focusAfterDialogEnter(inputEl), 0);
+      // On an iPhone or iPad the field waits for a tap (see autofocusOnOpen).
+      setTimeout(() => autofocusOnOpen(inputEl), 0);
     }
     try {
       recentRepos = await commands.listRecentRepos(10);
@@ -147,11 +241,15 @@
   function handleSelect(selection: RepoSelection) {
     query = '';
     dropdownOpen = false;
+    // Items take no focus (the dropdown's mousedown is cancelled, so the
+    // field keeps it); let it go, so it doesn't jump into the
+    // newly-revealed BranchPicker.
+    inputEl?.blur();
     onSelect(selection);
   }
 
   async function handleInput() {
-    dropdownOpen = true;
+    openDropdown();
     const trimmed = query.trim();
 
     const parsed = parseGitHubUrl(trimmed);
@@ -206,23 +304,31 @@
   }
 
   function handleFocus() {
-    dropdownOpen = true;
+    openDropdown();
+  }
+
+  function isInside(node: Node | null): boolean {
+    return !!node && (!!wrapperEl?.contains(node) || !!dropdownEl?.contains(node));
   }
 
   function handleFocusOut(e: FocusEvent) {
-    const related = e.relatedTarget as Node | null;
-    if (wrapperEl && related && wrapperEl.contains(related)) return;
+    if (isInside(e.relatedTarget as Node | null)) return;
     dropdownOpen = false;
   }
 
   function handleClickOutside(e: MouseEvent) {
-    if (wrapperEl && !wrapperEl.contains(e.target as Node)) {
-      dropdownOpen = false;
-    }
+    if (!isInside(e.target as Node)) dropdownOpen = false;
   }
 
+  // The field keeps the focus throughout; the arrows move a highlight over
+  // the items (as in HashtagInput) rather than the focus, which the
+  // dialog's focus trap would pull back from the portaled dropdown.
   function handleKeydown(e: KeyboardEvent) {
-    if (!dropdownOpen) return;
+    // A key the IME is handling (Enter committing a composition, arrows picking
+    // a candidate, Escape cancelling it) is the IME's, not the dropdown's, as in
+    // HashtagInput. Safari's committing Enter has isComposing false but
+    // keyCode 229; without this it picked the highlighted repo mid-composition.
+    if (!dropdownOpen || isImeKeydown(e)) return;
 
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -230,31 +336,24 @@
       inputEl?.focus();
     } else if (e.metaKey && e.key >= '1' && e.key <= '9') {
       const idx = parseInt(e.key) - 1;
-      const items = Array.from(wrapperEl?.querySelectorAll<HTMLElement>('.repo-item') ?? []);
+      const items = dropdownItems();
       if (idx < items.length) {
         e.preventDefault();
         items[idx].click();
       }
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
-      const items = Array.from(wrapperEl?.querySelectorAll<HTMLElement>('.repo-item') ?? []);
+      const items = dropdownItems();
       if (items.length === 0) return;
-
-      const current = document.activeElement as HTMLElement | null;
-      const idx = current ? items.indexOf(current) : -1;
-
-      if (e.key === 'ArrowDown') {
-        const next = items[Math.min(idx + 1, items.length - 1)];
-        next?.focus();
-        next?.scrollIntoView({ block: 'nearest' });
-      } else {
-        if (idx <= 0) {
-          inputEl?.focus();
-        } else {
-          const prev = items[idx - 1];
-          prev?.focus();
-          prev?.scrollIntoView({ block: 'nearest' });
-        }
+      const idx = selectedIndex < items.length ? selectedIndex : -1;
+      selectedIndex =
+        e.key === 'ArrowDown' ? Math.min(idx + 1, items.length - 1) : Math.max(idx - 1, -1);
+      items[selectedIndex]?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      const items = dropdownItems();
+      if (selectedIndex >= 0 && selectedIndex < items.length) {
+        e.preventDefault();
+        items[selectedIndex].click();
       }
     }
   }
@@ -270,7 +369,7 @@
   onfocusout={handleFocusOut}
 >
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="search-input" class:disabled onclick={() => inputEl?.focus()}>
+  <div class="search-input" class:disabled bind:this={searchBoxEl} onclick={() => inputEl?.focus()}>
     <Search size={14} class="search-icon" />
     <Input
       bind:ref={inputEl}
@@ -279,22 +378,58 @@
       placeholder="Search or paste a repository..."
       autocomplete="off"
       autocorrect="off"
+      autocapitalize="off"
       spellcheck="false"
       {disabled}
       oninput={handleInput}
       onfocus={handleFocus}
-      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 md:text-base"
+      role="combobox"
+      aria-expanded={dropdownOpen}
+      aria-autocomplete="list"
+      aria-controls={dropdownOpen ? listboxId : undefined}
+      aria-activedescendant={activeOptionId}
+      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-base"
     />
   </div>
 
   {#if dropdownOpen}
-    <div class="repo-dropdown">
+    <!-- The listbox takes no focus: the field keeps it and names the
+         highlighted option (ARIA combobox pattern). -->
+    <!-- svelte-ignore a11y_interactive_supports_focus -->
+    <!-- Portaled to #portal-root so position:fixed escapes the dialog's
+         transformed containing block and the form's scroll clip. pointerdown
+         is stopped so a tap on an item doesn't trip bits-ui's
+         dismiss-on-interact-outside and close the dialog; mousedown is
+         cancelled so the field keeps the focus: on iOS the focus would
+         otherwise leave on the tap's mousedown, the focusout would close the
+         dropdown, and the click would land on nothing.
+         The highlight follows mousemove, not mouseenter: ArrowDown's
+         scrollIntoView can move another item under a pointer that hasn't
+         moved, and that item's mouseenter would snap the highlight back. -->
+    <div
+      id={listboxId}
+      role="listbox"
+      aria-label="Repositories"
+      class="repo-dropdown"
+      class:above={dropdownAbove}
+      style={dropdownStyle}
+      bind:this={dropdownEl}
+      use:portal
+      onpointerdown={(e) => e.stopPropagation()}
+      onmousedown={(e) => e.preventDefault()}
+      onmouseleave={() => (selectedIndex = -1)}
+    >
       {#if filteredRecentRepos.length > 0}
         {#each filteredRecentRepos as recent, i}
           {@const hue = recentHue(recent)}
           <button
+            id={listboxOptionId(listboxId, i)}
+            role="option"
+            aria-selected={i === selectedIndex}
             class="repo-item recent"
+            class:selected={i === selectedIndex}
             tabindex="-1"
+            onmousemove={() => (selectedIndex = i)}
             style="--recent-bg: {badge.badgeBg(hue, dark)}; --recent-bg-hover: {badge.badgeBgHover(
               hue,
               dark
@@ -353,12 +488,18 @@
           {/if}
         </div>
       {:else}
-        {#each displayItems as item}
+        {#each displayItems as item, i}
           {#if item.type === 'repo'}
             {@const repo = item.data as GitHubRepo}
+            {@const itemIndex = filteredRecentRepos.length + i}
             <button
+              id={listboxOptionId(listboxId, itemIndex)}
+              role="option"
+              aria-selected={itemIndex === selectedIndex}
               class="repo-item"
+              class:selected={itemIndex === selectedIndex}
               tabindex="-1"
+              onmousemove={() => (selectedIndex = itemIndex)}
               onclick={() => handleSelect({ nameWithOwner: repo.nameWithOwner })}
             >
               <div class="repo-icon">
@@ -416,11 +557,11 @@
     flex-shrink: 0;
   }
 
+  /* Fixed and portaled; top/left/width/max-height come from
+     updateDropdownPosition. */
   .repo-dropdown {
-    position: absolute;
-    top: calc(100% + 4px);
-    left: 0;
-    right: 0;
+    position: fixed;
+    box-sizing: border-box;
     max-height: 280px;
     overflow-y: auto;
     display: flex;
@@ -431,14 +572,32 @@
     border: 1px solid var(--border-subtle);
     border-radius: 10px;
     box-shadow: var(--shadow-elevated);
-    z-index: 100;
+    z-index: var(--z-index-floating);
     animation: dropdown-in 0.15s ease;
+    /* A bits-ui popper left open sets `body { pointer-events: none }`; the
+       dropdown is outside its host, so re-enable them on it. */
+    pointer-events: auto;
+  }
+
+  .repo-dropdown.above {
+    animation-name: dropdown-in-above;
   }
 
   @keyframes dropdown-in {
     from {
       opacity: 0;
       transform: translateY(-6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes dropdown-in-above {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
     }
     to {
       opacity: 1;
@@ -477,7 +636,7 @@
     transition: background-color 0.15s ease;
   }
 
-  .repo-item:hover,
+  .repo-item.selected,
   .repo-item:focus {
     background-color: var(--bg-hover);
     outline: none;
@@ -495,7 +654,7 @@
     font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
   }
 
-  .repo-item.recent:hover,
+  .repo-item.recent.selected,
   .repo-item.recent:focus {
     background: var(--recent-bg-hover);
   }
@@ -554,7 +713,7 @@
     transition: color 0.15s ease;
   }
 
-  .repo-item:hover .repo-action,
+  .repo-item.selected .repo-action,
   .repo-item:focus .repo-action {
     color: var(--text-muted);
   }

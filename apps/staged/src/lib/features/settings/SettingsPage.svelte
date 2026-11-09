@@ -233,18 +233,27 @@
     min-height: 0;
   }
 
+  /* The panels are cards on the page's chrome; the bottom inset keeps them
+     clear of the home indicator (App.svelte's main leaves it to the panes). */
   .panel-pad {
     padding: 14px;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
     overflow: hidden;
   }
 
   @media (max-width: 920px) {
+    /* `1fr` alone is `minmax(auto, 1fr)`: the nav row's `max-content` items
+       set the column's minimum, and on a 402px phone the column (and every
+       panel in it) grew to 413px, past the viewport. `minmax(0, 1fr)` keeps
+       it at the width available; the four tabs fit a 402px phone at this
+       padding, and the nav list scrolls sideways should they not. */
     .settings-body {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
       grid-template-rows: auto 1fr;
     }
 
     .settings-nav {
+      min-width: 0;
       border-right: 0;
       border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
       background: var(--bg-app-bar);
@@ -262,7 +271,7 @@
       width: auto;
       margin: 0;
       min-width: max-content;
-      padding: 8px 12px;
+      padding: 8px 10px;
     }
 
     .nav-meta {

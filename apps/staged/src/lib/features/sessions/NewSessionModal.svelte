@@ -60,7 +60,7 @@
   import { createImage } from '../../commands';
   import { readClipboardText } from '../../transport';
   import { viewport } from '../../shared/viewport.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import { isMac } from '../keyboard/shortcuts';
 
   interface Props {
@@ -167,7 +167,7 @@
   );
   let submitLabel = $derived(currentWillQueue ? 'Queue' : 'Start');
   const footerControlClass =
-    'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center';
+    'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground mobile:h-11 mobile:justify-center';
 
   function selectPromptContent(el: HTMLElement, selection: 'all' | 'last-line') {
     const sel = window.getSelection();
@@ -287,9 +287,11 @@
   // Platform-aware modifier label for the ⌘1/2/3 mode-switch hints.
   let modKey = $derived(isMac() ? '⌘' : 'Ctrl ');
 
+  // On a touch screen neither this nor the open's focus below takes focus
+  // the prompt doesn't already have (see autofocusOnOpen).
   function focusPrompt(selection: 'all' | 'last-line' | null) {
     tick().then(() =>
-      focusAfterDialogEnter(textareaEl, (el) => {
+      autofocusOnOpen(textareaEl, (el) => {
         el.focus();
         if (selection && el.textContent) {
           selectPromptContent(el, selection);
@@ -524,7 +526,7 @@
     const el = textareaEl;
     const shouldSelect = prefilled;
     tick().then(() =>
-      focusAfterDialogEnter(el, (target) => {
+      autofocusOnOpen(el, (target) => {
         target.focus();
         if (shouldSelect && target.textContent) {
           selectPromptContent(target, prefillSelection);
@@ -756,7 +758,7 @@
       <Button
         variant="ghost"
         size="icon"
-        class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:size-10 [&_svg]:!size-[18px]"
+        class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground mobile:size-10 [&_svg]:!size-[18px]"
         title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
         aria-label="Close"
         onclick={handleClose}
@@ -821,7 +823,7 @@
           <Button
             type="button"
             variant="outline"
-            class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+            class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground mobile:h-11 mobile:flex-1 mobile:justify-center"
             onclick={handleClose}
             disabled={starting}
           >
@@ -830,7 +832,7 @@
           <Button
             type="submit"
             variant="accent"
-            class="gap-1.5 px-4 py-2 text-sm max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+            class="gap-1.5 px-4 py-2 text-sm mobile:h-11 mobile:flex-1 mobile:justify-center"
             title={submitDisabledReason ?? undefined}
             disabled={!canSubmit}
           >
@@ -1037,6 +1039,17 @@
     gap: 4px;
     flex: 1;
     min-height: 0;
+    /* The editor's minimum: twelve rows (rows={12}) when the window has
+       room, less in a short one. A full-screen dialog sizes the editor
+       itself (it fills what the other rows leave) and only keeps three
+       lines, so the model picker and the actions stay clear of it with the
+       keyboard up. */
+    --hashtag-input-min-height: min(18em, 40dvh);
+  }
+
+  :global([data-full-screen]) .form-group {
+    /* Three lines, plus the padding and border inside the border box. */
+    --hashtag-input-min-height: calc(4.5em + 22px);
   }
 
   /* Propagate flex constraint through HashtagInput wrapper divs */
@@ -1047,7 +1060,10 @@
     flex-direction: column;
   }
 
+  /* Clip rather than paint over the rows below should the editor ever be
+     squeezed past its minimum. */
   .form-group :global(.hashtag-input-container) {
+    overflow: hidden;
     flex: 1;
     min-height: 0;
     display: flex;
@@ -1076,6 +1092,14 @@
     border-color: var(--border-emphasis);
   }
 
+  /* With too little visible to share (the keyboard up on a phone held
+     sideways, dialog-content's `cramped`), the editor keeps its three lines
+     and the dialog scrolls instead. */
+  :global([data-cramped]) .modal-body,
+  :global([data-cramped]) .form-group {
+    flex: none;
+  }
+
   /* Actions */
   .form-actions {
     display: flex;
@@ -1083,6 +1107,9 @@
     justify-content: space-between;
     gap: 8px;
     margin-top: 4px;
+    /* The dialog's last row; clear of the home indicator in a full-screen
+       dialog (`--dialog-safe-bottom`, see dialog-content). */
+    padding-bottom: var(--dialog-safe-bottom, 0px);
     /* Stay pinned at the bottom of the keyboard-shrunk dialog while the prompt
        editor above is the only scroller. */
     flex-shrink: 0;
@@ -1100,9 +1127,17 @@
     gap: 8px;
   }
 
-  @media (max-width: 768px) {
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
+    /* Full-width rows: clear of a full-screen dialog's side insets, Close
+       included (`--dialog-safe-left` / `--dialog-safe-right`, see dialog-content). */
     .modal-header {
       padding: 12px 16px;
+      padding-top: calc(12px + var(--dialog-safe-top, 0px));
+      padding-left: calc(16px + var(--dialog-safe-left, 0px));
+      padding-right: calc(16px + var(--dialog-safe-right, 0px));
     }
 
     .mode-switcher-btn {
@@ -1111,6 +1146,8 @@
 
     .modal-body {
       padding: 16px;
+      padding-left: calc(16px + var(--dialog-safe-left, 0px));
+      padding-right: calc(16px + var(--dialog-safe-right, 0px));
     }
 
     .form-actions {

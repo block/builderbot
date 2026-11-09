@@ -122,12 +122,14 @@
 </script>
 
 <Dialog.Root {open} onOpenChange={(v) => !v && onClose()}>
-  <Dialog.Content class="sm:max-w-[460px] gap-3.5">
+  <!-- Full screen on a phone, the form is the dialog's scrolling row (see
+       the `[data-full-screen]` rule below). -->
+  <Dialog.Content class="sm:max-w-[460px] gap-3.5 mobile:grid-rows-[auto_minmax(0,1fr)]">
     <Dialog.Header>
       <Dialog.Title>Add Repository</Dialog.Title>
     </Dialog.Header>
 
-    <form class="flex flex-col gap-3.5" onsubmit={handleSubmit}>
+    <form class="add-repo-form flex flex-col gap-3.5" onsubmit={handleSubmit}>
       <RepoConfigForm
         bind:selectedRepo
         bind:headRepo
@@ -145,8 +147,14 @@
         <div class="error-message" transition:slide={{ duration: 150 }}>{error}</div>
       {/if}
 
-      <div class="flex justify-end gap-2">
-        <Button type="submit" variant="outline" class="w-full" disabled={!selectedRepo || saving}>
+      <!-- Last row: clear of the home indicator when full screen (see dialog-content). -->
+      <div class="flex justify-end gap-2 pb-[var(--dialog-safe-bottom,0px)]">
+        <Button
+          type="submit"
+          variant="outline"
+          class="w-full mobile:h-[44px]"
+          disabled={!selectedRepo || saving}
+        >
           {#if saving}
             <span class="inline-flex items-center gap-1.5">
               <Spinner size={14} />
@@ -162,6 +170,15 @@
 </Dialog.Root>
 
 <style>
+  /* With the on-screen keyboard up the dialog shrinks to what is visible
+     above it; the form scrolls so Add and the repo chips stay reachable
+     (as in NewProjectForm). */
+  :global([data-full-screen]) .add-repo-form {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
   .error-message {
     color: var(--ui-danger);
     font-size: var(--size-xs);

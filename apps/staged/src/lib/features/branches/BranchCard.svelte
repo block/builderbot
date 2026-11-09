@@ -2130,7 +2130,7 @@
         {refreshingGitState}
         fetchError={timeline?.gitState?.fetch.error ?? null}
       />
-      <div class="header-actions">
+      <div class="header-actions touch-hit-group">
         {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
@@ -2682,5 +2682,14 @@
     min-width: 0;
     max-width: 100%;
     flex-shrink: 1;
+  }
+
+  /* Taller footer controls on a touch screen (as in BranchTimeline's
+     footer-left-actions). */
+  @media (pointer: coarse) {
+    .footer-right-actions :global(button) {
+      min-width: 36px;
+      min-height: 36px;
+    }
   }
 </style>

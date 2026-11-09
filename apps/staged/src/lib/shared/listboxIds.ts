@@ -1,10 +1,10 @@
 /**
- * Ids for a combobox whose popup is a listbox managed with
- * `aria-activedescendant` (RepoSearchInput, HashtagInput's # dropdown). The
- * options take no focus; the input stays focused and points assistive tech at
- * the highlighted option by id, so every option needs a stable id and the
- * input needs to drop the reference whenever the popup is closed or nothing
- * is highlighted.
+ * Ids for a text field whose popup is a listbox managed with
+ * `aria-activedescendant` (RepoSearchInput's combobox, HashtagInput's textbox
+ * with its # dropdown). The options take no focus; the input stays focused
+ * and points assistive tech at the highlighted option by id, so every option
+ * needs a stable id and the input needs to drop the reference whenever the
+ * popup is closed or nothing is highlighted.
  */
 
 /** Id of the option at `index` (its position in the listbox, from 0). */

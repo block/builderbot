@@ -171,12 +171,14 @@
 
   let filteredItems = $derived.by(() => filteredSections.flatMap((section) => section.items));
 
-  // ARIA combobox over the contenteditable: the editor keeps the focus and the
-  // # dropdown is a listbox of options that take none, so the editor names the
-  // highlighted option through aria-activedescendant. Options are numbered
-  // across sections in the order selectedIndex counts (section.startIndex + i).
-  // The reference goes with the listbox: closed, or showing only "No matching
-  // items", there is none.
+  // ARIA: the editor stays a multi-line textbox (plain Enter inserts a line;
+  // a combobox would announce it as a single-line field), with the # dropdown
+  // exposed through aria-haspopup="listbox", aria-autocomplete, aria-controls
+  // and aria-activedescendant, which ARIA 1.2 allows on a textbox. The editor
+  // keeps the focus and the options take none, so it names the highlighted
+  // option by id. Options are numbered across sections in the order
+  // selectedIndex counts (section.startIndex + i). The references go with the
+  // listbox: closed, or showing only "No matching items", there are none.
   const listboxId = `${uid}-listbox`;
   let listboxOpen = $derived(showDropdown && filteredItems.length > 0);
   let activeOptionId = $derived(
@@ -609,17 +611,22 @@
 
 <div class="hashtag-input-wrapper" bind:this={wrapperEl}>
   <div class="hashtag-input-container">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <!-- svelte-ignore a11y_interactive_supports_focus -->
+    <!-- The placeholder is painted by CSS from data-placeholder, which gives
+         the editor no accessible name, so the same text is its aria-label:
+         unlike aria-placeholder it takes part in the name computation and is
+         read whether or not the field is empty. -->
     <!-- The contenteditable is focusable without a tabindex. -->
+    <!-- svelte-ignore a11y_interactive_supports_focus -->
     <!-- svelte-ignore a11y_aria_activedescendant_has_tabindex -->
     <div
       bind:this={editorEl}
       class="hashtag-editor {className}"
       class:is-empty={!value}
       contenteditable={disabled ? 'false' : 'true'}
-      role="combobox"
-      aria-expanded={listboxOpen}
+      role="textbox"
+      aria-multiline="true"
+      aria-label={placeholder || undefined}
+      aria-haspopup="listbox"
       aria-autocomplete="list"
       aria-controls={listboxOpen ? listboxId : undefined}
       aria-activedescendant={activeOptionId}
@@ -699,8 +706,10 @@
         {/each}
       </div>
     {:else if showDropdown && filterText.length > 0}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- A status region, so the empty result is announced: with no options
+           there is no listbox for the editor to point at. -->
       <div
+        role="status"
         class="hashtag-dropdown"
         class:above={dropdownPosition === 'above'}
         class:below={dropdownPosition === 'below'}

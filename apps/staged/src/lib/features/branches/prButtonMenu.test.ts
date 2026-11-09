@@ -5,6 +5,7 @@ import {
   deferredPushLabel,
   deferredPushName,
   deferredPushVariant,
+  deferredPushWaitingMeta,
   primaryOpensPr,
   type PrMenuEntry,
   type PrMenuInput,
@@ -20,6 +21,7 @@ function input(overrides: Partial<PrMenuInput> = {}): PrMenuInput {
     altHeld: false,
     workInFlight: false,
     deferredPush: null,
+    deferPushPending: false,
     ...overrides,
   };
 }
@@ -305,6 +307,34 @@ describe('buildPrMenu', () => {
     expect(aheadAlt).toEqual(divergedAlt);
   });
 
+  it('disables the deferred rows, and only those, while an arm or cancel round trip is pending', () => {
+    const disabledIds = (overrides: Partial<PrMenuInput>) =>
+      buildPrMenu(input({ deferPushPending: true, ...overrides }))
+        .filter((entry) => entry.id !== 'separator' && entry.disabled)
+        .map((entry) => entry.id);
+
+    expect(disabledIds({ pushAction: 'push', workInFlight: true })).toEqual([
+      'deferPush',
+      'deferPushNoVerify',
+    ]);
+    expect(disabledIds({ pushAction: 'forcePush', workInFlight: true, altHeld: true })).toEqual([
+      'deferForcePush',
+      'deferForcePushNoVerify',
+    ]);
+    expect(disabledIds({ pushAction: 'push', deferredPush: 'push' })).toEqual([
+      'cancelDeferredPush',
+    ]);
+    // The rows themselves are unchanged apart from the flag: labels, order
+    // and the other sections stay as they are.
+    expect(labels(buildPrMenu(input({ pushAction: 'push', workInFlight: true })))).toEqual(
+      labels(buildPrMenu(input({ pushAction: 'push', workInFlight: true, deferPushPending: true })))
+    );
+    // Nothing is disabled when nothing is pending.
+    for (const entry of buildPrMenu(input({ pushAction: 'push', workInFlight: true }))) {
+      if (entry.id !== 'separator') expect(entry.disabled).toBeUndefined();
+    }
+  });
+
   it('never starts or ends with a separator, or doubles one', () => {
     const states: Partial<PrMenuInput>[] = [
       { prState: 'idle', prNumber: null },
@@ -345,5 +375,26 @@ describe('primaryOpensPr', () => {
     [{ prState: 'creating' }, false],
   ])('%o → %s', (overrides, expected) => {
     expect(primaryOpensPr(input(overrides))).toBe(expected);
+  });
+});
+
+describe('deferredPushWaitingMeta', () => {
+  it.each<[Parameters<typeof deferredPushWaitingMeta>[0], string]>([
+    [{ branchSessions: 1, projectSessions: 0 }, 'Waiting for 1 branch session to finish'],
+    [{ branchSessions: 0, projectSessions: 2 }, 'Waiting for 2 project sessions to finish'],
+    [
+      { branchSessions: 2, projectSessions: 1 },
+      'Waiting for 2 branch sessions and 1 project session to finish',
+    ],
+    // What this client cannot see (a queued project session, a snapshot not
+    // loaded yet) falls back to the generic text rather than "0 sessions".
+    [
+      { branchSessions: 0, projectSessions: 0 },
+      'Waiting for branch and project sessions to finish',
+    ],
+    [null, 'Waiting for branch and project sessions to finish'],
+    [undefined, 'Waiting for branch and project sessions to finish'],
+  ])('%o → %s', (waitingOn, expected) => {
+    expect(deferredPushWaitingMeta(waitingOn)).toBe(expected);
   });
 });

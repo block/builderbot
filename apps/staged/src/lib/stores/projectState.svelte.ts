@@ -128,6 +128,23 @@ class ProjectStateStore {
   }
 
   /**
+   * The project's own running sessions: those registered without a branch,
+   * i.e. project-note sessions. Sessions on the project's branches are left
+   * out, so a branch can tell "the project is working" from "a sibling branch
+   * is working" — a deferred push waits for the former only.
+   */
+  getRunningProjectSessionIds(projectId: string): string[] {
+    this.version;
+    const state = this.getState(projectId);
+    if (!state) return [];
+    const ids: string[] = [];
+    for (const sessionId of state.runningSessions) {
+      if (!sessionRegistry.getBranchId(sessionId)) ids.push(sessionId);
+    }
+    return ids;
+  }
+
+  /**
    * Mark a project as read (called when user navigates to the project).
    * Drops the notes holding it unread too, in every window.
    */

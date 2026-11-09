@@ -848,23 +848,54 @@ impl Store {
         Ok(count > 0)
     }
 
-    /// Whether any of the project's own sessions is in flight.
+    /// The project's own sessions in flight, oldest first.
     ///
     /// Project-note sessions have no `branch_id` and reach the project only
     /// through `project_notes.session_id`, so the branch queries above cannot
     /// see them. `queued` counts along with `running` and `disconnected`: a
     /// deferred push ("Push after current work") waits for all three, so work
-    /// the project agent has lined up still runs before the push.
-    pub fn project_has_sessions_in_flight(&self, project_id: &str) -> Result<bool, StoreError> {
+    /// the project agent has lined up still runs before the push. The ids are
+    /// returned, not a count, so the drain can log what is holding a push.
+    pub fn project_session_ids_in_flight(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sessions s
+        let mut stmt = conn.prepare(
+            "SELECT s.id FROM sessions s
              INNER JOIN project_notes pn ON pn.session_id = s.id
-             WHERE pn.project_id = ?1 AND s.status IN ('running', 'disconnected', 'queued')",
-            params![project_id],
-            |row| row.get(0),
+             WHERE pn.project_id = ?1 AND s.status IN ('running', 'disconnected', 'queued')
+             ORDER BY s.created_at ASC",
         )?;
-        Ok(count > 0)
+        let ids = stmt
+            .query_map(params![project_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    /// The branch's `completed` sessions whose row was last written at or
+    /// after `since` (ms), oldest first.
+    ///
+    /// `updated_at` stands in for a completion time: the status write that
+    /// completes a session sets it, and a completed row is only touched again
+    /// by its own completion effects. The deferred push uses this to notice a
+    /// push that already did its job after it was armed.
+    pub fn get_completed_sessions_for_branch_since(
+        &self,
+        branch_id: &str,
+        since: i64,
+    ) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions
+             WHERE status = 'completed' AND branch_id = ?1 AND updated_at >= ?2
+             ORDER BY created_at ASC",
+        ))?;
+        let sessions = stmt
+            .query_map(params![branch_id, since], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
     }
 
     /// Resolve the branch that owns a session.

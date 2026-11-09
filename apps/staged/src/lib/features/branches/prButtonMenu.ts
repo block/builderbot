@@ -34,6 +34,8 @@ export interface PrMenuItem {
   label: string;
   /** Selecting it opens the force-push confirm dialog instead of acting. */
   confirm?: boolean;
+  /** Shown but not selectable: its action's round trip is still in flight. */
+  disabled?: boolean;
 }
 
 export interface PrMenuSeparator {
@@ -52,12 +54,19 @@ export interface PrMenuInput {
   /** Whether Option is held right now, which swaps in the force variants. */
   altHeld: boolean;
   /**
-   * Whether the branch or its project has sessions in flight — what a deferred
-   * push waits for, so the "after current work" rows only show while true.
+   * Whether this branch or the project's own sessions are in flight — what a
+   * deferred push waits for (see `deferredPushWaitingMeta`), so the "after
+   * current work" rows only show while true.
    */
   workInFlight: boolean;
   /** The deferred push armed on the branch, which the menu offers to cancel. */
   deferredPush: DeferredPushName | null;
+  /**
+   * An arm or cancel round trip is in flight: the deferred rows stay visible
+   * but disabled, so a second selection cannot arm twice or start two
+   * immediate pushes.
+   */
+  deferPushPending: boolean;
 }
 
 export function buildPrMenu(input: PrMenuInput): PrMenuEntry[] {
@@ -156,6 +165,39 @@ export function deferredPushLabel(name: DeferredPushName): string {
 }
 
 /**
+ * What a deferred push is waiting on, as this client can see it: this branch's
+ * sessions (timeline sessions queued, running or disconnected, plus our own
+ * push/pull actions) and the project's own sessions (project-note sessions
+ * running or disconnected). Sessions on the project's other branches do not
+ * hold the push and are not counted — this mirrors the backend's idle check.
+ */
+export interface DeferredPushWaitingOn {
+  branchSessions: number;
+  projectSessions: number;
+}
+
+/**
+ * The footer row's text for an armed deferred push. Names the counts when the
+ * client can see something; the generic form covers what it cannot (a queued
+ * project session, or a snapshot this client has not loaded yet).
+ */
+export function deferredPushWaitingMeta(waitingOn?: DeferredPushWaitingOn | null): string {
+  const parts: string[] = [];
+  if (waitingOn && waitingOn.branchSessions > 0) {
+    parts.push(countNoun(waitingOn.branchSessions, 'branch session'));
+  }
+  if (waitingOn && waitingOn.projectSessions > 0) {
+    parts.push(countNoun(waitingOn.projectSessions, 'project session'));
+  }
+  if (parts.length === 0) return 'Waiting for branch and project sessions to finish';
+  return `Waiting for ${parts.join(' and ')} to finish`;
+}
+
+function countNoun(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/**
  * "Push after current work": a push that fires once the branch and its project
  * are idle. Two rows, one per hook flavour, each Option-swapping to its force
  * variant, as the immediate no-verify row does; in the diverged state the
@@ -164,9 +206,15 @@ export function deferredPushLabel(name: DeferredPushName): string {
  * flight is the main use case. While one is armed, the section is just its
  * Cancel row, in every state — the flag can coexist with a queued or running
  * push. The timeline's footer row is the other undo, which is why the plain
- * variants need no confirm.
+ * variants need no confirm. While an arm or cancel round trip is pending the
+ * rows stay listed but disabled.
  */
-function deferredPushItems({
+function deferredPushItems(input: PrMenuInput): PrMenuItem[] {
+  const items = deferredPushSection(input);
+  return input.deferPushPending ? items.map((item) => ({ ...item, disabled: true })) : items;
+}
+
+function deferredPushSection({
   prState,
   prStatusState,
   pushState,

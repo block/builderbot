@@ -78,9 +78,10 @@
     timeline: BranchTimelineData | null;
     showButton?: boolean;
     /**
-     * Whether the branch or its project has sessions in flight — what a
-     * deferred push ("Push after current work") waits for, so the menu only
-     * offers one while this is true.
+     * Whether this branch or the project's own sessions are in flight — what
+     * a deferred push ("Push after current work") waits for, so the menu only
+     * offers one while this is true. Sessions on the project's other branches
+     * do not count, matching the backend's idle check.
      */
     workInFlight?: boolean;
     onOpenSession?: (sessionId: string) => void;
@@ -829,6 +830,9 @@
   // Deferred push ("Push after current work")
   // =========================================================================
 
+  /** An arm or cancel round trip is in flight (see `deferPush`). */
+  let deferPushPending = $state(false);
+
   /**
    * Arm a push to run once the branch and its project are idle. When they
    * already are — the work finished between the menu rendering and the click —
@@ -839,6 +843,12 @@
    * footer row show before the `branch-changed` refetch lands.
    */
   function deferPush(force: boolean, noVerify: boolean) {
+    // One round trip at a time: a second selection while the first is in
+    // flight would arm twice, or — on an idle branch — start two immediate
+    // pushes, the second not yet visible to the first's queued-push dedupe.
+    // The menu's deferred rows are disabled while this is set.
+    if (deferPushPending) return;
+    deferPushPending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     commands
@@ -855,10 +865,15 @@
         toast.error('Could not schedule push', {
           description: e instanceof Error ? e.message : String(e),
         })
-      );
+      )
+      .finally(() => {
+        deferPushPending = false;
+      });
   }
 
   function cancelDeferredPush() {
+    if (deferPushPending) return;
+    deferPushPending = true;
     commands
       .cancelDeferredPush(branch.id)
       .then(() => {
@@ -869,7 +884,10 @@
         toast.error('Could not cancel deferred push', {
           description: e instanceof Error ? e.message : String(e),
         })
-      );
+      )
+      .finally(() => {
+        deferPushPending = false;
+      });
   }
 
   // Retry repeats the failed push as it was asked for: a force push that
@@ -990,6 +1008,7 @@
       altHeld: altKey.held,
       workInFlight,
       deferredPush: branch.deferredPush,
+      deferPushPending,
     })
   );
   let showPrMenu = $derived(prMenuEntries.length > 0);
@@ -1021,12 +1040,14 @@
     },
     deferPush: {
       icon: Clock,
-      title: 'Push once the branch and project sessions have finished.',
+      title:
+        "Push once the sessions on this branch and the project's own sessions have finished (work on other branches does not hold it).",
       run: () => deferPush(false, false),
     },
     deferForcePush: {
       icon: Clock,
-      title: 'Force push once the branch and project sessions have finished.',
+      title:
+        "Force push once the sessions on this branch and the project's own sessions have finished (work on other branches does not hold it).",
       run: (item) =>
         item.confirm
           ? openForcePushDialog({ noVerify: false, deferred: true })
@@ -1035,13 +1056,13 @@
     deferPushNoVerify: {
       icon: Clock,
       title:
-        'Push once the branch and project sessions have finished, without running the pre-push hook (git push --no-verify).',
+        "Push once the sessions on this branch and the project's own sessions have finished (work on other branches does not hold it), without running the pre-push hook (git push --no-verify).",
       run: () => deferPush(false, true),
     },
     deferForcePushNoVerify: {
       icon: Clock,
       title:
-        'Force push once the branch and project sessions have finished, without running the pre-push hook (git push --no-verify).',
+        "Force push once the sessions on this branch and the project's own sessions have finished (work on other branches does not hold it), without running the pre-push hook (git push --no-verify).",
       run: (item) =>
         item.confirm
           ? openForcePushDialog({ noVerify: true, deferred: true })
@@ -1173,6 +1194,7 @@
               {@const action = prMenuActions[entry.id]}
               <DropdownMenu.Item
                 title={entry.id === 'cancelDeferredPush' ? cancelDeferredPushTitle : action.title}
+                disabled={entry.disabled}
                 onSelect={() => action.run(entry)}
               >
                 <action.icon size={14} />

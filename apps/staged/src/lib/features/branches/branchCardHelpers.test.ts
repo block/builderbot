@@ -14,6 +14,7 @@ import {
   renamePushTargetRef,
   extractPrNumber,
   extractPrUrl,
+  countGitActionsInFlight,
   isGitActionInFlight,
   isImageAttachmentFile,
   isImageFile,
@@ -254,6 +255,24 @@ describe('isGitActionInFlight', () => {
   it('reports an idle branch when neither store has an entry', () => {
     expect(isGitActionInFlight({})).toBe(false);
     expect(isGitActionInFlight({ push: null, pull: null, immediatePull: false })).toBe(false);
+  });
+});
+
+describe('countGitActionsInFlight', () => {
+  it('counts a push and a pull separately, and an immediate pull as the pull', () => {
+    expect(countGitActionsInFlight({ push: { state: 'pushing' } })).toBe(1);
+    expect(countGitActionsInFlight({ pull: { state: 'queued' } })).toBe(1);
+    expect(countGitActionsInFlight({ immediatePull: true })).toBe(1);
+    expect(countGitActionsInFlight({ push: { state: 'queued' }, pull: { state: 'pulling' } })).toBe(
+      2
+    );
+    // An inline pull and its store entry are one action, not two.
+    expect(countGitActionsInFlight({ pull: { state: 'pulling' }, immediatePull: true })).toBe(1);
+  });
+
+  it('counts nothing for finished or absent state', () => {
+    expect(countGitActionsInFlight({})).toBe(0);
+    expect(countGitActionsInFlight({ push: { state: 'done' }, pull: null })).toBe(0);
   });
 });
 

@@ -78,7 +78,7 @@
     divergedPushTargetRef,
     fileNameFromPath,
     formatBaseBranch,
-    isGitActionInFlight,
+    countGitActionsInFlight,
     isImageAttachmentFile,
     isMaybeTextFile,
     pushTargetRef,
@@ -115,6 +115,7 @@
   import { pushStateStore } from '../../stores/pushState.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
+  import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
   import {
     onBranchGitStateUpdated,
     onBranchSetupProgress,
@@ -363,10 +364,14 @@
 
   /** True when the branch has at least one queued or running session. */
   function hasActiveSessions(tl: NonNullable<typeof timeline>): boolean {
+    return countActiveSessions(tl) > 0;
+  }
+  /** The timeline's sessions in flight: queued, running or disconnected. */
+  function countActiveSessions(tl: NonNullable<typeof timeline>): number {
     return (
-      tl.commits.some((c) => isSessionActive(c.sessionStatus)) ||
-      tl.notes.some((n) => isSessionActive(n.sessionStatus)) ||
-      tl.reviews.some((r) => isSessionActive(r.sessionStatus))
+      tl.commits.filter((c) => isSessionActive(c.sessionStatus)).length +
+      tl.notes.filter((n) => isSessionActive(n.sessionStatus)).length +
+      tl.reviews.filter((r) => isSessionActive(r.sessionStatus)).length
     );
   }
   let commandPipelinePending = $state(false);
@@ -378,14 +383,15 @@
   // timeline artifact.
   let storePushState = $derived(pushStateStore.getPushState(branch.id));
   let storePullState = $derived(pullStateStore.getPullState(branch.id));
-  /** A git action of our own is running or waiting on the branch queue. */
-  let gitPipelineInFlight = $derived(
-    isGitActionInFlight({
+  /** Git actions of our own running or waiting on the branch queue. */
+  let gitPipelinesInFlight = $derived(
+    countGitActionsInFlight({
       push: storePushState,
       pull: storePullState,
       immediatePull: pullingOrigin,
     })
   );
+  let gitPipelineInFlight = $derived(gitPipelinesInFlight > 0);
   /**
    * True when the branch has work in flight that a new action queues behind.
    *
@@ -396,19 +402,34 @@
    * immediate pull that fails with "Cannot pull with uncommitted changes" instead
    * of a disabled button.
    */
-  let branchSessionBusy = $derived(
-    (timeline ? hasActiveSessions(timeline) : false) || gitPipelineInFlight
+  let branchSessionsInFlight = $derived(
+    (timeline ? countActiveSessions(timeline) : 0) + gitPipelinesInFlight
+  );
+  let branchSessionBusy = $derived(branchSessionsInFlight > 0);
+  /**
+   * The project's own sessions in flight: project-note sessions running or
+   * disconnected. Sessions on the project's other branches are deliberately
+   * not counted — the backend's idle check for a deferred push only looks at
+   * this branch and the project's own sessions, so counting a sibling branch
+   * here would offer a wait the backend would not perform. A session can sit
+   * in both stores briefly around a reconnect, hence the Set.
+   */
+  let projectSessionsInFlight = $derived(
+    new Set([
+      ...projectStateStore.getRunningProjectSessionIds(branch.projectId),
+      ...disconnectedSessionsStore.projectSessionsForProject(branch.projectId),
+    ]).size
   );
   /**
-   * What a deferred push ("Push after current work") waits for: work on the
-   * branch, or any session in the project. `runningSessions` holds every
-   * session in the project, branch ones included, so the project check is a
-   * superset of the timeline's; the OR keeps the git actions `branchSessionBusy`
-   * folds in.
+   * What a deferred push ("Push after current work") waits for, as this
+   * client can see it: this branch's sessions and git actions, and the
+   * project's own sessions. The counts feed the timeline's footer row.
    */
-  let workInFlight = $derived(
-    branchSessionBusy || projectStateStore.hasRunningSessions(branch.projectId)
-  );
+  let deferredPushWaitingOn = $derived({
+    branchSessions: branchSessionsInFlight,
+    projectSessions: projectSessionsInFlight,
+  });
+  let workInFlight = $derived(branchSessionsInFlight > 0 || projectSessionsInFlight > 0);
 
   /** Timeline label the backend gives a queued rebase/squash pipeline session. */
   const branchCommandLabels = { rebase: 'Rebase branch', squash: 'Squash commits' } as const;
@@ -2288,6 +2309,7 @@
               onCancelQueuedPull={cancelQueuedPull}
               onCancelDeferredPush={cancelDeferredPush}
               deferredPush={branch.deferredPush}
+              {deferredPushWaitingOn}
               {forcePushingOrigin}
               {pushQueuedOrigin}
               {pullQueuedOrigin}

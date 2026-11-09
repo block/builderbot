@@ -27,7 +27,11 @@
   } from '../../types';
   import { noteChatState, type NoteChatState, type NoteClickInfo } from '../sessions/noteFreshness';
   import type { PendingAdd } from '../branches/timelineImages';
-  import { deferredPushLabel } from '../branches/prButtonMenu';
+  import {
+    deferredPushLabel,
+    deferredPushWaitingMeta,
+    type DeferredPushWaitingOn,
+  } from '../branches/prButtonMenu';
   import TimelineRow from './TimelineRow.svelte';
   import TimelineContextMenu, {
     type TimelineContextMenuAction,
@@ -136,6 +140,8 @@
     onCancelDeferredPush?: () => void;
     /** The deferred push armed on the branch, shown as a footer row. */
     deferredPush?: DeferredPushName | null;
+    /** What the deferred push is waiting on, for the footer row's text. */
+    deferredPushWaitingOn?: DeferredPushWaitingOn | null;
     /** Push is queued behind in-flight branch work. */
     pushQueuedOrigin?: boolean;
     /** Pull is queued behind in-flight branch work. */
@@ -224,6 +230,7 @@
     transferring = false,
     onCancelDeferredPush,
     deferredPush = null,
+    deferredPushWaitingOn = null,
     pushQueuedOrigin = false,
     pullQueuedOrigin = false,
     branchSessionBusy = false,
@@ -710,7 +717,7 @@
       key: 'git-deferred-push',
       type: 'git-push',
       title: deferredPushLabel(deferredPush),
-      meta: 'Waiting for branch and project sessions to finish',
+      meta: deferredPushWaitingMeta(deferredPushWaitingOn),
       timestamp: gitFooterTimestamp,
       order: 2,
       placement: 'git-footer',

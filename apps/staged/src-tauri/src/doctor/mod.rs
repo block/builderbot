@@ -96,9 +96,11 @@ pub(super) fn provider_id_for_check(check_id: &str) -> Option<&str> {
 /// The enabled environment variables configured for the agent an
 /// `ai-agent-*` check fronts (Settings → Doctor → Environment variables);
 /// empty for every other check. Doctor's probes of that agent and its login
-/// fix run with these over the shared snapshot, as a session launch of the
-/// agent does (see `agent::env_vars`), so the row can't report "not
-/// authenticated" against a key the session right next to it launches with.
+/// fix run with these over the shared snapshot — as a `DoctorEnv` overlay,
+/// which the login shell re-exports after its startup files — as a session
+/// launch of the agent does (see `agent::env_vars`), so the row can't report
+/// "not authenticated" against a key the session right next to it launches
+/// with.
 pub(super) fn agent_env_for_check(check_id: &str) -> Vec<(String, String)> {
     provider_id_for_check(check_id)
         .map(crate::agent::env_vars::read_agent_env)

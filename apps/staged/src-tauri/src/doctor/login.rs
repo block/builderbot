@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::Serialize;
 
 use super::{
-    doctor_env_vars, ExecuteFixOptions, FixCancelHandle, FixCancellation, FixStdin, FixStdinWriter,
-    FixType,
+    doctor_env_vars, DoctorEnv, ExecuteFixOptions, FixCancelHandle, FixCancellation, FixStdin,
+    FixStdinWriter, FixType,
 };
 
 #[cfg(test)]
@@ -366,11 +366,15 @@ pub(super) async fn run_login_fix(
         output,
         slot,
     } = login;
-    let mut env_vars = doctor_env_vars().await;
     // The agent's own variables (Settings → Doctor) apply to its login as to
     // its checks and sessions, so a CLI that takes its API key from the
-    // environment logs in under the key the sessions will launch with.
-    env_vars.extend(super::agent_env_for_check(&check_id));
+    // environment logs in under the key the sessions will launch with. As an
+    // overlay rather than appended to the snapshot: the fix runs through a
+    // login shell, and the overlay is re-exported after that shell's startup
+    // files, so an `export` of the same name in `.zshenv`/`.zprofile` can't
+    // shadow the row for the login alone.
+    let env =
+        DoctorEnv::new(doctor_env_vars().await).with_overlay(super::agent_env_for_check(&check_id));
     let event_check_id = check_id.clone();
     let event_run_id = run_id.clone();
     let event_app = app_handle.clone();
@@ -379,7 +383,7 @@ pub(super) async fn run_login_fix(
         check_id.clone(),
         FixType::Auth,
         ExecuteFixOptions::default()
-            .with_env_snapshot(env_vars)
+            .with_env(env)
             .with_stdin(stdin)
             .with_cancellation(cancellation),
         move |line| {

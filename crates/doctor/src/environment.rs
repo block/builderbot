@@ -15,6 +15,11 @@ use std::process::Command;
 /// one check's subprocesses only. Staged uses them for the environment
 /// variables a user configures per agent in Doctor settings, so the agent's
 /// auth probe and version probe see what a session launch of that agent sees.
+/// An overlay also survives login-shell startup: the shell exec path
+/// (`build_shell_command` in `lib.rs`) re-exports every overlaid variable
+/// inside the `-c` payload, after `.zshenv`/`.zprofile` have run, so an
+/// `export` of the same name there can't shadow it — see
+/// [`DoctorEnv::with_overlay`].
 #[derive(Debug, Clone, Default)]
 pub struct DoctorEnv {
     /// The variables, in application order. A name may appear more than once
@@ -30,6 +35,12 @@ pub struct DoctorEnv {
     /// check (see [`DoctorEnv::for_check`]). Private so `new` stays the one
     /// constructor; the overlay for a check is reached through `for_check`.
     check_overlays: HashMap<String, Vec<(String, String)>>,
+    /// The variables [`with_overlay`](Self::with_overlay) appended to `vars`,
+    /// in order. Already part of `vars` (so [`get`](Self::get) and direct
+    /// spawns need nothing more); kept separately so the login-shell exec
+    /// path can re-export them after the shell's startup files have run
+    /// (see [`overlay`](Self::overlay)).
+    overlay: Vec<(String, String)>,
 }
 
 impl DoctorEnv {
@@ -37,7 +48,32 @@ impl DoctorEnv {
         Self {
             vars,
             check_overlays: HashMap::new(),
+            overlay: Vec::new(),
         }
+    }
+
+    /// Append `overlay` to the snapshot so it wins over it, and mark it for
+    /// re-export after login-shell startup. A direct spawn
+    /// ([`apply_doctor_env`]) sets the pairs last and they win outright. The
+    /// shell exec path starts `/bin/zsh -l -c` (or bash), whose
+    /// `.zshenv`/`.zprofile` run after the starting environment is set and can
+    /// `export` the same name over it; `build_shell_command` therefore also
+    /// carries each overlaid value in a mangled seed variable and the `-c`
+    /// payload re-exports it under its real name before the command, so the
+    /// overlay beats the rc files the way a session launch's extra env does.
+    /// Staged puts an agent's Doctor variables through here for its login
+    /// fix; [`for_check`](Self::for_check) does the same for its checks.
+    pub fn with_overlay(mut self, overlay: Vec<(String, String)>) -> Self {
+        self.vars.extend(overlay.iter().cloned());
+        self.overlay.extend(overlay);
+        self
+    }
+
+    /// The variables to re-export after login-shell startup (see
+    /// [`with_overlay`](Self::with_overlay)), in application order; a later
+    /// pair for a name wins, as in [`vars`](Self::vars).
+    pub fn overlay(&self) -> &[(String, String)] {
+        &self.overlay
     }
 
     /// Add variables that apply to `check_id`'s subprocesses only, after
@@ -59,16 +95,21 @@ impl DoctorEnv {
     }
 
     /// The environment for `check_id`'s subprocesses: this snapshot with the
-    /// check's overlay appended, so the overlay's values are the ones
-    /// [`get`](Self::get) returns and the ones a command receives. Borrows
-    /// when the check has no overlay, which is the common case.
+    /// check's overlay appended through [`with_overlay`](Self::with_overlay),
+    /// so the overlay's values are the ones [`get`](Self::get) returns, the
+    /// ones a command receives, and the ones the login shell re-exports after
+    /// its startup files. Borrows when the check has no overlay, which is the
+    /// common case.
     pub fn for_check(&self, check_id: &str) -> Cow<'_, Self> {
         match self.check_overlays.get(check_id) {
-            Some(overlay) => {
-                let mut vars = self.vars.clone();
-                vars.extend(overlay.iter().cloned());
-                Cow::Owned(Self::new(vars))
-            }
+            Some(overlay) => Cow::Owned(
+                Self {
+                    vars: self.vars.clone(),
+                    check_overlays: HashMap::new(),
+                    overlay: self.overlay.clone(),
+                }
+                .with_overlay(overlay.clone()),
+            ),
             None => Cow::Borrowed(self),
         }
     }
@@ -106,6 +147,59 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn with_overlay_appends_to_vars_and_records_the_overlay() {
+        let env = DoctorEnv::new(pairs(&[("KEY", "from snapshot"), ("PATH", "/usr/bin")]))
+            .with_overlay(pairs(&[("KEY", "from doctor row")]))
+            .with_overlay(pairs(&[("KEY", "later row"), ("EXTRA", "1")]));
+        assert_eq!(env.get("KEY"), Some("later row"));
+        assert_eq!(env.get("EXTRA"), Some("1"));
+        assert_eq!(
+            env.vars,
+            pairs(&[
+                ("KEY", "from snapshot"),
+                ("PATH", "/usr/bin"),
+                ("KEY", "from doctor row"),
+                ("KEY", "later row"),
+                ("EXTRA", "1"),
+            ])
+        );
+        assert_eq!(
+            env.overlay(),
+            pairs(&[
+                ("KEY", "from doctor row"),
+                ("KEY", "later row"),
+                ("EXTRA", "1")
+            ])
+        );
+        assert!(DoctorEnv::new(Vec::new()).overlay().is_empty());
+
+        // A check overlay is applied through `with_overlay`, on top of any
+        // overlay the snapshot already carries, so the shell re-exports both.
+        let check = env
+            .with_check_overlay("ai-agent-claude", pairs(&[("CHECK_KEY", "row")]))
+            .for_check("ai-agent-claude")
+            .into_owned();
+        assert_eq!(check.get("CHECK_KEY"), Some("row"));
+        assert_eq!(check.get("KEY"), Some("later row"));
+        assert_eq!(
+            check.overlay(),
+            pairs(&[
+                ("KEY", "from doctor row"),
+                ("KEY", "later row"),
+                ("EXTRA", "1"),
+                ("CHECK_KEY", "row"),
+            ])
+        );
+        // `vars` holds each pair once: the inherited overlay isn't re-appended.
+        assert_eq!(
+            check.vars.iter().filter(|(k, _)| k == "KEY").count(),
+            3,
+            "{:?}",
+            check.vars
+        );
     }
 
     #[test]

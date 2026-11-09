@@ -43,11 +43,23 @@
 //! Doctor's own probes of an agent — `auth status`, the version probe — and
 //! its login fix run with the same variables, laid over Doctor's shared
 //! snapshot for that agent's check only (`doctor::agent_env_for_check`, a
-//! `DoctorEnv` per-check overlay), so the panel can't call an agent
-//! unauthenticated against the key its sessions launch with. Those probes go
-//! through `zsh -l -c`, which reads `.zshenv`/`.zprofile` after the seed and
-//! has no exec-line reapplication, so an export there can still shadow a row
-//! for the probe alone; `.zshrc` isn't read by `-l -c`.
+//! `DoctorEnv` overlay), so the panel can't call an agent unauthenticated
+//! against the key its sessions launch with. Those probes go through
+//! `zsh -l -c`, which reads `.zshenv`/`.zprofile` after the starting
+//! environment is set; the overlay is therefore also carried in seed
+//! variables and re-exported inside the `-c` payload before the command
+//! (`doctor::DoctorEnv::with_overlay`), so an export there can't shadow a
+//! row for the probe either.
+//!
+//! # ACP config discovery
+//!
+//! The model/effort picker learns an agent's options by launching it for a
+//! throwaway session (`discover_acp_config_for_provider_async` in
+//! `session_commands`). That launch applies the agent's variables last, over
+//! the working-directory snapshot, as a session launch does: an agent that
+//! is authenticated only through a Doctor row would otherwise answer the
+//! discovery with `AuthRequired`, which reads as "no options", and the picker
+//! would show nothing for an agent whose sessions start fine.
 
 /// Preferences-store key: `Record<agentId, AgentEnvVar[]>`. Kept in sync with
 /// `AGENT_ENV_VARS_STORE_KEY` in the frontend preferences store.

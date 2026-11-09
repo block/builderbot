@@ -271,7 +271,7 @@
   }
 
   .env-var-error {
-    color: var(--destructive, var(--color-danger, #f85149));
+    color: var(--ui-danger);
   }
 
   .env-var-warning {

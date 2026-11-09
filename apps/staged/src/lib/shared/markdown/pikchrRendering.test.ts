@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { Pikchr } from 'pikchr-js';
 
 import { loadPikchrRenderer, sanitizePikchrSvg } from './pikchrRendering';
 
@@ -186,6 +187,48 @@ describe('loadPikchrRenderer', () => {
       expect(loadPikchr).toHaveBeenCalledTimes(2);
       expect(rendered).toMatchObject({ kind: 'svg', width: 10, height: 10 });
     } finally {
+      vi.doUnmock('pikchr-js');
+      vi.resetModules();
+    }
+  });
+
+  it('gives up on a load that never settles, then serves it once it lands', async () => {
+    let land: ((pikchr: Pikchr) => void) | undefined;
+    const loadPikchr = vi.fn(
+      () =>
+        new Promise<Pikchr>((resolve) => {
+          land = resolve;
+        })
+    );
+
+    vi.resetModules();
+    vi.doMock('pikchr-js', () => ({ default: loadPikchr }));
+    vi.useFakeTimers();
+
+    try {
+      const { loadPikchrRenderer } = await import('./pikchrRendering');
+
+      // A viewer waiting on this call renders its fallback instead of staying blank.
+      const rejection = expect(loadPikchrRenderer(1_000)).rejects.toThrow(
+        'did not load within 1000 ms'
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      await rejection;
+
+      // The import was kept running rather than restarted, and a later call gets it.
+      land?.({
+        render: () => ({
+          width: 10,
+          height: 10,
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" class="markdown-pikchr-svg" viewBox="0 0 10 10"><path d="M0,0L10,10" /></svg>',
+        }),
+      } as unknown as Pikchr);
+      const renderPikchr = await loadPikchrRenderer(1_000);
+
+      expect(loadPikchr).toHaveBeenCalledTimes(1);
+      expect(renderPikchr('box "Late" fit')).toMatchObject({ kind: 'svg', width: 10, height: 10 });
+    } finally {
+      vi.useRealTimers();
       vi.doUnmock('pikchr-js');
       vi.resetModules();
     }

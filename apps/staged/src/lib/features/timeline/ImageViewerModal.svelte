@@ -76,7 +76,7 @@
   <Dialog.Content
     class="max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] bg-background p-0 gap-0 overflow-hidden border border-[var(--border-subtle)] flex flex-col {isPdf
       ? 'w-[90vw] h-[90vh]'
-      : 'w-auto'}"
+      : 'w-fit'}"
     showCloseButton={false}
   >
     <Dialog.Header

@@ -68,9 +68,11 @@
 
 <Dialog.Root bind:open>
   <!-- The dialog is its own scroller, so its bottom padding is what keeps the
-       image's end clear of the home indicator when full screen. -->
+       image's end clear of the home indicator when full screen. `w-fit` hugs
+       the image: the dialog is anchored to every viewport edge, so an auto
+       width would stretch it to its max-width. -->
   <Dialog.Content
-    class="max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] w-auto overflow-auto pb-[calc(--spacing(6)+var(--dialog-safe-bottom,0px))]"
+    class="max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] w-fit overflow-auto pb-[calc(--spacing(6)+var(--dialog-safe-bottom,0px))]"
   >
     <Dialog.Header>
       <Dialog.Title>Tool result image</Dialog.Title>

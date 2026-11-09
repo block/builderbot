@@ -7961,6 +7961,8 @@ Formatting requirements:\n\
 Rules:\n\
 - `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).\n\
 - Only comment on changed files.\n\
+- `path` must be the repo-root-relative path exactly as shown in the `git diff` file headers \
+(without the `a/` or `b/` prefix), even when you are working inside a subdirectory.\n\
 - Be specific and actionable — reference the actual code, not generic advice.")
         }
     };
@@ -13147,6 +13149,23 @@ mod tests {
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
         assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
+    }
+
+    #[test]
+    fn review_prompt_requires_root_relative_comment_paths() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+            None,
+            None,
+        );
+
+        assert!(prompt.contains(
+            "`path` must be the repo-root-relative path exactly as shown in the `git diff` file headers \
+             (without the `a/` or `b/` prefix), even when you are working inside a subdirectory."
+        ));
     }
 
     #[test]

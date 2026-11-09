@@ -132,6 +132,20 @@ class ProjectStateStore {
    * i.e. project-note sessions. Sessions on the project's branches are left
    * out, so a branch can tell "the project is working" from "a sibling branch
    * is working" — a deferred push waits for the former only.
+   *
+   * "Registered without a branch" is the same set as the backend's "sessions
+   * joined to `project_notes`" (`project_session_ids_in_flight`), which is
+   * what makes the deferred push's wait here match the one the backend
+   * performs. A session only reaches this store with a project id, and the
+   * backend resolves a branchless session's project through `project_notes`
+   * alone: `project_active_session` (the `get_active_sessions` snapshot and
+   * the Blox reconcile events), `get_project_id_for_session` (terminal
+   * emits) and the resume plan's event context all fall back to the branch's
+   * project otherwise, and the only `running` emit that stamps a project id
+   * without looking it up is `start_project_session`, which creates the
+   * project note it belongs to. The other branchless rows the backend holds
+   * — Pikchr diagram child sessions — resolve to no project and emit no
+   * status event, so they are never registered.
    */
   getRunningProjectSessionIds(projectId: string): string[] {
     this.version;

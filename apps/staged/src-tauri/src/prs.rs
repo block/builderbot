@@ -2497,8 +2497,10 @@ fn branch_and_project_idle(store: &Arc<Store>, branch: &store::Branch) -> Result
     Ok(deferred_push_blockers(store, branch)?.is_empty())
 }
 
-/// Whether a push of `variant` completed successfully on the branch since
-/// `since` (ms), so a deferred push armed then has nothing left to do.
+/// The push session that already did a deferred push's job, if one has: a
+/// push of `variant` that completed successfully on the branch at or after
+/// `requested_at` (ms, when the deferred push was armed) *and* is the last
+/// thing that ended on the branch since.
 ///
 /// The case: a push queued behind the current work *and* "Push after current
 /// work" armed on top of it. The queued push runs first and the deferred one
@@ -2506,28 +2508,70 @@ fn branch_and_project_idle(store: &Arc<Store>, branch: &store::Branch) -> Result
 /// idle. "Successfully" is the pipeline's own verdict — completed without the
 /// agent, or every step succeeded or was skipped — since a rejection the agent
 /// recovered from may have pushed something else.
-fn push_of_variant_completed_since(
+///
+/// Both halves of the test use clocks that fail toward firing:
+///
+/// - *When the push finished* is the pipeline's own
+///   [`PipelineExecution::finished_at`], not the row's `updated_at`, which
+///   `project_transfer` and `branch_move` bump for every session on a branch
+///   long after it ended. An old push whose row was rewritten that way does
+///   not count, since its steps still carry their original timestamps.
+/// - *Nothing ended after it* reads the other sessions' `updated_at` through
+///   [`Store::branch_session_ids_ended_since`], which only ever moves later
+///   and counts a tie as "after". A session queued behind the push that
+///   commits and completes once the push is done is exactly what the
+///   deferred push exists to carry, so a push with anything terminal after it
+///   satisfies nothing. The cost of the pessimism is a redundant push, which
+///   git answers with "Everything up-to-date".
+///
+/// Of several qualifying pushes the latest is judged: anything ending after it
+/// ended after the earlier ones too.
+fn push_satisfying_deferred(
     store: &Arc<Store>,
     branch_id: &str,
     variant: PushVariant,
-    since: i64,
+    requested_at: i64,
 ) -> Result<Option<String>, String> {
+    // `updated_at >= requested_at` is a pre-filter that cannot exclude a push
+    // which finished since the arm (its row was written at completion, after
+    // its last step); the pipeline's own timestamp decides below.
     let completed = store
-        .get_completed_sessions_for_branch_since(branch_id, since)
+        .get_completed_sessions_for_branch_since(branch_id, requested_at)
         .map_err(|e| e.to_string())?;
-    Ok(completed
+    let latest = completed
         .into_iter()
-        .find(|session| {
-            session.pipeline.as_ref().is_some_and(|pipeline| {
-                pipeline.kind.as_ref() == Some(&PipelineKind::Push)
-                    && PushVariant::of(pipeline) == variant
-                    && (pipeline.completed_without_ai
-                        || pipeline.steps.iter().all(|step| {
-                            matches!(step.status, StepStatus::Succeeded | StepStatus::Skipped)
-                        }))
-            })
+        .filter_map(|session| {
+            let pipeline = session.pipeline.as_ref()?;
+            let is_successful_push_of_variant = pipeline.kind.as_ref() == Some(&PipelineKind::Push)
+                && PushVariant::of(pipeline) == variant
+                && (pipeline.completed_without_ai
+                    || pipeline.steps.iter().all(|step| {
+                        matches!(step.status, StepStatus::Succeeded | StepStatus::Skipped)
+                    }));
+            if !is_successful_push_of_variant {
+                return None;
+            }
+            let finished_at = pipeline.finished_at()?;
+            (finished_at >= requested_at).then_some((finished_at, session.id))
         })
-        .map(|session| session.id))
+        .max_by_key(|(finished_at, _)| *finished_at);
+    let Some((finished_at, push_session_id)) = latest else {
+        return Ok(None);
+    };
+    let ended_after = store
+        .branch_session_ids_ended_since(branch_id, finished_at, &push_session_id)
+        .map_err(|e| e.to_string())?;
+    if !ended_after.is_empty() {
+        log::info!(
+            "[session_queue] deferred push on branch {branch_id}: push session {push_session_id} \
+             (force: {}, no_verify: {}) completed since it was armed, but sessions {ended_after:?} \
+             ended after it, so it does not stand in",
+            variant.force,
+            variant.no_verify
+        );
+        return Ok(None);
+    }
+    Ok(Some(push_session_id))
 }
 
 /// Arm `variant` to push once the branch and its project are idle — or, when
@@ -2632,9 +2676,11 @@ enum DeferredPushCheck {
     /// Armed, but the branch or project still has work in flight.
     Blocked(DeferredPushBlockers),
     /// Armed and idle, but a push of the same variant already completed
-    /// since it was armed (the named session), so there is nothing to fire.
+    /// since it was armed and nothing on the branch ended after it (the named
+    /// session; see [`push_satisfying_deferred`]), so there is nothing to
+    /// fire.
     Satisfied(store::DeferredPush, String),
-    /// Armed, idle, and nothing has pushed since: fire it.
+    /// Armed, idle, and no such push: fire it.
     Ready(store::DeferredPush),
 }
 
@@ -2649,7 +2695,7 @@ fn check_deferred_push(store: &Arc<Store>, branch_id: &str) -> Result<DeferredPu
     if !blockers.is_empty() {
         return Ok(DeferredPushCheck::Blocked(blockers));
     }
-    if let Some(session_id) = push_of_variant_completed_since(
+    if let Some(session_id) = push_satisfying_deferred(
         store,
         branch_id,
         PushVariant::of_deferred(&deferred),
@@ -2662,8 +2708,9 @@ fn check_deferred_push(store: &Arc<Store>, branch_id: &str) -> Result<DeferredPu
 
 /// Fire the branch's deferred push through `fire` if one is armed, the
 /// branch and project are idle, and no push of its variant has completed since
-/// it was armed (that clears it instead). Returns whether a push was started;
-/// while blocked, the sessions holding it are logged.
+/// it was armed as the last thing to end on the branch (that clears it
+/// instead). Returns whether a push was started; while blocked, the sessions
+/// holding it are logged.
 ///
 /// The flag is cleared *before* the push starts, so the push's own terminal
 /// state (which kicks the branch again) cannot find it still armed and fire
@@ -2696,7 +2743,8 @@ where
                 .map_err(|e| e.to_string())?;
             log::info!(
                 "[session_queue] deferred push on branch {branch_id} cleared: push session \
-                 {session_id} (force: {}, no_verify: {}) completed since it was armed",
+                 {session_id} (force: {}, no_verify: {}) completed since it was armed and \
+                 nothing ended after it",
                 deferred.force,
                 deferred.no_verify
             );
@@ -3710,18 +3758,27 @@ mod tests {
     }
 
     /// Run the queued push `session_id` to a deterministic success, as the
-    /// pipeline runner records one: every step succeeded, no agent needed.
+    /// pipeline runner records one: every step succeeded with a finish time,
+    /// no agent needed.
     fn complete_push_successfully(store: &Arc<Store>, session_id: &str) {
         let session = store.get_session(session_id).unwrap().unwrap();
         let mut pipeline = session.pipeline.expect("a push pipeline");
         for step in &mut pipeline.steps {
             step.status = StepStatus::Succeeded;
+            step.completed_at = Some(store::now_timestamp());
         }
         pipeline.completed_without_ai = true;
         store
             .update_session_pipeline(session_id, &pipeline)
             .unwrap();
         end_session(store, session_id);
+    }
+
+    /// Let the millisecond clock move on, so the next write is strictly later
+    /// than the last: the checks under test compare timestamps and treat a
+    /// tie as "after".
+    fn next_millisecond() {
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 
     /// Every push pipeline session on the branch, whatever its state.
@@ -3774,8 +3831,10 @@ mod tests {
             "no second push row"
         );
 
-        // The queued push runs and succeeds: the branch is idle, and the push
-        // the user wanted has happened.
+        // The queued push runs and succeeds — after the note ended, as the
+        // queue guarantees — so the branch is idle and the push the user
+        // wanted has happened.
+        next_millisecond();
         complete_push_successfully(&store, &queued);
         assert_eq!(fire(&store, &branch.id).await, (false, vec![]));
         assert_eq!(
@@ -3848,6 +3907,87 @@ mod tests {
             end_session(&store, &session.id);
         }
         assert_eq!(fire(&store, &branch.id).await, (true, vec![PUSH]));
+    }
+
+    /// The review's counterexample: a same-variant push completes after the
+    /// arm, then a session queued behind it commits and completes. That push
+    /// cannot have carried the later commits, so it does not stand in for the
+    /// deferred push, which fires exactly once when the branch goes idle.
+    #[tokio::test]
+    async fn deferred_push_fires_when_a_session_ended_after_the_completed_push() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+        let queued = queue_push(&store, &branch.id, PUSH).expect("queued behind the note");
+        arm(&store, &branch.id, PUSH).await;
+
+        // The first note ends; the queued push runs and succeeds.
+        for session in store.get_running_sessions_for_branch(&branch.id).unwrap() {
+            end_session(&store, &session.id);
+        }
+        next_millisecond();
+        complete_push_successfully(&store, &queued);
+
+        // Before the drain tail looks, another session takes the branch (the
+        // commit session that was queued behind the push, say): still blocked.
+        start_running_note_session(&store, &branch.id);
+        assert_eq!(fire(&store, &branch.id).await, (false, vec![]));
+        assert!(deferred_push_of(&store, &branch.id).is_some());
+
+        // It completes after the push did. Its commits are unpushed.
+        next_millisecond();
+        for session in store.get_running_sessions_for_branch(&branch.id).unwrap() {
+            end_session(&store, &session.id);
+        }
+        assert_eq!(
+            fire(&store, &branch.id).await,
+            (true, vec![PUSH]),
+            "the completed push does not cover work that ended after it"
+        );
+        assert_eq!(deferred_push_of(&store, &branch.id), None);
+        assert_eq!(
+            fire(&store, &branch.id).await,
+            (false, vec![]),
+            "fired once: the flag is cleared before the push starts"
+        );
+    }
+
+    /// A same-variant push from before the arm whose *row* was rewritten after
+    /// it — `project_transfer` and `branch_move` bump `updated_at` on every
+    /// session of a branch — is still an old push: the pipeline's own finish
+    /// time is what counts, and it predates the arm.
+    #[tokio::test]
+    async fn deferred_push_is_not_satisfied_by_an_old_push_whose_row_was_rewritten() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+        let old_push = queue_push(&store, &branch.id, PUSH).expect("queued");
+        complete_push_successfully(&store, &old_push);
+        next_millisecond();
+        arm(&store, &branch.id, PUSH).await;
+        next_millisecond();
+        for session in store.get_running_sessions_for_branch(&branch.id).unwrap() {
+            end_session(&store, &session.id);
+        }
+
+        // The transfer's per-row write: `agent_id` and `updated_at` change,
+        // the pipeline does not. The old push now looks newer than the arm
+        // and than the note that just ended, if judged by `updated_at`.
+        next_millisecond();
+        store
+            .set_agent_session_id(&old_push, "agent-after-transfer")
+            .unwrap();
+        let rewritten = store.get_session(&old_push).unwrap().unwrap();
+        let armed_at = deferred_push_of(&store, &branch.id).unwrap().requested_at;
+        assert!(
+            rewritten.updated_at > armed_at,
+            "the row now postdates the arm"
+        );
+        assert!(
+            rewritten.pipeline.unwrap().finished_at().unwrap() < armed_at,
+            "but the pipeline finished before it"
+        );
+
+        assert_eq!(fire(&store, &branch.id).await, (true, vec![PUSH]));
+        assert_eq!(deferred_push_of(&store, &branch.id), None);
     }
 
     /// A push that fails to start leaves the flag armed for the next kick —

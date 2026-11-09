@@ -2114,6 +2114,74 @@ fn test_session_completion_effects_marker_round_trips() {
     assert_eq!(marked.updated_at, marked_at);
 }
 
+/// `branch_session_ids_ended_since` is the deferred push's "did anything end
+/// after that push" question: every terminal status on the branch counts, a
+/// row written in the same millisecond counts (a tie is "after"), the push
+/// itself is excluded, and running or queued rows and other branches' rows
+/// are not ends on this branch.
+#[test]
+fn test_branch_session_ids_ended_since_lists_other_terminal_rows_including_ties() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let sibling = Branch::new(&project.id, "other", "main");
+    store.create_branch(&sibling).unwrap();
+
+    let on_branch = |prompt: &str| {
+        let session = Session::new_running(prompt, Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&session).unwrap();
+        session.id
+    };
+    let push = on_branch("Push the current branch to the remote");
+    let completed = on_branch("completed");
+    let errored = on_branch("errored");
+    let cancelled = on_branch("cancelled");
+    let _still_running = on_branch("running");
+    let elsewhere = Session::new_running("elsewhere", Path::new("/tmp")).with_branch(&sibling.id);
+    store.create_session(&elsewhere).unwrap();
+
+    store
+        .update_session_status(&push, SessionStatus::Completed, None, None)
+        .unwrap();
+    store
+        .update_session_status(&completed, SessionStatus::Completed, None, None)
+        .unwrap();
+    store
+        .update_session_status(&errored, SessionStatus::Error, Some("boom"), None)
+        .unwrap();
+    store
+        .update_session_status(&cancelled, SessionStatus::Cancelled, None, None)
+        .unwrap();
+    store
+        .update_session_status(&elsewhere.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    let push_ended_at = store.get_session(&push).unwrap().unwrap().updated_at;
+
+    // Everything above was written within the same few milliseconds; asking
+    // from the push's own end time catches the ties and anything later.
+    assert_eq!(
+        store
+            .branch_session_ids_ended_since(&branch.id, push_ended_at, &push)
+            .unwrap(),
+        vec![completed.clone(), errored.clone(), cancelled.clone()]
+    );
+    assert!(
+        store
+            .branch_session_ids_ended_since(&branch.id, push_ended_at, &completed)
+            .unwrap()
+            .contains(&push),
+        "the exclusion is by id, not by kind"
+    );
+
+    // Nothing ended after a point in the future.
+    assert!(store
+        .branch_session_ids_ended_since(&branch.id, push_ended_at + 1_000, &push)
+        .unwrap()
+        .is_empty());
+}
+
 #[test]
 fn test_session_without_branch_or_artifact_resolves_to_none() {
     let store = Store::in_memory().unwrap();

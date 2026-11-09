@@ -411,8 +411,13 @@
    * disconnected. Sessions on the project's other branches are deliberately
    * not counted — the backend's idle check for a deferred push only looks at
    * this branch and the project's own sessions, so counting a sibling branch
-   * here would offer a wait the backend would not perform. A session can sit
-   * in both stores briefly around a reconnect, hence the Set.
+   * here would offer a wait the backend would not perform. Both stores count
+   * "has a project id, no branch id", which the backend only ever stamps on
+   * a project-note session (see `getRunningProjectSessionIds`), so the set
+   * matches the backend's `project_session_ids_in_flight` apart from queued
+   * project sessions, which this client cannot see and which only err toward
+   * not offering the wait. A session can sit in both stores briefly around a
+   * reconnect, hence the Set.
    */
   let projectSessionsInFlight = $derived(
     new Set([

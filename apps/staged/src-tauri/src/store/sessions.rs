@@ -876,10 +876,15 @@ impl Store {
     /// The branch's `completed` sessions whose row was last written at or
     /// after `since` (ms), oldest first.
     ///
-    /// `updated_at` stands in for a completion time: the status write that
-    /// completes a session sets it, and a completed row is only touched again
-    /// by its own completion effects. The deferred push uses this to notice a
-    /// push that already did its job after it was armed.
+    /// A pre-filter, not a completion time. `updated_at` is set by the status
+    /// write that completes a session, but also by later writes to the row:
+    /// `project_transfer` and `branch_move` rewrite every session on a branch
+    /// (`working_dir`, `agent_id`) and bump it, and so do the ACP title and
+    /// config-selection setters. It is therefore never *earlier* than the
+    /// session's completion, so filtering on it cannot miss a session that
+    /// completed since `since` — it can only return extra, older ones. The
+    /// deferred push narrows the result by the pipeline's own
+    /// [`PipelineExecution::finished_at`], which nothing rewrites.
     pub fn get_completed_sessions_for_branch_since(
         &self,
         branch_id: &str,
@@ -896,6 +901,43 @@ impl Store {
             .query_map(params![branch_id, since], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
+    }
+
+    /// Ids of the branch's sessions in a terminal state (`completed`, `error`
+    /// or `cancelled`), other than `except_session_id`, whose row was last
+    /// written at or after `since` (ms); oldest-created first.
+    ///
+    /// The deferred push asks this with a completed push's own
+    /// [`PipelineExecution::finished_at`] as `since`, to learn whether
+    /// anything else on the branch ended after that push — an agent session
+    /// that committed, say — whose work the push cannot have carried. Like
+    /// [`Self::get_completed_sessions_for_branch_since`] it reads
+    /// `updated_at`, which later writes to the row only ever move *later*,
+    /// and it keeps a tie (`>=`): both make it report "something ended after
+    /// the push" when nothing did, which costs a redundant push, never a
+    /// missing one. Every terminal status counts, since a session cancelled
+    /// or failed mid-run may still have committed.
+    pub fn branch_session_ids_ended_since(
+        &self,
+        branch_id: &str,
+        since: i64,
+        except_session_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM sessions
+             WHERE branch_id = ?1
+               AND status IN ('completed', 'error', 'cancelled')
+               AND updated_at >= ?2
+               AND id != ?3
+             ORDER BY created_at ASC",
+        )?;
+        let ids = stmt
+            .query_map(params![branch_id, since, except_session_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     /// Resolve the branch that owns a session.

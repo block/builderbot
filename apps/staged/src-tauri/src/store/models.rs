@@ -1875,6 +1875,22 @@ impl PipelineExecution {
         self
     }
 
+    /// When the pipeline's own execution last finished a step (ms): the latest
+    /// `completed_at` across its steps, `None` while no step has finished.
+    ///
+    /// This is the pipeline's completion time as the pipeline itself recorded
+    /// it, and the only clock the deferred push trusts for "did a push already
+    /// do my job": the session row's `updated_at` is also bumped by bulk
+    /// writers (`project_transfer`, `branch_move`) long after a session ends,
+    /// but nothing rewrites a finished pipeline's steps. For a pipeline that
+    /// handed off to the agent it is the handoff time, which is *earlier* than
+    /// the agent's finish; callers comparing it against other sessions' end
+    /// times therefore err toward "something finished after this push", the
+    /// safe direction.
+    pub fn finished_at(&self) -> Option<i64> {
+        self.steps.iter().filter_map(|step| step.completed_at).max()
+    }
+
     pub fn with_rebase_target(mut self, target: String) -> Self {
         self.rebase_target = Some(target);
         self

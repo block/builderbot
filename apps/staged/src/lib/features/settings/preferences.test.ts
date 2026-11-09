@@ -146,8 +146,8 @@ describe.each([true, false])('project status synchronization (native=%s)', (nati
     await client.initPreferences();
     // One listener per synced key (project statuses first, then new-project
     // location, then composer send mode, then the transfer dialog's
-    // uncommitted-changes and ignored-files answers).
-    expect(listeners).toHaveLength(5);
+    // uncommitted-changes and ignored-files answers, then agent env vars).
+    expect(listeners).toHaveLength(6);
 
     values.set(key, [custom]);
     listeners[0].options?.onEstablished?.();
@@ -449,5 +449,63 @@ describe.each([true, false])('transfer ignored files (native=%s)', (native) => {
     emit(null, { key: ignoredKey, exists: false });
     expect(a.preferences.transferIgnoredFiles).toBe(false);
     expect(set).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.each([true, false])('agent environment variables (native=%s)', (native) => {
+  const envKey = 'agent-env-vars';
+  const token = { name: 'ANTHROPIC_API_KEY', value: 'sk-test', enabled: true };
+  const debug = { name: 'DEBUG', value: '1', enabled: false };
+
+  it('defaults to no variables and persists each agent’s list in order', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.agentEnvVars).toEqual({});
+    expect(client.getAgentEnvVars('claude')).toEqual([]);
+
+    client.setAgentEnvVars('claude', [debug, token]);
+    client.setAgentEnvVars('goose', [token]);
+    expect(client.getAgentEnvVars('claude')).toEqual([debug, token]);
+    expect(values.get(envKey)).toEqual({ claude: [debug, token], goose: [token] });
+
+    // A fresh client reads the lists back.
+    const reopened = await newClient(native);
+    await reopened.initPreferences();
+    expect(reopened.preferences.agentEnvVars).toEqual({ claude: [debug, token], goose: [token] });
+  });
+
+  it('removes an agent’s entry when its list is emptied', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    client.setAgentEnvVars('claude', [token]);
+    client.setAgentEnvVars('goose', [token]);
+    client.setAgentEnvVars('claude', []);
+    expect(client.preferences.agentEnvVars).toEqual({ goose: [token] });
+    expect(values.get(envKey)).toEqual({ goose: [token] });
+  });
+
+  it('fills in defaults for older entries and drops malformed stored values', async () => {
+    values.set(envKey, { claude: [{ name: 'LEGACY' }], codex: 'FOO=bar' });
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.agentEnvVars).toEqual({
+      claude: [{ name: 'LEGACY', value: '', enabled: true }],
+    });
+    emit('invalid', { key: envKey });
+    expect(client.preferences.agentEnvVars).toEqual({});
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('follows a change made in another client without echoing it back', async () => {
+    const a = await newClient(native);
+    await a.initPreferences();
+    const b = await newClient(!native);
+    await b.initPreferences();
+
+    a.setAgentEnvVars('claude', [token]);
+    expect(b.getAgentEnvVars('claude')).toEqual([token]);
+    b.setAgentEnvVars('claude', [{ ...token, enabled: false }]);
+    expect(a.getAgentEnvVars('claude')).toEqual([{ ...token, enabled: false }]);
+    expect(set).toHaveBeenCalledTimes(2);
   });
 });

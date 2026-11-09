@@ -7,6 +7,7 @@
   import ArrowUpCircle from '@lucide/svelte/icons/arrow-up-circle';
   import Spinner from '../../shared/Spinner.svelte';
   import DoctorCheckRow from '../doctor/DoctorCheckRow.svelte';
+  import AgentEnvVarsSetting from './AgentEnvVarsSetting.svelte';
   import {
     doctorState,
     runChecks,
@@ -151,11 +152,15 @@
           <h3 class="section-label">Agents</h3>
           <div class="checks-list">
             {#each agentChecks as check (check.id)}
-              <DoctorCheckRow
-                {check}
-                agentId={check.id.replace('ai-agent-', '')}
-                onFixed={runChecksAndRefresh}
-              />
+              {@const agentId = check.id.replace('ai-agent-', '')}
+              <!-- The check row and the agent's environment variables share
+                   one card: the variables sit under the row they apply to. -->
+              <div class="agent-check">
+                <DoctorCheckRow {check} {agentId} onFixed={runChecksAndRefresh} />
+                <div class="agent-env">
+                  <AgentEnvVarsSetting {agentId} />
+                </div>
+              </div>
             {/each}
           </div>
         </div>
@@ -246,6 +251,24 @@
   :global(.doctor-settings-panel .check-row) {
     border: 1px solid var(--border-subtle);
     background: var(--bg-elevated);
+  }
+
+  .agent-check {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .agent-check :global(.check-row) {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  .agent-env {
+    padding: 10px 14px 12px;
+    border: 1px solid var(--border-subtle);
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    background: var(--bg-primary);
   }
 
   .loading-state,

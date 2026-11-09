@@ -1741,8 +1741,21 @@ pub fn start_session(
 
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
+            // The user's per-agent variables (Doctor settings → Environment
+            // variables) go under the session's own: both override the
+            // inherited environment, and a session's requirements (a commit
+            // session's git dates) stay in force. Local sessions only — a
+            // remote session's `extra_env` reaches the `sq blox acp` proxy,
+            // not the agent on the workstation.
+            let agent_env = match (&config.workspace_name, &resolved_provider_id) {
+                (None, Some(provider_id)) => crate::agent::env_vars::read_agent_env(provider_id),
+                _ => Vec::new(),
+            };
             let driver = driver
-                .with_extra_env(config.extra_env.clone())
+                .with_extra_env(crate::agent::env_vars::merge_agent_env(
+                    agent_env,
+                    config.extra_env.clone(),
+                ))
                 .with_background_hold(config.background_hold.clone())
                 // Publish the hold so the UI can show "waiting on background
                 // task (N)" — the session stays `running` throughout, so this

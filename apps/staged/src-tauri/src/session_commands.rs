@@ -624,9 +624,17 @@ fn acp_config_discovery_spawn_command(
     }
 }
 
+/// Start the discovery launch from `env_vars` alone, with the env-shebang
+/// `PATH` guard when the binary is run directly, then apply `agent_env` — the
+/// agent's per-agent variables (Settings → Doctor → Environment variables) —
+/// last, so they win over the snapshot and the guard exactly as a session
+/// launch's extra env does (see `agent::env_vars`). Without them an agent
+/// authenticated only through a Doctor row answers the discovery's
+/// `session/new` with `AuthRequired`, which reads as "no options".
 fn apply_acp_config_discovery_env(
     cmd: &mut Command,
     env_vars: &[(String, String)],
+    agent_env: &[(String, String)],
     binary_path: &Path,
     uses_explicit_interpreter: bool,
 ) {
@@ -639,15 +647,17 @@ fn apply_acp_config_discovery_env(
         cmd.env(key, value);
     }
 
-    if uses_explicit_interpreter {
-        return;
+    if !uses_explicit_interpreter {
+        if let Some(path) = doctor::resolve::guarded_path_for_env_shebang_launcher(
+            binary_path,
+            path_value.unwrap_or_default(),
+        ) {
+            cmd.env("PATH", path);
+        }
     }
 
-    if let Some(path) = doctor::resolve::guarded_path_for_env_shebang_launcher(
-        binary_path,
-        path_value.unwrap_or_default(),
-    ) {
-        cmd.env("PATH", path);
+    for (key, value) in agent_env {
+        cmd.env(key, value);
     }
 }
 
@@ -782,10 +792,14 @@ async fn discover_acp_config_for_provider_async(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    // Local launch, like every discovery: the agent's Doctor variables apply
+    // as they do to a local session (`agent::env_vars`).
+    let agent_env = crate::agent::env_vars::read_agent_env(&provider_id);
     match cache.get(&working_dir).await {
         Ok(snapshot) => apply_acp_config_discovery_env(
             &mut cmd,
             &snapshot.vars(),
+            &agent_env,
             agent.path(),
             spawn_command.uses_explicit_interpreter,
         ),
@@ -795,6 +809,11 @@ async fn discover_acp_config_for_provider_async(
                  (falling back to inherited environment): {e}",
                 working_dir.display()
             );
+            // Over the inherited environment, as `with_extra_env` is over an
+            // inherited one when a session's snapshot capture fails.
+            for (key, value) in &agent_env {
+                cmd.env(key, value);
+            }
         }
     }
 
@@ -12339,6 +12358,71 @@ mod tests {
     #[test]
     fn resolve_preferred_provider_id_returns_none_when_nothing_available() {
         assert_eq!(resolve_preferred_provider_id(None, &[], &[]), None);
+    }
+
+    /// The agent's Doctor variables are applied last on the discovery launch:
+    /// over the snapshot, and over the env-shebang `PATH` guard, as on a
+    /// session launch.
+    #[test]
+    fn acp_config_discovery_env_applies_agent_vars_last() {
+        let snapshot = vec![
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("KEY".to_string(), "from snapshot".to_string()),
+            ("ONLY_SNAPSHOT".to_string(), "kept".to_string()),
+        ];
+        let agent_env = vec![
+            ("KEY".to_string(), "from doctor row".to_string()),
+            ("ONLY_ROW".to_string(), "added".to_string()),
+        ];
+        let binary = Path::new("/nonexistent/agent");
+
+        for uses_explicit_interpreter in [false, true] {
+            let mut cmd = Command::new("true");
+            apply_acp_config_discovery_env(
+                &mut cmd,
+                &snapshot,
+                &agent_env,
+                binary,
+                uses_explicit_interpreter,
+            );
+            let envs: HashMap<String, String> = cmd
+                .as_std()
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+                .collect();
+            assert_eq!(envs.get("KEY").map(String::as_str), Some("from doctor row"));
+            assert_eq!(envs.get("ONLY_ROW").map(String::as_str), Some("added"));
+            assert_eq!(envs.get("ONLY_SNAPSHOT").map(String::as_str), Some("kept"));
+            assert!(envs.contains_key("PATH"));
+        }
+
+        // A row named PATH replaces the guarded path too, as the launcher's
+        // extra env does (the Doctor UI warns on that name).
+        let mut cmd = Command::new("true");
+        apply_acp_config_discovery_env(
+            &mut cmd,
+            &snapshot,
+            &[("PATH".to_string(), "/row/bin".to_string())],
+            binary,
+            false,
+        );
+        let path = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string());
+        assert_eq!(path.as_deref(), Some("/row/bin"));
+
+        // No rows: the snapshot is applied unchanged (`get_envs` is sorted).
+        let mut cmd = Command::new("true");
+        apply_acp_config_discovery_env(&mut cmd, &snapshot, &[], binary, true);
+        let keys: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(keys, ["KEY", "ONLY_SNAPSHOT", "PATH"]);
     }
 
     #[test]

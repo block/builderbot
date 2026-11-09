@@ -40,6 +40,11 @@ use resolve::resolve_binary_with_diagnostics;
 use types::{InstallSource, ResolvedBinary};
 
 const SNAPSHOT_PATH_ENV: &str = "__BUILDERBOT_DOCTOR_SNAPSHOT_PATH";
+/// Prefix of the seed variables that carry a [`DoctorEnv::overlay`] value
+/// into the login shell for the `-c` payload to re-export after the shell's
+/// startup files (see [`overlay_reexports`]). Grown by underscores until no
+/// snapshot variable starts with it.
+const OVERLAY_SEED_PREFIX: &str = "__BUILDERBOT_DOCTOR_OVERLAY_";
 
 /// Fallback check returned when a spawn_blocking task panics.
 fn empty_check(id: &str, label: &str) -> DoctorCheck {
@@ -87,6 +92,9 @@ pub struct RunChecksOptions {
     /// each child command's environment and applies these variables so binary
     /// resolution, checks, freshness probes, and fixes all see the same shell
     /// environment. `None` preserves the previous per-call-site behavior.
+    /// A snapshot's per-check overlays ([`DoctorEnv::with_check_overlay`])
+    /// apply to that check's own probes — an agent's auth and version probes
+    /// — but not to binary resolution, which is shared by every check.
     pub env: Option<DoctorEnv>,
     /// Directory holding agent binaries bundled inside the embedding app
     /// (e.g. Staged's `resources/acp/bin`). Binaries that resolve from inside
@@ -236,6 +244,10 @@ async fn collect_base_report(
                 .collect();
             let main = info.main_command.and_then(|cmd| resolved.get(cmd).cloned());
             tokio::task::spawn_blocking(move || {
+                // The agent's own probes (`acp --help`, `auth status`) run
+                // with the check's overlay — the variables the user set for
+                // this agent — so Doctor's verdict matches a session launch.
+                let env = env.as_deref().map(|env| env.for_check(info.id));
                 check_single_ai_agent(
                     info,
                     found,
@@ -586,6 +598,9 @@ async fn populate_freshness(
                 Some(args) => InstalledProbe::Cli(args),
                 None => select_installed_probe(t.install_source.as_ref(), t.package_id.as_deref()),
             };
+            // The version probe runs the agent's own binary, so it gets the
+            // check's overlay like the auth probe does.
+            let env = env.as_deref().map(|env| env.for_check(&t.id));
             let info = fetch_version_info(
                 t.latest_source,
                 t.package_id.as_deref(),
@@ -1214,6 +1229,15 @@ impl ExecuteFixOptions {
         self
     }
 
+    /// Run the fix from `env`, overlay included: a [`DoctorEnv::with_overlay`]
+    /// variable is re-exported after the login shell's startup files, where
+    /// [`with_env_snapshot`](Self::with_env_snapshot) would let an rc file's
+    /// `export` of the same name shadow it.
+    pub fn with_env(mut self, env: DoctorEnv) -> Self {
+        self.env = Some(env);
+        self
+    }
+
     /// Attach an opt-in stdin pipe (see [`FixStdin::pipe`]). The `FixStdin`
     /// feeds exactly one execution: call this again with a fresh pipe for
     /// every retry rather than reusing a built options struct.
@@ -1425,6 +1449,18 @@ enum StreamLine {
 /// startup can rewrite `PATH` after process spawn, snapshot callers also carry
 /// the merged path in an internal env var and restore it inside the `-c`
 /// payload immediately before running the requested command.
+///
+/// The snapshot's [`DoctorEnv::overlay`] (an agent's Doctor variables for its
+/// own probes and login fix) gets the same treatment, for the same reason: an
+/// `export` of the same name in `.zshenv`/`.zprofile` would otherwise replace
+/// the value the shell started with. Each overlaid value also rides in a seed
+/// variable (`__BUILDERBOT_DOCTOR_OVERLAY_<i>`, see [`overlay_reexports`]) and
+/// the payload re-exports it under its real name, then unsets the seed, before
+/// the `PATH` restore and the command. The `PATH` restore comes after so a
+/// user row named `PATH` doesn't drop the resolved-binary dirs
+/// [`merged_snapshot_path`] folded into it (the row's value is already that
+/// merge's base). Values never appear in the command text; the shell is
+/// `-l -c`, not interactive, so nothing is written to history either way.
 fn build_shell_command(
     command: &str,
     path_prefix: &[PathBuf],
@@ -1464,6 +1500,11 @@ fn build_shell_command(
             cmd.env(SNAPSHOT_PATH_ENV, path);
             shell_command = command_with_snapshot_path_restore(command);
         }
+        let reexports = overlay_reexports(env);
+        for reexport in &reexports {
+            cmd.env(&reexport.seed, &reexport.value);
+        }
+        shell_command = command_with_overlay_reexports(&reexports, &shell_command);
     } else {
         cmd.env("HOME", &home)
             .env("USER", &user)
@@ -1477,6 +1518,77 @@ fn build_shell_command(
 
     cmd.arg("-l").arg("-c").arg(shell_command);
     cmd
+}
+
+/// One [`DoctorEnv::overlay`] variable the login shell re-exports after its
+/// startup files: the value travels in `seed` and the payload copies it to
+/// `name` (see [`overlay_reexports`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OverlayReexport {
+    seed: String,
+    name: String,
+    value: String,
+}
+
+/// Whether `name` is a POSIX shell identifier, which is what both the
+/// re-export line (`NAME="$seed"; export NAME`) and an rc file's own `export`
+/// need. A name that isn't one — `1KEY`, `MY-KEY`, anything the frontend's
+/// `validateEnvVarName` lets through that the shell won't assign — can't be
+/// shadowed by an rc file either, so it needs no re-export: the shell passes
+/// its starting value through to the command untouched.
+fn is_shell_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// The re-exports for `env`'s overlay: one per overlaid variable whose name
+/// is a shell identifier, in overlay order (so a repeated name resolves to
+/// its last pair, as everywhere else), each with a seed
+/// `__BUILDERBOT_DOCTOR_OVERLAY_<i>`. The prefix grows an underscore until no
+/// snapshot variable starts with it, so a seed can never share a name with
+/// a user's or the snapshot's own variable. Empty without an overlay.
+fn overlay_reexports(env: &DoctorEnv) -> Vec<OverlayReexport> {
+    let overlay: Vec<&(String, String)> = env
+        .overlay()
+        .iter()
+        .filter(|(name, _)| is_shell_identifier(name))
+        .collect();
+    if overlay.is_empty() {
+        return Vec::new();
+    }
+    let mut prefix = OVERLAY_SEED_PREFIX.to_string();
+    while env.vars.iter().any(|(name, _)| name.starts_with(&prefix)) {
+        prefix.push('_');
+    }
+    overlay
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, value))| OverlayReexport {
+            seed: format!("{prefix}{i}"),
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+/// Prepend one line per re-export to `command`: when the seed is still set
+/// (an rc file could have unset it, in which case the starting value is left
+/// alone), assign and export the real name from it and drop the seed so it
+/// never reaches the command. Plain POSIX sh, valid in zsh and bash alike;
+/// names and seeds are identifiers, so no quoting is needed, and the value
+/// expands from the environment rather than being written into the text.
+fn command_with_overlay_reexports(reexports: &[OverlayReexport], command: &str) -> String {
+    let mut out = String::new();
+    for OverlayReexport { seed, name, .. } in reexports {
+        out.push_str(&format!(
+            "if [ \"${{{seed}+x}}\" = x ]; then {name}=\"${{{seed}}}\"; export {name}; unset {seed}; fi\n",
+        ));
+    }
+    out.push_str(command);
+    out
 }
 
 fn command_with_snapshot_path_restore(command: &str) -> String {
@@ -3559,6 +3671,155 @@ mod tests {
             other => {
                 panic!("expected snapshot PATH binary to beat login profile rewrite; got {other:?}")
             }
+        }
+    }
+
+    /// The overlay rides in seed variables and the `-c` payload re-exports
+    /// each identifier-named one before the `PATH` restore; a name the shell
+    /// can't assign gets no line, and the seed prefix steps aside from a
+    /// snapshot variable that starts with it.
+    #[test]
+    fn build_shell_command_reexports_the_overlay_after_shell_startup() {
+        let env = DoctorEnv::new(vec![
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), "/tmp".to_string()),
+            ("KEY".to_string(), "from snapshot".to_string()),
+            (
+                "__BUILDERBOT_DOCTOR_OVERLAY_0".to_string(),
+                "user's own".to_string(),
+            ),
+        ])
+        .with_overlay(vec![
+            ("KEY".to_string(), "from doctor row".to_string()),
+            ("1KEY".to_string(), "not an identifier".to_string()),
+            ("OTHER_1".to_string(), String::new()),
+        ]);
+
+        let cmd = build_shell_command("probe --flag", &[], Some(&env));
+        let envs: HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+        assert_eq!(envs.get("KEY").map(String::as_str), Some("from doctor row"));
+        assert_eq!(
+            envs.get("1KEY").map(String::as_str),
+            Some("not an identifier"),
+            "a non-identifier name is still seeded into the starting environment",
+        );
+        // The prefix grew past the snapshot's own `__BUILDERBOT_DOCTOR_OVERLAY_0`.
+        assert_eq!(
+            envs.get("__BUILDERBOT_DOCTOR_OVERLAY__0")
+                .map(String::as_str),
+            Some("from doctor row")
+        );
+        assert_eq!(
+            envs.get("__BUILDERBOT_DOCTOR_OVERLAY__1")
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            envs.get("__BUILDERBOT_DOCTOR_OVERLAY_0")
+                .map(String::as_str),
+            Some("user's own")
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(&args[..2], ["-l", "-c"]);
+        let payload = &args[2];
+        let lines: Vec<&str> = payload.lines().collect();
+        assert_eq!(
+            lines[0],
+            "if [ \"${__BUILDERBOT_DOCTOR_OVERLAY__0+x}\" = x ]; then \
+             KEY=\"${__BUILDERBOT_DOCTOR_OVERLAY__0}\"; export KEY; \
+             unset __BUILDERBOT_DOCTOR_OVERLAY__0; fi"
+        );
+        assert_eq!(
+            lines[1],
+            "if [ \"${__BUILDERBOT_DOCTOR_OVERLAY__1+x}\" = x ]; then \
+             OTHER_1=\"${__BUILDERBOT_DOCTOR_OVERLAY__1}\"; export OTHER_1; \
+             unset __BUILDERBOT_DOCTOR_OVERLAY__1; fi"
+        );
+        assert!(
+            lines[2].starts_with(&format!(
+                "if [ \"${{{SNAPSHOT_PATH_ENV}+x}}\" = x ]; then PATH="
+            )),
+            "the PATH restore follows the overlay re-exports: {payload}"
+        );
+        assert_eq!(lines[3], "probe --flag");
+        assert!(
+            !payload.contains("1KEY") && !payload.contains("from doctor row"),
+            "no line for a non-identifier name, and no value in the text: {payload}"
+        );
+
+        // Without an overlay the payload is unchanged.
+        let plain = build_shell_command("probe", &[], Some(&DoctorEnv::new(Vec::new())));
+        assert_eq!(plain.get_args().nth(2).unwrap().to_str(), Some("probe"));
+        assert!(plain
+            .get_envs()
+            .all(|(k, _)| !k.to_string_lossy().starts_with(OVERLAY_SEED_PREFIX)));
+    }
+
+    #[test]
+    fn shell_identifier_names() {
+        for ok in ["KEY", "_", "a1", "ANTHROPIC_API_KEY", "x_Y_9"] {
+            assert!(is_shell_identifier(ok), "{ok}");
+        }
+        for bad in ["", "1KEY", "MY-KEY", "A.B", "K=V", "K Y", "ключ", "K\0"] {
+            assert!(!is_shell_identifier(bad), "{bad:?}");
+        }
+    }
+
+    /// End to end through the login shell: a `.zshenv`/`.zprofile` (and
+    /// `.bash_profile`, for the bash fallback) that re-exports the overlaid
+    /// name is beaten by the overlay, and the seed never reaches the command.
+    #[tokio::test]
+    async fn exec_command_with_env_overlay_beats_login_shell_export() {
+        let tmp = unique_tmp_dir("auth-env-overlay-login-export");
+        let bin = tmp.join("bin");
+        let script_name = "doctor-overlay-probe";
+        write_executable(
+            &bin.join(script_name),
+            "#!/bin/sh\n\
+             [ \"$DOCTOR_OVERLAY_PROBE\" = from-doctor ] || { echo \"got: $DOCTOR_OVERLAY_PROBE\" >&2; exit 42; }\n\
+             env | grep -q '^__BUILDERBOT_DOCTOR_OVERLAY' && { echo 'seed leaked' >&2; exit 43; }\n\
+             exit 0\n",
+        );
+        let rc = "export DOCTOR_OVERLAY_PROBE=from-rc\n";
+        for file in [".zshenv", ".zprofile", ".bash_profile"] {
+            std::fs::write(tmp.join(file), rc).unwrap();
+        }
+
+        let env = DoctorEnv::new(vec![
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", bin.to_string_lossy()),
+            ),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), tmp.to_string_lossy().to_string()),
+            (
+                "DOCTOR_OVERLAY_PROBE".to_string(),
+                "from-snapshot".to_string(),
+            ),
+        ])
+        .with_overlay(vec![(
+            "DOCTOR_OVERLAY_PROBE".to_string(),
+            "from-doctor".to_string(),
+        )]);
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            execute_command_with_path_prefix_with_env(script_name, &[], Some(&env))
+        })
+        .await
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        match outcome {
+            ExecOutcome::Ok => {}
+            other => panic!("expected the overlay to beat the rc file's export; got {other:?}"),
         }
     }
 

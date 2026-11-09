@@ -1015,6 +1015,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(tmp);
     }
 
+    /// A per-check overlay — the variables a Staged user configures for the
+    /// agent in Doctor settings — reaches the auth probe over the snapshot's
+    /// own value, so Doctor's verdict is the one a session launch of that
+    /// agent would get. Another check's view of the same snapshot carries no
+    /// overlay.
+    #[test]
+    fn auth_probe_sees_the_checks_env_overlay_over_the_snapshot() {
+        let tmp = unique_tmp_dir("auth-env-overlay");
+        let bin = tmp.join("bin");
+        let bridge = bin.join("claude-agent-acp");
+        write_executable(
+            &bridge,
+            "#!/bin/sh\n\
+             test \"$ANTHROPIC_API_KEY\" = from-doctor-row || exit 43\n\
+             exit 0\n",
+        );
+        let bridge_resolved = ResolvedBinary {
+            path: Some(bridge),
+            search_output: String::new(),
+            install_source: Some(InstallSource::Npm),
+        };
+        let env = DoctorEnv::new(vec![
+            ("ANTHROPIC_API_KEY".to_string(), "from-snapshot".to_string()),
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", bin.to_string_lossy()),
+            ),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), tmp.to_string_lossy().to_string()),
+        ])
+        .with_check_overlay(
+            "ai-agent-claude",
+            vec![(
+                "ANTHROPIC_API_KEY".to_string(),
+                "from-doctor-row".to_string(),
+            )],
+        );
+
+        let with_overlay = check_single_ai_agent(
+            agent("ai-agent-claude"),
+            true,
+            std::slice::from_ref(&bridge_resolved),
+            None,
+            None,
+            Some(&env.for_check("ai-agent-claude")),
+        );
+        assert_eq!(with_overlay.auth_status, Some(AuthStatus::Authenticated));
+
+        let without_overlay = check_single_ai_agent(
+            agent("ai-agent-claude"),
+            true,
+            std::slice::from_ref(&bridge_resolved),
+            None,
+            None,
+            Some(&env.for_check("ai-agent-codex")),
+        );
+        assert_eq!(
+            without_overlay.auth_status,
+            Some(AuthStatus::NotAuthenticated)
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
     /// A fully unresolved agent carries neither readout.
     #[test]
     fn unresolved_agent_has_no_readouts() {

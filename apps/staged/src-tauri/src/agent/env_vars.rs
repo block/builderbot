@@ -27,9 +27,11 @@
 //! The driver applies `extra_env` last in every local spawn path: over the
 //! captured shell snapshot when it spawns the binary directly, and on the
 //! `exec` line (via `/usr/bin/env`) when it falls back to the login shell —
-//! `$SHELL -ils` for a POSIX shell, or `$SHELL -l -c` running that same line
-//! through `/bin/sh -c` for one that isn't (fish) — so an `export` in the
-//! user's rc files can't shadow a Doctor value there either. The flip side
+//! `$SHELL -ils` by default, or `$SHELL -l -c` running that same line
+//! through `/bin/sh -c` for a shell known not to be POSIX (fish, nu, …; the
+//! line travels in an environment variable, never quoted into the command)
+//! — so an `export` in the user's rc files can't shadow a Doctor value there
+//! either. The flip side
 //! is that a row named after something the launcher
 //! itself sets — `PATH`, `GOOSE_SEARCH_PATHS` (see
 //! `acp_tools::apply_managed_tools_env`) — replaces Staged's value for that

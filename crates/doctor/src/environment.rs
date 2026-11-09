@@ -17,6 +17,14 @@ use std::process::Command;
 /// auth probe and version probe see what a session launch of that agent sees.
 #[derive(Debug, Clone, Default)]
 pub struct DoctorEnv {
+    /// The variables, in application order. A name may appear more than once
+    /// — [`for_check`](Self::for_check) appends a check's overlay after the
+    /// snapshot rather than replacing in place — and the **last pair for a
+    /// name wins**. [`get`](Self::get) scans from the end, and
+    /// [`apply_doctor_env`] and `build_shell_command` in `lib.rs` call
+    /// `Command::env` in order, where a later call overwrites an earlier
+    /// one, so all three agree. Anything that reorders or deduplicates this
+    /// list must keep the last occurrence.
     pub vars: Vec<(String, String)>,
     /// Per-check variables, keyed by check id, applied after `vars` for that
     /// check (see [`DoctorEnv::for_check`]). Private so `new` stays the one
@@ -65,6 +73,9 @@ impl DoctorEnv {
         }
     }
 
+    /// The value `key` would have in a subprocess: the last pair with that
+    /// name in [`vars`](Self::vars), which is the one `Command::env` leaves
+    /// in place when the list is applied in order (see the field doc).
     pub fn get(&self, key: &str) -> Option<&str> {
         self.vars
             .iter()
@@ -74,6 +85,8 @@ impl DoctorEnv {
     }
 }
 
+/// Start `command` from `env` alone. Applied in order, so a repeated name
+/// resolves to its last pair, as [`DoctorEnv::get`] does.
 pub(crate) fn apply_doctor_env(command: &mut Command, env: Option<&DoctorEnv>) {
     let Some(env) = env else {
         return;
@@ -131,6 +144,32 @@ mod tests {
             assert_eq!(other_env.get("EXTRA"), None);
         }
         assert_eq!(env.get("KEY"), Some("from snapshot"));
+    }
+
+    #[test]
+    fn get_returns_the_overlay_value_for_a_name_the_snapshot_already_has() {
+        // The overlay is appended, not substituted, so `vars` holds the name
+        // twice; `get` must return the later, overlaid pair — the same value
+        // `Command::env` ends up with when the list is applied in order.
+        let env = DoctorEnv::new(pairs(&[("KEY", "from snapshot"), ("OTHER", "kept")]))
+            .with_check_overlay("ai-agent-claude", pairs(&[("KEY", "from doctor row")]));
+        let claude = env.for_check("ai-agent-claude");
+        assert_eq!(claude.get("KEY"), Some("from doctor row"));
+        assert_eq!(claude.get("OTHER"), Some("kept"));
+        assert_eq!(claude.get("MISSING"), None);
+        assert_eq!(
+            claude.vars.iter().filter(|(k, _)| k == "KEY").count(),
+            2,
+            "the overlay appends rather than replacing"
+        );
+        // Two overlays for one check: the later one wins too.
+        let twice = env
+            .clone()
+            .with_check_overlay("ai-agent-claude", pairs(&[("KEY", "from a later row")]));
+        assert_eq!(
+            twice.for_check("ai-agent-claude").get("KEY"),
+            Some("from a later row")
+        );
     }
 
     #[test]

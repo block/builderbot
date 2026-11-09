@@ -2,13 +2,18 @@
 //! are inspected with [`PREFLIGHT_SCRIPT`], and nothing is resumed, fetched
 //! or cloned.
 //!
-//! The project-level checks (the store, Blox, the workspaces' states) come
-//! first and fast; then every checkout is read, in up to
-//! [`MAX_PARALLEL_SCANS`] runs of the script at once, each checkout in two
-//! parts ([`PreflightPart`]) that run apart. A [`PreflightObserver`] sees
-//! the preflight after the project-level checks and again as each part
-//! lands, with the rows still to be read marked `scanning`, so the dialog can
-//! show what is known so far — and can ask for the reading to stop.
+//! The checks come in three steps, each slower than the last. First the
+//! store alone: the project, its repos and branches, their sessions, and
+//! which of them name a worktree or a workspace there may be a checkout to
+//! read in — nothing leaves this machine, so it takes milliseconds. Then
+//! Blox: whether it can be reached, and the state of each source workspace
+//! (one `sq blox` round trip each, about a second). Then every checkout is
+//! read, in up to [`MAX_PARALLEL_SCANS`] runs of the script at once, each
+//! checkout in two parts ([`PreflightPart`]) that run apart. A
+//! [`PreflightObserver`] sees the preflight after each of the first two
+//! steps and again as each part lands, with the rows still to be read marked
+//! `scanning`, so the dialog can show every row from the first step — and
+//! can ask for the reading to stop.
 //!
 //! The orchestrator runs the same [`inspect`] once the transfer is
 //! registered, so the dialog and the transfer agree on what each branch
@@ -203,9 +208,10 @@ impl ProjectTransferPreflight {
 
 /// Watches an inspection as it runs.
 pub(super) struct PreflightObserver<'a> {
-    /// Called with the preflight as it stands: once the project-level checks
-    /// are done, and again as each part of each checkout is read. It is
-    /// final once nothing in it is `scanning`.
+    /// Called with the preflight as it stands: once the store has been
+    /// read (every row that may have a checkout `scanning`), once Blox has
+    /// been asked about the workspaces, and again as each part of each
+    /// checkout is read. It is final once nothing in it is `scanning`.
     pub on_partial: &'a dyn Fn(&ProjectTransferPreflight),
     /// Whether to stop reading checkouts. The inspection then fails as
     /// cancelled, once the runs already going have finished.
@@ -317,9 +323,6 @@ pub(super) fn inspect_after_resuming(
             "Attach a repository to the project before transferring it.",
         ));
     }
-    if let Err(unavailable) = host.blox_ready() {
-        preflight.add_blocker(TransferIssue::new(unavailable.code, unavailable.message));
-    }
     if direction == TransferDirection::ToRemote {
         remote_layout_blockers(&project, &repos_by_id, &repos, &branches, &mut preflight);
     }
@@ -407,22 +410,52 @@ pub(super) fn inspect_after_resuming(
         preflight.repos.push(row);
     }
 
-    let mut running_workspaces = Vec::new();
-    let (units, kind) = match direction {
+    // Which checkouts there may be to read, from the store alone: a worktree
+    // on disk, or a workspace the branch names. Every such row is `scanning`
+    // in this first step, so the dialog shows them all before Blox has been
+    // asked anything.
+    let (mut units, kind, by_workspace) = match direction {
         TransferDirection::ToRemote => (
             plan_local_scans(store, &sources, &mut preflight)?,
             "worktree",
+            BTreeMap::new(),
         ),
-        TransferDirection::ToLocal => {
-            let (units, running) = plan_remote_scans(host, resumed, &mut sources, &mut preflight);
-            running_workspaces = running;
-            (units, "clone")
-        }
+        TransferDirection::ToLocal => (
+            Vec::new(),
+            "clone",
+            plan_remote_sources(&mut sources, &mut preflight),
+        ),
     };
     for unit in &units {
         preflight.repos[unit.row].scanning = true;
     }
+    for &i in by_workspace.values().flatten() {
+        preflight.repos[i].scanning = true;
+    }
+    preflight.finalize();
+    (observer.on_partial)(&preflight);
+    if (observer.cancelled)() {
+        return Err(TransferError::Cancelled.to_string());
+    }
+
+    // Then Blox: whether it can be reached at all, and the state of each
+    // source workspace, which decides which rows are read now and which
+    // wait for the transfer to resume their workspace.
+    if let Err(unavailable) = host.blox_ready() {
+        preflight.add_blocker(TransferIssue::new(unavailable.code, unavailable.message));
+    }
+    let mut running_workspaces = Vec::new();
     if direction == TransferDirection::ToLocal {
+        let (remote_units, running) =
+            plan_remote_scans(host, resumed, by_workspace, &sources, &mut preflight);
+        units = remote_units;
+        running_workspaces = running;
+        for row in &mut preflight.repos {
+            row.scanning = false;
+        }
+        for unit in &units {
+            preflight.repos[unit.row].scanning = true;
+        }
         // Rows that won't be read (a workspace to resume first) still get
         // their local name planned; the rows read get it as they land.
         for (source, row) in sources.iter().zip(preflight.repos.iter_mut()) {
@@ -433,6 +466,9 @@ pub(super) fn inspect_after_resuming(
     }
     preflight.finalize();
     (observer.on_partial)(&preflight);
+    if (observer.cancelled)() {
+        return Err(TransferError::Cancelled.to_string());
+    }
 
     read_checkouts(
         host,
@@ -629,25 +665,25 @@ fn plan_local_scans(
     Ok(units)
 }
 
-/// To local: a unit per part for each branch's clone in a running source
-/// workspace; returns the units and those workspaces. One that is
-/// suspended, stopped or failed is for the transfer to resume — unless it
-/// is in `resumed` already, when it is a blocker.
-fn plan_remote_scans(
-    host: &dyn TransferHost,
-    resumed: &BTreeMap<String, Option<String>>,
+/// To local, from the store alone: the rows by the source workspace their
+/// branch names (set on each source too), with a warning on every row that
+/// names none. The first workspace names the preflight.
+fn plan_remote_sources(
     sources: &mut [BranchSource],
     preflight: &mut ProjectTransferPreflight,
-) -> (Vec<ScanUnit>, Vec<String>) {
+) -> BTreeMap<String, Vec<usize>> {
     let mut by_workspace: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, source) in sources.iter().enumerate() {
+    for (i, source) in sources.iter_mut().enumerate() {
         match source
             .branch
             .workspace_name
             .as_deref()
             .filter(|n| !n.is_empty())
         {
-            Some(name) => by_workspace.entry(name.to_string()).or_default().push(i),
+            Some(name) => {
+                source.workspace = Some(name.to_string());
+                by_workspace.entry(name.to_string()).or_default().push(i);
+            }
             None => {
                 let row = &mut preflight.repos[i];
                 let issue = TransferIssue::new(
@@ -662,13 +698,24 @@ fn plan_remote_scans(
         }
     }
     preflight.workspace_name = by_workspace.keys().next().cloned();
+    by_workspace
+}
 
+/// To local, asking Blox: a unit per part for each branch's clone in a
+/// running source workspace of [`plan_remote_sources`]'s; returns the units
+/// and those workspaces. One that is suspended, stopped or failed is for the
+/// transfer to resume — unless it is in `resumed` already, when it is a
+/// blocker.
+fn plan_remote_scans(
+    host: &dyn TransferHost,
+    resumed: &BTreeMap<String, Option<String>>,
+    by_workspace: BTreeMap<String, Vec<usize>>,
+    sources: &[BranchSource],
+    preflight: &mut ProjectTransferPreflight,
+) -> (Vec<ScanUnit>, Vec<String>) {
     let mut units = Vec::new();
     let mut running = Vec::new();
     for (workspace, indexes) in by_workspace {
-        for &i in &indexes {
-            sources[i].workspace = Some(workspace.clone());
-        }
         let state = match host.workspace_state(&workspace) {
             Ok(state) => state,
             Err(e) => {

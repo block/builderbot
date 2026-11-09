@@ -49,6 +49,7 @@ import {
   isTransferCancelledError,
   isTransferStaleError,
   issueMessage,
+  placeholderPreflight,
   transferDestinationLabel,
   transferDirectionFrom,
   transferResultWarnings,
@@ -207,12 +208,13 @@ class ProjectActionsController {
 
   /**
    * Open the transfer dialog for a project and scan its preflight: what each
-   * branch would carry and what stops the transfer. The scan streams: the
-   * dialog shows the branches as soon as the cheap checks are done, each
-   * row's counts land as its checkout is read, and the Transfer button is
-   * live throughout (confirming mid-scan asks first, since files not yet
-   * listed may be lost). Resolves once the scan has finished, failed or been
-   * stopped by a confirm or cancel.
+   * branch would carry and what stops the transfer. The dialog opens with
+   * the branches already known here, each "Checking…", and the Transfer
+   * button live from the first frame (confirming mid-scan asks first, since
+   * files not yet listed may be lost). The scan streams into it: the
+   * backend's store view first, then what Blox says of the workspaces, then
+   * each row's counts as its checkout is read. Resolves once the scan has
+   * finished, failed or been stopped by a confirm or cancel.
    */
   async requestTransferProject(project: Project): Promise<void> {
     if (
@@ -224,10 +226,20 @@ class ProjectActionsController {
     const request = ++this.transferRequest;
     this.stopActiveScan();
     const direction = transferDirectionFrom(project.location);
-    this._pendingTransfer = { project, direction, status: 'loading' };
-    // The dialog labels rows from the preflight, but the progress banner
-    // names repos from the project's own, so fetch them meanwhile (deduped
-    // like the remove flow's). Never rejects, and the dialog doesn't wait.
+    // The branches this store knows are enough to open with; the scan's
+    // steps replace them. A project whose branches haven't loaded yet opens
+    // loading instead, for the few milliseconds until the scan's first step.
+    const placeholder = placeholderPreflight(
+      project,
+      projectsDataStore.branchesByProject.get(project.id) ?? [],
+      projectsDataStore.reposByProject.get(project.id) ?? []
+    );
+    this._pendingTransfer = placeholder
+      ? { project, direction, status: 'ready', preflight: placeholder }
+      : { project, direction, status: 'loading' };
+    // The progress banner names repos from the project's own, so fetch them
+    // meanwhile (deduped like the remove flow's). Never rejects, and the
+    // dialog doesn't wait.
     void projectsDataStore.ensureProjectHydrated(project.id);
 
     const scanId = crypto.randomUUID();

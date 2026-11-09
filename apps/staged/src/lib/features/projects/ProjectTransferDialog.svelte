@@ -5,8 +5,10 @@
   Mounted once in App.svelte and driven by projectActions.pendingTransfer, so
   every transfer entry point (sidebar and landing-grid context menus,
   ProjectHome's top bar) shares one flow. A Dialog rather than an AlertDialog:
-  it opens at once and shows the preflight loading, then one row per branch
-  with what it carries. Blockers disable Transfer and say why. When a repo has
+  it opens at once with one row per branch, each "Checking…" until the scan
+  has read its checkout (or loading, for the moment before the branches are
+  known), and Transfer live from the first frame — confirming before the scan
+  is done asks first. Blockers disable Transfer and say why. When a repo has
   uncommitted changes, or may have (a workspace the transfer resumes first),
   a checkbox (defaulting to the last answer) chooses whether they move or
   stay behind in the backup. When a repo has ignored files outside ignored

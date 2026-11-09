@@ -1,7 +1,14 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Project, ProjectTransferPreflight, ProjectTransferRepoPreflight } from '../../types';
+import type {
+  Branch,
+  Project,
+  ProjectRepo,
+  ProjectTransferPreflight,
+  ProjectTransferRepoPreflight,
+} from '../../types';
 import type { PendingTransfer } from './projectActions.svelte';
+import { placeholderPreflight } from './projectTransfer';
 
 // The dialog is driven by projectActions.pendingTransfer; the test owns that
 // state and watches the confirm/cancel calls. Dialog chrome is stubbed to
@@ -115,6 +122,50 @@ function ready(pf: ProjectTransferPreflight, forProject: Project = project): Pen
   return { project: forProject, direction: pf.direction, status: 'ready', preflight: pf };
 }
 
+/** A branch as the projects store knows it, for the dialog's placeholder. */
+function knownBranch(overrides: Partial<Branch> = {}): Branch {
+  return {
+    id: 'b1',
+    projectId: 'p1',
+    projectRepoId: 'r1',
+    branchName: 'feature',
+    baseBranch: 'main',
+    prNumber: null,
+    branchType: 'local',
+    workspaceName: null,
+    workstationId: null,
+    workspaceStatus: null,
+    setupComplete: true,
+    worktreePath: '/wt/b1',
+    createdAt: 0,
+    updatedAt: 0,
+    prState: null,
+    prChecksStatus: null,
+    prReviewDecision: null,
+    prMergeable: null,
+    prDraft: null,
+    prUrl: null,
+    prUpdatedAt: null,
+    prFetchedAt: null,
+    prHeadSha: null,
+    prTitle: null,
+    ...overrides,
+  };
+}
+
+const knownRepo: ProjectRepo = {
+  id: 'r1',
+  projectId: 'p1',
+  githubRepo: 'org/alpha',
+  branchName: 'feature',
+  subpath: null,
+  isPrimary: true,
+  reason: null,
+  headRepo: null,
+  createdAt: 0,
+  updatedAt: 0,
+};
+
 const dirty = () =>
   preflight({
     repos: [repo({ unstaged: 1, hasUncommittedChanges: true })],
@@ -170,6 +221,59 @@ describe('ProjectTransferDialog', () => {
     expect(submitButton().disabled).toBe(true);
     expect(submitButton().textContent).toContain('Transfer to Blox');
     expect(checkbox()).toBeNull();
+    unmount(dialog);
+  });
+
+  it('shows the branches it knows as Checking… with Transfer live before the scan has said anything', async () => {
+    // What projectActions opens the dialog with, from the projects store
+    // alone: no preflight event has arrived, or even been asked for.
+    const remote: Project = { ...project, location: 'remote' };
+    const placeholder = placeholderPreflight(
+      remote,
+      [
+        knownBranch({ branchType: 'remote', workspaceName: 'stg-feature', worktreePath: null }),
+        knownBranch({
+          id: 'b2',
+          projectRepoId: null,
+          branchName: 'gizmo',
+          branchType: 'remote',
+          workspaceName: 'stg-feature',
+          worktreePath: null,
+        }),
+      ],
+      [knownRepo]
+    );
+    expect(placeholder).not.toBeNull();
+    const dialog = mountDialog(ready(placeholder!, remote));
+    await settle();
+    expect(document.body.textContent).not.toContain('Checking what would move');
+    const rows = rowTexts();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain('feature');
+    expect(rows[0]).toContain('Checking…');
+    expect(rows[1]).toContain('gizmo');
+    expect(rows[1]).toContain('Checking…');
+    expect(document.body.textContent).toContain('Still checking what would be left behind');
+    expect(document.body.textContent).toContain('Transfer uncommitted changes, if there are any');
+    expect(submitButton().textContent).toContain('Transfer to local');
+    expect(submitButton().disabled).toBe(false);
+
+    // Transfer now goes through the mid-scan confirmation, like any confirm
+    // before the scan is done.
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      "The scan of what will be left behind hasn't finished; files not yet listed may be lost on the remote. Transfer anyway?"
+    );
+    [...document.querySelectorAll('button')]
+      .find((b) => b.textContent?.trim() === 'Transfer anyway')!
+      .click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
     unmount(dialog);
   });
 

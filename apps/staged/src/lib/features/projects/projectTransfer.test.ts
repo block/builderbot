@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  Branch,
+  Project,
+  ProjectRepo,
   ProjectTransferPreflight,
   ProjectTransferRepoPreflight,
   ProjectTransferResult,
@@ -13,6 +16,7 @@ import {
   ignoredFoldersSummary,
   ignoredTransferBlocked,
   lfsSummary,
+  placeholderPreflight,
   isTransferCancellable,
   isTransferCancelledError,
   isTransferStaleError,
@@ -322,5 +326,116 @@ describe('transferResultWarnings', () => {
     ]);
     // Without a preflight to compare against, everything is new.
     expect(transferResultWarnings(r)).toEqual([left, lfs, apply]);
+  });
+});
+
+describe('placeholderPreflight', () => {
+  const project: Project = {
+    id: 'p1',
+    name: 'Alpha',
+    githubRepo: 'org/alpha',
+    location: 'remote',
+    subpath: null,
+    createdAt: 0,
+    updatedAt: 0,
+    statusOverride: null,
+  };
+  const branch = (overrides: Partial<Branch> = {}): Branch => ({
+    id: 'b1',
+    projectId: 'p1',
+    projectRepoId: 'r1',
+    branchName: 'feature',
+    baseBranch: 'main',
+    prNumber: null,
+    branchType: 'remote',
+    workspaceName: 'stg-feature',
+    workstationId: null,
+    workspaceStatus: 'running',
+    setupComplete: true,
+    worktreePath: null,
+    createdAt: 0,
+    updatedAt: 0,
+    prState: null,
+    prChecksStatus: null,
+    prReviewDecision: null,
+    prMergeable: null,
+    prDraft: null,
+    prUrl: null,
+    prUpdatedAt: null,
+    prFetchedAt: null,
+    prHeadSha: null,
+    prTitle: null,
+    ...overrides,
+  });
+  const projectRepo: ProjectRepo = {
+    id: 'r1',
+    projectId: 'p1',
+    githubRepo: 'org/beta',
+    branchName: 'feature',
+    subpath: 'apps/beta',
+    isPrimary: false,
+    reason: null,
+    headRepo: null,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  it('is nothing without branches to show', () => {
+    expect(placeholderPreflight(project, [], [projectRepo])).toBeNull();
+  });
+
+  it("opens a remote project's dialog with every branch being checked and Transfer live", () => {
+    const pf = placeholderPreflight(
+      project,
+      [branch(), branch({ id: 'b2', projectRepoId: null, branchName: 'gizmo' })],
+      [projectRepo]
+    );
+    expect(pf).toMatchObject({
+      projectId: 'p1',
+      from: 'remote',
+      to: 'local',
+      direction: 'toLocal',
+      workspaceName: 'stg-feature',
+      blockers: [],
+      warnings: [],
+      canTransfer: true,
+      hasUncommittedChanges: false,
+      scanning: true,
+    });
+    expect(pf!.repos.map((r) => [r.branchId, r.githubRepo, r.subpath, r.branchName])).toEqual([
+      // The branch's project repo, or — with none — the project's own.
+      ['b1', 'org/beta', 'apps/beta', 'feature'],
+      ['b2', 'org/alpha', null, 'gizmo'],
+    ]);
+    for (const row of pf!.repos) {
+      expect(row).toMatchObject({
+        destBranchName: row.branchName,
+        state: 'nothingToCarry',
+        scanning: true,
+        hasUncommittedChanges: false,
+        blockers: [],
+        warnings: [],
+      });
+      expect(uncommittedCount(row)).toBe(0);
+    }
+    // Rows still being checked may have uncommitted changes nobody has
+    // counted yet, so the dialog asks about them.
+    expect(asksAboutUncommitted(pf!)).toBe(true);
+    expect(uncommittedOnlyPossible(pf!)).toBe(true);
+    expect(asksAboutIgnored(pf!)).toBe(false);
+  });
+
+  it('goes the other way for a local project, naming no workspace', () => {
+    const pf = placeholderPreflight(
+      { ...project, location: 'local' },
+      [branch({ branchType: 'local', workspaceName: null, worktreePath: '/wt/b1' })],
+      [projectRepo]
+    );
+    expect(pf).toMatchObject({
+      from: 'local',
+      to: 'remote',
+      direction: 'toRemote',
+      workspaceName: null,
+    });
   });
 });

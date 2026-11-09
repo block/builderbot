@@ -1075,18 +1075,32 @@ describe('navigation on delete', () => {
 });
 
 describe('requestTransferProject', () => {
-  it('opens the dialog loading, then streams the scan into it', async () => {
+  it('opens the dialog with the branches it knows as Checking…, then streams the scan into it', async () => {
     scanResult = 'hold';
-    // The repos are fetched for the progress banner; the dialog labels rows
-    // from the preflight, so a cold project's hydration doesn't hold it back.
+    // The repos are fetched for the progress banner; the dialog opens from
+    // the branches already here, so a cold project's hydration doesn't hold
+    // it back.
     ensureProjectHydrated.mockReturnValue(new Promise(() => {}));
     const actions = await importActions();
 
     const request = actions.requestTransferProject(project());
+    // Before the scan has said anything — before it has even been started —
+    // the dialog has its rows, each being checked, and Transfer is live.
     expect(actions.pendingTransfer).toEqual({
       project: project(),
       direction: 'toRemote',
-      status: 'loading',
+      status: 'ready',
+      preflight: preflight({
+        repos: [
+          repoPreflight({
+            state: 'nothingToCarry',
+            head: null,
+            upstream: null,
+            scanning: true,
+          }),
+        ],
+        scanning: true,
+      }),
     });
     expect(ensureProjectHydrated).toHaveBeenCalledWith('p1');
     // The scan starts only once the listener is in place.
@@ -1121,6 +1135,45 @@ describe('requestTransferProject', () => {
     expect(scanUnlisten).toHaveBeenCalled();
     expect(cancelProjectTransferPreflight).not.toHaveBeenCalled();
     expect(transferProject).not.toHaveBeenCalled();
+  });
+
+  it("opens the dialog loading when the project's branches aren't known yet", async () => {
+    scanResult = 'hold';
+    storeState.branchesByProject = new Map();
+    const actions = await importActions();
+    const request = actions.requestTransferProject(project());
+    expect(actions.pendingTransfer).toEqual({
+      project: project(),
+      direction: 'toRemote',
+      status: 'loading',
+    });
+    await tick();
+    const partial = preflight({ repos: [repoPreflight({ scanning: true })], scanning: true });
+    emitScan({ preflight: partial });
+    expect(actions.pendingTransfer?.status).toBe('ready');
+    emitScan({ preflight: preflight(), done: true });
+    await request;
+  });
+
+  it('names the workspace a remote project comes from before the scan does', async () => {
+    scanResult = 'hold';
+    storeState.branchesByProject = new Map([
+      ['p1', [branch({ branchType: 'remote', workspaceName: 'stg-feature', worktreePath: null })]],
+    ]);
+    const actions = await importActions();
+    const request = actions.requestTransferProject(project({ location: 'remote' }));
+    const pending = actions.pendingTransfer;
+    expect(pending?.status === 'ready' && pending.preflight).toMatchObject({
+      direction: 'toLocal',
+      from: 'remote',
+      to: 'local',
+      workspaceName: 'stg-feature',
+      canTransfer: true,
+      scanning: true,
+    });
+    await tick();
+    emitScan({ preflight: preflight({ direction: 'toLocal' }), done: true });
+    await request;
   });
 
   it('offers the other location for a remote project', async () => {

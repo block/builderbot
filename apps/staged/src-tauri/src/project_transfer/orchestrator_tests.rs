@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::backups;
@@ -210,6 +211,10 @@ struct FakeHost {
     /// Workspace lifecycle calls, as `start <name>`, `resume <name>`,
     /// `delete <name>`.
     calls: Mutex<Vec<String>>,
+    /// How often Blox was asked whether it can be reached at all.
+    blox_checks: AtomicUsize,
+    /// The workspaces whose state was read, in order, one entry per read.
+    state_reads: Mutex<Vec<String>>,
     faults: Arc<Mutex<Faults>>,
     blox: Mutex<Option<BloxUnavailable>>,
     /// What a new workspace's bootstrap does to its primary clone.
@@ -235,6 +240,8 @@ impl FakeHost {
             root,
             states: Mutex::default(),
             calls: Mutex::default(),
+            blox_checks: AtomicUsize::new(0),
+            state_reads: Mutex::default(),
             faults: Arc::default(),
             blox: Mutex::default(),
             bootstrap: Mutex::default(),
@@ -299,6 +306,24 @@ impl FakeHost {
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn blox_checks(&self) -> usize {
+        self.blox_checks.load(Ordering::SeqCst)
+    }
+
+    fn state_reads(&self) -> Vec<String> {
+        self.state_reads.lock().unwrap().clone()
+    }
+
+    /// Count every script run, at either end, from now on.
+    fn count_scripts(&self) -> Arc<AtomicUsize> {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&runs);
+        self.on_every_script(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        runs
     }
 
     fn arm(&self, fault: Fault) {
@@ -410,6 +435,7 @@ impl TransferHost for FakeHost {
     }
 
     fn blox_ready(&self) -> Result<(), BloxUnavailable> {
+        self.blox_checks.fetch_add(1, Ordering::SeqCst);
         match self.blox.lock().unwrap().clone() {
             Some(unavailable) => Err(unavailable),
             None => Ok(()),
@@ -417,6 +443,7 @@ impl TransferHost for FakeHost {
     }
 
     fn workspace_state(&self, name: &str) -> Result<WorkspaceState, String> {
+        self.state_reads.lock().unwrap().push(name.to_string());
         if let Some(state) = self.states.lock().unwrap().get(name) {
             return Ok(*state);
         }
@@ -1463,9 +1490,10 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
     assert_eq!(codes(&preflight.repos[0].blockers), vec!["session_running"]);
 }
 
-/// The preflight comes in steps: first the project-level checks with every
-/// checkout still to read, then each checkout's status and content parts as
-/// they land, in any order; the last step reads the same as a one-shot run.
+/// The preflight comes in steps: first the store's view with every checkout
+/// still to read, then the same once Blox has been asked, then each
+/// checkout's status and content parts as they land, in any order; the last
+/// step reads the same as a one-shot run.
 #[test]
 fn preflight_streams_each_checkout_as_its_parts_land() {
     let f = Fixture::new(&[(WIDGETS, "feature"), (GADGETS, "gizmo")]);
@@ -1495,13 +1523,14 @@ fn preflight_streams_each_checkout_as_its_parts_land() {
     .unwrap();
     let steps = steps.into_inner().unwrap();
 
-    // One step before any read, then one per part per checkout.
-    assert_eq!(steps.len(), 1 + 2 * 2, "{:?}", steps.len());
-    let first = &steps[0];
-    assert!(first.scanning);
-    assert!(first.repos.iter().all(|r| r.scanning));
-    assert!(first.can_transfer, "nothing known yet blocks it");
-    assert!(!first.has_uncommitted_changes);
+    // Two steps before any read, then one per part per checkout.
+    assert_eq!(steps.len(), 2 + 2 * 2, "{:?}", steps.len());
+    for first in &steps[..2] {
+        assert!(first.scanning);
+        assert!(first.repos.iter().all(|r| r.scanning));
+        assert!(first.can_transfer, "nothing known yet blocks it");
+        assert!(!first.has_uncommitted_changes);
+    }
     // Each step knows at least as much as the one before.
     for pair in steps.windows(2) {
         let (before, after) = (&pair[0], &pair[1]);
@@ -1557,6 +1586,168 @@ fn a_cancelled_preflight_stops_reading_and_says_so() {
     );
     assert_eq!(result.err(), Some(TransferError::Cancelled.to_string()));
     assert_eq!(*steps.lock().unwrap(), 1, "no checkout was read");
+}
+
+/// What one step of a streamed preflight saw: the preflight, and how many
+/// times Blox had been asked whether it can be reached, how many workspace
+/// states had been read and how many scripts had run by then — counting
+/// from the start of this preflight, not the transfer that put the project
+/// where it is.
+struct Step {
+    preflight: ProjectTransferPreflight,
+    blox_checks: usize,
+    state_reads: usize,
+    script_runs: usize,
+}
+
+/// Stream the preflight of `f`'s project, recording each step.
+fn preflight_steps(f: &Fixture) -> (Result<ProjectTransferPreflight, String>, Vec<Step>) {
+    let runs = f.host.count_scripts();
+    let (blox_before, states_before) = (f.host.blox_checks(), f.host.state_reads().len());
+    let steps: Mutex<Vec<Step>> = Mutex::new(Vec::new());
+    let on_partial = |p: &ProjectTransferPreflight| {
+        steps.lock().unwrap().push(Step {
+            preflight: p.clone(),
+            blox_checks: f.host.blox_checks() - blox_before,
+            state_reads: f.host.state_reads().len() - states_before,
+            script_runs: runs.load(Ordering::SeqCst),
+        })
+    };
+    let result = inspect_after_resuming(
+        &f.store,
+        &f.host,
+        &f.project.id,
+        &Default::default(),
+        &PreflightObserver {
+            on_partial: &on_partial,
+            cancelled: &|| false,
+        },
+    )
+    .map(|inspection| inspection.preflight);
+    (result, steps.into_inner().unwrap())
+}
+
+/// A project on Blox: the first step of its preflight comes from the store
+/// alone — every branch, "scanning", under its workspace's name — before
+/// Blox has been asked anything, so the dialog has its rows at once. The
+/// second step has asked Blox whether it can be reached and read the
+/// workspace's state, and still nothing in the workspace itself; the
+/// checkout's parts follow.
+#[test]
+fn the_first_preflight_step_comes_from_the_store_alone() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer(true).result.expect("to remote");
+
+    let (result, steps) = preflight_steps(&f);
+    let last = result.unwrap();
+    assert_eq!(
+        steps.len(),
+        2 + 2,
+        "two steps before the read, then its two parts"
+    );
+
+    let first = &steps[0];
+    assert_eq!(
+        (first.blox_checks, first.state_reads, first.script_runs),
+        (0, 0, 0),
+        "nothing left this machine before the first step"
+    );
+    assert_eq!(first.preflight.workspace_name.as_deref(), Some(WORKSPACE));
+    assert!(first.preflight.scanning);
+    assert_eq!(first.preflight.repos.len(), 1);
+    assert!(first.preflight.repos[0].scanning);
+    assert!(first.preflight.can_transfer);
+    assert!(
+        first.preflight.warnings.is_empty(),
+        "{:?}",
+        first.preflight.warnings
+    );
+
+    let second = &steps[1];
+    assert_eq!(
+        (second.blox_checks, second.state_reads, second.script_runs),
+        (1, 1, 0),
+        "Blox asked once, the workspace's state read once, nothing in it read yet"
+    );
+    assert_eq!(
+        f.host.state_reads().last().map(String::as_str),
+        Some(WORKSPACE)
+    );
+    assert!(
+        second.preflight.repos[0].scanning,
+        "a running workspace's clone is read"
+    );
+
+    assert!(steps[2].script_runs >= 1);
+    assert!(!last.scanning);
+    assert_eq!(last.repos[0].state, RepoTransferState::Carry);
+    assert_eq!(
+        serde_json::to_value(&last).unwrap(),
+        serde_json::to_value(&f.preflight()).unwrap(),
+        "the same as read in one go"
+    );
+}
+
+/// The store says the branch has a workspace, so the first step shows it
+/// being checked; Blox says the workspace is gone, so the second step says
+/// there is nothing to carry, with the warning a one-shot preflight gives,
+/// and no checkout is read.
+#[test]
+fn a_workspace_blox_no_longer_has_is_found_out_at_the_second_step() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer(true).result.expect("to remote");
+    f.host.set_state(WORKSPACE, WorkspaceState::NotFound);
+
+    let (result, steps) = preflight_steps(&f);
+    let last = result.unwrap();
+    assert_eq!(steps.len(), 2, "nothing to read once Blox has answered");
+    assert!(steps[0].preflight.repos[0].scanning);
+    assert!(steps[0].preflight.warnings.is_empty());
+    let second = &steps[1].preflight;
+    assert!(!second.scanning);
+    assert_eq!(second.repos[0].state, RepoTransferState::NothingToCarry);
+    let codes: Vec<&str> = second.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert_eq!(codes, ["workspace_missing"]);
+    assert!(second.can_transfer);
+    assert_eq!(steps[1].script_runs, 0);
+    assert_eq!(
+        serde_json::to_value(&last).unwrap(),
+        serde_json::to_value(&f.preflight()).unwrap()
+    );
+}
+
+/// A scan stopped at its first step — the dialog's Transfer confirmed before
+/// anything landed, or the dialog closed — never asked Blox anything: no
+/// reachability check, no workspace state, no script in the workspace. The
+/// transfer that follows reads everything for itself.
+#[test]
+fn a_scan_cancelled_at_its_first_step_never_asks_blox() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer(true).result.expect("to remote");
+    let runs = f.host.count_scripts();
+    let (blox_before, states_before) = (f.host.blox_checks(), f.host.state_reads());
+
+    let steps = Mutex::new(0usize);
+    let on_partial = |p: &ProjectTransferPreflight| {
+        assert!(p.repos[0].scanning);
+        *steps.lock().unwrap() += 1;
+    };
+    let cancelled = || *steps.lock().unwrap() >= 1;
+    let result = inspect_after_resuming(
+        &f.store,
+        &f.host,
+        &f.project.id,
+        &Default::default(),
+        &PreflightObserver {
+            on_partial: &on_partial,
+            cancelled: &cancelled,
+        },
+    );
+    assert_eq!(result.err(), Some(TransferError::Cancelled.to_string()));
+    assert_eq!(*steps.lock().unwrap(), 1);
+    assert_eq!(f.host.blox_checks(), blox_before);
+    assert_eq!(f.host.state_reads(), states_before);
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
 }
 
 /// A dialog left open while another window moved the project asks for the

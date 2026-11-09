@@ -185,7 +185,7 @@
       <div class="pinned-row">
         <Checkbox
           id={pinnedId}
-          class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)] mobile:after:-inset-[16px]"
+          class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)]"
           bind:checked={draft.pinned}
           disabled={saving}
         />
@@ -234,6 +234,12 @@
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
+    /* A scroller clips what overflows it sideways too, which cut the left
+       16 px off the checkbox's tap area below. The form takes that room
+       from the dialog's padding and gives it back as its own, so the rows
+       sit where they did and the area is inside the scroller. */
+    margin-inline: -16px;
+    padding-inline: 16px;
   }
 
   .field {
@@ -252,6 +258,19 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+
+  /* A 16 px inset round the checkbox on a phone: a 45 px tap area at the
+     app's 13 px rem, measured on the simulator. The Checkbox's
+     own `after:-inset-x-3 after:-inset-y-2` utilities draw the desktop
+     one; this rule is unlayered, so it wins over them without relying on
+     how Tailwind orders a `mobile:after:` utility against them. */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
+    .pinned-row :global([data-slot='checkbox'])::after {
+      inset: -16px;
+    }
   }
 
   .form-error {

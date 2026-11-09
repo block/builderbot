@@ -1356,7 +1356,8 @@
   // every millisecond (flingScroll.ts) until the speed is spent or the
   // content stops moving at an edge. The content moves against the finger,
   // as it did during the drag. A finger landing anywhere on the viewer stops
-  // it (handleMobileDiffPointerDown), as does switching files.
+  // it (handleMobileDiffPointerDown), as do a wheel or trackpad scroll and
+  // switching files.
   function startMobileDiffFling(
     mode: MobileDiffGestureMode,
     side: 'before' | 'after',
@@ -1562,6 +1563,12 @@
       );
     }
     mobileDiffVelocity.reset();
+  }
+
+  // A trackpad or wheel scroll in a narrow desktop window takes over from a
+  // coast rather than adding to it.
+  function handleMobileDiffWheel() {
+    stopMobileDiffFling();
   }
 
   function handleMobileDiffMouseDownCapture(event: MouseEvent) {
@@ -1772,6 +1779,7 @@
       onpointermove={handleMobileDiffPointerMove}
       onpointerup={handleMobileDiffPointerUp}
       onpointercancel={handleMobileDiffPointerCancel}
+      onwheel={handleMobileDiffWheel}
       onmousedowncapture={handleMobileDiffMouseDownCapture}
     >
       <DiffViewer

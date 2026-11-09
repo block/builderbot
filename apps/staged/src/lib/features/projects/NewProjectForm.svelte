@@ -275,8 +275,9 @@
      chips, Create, Cancel) are a scroll away instead of under the keyboard.
      The dialog's grid gives this row the height left under the header
      (`mobile:grid-rows-[auto_minmax(0,1fr)]`). Elsewhere (the splash
-     screen, the desktop dialog) the form stays content-sized and the repo
-     dropdown paints over the rows below it. */
+     screen, the desktop dialog) the form stays content-sized. The repo
+     dropdown is portaled out of the form (RepoSearchInput), so the scroll
+     clip never cuts it off. */
   :global([data-full-screen]) .new-project-form {
     min-height: 0;
     overflow-y: auto;

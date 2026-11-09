@@ -198,12 +198,17 @@
 
   // Whether a press may start a line selection from its `mousedown`
   // (touchSelectionGuard.ts): a touch that moved was a scroll or a pane
-  // drag, not a pick of a line. The row hover highlight is for pointers
-  // that hover; a touch would leave it on the last row touched.
+  // drag, not a pick of a line. Only the pointerdown comes from here; the
+  // guard follows the rest of the gesture on the window, since an ancestor
+  // (DiffModal's container) may take pointer capture mid-way and the later
+  // events then never pass through this element. The row hover highlight is for devices with
+  // a pointer that hovers (`any-hover`, so an iPad with a trackpad or mouse
+  // counts though its primary pointer is touch); a touch would leave it on
+  // the last row touched.
   const selectionGuard = createTouchSelectionGuard();
   const hoverCapable =
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(hover: hover)')
+      ? window.matchMedia('(any-hover: hover)')
       : null;
   let beforeMarkdownArea: HTMLDivElement | null = $state(null);
   let afterMarkdownArea: HTMLDivElement | null = $state(null);
@@ -2242,6 +2247,7 @@
 
     return () => {
       cleanupKeyboardNav?.();
+      selectionGuard.destroy();
       document.removeEventListener('copy', handleCopy);
       document.removeEventListener('mouseup', handleGlobalMouseUp);
       document.removeEventListener('click', handleGlobalClick);
@@ -2296,9 +2302,6 @@
   class:loading
   bind:this={diffViewerEl}
   onpointerdowncapture={(event) => selectionGuard.pointerDown(event)}
-  onpointermovecapture={(event) => selectionGuard.pointerMove(event)}
-  onpointerupcapture={(event) => selectionGuard.pointerEnd(event)}
-  onpointercancelcapture={() => selectionGuard.pointerCancel()}
 >
   {#if loading}
     <div class="loading-overlay">
@@ -2962,9 +2965,10 @@
       background-color 0.1s;
   }
 
-  /* Hover styling only where a pointer hovers: a touch leaves :hover on
-     the last element touched until the next tap. */
-  @media (hover: hover) {
+  /* Hover styling only where some pointer hovers (an iPad's trackpad
+     counts): a touch leaves :hover on the last element touched until the
+     next tap. */
+  @media (any-hover: hover) {
     .markdown-toggle:hover {
       color: var(--text-primary);
       background-color: var(--bg-hover);
@@ -3106,7 +3110,7 @@
     opacity: 1;
   }
 
-  @media (hover: hover) {
+  @media (any-hover: hover) {
     .spine:hover .divider-handle {
       opacity: 1;
     }
@@ -3307,7 +3311,7 @@
       background-color 0.1s;
   }
 
-  @media (hover: hover) {
+  @media (any-hover: hover) {
     .range-btn:hover {
       background-color: var(--bg-hover);
     }

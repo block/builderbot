@@ -126,7 +126,8 @@ export interface FlingHandle {
  * Coast from `velocity` (px/ms), calling `apply` with each frame's
  * distance. `apply` returns whether the content moved; a frame that moves
  * nothing (an edge) ends the fling, as does the speed dropping under
- * FLING_MIN_VELOCITY. Returns null when `velocity` is too slow to start;
+ * FLING_MIN_VELOCITY. A frame with no time since the last is skipped, not
+ * applied, so only those two end it. Returns null when `velocity` is too slow to start;
  * faster than FLING_MAX_VELOCITY starts at that. The first frame only
  * takes the clock; the content moves from the second.
  */
@@ -150,6 +151,12 @@ export function startFling(
     }
     const dt = Math.min(Math.max(now - last, 0), MAX_FRAME_MS);
     last = now;
+    // Two frames on one timestamp (a throttled or just-shown tab) cover no
+    // distance; applying nothing would read as an edge and end the fling.
+    if (dt === 0) {
+      id = frames.request(tick);
+      return;
+    }
     const step = flingStep(remaining, dt);
     remaining = step.velocity;
     if (apply(step.distance) && isFlingVelocity(remaining)) id = frames.request(tick);

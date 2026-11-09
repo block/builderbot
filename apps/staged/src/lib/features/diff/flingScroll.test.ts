@@ -171,6 +171,30 @@ describe('startFling', () => {
     expect(frames.hasPending).toBe(false);
   });
 
+  it('a frame on the same timestamp as the last is still moving, not an edge', () => {
+    const frames = fakeFrames();
+    const distances: number[] = [];
+    startFling(
+      1,
+      (distance) => {
+        distances.push(distance);
+        return true;
+      },
+      frames.scheduler
+    );
+    frames.run(0);
+    frames.run(16);
+    expect(distances).toHaveLength(1);
+    // A throttled tab fires two callbacks with one timestamp: nothing to
+    // apply, and the coast goes on to the next frame.
+    frames.run(16);
+    expect(distances).toHaveLength(1);
+    expect(frames.hasPending).toBe(true);
+    frames.run(32);
+    expect(distances).toHaveLength(2);
+    expect(distances[1]).toBeCloseTo(flingStep(flingStep(1, 16).velocity, 16).distance, 10);
+  });
+
   it('caps a long gap between frames, so a hidden tab does not jump', () => {
     const frames = fakeFrames();
     const distances: number[] = [];

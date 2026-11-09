@@ -249,13 +249,14 @@
     line-height: 1.7;
   }
 
-  /* 16px body text on a phone: below that iOS Safari zooms the page in when
-     the editor takes focus and leaves it zoomed. */
+  /* At least 16px body text on a phone: below that iOS Safari zooms the page
+     in when the editor takes focus and leaves it zoomed. --size-xl follows
+     the user's base size preference, so a lowered base size is floored. */
   @media (max-width: 768px),
     (pointer: coarse) and (max-device-width: 500px),
     (pointer: coarse) and (max-device-height: 500px) {
     .editor-host :global(.milkdown) {
-      --crepe-base-font-size: var(--size-xl);
+      --crepe-base-font-size: max(16px, var(--size-xl));
     }
   }
 

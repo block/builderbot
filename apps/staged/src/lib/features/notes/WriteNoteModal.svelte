@@ -145,7 +145,7 @@
         >
           {isEdit ? 'Edit note' : 'Write note'}
         </Dialog.Title>
-        <div class="header-actions">
+        <div class="header-actions touch-hit-group">
           {#if note}
             <NoteTransferMenu
               noteId={note.id}
@@ -159,7 +159,7 @@
           <Button
             variant="ghost"
             size="icon-sm"
-            class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+            class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4 touch-hit mobile:size-9"
             title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
             aria-label="Close"
             onclick={requestClose}
@@ -186,14 +186,20 @@
       {#if error}
         <p class="write-note-error" role="alert">{error}</p>
       {/if}
-      <Button type="button" variant="outline" onclick={requestClose} disabled={saving}>
+      <Button
+        type="button"
+        variant="outline"
+        class="mobile:h-[44px] mobile:flex-1"
+        onclick={requestClose}
+        disabled={saving}
+      >
         Cancel
       </Button>
       <!-- The spinner overlays an invisible label so the button keeps its
            width while saving and the Cancel button next to it never shifts. -->
       <Button
         type="button"
-        class="relative"
+        class="relative mobile:h-[44px] mobile:flex-1"
         onclick={handleSave}
         disabled={!canSave}
         aria-busy={saving}

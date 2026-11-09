@@ -264,6 +264,7 @@
     <Button
       variant="outline"
       size="sm"
+      class="touch-hit"
       disabled={busy || !hasAnyCustomBindings(shortcutGroups)}
       onclick={handleResetAll}
     >
@@ -518,6 +519,14 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+  }
+
+  /* Finger-sized Edit/Reset/Save/Cancel on a touch screen. */
+  @media (pointer: coarse) {
+    .shortcut-actions :global([data-slot='button']) {
+      min-height: 36px;
+      padding-inline: 10px;
+    }
   }
 
   .key-list {

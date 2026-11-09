@@ -966,11 +966,11 @@
            The tooltip lives on a wrapping span, as it does there, because
            browsers don't reliably show tooltips on a disabled element. -->
       <DropdownMenu.Root>
-        <span class="inline-flex -ml-px shrink-0" title="More PR options">
+        <span class="touch-hit-group inline-flex -ml-px shrink-0" title="More PR options">
           <DropdownMenu.Trigger
             class={cn(
               buttonVariants({ variant: 'outline', size: 'sm' }),
-              'w-6 rounded-l-none px-0 [&_svg]:!size-3.5',
+              'touch-hit w-6 rounded-l-none px-0 [&_svg]:!size-3.5',
               detectingPr && 'border-[var(--border-muted)]'
             )}
             disabled={showPrDetectionDialog || detectingPr}

@@ -552,6 +552,16 @@
     align-items: center;
     gap: 4px;
     padding: 3px 10px;
+  }
+
+  /* A finger-sized chip on a touch screen. */
+  @media (pointer: coarse) {
+    .recent-chip {
+      padding: 8px 12px;
+    }
+  }
+
+  .recent-chip {
     border: 1px solid var(--chip-border);
     border-radius: 5px;
     background: var(--chip-bg);

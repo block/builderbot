@@ -31,7 +31,7 @@
   import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Select from '$lib/components/ui/select';
   import Spinner from '../../shared/Spinner.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import type { ProjectAction } from '../../api/commands';
   import IconPicker from './IconPicker.svelte';
 
@@ -77,7 +77,8 @@
         : { name: '', command: '', actionType: 'run', pinned: defaultPinned, icon: null };
       error = null;
       saving = false;
-      void tick().then(() => focusAfterDialogEnter(nameElement));
+      // On an iPhone or iPad the name field waits for a tap (see autofocusOnOpen).
+      void tick().then(() => autofocusOnOpen(nameElement));
     }
     wasOpen = open;
   });
@@ -117,7 +118,9 @@
 </script>
 
 <Dialog.Root bind:open={() => open, (nextOpen) => (nextOpen ? (open = true) : requestClose())}>
-  <Dialog.Content class="sm:max-w-[460px] gap-4">
+  <!-- Full screen on a phone, the form is the dialog's scrolling row (see
+       the `[data-full-screen]` rule below). -->
+  <Dialog.Content class="sm:max-w-[460px] gap-4 mobile:grid-rows-[auto_minmax(0,1fr)]">
     <Dialog.Header>
       <Dialog.Title>{action ? 'Edit Action' : 'Add Action'}</Dialog.Title>
     </Dialog.Header>
@@ -182,7 +185,7 @@
       <div class="pinned-row">
         <Checkbox
           id={pinnedId}
-          class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)]"
+          class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)] mobile:after:-inset-[16px]"
           bind:checked={draft.pinned}
           disabled={saving}
         />
@@ -194,10 +197,16 @@
       {/if}
 
       <Dialog.Footer>
-        <Button type="button" variant="outline" onclick={requestClose} disabled={saving}>
+        <Button
+          type="button"
+          variant="outline"
+          class="mobile:h-[44px]"
+          onclick={requestClose}
+          disabled={saving}
+        >
           Cancel
         </Button>
-        <Button type="submit" disabled={saving || !canSave}>
+        <Button type="submit" class="mobile:h-[44px]" disabled={saving || !canSave}>
           {#if saving}
             <Spinner size={14} />
             <span>Saving...</span>
@@ -216,6 +225,15 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+  }
+
+  /* With the on-screen keyboard up the dialog shrinks to what is visible
+     above it; the form scrolls so Save and Cancel stay reachable (as in
+     NewProjectForm). */
+  :global([data-full-screen]) .action-form {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .field {

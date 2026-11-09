@@ -74,7 +74,15 @@
     type FileEntry,
     type TreeNode,
   } from './diffModalHelpers';
+  import {
+    createVelocityTracker,
+    startFling,
+    type FlingHandle,
+    type PointerSample,
+    type Velocity,
+  } from './flingScroll';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
+  import { Portal } from 'bits-ui';
   import { openDiffRoute } from '../layout/navigation.svelte';
   import {
     disabledReferenceNav,
@@ -85,6 +93,7 @@
     type ReferenceHistoryEntry,
   } from '../references/referenceHistory.svelte';
   import { MOBILE_LAYOUT_QUERY } from '../../shared/viewport.svelte';
+  import { visibleViewport, watchVisualViewport } from '../../shared/visualViewport.svelte';
 
   // ==========================================================================
   // Props
@@ -160,6 +169,7 @@
     scrollByX: (side: 'before' | 'after', deltaX: number) => void;
     scrollByXBoth: (deltaX: number) => void;
     canScrollX: (side: 'before' | 'after') => boolean;
+    scrollPosition: (side: 'before' | 'after') => { x: number; y: number };
   };
 
   type DiffViewerComponentHandle = {
@@ -325,6 +335,26 @@
       : false
   );
   let showMobileSidebar = $state(false);
+
+  // The phone's file drawer follows the visual viewport while it is open, as
+  // a full-screen dialog does (see dialog-content): with the keyboard up for
+  // the file filter it shrinks to the part of the screen above the keyboard
+  // instead of keeping its bottom rows (and the list's end) under it.
+  $effect(() => {
+    if (isSmallDiffViewport && showMobileSidebar) return watchVisualViewport();
+  });
+  const mobileSidebarStyle = $derived.by(() => {
+    const { top, height, keyboardOpen } = visibleViewport;
+    if (height === null) return undefined;
+    return [
+      'position:fixed',
+      'left:0',
+      'right:0',
+      `top:${top}px`,
+      `height:${height}px`,
+      ...(keyboardOpen ? ['--dialog-safe-bottom:0px'] : []),
+    ].join(';');
+  });
   let diffDetailEl: HTMLDivElement | null = $state(null);
   let diffViewerContainerEl: HTMLDivElement | null = $state(null);
   let mobileDiffDragX = $state(0);
@@ -340,6 +370,10 @@
   let mobileDiffScrollSide: 'before' | 'after' = 'after';
   let mobileDiffMarkdownScrollEl: HTMLElement | null = null;
   let mobileDiffLastY = 0;
+  // The finger's recent path, for the fling a lift at speed starts, and the
+  // fling in progress (flingScroll.ts).
+  const mobileDiffVelocity = createVelocityTracker();
+  let mobileDiffFling: FlingHandle | null = null;
   let diffViewerScrollApi: DiffViewerScrollApi | null = $state(null);
   let diffViewerComponent: DiffViewerComponentHandle | null = $state(null);
   // The diff theme's CSS variables are scoped onto the diff-viewer container so
@@ -1268,6 +1302,7 @@
       isSmallDiffViewport = mediaQuery.matches;
       if (!isSmallDiffViewport) {
         showMobileSidebar = false;
+        stopMobileDiffFling();
         resetMobileDiffDrag();
       }
     };
@@ -1278,6 +1313,7 @@
     document.addEventListener('keyup', handleKeyup);
     document.addEventListener('click', handleClickOutsideDropdown);
     return () => {
+      stopMobileDiffFling();
       mediaQuery.removeEventListener('change', updateSmallDiffViewport);
       document.removeEventListener('keydown', handleKeydown);
       document.removeEventListener('keyup', handleKeyup);
@@ -1299,6 +1335,58 @@
     mobileDiffScrollSide = 'after';
     mobileDiffMarkdownScrollEl = null;
     mobileDiffDragX = 0;
+  }
+
+  // A fling is for the file it started on.
+  $effect(() => {
+    void currentDiff;
+    stopMobileDiffFling();
+  });
+
+  function stopMobileDiffFling() {
+    mobileDiffFling?.cancel();
+    mobileDiffFling = null;
+  }
+
+  function pointerSample(event: PointerEvent): PointerSample {
+    return { t: event.timeStamp, x: event.clientX, y: event.clientY };
+  }
+
+  // Coast on after a lift at speed, as a native scroller would, slowing
+  // every millisecond (flingScroll.ts) until the speed is spent or the
+  // content stops moving at an edge. The content moves against the finger,
+  // as it did during the drag. A finger landing anywhere on the viewer stops
+  // it (handleMobileDiffPointerDown), as does switching files.
+  function startMobileDiffFling(
+    mode: MobileDiffGestureMode,
+    side: 'before' | 'after',
+    markdownScrollEl: HTMLElement | null,
+    velocity: Velocity
+  ) {
+    stopMobileDiffFling();
+    if (mode === 'vertical-scroll') {
+      mobileDiffFling = markdownScrollEl
+        ? startFling(-velocity.vy, (distance) => {
+            const before = markdownScrollEl.scrollTop;
+            markdownScrollEl.scrollTop += distance;
+            return markdownScrollEl.scrollTop !== before;
+          })
+        : startFling(-velocity.vy, (distance) => {
+            const api = diffViewerScrollApi;
+            if (!api) return false;
+            const before = api.scrollPosition(side).y;
+            api.scrollBy(side, distance);
+            return api.scrollPosition(side).y !== before;
+          });
+    } else if (mode === 'horizontal-scroll') {
+      mobileDiffFling = startFling(-velocity.vx, (distance) => {
+        const api = diffViewerScrollApi;
+        if (!api) return false;
+        const before = api.scrollPosition(side).x;
+        api.scrollByXBoth(distance);
+        return api.scrollPosition(side).x !== before;
+      });
+    }
   }
 
   function isMobileDiffInteractiveTarget(target: HTMLElement): boolean {
@@ -1350,6 +1438,8 @@
   function handleMobileDiffPointerDown(event: PointerEvent) {
     if (!isSmallDiffViewport) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    // A finger landing on a coasting pane stops it where it is.
+    stopMobileDiffFling();
 
     const target = event.target as HTMLElement;
     const canDragPane = isMobileDiffRevealTarget(target, event);
@@ -1373,10 +1463,13 @@
     mobileDiffCanScrollCode = canScrollCode;
     mobileDiffScrollSide = codeSide ?? 'after';
     mobileDiffMarkdownScrollEl = markdownScrollEl;
+    mobileDiffVelocity.reset();
+    mobileDiffVelocity.push(pointerSample(event));
   }
 
   function handleMobileDiffPointerMove(event: PointerEvent) {
     if (!isSmallDiffViewport || mobileDiffPointerId !== event.pointerId) return;
+    mobileDiffVelocity.push(pointerSample(event));
 
     const deltaX = event.clientX - mobileDiffStartX;
     const deltaY = event.clientY - mobileDiffStartY;
@@ -1441,11 +1534,34 @@
   }
 
   function handleMobileDiffPointerUp(event: PointerEvent) {
+    endMobileDiffPointer(event, true);
+  }
+
+  // The browser took the pointer: the gesture ends where it is, no fling.
+  function handleMobileDiffPointerCancel(event: PointerEvent) {
+    endMobileDiffPointer(event, false);
+  }
+
+  function endMobileDiffPointer(event: PointerEvent, fling: boolean) {
     if (mobileDiffPointerId !== event.pointerId) return;
     if (diffViewerContainerEl?.hasPointerCapture(event.pointerId)) {
       diffViewerContainerEl.releasePointerCapture(event.pointerId);
     }
+    const mode = mobileDiffGestureMode;
+    const side = mobileDiffScrollSide;
+    const markdownScrollEl = mobileDiffMarkdownScrollEl;
     resetMobileDiffDrag();
+    if (fling && (mode === 'vertical-scroll' || mode === 'horizontal-scroll')) {
+      // The speed over the last moves; a finger held still before it lifts
+      // gives none (see createVelocityTracker).
+      startMobileDiffFling(
+        mode,
+        side,
+        markdownScrollEl,
+        mobileDiffVelocity.velocity(event.timeStamp)
+      );
+    }
+    mobileDiffVelocity.reset();
   }
 
   function handleMobileDiffMouseDownCapture(event: MouseEvent) {
@@ -1655,7 +1771,7 @@
       onpointerdown={handleMobileDiffPointerDown}
       onpointermove={handleMobileDiffPointerMove}
       onpointerup={handleMobileDiffPointerUp}
-      onpointercancel={handleMobileDiffPointerUp}
+      onpointercancel={handleMobileDiffPointerCancel}
       onmousedowncapture={handleMobileDiffMouseDownCapture}
     >
       <DiffViewer
@@ -1689,27 +1805,37 @@
     {/if}
   </div>
 
+  <!-- Portaled to the body: in the detail host (a `z-index: 1` stacking
+       context) the drawer sat under the shell's top bar, whose "Show changed
+       files" button then took the taps meant for the drawer's Close. -->
   {#if isSmallDiffViewport && showMobileSidebar}
-    <div class="mobile-sidebar-backdrop" role="dialog" aria-modal="true" aria-label="Changed files">
-      <div class="mobile-sidebar-dialog">
-        <div class="mobile-sidebar-header">
-          <span class="mobile-sidebar-title">Changed files</span>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
-            title="Close changed files"
-            aria-label="Close changed files"
-            onclick={() => (showMobileSidebar = false)}
-          >
-            <X size={14} />
-          </Button>
-        </div>
-        <div class="mobile-sidebar-body">
-          {@render fileSidebarContents()}
+    <Portal>
+      <div
+        class="mobile-sidebar-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Changed files"
+      >
+        <div class="mobile-sidebar-dialog" data-full-screen="" style={mobileSidebarStyle}>
+          <div class="mobile-sidebar-header">
+            <span class="mobile-sidebar-title">Changed files</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+              title="Close changed files"
+              aria-label="Close changed files"
+              onclick={() => (showMobileSidebar = false)}
+            >
+              <X size={14} />
+            </Button>
+          </div>
+          <div class="mobile-sidebar-body">
+            {@render fileSidebarContents()}
+          </div>
         </div>
       </div>
-    </div>
+    </Portal>
   {/if}
 
   {#if showNewSessionModal && branch}

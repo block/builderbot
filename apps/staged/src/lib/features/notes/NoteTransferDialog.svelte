@@ -40,7 +40,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import Spinner from '../../shared/Spinner.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import ProjectLocationPicker from '../projects/ProjectLocationPicker.svelte';
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
@@ -132,7 +132,8 @@
       defaultBranchPrefetch = null;
       lookUpNoteRepo();
       void projectsDataStore.ensureProjectsHydrated();
-      void tick().then(() => focusAfterDialogEnter(searchElement));
+      // On an iPhone or iPad the search waits for a tap (see autofocusOnOpen).
+      void tick().then(() => autofocusOnOpen(searchElement));
     }
     wasOpen = open;
   });
@@ -359,6 +360,9 @@
           disabled={working}
           placeholder="Search projects or type a new name…"
           autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           class="pl-8 bg-[var(--bg-primary)] focus-visible:ring-0 focus-visible:border-[var(--border-emphasis)]"
           onkeydown={handleSearchKeydown}
         />

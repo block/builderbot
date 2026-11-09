@@ -22,7 +22,7 @@
   import { matchesRepoSearch } from '../../shared/repoSearch';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import { viewport } from '../../shared/viewport.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import * as badge from '../../shared/badgeColors';
@@ -128,7 +128,8 @@
       // before we open the dropdown. Otherwise the trailing window-level
       // handleClickOutside (registered when this component mounted) sees a
       // target outside our wrapper and closes the dropdown we just opened.
-      setTimeout(() => focusAfterDialogEnter(inputEl), 0);
+      // On an iPhone or iPad the field waits for a tap (see autofocusOnOpen).
+      setTimeout(() => autofocusOnOpen(inputEl), 0);
     }
     try {
       recentRepos = await commands.listRecentRepos(10);
@@ -279,6 +280,7 @@
       placeholder="Search or paste a repository..."
       autocomplete="off"
       autocorrect="off"
+      autocapitalize="off"
       spellcheck="false"
       {disabled}
       oninput={handleInput}

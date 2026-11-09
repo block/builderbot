@@ -124,7 +124,7 @@
       <span class="suggested-title">Suggested repos</span>
       <Button
         variant="ghost"
-        class="size-[22px] rounded-[4px] p-0 text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] [&_svg]:!size-3.5"
+        class="touch-hit size-[22px] rounded-[4px] p-0 text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] [&_svg]:!size-3.5"
         aria-label="Dismiss suggestions"
         title="Dismiss suggestions"
         onclick={handleDismiss}
@@ -200,6 +200,16 @@
     align-items: center;
     gap: 4px;
     padding: 3px 10px;
+  }
+
+  /* A finger-sized chip on a touch screen. */
+  @media (pointer: coarse) {
+    .suggested-chip {
+      padding: 8px 12px;
+    }
+  }
+
+  .suggested-chip {
     border: 1px solid var(--chip-border);
     border-radius: 5px;
     background: var(--chip-bg);

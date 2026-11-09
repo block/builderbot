@@ -48,7 +48,7 @@
 
 <DropdownMenu.Root>
   <DropdownMenu.Trigger
-    class="project-status-pill"
+    class="project-status-pill touch-hit"
     {disabled}
     title="Set project status"
     style={override ? `color: ${PROJECT_STATUS_COLOR_VARS[override.color]}` : undefined}

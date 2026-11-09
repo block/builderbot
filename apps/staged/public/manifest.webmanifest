@@ -3,8 +3,8 @@
   "short_name": "Staged",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#060606",
-  "theme_color": "#060606",
+  "background_color": "#18151d",
+  "theme_color": "#18151d",
   "icons": [
     {
       "src": "/icons/staged-192.png",

@@ -5,7 +5,11 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/icons/staged-32.png" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="theme-color" content="#060606" />
+    <!-- The app's chrome colours (`--bg-chrome` in app.css and the light
+         chrome preferences.svelte.ts derives), so the splash, the status bar
+         and a Safari tab match the loaded app rather than flashing black. -->
+    <meta name="theme-color" content="#18151d" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f7" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <!-- `default` keeps the home-screen app below the status bar, which iOS
          tints to match the page. With black-translucent and viewport-fit=cover,

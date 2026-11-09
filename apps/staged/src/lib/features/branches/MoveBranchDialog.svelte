@@ -20,7 +20,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import Spinner from '../../shared/Spinner.svelte';
-  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
@@ -58,7 +58,8 @@
       // Repos hydrate lazily, so the duplicate-repo check can't be trusted
       // until every candidate's repos have actually been fetched.
       void projectsDataStore.ensureProjectsHydrated();
-      void tick().then(() => focusAfterDialogEnter(searchElement));
+      // On an iPhone or iPad the search waits for a tap (see autofocusOnOpen).
+      void tick().then(() => autofocusOnOpen(searchElement));
     }
     wasOpen = open;
   });
@@ -163,6 +164,9 @@
           disabled={moving}
           placeholder="Search projects…"
           autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           class="pl-8 bg-[var(--bg-primary)] focus-visible:ring-0 focus-visible:border-[var(--border-emphasis)]"
           onkeydown={handleSearchKeydown}
         />

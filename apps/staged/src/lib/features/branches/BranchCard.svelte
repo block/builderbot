@@ -2683,4 +2683,13 @@
     max-width: 100%;
     flex-shrink: 1;
   }
+
+  /* Taller footer controls on a touch screen (as in BranchTimeline's
+     footer-left-actions). */
+  @media (pointer: coarse) {
+    .footer-right-actions :global(button) {
+      min-width: 36px;
+      min-height: 36px;
+    }
+  }
 </style>

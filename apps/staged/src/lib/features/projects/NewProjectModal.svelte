@@ -21,7 +21,10 @@
 </script>
 
 <Dialog.Root {open} onOpenChange={(v) => !v && onClose()}>
-  <Dialog.Content class="sm:max-w-[460px]">
+  <!-- Full screen on a phone, the form is the dialog's scrolling row and
+       takes the height left under the header (see NewProjectForm's
+       `[data-full-screen]` rule). -->
+  <Dialog.Content class="sm:max-w-[460px] mobile:grid-rows-[auto_minmax(0,1fr)]">
     <Dialog.Header>
       <Dialog.Title>New Project</Dialog.Title>
     </Dialog.Header>

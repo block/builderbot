@@ -269,7 +269,7 @@
 
 <DropdownMenu.Root>
   <DropdownMenu.Trigger
-    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-faint)] transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground focus-visible:bg-[var(--bg-hover)] focus-visible:text-foreground focus-visible:outline-none data-[state=open]:bg-[var(--bg-hover)] data-[state=open]:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+    class="touch-hit inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-faint)] transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground focus-visible:bg-[var(--bg-hover)] focus-visible:text-foreground focus-visible:outline-none data-[state=open]:bg-[var(--bg-hover)] data-[state=open]:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
     aria-label="More options"
     title="More options"
   >

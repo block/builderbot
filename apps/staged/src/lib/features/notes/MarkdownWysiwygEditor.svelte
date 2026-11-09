@@ -25,6 +25,7 @@
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import type { Crepe as CrepeEditor } from '@milkdown/crepe';
 
   interface Props {
@@ -112,7 +113,9 @@
         if (disposed) return;
 
         crepe = editor;
-        focus();
+        // On an iPhone or iPad the editor waits for a tap: a focus the user
+        // didn't ask for raises no keyboard there (see autofocusOnOpen).
+        autofocusOnOpen(host?.querySelector<HTMLElement>('.ProseMirror'));
         onReady?.(null);
       } catch (e) {
         if (disposed) return;
@@ -234,11 +237,26 @@
      the side insets (`--dialog-safe-left` / `--dialog-safe-right`, see
      dialog-content). */
   .editor-host :global(.milkdown .ProseMirror) {
+    /* The document fills the scroller, so a tap anywhere below the last
+       line lands in the editor (and raises the keyboard on a phone) rather
+       than on the blank host under it. */
+    box-sizing: border-box;
+    min-height: 100%;
     padding: 24px;
     padding-left: calc(24px + var(--dialog-safe-left, 0px));
     padding-right: calc(24px + var(--dialog-safe-right, 0px));
     outline: none;
     line-height: 1.7;
+  }
+
+  /* 16px body text on a phone: below that iOS Safari zooms the page in when
+     the editor takes focus and leaves it zoomed. */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
+    .editor-host :global(.milkdown) {
+      --crepe-base-font-size: var(--size-xl);
+    }
   }
 
   .editor-host :global(.milkdown .ProseMirror p) {

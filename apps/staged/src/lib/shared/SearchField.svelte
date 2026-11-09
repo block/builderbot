@@ -61,6 +61,7 @@
     aria-label={label}
     autocomplete="off"
     autocorrect="off"
+    autocapitalize="off"
     spellcheck="false"
     {onfocus}
     {onkeydown}

@@ -44,6 +44,14 @@
 </button>
 
 <style>
+  /* A finger-sized row on a touch screen; the rows stack, so the box grows
+     rather than an invisible `touch-hit` area spilling onto its neighbours. */
+  @media (pointer: coarse) {
+    .tool-header {
+      min-height: 32px;
+    }
+  }
+
   .tool-header {
     display: flex;
     align-items: center;

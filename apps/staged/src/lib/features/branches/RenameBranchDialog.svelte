@@ -101,6 +101,10 @@
           bind:ref={inputElement}
           bind:value={draft}
           disabled={renaming}
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           aria-invalid={error ? 'true' : undefined}
           oninput={() => (error = null)}
         />

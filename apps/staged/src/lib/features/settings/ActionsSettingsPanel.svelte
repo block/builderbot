@@ -10,6 +10,7 @@
   import Pencil from '@lucide/svelte/icons/pencil';
   import Code2 from '@lucide/svelte/icons/code-2';
   import Search from '@lucide/svelte/icons/search';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import RepoBadge from '../../shared/RepoBadge.svelte';
@@ -31,6 +32,7 @@
   import { agentState } from '../agents/agent.svelte';
   import { navigation } from '../layout/navigation.svelte';
   import { consumeRepoSettingsTarget } from './repoSettingsTarget';
+  import { viewport, watchViewport } from '../../shared/viewport.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -49,6 +51,11 @@
 
   let contexts = $state<ActionContext[]>([]);
   let selectedRepoKey = $state<string | null>(null);
+  // The mobile layout shows the repo list or the selected repo's panel, not
+  // both: this is which (see the master/detail rules in the style block).
+  // Tapping a repo or arriving through a deep link opens the panel; the
+  // selection the load makes on its own does not.
+  let mobileDetailOpen = $state(false);
   let loadingContexts = $state(false);
   let loadingRepoAttachments = $state(false);
   let repoAttachmentsByContext = $state<Record<string, RepoAttachment[]>>({});
@@ -90,6 +97,13 @@
   onDestroy(() => {
     unlistenDetection?.();
   });
+
+  onMount(() => watchViewport());
+
+  function openEntry(key: string) {
+    selectedRepoKey = key;
+    mobileDetailOpen = true;
+  }
 
   async function ensureBadgesForContexts(ctxs: ActionContext[]) {
     if (ctxs.length === 0) return;
@@ -247,7 +261,7 @@
       await loadRepoAttachments(nextContexts);
       // Honor the parked target now that the entry list is resolved.
       if (requestedKey && mergedEntries.some((e) => e.key === requestedKey)) {
-        selectedRepoKey = requestedKey;
+        openEntry(requestedKey);
         revealRequested = true;
       } else if (!selectedRepoKey && mergedEntries.length > 0) {
         selectedRepoKey = mergedEntries[0].key;
@@ -523,7 +537,7 @@
 </script>
 
 <div class="actions-settings-panel">
-  <div class="panel-body">
+  <div class="panel-body" class:detail-open={mobileDetailOpen}>
     <aside class="sidebar" bind:this={sidebarEl} transition:sidebarSlide|global>
       <div class="sidebar-header">
         <h2>
@@ -538,6 +552,10 @@
           bind:value={repoSearch}
           placeholder="Search"
           aria-label="Search repos"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           class="min-h-9 px-3 py-2"
         />
       </label>
@@ -554,7 +572,7 @@
             <button
               class="context-item"
               class:selected={entry.key === selectedRepoKey}
-              onclick={() => (selectedRepoKey = entry.key)}
+              onclick={() => openEntry(entry.key)}
             >
               <div class="context-item-main">
                 <div class="context-item-header">
@@ -580,6 +598,20 @@
     </aside>
 
     <section class="main-panel" out:hideOnExit|global>
+      {#if viewport.isMobile}
+        <div class="main-panel-back">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="touch-hit -ml-2 gap-1 px-2 text-muted-foreground"
+            aria-label="Back to repos"
+            onclick={() => (mobileDetailOpen = false)}
+          >
+            <ChevronLeft size={16} />
+            Repos
+          </Button>
+        </div>
+      {/if}
       <div class="main-panel-scroll">
         {#if !selectedEntry}
           <div class="empty-main">Select a repo to configure actions</div>
@@ -743,10 +775,13 @@
                             </div>
                           </div>
                         </div>
-                        <div class="action-buttons">
+                        <div class="action-buttons touch-hit-group">
                           <Button
                             variant="ghost"
                             size="icon-sm"
+                            class="touch-hit"
+                            aria-label="Edit action"
+                            title="Edit action"
                             onclick={() => startEditAction(action)}
                           >
                             <Pencil size={13} />
@@ -754,7 +789,9 @@
                           <Button
                             variant="ghost"
                             size="icon-sm"
-                            class="hover:text-destructive"
+                            class="touch-hit hover:text-destructive"
+                            aria-label="Delete action"
+                            title="Delete action"
                             onclick={() => deleteAction(action.id)}
                           >
                             <Trash2 size={13} />
@@ -1222,6 +1259,41 @@
     .actions-header :global(button) {
       flex: 1 1 auto;
       justify-content: center;
+    }
+  }
+
+  .main-panel-back {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-bottom: -4px;
+  }
+
+  /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts): a
+     master/detail flow instead of the stacked panes above. The repo list
+     has the whole panel until a repo is tapped; the repo's panel then
+     replaces it, with the Back row at its top (`detail-open`). The row the
+     load selected on its own is not highlighted while the list shows,
+     since nothing of it is on screen. */
+  @media (max-width: 768px),
+    (pointer: coarse) and (max-device-width: 500px),
+    (pointer: coarse) and (max-device-height: 500px) {
+    .sidebar {
+      width: auto;
+      flex: 1;
+      max-height: none;
+      border-right: none;
+      border-bottom: none;
+      padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    }
+
+    .panel-body.detail-open .sidebar,
+    .panel-body:not(.detail-open) .main-panel {
+      display: none;
+    }
+
+    .panel-body:not(.detail-open) .context-item.selected {
+      background: transparent;
     }
   }
 </style>

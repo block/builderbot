@@ -991,6 +991,13 @@
       opacity: 1;
     }
 
+    /* Taller boxes rather than `touch-hit` areas: rows stack, and an
+       invisible 44px area would spill onto the rows above and below. */
+    .timeline-actions :global([data-slot='button']) {
+      min-width: 32px;
+      min-height: 32px;
+    }
+
     .timeline-actions :global(.session-action) {
       width: 44px;
       min-width: 44px;

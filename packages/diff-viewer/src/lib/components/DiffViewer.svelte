@@ -25,6 +25,7 @@
   import Code from '@lucide/svelte/icons/code';
   import { marked } from 'marked';
   import { sanitize } from '../utils/sanitize';
+  import { createTouchSelectionGuard } from '../utils/touchSelectionGuard';
   import type {
     FileDiff,
     Alignment,
@@ -101,6 +102,8 @@
     scrollByX: (side: 'before' | 'after', deltaX: number) => void;
     scrollByXBoth: (deltaX: number) => void;
     canScrollX: (side: 'before' | 'after') => boolean;
+    /** Where a pane is scrolled to, for a caller driving it by increments. */
+    scrollPosition: (side: 'before' | 'after') => { x: number; y: number };
   };
 
   type CommentEditorHandle = {
@@ -192,6 +195,16 @@
   let afterPane: HTMLDivElement | null = $state(null);
   let connectorCanvas: HTMLCanvasElement | null = $state(null);
   let diffViewerEl: HTMLDivElement | null = $state(null);
+
+  // Whether a press may start a line selection from its `mousedown`
+  // (touchSelectionGuard.ts): a touch that moved was a scroll or a pane
+  // drag, not a pick of a line. The row hover highlight is for pointers
+  // that hover; a touch would leave it on the last row touched.
+  const selectionGuard = createTouchSelectionGuard();
+  const hoverCapable =
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(hover: hover)')
+      : null;
   let beforeMarkdownArea: HTMLDivElement | null = $state(null);
   let afterMarkdownArea: HTMLDivElement | null = $state(null);
 
@@ -417,6 +430,10 @@
       const dims = scrollController.getDimensions(side);
       return (dims.contentWidth ?? 0) > (dims.viewportWidth ?? 0) + 1;
     },
+    scrollPosition: (side) =>
+      side === 'before'
+        ? { x: scrollController.beforeScrollX, y: scrollController.beforeScrollY }
+        : { x: scrollController.afterScrollX, y: scrollController.afterScrollY },
   };
 
   function updateScrollPositionedElements() {
@@ -1400,6 +1417,7 @@
 
   function handleLineMouseEnter(pane: 'before' | 'after', lineIndex: number) {
     if (!isTwoPaneMode) return;
+    if (hoverCapable && !hoverCapable.matches) return;
     const map = pane === 'before' ? beforeLineToAlignment : afterLineToAlignment;
     const alignmentIdx = map.get(lineIndex);
 
@@ -1727,6 +1745,9 @@
     if (pane === 'before') return;
     if (event.button !== 0) return;
     if (!commentingEnabled) return;
+    // iOS and Android send a compatibility mousedown after a touch lifts;
+    // only a touch that stayed on the line (a tap) may select it.
+    if (!selectionGuard.allowsMouseDown()) return;
 
     const previousLineSelection = lineSelection;
     const pendingLineComment = commentingOnLines;
@@ -2269,7 +2290,16 @@
   });
 </script>
 
-<div class="diff-viewer" class:loading bind:this={diffViewerEl}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="diff-viewer"
+  class:loading
+  bind:this={diffViewerEl}
+  onpointerdowncapture={(event) => selectionGuard.pointerDown(event)}
+  onpointermovecapture={(event) => selectionGuard.pointerMove(event)}
+  onpointerupcapture={(event) => selectionGuard.pointerEnd(event)}
+  onpointercancelcapture={() => selectionGuard.pointerCancel()}
+>
   {#if loading}
     <div class="loading-overlay">
       <span class="loading-text">Loading...</span>
@@ -2932,9 +2962,13 @@
       background-color 0.1s;
   }
 
-  .markdown-toggle:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
+  /* Hover styling only where a pointer hovers: a touch leaves :hover on
+     the last element touched until the next tap. */
+  @media (hover: hover) {
+    .markdown-toggle:hover {
+      color: var(--text-primary);
+      background-color: var(--bg-hover);
+    }
   }
 
   .code-area.markdown-mode {
@@ -3068,9 +3102,14 @@
     cursor: col-resize;
   }
 
-  .spine:hover .divider-handle,
   .spine.dragging .divider-handle {
     opacity: 1;
+  }
+
+  @media (hover: hover) {
+    .spine:hover .divider-handle {
+      opacity: 1;
+    }
   }
 
   .divider-handle {
@@ -3268,12 +3307,14 @@
       background-color 0.1s;
   }
 
-  .range-btn:hover {
-    background-color: var(--bg-hover);
-  }
+  @media (hover: hover) {
+    .range-btn:hover {
+      background-color: var(--bg-hover);
+    }
 
-  .range-btn.comment-btn:hover {
-    color: var(--ui-accent);
+    .range-btn.comment-btn:hover {
+      color: var(--ui-accent);
+    }
   }
 
   /* Line selection toolbar */

@@ -51,6 +51,10 @@ pub(crate) enum KickSource {
     Reconciled,
     /// The branch's project moved between local and remote.
     ProjectTransferred,
+    /// A transfer of the branch's project failed or was cancelled before
+    /// it moved: the work held for the transfer starts where the project
+    /// still is.
+    TransferFailed,
 }
 
 impl KickSource {
@@ -73,6 +77,7 @@ impl KickSource {
             Self::LaunchResume => "launch resume",
             Self::Reconciled => "reconciled",
             Self::ProjectTransferred => "project transferred",
+            Self::TransferFailed => "transfer failed",
         }
     }
 }
@@ -81,6 +86,12 @@ type DrainFuture = Pin<Box<dyn Future<Output = Result<bool, String>> + Send>>;
 /// The drain a kick runs: given a branch id, start what can start. Injected
 /// so the coalescing can be tested without the session runner.
 pub(crate) type DrainFn = Arc<dyn Fn(String) -> DrainFuture + Send + Sync>;
+/// What a kick's companion for the replies held while a branch's project
+/// was transferred runs: given a branch id, send the follow-ups held for it
+/// that the branch can take now (see [`super::follow_ups`]). Injected like
+/// the drain, so the provisioning paths — generic over the runtime for the
+/// mock-app tests — can ask for it without the session runner.
+pub(crate) type FlushFn = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Per-branch coalescing of kicks, managed as app state.
 ///
@@ -90,6 +101,7 @@ pub(crate) type DrainFn = Arc<dyn Fn(String) -> DrainFuture + Send + Sync>;
 /// it is covered by the single rerun.
 pub(crate) struct BranchQueueKicker {
     drain: DrainFn,
+    flush: FlushFn,
     /// Branches with a drain in flight, and whether a rerun was requested.
     in_flight: Mutex<HashMap<String, bool>>,
     /// Queued rows whose pre-claim start has failed, and how often; the
@@ -100,18 +112,30 @@ pub(crate) struct BranchQueueKicker {
     kicks: Mutex<Vec<(String, KickSource)>>,
     #[cfg(test)]
     scheduled: Mutex<Vec<(String, Duration, KickSource)>>,
+    #[cfg(test)]
+    flushes: Mutex<Vec<String>>,
 }
 
 impl BranchQueueKicker {
+    /// A kicker that drains with `drain` and has nothing to send held
+    /// follow-ups with: a flush only records and does nothing.
+    #[cfg(test)]
     pub(crate) fn new(drain: DrainFn) -> Self {
+        Self::with_flush(drain, Arc::new(|_| {}))
+    }
+
+    pub(crate) fn with_flush(drain: DrainFn, flush: FlushFn) -> Self {
         Self {
             drain,
+            flush,
             in_flight: Mutex::new(HashMap::new()),
             start_attempts: QueuedStartAttempts::default(),
             #[cfg(test)]
             kicks: Mutex::new(Vec::new()),
             #[cfg(test)]
             scheduled: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            flushes: Mutex::new(Vec::new()),
         }
     }
 
@@ -125,18 +149,44 @@ impl BranchQueueKicker {
     /// registry from app state at drain time so it is valid across the
     /// needs-reset flow.
     pub(crate) fn for_app(app_handle: tauri::AppHandle) -> Self {
-        Self::new(Arc::new(move |branch_id: String| {
-            let app_handle = app_handle.clone();
-            Box::pin(async move {
-                let store = crate::get_store(&app_handle.state::<Mutex<Option<Arc<Store>>>>())?;
-                let registry =
-                    Arc::clone(&app_handle.state::<Arc<crate::session_runner::SessionRegistry>>());
-                crate::session_commands::drain_branch_queue(
-                    store, registry, app_handle, branch_id, None,
-                )
-                .await
-            })
-        }))
+        let flush_app = app_handle.clone();
+        Self::with_flush(
+            Arc::new(move |branch_id: String| {
+                let app_handle = app_handle.clone();
+                Box::pin(async move {
+                    let store = crate::get_store(&app_handle.state::<Mutex<Option<Arc<Store>>>>())?;
+                    let registry = Arc::clone(
+                        &app_handle.state::<Arc<crate::session_runner::SessionRegistry>>(),
+                    );
+                    crate::session_commands::drain_branch_queue(
+                        store, registry, app_handle, branch_id, None,
+                    )
+                    .await
+                })
+            }),
+            Arc::new(move |branch_id: String| {
+                let store = match crate::get_store(&flush_app.state::<Mutex<Option<Arc<Store>>>>())
+                {
+                    Ok(store) => store,
+                    Err(e) => {
+                        log::warn!(
+                            "[session_queue] cannot flush the follow-ups held on branch \
+                             {branch_id}: {e}"
+                        );
+                        return;
+                    }
+                };
+                super::follow_ups::flush_follow_ups_for_branch(&flush_app, &store, &branch_id);
+            }),
+        )
+    }
+
+    /// Send the follow-ups held for `branch_id` while its project was
+    /// transferred, if the branch can take them now.
+    pub(crate) fn flush_follow_ups(&self, branch_id: &str) {
+        #[cfg(test)]
+        self.flushes.lock().unwrap().push(branch_id.to_string());
+        (self.flush)(branch_id.to_string());
     }
 
     /// Kick `branch_id`: start a drain, or fold into the one in flight.
@@ -250,6 +300,13 @@ impl BranchQueueKicker {
         self.scheduled.lock().unwrap().clone()
     }
 
+    /// The branches whose held follow-ups were asked for so far, oldest
+    /// first.
+    #[cfg(test)]
+    pub(crate) fn flushed(&self) -> Vec<String> {
+        self.flushes.lock().unwrap().clone()
+    }
+
     /// The branch ids kicked so far, oldest first.
     #[cfg(test)]
     pub(crate) fn kicked_branches(&self) -> Vec<String> {
@@ -289,6 +346,24 @@ pub(crate) fn kick<R: tauri::Runtime>(
         None => log::debug!(
             "[session_queue] no kicker managed; dropping kick for branch {branch_id} ({})",
             source.as_str()
+        ),
+    }
+}
+
+/// Send the follow-ups held for `branch_id` through the app's managed
+/// [`BranchQueueKicker`], the way [`kick`] kicks: the provisioning paths
+/// that call both are generic over the runtime, and only the kicker holds
+/// the handle the runner needs. With no kicker managed, logs and does
+/// nothing.
+pub(crate) fn flush_follow_ups<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+) {
+    match app_handle.try_state::<Arc<BranchQueueKicker>>() {
+        Some(kicker) => kicker.flush_follow_ups(branch_id),
+        None => log::debug!(
+            "[session_queue] no kicker managed; leaving the follow-ups held on branch \
+             {branch_id} queued"
         ),
     }
 }

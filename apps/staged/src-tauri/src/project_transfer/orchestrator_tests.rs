@@ -555,6 +555,9 @@ struct Transfer {
     /// What the command's after-transfer work (diff caches, prerun actions,
     /// queue kicks) was run on, if it ran.
     after_switch: Option<ProjectTransferResult>,
+    /// Whether the command's after-failure work (setting the work held for
+    /// the transfer going where the project still is) ran.
+    held_work_released: bool,
     events: Vec<TransferProgress>,
     transfer_id: String,
 }
@@ -722,10 +725,16 @@ impl Fixture {
         drop(guard);
         assert!(!registry::is_project_transferring(&self.project.id));
         let mut after_switch = None;
-        let result = settle(outcome, |result| after_switch = Some(result.clone()));
+        let mut held_work_released = false;
+        let result = settle(
+            outcome,
+            |result| after_switch = Some(result.clone()),
+            || held_work_released = true,
+        );
         Transfer {
             result,
             after_switch,
+            held_work_released,
             events: events.into_inner().unwrap(),
             transfer_id,
         }
@@ -1752,14 +1761,16 @@ fn queued_sessions_and_held_replies_wait_for_the_transfer_and_move_with_it() {
     assert!(preflight.can_transfer, "{:?}", preflight.repos[0].blockers);
     assert!(codes(&preflight.repos[0].blockers).is_empty());
 
-    // A failure leaves them queued, and says so.
+    // A failure leaves them queued, says so, and — once the project is free
+    // again — has the command set them going where the project still is.
     f.host.arm(Fault::Script(Side::Workspace, APPLY_SCRIPT, 1));
     let failed = f.transfer(true);
+    assert!(failed.held_work_released);
+    assert!(failed.after_switch.is_none());
     let err = failed.result.unwrap_err();
     assert!(
         err.ends_with(
-            "1 session and 1 reply queued for the transfer are still queued; start them from the \
-             timeline, or transfer again."
+            "1 session and 1 reply queued for the transfer are going ahead where the project is."
         ),
         "{err}"
     );
@@ -1774,7 +1785,10 @@ fn queued_sessions_and_held_replies_wait_for_the_transfer_and_move_with_it() {
 
     // A success moves them with the branch: the queued row is the branch's
     // to start at the destination, the reply is there to be drained.
-    let result = f.transfer(true).result.expect("to remote");
+    let moved_with = f.transfer(true);
+    assert!(!moved_with.held_work_released);
+    assert!(moved_with.after_switch.is_some());
+    let result = moved_with.result.expect("to remote");
     assert_eq!(result.location, ProjectLocation::Remote);
     let moved = f.store.get_session(&queued.id).unwrap().unwrap();
     assert_eq!(moved.status, crate::store::SessionStatus::Queued);

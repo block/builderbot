@@ -1073,8 +1073,11 @@ impl Run<'_> {
     }
 
     /// Roll back, report the failure, and hand back its message — with what
-    /// is still queued for the transfer to finish, now waiting on nothing,
-    /// so the user knows it is there.
+    /// was queued for the transfer to finish, so the user knows it goes
+    /// ahead where the project still is. The command sets it going
+    /// (`session_queue::release_held_work`) once the guard has dropped,
+    /// which is what the queued work waits on; it can't happen here, under
+    /// the guard.
     fn fail(&self, message: String) -> String {
         self.roll_back();
         let message =

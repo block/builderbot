@@ -55,15 +55,13 @@ impl Run<'_> {
                 // in its repository's clone, its ignored files into the
                 // transfer's own directory.
                 let left = Mutex::new(Vec::new());
+                let removed = Mutex::new(Vec::new());
                 let outcome = self.for_each_leg(
                     legs,
                     |_| true,
-                    |_, leg| {
+                    |index, leg| {
                         match self.remove_local_source(leg) {
-                            // Only once it is gone: the check that the worktree
-                            // is unchanged hashes its untracked files, which
-                            // these entries keep out of it.
-                            Ok(()) => left.lock().unwrap().extend(self.release_excludes(leg)),
+                            Ok(()) => removed.lock().unwrap().push(index),
                             Err(issue) => left.lock().unwrap().push(issue),
                         }
                         Ok(())
@@ -71,6 +69,19 @@ impl Run<'_> {
                 );
                 debug_assert!(outcome.is_ok(), "the work never fails");
                 warnings.extend(left.into_inner().unwrap());
+                // Only once a worktree is gone: the check that it is
+                // unchanged hashes its untracked files, which these entries
+                // keep out of it. And one leg after another, on this thread:
+                // a release reads and rewrites every manifest under the
+                // transfers directory that holds a record, whichever
+                // worktree it is for, and edits each clone's `info/exclude`
+                // — shared files two legs at once would race on, one
+                // writing back a record the other had just cleared.
+                let mut removed = removed.into_inner().unwrap();
+                removed.sort_unstable();
+                for index in removed {
+                    warnings.extend(self.release_excludes(&legs[index]));
+                }
                 // The bundles at the destination have served their purpose.
                 if let (Some(workspace), Some(dir)) = (
                     self.workspace_name.as_deref(),
@@ -163,7 +174,8 @@ impl Run<'_> {
     /// Take out the entries earlier transfers to local added to the clone's
     /// `info/exclude` for a carried leg's worktree, which has just been
     /// removed. What can't be taken out is said; its record stays, for a
-    /// start's prune to try again.
+    /// start's prune to try again. Never from two legs at once (see
+    /// [`Self::tear_down`]).
     fn release_excludes(&self, leg: &Leg) -> Option<TransferIssue> {
         let dir = leg.plan.as_ref()?.source_dir.as_str();
         let problems = match self.host.transfers_dir() {

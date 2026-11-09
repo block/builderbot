@@ -28,7 +28,8 @@
 //! - [`follow_ups`] holds the work a project being transferred can't take —
 //!   session starts queue as rows (the drain waits out the transfer),
 //!   replies to its sessions queue as follow-up messages — and sets it going
-//!   once the project has moved.
+//!   once the project has moved, or once the transfer has failed and left it
+//!   where it was.
 //!
 //! Every kick logs its source at `info`, every sweep action is a `warn`, and
 //! the Doctor's "Session Queue" check reports [`sweep::queue_health`], so a
@@ -43,6 +44,8 @@ pub(crate) mod teardown;
 mod tests;
 
 pub(crate) use follow_ups::{
-    flush_follow_ups_for_branch, flush_follow_ups_for_project, held_work_note,
+    flush_follow_ups_for_branch, flush_follow_ups_for_project, held_work_note, release_held_work,
 };
-pub(crate) use kick::{kick, kick_all_with_queued_work, BranchQueueKicker, KickSource};
+pub(crate) use kick::{
+    flush_follow_ups, kick, kick_all_with_queued_work, BranchQueueKicker, KickSource,
+};

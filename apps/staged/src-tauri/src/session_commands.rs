@@ -4207,9 +4207,12 @@ fn branch_session_start_waits_for_provisioning(
 
 /// Whether `branch` has nowhere to run a session yet: a local branch with no
 /// worktree, or a remote one whose workspace is not `Running`. Its queued rows
-/// wait for the kick provisioning sends when it lands
-/// (`create_and_link_worktree`, `workspace_status_written`).
-fn branch_waits_for_provisioning(store: &Store, branch: &store::Branch) -> Result<bool, String> {
+/// and the follow-ups held for it wait for the kick provisioning sends when
+/// it lands (`create_and_link_worktree`, `workspace_status_written`).
+pub(crate) fn branch_waits_for_provisioning(
+    store: &Store,
+    branch: &store::Branch,
+) -> Result<bool, String> {
     match branch.branch_type {
         store::BranchType::Local => store
             .get_workdir_for_branch(&branch.id)

@@ -1512,7 +1512,7 @@ fn a_long_unicode_branch_name_names_its_workspace_in_ascii() {
 
     let workspace = crate::branches::infer_workspace_name(&f.project.id, &branch);
     assert!(
-        workspace.starts_with(&format!("stg-{}-", "a".repeat(21))),
+        workspace.starts_with(&format!("{}-", "a".repeat(25))),
         "{workspace}"
     );
     assert_eq!(workspace.len(), crate::branches::WORKSPACE_NAME_MAX_LENGTH);

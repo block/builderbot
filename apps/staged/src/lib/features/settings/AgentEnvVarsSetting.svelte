@@ -190,9 +190,9 @@
       Add variable
     </Button>
     <span class="field-description">
-      Set for the agent when it starts, over anything the shell sets. Unchecked rows are kept but
-      not set. Values are stored unencrypted in the local preferences file. Local sessions only:
-      remote Blox sessions don’t receive them.
+      Set for the agent when it starts, and for Doctor’s checks and login of it, over anything the
+      shell sets. Unchecked rows are kept but not set. Values are stored unencrypted in the local
+      preferences file. Local sessions only: remote Blox sessions don’t receive them.
     </span>
   </div>
 </div>

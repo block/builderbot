@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 pub use doctor::types::{AuthStatus, InstallSource};
 pub use doctor::{
-    AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, ExecuteFixOptions, FixCancelHandle,
-    FixCancellation, FixStdin, FixStdinWriter, FixType, RunChecksOptions,
+    AgentVersionInfo, CheckStatus, DoctorCheck, DoctorEnv, DoctorReport, ExecuteFixOptions,
+    FixCancelHandle, FixCancellation, FixStdin, FixStdinWriter, FixType, RunChecksOptions,
 };
 
 pub mod login;
@@ -53,11 +53,21 @@ pub(crate) async fn doctor_env_vars() -> Vec<(String, String)> {
     env_vars
 }
 
+/// `agent_env` is each agent check's per-agent variables (see
+/// [`agent_env_overlays`]), keyed by check id. They ride on the snapshot as
+/// per-check overlays, so an agent's own probes see its rows over the shared
+/// snapshot and no other check does.
 fn run_checks_options(
     check_freshness: bool,
     env_vars: Vec<(String, String)>,
+    agent_env: Vec<(String, Vec<(String, String)>)>,
     bundled_dir: Option<PathBuf>,
 ) -> RunChecksOptions {
+    let env = agent_env
+        .into_iter()
+        .fold(DoctorEnv::new(env_vars), |env, (check_id, vars)| {
+            env.with_check_overlay(check_id, vars)
+        });
     RunChecksOptions {
         check_freshness,
         offline: false,
@@ -65,14 +75,46 @@ fn run_checks_options(
         // set `STAGED_NPM_REGISTRY`; otherwise npm resolves its own config
         // (see the registry policy note in `managed_acp_tools`).
         npm_registry: crate::managed_acp_tools::npm_registry_override(),
-        env: None,
+        env: Some(env),
         // Doctor labels binaries resolved from this dir as bundled (install
         // source + readout flag) and suppresses registry update fixes for
         // them — the startup reconciler floats the managed shims to @latest,
         // so Staged owns their updates.
         bundled_tools_dir: bundled_dir,
     }
-    .with_env_snapshot(env_vars)
+}
+
+/// The agent (provider) id behind an `ai-agent-<id>` doctor check — the key
+/// its environment variables are stored under in preferences — or `None` for
+/// any other check. Mirrors `check.id.replace('ai-agent-', '')` in
+/// `DoctorSettingsPanel.svelte`, which mounts the variables editor under the
+/// row by it.
+pub(super) fn provider_id_for_check(check_id: &str) -> Option<&str> {
+    check_id.strip_prefix("ai-agent-")
+}
+
+/// The enabled environment variables configured for the agent an
+/// `ai-agent-*` check fronts (Settings → Doctor → Environment variables);
+/// empty for every other check. Doctor's probes of that agent and its login
+/// fix run with these over the shared snapshot, as a session launch of the
+/// agent does (see `agent::env_vars`), so the row can't report "not
+/// authenticated" against a key the session right next to it launches with.
+pub(super) fn agent_env_for_check(check_id: &str) -> Vec<(String, String)> {
+    provider_id_for_check(check_id)
+        .map(crate::agent::env_vars::read_agent_env)
+        .unwrap_or_default()
+}
+
+/// Every agent check's variables for [`run_checks_options`], keyed by check
+/// id; agents with no enabled variables are left out.
+fn agent_env_overlays() -> Vec<(String, Vec<(String, String)>)> {
+    doctor::agents::AI_AGENT_CHECKS
+        .iter()
+        .filter_map(|info| {
+            let vars = agent_env_for_check(info.id);
+            (!vars.is_empty()).then(|| (info.id.to_string(), vars))
+        })
+        .collect()
 }
 
 fn execute_fix_options(
@@ -216,6 +258,7 @@ async fn run_doctor_report(
         doctor::run_checks_with_options(run_checks_options(
             check_freshness,
             env_vars.clone(),
+            agent_env_overlays(),
             crate::acp_tools::primary_tools_dir(),
         )),
         run_node_runtime_check(),
@@ -434,8 +477,15 @@ async fn expected_update_command(
     env_vars: Vec<(String, String)>,
     bundled_dir: Option<PathBuf>,
 ) -> Result<String, String> {
-    let report =
-        doctor::run_checks_with_options(run_checks_options(true, env_vars, bundled_dir)).await;
+    // Same overlays as the report the UI rendered, so the version probe that
+    // derives the command runs the agent the way the report's did.
+    let report = doctor::run_checks_with_options(run_checks_options(
+        true,
+        env_vars,
+        agent_env_overlays(),
+        bundled_dir,
+    ))
+    .await;
 
     let check = report
         .checks

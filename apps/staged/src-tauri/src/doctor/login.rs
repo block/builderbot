@@ -366,7 +366,11 @@ pub(super) async fn run_login_fix(
         output,
         slot,
     } = login;
-    let env_vars = doctor_env_vars().await;
+    let mut env_vars = doctor_env_vars().await;
+    // The agent's own variables (Settings → Doctor) apply to its login as to
+    // its checks and sessions, so a CLI that takes its API key from the
+    // environment logs in under the key the sessions will launch with.
+    env_vars.extend(super::agent_env_for_check(&check_id));
     let event_check_id = check_id.clone();
     let event_run_id = run_id.clone();
     let event_app = app_handle.clone();

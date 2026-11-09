@@ -87,6 +87,9 @@ pub struct RunChecksOptions {
     /// each child command's environment and applies these variables so binary
     /// resolution, checks, freshness probes, and fixes all see the same shell
     /// environment. `None` preserves the previous per-call-site behavior.
+    /// A snapshot's per-check overlays ([`DoctorEnv::with_check_overlay`])
+    /// apply to that check's own probes — an agent's auth and version probes
+    /// — but not to binary resolution, which is shared by every check.
     pub env: Option<DoctorEnv>,
     /// Directory holding agent binaries bundled inside the embedding app
     /// (e.g. Staged's `resources/acp/bin`). Binaries that resolve from inside
@@ -236,6 +239,10 @@ async fn collect_base_report(
                 .collect();
             let main = info.main_command.and_then(|cmd| resolved.get(cmd).cloned());
             tokio::task::spawn_blocking(move || {
+                // The agent's own probes (`acp --help`, `auth status`) run
+                // with the check's overlay — the variables the user set for
+                // this agent — so Doctor's verdict matches a session launch.
+                let env = env.as_deref().map(|env| env.for_check(info.id));
                 check_single_ai_agent(
                     info,
                     found,
@@ -586,6 +593,9 @@ async fn populate_freshness(
                 Some(args) => InstalledProbe::Cli(args),
                 None => select_installed_probe(t.install_source.as_ref(), t.package_id.as_deref()),
             };
+            // The version probe runs the agent's own binary, so it gets the
+            // check's overlay like the auth probe does.
+            let env = env.as_deref().map(|env| env.for_check(&t.id));
             let info = fetch_version_info(
                 t.latest_source,
                 t.package_id.as_deref(),

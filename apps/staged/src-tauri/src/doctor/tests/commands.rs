@@ -5,11 +5,52 @@ use super::*;
 #[test]
 fn run_checks_options_carries_bundled_tools_dir() {
     let dir = PathBuf::from("/data/packages/bin");
-    let opts = run_checks_options(false, Vec::new(), Some(dir.clone()));
+    let opts = run_checks_options(false, Vec::new(), Vec::new(), Some(dir.clone()));
     assert_eq!(opts.bundled_tools_dir, Some(dir));
 
-    let opts = run_checks_options(false, Vec::new(), None);
+    let opts = run_checks_options(false, Vec::new(), Vec::new(), None);
     assert!(opts.bundled_tools_dir.is_none());
+}
+
+/// The per-agent variables ride on the snapshot as per-check overlays: an
+/// agent's probes see its rows over the shared snapshot, nothing else does.
+#[test]
+fn run_checks_options_overlays_agent_env_on_that_agents_check() {
+    let snapshot = vec![("KEY".to_string(), "from snapshot".to_string())];
+    let overlays = vec![(
+        "ai-agent-claude".to_string(),
+        vec![("KEY".to_string(), "from doctor row".to_string())],
+    )];
+    let env = run_checks_options(false, snapshot, overlays, None)
+        .env
+        .expect("the snapshot is always set");
+    assert_eq!(
+        env.for_check("ai-agent-claude").get("KEY"),
+        Some("from doctor row")
+    );
+    assert_eq!(
+        env.for_check("ai-agent-codex").get("KEY"),
+        Some("from snapshot")
+    );
+    assert_eq!(env.get("KEY"), Some("from snapshot"));
+}
+
+/// The variables are stored by provider id, the part of the check id after
+/// `ai-agent-` (the frontend derives it the same way), and only agent checks
+/// have one — so every agent's rows can reach its probes and no other check
+/// picks any up.
+#[test]
+fn agent_env_is_keyed_by_the_provider_id_behind_the_check() {
+    assert_eq!(provider_id_for_check("ai-agent-claude"), Some("claude"));
+    assert_eq!(provider_id_for_check("gh-auth"), None);
+    assert!(agent_env_for_check("gh-auth").is_empty());
+    for info in doctor::agents::AI_AGENT_CHECKS {
+        assert!(
+            provider_id_for_check(info.id).is_some(),
+            "{} has no provider id",
+            info.id
+        );
+    }
 }
 
 /// Fixes and updates for the two bridge checks route to the managed
@@ -82,7 +123,7 @@ fn both_update_fix_types_dispatch_to_the_managed_installer() {
 fn doctor_options_route_npm_through_the_registry_override() {
     let expected = crate::managed_acp_tools::npm_registry_override();
     assert_eq!(
-        run_checks_options(false, Vec::new(), None).npm_registry,
+        run_checks_options(false, Vec::new(), Vec::new(), None).npm_registry,
         expected
     );
     assert_eq!(execute_fix_options(None, Vec::new()).npm_registry, expected);

@@ -26,13 +26,26 @@
 //!
 //! The driver applies `extra_env` last in every local spawn path: over the
 //! captured shell snapshot when it spawns the binary directly, and on the
-//! `exec` line (via `/usr/bin/env`) when it falls back to `$SHELL -ils`, so
-//! an `export` in the user's rc files can't shadow a Doctor value there
-//! either. The flip side is that a row named after something the launcher
+//! `exec` line (via `/usr/bin/env`) when it falls back to the login shell —
+//! `$SHELL -ils` for a POSIX shell, or `$SHELL -l -c` running that same line
+//! through `/bin/sh -c` for one that isn't (fish) — so an `export` in the
+//! user's rc files can't shadow a Doctor value there either. The flip side
+//! is that a row named after something the launcher
 //! itself sets — `PATH`, `GOOSE_SEARCH_PATHS` (see
 //! `acp_tools::apply_managed_tools_env`) — replaces Staged's value for that
 //! agent and everything it spawns. The Doctor UI warns on those names
 //! (`LAUNCHER_RESERVED_NAMES` in the frontend) but doesn't refuse them.
+//!
+//! # Doctor
+//!
+//! Doctor's own probes of an agent — `auth status`, the version probe — and
+//! its login fix run with the same variables, laid over Doctor's shared
+//! snapshot for that agent's check only (`doctor::agent_env_for_check`, a
+//! `DoctorEnv` per-check overlay), so the panel can't call an agent
+//! unauthenticated against the key its sessions launch with. Those probes go
+//! through `zsh -l -c`, which reads `.zshenv`/`.zprofile` after the seed and
+//! has no exec-line reapplication, so an export there can still shadow a row
+//! for the probe alone; `.zshrc` isn't read by `-l -c`.
 
 /// Preferences-store key: `Record<agentId, AgentEnvVar[]>`. Kept in sync with
 /// `AGENT_ENV_VARS_STORE_KEY` in the frontend preferences store.
@@ -161,6 +174,8 @@ pub(crate) fn merge_agent_env(
 /// Read the enabled variables configured for `provider_id` from the
 /// preferences store. Any failure — missing file, unparseable JSON, absent or
 /// malformed key — yields no variables, so the agent launches as before.
+/// Called at session launch, for pikchr sub-agents, and by Doctor for the
+/// agent's checks and login fix.
 pub(crate) fn read_agent_env(provider_id: &str) -> Vec<(String, String)> {
     let Some(path) = crate::preferences_store_path_buf() else {
         return Vec::new();

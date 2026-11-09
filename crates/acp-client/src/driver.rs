@@ -1337,8 +1337,9 @@ impl AcpDriver {
     ///
     /// They are applied after everything else the process inherits — the
     /// captured snapshot, the inherited environment of a remote proxy, and
-    /// the rc files of the `$SHELL -ils` fallback — so a value set here wins
-    /// in every spawn path.
+    /// the rc files of the login-shell fallback (`$SHELL -ils`, or `-l -c`
+    /// through `/bin/sh` for a shell that isn't POSIX; see
+    /// [`LoginShellExec`]) — so a value set here wins in every spawn path.
     pub fn with_extra_env(mut self, vars: Vec<(String, String)>) -> Self {
         self.extra_env = vars;
         self
@@ -1620,6 +1621,10 @@ fn shell_exec_line(
 /// names never contain `=` (callers validate them), so each word is
 /// unambiguously an assignment; and `--` keeps a leading `-` in a name from
 /// being read as an `env` option.
+///
+/// All of it is POSIX sh. A login shell that isn't one (fish rejects `$@` at
+/// parse time) runs the whole line through `/bin/sh -c` instead — see
+/// [`LoginShellExec`].
 fn shell_exec_prefix(extra_env: &[(String, String)]) -> String {
     if extra_env.is_empty() {
         return "exec".to_string();
@@ -1655,6 +1660,85 @@ fn shell_extra_env_seeds(extra_env: &[(String, String)]) -> Vec<(String, String)
         .enumerate()
         .map(|(i, (_, value))| (format!("{prefix}{i}"), value.clone()))
         .collect()
+}
+
+/// Login shells whose command language is POSIX sh, by basename. The exec
+/// line of [`shell_exec_line`] goes to these on stdin as is; any other shell
+/// gets it through [`LoginShellExec::Command`].
+const POSIX_LOGIN_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "ash"];
+
+fn is_posix_login_shell(shell: &Path) -> bool {
+    shell
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| POSIX_LOGIN_SHELLS.contains(&name))
+}
+
+/// How the fallback login shell is handed the exec line of
+/// [`shell_exec_line`], decided from the shell's basename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoginShellExec {
+    /// `$SHELL -i -l -s` (a POSIX shell): the shell runs its rc files, the
+    /// line is then written to its stdin, and `exec` replaces it with the
+    /// agent, which inherits the rest of stdin as its transport. `-i` so
+    /// hooks like `precmd` (Hermit) are installed and fire in the working
+    /// directory before the line is read. A POSIX shell reads a non-seekable
+    /// stdin one byte at a time, so nothing written after the line is lost.
+    Stdin,
+    /// `$SHELL -l -c <command>` (any other shell, fish in practice): the
+    /// shell runs its own rc files — `config.fish`, where a fish user's
+    /// exports live — and then `exec`s `/bin/sh -c '<line>'`, so the env
+    /// handoff (`set --`, `unset`, `"$@"`, which fish rejects at parse time)
+    /// happens in POSIX sh. Values still never appear in the command text:
+    /// the line carries names, the values ride in the seeds of
+    /// [`shell_extra_env_seeds`], which `/bin/sh` reads from its environment.
+    ///
+    /// The line goes in the command argument, not stdin, because fish has no
+    /// `-s` (it rejects `-ils` outright) and, given commands on stdin, reads
+    /// them all to EOF before running any — the driver never closes stdin,
+    /// so the agent would never start, and the shell would have swallowed
+    /// its first requests besides. No `-i`: fish runs `config.fish` for `-c`
+    /// anyway, and an interactive fish whose `exec` failed would sit at a
+    /// prompt instead of exiting.
+    Command(String),
+}
+
+impl LoginShellExec {
+    fn for_shell(shell: &Path, exec_line: &str) -> Self {
+        if is_posix_login_shell(shell) {
+            Self::Stdin
+        } else {
+            Self::Command(format!(
+                "exec /bin/sh -c {}",
+                fish_quote(exec_line.trim_end_matches('\n'))
+            ))
+        }
+    }
+
+    /// The arguments to spawn the shell with.
+    fn args(&self) -> Vec<&str> {
+        match self {
+            Self::Stdin => vec!["-i", "-l", "-s"],
+            Self::Command(command) => vec!["-l", "-c", command],
+        }
+    }
+
+    /// For the spawn log: which path this shell took.
+    fn describe(&self) -> &'static str {
+        match self {
+            Self::Stdin => "POSIX shell, exec line on stdin",
+            Self::Command(_) => "non-POSIX shell, exec line through /bin/sh -c",
+        }
+    }
+}
+
+/// Single-quote `s` by fish's rules: inside single quotes fish treats `\\`
+/// and `\'` as escapes (POSIX sh treats nothing), so both characters are
+/// backslash-escaped and everything else is literal. Verified for fish; other
+/// non-POSIX shells get the same quoting as a best effort, and the spawn log
+/// names the shell when it doesn't take it.
+fn fish_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 #[derive(Debug)]
@@ -2476,20 +2560,46 @@ impl AcpDriver {
         // with the agent binary so all subsequent stdin/stdout traffic is the
         // JSON-RPC protocol. This path is fragile (it depends on `precmd`
         // firing inside an attached interactive shell), which is exactly why
-        // the snapshot path is preferred when available.
+        // the snapshot path is preferred when available. A login shell that
+        // isn't a POSIX shell (fish) gets the same exec line as its `-c`
+        // argument, wrapped in `/bin/sh -c` — see `LoginShellExec`.
         let use_shell_spawn = !self.is_remote && self.env_snapshot.is_none();
+        let shell_spawn = use_shell_spawn.then(|| {
+            let shell =
+                PathBuf::from(std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()));
+            // If the fallback shell's initialized PATH already provides an
+            // env-shebang interpreter, keep it unchanged. Otherwise add the
+            // agent bin dir only as an interpreter fallback, preserving broad
+            // toolchain dirs behind project-managed PATH entries.
+            let exec_line = shell_exec_line(
+                &self.binary_path,
+                &self.acp_args,
+                self.interpreter_env_snapshot.as_deref(),
+                &self.extra_env,
+            );
+            let exec = LoginShellExec::for_shell(&shell, &exec_line);
+            (shell, exec_line, exec)
+        });
 
-        let mut cmd = if use_shell_spawn {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            let mut c = Command::new(&shell);
+        let mut cmd = if let Some((shell, exec_line, exec)) = &shell_spawn {
+            // Logged before the spawn, names only (the line never carries
+            // values): a shell that exits at EOF without exec'ing otherwise
+            // shows up as an opaque early shutdown, with no record of which
+            // shell was given what.
+            log::info!(
+                "Spawning {} through login shell {} ({}); exec line: {}",
+                self.agent_label,
+                shell.display(),
+                exec.describe(),
+                exec_line.trim_end()
+            );
+            let mut c = Command::new(shell);
             c.current_dir(&spawn_working_dir) // start in project dir so precmd sees hermit config
                 .env_clear() // clean slate — shell init rebuilds the environment
                 .env("HOME", std::env::var("HOME").unwrap_or_default())
                 .env("USER", std::env::var("USER").unwrap_or_default())
-                .env("SHELL", &shell)
-                .arg("-i") // interactive: ensures hooks like precmd/chpwd are installed
-                .arg("-l") // login: loads full profile / environment
-                .arg("-s"); // read commands from stdin (after init completes)
+                .env("SHELL", shell)
+                .args(exec.args());
             c
         } else {
             let spawn_command = acp_spawn_command(
@@ -2573,9 +2683,15 @@ impl AcpDriver {
                 cmd.env(k, v);
             }
         }
+        let via_shell = shell_spawn
+            .as_ref()
+            .map(|(shell, _, exec)| {
+                format!(", login shell: {} ({})", shell.display(), exec.describe())
+            })
+            .unwrap_or_default();
         let spawn_error = |e: std::io::Error| {
             format!(
-                "Failed to spawn {} (binary: {}, cwd: {}): {e}",
+                "Failed to spawn {} (binary: {}, cwd: {}{via_shell}): {e}",
                 self.agent_label,
                 self.binary_path.display(),
                 spawn_working_dir.display()
@@ -2655,24 +2771,16 @@ impl AcpDriver {
                 .take()
                 .ok_or_else(|| "Failed to get stdin".to_string())?;
 
-            // For the shell-spawn fallback, write the exec command to stdin. By the
-            // time the shell reads from stdin, init is complete and `precmd` has
-            // fired in the working directory (activating Hermit). `exec` replaces
-            // the shell with the agent binary — from this point on, stdin belongs
-            // to the agent's JSON-RPC transport. When a snapshot was applied the
-            // agent binary is already the child process, so there is nothing to
-            // exec.
-            if use_shell_spawn {
-                // If the fallback shell's initialized PATH already provides an
-                // env-shebang interpreter, keep it unchanged. Otherwise add the
-                // agent bin dir only as an interpreter fallback, preserving broad
-                // toolchain dirs behind project-managed PATH entries.
-                let exec_line = shell_exec_line(
-                    &self.binary_path,
-                    &self.acp_args,
-                    self.interpreter_env_snapshot.as_deref(),
-                    &self.extra_env,
-                );
+            // For the shell-spawn fallback through a POSIX shell, write the exec
+            // command to stdin. By the time the shell reads from stdin, init is
+            // complete and `precmd` has fired in the working directory
+            // (activating Hermit). `exec` replaces the shell with the agent
+            // binary — from this point on, stdin belongs to the agent's JSON-RPC
+            // transport. A non-POSIX shell already has the line as its `-c`
+            // argument and never reads stdin, and when a snapshot was applied
+            // the agent binary is already the child process, so in both cases
+            // there is nothing to write.
+            if let Some((_, exec_line, LoginShellExec::Stdin)) = &shell_spawn {
                 stdin
                     .write_all(exec_line.as_bytes())
                     .await
@@ -8845,7 +8953,7 @@ mod tests {
         AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
         BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BackgroundTaskSet,
         BasicMessageWriter, HoldOutcome, HoldSettle, HoldingState, IncomingSessionUpdate,
-        MessageWriter, OutOfTurnPermissionPolicy, PromptImage, QueuedSessionTurn,
+        LoginShellExec, MessageWriter, OutOfTurnPermissionPolicy, PromptImage, QueuedSessionTurn,
         RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState,
         SessionLifetime, SessionSettleReason, SessionSettled, StopAsyncTaskRequest, Store,
         TaskTrackingMode, TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
@@ -11103,12 +11211,185 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         );
     }
 
-    /// `zsh`/`bash` as the driver would spawn them, if installed.
+    /// `zsh`/`bash`/`fish` as the driver would spawn them, if installed: the
+    /// system dirs, Homebrew's usual prefixes (arm64 `/opt/homebrew`, Intel
+    /// `/usr/local`, or `HOMEBREW_PREFIX`), PATH, and last `brew --prefix`.
     fn installed_shell(name: &str) -> Option<PathBuf> {
-        ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+        let mut dirs: Vec<PathBuf> = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
             .iter()
-            .map(|dir| Path::new(dir).join(name))
+            .map(PathBuf::from)
+            .collect();
+        if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
+            dirs.push(Path::new(&prefix).join("bin"));
+        }
+        if let Some(path) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&path));
+        }
+        dirs.into_iter()
+            .map(|dir| dir.join(name))
             .find(|path| path.is_file())
+            .or_else(|| {
+                let output = std::process::Command::new("brew")
+                    .arg("--prefix")
+                    .output()
+                    .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                let prefix = String::from_utf8_lossy(&output.stdout);
+                Some(Path::new(prefix.trim()).join("bin").join(name)).filter(|path| path.is_file())
+            })
+    }
+
+    #[test]
+    fn login_shell_exec_writes_stdin_for_posix_shells_and_wraps_others_in_sh() {
+        // The line as `shell_exec_line` builds it: names and seeds only, the
+        // binary path with a `'` so the wrapper's quoting has something to do.
+        let line = concat!(
+            "set -- 'K='\"$__STAGED_EXTRA_ENV_0\"; unset __STAGED_EXTRA_ENV_0; ",
+            "exec /usr/bin/env -- \"$@\" '/x/it'\\''s/agent' '--stdio'\n"
+        );
+
+        for shell in [
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/usr/bin/dash",
+            "/bin/ksh",
+            "/usr/local/bin/mksh",
+            "/bin/ash",
+            "/opt/homebrew/bin/bash",
+        ] {
+            let exec = LoginShellExec::for_shell(Path::new(shell), line);
+            assert_eq!(exec, LoginShellExec::Stdin, "{shell}");
+            assert_eq!(exec.args(), vec!["-i", "-l", "-s"], "{shell}");
+        }
+
+        // fish: the whole line, single-quoted by fish's rules (`\'` and `\\`
+        // escaped, nothing else), as the argument of `/bin/sh -c`, which the
+        // login shell execs after its own rc files have run. No trailing
+        // newline inside the quotes.
+        let fish = LoginShellExec::for_shell(Path::new("/opt/homebrew/bin/fish"), line);
+        let expected = concat!(
+            "exec /bin/sh -c 'set -- \\'K=\\'\"$__STAGED_EXTRA_ENV_0\"; unset __STAGED_EXTRA_ENV_0; ",
+            "exec /usr/bin/env -- \"$@\" \\'/x/it\\'\\\\\\'\\'s/agent\\' \\'--stdio\\''"
+        );
+        assert_eq!(fish, LoginShellExec::Command(expected.to_string()));
+        assert_eq!(fish.args(), vec!["-l", "-c", expected]);
+
+        // Any other non-POSIX shell takes the same wrapper (best effort), and
+        // a path-less or oddly cased name doesn't pass as POSIX.
+        for shell in ["/usr/local/bin/nu", "/bin/tcsh", "/bin/Bash", "fish"] {
+            assert!(
+                matches!(
+                    LoginShellExec::for_shell(Path::new(shell), line),
+                    LoginShellExec::Command(_)
+                ),
+                "{shell}"
+            );
+        }
+    }
+
+    /// An "agent" that prints the variable under test, then its environment,
+    /// then everything it reads from stdin — the transport a real agent gets.
+    const PRINT_KEY_ENV_AND_STDIN: &str =
+        "#!/bin/sh\nprintf '%s\\n' \"$KEY\"\n/usr/bin/env\nprintf 'stdin='\ncat\n";
+
+    fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                files_under(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn fish_login_shell_runs_the_exec_line_through_sh_and_hands_over_stdin() {
+        // fish is the login shell this wrapper exists for: it rejects the
+        // POSIX line at parse time, has no `-s`, and reads stdin to EOF before
+        // running anything. Spawn it as the driver would (`-l -c`), with a
+        // config.fish that re-exports the same name, and check the agent sees
+        // the override, no seed reaches it, it gets what was written to stdin
+        // right after the spawn, and the value lands in no file under HOME.
+        let Some(fish) = installed_shell("fish") else {
+            eprintln!("skipping: fish is not installed");
+            return;
+        };
+        let secret = "sk-live-fish-do-not-record-7f3a";
+        let extra_env = vec![(String::from("KEY"), secret.to_string())];
+        let dir = unique_test_dir("acp-shell-fish");
+        let home = dir.join("home");
+        let config_dir = home.join(".config").join("fish");
+        std::fs::create_dir_all(&config_dir).expect("create fish config dir");
+        std::fs::write(
+            config_dir.join("config.fish"),
+            "set -gx KEY 'from rc file'\n",
+        )
+        .expect("write config.fish");
+        // Both characters fish's single quotes escape, so the quoting is
+        // exercised end to end, not just in the unit test above.
+        let printer = dir.join("print'k\\ey");
+        write_executable(&printer, PRINT_KEY_ENV_AND_STDIN);
+        let exec_line = shell_exec_line(&printer, &[], None, &extra_env);
+        let exec = LoginShellExec::for_shell(&fish, &exec_line);
+        assert!(matches!(exec, LoginShellExec::Command(_)), "{exec:?}");
+
+        let output = std::process::Command::new(&fish)
+            .args(exec.args())
+            .current_dir(&dir)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "dumb")
+            .env("SHELL", &fish)
+            .envs(extra_env.iter().cloned())
+            .envs(shell_extra_env_seeds(&extra_env))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                // Written at once, as the driver writes `initialize` without
+                // waiting for the shell: the shell must leave it in the pipe.
+                let mut stdin = child.stdin.take().expect("stdin");
+                stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1}\n")?;
+                drop(stdin);
+                child.wait_with_output()
+            })
+            .unwrap_or_else(|e| panic!("run {}: {e}", fish.display()));
+
+        assert!(
+            output.status.success(),
+            "fish exited {:?}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_agent_saw_override(&output.stdout, secret);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.lines().last(),
+            Some("stdin={\"jsonrpc\":\"2.0\",\"id\":1}"),
+            "the agent did not get what was written to stdin: {stdout}"
+        );
+
+        let mut files = Vec::new();
+        files_under(&home, &mut files);
+        for path in files {
+            let text =
+                String::from_utf8_lossy(&std::fs::read(&path).expect("read file under home"))
+                    .into_owned();
+            assert!(
+                !text.contains(secret),
+                "fish wrote the secret to {}: {text}",
+                path.display()
+            );
+        }
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
     }
 
     #[test]

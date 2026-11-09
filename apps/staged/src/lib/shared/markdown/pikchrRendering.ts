@@ -107,9 +107,22 @@ export type RenderedPikchrDiagram =
 
 export type PikchrRenderer = (source: string) => RenderedPikchrDiagram;
 
+/** How long a `loadPikchrRenderer()` call waits for the WASM module before giving up. */
+export const PIKCHR_LOAD_TIMEOUT_MS = 5_000;
+
 let rendererPromise: Promise<PikchrRenderer> | null = null;
 
-export function loadPikchrRenderer(): Promise<PikchrRenderer> {
+/**
+ * Load the pikchr renderer, shared by every caller on the page.
+ *
+ * A note viewer holds its first render until this settles (see
+ * noteRenderReadiness.ts), so a dynamic import that neither resolves nor
+ * rejects must not leave it blank: each call rejects after `timeoutMs`, and
+ * the caller renders the fenced source fallback instead. The import itself is
+ * left running and stays cached, so a later call finds the renderer if it did
+ * eventually land; only a rejected import is dropped, so the next call retries.
+ */
+export function loadPikchrRenderer(timeoutMs = PIKCHR_LOAD_TIMEOUT_MS): Promise<PikchrRenderer> {
   rendererPromise ??= import('pikchr-js')
     .then(({ default: loadPikchr }) => loadPikchr())
     .then((pikchr) => {
@@ -119,7 +132,27 @@ export function loadPikchrRenderer(): Promise<PikchrRenderer> {
       rendererPromise = null;
       throw error;
     });
-  return rendererPromise;
+  return withDeadline(
+    rendererPromise,
+    timeoutMs,
+    `Pikchr renderer did not load within ${timeoutMs} ms`
+  );
+}
+
+function withDeadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
 }
 
 export function renderPikchrSource(pikchr: Pikchr, source: string): RenderedPikchrDiagram {

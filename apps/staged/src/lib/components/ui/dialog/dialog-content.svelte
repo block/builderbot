@@ -213,7 +213,9 @@
     clip plays. Layout-positioned boxes are pixel-snapped, so auto margins
     centre to the same place and stay crisp; the zoom animation only uses
     `transform`, so it still runs. The mobile full-screen style zeroes the
-    margin along with the insets.
+    margin along with the insets. Being anchored to every edge also means an
+    auto width fills the viewport (to the max-width) rather than shrinking to
+    the content: a dialog that should hug its content passes `w-fit`.
   -->
   <DialogPrimitive.Content
     bind:ref

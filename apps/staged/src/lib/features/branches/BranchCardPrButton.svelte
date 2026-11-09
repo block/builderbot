@@ -1357,10 +1357,12 @@
               : 'Force Push'}</AlertDialog.Title
         >
         <AlertDialog.Description>
+          <!-- Svelte trims the leading whitespace of each block body, so the
+               joining spaces are explicit `{' '}` expressions. -->
           {pushTargetRef(branch, timeline?.gitState)} has commits that would be lost. Do you want to force
-          push? This will overwrite {pushTargetRef(branch, timeline?.gitState)} with your local version{#if forcePushDeferred}
-            once the current branch and project sessions finish{/if}.{#if forcePushNoVerify}
-            The pre-push hook won't run.{/if}
+          push? This will overwrite {pushTargetRef(branch, timeline?.gitState)} with your local version{#if forcePushDeferred}{' '}once
+            the current branch and project sessions finish{/if}.{#if forcePushNoVerify}{' '}The
+            pre-push hook won't run.{/if}
         </AlertDialog.Description>
       </AlertDialog.Header>
       <AlertDialog.Footer>

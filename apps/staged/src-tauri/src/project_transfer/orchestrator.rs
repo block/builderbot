@@ -51,6 +51,10 @@ use super::undo::{
 };
 use super::TransferError;
 
+/// How many candidate workspace names a transfer tries before giving up:
+/// the derived name, then as many later ordinals.
+const WORKSPACE_NAME_ATTEMPTS: u32 = 20;
+
 /// Where a transfer is, as `project-transfer-progress` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -555,23 +559,19 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// A free workspace name, from the primary branch's.
-    fn pick_workspace_name(&self, seed: &str) -> Result<String, Failure> {
-        use crate::branches::WORKSPACE_NAME_MAX_LENGTH as MAX;
-        use crate::branches::{infer_workspace_name, truncate_workspace_name};
-        let base = infer_workspace_name(seed);
-        for n in 1..=20 {
-            let name = if n == 1 {
-                base.clone()
-            } else {
-                let suffix = format!("-{n}");
-                let kept = truncate_workspace_name(&base, MAX - suffix.len());
-                format!("{kept}{suffix}")
-            };
+    /// A free workspace name, from the primary branch's: the derived name,
+    /// or when that is taken the next ordinal's, which keeps the
+    /// `{readable}-{hash}` shape rather than appending `-2` to a name that
+    /// may already be at the length limit.
+    fn pick_workspace_name(&self, project_id: &str, seed: &str) -> Result<String, Failure> {
+        use crate::branches::infer_workspace_name_nth;
+        for ordinal in 0..WORKSPACE_NAME_ATTEMPTS {
+            let name = infer_workspace_name_nth(project_id, seed, ordinal);
             if self.host.workspace_state(&name)? == WorkspaceState::NotFound {
                 return Ok(name);
             }
         }
+        let base = infer_workspace_name_nth(project_id, seed, 0);
         Err(format!("No free workspace name like {base}").into())
     }
 
@@ -594,7 +594,7 @@ impl Run<'_> {
             .or((!legs.is_empty()).then_some(0))
             .map(|i| legs[i].row.branch_name.clone())
             .unwrap_or_else(|| crate::branches::infer_branch_name(&inspection.project.name));
-        let workspace = self.pick_workspace_name(&seed)?;
+        let workspace = self.pick_workspace_name(&inspection.project.id, &seed)?;
         self.workspace_name = Some(workspace.clone());
         let Some(primary) = primary else {
             return Ok(());

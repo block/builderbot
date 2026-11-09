@@ -268,7 +268,7 @@ fn a_source_whose_ignored_files_cant_be_backed_up_stays() {
         "{:?}",
         result.warnings
     );
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
     assert!(!f.host.calls().iter().any(|c| c.starts_with("delete")));
 }
 
@@ -318,7 +318,7 @@ fn ignored_files_that_change_after_their_backup_keep_the_source() {
         "{:?}",
         result.warnings
     );
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
     assert!(!f.host.calls().iter().any(|c| c.starts_with("delete")));
     assert_eq!(read(&checkout, "late.log").as_deref(), Some("late\n"));
     assert_eq!(read(&checkout, "remote.log").as_deref(), Some("remote\n"));
@@ -360,7 +360,7 @@ fn an_ignored_file_gone_or_new_after_the_backup_keeps_the_source() {
         "{:?}",
         result.warnings
     );
-    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert_eq!(f.host.workspaces(), vec![f.workspace()]);
     assert!(!f.host.calls().iter().any(|c| c.starts_with("delete")));
 }
 

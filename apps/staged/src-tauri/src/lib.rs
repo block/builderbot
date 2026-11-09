@@ -493,7 +493,8 @@ fn create_project(
                 (branch.id, true)
             }
             store::ProjectLocation::Remote => {
-                let workspace_name = branches::infer_workspace_name(&inferred_branch_name);
+                let workspace_name =
+                    branches::infer_workspace_name(&project.id, &inferred_branch_name);
                 let mut branch = store::Branch::new_remote(
                     &project.id,
                     &inferred_branch_name,

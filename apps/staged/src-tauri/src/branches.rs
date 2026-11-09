@@ -468,21 +468,15 @@ pub(crate) fn resolve_workspace_repo_path(
     Ok(repo_subpath.to_string())
 }
 
-/// Resolve the workspace-relative path for a branch's repository.
-///
-/// The workspace clone directory is derived from `github_repo` (e.g.
-/// `squareup/g2` → `~/g2`). If the repo has a subpath (a monorepo
-/// subdirectory like `apps/staged`), it is appended to the clone directory.
-///
-/// Returns a `home:<dir>` string suitable for `resolve_workspace_repo_path`,
-/// or `None` when the branch has no associated project repo.
 /// Return just the repo-root clone directory as `home:<clone_dir>`.
 ///
 /// This is the base path on the workspace filesystem where the repo is
-/// cloned. Use this when you need commands to run from the repo root
-/// (e.g. `git diff` in `diff_commands`).
+/// cloned, and where its `.git` lives even for a monorepo subpath repo. Use
+/// this when you need commands to run from the repo root (e.g. `git diff` in
+/// `diff_commands`) or when checking for and creating the clone itself
+/// (`clone_repo_into_workspace`).
 pub(crate) fn resolve_branch_clone_dir(
-    store: &Arc<Store>,
+    store: &Store,
     branch: &store::Branch,
 ) -> Result<Option<String>, String> {
     let Some(repo_id) = branch.project_repo_id.as_deref() else {
@@ -495,6 +489,14 @@ pub(crate) fn resolve_branch_clone_dir(
     Ok(Some(format!("home:{clone_dir}")))
 }
 
+/// Resolve the workspace-relative path for a branch's repository.
+///
+/// The workspace clone directory is derived from `github_repo` (e.g.
+/// `squareup/g2` → `~/g2`). If the repo has a subpath (a monorepo
+/// subdirectory like `apps/staged`), it is appended to the clone directory.
+///
+/// Returns a `home:<dir>` string suitable for `resolve_workspace_repo_path`,
+/// or `None` when the branch has no associated project repo.
 pub(crate) fn resolve_branch_workspace_subpath(
     store: &Store,
     branch: &store::Branch,
@@ -658,20 +660,29 @@ fn needs_clone(probe: Result<String, blox::BloxError>) -> Result<bool, blox::Blo
 }
 
 /// Clone a repo into an already-running workspace, fetch the base branch,
-/// and create the feature branch.
+/// and check out the feature branch.
+///
+/// `clone_dir` is the repo-root clone directory from
+/// [`resolve_branch_clone_dir`] (`home:<clone>`), never the monorepo subpath
+/// from [`resolve_branch_workspace_subpath`]: `.git` lives at the clone root,
+/// so a `<clone>/<subpath>` path never finds an existing clone, and cloning
+/// into it fails on a workstation that already has the repo (or nests a
+/// second clone under the first on one that doesn't).
 ///
 /// This is used both by `start_workspace` (secondary repo in a shared
-/// workspace) and by `add_project_repo` (adding a repo to a remote project
-/// whose workspace is already running).
+/// workspace, or a branch re-entering `Starting` on a workstation that
+/// already has its clone, e.g. after `resume_workspace`) and by
+/// `add_project_repo` (adding a repo to a remote project whose workspace is
+/// already running).
 pub(crate) async fn clone_repo_into_workspace(
     ws_name: &str,
-    repo_subpath: &str,
+    clone_dir: &str,
     repo_slug: &str,
     base_ref: &str,
     branch_name: &str,
 ) -> Result<(), String> {
-    let repo_path = resolve_workspace_repo_path(ws_name, repo_subpath)
-        .map_err(|e| format!("Failed to resolve workspace repo path '{repo_subpath}': {e}"))?;
+    let repo_path = resolve_workspace_repo_path(ws_name, clone_dir)
+        .map_err(|e| format!("Failed to resolve workspace repo path '{clone_dir}': {e}"))?;
 
     // Clone only if the repo directory doesn't already exist.
     let probe = ws_exec_async(
@@ -681,7 +692,7 @@ pub(crate) async fn clone_repo_into_workspace(
     )
     .await;
     let needs_clone = needs_clone(probe).map_err(|e| {
-        format!("Failed to verify repo path '{repo_subpath}' in workspace '{ws_name}': {e}")
+        format!("Failed to verify repo path '{clone_dir}' in workspace '{ws_name}': {e}")
     })?;
     if needs_clone {
         let repo_url = format!("https://github.com/{repo_slug}.git");
@@ -695,79 +706,89 @@ pub(crate) async fn clone_repo_into_workspace(
         .await
         .map_err(|e| format!("Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}"))?;
     }
+    let clone_existed = !needs_clone;
 
     // Apply staged-managed git config. Idempotent — also serves as the
     // lazy migration for pre-existing remote clones (no registry on blox
     // workstations, so we redo the cheap config check on every visit).
     crate::git::config_apply::apply_to_blox_clone(ws_name, &repo_path).await;
 
-    // Tracked: a fetch on a large repo can outlast the transient 60 s limit.
-    run_workspace_git_async(
-        ws_name,
-        Some(repo_subpath),
-        ExecMode::Tracked,
-        &["fetch", "origin", base_ref],
-    )
+    let workspace = ws_name.to_string();
+    let remote_dir = clone_dir.to_string();
+    let base = base_ref.to_string();
+    let branch = branch_name.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Tracked for everything but `rev-parse`: Blox SIGKILLs a transient
+        // git at 60 s, which a fetch on a large repo can outlast (reading as
+        // "no remote branch" and silently branching from base), and a
+        // checkout far from the default branch (or smudging LFS files) can
+        // outlast too, leaving `.git/index.lock` and a half-updated worktree.
+        let git: GitRunner<'_> = Box::new(move |args: &[&str]| {
+            let mode = if args.first() == Some(&"rev-parse") {
+                ExecMode::Transient
+            } else {
+                ExecMode::Tracked
+            };
+            run_workspace_git_with_mode(&workspace, Some(&remote_dir), mode, args)
+                .map_err(|e| e.to_string())
+        });
+        check_out_workspace_branch(&git, &base, &branch, clone_existed)
+    })
     .await
-        .map_err(|e| format!(
-            "Failed to fetch base branch '{base_ref}' for '{repo_slug}' in workspace '{ws_name}': {e}"
-        ))?;
+    .map_err(|e| format!("Branch checkout task failed: {e}"))?
+    .map_err(|e| format!("Failed to set up '{repo_slug}' in workspace '{ws_name}': {e}"))
+}
+
+/// Fetch `base_ref` into the clone `git` runs in, and put the clone on
+/// `branch_name`.
+///
+/// A clone that already existed and already has `branch_name` checked out is
+/// left as it is: this runs again whenever a branch re-enters `Starting` on a
+/// workstation that has its clone, and `checkout -B` there would reset the
+/// branch onto origin, dropping any unpushed commits. Only the fetches run.
+fn check_out_workspace_branch(
+    git: &GitRunner<'_>,
+    base_ref: &str,
+    branch_name: &str,
+    clone_existed: bool,
+) -> Result<(), String> {
+    git(&["fetch", "origin", base_ref])
+        .map_err(|e| format!("could not fetch base branch '{base_ref}': {e}"))?;
 
     // If the branch already exists on the remote (e.g. from an existing PR),
     // fetch it and start from there so we pick up its commits. Otherwise fall
-    // back to starting from the base branch. Tracked: a transient fetch killed
-    // at 60 s would read as "no remote branch" and silently branch from base.
-    let has_remote_branch = if branch_name != base_ref {
-        run_workspace_git_async(
-            ws_name,
-            Some(repo_subpath),
-            ExecMode::Tracked,
-            &["fetch", "origin", branch_name],
-        )
-        .await
-        .is_ok()
-    } else {
-        false
-    };
+    // back to starting from the base branch.
+    let has_remote_branch =
+        branch_name != base_ref && git(&["fetch", "origin", branch_name]).is_ok();
+
+    if clone_existed
+        && git(&["rev-parse", "--abbrev-ref", "HEAD"]).is_ok_and(|head| head.trim() == branch_name)
+    {
+        return Ok(());
+    }
 
     // `checkout -B <branch> origin/<branch>` makes the checkout track the
     // branch it pushes to. A fresh branch must not track `origin/<base>`
     // instead — git's upstream is read back as the push target.
-    let checkout_args: Vec<String> = if has_remote_branch {
-        vec![
-            "checkout".into(),
-            "-B".into(),
-            branch_name.into(),
-            format!("origin/{branch_name}"),
-        ]
+    let checkout = if has_remote_branch {
+        git(&[
+            "checkout",
+            "-B",
+            branch_name,
+            &format!("origin/{branch_name}"),
+        ])
     } else {
-        vec![
-            "checkout".into(),
-            "--no-track".into(),
-            "-B".into(),
-            branch_name.into(),
-            format!("origin/{base_ref}"),
-        ]
+        git(&[
+            "checkout",
+            "--no-track",
+            "-B",
+            branch_name,
+            &format!("origin/{base_ref}"),
+        ])
     };
-    let checkout_args: Vec<&str> = checkout_args.iter().map(String::as_str).collect();
-
-    // Tracked: Blox SIGKILLs a transient git at 60 s, and a checkout far from
-    // the default branch (or smudging LFS files) can outlast that, leaving
-    // `.git/index.lock` and a half-updated worktree behind.
-    run_workspace_git_async(
-        ws_name,
-        Some(repo_subpath),
-        ExecMode::Tracked,
-        &checkout_args,
-    )
-    .await
-    .map_err(|e| {
-        format!(
-        "Failed to create branch '{branch_name}' for '{repo_slug}' in workspace '{ws_name}': {e}"
-    )
-    })?;
-
-    Ok(())
+    checkout
+        .map(|_| ())
+        .map_err(|e| format!("could not create branch '{branch_name}': {e}"))
 }
 
 /// Kick the branch's session queue when a workspace-status write moved it to
@@ -819,14 +840,14 @@ pub(crate) async fn setup_remote_repo_clone<R: tauri::Runtime>(
         .workspace_name
         .as_deref()
         .ok_or("Branch has no workspace name")?;
-    let repo_subpath = resolve_branch_workspace_subpath(store, &branch)?
-        .ok_or("Branch has no workspace subpath")?;
+    let clone_dir =
+        resolve_branch_clone_dir(store, &branch)?.ok_or("Branch has no project repo to clone")?;
     let ref_name = normalize_branch_ref(&branch.base_branch);
     let repo_slug = resolve_branch_repo_slug(store, &project, &branch)?;
 
     clone_repo_into_workspace(
         ws_name,
-        &repo_subpath,
+        &clone_dir,
         &repo_slug,
         &ref_name,
         &branch.branch_name,
@@ -2073,6 +2094,7 @@ pub async fn start_workspace(
         .as_deref()
         .ok_or("Branch has no workspace name")?;
     let repo_subpath = resolve_branch_workspace_subpath(&store, &branch)?;
+    let clone_dir = resolve_branch_clone_dir(&store, &branch)?;
     let ref_name = normalize_branch_ref(&branch.base_branch);
     let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
 
@@ -2086,8 +2108,10 @@ pub async fn start_workspace(
         return Err(e.to_string());
     }
 
-    // Secondary repo setup in an already-running shared workspace.
-    if let Some(repo_subpath) = repo_subpath.as_deref() {
+    // Secondary repo setup in an already-running shared workspace — or a
+    // branch re-entering `Starting` (e.g. after `resume_workspace`) on a
+    // workstation that already has this clone.
+    if let Some(clone_dir) = clone_dir.as_deref() {
         if let Ok(info) = run_blox_blocking({
             let ws_name = ws_name.to_string();
             move || blox::ws_info(&ws_name)
@@ -2107,7 +2131,7 @@ pub async fn start_workspace(
             if ws_status == "running" {
                 clone_repo_into_workspace(
                     ws_name,
-                    repo_subpath,
+                    clone_dir,
                     &repo_slug,
                     &ref_name,
                     &branch.branch_name,
@@ -3850,6 +3874,70 @@ mod tests {
         );
     }
 
+    /// A monorepo repo is cloned, and its `.git` lives, at the repo root:
+    /// `clone_repo_into_workspace` checks for and creates the clone at the
+    /// clone dir, while sessions run in the subpath beneath it. Handing it the
+    /// subpath made it miss the existing clone and `git clone` into a
+    /// non-empty directory.
+    #[test]
+    fn clone_dir_is_the_repo_root_for_a_subpath_repo() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("block/builderbot");
+        store.create_project(&project).unwrap();
+        let repo = store::ProjectRepo::new(
+            &project.id,
+            "block/builderbot",
+            "feature",
+            Some("apps/staged".to_string()),
+        );
+        store.create_project_repo(&repo).unwrap();
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", "ws-1")
+            .with_project_repo(&repo.id);
+
+        let clone_dir = resolve_branch_clone_dir(&store, &branch).unwrap().unwrap();
+        assert_eq!(clone_dir, "home:builderbot");
+        assert_eq!(
+            resolve_workspace_repo_path("ws-1", &clone_dir).unwrap(),
+            "/home/bloxer/builderbot"
+        );
+        assert_eq!(
+            resolve_branch_workspace_subpath(&store, &branch)
+                .unwrap()
+                .as_deref(),
+            Some("home:builderbot/apps/staged")
+        );
+    }
+
+    /// Without a subpath the clone dir and the session dir are the same.
+    #[test]
+    fn clone_dir_matches_the_workspace_subpath_without_a_subpath() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("squareup/g2");
+        store.create_project(&project).unwrap();
+        let repo = store::ProjectRepo::new(&project.id, "squareup/g2", "feature", None);
+        store.create_project_repo(&repo).unwrap();
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", "ws-1")
+            .with_project_repo(&repo.id);
+
+        let clone_dir = resolve_branch_clone_dir(&store, &branch).unwrap();
+        assert_eq!(clone_dir.as_deref(), Some("home:g2"));
+        assert_eq!(
+            resolve_branch_workspace_subpath(&store, &branch).unwrap(),
+            clone_dir
+        );
+    }
+
+    /// A branch with no project repo has no clone to check for or create.
+    #[test]
+    fn clone_dir_is_none_without_a_repo() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("squareup/g2");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", "ws-1");
+
+        assert!(resolve_branch_clone_dir(&store, &branch).unwrap().is_none());
+    }
+
     #[test]
     fn apply_branch_prefix_joins_with_slash() {
         assert_eq!(
@@ -5204,5 +5292,99 @@ mod upstream_tracking_tests {
         );
         assert_eq!(merge_config(clone.path(), "feature-y"), "");
         assert_eq!(resolve_remote_branch_sync(&store, &stored), "feature-y");
+    }
+
+    // ── Workspace checkout on (re-)entry ────────────────────────────────────
+
+    /// An existing clone of [`bare_origin`] with `feature-x` checked out and
+    /// one commit on it that origin doesn't have. Returns the commit's sha.
+    fn clone_on_feature_x_with_an_unpushed_commit() -> (TempDir, TempDir, String) {
+        let origin = bare_origin();
+        let clone = clone_of(&origin, &[]);
+        git(
+            clone.path(),
+            &["checkout", "-b", "feature-x", "origin/feature-x"],
+        );
+        std::fs::write(clone.path().join("file.txt"), "base\nfeature\nunpushed\n").unwrap();
+        git(clone.path(), &["commit", "-am", "unpushed"]);
+        let sha = git(clone.path(), &["rev-parse", "HEAD"]);
+        (origin, clone, sha)
+    }
+
+    /// A branch re-entering `Starting` on a workstation that already has its
+    /// checkout keeps it: `checkout -B feature-x origin/feature-x` would reset
+    /// the branch and drop the unpushed commit.
+    #[test]
+    fn an_existing_clone_already_on_the_branch_is_not_reset() {
+        let (_origin, clone, unpushed) = clone_on_feature_x_with_an_unpushed_commit();
+
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            "main",
+            "feature-x",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-x"
+        );
+        assert_eq!(git(clone.path(), &["rev-parse", "HEAD"]), unpushed);
+    }
+
+    /// An existing clone on some other branch is still moved onto the
+    /// branch, tracking it on origin.
+    #[test]
+    fn an_existing_clone_on_another_branch_checks_out_the_branch() {
+        let origin = bare_origin();
+        let clone = clone_of(&origin, &[]);
+
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            "main",
+            "feature-x",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-x"
+        );
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "HEAD"]),
+            git(clone.path(), &["rev-parse", "origin/feature-x"])
+        );
+        assert_eq!(
+            merge_config(clone.path(), "feature-x"),
+            "refs/heads/feature-x"
+        );
+    }
+
+    /// A branch not on origin starts from the base branch and tracks
+    /// nothing, so its first push goes to its own name.
+    #[test]
+    fn a_branch_missing_from_origin_starts_untracked_from_the_base() {
+        let origin = bare_origin();
+        let clone = clone_of(&origin, &[]);
+
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            "main",
+            "feature-new",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-new"
+        );
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "HEAD"]),
+            git(clone.path(), &["rev-parse", "origin/main"])
+        );
+        assert_eq!(merge_config(clone.path(), "feature-new"), "");
     }
 }

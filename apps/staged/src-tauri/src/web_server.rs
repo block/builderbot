@@ -2170,6 +2170,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     .as_deref()
                     .ok_or("Branch has no workspace name")?;
                 let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
+                let clone_dir = crate::branches::resolve_branch_clone_dir(&store, &branch)?;
                 let ref_name = crate::branches::normalize_branch_ref(&branch.base_branch);
                 let repo_slug = crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
 
@@ -2181,8 +2182,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     return Err(e.to_string());
                 }
 
-                // Secondary repo setup in an already-running shared workspace
-                if let Some(repo_subpath) = repo_subpath.as_deref() {
+                // Secondary repo setup in an already-running shared workspace —
+                // or a branch re-entering `Starting` on a workstation that
+                // already has this clone.
+                if let Some(clone_dir) = clone_dir.as_deref() {
                     if let Ok(info) = crate::branches::run_blox_blocking({
                         let ws_name = ws_name.to_string();
                         move || crate::blox::ws_info(&ws_name)
@@ -2202,7 +2205,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                         if ws_status == "running" {
                             crate::branches::clone_repo_into_workspace(
                                 ws_name,
-                                repo_subpath,
+                                clone_dir,
                                 &repo_slug,
                                 &ref_name,
                                 &branch.branch_name,

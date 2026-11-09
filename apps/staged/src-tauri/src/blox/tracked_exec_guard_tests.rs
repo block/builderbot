@@ -3,7 +3,9 @@
 //! Tracked entries are never cleaned up, so Staged's own plumbing flooded it
 //! with over a thousand git reads in an afternoon. Transient is the default
 //! for plumbing, and a tracked call is a reviewed exception: one that can
-//! outlast the transient path's 60 s limit, streams output, or runs a
+//! outlast the transient path's 60 s limit, rewrites the worktree (Blox kills
+//! a transient command at 60 s, and a git killed mid-rewrite leaves a
+//! half-updated tree and `.git/index.lock`), streams output, or runs a
 //! command the user wrote.
 //!
 //! Source-level: each `ExecMode::Tracked` in `src/` is attributed to the fn it
@@ -19,6 +21,9 @@ const TRACKED: &[(&str, &str, usize)] = &[
     // `git clone`, both setup fetches and the setup checkout, for a repo
     // added to a workspace. A killed checkout leaves `.git/index.lock`.
     ("branches.rs", "clone_repo_into_workspace", 4),
+    // The diff-collection script reads both versions of every changed file
+    // for every commit on the branch; on a large branch it outlasts 60 s.
+    ("diff_cache.rs", "collect_branch_diff", 1),
     // The setup fetch probing whether the branch exists on the remote (a
     // killed probe would silently branch from base instead) and the setup
     // checkout (a killed one leaves `.git/index.lock`).
@@ -28,6 +33,13 @@ const TRACKED: &[(&str, &str, usize)] = &[
     // Project transfer scripts hash working trees, write bundles and clone;
     // their timeout grows with the payload, well past 60 s.
     ("project_transfer/endpoint.rs", "run_script_sized", 1),
+    // Worktree rewrites: `reset --hard` to the parent commit, `merge
+    // --ff-only`, `reset --hard` + `clean -fd` (twice: reset to remote, and
+    // discarding worktree changes).
+    ("timeline.rs", "delete_commit_impl", 1),
+    ("timeline.rs", "discard_remote_worktree_changes", 2),
+    ("timeline.rs", "pull_branch_ff_only_impl", 1),
+    ("timeline.rs", "reset_branch_to_remote_impl", 2),
     // The `start_workspace` arm's copy of the setup fetch and checkout.
     ("web_server.rs", "dispatch", 2),
 ];
@@ -69,8 +81,8 @@ fn tracked_blox_execs_match_the_allowlist() {
         found, expected,
         "a Blox exec switched to or from ExecMode::Tracked. Tracked execs stay in the \
          workstation's command history forever; use ExecMode::Transient unless the \
-         call can outlast 60 s, streams output, or runs a user-written command, and \
-         update TRACKED with the reason"
+         call can outlast 60 s, rewrites the worktree, streams output, or runs a \
+         user-written command, and update TRACKED with the reason"
     );
 }
 

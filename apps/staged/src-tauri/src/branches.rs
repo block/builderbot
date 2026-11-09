@@ -253,10 +253,13 @@ fn workspace_git_args(
 
 /// Run a git command inside a Blox workspace as Staged plumbing.
 ///
-/// Always [`ExecMode::Transient`]: callers are quick reads and Staged-composed
-/// mutations, which would otherwise flood the workstation's Blox command
-/// history. Anything that can run past 60 s goes through
-/// [`run_workspace_git_async`] with an explicit mode instead.
+/// Always [`ExecMode::Transient`]: callers are quick reads and ref-only
+/// writes, which would otherwise flood the workstation's Blox command
+/// history. Anything that rewrites the worktree (`reset --hard`, `clean`,
+/// `merge`, `checkout`) or can run past 60 s goes through
+/// [`run_workspace_git_with_mode`] as a tracked exec instead: Blox kills a
+/// transient command at 60 s, and a git killed mid-rewrite leaves a
+/// half-updated tree and `.git/index.lock`.
 pub(crate) fn run_workspace_git(
     workspace_name: &str,
     repo_subpath: Option<&str>,
@@ -265,7 +268,9 @@ pub(crate) fn run_workspace_git(
     run_workspace_git_with_mode(workspace_name, repo_subpath, ExecMode::Transient, git_args)
 }
 
-fn run_workspace_git_with_mode(
+/// [`run_workspace_git`] with an explicit [`ExecMode`], for the worktree
+/// mutations that must not be killed part-way.
+pub(crate) fn run_workspace_git_with_mode(
     workspace_name: &str,
     repo_subpath: Option<&str>,
     mode: ExecMode,

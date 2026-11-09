@@ -608,21 +608,60 @@ pub fn ws_exec_command(name: &str, mode: ExecMode, args: &[&str]) -> Vec<String>
         .collect()
 }
 
-/// Runs `"$@"` with stdout captured to a temp file, then prints that file as
+/// Runs `$2…` with stdout captured to a temp file, then prints that file as
 /// base64 and exits with the command's status. Transient execs reject
 /// non-UTF-8 stdout, so binary-returning calls go through this. A temp file
 /// rather than a pipe keeps the exit code without relying on `pipefail`.
 /// A failed `base64` exits 125: its output may be empty or cut at a line
 /// boundary, either of which would otherwise decode cleanly as short bytes.
-const BASE64_STDOUT_SCRIPT: &str =
-    r#"f=$(mktemp) || exit 125; "$@" >"$f"; rc=$?; base64 <"$f" || rc=125; rm -f "$f"; exit $rc"#;
+///
+/// Blox SIGKILLs a transient command at 60 s, which would orphan the payload
+/// (still writing the temp file) and skip the cleanup. So the payload runs in
+/// the background under a watchdog that TERMs it after `$1` seconds (then
+/// KILLs it two seconds later) and the wrapper exits 124, the same code
+/// `timeout(1)` uses; `$1` stays under 60 s so the wrapper always gets to
+/// clean up. A TERM/INT/HUP to the wrapper itself kills the payload and the
+/// temp dir too. Only the payload process is killed, not grandchildren of a
+/// `sh -c` payload. Written for POSIX `sh` (dash on the workstations), so no
+/// `timeout`, `pipefail` or process groups.
+const BASE64_STDOUT_SCRIPT: &str = concat!(
+    r#"d=$(mktemp -d) || exit 125; t=$1; shift; "#,
+    r#""$@" >"$d/out" & p=$!; "#,
+    r#"(trap 'kill $! 2>/dev/null; exit' TERM; sleep "$t" & wait $!; : >"$d/late"; "#,
+    r#"kill -TERM $p 2>/dev/null; sleep 2 & wait $!; kill -KILL $p 2>/dev/null) & w=$!; "#,
+    r#"trap 'kill -TERM $p $w 2>/dev/null; rm -rf "$d"; exit 124' TERM INT HUP; "#,
+    r#"wait $p; rc=$?; kill $w 2>/dev/null; trap - TERM INT HUP; "#,
+    r#"if [ -e "$d/late" ]; then rc=124; else base64 <"$d/out" || rc=125; fi; "#,
+    r#"rm -rf "$d"; exit $rc"#,
+);
+
+/// How long [`BASE64_STDOUT_SCRIPT`] lets its payload run. Blox's 60 s clock
+/// starts before the wrapper's does, and base64-encoding the output and
+/// shipping it back have to fit inside the remainder.
+const BASE64_PAYLOAD_DEADLINE: &str = "50";
 
 /// Wrap `args` in [`BASE64_STDOUT_SCRIPT`] when `mode` needs it.
 fn binary_safe_args<'a>(mode: ExecMode, args: &[&'a str]) -> Vec<&'a str> {
+    binary_safe_args_with_deadline(mode, BASE64_PAYLOAD_DEADLINE, args)
+}
+
+/// [`binary_safe_args`] with the payload deadline in seconds spelled out, so
+/// tests can hit it quickly.
+fn binary_safe_args_with_deadline<'a>(
+    mode: ExecMode,
+    deadline_secs: &'a str,
+    args: &[&'a str],
+) -> Vec<&'a str> {
     match mode {
         ExecMode::Tracked => args.to_vec(),
         ExecMode::Transient => {
-            let mut wrapped = vec!["sh", "-c", BASE64_STDOUT_SCRIPT, "staged-b64"];
+            let mut wrapped = vec![
+                "sh",
+                "-c",
+                BASE64_STDOUT_SCRIPT,
+                "staged-b64",
+                deadline_secs,
+            ];
             wrapped.extend_from_slice(args);
             wrapped
         }
@@ -964,6 +1003,109 @@ mod tests {
             assert_eq!(output.status.code(), Some(125), "{shell}");
         }
         let _ = std::fs::remove_dir_all(&stub_dir);
+        assert!(shells_run > 0);
+    }
+
+    /// A fresh `TMPDIR` for one wrapper run, so the test can check the
+    /// wrapper's temp dir was removed whichever way it exited.
+    fn scratch_tmpdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "blox-cli-b64-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn dir_is_empty(dir: &Path) -> bool {
+        std::fs::read_dir(dir).unwrap().next().is_none()
+    }
+
+    /// Past the deadline the wrapper kills the payload, exits 124 and leaves
+    /// no temp dir behind, instead of waiting for Blox's 60 s SIGKILL.
+    #[test]
+    fn base64_wrapper_kills_the_payload_at_its_deadline() {
+        let mut shells_run = 0;
+        for shell in ["/bin/sh", "/bin/dash"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            shells_run += 1;
+            let tmp = scratch_tmpdir("deadline");
+            let args = binary_safe_args_with_deadline(
+                ExecMode::Transient,
+                "1",
+                &["sh", "-c", "printf partial; exec sleep 30"],
+            );
+            let started = std::time::Instant::now();
+            let output = Command::new(shell)
+                .args(&args[1..])
+                .env("TMPDIR", &tmp)
+                .output()
+                .unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(output.status.code(), Some(124), "{shell}");
+            assert!(
+                output.stdout.is_empty(),
+                "{shell}: partial output must not be returned"
+            );
+            assert!(
+                elapsed < Duration::from_secs(20),
+                "{shell}: took {elapsed:?}"
+            );
+            assert!(dir_is_empty(&tmp), "{shell}: temp dir leaked");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+        assert!(shells_run > 0);
+    }
+
+    /// A TERM to the wrapper itself (rather than its deadline firing) also
+    /// kills the payload and removes the temp dir.
+    #[cfg(unix)]
+    #[test]
+    fn base64_wrapper_cleans_up_when_terminated() {
+        let mut shells_run = 0;
+        for shell in ["/bin/sh", "/bin/dash"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            shells_run += 1;
+            let tmp = scratch_tmpdir("term");
+            let args = binary_safe_args_with_deadline(
+                ExecMode::Transient,
+                "50",
+                &["sh", "-c", "printf partial; exec sleep 30"],
+            );
+            let started = std::time::Instant::now();
+            let mut child = Command::new(shell)
+                .args(&args[1..])
+                .env("TMPDIR", &tmp)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // Give the wrapper time to install its trap before signalling.
+            std::thread::sleep(Duration::from_secs(1));
+            let killed = Command::new("kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status()
+                .unwrap();
+            assert!(killed.success(), "{shell}");
+            let output = child.wait_with_output().unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(output.status.code(), Some(124), "{shell}");
+            assert!(output.stdout.is_empty(), "{shell}");
+            assert!(
+                elapsed < Duration::from_secs(20),
+                "{shell}: took {elapsed:?}"
+            );
+            assert!(dir_is_empty(&tmp), "{shell}: temp dir leaked");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
         assert!(shells_run > 0);
     }
 

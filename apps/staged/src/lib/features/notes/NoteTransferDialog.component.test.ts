@@ -25,7 +25,7 @@ vi.mock(
   '../projects/ProjectRowContent.svelte',
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
-vi.mock('../settings/sq.svelte', () => ({ sqState: sq }));
+vi.mock('../settings/sq.svelte', () => ({ bloxAvailable: () => sq.loaded && sq.available }));
 vi.mock('../settings/preferences.svelte', () => ({ preferences: prefs, setNewProjectLocation }));
 vi.mock('../../stores/projectsData.svelte', () => ({
   projectsDataStore: {

@@ -3,7 +3,7 @@
 
   Shared by NewProjectForm and the note transfer picker's "create project"
   path. Hosts only render it when remote projects are available at all (see
-  `sqState`); `remoteDisabledReason` is for a host that has remote but can't
+  `bloxAvailable`); `remoteDisabledReason` is for a host that has remote but can't
   use it for this project. It disables the Remote tile and is shown as a
   helper line below the tiles rather than inside the faded tile. The group
   and the tile are both described by it, since a disabled tile takes no focus.

@@ -15,7 +15,10 @@ const { sq, prefs, setNewProjectLocation, createProject } = vi.hoisted(() => {
 });
 
 vi.mock('./RepoConfigForm.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
-vi.mock('../settings/sq.svelte', () => ({ sqState: sq }));
+vi.mock('../settings/sq.svelte', () => ({
+  sqState: sq,
+  bloxAvailable: () => sq.loaded && sq.available,
+}));
 vi.mock('../settings/preferences.svelte', () => ({ preferences: prefs, setNewProjectLocation }));
 vi.mock('../../api/commands', () => ({ createProject, createProjectNote: vi.fn() }));
 

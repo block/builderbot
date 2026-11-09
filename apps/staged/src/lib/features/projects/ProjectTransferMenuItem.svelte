@@ -1,9 +1,9 @@
 <!--
   ProjectTransferMenuItem.svelte — the "Transfer to Blox" / "Transfer to
   local" context-menu item shared by the landing grid and the sidebar.
-  Whichever location the project is not in; hidden for a project known to
-  have no repos, disabled while the project is deleting or already
-  transferring.
+  Whichever location the project is not in; hidden when the `sq` CLI is
+  unavailable (either direction needs Blox) and for a project known to have no
+  repos, disabled while the project is deleting or already transferring.
 -->
 <script lang="ts">
   import CloudUpload from '@lucide/svelte/icons/cloud-upload';
@@ -11,6 +11,7 @@
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import type { Project } from '../../types';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import { bloxAvailable } from '../settings/sq.svelte';
   import { projectActions } from './projectActions.svelte';
   import { transferActionLabel, transferDirectionFrom } from './projectTransfer';
 
@@ -31,7 +32,7 @@
   });
 </script>
 
-{#if hasRepos}
+{#if bloxAvailable() && hasRepos}
   <ContextMenu.Item
     disabled={disabled || projectsDataStore.isProjectTransferring(project.id)}
     onSelect={() => projectActions.requestTransferProject(project)}

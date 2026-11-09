@@ -44,7 +44,7 @@
   import ProjectLocationPicker from '../projects/ProjectLocationPicker.svelte';
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { sqState } from '../settings/sq.svelte';
+  import { bloxAvailable } from '../settings/sq.svelte';
   import { preferences, setNewProjectLocation } from '../settings/preferences.svelte';
   import * as commands from '../../api/commands';
   import { filterMoveTargets, nextMoveTargetIndex } from '../branches/moveBranchTarget';
@@ -167,7 +167,7 @@
   // What confirming acts on, picked or not: it is the row shown as chosen, and
   // when it is a project to create, its location is on screen to change.
   let target = $derived(noteTransferTarget(selected, query, filtered, createName));
-  let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);
+  let remoteProjectsAvailable = $derived(bloxAvailable());
   let remoteBlocker = $derived(newRemoteProjectBlocker(noteRepo));
   let remoteSelectable = $derived(remoteProjectsAvailable && !remoteBlocker);
   // The picker shows this, so a remembered Remote doesn't sit selected on a

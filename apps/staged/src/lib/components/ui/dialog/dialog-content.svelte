@@ -115,6 +115,7 @@
       'width:100%',
       'max-width:none',
       'max-height:none',
+      'margin:0',
       'transform:none',
       'translate:none',
       'border-radius:0',
@@ -202,6 +203,18 @@
     defaults it on). They have no overlay, so that body `pointer-events: none`
     is what swallows the outside click that dismisses them.
   -->
+  <!--
+    Desktop centering is `inset: 0; margin: auto` on a fit-content height, not
+    `top/left: 50%` with a -50% translate. The translate puts the dialog at a
+    fractional device-pixel offset whenever its height is odd in half-pixels
+    (a 16:9 video alone makes it so), and WKWebView composites the native
+    `<video controls>` bar — a backdrop-filter layer — through that fractional
+    transform, which smears its timeline and time labels into a blur while a
+    clip plays. Layout-positioned boxes are pixel-snapped, so auto margins
+    centre to the same place and stay crisp; the zoom animation only uses
+    `transform`, so it still runs. The mobile full-screen style zeroes the
+    margin along with the insets.
+  -->
   <DialogPrimitive.Content
     bind:ref
     data-slot="dialog-content"
@@ -209,7 +222,7 @@
       'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl pt-[calc(--spacing(6)+var(--dialog-safe-top,0px))] pb-6 pl-[calc(--spacing(6)+var(--dialog-safe-left,0px))] pr-[calc(--spacing(6)+var(--dialog-safe-right,0px))] text-sm ring-1 duration-100 sm:max-w-md fixed z-(--z-index-overlay) w-full outline-none',
       fullScreen
         ? 'data-open:slide-in-from-bottom data-closed:slide-out-to-bottom'
-        : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 data-closed:zoom-out-95 data-open:zoom-in-95',
+        : 'inset-0 m-auto h-fit data-closed:zoom-out-95 data-open:zoom-in-95',
       className
     )}
     style={contentStyle}

@@ -44,6 +44,7 @@
   } from '../../api/commands';
   import { listenToEvent } from '../../transport';
   import { notesChangeAffectsNote } from './noteRefresh';
+  import { noteRenderInputsReady } from './noteRenderReadiness';
   import { NoteReadTracker } from './noteReadTracker.svelte';
   import { formatChatButtonLabel, type LinkedNoteContext } from '../sessions/noteFreshness';
   import PooledSessionChatPane from '../sessions/PooledSessionChatPane.svelte';
@@ -269,13 +270,23 @@
       cancelled = true;
     };
   });
-  // The note is not rendered until its images' dimensions are in: `{@html}`
-  // rebuilds the DOM when the string changes, so rendering unsized first and
-  // again once the (local) lookup answers would reload every image and jump
-  // the ones already painted. A note with no embedded images, or whose
-  // images are already known, renders at once.
+  // The note is not rendered until everything its render needs is in — its
+  // images' dimensions (a local lookup) and, for a note with a pikchr
+  // diagram, the lazily loaded renderer. `{@html}` rebuilds the DOM when the
+  // string changes, so rendering first without an input and again once it
+  // lands would reload every image, jump the ones already painted and remount
+  // a video the reader had started (see noteRenderReadiness.ts). A note that
+  // needs neither, or whose inputs are already cached, renders at once.
+  let noteRenderReady = $derived(
+    noteRenderInputsReady({
+      mediaDimensionsKnown,
+      needsPikchr: noteHasPikchr,
+      pikchrRendererLoaded: pikchrRenderer !== null,
+      pikchrRendererLoadFailed,
+    })
+  );
   let renderedNoteHtml = $derived(
-    mediaDimensionsKnown
+    noteRenderReady
       ? renderNoteMarkdown(noteMarkdown, {
           pikchrRenderer,
           renderInlineText: hashtagItems.length

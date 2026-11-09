@@ -15,6 +15,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use super::cli::GitError;
+use crate::blox::ExecMode;
 
 const FSMONITOR_MIN_MAJOR: u32 = 2;
 const FSMONITOR_MIN_MINOR: u32 = 36;
@@ -104,6 +105,7 @@ pub async fn apply_to_blox_clone(ws_name: &str, repo_path: &str) {
 async fn set_if_unset_blox(ws_name: &str, repo_path: &str, key: &str, value: &str) {
     match crate::branches::ws_exec_async(
         ws_name,
+        ExecMode::Transient,
         &["git", "-C", repo_path, "config", "--local", "--get", key],
     )
     .await
@@ -112,6 +114,7 @@ async fn set_if_unset_blox(ws_name: &str, repo_path: &str, key: &str, value: &st
         Err(crate::blox::BloxError::CommandFailed(_)) => {
             if let Err(e) = crate::branches::ws_exec_async(
                 ws_name,
+                ExecMode::Transient,
                 &["git", "-C", repo_path, "config", "--local", key, value],
             )
             .await
@@ -139,15 +142,18 @@ async fn blox_supports_fsmonitor(ws_name: &str) -> bool {
         }
     }
 
-    let supported = match crate::branches::ws_exec_async(ws_name, &["git", "--version"]).await {
-        Ok(out) => parse_git_version(&out)
-            .map(version_supports_fsmonitor)
-            .unwrap_or(false),
-        Err(e) => {
-            log::warn!("[config_apply] could not probe git version on {ws_name}: {e}");
-            false
-        }
-    };
+    let supported =
+        match crate::branches::ws_exec_async(ws_name, ExecMode::Transient, &["git", "--version"])
+            .await
+        {
+            Ok(out) => parse_git_version(&out)
+                .map(version_supports_fsmonitor)
+                .unwrap_or(false),
+            Err(e) => {
+                log::warn!("[config_apply] could not probe git version on {ws_name}: {e}");
+                false
+            }
+        };
     cache.lock().await.insert(ws_name.to_string(), supported);
     supported
 }

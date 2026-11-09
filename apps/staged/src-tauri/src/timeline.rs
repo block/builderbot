@@ -10,6 +10,7 @@
 
 mod git_state_follow_up;
 
+use crate::blox::ExecMode;
 use crate::git;
 use crate::session_runner;
 use crate::store::{CommentAuthor, CommentType, Review, Store};
@@ -919,9 +920,12 @@ pub(crate) fn pull_branch_ff_only_impl(store: &Arc<Store>, branch_id: &str) -> R
             git::WorktreeStatusScope::Full,
         );
         git::ensure_fast_forward_pullable(&state)?;
-        branches::run_workspace_git(
+        // Tracked: a fast-forward rewrites the worktree, and a merge killed at
+        // the transient 60 s limit leaves it half-updated with `index.lock`.
+        branches::run_workspace_git_with_mode(
             ws_name,
             repo_subpath.as_deref(),
+            ExecMode::Tracked,
             &["merge", "--ff-only", &state.upstream.r#ref],
         )
         .map_err(|e| e.to_string())?;
@@ -1072,14 +1076,21 @@ pub(crate) fn reset_branch_to_remote_impl(
             git::WorktreeStatusScope::Full,
         );
         ensure_reset_to_remote_allowed(&state)?;
-        branches::run_workspace_git(
+        // Tracked: both rewrite the worktree (see `run_workspace_git`).
+        branches::run_workspace_git_with_mode(
             ws_name,
             repo_subpath.as_deref(),
+            ExecMode::Tracked,
             &["reset", "--hard", &state.upstream.r#ref],
         )
         .map_err(|e| e.to_string())?;
-        branches::run_workspace_git(ws_name, repo_subpath.as_deref(), &["clean", "-fd"])
-            .map_err(|e| e.to_string())?;
+        branches::run_workspace_git_with_mode(
+            ws_name,
+            repo_subpath.as_deref(),
+            ExecMode::Tracked,
+            &["clean", "-fd"],
+        )
+        .map_err(|e| e.to_string())?;
         return Ok(());
     }
 
@@ -1134,9 +1145,15 @@ fn discard_remote_worktree_changes(
     repo_subpath: Option<&str>,
     changes: &git::WorktreeChangePaths,
 ) -> Result<(), String> {
+    // Tracked: both rewrite the worktree (see `run_workspace_git`).
     if changes.reset_required {
-        branches::run_workspace_git(workspace_name, repo_subpath, &["reset", "--hard", "HEAD"])
-            .map_err(|e| e.to_string())?;
+        branches::run_workspace_git_with_mode(
+            workspace_name,
+            repo_subpath,
+            ExecMode::Tracked,
+            &["reset", "--hard", "HEAD"],
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     if !changes.remove_paths.is_empty() {
@@ -1147,8 +1164,13 @@ fn discard_remote_worktree_changes(
             .collect::<Vec<_>>();
         let mut args = vec!["clean", "-fd", "--"];
         args.extend(pathspecs.iter().map(String::as_str));
-        branches::run_workspace_git(workspace_name, repo_subpath, &args)
-            .map_err(|e| e.to_string())?;
+        branches::run_workspace_git_with_mode(
+            workspace_name,
+            repo_subpath,
+            ExecMode::Tracked,
+            &args,
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     Ok(())
@@ -1489,8 +1511,11 @@ pub(crate) async fn delete_commit_impl(
                 "git reset --hard \"$parent\""
             );
 
+            // Tracked: the `reset --hard` rewrites the worktree by the
+            // commit's diff (see `run_workspace_git`).
             blox::ws_exec(
                 ws_name,
+                ExecMode::Tracked,
                 &["sh", "-c", script, "_", &resolved_path, &commit_sha],
             )
             .map_err(|e| {

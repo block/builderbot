@@ -222,8 +222,15 @@ impl TransferEndpoint for BloxEndpoint {
     ) -> Result<ScriptOutput, TransferError> {
         let mut argv = vec!["sh", "-c", script, "staged-transfer"];
         argv.extend(args.iter().map(String::as_str));
-        let output = blox::ws_exec_output_sized(&self.workspace, &argv, payload_bytes)
-            .map_err(|e| self.exec_error(e))?;
+        // Tracked: transfer scripts hash working trees, write bundles and
+        // clone, which can run far past the transient path's 60 s limit.
+        let output = blox::ws_exec_output_sized(
+            &self.workspace,
+            blox::ExecMode::Tracked,
+            &argv,
+            payload_bytes,
+        )
+        .map_err(|e| self.exec_error(e))?;
         Ok(ScriptOutput {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),

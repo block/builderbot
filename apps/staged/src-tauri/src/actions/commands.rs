@@ -950,16 +950,13 @@ pub(crate) async fn run_branch_action_impl(
                 "Could not find `sq` binary. Is it installed and on your PATH?".to_string()
             })?;
 
-        let args = vec![
-            "blox".to_string(),
-            "ws".to_string(),
-            "exec".to_string(),
-            workspace_name.to_string(),
-            "--".to_string(),
-            "sh".to_string(),
-            "-lc".to_string(),
-            shell_command,
-        ];
+        // Tracked: the user wrote this command, and it streams output and may
+        // run for minutes — neither works on the transient path.
+        let args = blox_cli::ws_exec_command(
+            workspace_name,
+            blox_cli::ExecMode::Tracked,
+            &["sh", "-lc", &shell_command],
+        );
 
         // Again, after the awaits: a transfer that began meanwhile has
         // already stopped the branch's actions, and this one must not start.

@@ -190,7 +190,10 @@ impl WsTransport for SqWorkspace<'_> {
     }
 
     fn exec(&self, args: &[&str]) -> Result<String, BloxError> {
-        super::ws_exec(self.name, args)
+        // Tracked: joining or splitting a multi-gigabyte bundle can outlast
+        // the transient path's 60 s limit, and this route only runs when ssh
+        // cannot reach the workstation, so it adds little to the history.
+        super::ws_exec(self.name, super::ExecMode::Tracked, args)
     }
 }
 

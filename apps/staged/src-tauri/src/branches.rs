@@ -706,7 +706,6 @@ pub(crate) async fn clone_repo_into_workspace(
         .await
         .map_err(|e| format!("Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}"))?;
     }
-    let clone_existed = !needs_clone;
 
     // Apply staged-managed git config. Idempotent — also serves as the
     // lazy migration for pre-existing remote clones (no registry on blox
@@ -721,8 +720,8 @@ pub(crate) async fn clone_repo_into_workspace(
         // Tracked for everything but `rev-parse`: Blox SIGKILLs a transient
         // git at 60 s, which a fetch on a large repo can outlast (reading as
         // "no remote branch" and silently branching from base), and a
-        // checkout far from the default branch (or smudging LFS files) can
-        // outlast too, leaving `.git/index.lock` and a half-updated worktree.
+        // checkout or fast-forward far from where the tree is (or smudging LFS
+        // files) can outlast it too, leaving `.git/index.lock` and a half-updated worktree.
         let git: GitRunner<'_> = Box::new(move |args: &[&str]| {
             let mode = if args.first() == Some(&"rev-parse") {
                 ExecMode::Transient
@@ -732,7 +731,7 @@ pub(crate) async fn clone_repo_into_workspace(
             run_workspace_git_with_mode(&workspace, Some(&remote_dir), mode, args)
                 .map_err(|e| e.to_string())
         });
-        check_out_workspace_branch(&git, &base, &branch, clone_existed)
+        check_out_workspace_branch(&git, &base, &branch)
     })
     .await
     .map_err(|e| format!("Branch checkout task failed: {e}"))?
@@ -742,28 +741,41 @@ pub(crate) async fn clone_repo_into_workspace(
 /// Fetch `base_ref` into the clone `git` runs in, and put the clone on
 /// `branch_name`.
 ///
-/// A clone that already existed and already has `branch_name` checked out is
-/// left as it is: this runs again whenever a branch re-enters `Starting` on a
-/// workstation that has its clone, and `checkout -B` there would reset the
-/// branch onto origin, dropping any unpushed commits. Only the fetches run.
+/// A branch the clone already has is checked out as it is, never recreated.
+/// Every remote branch of a repo shares one clone, and this runs again
+/// whenever any of them re-enters `Starting` (e.g. after `resume_workspace`),
+/// so `checkout -B` would reset a branch onto origin and drop its unpushed
+/// commits, whichever branch HEAD happened to be on. When origin has the
+/// branch too, it is then fast-forwarded if it can be: a branch that is only
+/// behind picks up what was pushed, and one that has diverged keeps its local
+/// commits. Only a branch the clone doesn't have yet is created, from origin's
+/// copy or from the base.
 fn check_out_workspace_branch(
     git: &GitRunner<'_>,
     base_ref: &str,
     branch_name: &str,
-    clone_existed: bool,
 ) -> Result<(), String> {
     git(&["fetch", "origin", base_ref])
         .map_err(|e| format!("could not fetch base branch '{base_ref}': {e}"))?;
 
     // If the branch already exists on the remote (e.g. from an existing PR),
-    // fetch it and start from there so we pick up its commits. Otherwise fall
-    // back to starting from the base branch.
+    // fetch it so we pick up its commits: a new branch starts from there and
+    // an existing one fast-forwards to it. Otherwise a new branch falls back
+    // to starting from the base branch.
     let has_remote_branch =
         branch_name != base_ref && git(&["fetch", "origin", branch_name]).is_ok();
+    let remote_branch = format!("origin/{branch_name}");
 
-    if clone_existed
-        && git(&["rev-parse", "--abbrev-ref", "HEAD"]).is_ok_and(|head| head.trim() == branch_name)
-    {
+    let local_ref = format!("refs/heads/{branch_name}");
+    if git(&["rev-parse", "--verify", "--quiet", &local_ref]).is_ok() {
+        git(&["checkout", branch_name])
+            .map_err(|e| format!("could not check out branch '{branch_name}': {e}"))?;
+        if has_remote_branch {
+            // Fails when the branch has diverged from origin (or local
+            // changes are in the way). The branch then stays as it is, local
+            // commits and all, which is the point: never reset it.
+            let _ = git(&["merge", "--ff-only", &remote_branch]);
+        }
         return Ok(());
     }
 
@@ -771,12 +783,7 @@ fn check_out_workspace_branch(
     // branch it pushes to. A fresh branch must not track `origin/<base>`
     // instead — git's upstream is read back as the push target.
     let checkout = if has_remote_branch {
-        git(&[
-            "checkout",
-            "-B",
-            branch_name,
-            &format!("origin/{branch_name}"),
-        ])
+        git(&["checkout", "-B", branch_name, &remote_branch])
     } else {
         git(&[
             "checkout",
@@ -5318,13 +5325,8 @@ mod upstream_tracking_tests {
     fn an_existing_clone_already_on_the_branch_is_not_reset() {
         let (_origin, clone, unpushed) = clone_on_feature_x_with_an_unpushed_commit();
 
-        check_out_workspace_branch(
-            &git_runner(clone.path(), None, None),
-            "main",
-            "feature-x",
-            true,
-        )
-        .unwrap();
+        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
+            .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -5333,20 +5335,99 @@ mod upstream_tracking_tests {
         assert_eq!(git(clone.path(), &["rev-parse", "HEAD"]), unpushed);
     }
 
-    /// An existing clone on some other branch is still moved onto the
-    /// branch, tracking it on origin.
+    /// Every remote branch of a repo shares one clone, so a branch can have a
+    /// local ref with unpushed commits while HEAD is on a sibling branch —
+    /// e.g. after `resume_workspace` restarts both. Switching back must not
+    /// reset it onto origin.
+    #[test]
+    fn a_local_branch_with_an_unpushed_commit_is_not_reset_from_another_branch() {
+        let (_origin, clone, unpushed) = clone_on_feature_x_with_an_unpushed_commit();
+        git(
+            clone.path(),
+            &["checkout", "-b", "feature-y", "origin/main"],
+        );
+
+        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
+            .unwrap();
+
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-x"
+        );
+        assert_eq!(git(clone.path(), &["rev-parse", "HEAD"]), unpushed);
+    }
+
+    /// Push a commit to origin's `feature-x` from a separate clone, the way
+    /// another machine would while the workstation is away. Returns its sha.
+    fn push_to_origin_feature_x(origin: &TempDir) -> String {
+        let other = clone_of(origin, &[]);
+        git(
+            other.path(),
+            &["checkout", "-b", "feature-x", "origin/feature-x"],
+        );
+        std::fs::write(other.path().join("pushed.txt"), "pushed\n").unwrap();
+        git(other.path(), &["add", "pushed.txt"]);
+        git(other.path(), &["commit", "-m", "pushed"]);
+        git(other.path(), &["push", "origin", "feature-x"]);
+        git(other.path(), &["rev-parse", "HEAD"])
+    }
+
+    /// A local branch that is only behind origin is fast-forwarded to it, so
+    /// it picks up what was pushed elsewhere.
+    #[test]
+    fn a_local_branch_behind_origin_is_fast_forwarded() {
+        let origin = bare_origin();
+        let clone = clone_of(&origin, &[]);
+        git(clone.path(), &["branch", "feature-x", "origin/feature-x"]);
+        let pushed = push_to_origin_feature_x(&origin);
+
+        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
+            .unwrap();
+
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-x"
+        );
+        assert_eq!(git(clone.path(), &["rev-parse", "HEAD"]), pushed);
+        assert_eq!(
+            merge_config(clone.path(), "feature-x"),
+            "refs/heads/feature-x"
+        );
+    }
+
+    /// A local branch that has diverged from origin can't fast-forward. It
+    /// keeps its local commits rather than being reset, and setup still
+    /// succeeds.
+    #[test]
+    fn a_local_branch_diverged_from_origin_keeps_its_commits() {
+        let (origin, clone, unpushed) = clone_on_feature_x_with_an_unpushed_commit();
+        git(clone.path(), &["checkout", "main"]);
+        let pushed = push_to_origin_feature_x(&origin);
+
+        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
+            .unwrap();
+
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-x"
+        );
+        assert_eq!(git(clone.path(), &["rev-parse", "HEAD"]), unpushed);
+        // Origin's commit was fetched, just not merged.
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "origin/feature-x"]),
+            pushed
+        );
+    }
+
+    /// An existing clone on some other branch that doesn't have the branch
+    /// yet is moved onto it, tracking it on origin.
     #[test]
     fn an_existing_clone_on_another_branch_checks_out_the_branch() {
         let origin = bare_origin();
         let clone = clone_of(&origin, &[]);
 
-        check_out_workspace_branch(
-            &git_runner(clone.path(), None, None),
-            "main",
-            "feature-x",
-            true,
-        )
-        .unwrap();
+        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
+            .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -5369,13 +5450,8 @@ mod upstream_tracking_tests {
         let origin = bare_origin();
         let clone = clone_of(&origin, &[]);
 
-        check_out_workspace_branch(
-            &git_runner(clone.path(), None, None),
-            "main",
-            "feature-new",
-            false,
-        )
-        .unwrap();
+        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-new")
+            .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),

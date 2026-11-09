@@ -321,9 +321,16 @@ impl FakeSq {
 
     /// Answer `sq blox ws commands` with these active commands and full
     /// history.
+    ///
+    /// History is written first. The liveness check reads the active list
+    /// and consults history only when the command is missing from it, so a
+    /// poll that lands between the two writes must find the new history
+    /// record already complete; the other order let it read the old or a
+    /// half-written history file and report the agent as "no longer listed"
+    /// instead of failed.
     fn set_commands(&self, active: &str, history: &str) {
-        std::fs::write(self.dir.join("active.json"), active).unwrap();
         std::fs::write(self.dir.join("history.json"), history).unwrap();
+        std::fs::write(self.dir.join("active.json"), active).unwrap();
     }
 
     /// Once `count` agents have launched, have bloxlet list each as running,

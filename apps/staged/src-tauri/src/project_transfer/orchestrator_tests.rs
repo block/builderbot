@@ -1652,7 +1652,7 @@ fn the_first_preflight_step_comes_from_the_store_alone() {
         (0, 0, 0),
         "nothing left this machine before the first step"
     );
-    assert_eq!(first.preflight.workspace_name.as_deref(), Some(WORKSPACE));
+    assert_eq!(first.preflight.workspace_name, Some(f.workspace()));
     assert!(first.preflight.scanning);
     assert_eq!(first.preflight.repos.len(), 1);
     assert!(first.preflight.repos[0].scanning);
@@ -1669,10 +1669,7 @@ fn the_first_preflight_step_comes_from_the_store_alone() {
         (1, 1, 0),
         "Blox asked once, the workspace's state read once, nothing in it read yet"
     );
-    assert_eq!(
-        f.host.state_reads().last().map(String::as_str),
-        Some(WORKSPACE)
-    );
+    assert_eq!(f.host.state_reads().last().cloned(), Some(f.workspace()));
     assert!(
         second.preflight.repos[0].scanning,
         "a running workspace's clone is read"
@@ -1696,7 +1693,7 @@ fn the_first_preflight_step_comes_from_the_store_alone() {
 fn a_workspace_blox_no_longer_has_is_found_out_at_the_second_step() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
     f.transfer(true).result.expect("to remote");
-    f.host.set_state(WORKSPACE, WorkspaceState::NotFound);
+    f.host.set_state(&f.workspace(), WorkspaceState::NotFound);
 
     let (result, steps) = preflight_steps(&f);
     let last = result.unwrap();

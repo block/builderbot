@@ -1,48 +1,111 @@
 import { describe, expect, it } from 'vitest';
-import { buildFileEntries, fileChangeScale, fileChangeTotal, pathsMatch } from './diffModalHelpers';
+import type { Comment } from '../types';
+import {
+  buildFileEntries,
+  fileChangeScale,
+  fileChangeTotal,
+  resolveCommentFilePath,
+} from './diffModalHelpers';
 
-describe('pathsMatch', () => {
-  it('returns true for identical paths', () => {
-    expect(pathsMatch('src/foo.ts', 'src/foo.ts')).toBe(true);
+// A root file plus two same-named files in subdirectories, in the byte order
+// git lists them: `.github/VISION.md` sorts before the root `VISION.md`.
+const SAME_NAME_FILES = ['.github/VISION.md', 'VISION.md', 'apps/web/VISION.md'];
+
+function comment(path: string, overrides: Partial<Comment> = {}): Comment {
+  return {
+    id: `comment-${path}`,
+    path,
+    span: { start: 0, end: 1 },
+    content: 'note',
+    author: 'user',
+    commentType: 'suggestion',
+    createdAt: 0,
+    deletedAt: null,
+    githubCommentId: null,
+    githubCommentType: null,
+    githubCommentStale: false,
+    noteSessionId: null,
+    commitSessionId: null,
+    ...overrides,
+  };
+}
+
+describe('resolveCommentFilePath', () => {
+  describe('without a subpath', () => {
+    const files = new Set(SAME_NAME_FILES);
+
+    it('keeps a root comment on the root file', () => {
+      expect(resolveCommentFilePath('VISION.md', files)).toBe('VISION.md');
+      expect(resolveCommentFilePath('VISION.md', files, null)).toBe('VISION.md');
+      expect(resolveCommentFilePath('VISION.md', files, '')).toBe('VISION.md');
+    });
+
+    it('keeps each subdirectory comment on its own file', () => {
+      expect(resolveCommentFilePath('apps/web/VISION.md', files)).toBe('apps/web/VISION.md');
+      expect(resolveCommentFilePath('.github/VISION.md', files)).toBe('.github/VISION.md');
+    });
+
+    it('does not suffix-match when the root file is absent', () => {
+      const subdirOnly = new Set(['apps/web/VISION.md', 'docs/VISION.md']);
+      expect(resolveCommentFilePath('VISION.md', subdirOnly)).toBe('VISION.md');
+      expect(resolveCommentFilePath('web/VISION.md', subdirOnly)).toBe('web/VISION.md');
+    });
+
+    it('does not prefix-strip onto a same-named root file', () => {
+      const rootOnly = new Set(['VISION.md']);
+      expect(resolveCommentFilePath('docs/VISION.md', rootOnly)).toBe('docs/VISION.md');
+    });
   });
 
-  it('returns true when first path is a suffix of the second at a / boundary', () => {
-    expect(pathsMatch('prefix/src/foo.ts', 'src/foo.ts')).toBe(true);
-  });
+  describe('with a subpath', () => {
+    it('prefers an exact root-relative match over the subpath candidate', () => {
+      const files = new Set([...SAME_NAME_FILES, 'apps/web/apps/web/VISION.md']);
+      expect(resolveCommentFilePath('VISION.md', files, 'apps/web')).toBe('VISION.md');
+      expect(resolveCommentFilePath('apps/web/VISION.md', files, 'apps/web')).toBe(
+        'apps/web/VISION.md'
+      );
+      expect(resolveCommentFilePath('.github/VISION.md', files, 'apps/web')).toBe(
+        '.github/VISION.md'
+      );
+    });
 
-  it('returns true when second path is a suffix of the first at a / boundary', () => {
-    expect(pathsMatch('src/foo.ts', 'prefix/src/foo.ts')).toBe(true);
-  });
+    it('maps a subpath-relative path onto the root-relative diff file', () => {
+      const files = new Set(['apps/web/src/foo.ts', 'docs/VISION.md']);
+      expect(resolveCommentFilePath('src/foo.ts', files, 'apps/web')).toBe('apps/web/src/foo.ts');
+    });
 
-  it('returns false for completely different paths', () => {
-    expect(pathsMatch('src/foo.ts', 'src/bar.ts')).toBe(false);
-  });
+    it('lands a subpath-relative comment on the subpath file, not a same-named sibling', () => {
+      const files = new Set(['apps/web/VISION.md', 'docs/VISION.md', 'apps/api/VISION.md']);
+      expect(resolveCommentFilePath('VISION.md', files, 'apps/web')).toBe('apps/web/VISION.md');
+    });
 
-  it('returns false when suffix matches but not at a / boundary', () => {
-    expect(pathsMatch('foo/bar.ts', 'baz/foobar.ts')).toBe(false);
-  });
+    it('strips exactly the subpath prefix in the reverse direction', () => {
+      const files = new Set(['src/foo.ts']);
+      expect(resolveCommentFilePath('apps/web/src/foo.ts', files, 'apps/web')).toBe('src/foo.ts');
+      expect(resolveCommentFilePath('apps/webby/src/foo.ts', files, 'apps/web')).toBe(
+        'apps/webby/src/foo.ts'
+      );
+    });
 
-  it('returns false when suffix matches but not at a / boundary (reversed)', () => {
-    expect(pathsMatch('baz/foobar.ts', 'foo/bar.ts')).toBe(false);
-  });
+    it('normalizes surrounding slashes and whitespace on the subpath', () => {
+      const files = new Set(['apps/web/src/foo.ts']);
+      expect(resolveCommentFilePath('src/foo.ts', files, ' /apps/web/ ')).toBe(
+        'apps/web/src/foo.ts'
+      );
+    });
 
-  it('handles deeply nested path prefixes', () => {
-    expect(pathsMatch('a/b/c/d/file.ts', 'c/d/file.ts')).toBe(true);
-    expect(pathsMatch('c/d/file.ts', 'a/b/c/d/file.ts')).toBe(true);
-  });
+    it('only tries the configured subpath, never an arbitrary suffix', () => {
+      const files = new Set(['docs/VISION.md', 'packages/web/src/foo.ts']);
+      expect(resolveCommentFilePath('VISION.md', files, 'apps/web')).toBe('VISION.md');
+      expect(resolveCommentFilePath('src/foo.ts', files, 'apps/web')).toBe('src/foo.ts');
+    });
 
-  it('returns true for single filename suffix match', () => {
-    expect(pathsMatch('src/file.ts', 'file.ts')).toBe(true);
-    expect(pathsMatch('file.ts', 'src/file.ts')).toBe(true);
-  });
-
-  it('returns false when one path is empty', () => {
-    expect(pathsMatch('', 'foo.ts')).toBe(false);
-    expect(pathsMatch('foo.ts', '')).toBe(false);
-  });
-
-  it('returns true when both paths are empty', () => {
-    expect(pathsMatch('', '')).toBe(true);
+    it('leaves the path unchanged when the fallback is ambiguous', () => {
+      // Neither the comment path itself nor a unique fallback exists: both
+      // `<subpath>/<path>` and `<path>` minus the subpath are diff files.
+      const files = new Set(['apps/web/apps/web/foo.ts', 'foo.ts']);
+      expect(resolveCommentFilePath('apps/web/foo.ts', files, 'apps/web')).toBe('apps/web/foo.ts');
+    });
   });
 });
 
@@ -93,5 +156,24 @@ describe('buildFileEntries', () => {
       addedLines: null,
       deletedLines: null,
     });
+  });
+
+  it('counts comments only on the file whose path matches exactly', () => {
+    const files = SAME_NAME_FILES.map((path) => ({ before: path, after: path }));
+    const entries = buildFileEntries(
+      files,
+      [],
+      [
+        comment('VISION.md', { id: 'root-1', commentType: 'issue' }),
+        comment('VISION.md', { id: 'root-2' }),
+        comment('.github/VISION.md', { id: 'github-1', commentType: 'warning' }),
+      ]
+    );
+
+    expect(entries.map((e) => [e.path, e.commentCount, e.commentTypes])).toEqual([
+      ['.github/VISION.md', 1, ['warning']],
+      ['VISION.md', 2, ['issue', 'suggestion']],
+      ['apps/web/VISION.md', 0, []],
+    ]);
   });
 });

@@ -83,7 +83,6 @@
   import { createLineDiffCache } from '../utils/inlineDiff.js';
   import type { BeforeLineClass, AfterLineClass, CharHighlight } from '../utils/inlineDiff.js';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
-  import { pathsMatch } from '../utils/diffModalHelpers';
   import {
     DEFAULT_STRUCTURAL_HEADER_MAX_ROWS,
     getHeaderAwareActiveStructuralStack,
@@ -382,10 +381,9 @@
     return buildLineToAlignmentMap(changedAlignments, 'after');
   });
 
-  // Comments for the current file (suffix-match to handle path prefix mismatches)
-  let currentFileComments = $derived(
-    comments.filter((c) => currentFilePath !== null && pathsMatch(c.path, currentFilePath))
-  );
+  // Comments for the current file. Matched exactly: hosts resolve comment paths
+  // to diff-file paths (see `resolveCommentFilePath`) before passing them in.
+  let currentFileComments = $derived(comments.filter((c) => c.path === currentFilePath));
   let activeLineCommentState = $derived(
     resolveTrackedComment(currentFileComments, activeLineComment, editingCommentId)
   );

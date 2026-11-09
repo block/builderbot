@@ -20,13 +20,47 @@ export interface TreeNode {
   file?: FileEntry;
 }
 
-/** Check whether two file paths refer to the same file.
- *  Handles cases where one path is a suffix of the other (e.g. different root prefixes). */
-export function pathsMatch(a: string, b: string): boolean {
-  if (a === b) return true;
-  if (a.endsWith(b)) return a[a.length - b.length - 1] === '/';
-  if (b.endsWith(a)) return b[b.length - a.length - 1] === '/';
-  return false;
+/** Trim whitespace and surrounding slashes from a repo subpath; empty means none. */
+function normalizeSubpath(subpath: string | null | undefined): string | null {
+  const trimmed = (subpath ?? '').trim().replace(/^\/+|\/+$/g, '');
+  return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * Resolve a comment's stored path to the diff file it belongs to.
+ *
+ * Diff file paths are repo-root-relative, but an agent reviewing from inside
+ * a repo subpath may write paths relative to that subpath. Matching is strict
+ * so that same-named files in different directories (e.g. `VISION.md` and
+ * `docs/VISION.md`) never pick up each other's comments:
+ *
+ * 1. An exact match always wins.
+ * 2. Only when a subpath is configured, try exactly `<subpath>/<path>` and
+ *    `<path>` with exactly the `<subpath>/` prefix removed.
+ * 3. If no fallback candidate exists, or more than one does, the path is
+ *    returned unchanged rather than guessing.
+ */
+export function resolveCommentFilePath(
+  commentPath: string,
+  filePaths: ReadonlySet<string>,
+  subpath?: string | null
+): string {
+  if (filePaths.has(commentPath)) return commentPath;
+
+  const prefix = normalizeSubpath(subpath);
+  if (!prefix) return commentPath;
+
+  const candidates = new Set<string>();
+  const joined = `${prefix}/${commentPath}`;
+  if (filePaths.has(joined)) candidates.add(joined);
+  if (commentPath.startsWith(`${prefix}/`)) {
+    const stripped = commentPath.slice(prefix.length + 1);
+    if (filePaths.has(stripped)) candidates.add(stripped);
+  }
+
+  if (candidates.size !== 1) return commentPath;
+  const [resolved] = candidates;
+  return resolved;
 }
 
 export function fileStatus(summary: FileDiffSummary): 'added' | 'deleted' | 'modified' | 'renamed' {
@@ -59,33 +93,13 @@ interface CommentAgg {
   types: Set<CommentType>;
 }
 
-/** Extract the basename (last segment after '/') from a path. */
-function basename(path: string): string {
-  const idx = path.lastIndexOf('/');
-  return idx === -1 ? path : path.slice(idx + 1);
-}
-
-/**
- * Pre-groups comments by their basename, then aggregates per unique comment
- * path. This lets us avoid the O(files × comments) nested loop — each file
- * only checks the (usually tiny) set of comment paths that share its basename.
- */
-function groupCommentsByBasename(
-  comments: Comment[]
-): Map<string, Map<string, CommentAgg>> {
-  // basename → (commentPath → CommentAgg)
-  const groups = new Map<string, Map<string, CommentAgg>>();
+function groupCommentsByPath(comments: Comment[]): Map<string, CommentAgg> {
+  const groups = new Map<string, CommentAgg>();
   for (const comment of comments) {
-    const base = basename(comment.path);
-    let byPath = groups.get(base);
-    if (!byPath) {
-      byPath = new Map();
-      groups.set(base, byPath);
-    }
-    let agg = byPath.get(comment.path);
+    let agg = groups.get(comment.path);
     if (!agg) {
       agg = { count: 0, types: new Set() };
-      byPath.set(comment.path, agg);
+      groups.set(comment.path, agg);
     }
     agg.count++;
     if (comment.commentType) agg.types.add(comment.commentType);
@@ -93,30 +107,22 @@ function groupCommentsByBasename(
   return groups;
 }
 
+/**
+ * Build sidebar entries for the diff's files. Comments are matched to files by
+ * exact path, so callers holding subpath-relative comment paths should resolve
+ * them first with `resolveCommentFilePath`.
+ */
 export function buildFileEntries(
   files: FileDiffSummary[],
   reviewedPaths: string[],
   comments: Comment[]
 ): FileEntry[] {
   const reviewedSet = new Set(reviewedPaths);
-  const filePaths = files.map(fileSummaryPath);
-  const commentGroups = groupCommentsByBasename(comments);
+  const commentGroups = groupCommentsByPath(comments);
 
-  return files.map((summary, i) => {
-    const path = filePaths[i];
-    let commentCount = 0;
-    const commentTypes = new Set<CommentType>();
-
-    // Only inspect comment paths that share this file's basename.
-    const candidates = commentGroups.get(basename(path));
-    if (candidates) {
-      for (const [commentPath, agg] of candidates) {
-        if (pathsMatch(commentPath, path)) {
-          commentCount += agg.count;
-          for (const t of agg.types) commentTypes.add(t);
-        }
-      }
-    }
+  return files.map((summary) => {
+    const path = fileSummaryPath(summary);
+    const agg = commentGroups.get(path);
 
     return {
       path,
@@ -124,8 +130,8 @@ export function buildFileEntries(
       addedLines: summary.addedLines ?? null,
       deletedLines: summary.deletedLines ?? null,
       isReviewed: reviewedSet.has(path),
-      commentCount,
-      commentTypes: [...commentTypes],
+      commentCount: agg?.count ?? 0,
+      commentTypes: agg ? [...agg.types] : [],
     };
   });
 }

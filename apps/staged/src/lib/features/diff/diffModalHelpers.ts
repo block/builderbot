@@ -6,7 +6,7 @@ export {
   fileChangeScale,
   fileChangeTotal,
   formatLineRange,
-  pathsMatch,
+  resolveCommentFilePath,
   truncateText,
   type FileEntry,
   type TreeNode,

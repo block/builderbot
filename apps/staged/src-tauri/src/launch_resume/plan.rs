@@ -20,7 +20,8 @@ pub(crate) const PROJECT_SESSION_RESUME_PROMPT: &str = "Staged was closed and re
      you were working. The repo sessions you started were restarted where possible; call \
      `wait_for_repo_session` again on any handle you were waiting on. A handle that reports \
      `cancelled` or `failed` with reason `app_quit` could not be restarted and may be continued \
-     with `continue_repo_session` or started again. Then continue where you left off.";
+     with `continue_repo_session` to finish its own goal, or started again. Then continue where \
+     you left off.";
 
 /// Why a session is listed but not restarted automatically.
 pub(crate) const PIPELINE_NOT_RESUMED_REASON: &str =

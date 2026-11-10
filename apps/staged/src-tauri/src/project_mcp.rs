@@ -655,7 +655,7 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Set `expected_outcome`: prefer `\"child_note\"` for research/planning spawned by this project session (the note attaches to this project note and stays out of the repo's visible timeline), use `\"note_in_repo\"` for a detached note that should stand alone in the repo, `\"commit\"` for code changes and a signed-off conventional commit, or `\"code_review\"` for an AI code review of the changes on the repo's branch. Each repo session is a single artifact on the timeline with one goal and one outcome, not an ongoing worker: start a new session for every new piece of work, even in the same repo and even when it follows directly from an earlier session — a next step, a follow-up note, another commit, a review of a commit, or applying review feedback as a new commit. Earlier notes and artifacts are already visible to the new session through hashtag references such as `#note:<id>`, `#commit:<sha>`, and `#review:<id>`, so an earlier session does not need to be reused for its context. The `repo` + `subpath` combination must exactly match an entry already in the project."
+        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Set `expected_outcome`: prefer `\"child_note\"` for research/planning spawned by this project session (the note attaches to this project note and stays out of the repo's visible timeline), use `\"note_in_repo\"` for a detached note that should stand alone in the repo, `\"commit\"` for code changes and a signed-off conventional commit, or `\"code_review\"` for an AI code review of the changes on the repo's branch. Each repo session is a single artifact — one note, one commit, or one review — with one goal and one outcome, not an ongoing worker: start a new session for every new piece of work, even in the same repo and even when it follows directly from an earlier session — a next step, a follow-up note, another commit, a review of a commit, or applying review feedback as a new commit. Earlier notes and artifacts are already in the branch history of new sessions in the same repo; point to them with hashtag references such as `#note:<id>`, `#commit:<sha>`, and `#review:<id>`, so an earlier session does not need to be reused for its context. The `repo` + `subpath` combination must exactly match an entry already in the project."
     )]
     async fn start_repo_session(
         &self,
@@ -816,7 +816,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running, or disconnected (a remote session Staged lost its connection to; it may still be working). A `failed` session reports `completion_reason` and `error_message`; `remote_agent_lost` means its remote workspace agent died under it (the message names why, such as the workstation restarting), so work it left may be uncommitted on the workspace. A completed session has produced its one outcome: follow up with `continue_repo_session` only to fix that outcome, and start a new repo session for whatever comes next."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running, or disconnected (a remote session Staged lost its connection to; it may still be working). A `failed` session reports `completion_reason` and `error_message`; `remote_agent_lost` means its remote workspace agent died under it (the message names why, such as the workstation restarting), so work it left may be uncommitted on the workspace. A completed session has finished its one goal: follow up with `continue_repo_session` only to answer a question it ended on or to fix that outcome, and start a new repo session for whatever comes next."
     )]
     async fn wait_for_repo_session(
         &self,
@@ -945,7 +945,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Send a follow-up message to a repo session started by `start_repo_session`, only to keep it on course toward the goal it already has: a correction mid-run, the answer to a question it raised, or a retry or fix of a failed, cancelled, or unsatisfactory result for that same outcome. Do not use it to hand the session new work: each repo session is one artifact with one goal, not an ongoing worker, so a next step, a follow-up note, another commit, a review of a commit, or applying review feedback as a new commit each needs a new `start_repo_session`, even in the same repo — earlier notes and artifacts are visible to new sessions through hashtag references. A running session receives the message within seconds without being stopped, so its work so far is kept; a completed, cancelled, or failed session is resumed with the message as its next instruction. A session that has not started yet cannot take a message — wait for it to run, or cancel it and start a new one. When correcting or retrying the session's own goal and its work so far is still wanted, prefer this over cancelling and starting over. Returns the session's current state together with how the message was delivered, or why it was not. The activity's last user-message time is when the session's agent most recently received any user message — the original instructions included, not only this one — so to confirm this message landed, compare it with the time you made this call."
+        description = "Send a follow-up message to a repo session started by `start_repo_session`, only to keep it on course toward the goal it already has: a correction mid-run, the answer to a question it raised, or a retry or fix of a failed, cancelled, or unsatisfactory result for that same outcome. Do not use it to hand the session new work: each repo session is one artifact with one goal, not an ongoing worker, so a next step, a follow-up note, another commit, a review of a commit, or applying review feedback as a new commit each needs a new `start_repo_session`, even in the same repo — earlier notes and artifacts are already in the branch history of new sessions in the same repo, where hashtag references can point to them. A running session receives the message within seconds without being stopped, so its work so far is kept; a completed, cancelled, or failed session is resumed with the message as its next instruction. A session that has not started yet cannot take a message — wait for it to run, or cancel it and start a new one. When correcting or retrying the session's own goal and its work so far is still wanted, prefer this over cancelling and starting over. Returns the session's current state together with how the message was delivered, or why it was not. The activity's last user-message time is when the session's agent most recently received any user message — the original instructions included, not only this one — so to confirm this message landed, compare it with the time you made this call."
     )]
     async fn continue_repo_session(
         &self,
@@ -1669,25 +1669,78 @@ mod tests {
         assert!(start.contains("start a new session for every new piece of work"));
         assert!(start.contains("even in the same repo"));
         assert!(start.contains("applying review feedback as a new commit"));
-        assert!(start.contains("hashtag references"));
+        // A child note stays out of the repo's visible timeline, so a repo
+        // session is not described as an artifact "on the timeline".
+        assert!(!start.contains("artifact on the timeline"));
+        // Earlier work reaches a new session through the branch history of
+        // that repo only; a hashtag reference does not carry it elsewhere.
+        assert!(start.contains("already in the branch history of new sessions in the same repo"));
+        assert!(start.contains("point to them with hashtag references"));
+        assert!(!start.contains("visible to the new session through hashtag references"));
+        // A session that stopped to ask a question reports `completed`, so
+        // the wait description must still allow answering it.
+        assert!(wait.contains(
+            "follow up with `continue_repo_session` only to answer a question it ended on or to fix that outcome"
+        ));
+        assert!(!wait.contains("only to fix that outcome"));
         assert!(wait.contains("start a new repo session for whatever comes next"));
         assert!(cancel.contains("Work toward a different goal gets a new repo session"));
     }
 
-    #[test]
-    fn start_repo_session_schema_lets_review_instructions_stay_empty() {
-        let router = ProjectToolsHandler::tool_router();
-        let instructions = router
-            .get("start_repo_session")
+    /// The `input_schema` description of `field` on `tool`, which reaches the
+    /// agent alongside the tool description.
+    fn schema_property_description(tool: &str, field: &str) -> String {
+        ProjectToolsHandler::tool_router()
+            .get(tool)
             .and_then(|tool| {
                 tool.input_schema
                     .get("properties")?
-                    .get("instructions")?
+                    .get(field)?
                     .get("description")?
                     .as_str()
                     .map(ToOwned::to_owned)
             })
-            .expect("instructions description");
+            .unwrap_or_else(|| panic!("{tool}.{field} description"))
+    }
+
+    /// The parameter docs carry the same one-goal scoping as the tool
+    /// descriptions, so neither can reintroduce handing a session new work.
+    /// Doc-comment lines reach the schema joined by `\n`, so each phrase
+    /// checked here sits on one source line.
+    #[test]
+    fn repo_session_param_docs_scope_each_session_to_one_goal() {
+        let instructions = schema_property_description("start_repo_session", "instructions");
+        let message = schema_property_description("continue_repo_session", "message");
+
+        assert!(
+            instructions.contains("stating this session's one goal"),
+            "instructions must state one goal: {instructions}"
+        );
+        assert!(
+            instructions.contains("created for this repo are available to the session"),
+            "instructions must scope earlier notes to the repo: {instructions}"
+        );
+        assert!(
+            instructions.contains("rather than by reusing that session"),
+            "instructions must rule out reuse for context: {instructions}"
+        );
+        assert!(
+            message.contains("already has: a correction"),
+            "message must keep to the session's goal: {message}"
+        );
+        assert!(
+            message.contains("Not new work"),
+            "message must rule out new work: {message}"
+        );
+        assert!(
+            !message.contains("its next step"),
+            "message must not invite a next step: {message}"
+        );
+    }
+
+    #[test]
+    fn start_repo_session_schema_lets_review_instructions_stay_empty() {
+        let instructions = schema_property_description("start_repo_session", "instructions");
 
         assert!(
             instructions.contains("code_review"),
@@ -1746,6 +1799,8 @@ mod tests {
         assert!(description.contains("Do not use it to hand the session new work"));
         assert!(description.contains("not an ongoing worker"));
         assert!(description.contains("needs a new `start_repo_session`"));
+        assert!(description.contains("in the branch history of new sessions in the same repo"));
+        assert!(!description.contains("visible to new sessions through hashtag references"));
         assert!(description.contains(
             "When correcting or retrying the session's own goal and its work so far is still wanted, prefer this over cancelling"
         ));

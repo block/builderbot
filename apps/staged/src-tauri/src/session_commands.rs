@@ -4324,14 +4324,38 @@ const NOTE_STANDALONE_OUTPUT_GUIDANCE: &str =
 /// session per goal, never a long-lived worker fed new work through
 /// `continue_repo_session`. Shared by the local and remote prompts.
 const PROJECT_SESSION_REPO_SESSION_SCOPE_GUIDANCE: &str = "This project session is a coordinator. \
-Each repo session is a single artifact on the timeline — one note, one commit, or one review — \
-with one goal and one outcome. Do not use one repo session as an ongoing worker that you keep \
-feeding work to. You may steer a repo session or restart it with a message, but only toward that \
-session's own goal. Every new piece of work gets a new `start_repo_session`, even in the same repo \
-and even when it follows directly from an earlier session: a next step, a follow-up note, another \
-commit, a review of a commit, or applying review feedback as a new commit. Notes and other earlier \
-artifacts are already visible to new repo sessions through hashtag references, so reusing a \
-session is not needed for its context.";
+Each repo session is a single artifact — one note, one commit, or one review — with one goal and \
+one outcome. Do not use one repo session as an ongoing worker that you keep feeding work to. You \
+may steer a repo session or restart it with a message, but only toward that session's own goal. \
+Every new piece of work gets a new `start_repo_session`, even in the same repo and even when it \
+follows directly from an earlier session: a next step, a follow-up note, another commit, a review \
+of a commit, or applying review feedback as a new commit. Notes and other earlier artifacts are \
+already in the branch history of new repo sessions in the same repo; point to them with hashtag \
+references, so reusing a session is not needed for its context.";
+
+/// The `wait_for_repo_session`, `cancel_repo_session`, and
+/// `continue_repo_session` bullets. They are the same in the local and remote
+/// prompts (only the `start_repo_session` bullet differs), so sharing them
+/// keeps the two from drifting apart.
+const PROJECT_SESSION_REPO_SESSION_FOLLOW_UP_TOOLS: &str = "- wait_for_repo_session: Use this to \
+wait on a previously started repo session by passing the `repo_session_id`. It returns the queue \
+state (`queued`, `running`, `completed`, `cancelled`, or `failed`), any available artifacts, and \
+activity details. Prefer another `wait_for_repo_session` call when the returned activity shows \
+recent progress. A completed session has finished its one goal: follow up with \
+`continue_repo_session` only to answer a question it ended on or to fix that outcome, and start a \
+new repo session for whatever comes next.\n\
+- cancel_repo_session: Use this to abort a queued or running repo session by `repo_session_id` \
+when the user wants the session stopped. Cancellation is best used when the user wants to go \
+down a different path rather than when you are surprised at how long the session is taking. \
+Work toward a different goal gets a new repo session rather than a redirected one.\n\
+- continue_repo_session: Use this only to steer a repo session, by `repo_session_id`, toward the \
+goal it already has — to correct it mid-run, answer a question it raised, or retry or fix a \
+failed, cancelled, or unsatisfactory result for that same outcome. Never use it to give a session \
+new work. A running session receives the message within seconds without being stopped and keeps \
+its work; a completed, cancelled, or failed session is resumed with it as the next instruction. A \
+session that has not started yet cannot take a message; wait for it to run or cancel it and start \
+a new one. When correcting or retrying the session's own goal and its work so far is still \
+wanted, prefer this over cancelling and starting over.";
 
 const PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE: &str = "When referring to existing timeline \
 items in notes or repo-session instructions, use hashtag references in the form #<type>:<id>, \
@@ -4362,24 +4386,7 @@ repo's visible timeline; use `expected_outcome=\"note_in_repo\"` (a detached not
 note should stand alone in the repo. Use `expected_outcome=\"commit\"` for code changes/commits and \
 `expected_outcome=\"code_review\"` for an AI code review of the changes on a repo's branch; commit \
 sessions create signed-off conventional commits. For remote branches this subagent runs on the \
-remote workspace, where file access, notes, commits, and reviews must happen.\n\
-- wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
-`repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
-or `failed`), any available artifacts, and activity details. Prefer another \
-`wait_for_repo_session` call when the returned activity shows recent progress. A completed \
-session has produced its one outcome; start a new repo session for whatever comes next.\n\
-- cancel_repo_session: Use this to abort a queued or running repo session by `repo_session_id` \
-when the user wants the session stopped. Cancellation is best used when the user wants to go \
-down a different path rather than when you are surprised at how long the session is taking. \
-Work toward a different goal gets a new repo session rather than a redirected one.\n\
-- continue_repo_session: Use this only to steer a repo session, by `repo_session_id`, toward the \
-goal it already has — to correct it mid-run, answer a question it raised, or retry or fix a \
-failed, cancelled, or unsatisfactory result for that same outcome. Never use it to give a session \
-new work. A running session receives the message within seconds without being stopped and keeps \
-its work; a completed, cancelled, or failed session is resumed with it as the next instruction. A \
-session that has not started yet cannot take a message; wait for it to run or cancel it and start \
-a new one. When correcting or retrying the session's own goal and its work so far is still \
-wanted, prefer this over cancelling and starting over."
+remote workspace, where file access, notes, commits, and reviews must happen."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. For notes, prefer \
@@ -4391,24 +4398,7 @@ sessions create signed-off conventional commits. Do not ask for multiple outcome
 a commit) in a single start_repo_session request — choose one outcome per call. All reasoning \
 specific to a repo must be done within a repo session rather than in this project-wide context. \
 You MUST NOT write files directly — all file writes MUST go through start_repo_session with \
-expected_outcome=\"commit\".\n\
-- wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
-`repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
-or `failed`), any available artifacts, and activity details. Prefer another \
-`wait_for_repo_session` call when the returned activity shows recent progress. A completed \
-session has produced its one outcome; start a new repo session for whatever comes next.\n\
-- cancel_repo_session: Use this to abort a queued or running repo session by `repo_session_id` \
-when the user wants the session stopped. Cancellation is best used when the user wants to go \
-down a different path rather than when you are surprised at how long the session is taking. \
-Work toward a different goal gets a new repo session rather than a redirected one.\n\
-- continue_repo_session: Use this only to steer a repo session, by `repo_session_id`, toward the \
-goal it already has — to correct it mid-run, answer a question it raised, or retry or fix a \
-failed, cancelled, or unsatisfactory result for that same outcome. Never use it to give a session \
-new work. A running session receives the message within seconds without being stopped and keeps \
-its work; a completed, cancelled, or failed session is resumed with it as the next instruction. A \
-session that has not started yet cannot take a message; wait for it to run or cancel it and start \
-a new one. When correcting or retrying the session's own goal and its work so far is still \
-wanted, prefer this over cancelling and starting over."
+expected_outcome=\"commit\"."
     };
 
     let coordinator_reminder = if is_remote {
@@ -4429,7 +4419,8 @@ repository edits directly here; use `start_repo_session` for implementation work
 fulfill the request below, then produce a project note summarizing what you found and any \
 actions taken.\n\n\
 {preamble}\n\n\
-{start_repo_session_desc}\n\n\
+{start_repo_session_desc}\n\
+{PROJECT_SESSION_REPO_SESSION_FOLLOW_UP_TOOLS}\n\n\
 {PROJECT_SESSION_REPO_SESSION_SCOPE_GUIDANCE}\n\n\
 {PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE}\n\n\
 {pikchr_guidance}\n\n{media_guidance}\n\n\
@@ -13092,20 +13083,52 @@ mod tests {
         assert!(!prompt.contains("repo session is taking a long time"));
     }
 
+    /// Both prompts carry the shared scope paragraph and follow-up tool
+    /// bullets (their wording is checked once, in
+    /// `project_session_repo_session_guidance_scopes_each_session_to_one_goal`),
+    /// and nothing else in either prompt brings back the old reuse wording.
     fn assert_project_session_repo_session_scope_guidance(prompt: &str) {
         assert!(prompt.contains(PROJECT_SESSION_REPO_SESSION_SCOPE_GUIDANCE));
-        assert!(prompt.contains("This project session is a coordinator"));
-        assert!(prompt.contains("Do not use one repo session as an ongoing worker"));
-        assert!(prompt.contains("but only toward that session's own goal"));
-        assert!(prompt.contains("Every new piece of work gets a new `start_repo_session`"));
-        assert!(prompt.contains("applying review feedback as a new commit"));
-        assert!(prompt.contains("start a new repo session for whatever comes next"));
-        assert!(prompt.contains("Work toward a different goal gets a new repo session"));
-        assert!(prompt.contains("Use this only to steer a repo session"));
-        assert!(prompt.contains("toward the goal it already has"));
-        assert!(prompt.contains("Never use it to give a session new work"));
+        assert!(prompt.contains(PROJECT_SESSION_REPO_SESSION_FOLLOW_UP_TOOLS));
         assert!(!prompt.contains("or a next step"));
-        assert!(!prompt.contains("Prefer this over cancelling and starting over when"));
+        assert!(!prompt
+            .to_lowercase()
+            .contains("prefer this over cancelling and starting over when"));
+        assert!(!prompt.contains("the session's work so far is still wanted"));
+        assert!(!prompt.contains("artifact on the timeline"));
+        assert!(!prompt.contains("visible to new repo sessions through hashtag references"));
+        assert!(!prompt.contains("has produced its one outcome"));
+    }
+
+    /// Each repo session is one artifact with one goal: the shared guidance
+    /// sends new work to a new `start_repo_session`, keeps
+    /// `continue_repo_session` to the session's own goal (answering a
+    /// question it ended on included, since that session reports
+    /// `completed`), and scopes earlier work to the same repo's history.
+    #[test]
+    fn project_session_repo_session_guidance_scopes_each_session_to_one_goal() {
+        let scope = PROJECT_SESSION_REPO_SESSION_SCOPE_GUIDANCE;
+        assert!(scope.contains("This project session is a coordinator"));
+        assert!(scope.contains("Do not use one repo session as an ongoing worker"));
+        assert!(scope.contains("but only toward that session's own goal"));
+        assert!(scope.contains("Every new piece of work gets a new `start_repo_session`"));
+        assert!(scope.contains("applying review feedback as a new commit"));
+        assert!(scope.contains(
+            "already in the branch history of new repo sessions in the same repo; point to them with hashtag references"
+        ));
+
+        let tools = PROJECT_SESSION_REPO_SESSION_FOLLOW_UP_TOOLS;
+        assert!(tools.contains(
+            "follow up with `continue_repo_session` only to answer a question it ended on or to fix that outcome"
+        ));
+        assert!(tools.contains("start a new repo session for whatever comes next"));
+        assert!(tools.contains("Work toward a different goal gets a new repo session"));
+        assert!(tools.contains("Use this only to steer a repo session"));
+        assert!(tools.contains("toward the goal it already has"));
+        assert!(tools.contains("Never use it to give a session new work"));
+        assert!(tools.contains(
+            "When correcting or retrying the session's own goal and its work so far is still wanted, prefer this over cancelling and starting over"
+        ));
     }
 
     fn assert_project_session_outcome_guidance(prompt: &str) {

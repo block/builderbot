@@ -6,7 +6,7 @@ use tauri::Manager;
 
 use super::plan::{
     action_for, plan_launch_resume, CandidateKind, LaunchAction, LaunchCandidate,
-    PIPELINE_NOT_RESUMED_REASON, PROJECT_NEVER_STARTED_REASON,
+    PIPELINE_NOT_RESUMED_REASON, PROJECT_NEVER_STARTED_REASON, PROJECT_SESSION_RESUME_PROMPT,
 };
 use super::run::{run_project_phase, run_repo_phase, wait_until_settled, PhaseOutcome};
 use super::{build_recovery, handled_through_from_preferences, LaunchResumeState};
@@ -168,6 +168,14 @@ fn action_depends_on_kind_and_conversation() {
         action_for(&candidate("a", None, 1, CandidateKind::Internal, true)),
         LaunchAction::Skip { .. }
     ));
+}
+
+/// A resumed project session may continue an `app_quit` repo session only
+/// toward that session's own goal, never to hand it the next piece of work.
+#[test]
+fn project_resume_prompt_scopes_continue_to_the_sessions_own_goal() {
+    assert!(PROJECT_SESSION_RESUME_PROMPT
+        .contains("with `continue_repo_session` to finish its own goal, or started again"));
 }
 
 /// Repo sessions come first, grouped by branch in `created_at` order; project

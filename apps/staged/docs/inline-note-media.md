@@ -18,18 +18,19 @@ fence ends with its container: a line without the `>` prefix ends a quoted
 fence, and a dedented ```` ``` ```` under a list item ends the item and opens
 a new top-level fence rather than closing the old one, so the text that
 follows stays code. Other dedented lines are absorbed by the list item, as
-Marked does, unless a blank line precedes them. HTML blocks are skipped too:
-`<pre>`, `<script>`, `<style>`, and `<textarea>` run to their own closing tag
+Marked does, unless a blank line precedes them (or, in an HTML block, they
+directly follow its start line). HTML blocks are skipped too: `<pre>`,
+`<script>`, `<style>`, and `<textarea>` run to their own closing tag
 (a `</script>` does not end a `<pre>` block, and with no matching closer the
 block runs to the end of the note, as Marked's backreference does), `<!-- -->`
 runs to `-->`, and block-level tags such as `<div>` or `<table>` run to the
 next blank line. Processing instructions (`<?…?>`), declarations
 (`<!DOCTYPE …>`), and `<![CDATA[…]]>` sections are skipped as well, each
 ending only on its own closer (a bare `>` ends a declaration but not a CDATA
-section or processing instruction). Matching Marked, these three neither
-interrupt a paragraph nor end a list item from a dedented line, whereas raw
-tags, comments, and block-level tags do. An arbitrary custom tag on its own
-line is not recognized as an HTML block. Inline HTML spans inside a paragraph
+section or processing instruction). Matching Marked, all of these HTML
+blocks interrupt a paragraph and end a list item from a dedented line. An
+arbitrary custom tag on its own line is not recognized as an HTML block (Marked
+hides it to the next blank line). Inline HTML spans inside a paragraph
 (such as `Para <!--` continuing onto the next line) are not tracked, so an
 image Marked hides inside one is still ingested.
 

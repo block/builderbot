@@ -33,7 +33,7 @@ sha2 = "0.11"
 
 # Review storage
 rusqlite = { version = "0.41", features = ["bundled"] }
-rusqlite_migration = { version = "2.6.0", features = ["from-directory"] }
+rusqlite_migration = { version = "2.7.0", features = ["from-directory"] }
 include_dir = "0.7.4"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 dirs = "7.0"

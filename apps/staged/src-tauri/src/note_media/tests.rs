@@ -990,8 +990,11 @@ fn html_blocks_are_not_prose() {
         ("<Pre>![S](p)</pre> ![T](p)", 0),
         ("<pre\n![S](p)\n</pre>\n![T](p)", 1),
         ("<pre/>\n![S](p)\n</pre>\n![T](p)", 2),
-        ("<prex>\n![S](p)\n\n![T](p)", 2),
-        ("</pre>\n![S](p)\n\n![T](p)", 2),
+        // Trailing text keeps these out of condition 7 (a complete tag alone
+        // on its line), which Marked hides to the next blank line but the
+        // scanner deliberately does not recognize.
+        ("<prex> x\n![S](p)\n\n![T](p)", 2),
+        ("</pre> x\n![S](p)\n\n![T](p)", 2),
         ("<script>\n![S](p)\n</script>", 0),
         ("<style>\n![S](p)", 0),
         ("<textarea>\n![S](p)\n</textarea>\n![T](p)", 1),
@@ -999,7 +1002,7 @@ fn html_blocks_are_not_prose() {
         // runs to the end of the document.
         ("<pre>\n![S](p)\n</script>\n![T](p)", 0),
         ("<pre>\n![S](p)\n</script>\n![T](p)\n</pre>\n![U](p)", 1),
-        ("<pre>\n![S](p)\n</pre>\n</script>\n![T](p)", 1),
+        ("<pre>\n![S](p)\n</pre>\n</script> x\n![T](p)", 1),
         ("<script>\n![S](p)\n</pre>\n</script>\n![T](p)", 1),
         ("<textarea>\n![S](p)\n</pre>\n![T](p)", 0),
         ("<style>\n![S](p)\n</STYLE>\n![T](p)", 1),
@@ -1042,12 +1045,18 @@ fn html_blocks_are_not_prose() {
         ("- a\n<div>\n![S](p)\n</div>", 0),
         ("- a\n  <div>\n  ![S](p)\n\n  ![T](p)", 1),
         ("- a\n  <!--\n  x\nlazy ![S](p)\n  -->\n![T](p)", 1),
+        // A dedented line directly after the start line ends the item.
+        ("- <div>\nlazy ![S](p)", 1),
+        ("- <pre>\nlazy ![S](p)\n</pre>", 1),
+        ("- <!--\nlazy ![S](p)\n-->", 1),
+        ("- a\n  <div>\nlazy ![S](p)", 1),
+        ("- <div>\n  x\nlazy ![S](p)", 0),
     ]);
 }
 
 /// Processing instructions, declarations, and CDATA sections (conditions 3,
-/// 4, and 5) end only on their own closer and, unlike the other HTML blocks,
-/// neither interrupt a paragraph nor end a list item from a dedented line.
+/// 4, and 5) end only on their own closer and, like the other HTML blocks,
+/// interrupt a paragraph and end a list item from a dedented line.
 /// Every count was checked against Marked with the app's options.
 #[test]
 fn html_block_declarations_are_not_prose() {
@@ -1072,18 +1081,23 @@ fn html_block_declarations_are_not_prose() {
         ("<!DOCTYPE\n![S](p)", 0),
         (" <![CDATA[\n![S](p)", 0),
         ("    <![CDATA[\n![S](p)", 1),
-        ("Para\n<!DOCTYPE\n![S](p)\n>\n![T](p)", 2),
-        ("- a\n  ```\n  code\n<![CDATA[\n![S](p)\n  ```\n![T](p)", 1),
-        ("- a\n  ```\n  code\n<?x\n![S](p)\n  ```\n![T](p)", 1),
-        ("- a\n  ```\n  code\n<!X\n![S](p)\n  ```\n![T](p)", 1),
+        ("Para\n<!DOCTYPE\n![S](p)\n>\n![T](p)", 1),
+        ("Para\n<![CDATA[ x ]]> ![S](p)\n![T](p)", 1),
+        ("- a\n<!DOCTYPE\n![S](p)\n>\n![T](p)", 1),
+        ("- a\n  ```\n  code\n<![CDATA[\n![S](p)\n  ```\n![T](p)", 0),
+        ("- a\n  ```\n  code\n<?x\n![S](p)\n  ```\n![T](p)", 0),
+        ("- a\n  ```\n  code\n<!X\n![S](p)\n  ```\n![T](p)", 0),
+        ("1. a\n   ```\n   x\n<?y\n![S](p)\n?>\n![T](p)", 1),
         ("- <![CDATA[\n  ![S](p)\n  ]]>\n  ![T](p)", 1),
         ("> <?php\n> ![S](p)\n> ?>\n> ![T](p)", 1),
         ("> <![CDATA[\n> ![S](p)\n![T](p)\n> ]]>\n![U](p)", 2),
         ("- <![CDATA[\n  ![S](p)\n![T](p)\n  ]]>\n![U](p)", 1),
-        // A blank line first, so the block starts in the item rather than
-        // continuing `a` (where Marked's inline CDATA span would hide `S`).
+        // The block starts in the item, after a blank line or interrupting
+        // `a`, and absorbs a later lazy line.
         ("- a\n\n  <![CDATA[\n  x\nlazy ![S](p)\n  ]]>\n![T](p)", 1),
         ("- a\n\n  <?x\n  y\nlazy ![S](p)\n  ?>\n![T](p)", 1),
+        ("- a\n  <![CDATA[\n  x\nlazy ![S](p)\n  ]]>\n![T](p)", 1),
+        ("- a\n  <?x\n  y\nlazy ![S](p)\n  ?>\n![T](p)", 1),
         ("- <!DOCTYPE\n  ![S](p)\n\n![T](p)", 1),
     ]);
 }

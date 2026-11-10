@@ -102,17 +102,6 @@ impl HtmlBlock {
             HtmlBlock::Block => false,
         }
     }
-
-    /// Whether this block may interrupt a paragraph, or end a list item from
-    /// a dedented line. Marked's paragraph and list-item interrupt patterns
-    /// list only conditions 1, 2, and 6, so a processing instruction,
-    /// declaration, or CDATA section after paragraph text is more paragraph.
-    fn interrupts_paragraph(self) -> bool {
-        match self {
-            HtmlBlock::Raw(_) | HtmlBlock::Comment | HtmlBlock::Block => true,
-            HtmlBlock::ProcessingInstruction | HtmlBlock::Declaration | HtmlBlock::Cdata => false,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -124,6 +113,9 @@ struct Scanner {
     /// Whether the previous line was blank; a dedented line after a blank
     /// ends a list item even inside its fence or HTML block.
     last_blank: bool,
+    /// Whether the previous line opened the HTML block still open; Marked
+    /// ends a list item before a dedented line directly after that line.
+    html_opened: bool,
 }
 
 impl Scanner {
@@ -134,10 +126,13 @@ impl Scanner {
     }
 
     fn scan(&mut self, line: &str) -> bool {
+        let after_html_start = std::mem::take(&mut self.html_opened);
         let mut cursor = Cursor::new(line);
         let matched = self.match_containers(&mut cursor);
         if self.fence.is_some() || self.html.is_some() {
-            if matched < self.stack.len() && self.leaves_container(&cursor, matched) {
+            if matched < self.stack.len()
+                && self.leaves_container(&cursor, matched, after_html_start)
+            {
                 // The container closed, taking its fence or HTML block with
                 // it. The line is then read afresh at the outer level, where a
                 // dedented ``` opens a new fence rather than closing one.
@@ -203,11 +198,12 @@ impl Scanner {
     /// Whether a line that failed to match the container at `depth` ends it
     /// while a fence or HTML block is open. Blockquotes end as CommonMark
     /// says; Marked's list items also absorb dedented lines unless a blank
-    /// line preceded them or they would start a block.
-    fn leaves_container(&self, cursor: &Cursor, depth: usize) -> bool {
+    /// line or the HTML block's start line directly preceded them, or they
+    /// would start a block.
+    fn leaves_container(&self, cursor: &Cursor, depth: usize, after_html_start: bool) -> bool {
         match self.stack[depth] {
             Container::Quote => true,
-            Container::Item { .. } => self.last_blank || starts_block(cursor),
+            Container::Item { .. } => self.last_blank || after_html_start || starts_block(cursor),
         }
     }
 
@@ -243,13 +239,14 @@ impl Scanner {
                 self.in_paragraph = false;
                 return false;
             }
-            if let Some(html) = html_block_start(content)
-                .filter(|html| !self.in_paragraph || html.interrupts_paragraph())
-            {
+            // Every recognized condition (1 through 6) may interrupt a
+            // paragraph.
+            if let Some(html) = html_block_start(content) {
                 // A start line that also meets the end condition is the whole
                 // block.
                 if !html.ends_on(content) {
                     self.html = Some(html);
+                    self.html_opened = true;
                 }
                 self.in_paragraph = false;
                 return false;
@@ -270,7 +267,7 @@ fn starts_block(cursor: &Cursor) -> bool {
             || parse_opening_fence(content).is_some()
             || is_atx_heading(content)
             || is_thematic_break(content)
-            || html_block_start(content).is_some_and(HtmlBlock::interrupts_paragraph))
+            || html_block_start(content).is_some())
 }
 
 /// Tags whose open or close tag on a line starts an HTML block that runs to
@@ -342,8 +339,7 @@ const BLOCK_TAGS: &[&str] = &[
 
 /// HTML block start conditions 1 through 6 for a line's content (after
 /// container prefixes and under four columns of indentation); 7 is
-/// deliberately not recognized. Whether the block may interrupt a paragraph
-/// is up to the caller, via [`HtmlBlock::interrupts_paragraph`].
+/// deliberately not recognized.
 fn html_block_start(content: &str) -> Option<HtmlBlock> {
     let rest = content.strip_prefix('<')?;
     if rest.starts_with("!--") {

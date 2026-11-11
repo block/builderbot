@@ -18,9 +18,10 @@ use std::path::Path;
 const TRACKED: &[(&str, &str, usize)] = &[
     // The user's own repo action: streams output and may run for minutes.
     ("actions/commands.rs", "run_branch_action_impl", 1),
-    // `git clone`, both setup fetches and the setup checkout, for a repo
+    // `git clone`, plus the runner behind `check_out_workspace_branch` (setup
+    // fetches, checkout, fast-forward merge, branch creation), for a repo
     // added to a workspace. A killed checkout leaves `.git/index.lock`.
-    ("branches.rs", "clone_repo_into_workspace", 4),
+    ("branches.rs", "clone_repo_into_workspace", 2),
     // The diff-collection script reads both versions of every changed file
     // for every commit on the branch; on a large branch it outlasts 60 s.
     ("diff_cache.rs", "collect_branch_diff", 1),

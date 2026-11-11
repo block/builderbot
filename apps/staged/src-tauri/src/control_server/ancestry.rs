@@ -47,6 +47,10 @@ impl Ancestry {
     }
 
     /// A fixed pid → parent table; anything absent has no readable parent.
+    ///
+    /// The walk compares every pid it visits against the test binary's own
+    /// pid, so tables must be built from [`fake_pid`] values, which no live
+    /// process can hold.
     #[cfg(test)]
     pub fn fake(parents: std::collections::HashMap<i32, i32>) -> Self {
         Self {
@@ -119,6 +123,18 @@ fn system_parent_of(pid: i32) -> Option<i32> {
     i32::try_from(info.pbi_ppid).ok()
 }
 
+/// Fake pids for test process tables start here: above Linux's largest
+/// `pid_max` (2^22) and macOS's cap (99998), so a fake table entry can never
+/// coincide with the test binary's own pid, which ends the walk early.
+#[cfg(test)]
+pub(crate) const FAKE_PID_BASE: i32 = 2_000_000_000;
+
+/// The `n`th fake pid for a test process table; see [`FAKE_PID_BASE`].
+#[cfg(test)]
+pub(crate) fn fake_pid(n: i32) -> i32 {
+    FAKE_PID_BASE + n
+}
+
 #[cfg(target_os = "linux")]
 fn system_parent_of(pid: i32) -> Option<i32> {
     if pid <= 0 {
@@ -149,18 +165,27 @@ mod tests {
         }
     }
 
+    /// `fake_pid(n)`, read in the table shapes below as pid `n`.
+    fn fp(n: i32) -> i32 {
+        fake_pid(n)
+    }
+
     #[test]
     fn a_descendant_of_a_registered_agent_is_classified_as_its_session() {
         let grants = ControlGrants::default();
-        grants.register_agent_process(500, session("s-1"));
+        grants.register_agent_process(fp(500) as u32, session("s-1"));
         // stagedctl 503 ← sh 502 ← node tool 501 ← agent 500 ← app.
-        let ancestry = Ancestry::fake(HashMap::from([(503, 502), (502, 501), (501, 500)]));
+        let ancestry = Ancestry::fake(HashMap::from([
+            (fp(503), fp(502)),
+            (fp(502), fp(501)),
+            (fp(501), fp(500)),
+        ]));
         assert_eq!(
-            ancestry.spawned_session_of(503, &grants),
+            ancestry.spawned_session_of(fp(503), &grants),
             Some(session("s-1"))
         );
         assert_eq!(
-            ancestry.spawned_session_of(500, &grants),
+            ancestry.spawned_session_of(fp(500), &grants),
             Some(session("s-1")),
             "the agent process itself"
         );
@@ -169,15 +194,15 @@ mod tests {
     #[test]
     fn unrelated_and_unreadable_ancestry_is_nobodys_session() {
         let grants = ControlGrants::default();
-        grants.register_agent_process(500, session("s-1"));
+        grants.register_agent_process(fp(500) as u32, session("s-1"));
         // A user shell under launchd: never reaches an agent.
-        let ancestry = Ancestry::fake(HashMap::from([(900, 800), (800, 1)]));
-        assert_eq!(ancestry.spawned_session_of(900, &grants), None);
+        let ancestry = Ancestry::fake(HashMap::from([(fp(900), fp(800)), (fp(800), 1)]));
+        assert_eq!(ancestry.spawned_session_of(fp(900), &grants), None);
         // A parent that cannot be read stops the walk without a match.
-        assert_eq!(ancestry.spawned_session_of(42, &grants), None);
+        assert_eq!(ancestry.spawned_session_of(fp(42), &grants), None);
         // A table that loops cannot spin.
-        let looping = Ancestry::fake(HashMap::from([(7, 8), (8, 7)]));
-        assert_eq!(looping.spawned_session_of(7, &grants), None);
+        let looping = Ancestry::fake(HashMap::from([(fp(7), fp(8)), (fp(8), fp(7))]));
+        assert_eq!(looping.spawned_session_of(fp(7), &grants), None);
         assert_eq!(ancestry.spawned_session_of(0, &grants), None);
         assert_eq!(ancestry.spawned_session_of(-1, &grants), None);
     }
@@ -185,13 +210,13 @@ mod tests {
     #[test]
     fn the_walk_is_bounded() {
         let grants = ControlGrants::default();
-        grants.register_agent_process(1_000, session("deep"));
+        grants.register_agent_process(fp(1_000) as u32, session("deep"));
         // A straight chain below the agent: pid 1_000 + d is d hops from it.
         let chain: HashMap<i32, i32> = (1..=MAX_ANCESTRY_HOPS as i32 + 1)
-            .map(|d| (1_000 + d, 1_000 + d - 1))
+            .map(|d| (fp(1_000 + d), fp(1_000 + d - 1)))
             .collect();
         let ancestry = Ancestry::fake(chain);
-        let reachable = 1_000 + MAX_ANCESTRY_HOPS as i32;
+        let reachable = fp(1_000 + MAX_ANCESTRY_HOPS as i32);
         assert_eq!(
             ancestry.spawned_session_of(reachable, &grants),
             Some(session("deep")),
@@ -211,8 +236,8 @@ mod tests {
         // Registering the app's own pid as an agent is nonsense, but even
         // then the app is not classified as a session.
         grants.register_agent_process(own as u32, session("never"));
-        let ancestry = Ancestry::fake(HashMap::from([(77, own)]));
-        assert_eq!(ancestry.spawned_session_of(77, &grants), None);
+        let ancestry = Ancestry::fake(HashMap::from([(fp(77), own)]));
+        assert_eq!(ancestry.spawned_session_of(fp(77), &grants), None);
     }
 
     #[test]
@@ -226,5 +251,6 @@ mod tests {
         assert_eq!(system_parent_of(-5), None);
         // A pid no process holds.
         assert_eq!(system_parent_of(i32::MAX - 7), None);
+        assert_eq!(system_parent_of(fake_pid(1)), None);
     }
 }

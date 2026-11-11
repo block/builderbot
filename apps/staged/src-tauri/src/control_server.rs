@@ -1076,7 +1076,9 @@ mod tests {
         assert_eq!(HANDLED.load(Ordering::SeqCst), 1);
     }
 
-    /// A gate whose process table is `parents` (pid → parent pid).
+    /// A gate whose process table is `parents` (pid → parent pid), built
+    /// from [`ancestry::fake_pid`] values so no entry can be the test
+    /// binary's own pid.
     fn fake_gate(
         grants: &ControlGrants,
         parents: std::collections::HashMap<i32, i32>,
@@ -1234,10 +1236,11 @@ mod tests {
             Json(serde_json::json!({ "requestId": pending.id }))
         }
         let grants = ControlGrants::default();
+        let fp = ancestry::fake_pid;
         // Session s-1's agent is pid 500; stagedctl 503 ← sh 502 ← tool 501
         // ← agent 500. Pid 900 is the user's own shell under launchd.
         grants.register_agent_process(
-            500,
+            fp(500) as u32,
             grants::SpawnedSession {
                 session_id: "s-1".to_string(),
                 epoch: 1,
@@ -1245,12 +1248,12 @@ mod tests {
             },
         );
         let parents = std::collections::HashMap::from([
-            (503, 502),
-            (502, 501),
-            (501, 500),
-            (500, std::process::id() as i32),
-            (900, 800),
-            (800, 1),
+            (fp(503), fp(502)),
+            (fp(502), fp(501)),
+            (fp(501), fp(500)),
+            (fp(500), std::process::id() as i32),
+            (fp(900), fp(800)),
+            (fp(800), 1),
         ]);
         let router = Router::new()
             .route("/api/connect", post(stand_in))
@@ -1287,7 +1290,7 @@ mod tests {
         ] {
             let response = router
                 .clone()
-                .oneshot(request(path, Some(503)))
+                .oneshot(request(path, Some(fp(503))))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
@@ -1316,8 +1319,8 @@ mod tests {
         // Unrelated ancestry, an unreadable one (pid absent from the table)
         // and no pid at all pass through.
         for (pid, what) in [
-            (Some(900), "the user's own shell"),
-            (Some(31337), "a pid whose parent cannot be read"),
+            (Some(fp(900)), "the user's own shell"),
+            (Some(fp(31337)), "a pid whose parent cannot be read"),
             (None, "no peer pid reported"),
         ] {
             let response = router
@@ -1338,8 +1341,9 @@ mod tests {
     #[test]
     fn a_connected_app_bearer_from_inside_a_session_is_refused_on_invoke() {
         let grants = ControlGrants::default();
+        let fp = ancestry::fake_pid;
         grants.register_agent_process(
-            500,
+            fp(500) as u32,
             grants::SpawnedSession {
                 session_id: "s-1".to_string(),
                 epoch: 1,
@@ -1348,7 +1352,7 @@ mod tests {
         );
         let gate = fake_gate(
             &grants,
-            std::collections::HashMap::from([(503, 502), (502, 500), (900, 1)]),
+            std::collections::HashMap::from([(fp(503), fp(502)), (fp(502), fp(500)), (fp(900), 1)]),
         );
         let app_token = grants.mint_app_bearer(
             "g-1",
@@ -1368,7 +1372,7 @@ mod tests {
             access: Access::ReadWrite,
         };
 
-        let refused = enrol::refuse_app_bearer_from_session(&gate, Some(503), &app_grant)
+        let refused = enrol::refuse_app_bearer_from_session(&gate, Some(fp(503)), &app_grant)
             .expect("a class B bearer from inside session s-1 is refused");
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
         let body = tauri::async_runtime::block_on(json_body(refused));
@@ -1382,11 +1386,11 @@ mod tests {
         );
 
         assert!(
-            enrol::refuse_app_bearer_from_session(&gate, Some(503), &session_grant).is_none(),
+            enrol::refuse_app_bearer_from_session(&gate, Some(fp(503)), &session_grant).is_none(),
             "the session's own credential is what it should use"
         );
         assert!(
-            enrol::refuse_app_bearer_from_session(&gate, Some(900), &app_grant).is_none(),
+            enrol::refuse_app_bearer_from_session(&gate, Some(fp(900)), &app_grant).is_none(),
             "the connected app from the user's shell"
         );
         assert!(

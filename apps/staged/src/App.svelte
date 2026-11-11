@@ -77,10 +77,9 @@
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { sweepCache } from './lib/cache';
+  import { initUpdater, initUpdaterMirror } from './lib/services/updater.svelte';
+  import { isUpdaterAvailable, logUpdaterMessage } from './lib/services/updater';
   import type { StoreIncompatibility } from './lib/types';
-
-  const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
-  const updaterCheckIntervalMs = 15 * 60 * 1000;
 
   let showSessionLab = $state(false);
   let unlistenMenu: UnlistenFn | undefined;
@@ -93,7 +92,11 @@
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let unguardDocumentScroll: (() => void) | undefined;
+  // Set only while this window owns the updater loop; ensureUpdaterLoopStarted
+  // guards on it, so the mirror cleanup must live in its own handle or a later
+  // `updater-owner-available` could never promote this window to owner.
   let stopUpdaterLoop: (() => void) | null = null;
+  let stopUpdaterMirror: (() => void) | null = null;
   let updaterStartPending = false;
   let updaterStartQueued = false;
   let destroyed = false;
@@ -260,120 +263,50 @@
     return event.defaultPrevented;
   }
 
-  async function logUpdater(message: string) {
-    console.warn(message);
-    try {
-      const { warn } = await import('@tauri-apps/plugin-log');
-      await warn(message);
-    } catch {
-      // log plugin is optional during local web-only development
-    }
-  }
-
-  async function startUpdaterLoop(): Promise<(() => void) | null> {
-    const isTauriApp = isTauri;
+  async function startUpdaterLoop(): Promise<{ owner: boolean; stop: () => void } | null> {
     const windowLabel = getWindowLabel();
-    void logUpdater(
-      `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp} window=${windowLabel}`
-    );
 
-    if (!updaterEnabled || import.meta.env.DEV || !isTauriApp) {
-      void logUpdater('[updater] skipped because a gate condition was not met');
+    // The updater service owns the build gate (see services/updater.ts); this
+    // shell only decides *which* window runs it. Ask about the gate first, so
+    // non-updating builds never reach the Tauri-only ownership command.
+    if (!isUpdaterAvailable()) {
+      logUpdaterMessage(
+        `[updater] skipped because a gate condition was not met (window=${windowLabel})`
+      );
       return null;
     }
 
     // Update prompts and relaunches are app-wide. The backend grants one live
     // window ownership and releases it from the native Destroyed hook, allowing
     // a surviving peer to take over even if frontend teardown never runs.
+    // Losing windows mirror the owner's status and route manual checks to it,
+    // so their Settings panel stays accurate and usable.
     if (!(await commands.claimUpdaterOwnership())) {
-      void logUpdater('[updater] skipped because another window owns the updater loop');
-      return null;
+      logUpdaterMessage(
+        `[updater] mirroring because another window owns the updater loop (window=${windowLabel})`
+      );
+      return { owner: false, stop: initUpdaterMirror() };
     }
 
-    let cancelled = false;
-    let updaterRunInFlight = false;
-    let updaterRunQueued = false;
-    let lastPromptedUpdateVersion: string | null = null;
-
-    const runUpdater = async () => {
-      if (updaterRunInFlight) {
-        updaterRunQueued = true;
-        await logUpdater('[updater] check skipped because a previous run is still active');
-        return;
-      }
-
-      updaterRunInFlight = true;
-      try {
-        await logUpdater('[updater] checking for updates');
-        const [{ check }, { relaunch }] = await Promise.all([
-          import('@tauri-apps/plugin-updater'),
-          import('@tauri-apps/plugin-process'),
-        ]);
-        const updatePromise = check();
-        const timeoutPromise = new Promise<null>((resolve) =>
-          setTimeout(() => resolve(null), 15_000)
-        );
-        const update = await Promise.race([updatePromise, timeoutPromise]);
-
-        if (!update || cancelled) {
-          await logUpdater('[updater] no update available, cancelled, or timed out');
-          return;
-        }
-
-        if (lastPromptedUpdateVersion === update.version) {
-          await logUpdater(`[updater] update ${update.version} already prompted; skipping`);
-          return;
-        }
-
-        lastPromptedUpdateVersion = update.version;
-        await logUpdater(`[updater] update found: ${update.version}`);
-
-        const { confirm } = await import('@tauri-apps/plugin-dialog');
-        const shouldInstall = await confirm(
-          `Staged ${update.version} is available. Install now? The app will restart once finished.`,
-          { title: 'Update Available', kind: 'info' }
-        );
-        if (!shouldInstall || cancelled) {
-          await logUpdater(`[updater] install deferred for ${update.version}`);
-          return;
-        }
-
-        await logUpdater('[updater] downloading and installing update');
-        await update.downloadAndInstall();
-        if (cancelled) return;
-
-        await relaunch();
-      } catch (error) {
-        await logUpdater(`[updater] check failed: ${error}`);
-      } finally {
-        updaterRunInFlight = false;
-        if (!cancelled && updaterRunQueued) {
-          updaterRunQueued = false;
-          void runUpdater();
-        }
-      }
-    };
-
-    void runUpdater();
-    const interval = setInterval(() => {
-      void runUpdater();
-    }, updaterCheckIntervalMs);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    logUpdaterMessage(`[updater] window=${windowLabel} owns the updater loop`);
+    return { owner: true, stop: initUpdater() };
   }
 
   async function ensureUpdaterLoopStarted() {
     if (destroyed || stopUpdaterLoop || updaterStartPending) return;
     updaterStartPending = true;
     try {
-      const stop = await startUpdaterLoop();
-      if (destroyed) stop?.();
-      else stopUpdaterLoop = stop;
+      const started = await startUpdaterLoop();
+      if (destroyed) {
+        started?.stop();
+      } else if (started) {
+        stopUpdaterMirror?.();
+        stopUpdaterMirror = null;
+        if (started.owner) stopUpdaterLoop = started.stop;
+        else stopUpdaterMirror = started.stop;
+      }
     } catch (error) {
-      await logUpdater(`[updater] failed to claim ownership: ${error}`);
+      logUpdaterMessage(`[updater] failed to claim ownership: ${error}`);
     } finally {
       updaterStartPending = false;
       if (updaterStartQueued) {
@@ -663,6 +596,8 @@
 
     // Window was created hidden — show it now that the theme is applied
     await getWindowSync().show();
+    // Start the updater service in whichever window wins the ownership claim
+    // (gated: only official release builds check).
     requestUpdaterLoopStart();
   });
 
@@ -683,6 +618,7 @@
     projectsDataStore.stopListeners();
     projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();
+    stopUpdaterMirror?.();
   });
 
   async function handleResetStore() {

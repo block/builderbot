@@ -10,6 +10,9 @@
   import { Label } from '$lib/components/ui/label';
   import DiagramConfigSetting from './DiagramConfigSetting.svelte';
   import ProjectStatusOptionsSetting from './ProjectStatusOptionsSetting.svelte';
+  import UpdateSettings from './UpdateSettings.svelte';
+  import { isTauri } from '../../transport';
+  import { updaterState, checkForUpdatesNow } from '../../services/updater.svelte';
   import {
     preferences,
     getAvailableSyntaxThemes,
@@ -46,10 +49,24 @@
 
   const activeColors = $derived(previewColors.get(preferences.diffTheme));
 
+  let appVersion = $state(__APP_VERSION__);
+
   onMount(() => {
     loadAllThemePreviewColors().then((colors) => {
       previewColors = colors;
     });
+
+    if (isTauri) {
+      // Prefer the native bundle version over the compile-time constant.
+      import('@tauri-apps/api/app')
+        .then(({ getVersion }) => getVersion())
+        .then((version) => {
+          appVersion = version;
+        })
+        .catch((error) => {
+          console.warn('[Settings] Could not load runtime app version', error);
+        });
+    }
   });
 
   function handleThemeSelect(name: string) {
@@ -156,6 +173,10 @@
 
     <div class="field">
       <DiagramConfigSetting />
+    </div>
+
+    <div class="field">
+      <UpdateSettings updater={updaterState} {appVersion} onCheck={() => checkForUpdatesNow()} />
     </div>
 
     <div class="field">

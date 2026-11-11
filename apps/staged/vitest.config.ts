@@ -8,7 +8,11 @@ export default defineConfig({
       {
         test: {
           name: 'unit',
-          include: ['src/**/*.test.ts', '../../packages/diff-viewer/src/**/*.test.ts'],
+          include: [
+            'src/**/*.test.ts',
+            'scripts/**/*.test.ts',
+            '../../packages/diff-viewer/src/**/*.test.ts',
+          ],
           exclude: [...configDefaults.exclude, 'src/**/*.component.test.ts'],
         },
       },

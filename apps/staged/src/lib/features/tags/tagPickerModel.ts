@@ -8,7 +8,9 @@
  * tags, which act as checkboxes. A query keeps the tags whose name contains
  * it, or every tag of a group whose name does, ignoring case. When no tag's
  * name equals the query (ignoring case, in any scope), a create row offers to
- * make it an ungrouped tag. "Manage tags…" always closes the list.
+ * make it an ungrouped tag. The highlight starts on a tag the query matches
+ * before the create row, so Enter on `q4` picks `q4-launch` rather than making
+ * a near-duplicate. "Manage tags…" always closes the list.
  */
 
 import type { Tag } from '../../types';
@@ -123,12 +125,15 @@ export function buildTagPickerModel(
 
 /**
  * Where the highlight starts: on a query, the tag it names exactly, else the
- * create row (so Enter creates), else the first match; with no query, the
+ * first tag it matches (an existing tag beats a near-duplicate), else the
+ * create row, so Enter creates only when nothing matches; with no query, the
  * first row.
  */
 function defaultActiveIndex(rows: TagPickerRow[], exactIndex: number, hasQuery: boolean): number {
   if (!hasQuery) return 0;
   if (exactIndex >= 0) return exactIndex;
+  const firstTag = rows.findIndex((row) => row.kind === 'tag');
+  if (firstTag >= 0) return firstTag;
   const createIndex = rows.findIndex((row) => row.kind === 'create');
   return createIndex >= 0 ? createIndex : 0;
 }

@@ -13,7 +13,9 @@
   the card off the board, and focus goes to its neighbour instead. Collapsed
   and hidden columns are remembered per group (boardViewPrefs). When every
   showing card is in a hidden column (a tag chip for a hidden column's tag,
-  say), the board says so over the columns, with a way to show them.
+  say), the board says so over the columns, with a way to show them. When
+  the columns run past the window, a fade and chevron mark each side with
+  more (BoardScrollEdges).
 
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, never as a
@@ -32,6 +34,7 @@
   import BoardColumn from './BoardColumn.svelte';
   import BoardEmptyState from './BoardEmptyState.svelte';
   import BoardPhonePager from './BoardPhonePager.svelte';
+  import BoardScrollEdges from './BoardScrollEdges.svelte';
   import { buildBoardColumns } from './boardColumns';
   import {
     PROJECT_DRAG_TYPE,
@@ -242,30 +245,33 @@
         </button>
       </p>
     {/if}
-    <div
-      class="board-columns"
-      class:paged
-      bind:this={columnsEl}
-      onscroll={handleColumnsScroll}
-      aria-label={`Projects by ${group.name}`}
-      role="group"
-    >
-      {#each layout.columns as column (column.key)}
-        <BoardColumn
-          {column}
-          {group}
-          {handlers}
-          {isVisible}
-          {paged}
-          dropTarget={draggingId !== null && dropKey === column.key}
-          onDragOver={(event) => handleDragOver(column.key, event)}
-          onDragLeave={(event) => handleDragLeave(column.key, event)}
-          onDrop={(event) => handleDrop(column.key, event)}
-          onCollapse={(collapsed) => setCollapsed(column.key, collapsed)}
-          onHide={() => hideColumn(column.key)}
-        />
-      {/each}
-      <BoardAddColumn {group} {paged} />
+    <div class="board-columns-frame">
+      <div
+        class="board-columns"
+        class:paged
+        bind:this={columnsEl}
+        onscroll={handleColumnsScroll}
+        aria-label={`Projects by ${group.name}`}
+        role="group"
+      >
+        {#each layout.columns as column (column.key)}
+          <BoardColumn
+            {column}
+            {group}
+            {handlers}
+            {isVisible}
+            {paged}
+            dropTarget={draggingId !== null && dropKey === column.key}
+            onDragOver={(event) => handleDragOver(column.key, event)}
+            onDragLeave={(event) => handleDragLeave(column.key, event)}
+            onDrop={(event) => handleDrop(column.key, event)}
+            onCollapse={(collapsed) => setCollapsed(column.key, collapsed)}
+            onHide={() => hideColumn(column.key)}
+          />
+        {/each}
+        <BoardAddColumn {group} {paged} />
+      </div>
+      <BoardScrollEdges scroller={columnsEl} enabled={!paged} />
     </div>
   {/if}
 </div>
@@ -307,6 +313,12 @@
 
   .board-hint-action:hover {
     text-decoration: underline;
+  }
+
+  /* Positions BoardScrollEdges' fades over the scroller's sides. */
+  .board-columns-frame {
+    position: relative;
+    min-width: 0;
   }
 
   .board-columns {

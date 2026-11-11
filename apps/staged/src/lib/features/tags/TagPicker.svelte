@@ -9,7 +9,9 @@
   A search box over every tag: each group's tags act as radio buttons (picking
   the checked one clears it), the ungrouped tags as checkboxes. When nothing
   is named exactly what was typed, a create row makes it an ungrouped tag with
-  an automatic colour, assigned to the project, and Enter picks it. Up/Down
+  an automatic colour, assigned to the project. Enter picks it when no tag
+  matches; otherwise the highlight starts on the first match, so a prefix of
+  an existing tag picks that tag instead of making a near-duplicate. Up/Down
   move the highlight, Enter toggles, Escape closes; the list stays open so
   several tags can be set in a row. "Manage tags…" opens Settings › Tags.
 

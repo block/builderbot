@@ -8,7 +8,9 @@
   "Tags" submenu: a checkbox per ungrouped tag, "New tag…" (a small dialog
   that creates one and assigns it) and "Manage tags…" (Settings › Tags).
 
-  A board card's menu leads with "Move to" (BoardMoveToMenu) before these.
+  A board card's menu leads with "Move to" (BoardMoveToMenu) before these,
+  and passes the board's group as `omitGroupId` so the same choice isn't
+  offered twice.
 
   Built on the ContextMenu.Sub wrappers, so on a phone each submenu is a
   sheet over the menu's own, with a Back row. Branches come from the shared
@@ -34,11 +36,17 @@
 
   interface Props {
     project: Project;
+    /** A group to leave out: on a board card, "Move to" already covers it. */
+    omitGroupId?: string | null;
   }
 
-  let { project }: Props = $props();
+  let { project, omitGroupId = null }: Props = $props();
 
-  let groups = $derived(iconGroupFirst(tagsStore.groups, tagsStore.iconGroup));
+  let groups = $derived(
+    iconGroupFirst(tagsStore.groups, tagsStore.iconGroup).filter(
+      (group) => group.id !== omitGroupId
+    )
+  );
   let ungrouped = $derived(tagsStore.tagsByGroup.get(null) ?? []);
   let tagIds = $derived(tagsStore.tagIdsFor(project.id));
   let assignedUngrouped = $derived(ungrouped.filter((tag) => tagIds.has(tag.id)).length);

@@ -304,6 +304,23 @@ describe('ProjectTagPills', () => {
       expect(chipNames(root)).toEqual(['infra']);
     });
 
+    it('picks a partial match on Enter, with the create row one step below', async () => {
+      const { root } = await mountPills(tagState());
+      const input = await openPicker(root);
+
+      await type(input, 'inf');
+      expect(activeOption()?.textContent).toContain('infra');
+      await press(input, 'Enter');
+
+      expect(commandsMock.createTag).not.toHaveBeenCalled();
+      expect(commandsMock.setProjectTagAssigned).toHaveBeenCalledWith('p1', 'infra', true);
+      expect(chipNames(root)).toEqual(['infra']);
+
+      // The query stays, and creating the near-duplicate is one ArrowDown away.
+      await press(input, 'ArrowDown');
+      expect(activeOption()?.textContent).toContain('Create tag “inf”');
+    });
+
     it('moves with the arrow keys and picks a group’s tag like a radio', async () => {
       const { root } = await mountPills(tagState([{ projectId: 'p1', tagId: 'idea' }]));
       const input = await openPicker(root);

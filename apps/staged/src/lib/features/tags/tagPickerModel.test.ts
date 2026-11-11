@@ -66,6 +66,8 @@ describe('buildTagPickerModel', () => {
       name: 'q4-launch',
       tooLong: false,
     });
+    // Nothing contains "q4-launch", so the create row is the only choice.
+    expect(keys(model.rows)).toEqual(['create', 'manage']);
     expect(model.rows[model.defaultActive].key).toBe('create');
   });
 
@@ -76,12 +78,28 @@ describe('buildTagPickerModel', () => {
     expect(model.rows[model.defaultActive].key).toBe('tag:q4');
   });
 
-  it('highlights the create row over partial matches', () => {
+  it('highlights the first partial match over the create row', () => {
     const model = buildTagPickerModel(catalog, new Set(), 'p');
 
-    // "p" matches P0 and P1 (and names Priority), but no tag is named "p".
+    // "p" matches P0 and P1 (and names Priority), but no tag is named "p":
+    // the create row is offered, but Enter picks the existing P0.
     expect(keys(model.rows)).toEqual(['tag:p0', 'tag:p1', 'create', 'manage']);
-    expect(model.rows[model.defaultActive].key).toBe('create');
+    expect(model.rows[model.defaultActive].key).toBe('tag:p0');
+  });
+
+  it('highlights a prefix match rather than creating a near-duplicate', () => {
+    const model = buildTagPickerModel(catalog, new Set(), 'inf');
+
+    expect(keys(model.rows)).toEqual(['tag:infra', 'create', 'manage']);
+    expect(model.create?.name).toBe('inf');
+    expect(model.rows[model.defaultActive].key).toBe('tag:infra');
+  });
+
+  it('highlights the first of a group whose name matches', () => {
+    const model = buildTagPickerModel(catalog, new Set(), 'prio');
+
+    expect(keys(model.rows)).toEqual(['tag:p0', 'tag:p1', 'create', 'manage']);
+    expect(model.rows[model.defaultActive].key).toBe('tag:p0');
   });
 
   it('marks a name longer than the backend accepts', () => {

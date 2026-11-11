@@ -336,8 +336,14 @@ describe('ProjectsBoard', () => {
     );
     expect(items[0]).toContain('Move to');
     expect(items[1]).toContain('Mark as Unread');
+    // "Move to" is the board group's submenu, so the Status submenu it would
+    // repeat is left out; the other groups and Tags stay.
     const triggers = [...menu.querySelectorAll<HTMLElement>('[data-tag-group-trigger]')];
-    expect(triggers[0].dataset.tagGroupTrigger).toBe('move-to');
+    expect(triggers.map((t) => t.dataset.tagGroupTrigger)).toEqual([
+      'move-to',
+      'priority',
+      'ungrouped',
+    ]);
 
     triggers[0].focus();
     triggers[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
@@ -396,6 +402,53 @@ describe('ProjectsBoard', () => {
     expect(strip.classList.contains('drop-target')).toBe(false);
     expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p3', 'status', 'done');
     expect(strip.textContent).toContain('2');
+  });
+
+  it('marks each side with columns past it, and its chevron reveals the next one', async () => {
+    const root = await mountBoard();
+    const scroller = root.querySelector<HTMLElement>('.board-columns')!;
+    const edges = () =>
+      [...root.querySelectorAll<HTMLElement>('[data-board-scroll-edge]')].map(
+        (el) => el.dataset.boardScrollEdge
+      );
+    // jsdom lays nothing out, so the columns fit.
+    expect(edges()).toEqual([]);
+
+    // An 800px row of five 272px columns (four and the + column), 12px apart.
+    let scrollLeft = 0;
+    Object.defineProperties(scroller, {
+      clientWidth: { configurable: true, get: () => 800 },
+      scrollWidth: { configurable: true, get: () => 1400 },
+      scrollLeft: { configurable: true, get: () => scrollLeft },
+    });
+    const rect = (left: number, width: number) =>
+      ({ left, right: left + width, top: 0, bottom: 300, width, height: 300 }) as DOMRect;
+    scroller.getBoundingClientRect = () => rect(0, 800);
+    [...scroller.children].forEach((child, i) => {
+      child.getBoundingClientRect = () => rect(i * 284 - scrollLeft, 272);
+    });
+    const scrollBy = vi.fn();
+    scroller.scrollBy = scrollBy as unknown as HTMLElement['scrollBy'];
+    scroller.dispatchEvent(new Event('scroll'));
+    await settle();
+    expect(edges()).toEqual(['end']);
+
+    // The third column ends at 840, under the right fade (from 752).
+    root.querySelector<HTMLButtonElement>('[data-board-scroll-edge="end"] button')!.click();
+    expect(scrollBy).toHaveBeenCalledWith({ left: 88, behavior: 'smooth' });
+
+    scrollLeft = 300;
+    scroller.dispatchEvent(new Event('scroll'));
+    await settle();
+    expect(edges()).toEqual(['start', 'end']);
+
+    scrollLeft = 600;
+    scroller.dispatchEvent(new Event('scroll'));
+    await settle();
+    expect(edges()).toEqual(['start']);
+    // The third column now starts at -32, under the left fade (to 48).
+    root.querySelector<HTMLButtonElement>('[data-board-scroll-edge="start"] button')!.click();
+    expect(scrollBy).toHaveBeenLastCalledWith({ left: -80, behavior: 'smooth' });
   });
 
   it('hides a column from its menu, "No ‹group›" included', async () => {

@@ -5,6 +5,8 @@
 
   On a board card, `moveToGroup` puts "Move to" for the board's group first
   (BoardMoveToMenu): on a board, changing column is the card's main action.
+  That group's own submenu is then left out of the tags below, since it would
+  offer the same choice under another name.
 -->
 <script lang="ts">
   import Mail from '@lucide/svelte/icons/mail';
@@ -38,7 +40,7 @@
   <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
     <Mail size={14} /> Mark as Unread
   </ContextMenu.Item>
-  <ProjectTagMenuItems {project} />
+  <ProjectTagMenuItems {project} omitGroupId={moveToGroup?.id ?? null} />
   <ContextMenu.Separator />
   <ProjectTransferMenuItem {project} />
   <ContextMenu.Item variant="destructive" disabled={transferring} onSelect={onRemove}>

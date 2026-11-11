@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::serve::Listener;
@@ -576,16 +576,16 @@ struct EventsQuery {
 async fn ws_events(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
+    uri: Uri,
     Query(query): Query<EventsQuery>,
     State(state): State<WebAppState>,
 ) -> Response {
-    let header_str = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
-    let origin = header_str(header::ORIGIN);
-    let host = header_str(header::HOST);
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    let host = request_authority(&headers, &uri);
     let dev_origin = vite_dev_authority();
     if !ws_origin_allowed(origin, host, dev_origin.as_deref()) {
         log::warn!(
-            "[web_server] refusing /api/events upgrade from Origin {:?} (Host {:?})",
+            "[web_server] refusing /api/events upgrade from Origin {:?} (authority {:?})",
             origin,
             host
         );
@@ -595,8 +595,26 @@ async fn ws_events(
     ws.on_upgrade(move |socket| handle_ws(socket, state, client_id))
 }
 
-/// Whether a WebSocket handshake with these `Origin` and `Host` headers may
-/// upgrade. `dev_origin` is the extra `host:port` authority the Vite dev
+/// The authority the client addressed this request to: the `Host` header
+/// when present, else the request URI's authority.
+///
+/// An HTTP/1.1 handshake always carries `Host`. An HTTP/2 one does not: the
+/// server advertises `h2` over ALPN and axum enables the RFC 8441 extended
+/// CONNECT protocol, so Chrome and Firefox open the WebSocket on the page's
+/// existing h2 connection, where the authority travels in the `:authority`
+/// pseudo-header. The h2 crate maps that into the request URI and hyper does
+/// not synthesize a `Host` from it, so without the fallback every same-origin
+/// browser on h2 would be refused and sit in the client's reconnect loop.
+fn request_authority<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.authority().map(|a| a.as_str()))
+}
+
+/// Whether a WebSocket handshake with this `Origin` header and request
+/// authority (`Host`, or `:authority` on HTTP/2 — see [`request_authority`])
+/// may upgrade. `dev_origin` is the extra `host:port` authority the Vite dev
 /// server is reachable at, if any (see [`vite_dev_authority`]).
 ///
 /// CORS never applies to WebSocket handshakes, so this is the only thing
@@ -610,7 +628,16 @@ async fn ws_events(
 /// matching authority is the same origin. A missing `Origin` is a
 /// non-browser client (curl, a script), which the server does not try to
 /// keep out: there is no authentication, and a browser page cannot omit the
-/// header, so letting it through costs nothing.
+/// header, so letting it through costs nothing. A missing authority on the
+/// server side (no `Host` and no `:authority`) fails closed.
+///
+/// Comparing `Origin` against the request's *own* authority, rather than a
+/// fixed allow-list, is only sound because the server is TLS-only. A DNS
+/// rebinding attacker who points `evil.example` at this host would get a
+/// matching `Origin` and `Host` on both sides, but the TLS handshake fails
+/// first: the certificate does not cover `evil.example`. A plain-HTTP
+/// variant of this server has no such backstop and must not reuse this
+/// check as-is.
 ///
 /// Under `just dev-web` the page lives on the Vite origin
 /// (`https://$STAGED_WEB_HOST:$VITE_PORT`) and reaches this server through
@@ -4683,9 +4710,10 @@ mod blocking_guard_tests;
 mod tests {
     use super::{
         broadcast_web_event, control_create_image_args, emit_to_all, event_gap_payload,
-        normalize_ws_client_id, origin_authority, web_caller_rejection, web_client_id,
-        ws_origin_allowed, DispatchCaller, WebEvent,
+        normalize_ws_client_id, origin_authority, request_authority, web_caller_rejection,
+        web_client_id, ws_origin_allowed, DispatchCaller, WebEvent,
     };
+    use axum::http::{header, HeaderMap, Uri};
     use serde_json::{json, Value};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -4977,13 +5005,73 @@ mod tests {
             Some("mac.example.com:5175"),
             None
         ));
-        // No Host to compare against at all (HTTP/1.1 requires one, but the
-        // handler must not fall open if it is missing).
+        // No authority to compare against at all (neither Host nor
+        // `:authority`): the handler must not fall open.
         assert!(!ws_origin_allowed(
             Some("https://mac.example.com:5175"),
             None,
             None
         ));
+    }
+
+    #[test]
+    fn ws_origin_h2_handshake_uses_uri_authority_when_host_is_absent() {
+        // RFC 8441 extended CONNECT over h2: no Host header, the authority is
+        // in `:authority`, which hyper exposes as the request URI's authority.
+        let headers = HeaderMap::new();
+        let uri = Uri::from_static("https://mac.example.com:5175/api/events?clientId=web-1");
+        let authority = request_authority(&headers, &uri);
+        assert_eq!(authority, Some("mac.example.com:5175"));
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            authority,
+            None
+        ));
+        // A same-origin page on h2 against the default port.
+        let uri = Uri::from_static("https://mac.example.com/api/events");
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com"),
+            request_authority(&headers, &uri),
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_h2_handshake_with_mismatched_uri_authority_is_rejected() {
+        let headers = HeaderMap::new();
+        let uri = Uri::from_static("https://mac.example.com:5175/api/events");
+        let authority = request_authority(&headers, &uri);
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example:5175"),
+            authority,
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5176"),
+            authority,
+            None
+        ));
+        // An origin-form request URI (HTTP/1.1 without Host) has no authority
+        // to fall back to, so the check fails closed.
+        let uri = Uri::from_static("/api/events");
+        assert_eq!(request_authority(&headers, &uri), None);
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            request_authority(&headers, &uri),
+            None
+        ));
+    }
+
+    #[test]
+    fn request_authority_prefers_host_header_over_uri() {
+        // HTTP/1.1: Host wins even if the request line carried an absolute URI.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "mac.example.com:5175".parse().unwrap());
+        let uri = Uri::from_static("https://other.example:5175/api/events");
+        assert_eq!(
+            request_authority(&headers, &uri),
+            Some("mac.example.com:5175")
+        );
     }
 
     #[test]

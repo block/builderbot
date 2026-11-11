@@ -8,10 +8,10 @@ import { reactiveProps } from './testStubs/reactiveProps.svelte';
 // The composer's field: one box holding the quote blocks, the text between
 // them and the main input, which the user works as one editor. Covered here
 // are the ways the field ties its inputs together — the arrows walking from
-// one into the next, a click on its surface landing the caret in an input,
+// one into the next, a press on its surface landing the caret in an input,
 // the single placeholder, the keyboard cap on the whole field and the
-// focused input kept in view — while the inputs' own behaviour is under
-// ComposerDraftQuotes.component.test.ts.
+// focused input kept in view by the field's own scroll — while the inputs'
+// own behaviour is under ComposerDraftQuotes.component.test.ts.
 
 // The on-screen-keyboard cap reads the visible viewport; stand it in with a
 // keyboard up, so the cap is a share of the 400px left.
@@ -93,11 +93,39 @@ function arrow(el: HTMLElement, key: 'ArrowUp' | 'ArrowDown', init: KeyboardEven
   return event;
 }
 
+function press(el: HTMLElement, init: MouseEventInit = {}) {
+  const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, ...init });
+  el.dispatchEvent(event);
+  flushSync();
+  return event;
+}
+
+function rect(top: number, bottom: number): DOMRect {
+  return { top, bottom, height: bottom - top, left: 0, right: 10, width: 10 } as DOMRect;
+}
+
+/** Give the field a 100px view from 201 to 301 (1px border) and a scroll offset of its own. */
+function layOutField(): HTMLElement {
+  const el = field();
+  Object.defineProperty(el, 'clientHeight', { value: 100 });
+  Object.defineProperty(el, 'clientTop', { value: 1 });
+  let scroll = 0;
+  Object.defineProperty(el, 'scrollTop', {
+    get: () => scroll,
+    set: (value: number) => {
+      scroll = value;
+    },
+  });
+  el.getBoundingClientRect = () => rect(200, 302);
+  return el;
+}
+
 beforeEach(() => {
-  // jsdom lays nothing out and has no scrollIntoView; the field only needs it to exist.
+  // jsdom has no scrollIntoView; the tests watch that the field doesn't reach for it.
   if (!('scrollIntoView' in Element.prototype)) {
     Object.defineProperty(Element.prototype, 'scrollIntoView', {
       configurable: true,
+      writable: true,
       value: () => {},
     });
   }
@@ -126,14 +154,18 @@ describe('ChatComposer field', () => {
     expect(field().style.getPropertyValue('--composer-field-cap')).toBe('160px');
   });
 
-  it('scrolls the input that takes focus into view', () => {
+  it('scrolls the field, and nothing above it, to the input that takes focus', () => {
     render([quote('a'), quote('b')]);
-    const reveal = vi.spyOn(replyOf('b'), 'scrollIntoView');
+    const fieldEl = layOutField();
+    replyOf('b').getBoundingClientRect = () => rect(320, 350);
+    const ancestors = vi.spyOn(Element.prototype, 'scrollIntoView');
 
     replyOf('b').focus();
     flushSync();
 
-    expect(reveal).toHaveBeenCalledWith({ block: 'nearest' });
+    expect(fieldEl.scrollTop).toBe(49);
+    expect(ancestors).not.toHaveBeenCalled();
+    ancestors.mockRestore();
   });
 });
 
@@ -157,30 +189,41 @@ describe('ChatComposer placeholder', () => {
   });
 });
 
-describe('ChatComposer surface click', () => {
-  it('puts the caret in the nearest input — the last, when nothing is nearer', () => {
-    render([quote('a')]);
-
-    field().dispatchEvent(new MouseEvent('click', { bubbles: true, clientY: 300 }));
-    flushSync();
-
-    expect(document.activeElement).toBe(mainInput());
-  });
-
-  it('leaves a click on an input or a block to them', () => {
+describe('ChatComposer surface press', () => {
+  it('puts the caret in the nearest input on mousedown — the last, when nothing is nearer', () => {
     render([quote('a')]);
     gapOf('a').focus();
 
-    gapOf('a').dispatchEvent(new MouseEvent('click', { bubbles: true, clientY: 10 }));
-    flushSync();
+    const event = press(field(), { clientY: 300 });
+
+    expect(document.activeElement).toBe(mainInput());
+    // The press's default is prevented, so the gap was never blurred to the page.
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('leaves a press on an input or a block to them', () => {
+    render([quote('a')]);
+    gapOf('a').focus();
+
+    expect(press(gapOf('a'), { clientY: 10 }).defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(gapOf('a'));
 
     const block = target.querySelector<HTMLElement>('.composer-quote');
     if (!block) throw new Error('no block');
-    block.dispatchEvent(new MouseEvent('click', { bubbles: true, clientY: 10 }));
-    flushSync();
+    press(block, { clientY: 10 });
     // The block's own padding takes the caret to its reply, not the field's nearest.
     expect(document.activeElement).toBe(replyOf('a'));
+  });
+
+  it('leaves a Shift-press, a secondary button and a click alone', () => {
+    render([quote('a')]);
+    gapOf('a').focus();
+
+    expect(press(field(), { clientY: 300, shiftKey: true }).defaultPrevented).toBe(false);
+    expect(press(field(), { clientY: 300, button: 2 }).defaultPrevented).toBe(false);
+    field().dispatchEvent(new MouseEvent('click', { bubbles: true, clientY: 300 }));
+    flushSync();
+    expect(document.activeElement).toBe(gapOf('a'));
   });
 });
 

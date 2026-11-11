@@ -47,22 +47,31 @@
   let blockEl = $state<HTMLDivElement>();
   let replyEl = $state<HTMLElement | null>(null);
 
-  function handleClick(event: MouseEvent) {
+  /**
+   * A press on the block's own padding or the excerpt's margin puts the
+   * caret at the end of the reply. On mousedown with the default prevented,
+   * as the field does for its surface, so the input that had focus isn't
+   * blurred to the page in between. A press on the quote text, the reply or
+   * the X means those, and a drag over the quote text is left to select it.
+   */
+  function handleMousedown(event: MouseEvent) {
+    if (event.button !== 0 || event.shiftKey) return;
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    // Only the block's own padding and the excerpt's margin: a click on the
-    // quote text, the reply or the X means those.
     if (target !== blockEl && !target.classList.contains('composer-quote-excerpt')) return;
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed) return;
+    event.preventDefault();
     focusAtEndSync(replyEl);
   }
 </script>
 
 <!-- A pointer convenience: keyboard users reach the reply by Tab or the arrows. -->
-<!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="composer-quote" data-quote-id={quote.id} bind:this={blockEl} onclick={handleClick}>
+<div
+  class="composer-quote"
+  data-quote-id={quote.id}
+  bind:this={blockEl}
+  onmousedown={handleMousedown}
+>
   <div class="composer-quote-excerpt">
     <QuoteExcerpt quote={quote.quote} headings={quote.headings} clampLines={3} />
   </div>

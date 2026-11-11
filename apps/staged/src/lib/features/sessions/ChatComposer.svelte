@@ -87,6 +87,7 @@
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { visibleViewport, watchVisualViewport } from '../../shared/visualViewport.svelte';
   import { adjacentEditor, caretLineEdges, isPlainVerticalArrow } from './composerCaretNav';
+  import { revealInField } from './composerFieldReveal';
   import { createCompositionSendGate, createTouchPressFocusGuard } from './composerSendPress';
   import type { HashtagItem } from '../../types';
 
@@ -201,11 +202,15 @@
     value !== '' || quotes.some((quote) => quote.before !== '' || quote.reply !== '')
   );
 
-  /** Bring the input being typed in into view: on focus, and as the cap moves under it. */
+  /**
+   * Scroll the field so the input being typed in is in view: on focus, and
+   * as the cap moves under it. Only the field scrolls; the pane and the page
+   * around it stay where they are.
+   */
   function revealFocused() {
     const active = document.activeElement;
     if (!fieldEl || !(active instanceof HTMLElement) || !fieldEl.contains(active)) return;
-    active.scrollIntoView({ block: 'nearest' });
+    revealInField(fieldEl, active);
   }
 
   $effect(() => {
@@ -219,18 +224,24 @@
   }
 
   /**
-   * A click on the field's own surface — its box outside any input or block,
+   * A press on the field's own surface — its box outside any input or block,
    * or the quote list's — puts the caret in the input nearest the pointer,
-   * at the end nearest it, as a click in a textarea's margin does. Clicks on
-   * an input, a block or a button mean those, and a drag that ends on the
-   * surface keeps the text it selected.
+   * at the end nearest it, as a click in a textarea's margin does. It is
+   * done on mousedown, with the default prevented: the surface can't take
+   * focus, so letting the press through would blur the input to the page
+   * until the click — dropping `:focus-within` for a flicker of the border,
+   * closing an open hashtag dropdown, and on iOS arming the visual-viewport
+   * re-measure — only for the click to focus an input again. A press on an
+   * input, a block or a button means those; a Shift-press or a secondary
+   * button is left alone. A drag that starts on the surface selects nothing,
+   * as one in a textarea's margin doesn't.
    */
-  function handleFieldClick(event: MouseEvent) {
+  function handleFieldMousedown(event: MouseEvent) {
+    if (event.button !== 0 || event.shiftKey) return;
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
     if (target !== fieldEl && !target.classList.contains('composer-draft-quotes')) return;
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed) return;
+    event.preventDefault();
     let nearest: { editor: HTMLElement; distance: number; below: boolean } | null = null;
     for (const editor of fieldEditors()) {
       const box = editor.getBoundingClientRect();
@@ -410,8 +421,7 @@
     <ComposerError message={attachError} />
   {/if}
   <ComposerError message={sendError} />
-  <!-- The field's click is a pointer convenience; its inputs are reached by Tab. -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- The field's press is a pointer convenience; its inputs are reached by Tab. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="composer-field"
@@ -421,7 +431,7 @@
     style:--composer-field-cap={fieldCap}
     onfocusin={revealFocused}
     onkeydown={handleFieldKeydown}
-    onclick={handleFieldClick}
+    onmousedown={handleFieldMousedown}
   >
     {#if quotes.length > 0}
       <ComposerDraftQuotes
@@ -646,6 +656,12 @@
     border-color: var(--border-emphasis);
   }
 
+  /* The field's items — the quote list and the main input's wrapper — keep
+     their content height; the field scrolls rather than squeezing them. */
+  .composer-field > :global(*) {
+    flex-shrink: 0;
+  }
+
   .chat-composer :global(.message-input) {
     --hashtag-input-min-height: 34px;
     padding: 7px 12px;
@@ -656,7 +672,6 @@
     font-family: inherit;
     line-height: 1.5;
     resize: none;
-    flex-shrink: 0;
   }
 
   /* After a quote block the main input is the text under it. */

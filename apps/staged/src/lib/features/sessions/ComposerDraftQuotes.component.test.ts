@@ -10,7 +10,7 @@ import { reactiveProps } from './testStubs/reactiveProps.svelte';
 // where it was so the composer can move it on, and a composition open in any
 // gap or reply is reported through one `composing` flag so the composer's
 // Send gate sees it — the main input isn't the only place a word can be
-// half-typed. A click on a block's own padding puts the caret in its reply.
+// half-typed. A press on a block's own padding puts the caret in its reply.
 // The field around the list (its box, cap and arrows) is covered by
 // ChatComposer.component.test.ts.
 
@@ -198,12 +198,16 @@ describe('ComposerDraftQuotes block surface', () => {
     return block;
   }
 
-  it('puts the caret at the end of the reply on a click on its own padding', () => {
+  it('puts the caret at the end of the reply on a press on its own padding', () => {
     render([quote('a', '', 'so far')]);
+    gapOf('a').focus();
 
-    blockOf('a').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    blockOf('a').dispatchEvent(event);
     flushSync();
 
+    // Prevented, so the gap that had focus was never blurred to the page first.
+    expect(event.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(replyOf('a'));
     const selection = window.getSelection();
     if (!selection?.anchorNode) throw new Error('no selection');
@@ -213,16 +217,19 @@ describe('ComposerDraftQuotes block surface', () => {
     expect(beforeCaret.toString()).toBe('so far');
   });
 
-  it('leaves a click on the quote text and one that ends a drag alone', () => {
+  it('leaves a press on the quote text, and the click that ends a drag, alone', () => {
     render([quote('a', '', 'so far')]);
     const text = blockOf('a').querySelector<HTMLElement>('.quote-text');
     if (!text) throw new Error('no quote text');
 
-    text.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    text.dispatchEvent(event);
     flushSync();
+    expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).not.toBe(replyOf('a'));
 
-    // A drag over the quote text that ends on the padding keeps its selection.
+    // A drag over the quote text that ends on the padding keeps its selection:
+    // the click there is nothing to the block.
     const range = document.createRange();
     range.selectNodeContents(text);
     window.getSelection()?.removeAllRanges();

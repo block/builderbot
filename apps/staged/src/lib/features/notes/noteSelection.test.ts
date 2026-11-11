@@ -6,6 +6,7 @@ import {
   rangeStartNode,
   replyButtonOffset,
   REPLY_BUTTON_EDGE_GAP,
+  scrollRangeEndIntoView,
 } from './noteSelection';
 
 let root: HTMLElement;
@@ -198,5 +199,58 @@ describe('replyButtonOffset', () => {
     // The button's right edge is well left of where the end handle is drawn.
     expect(touch.left + 92).toBeLessThanOrEqual(250 - 50 - 20);
     expect(touch.left).toBeGreaterThanOrEqual(REPLY_BUTTON_EDGE_GAP);
+  });
+});
+
+describe('scrollRangeEndIntoView', () => {
+  type Box = { top: number; bottom: number; width: number; height: number };
+  const rect = (top: number, bottom: number): Box => ({
+    top,
+    bottom,
+    width: 100,
+    height: bottom - top,
+  });
+
+  /** A 400px-tall scroll box at the top of the viewport, with a range whose last line box is given. */
+  function setUp(ends: Box[]) {
+    const container = document.createElement('div');
+    document.body.replaceChildren(container);
+    container.getBoundingClientRect = () => rect(0, 400) as DOMRect;
+    container.scrollTop = 100;
+    const range = document.createRange();
+    range.getClientRects = () => ends as unknown as DOMRectList;
+    range.getBoundingClientRect = () => (ends[ends.length - 1] ?? rect(0, 0)) as DOMRect;
+    return { container, range };
+  }
+
+  it('scrolls the end of the range up out from under the band by the least amount', () => {
+    // The last line ends at 390, under a 60px band over 340–400.
+    const { container, range } = setUp([rect(300, 320), rect(370, 390)]);
+    expect(scrollRangeEndIntoView(container, range, 60)).toBe(50);
+    expect(container.scrollTop).toBe(150);
+  });
+
+  it('leaves the scroll alone when the end is already clear of the band', () => {
+    const { container, range } = setUp([rect(300, 340)]);
+    expect(scrollRangeEndIntoView(container, range, 60)).toBe(0);
+    expect(container.scrollTop).toBe(100);
+  });
+
+  it('scrolls down to an end above the top, as nearest would', () => {
+    const { container, range } = setUp([rect(-30, -10)]);
+    expect(scrollRangeEndIntoView(container, range, 60)).toBe(-30);
+    expect(container.scrollTop).toBe(70);
+  });
+
+  it('skips empty line boxes and a collapsed range', () => {
+    const { container, range } = setUp([
+      rect(370, 390),
+      { top: 0, bottom: 0, width: 0, height: 0 },
+    ]);
+    expect(scrollRangeEndIntoView(container, range, 60)).toBe(50);
+    const collapsed = setUp([]);
+    collapsed.range.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 0, width: 0, height: 0 }) as DOMRect;
+    expect(scrollRangeEndIntoView(collapsed.container, collapsed.range, 60)).toBe(0);
   });
 });

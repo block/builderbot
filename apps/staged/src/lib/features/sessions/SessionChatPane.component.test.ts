@@ -2,7 +2,7 @@ import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from '../../types';
 
-const { writer, loadDraftMock, saveDraftMock, toastMock } = vi.hoisted(() => {
+const { writer, loadDraftMock, saveDraftMock, toastMock, resumeSessionMock } = vi.hoisted(() => {
   let toastIds = 0;
   const toastMock = Object.assign(
     vi.fn((_message: string, _options?: unknown) => `toast-${++toastIds}`),
@@ -22,6 +22,8 @@ const { writer, loadDraftMock, saveDraftMock, toastMock } = vi.hoisted(() => {
     ),
     saveDraftMock: vi.fn(async (_key: string, _content: unknown) => {}),
     toastMock,
+    /** The idle composer's send; rejects to fail one. */
+    resumeSessionMock: vi.fn(async () => ({ outcome: 'resumed' })),
   };
 });
 
@@ -67,14 +69,13 @@ vi.mock('../../commands', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../commands')>()),
   getSession: async (id: string) =>
     ({ id, status: 'completed', provider: null, workingDir: null }) as unknown as Session,
-  getSessionMessages: async () => ({ data: [] }),
   getLatestSessionMessages: async () => ({ data: [] }),
   getOlderSessionMessages: async () => [],
   getSessionMessagesSince: async () => [],
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],
-  resumeSession: async () => ({ outcome: 'resumed' }),
+  resumeSession: () => resumeSessionMock(),
 }));
 
 import SessionChatPane from './SessionChatPane.svelte';
@@ -197,6 +198,7 @@ describe('SessionChatPane quoted replies', () => {
     saveDraftMock.mockClear();
     toastMock.mockClear();
     toastMock.dismiss.mockClear();
+    resumeSessionMock.mockClear();
     loadDraftMock.mockReset();
     loadDraftMock.mockImplementation(async () => null);
   });
@@ -323,6 +325,32 @@ describe('SessionChatPane quoted replies', () => {
     expect(quoteCount()).toBe(0);
     expect(lastSaved(replyKey('session-sent'))).toBeUndefined();
     expect(saveDraftMock).not.toHaveBeenCalled();
+
+    unmount(pane);
+  });
+
+  it('keeps the Undo toast through a failed send, whose draft is put back', async () => {
+    const { pane, before } = await removeMiddleQuote('session-failed');
+    const undo = lastUndo();
+    resumeSessionMock.mockRejectedValueOnce(new Error('agent gone'));
+
+    document.querySelector<HTMLElement>('[data-testid="composer-send"]')!.click();
+    await settle();
+    // The draft is back in the box, the block it lost still restorable.
+    expect(quoteCount()).toBe(2);
+    expect(toastMock.dismiss).not.toHaveBeenCalled();
+
+    undo.action.onClick();
+    await settle();
+    expect(quoteCount()).toBe(3);
+    expect(composerDraftFromContent(lastSaved(replyKey('session-failed')))).toEqual(before);
+
+    // Pressed, the toast is gone with the press; the send that follows has
+    // nothing left to take down.
+    document.querySelector<HTMLElement>('[data-testid="composer-send"]')!.click();
+    await settle();
+    expect(quoteCount()).toBe(0);
+    expect(toastMock.dismiss).not.toHaveBeenCalled();
 
     unmount(pane);
   });

@@ -67,6 +67,7 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
+  import { scrollRangeEndIntoView } from './noteSelection';
   import '../../shared/markdown/diagramStyles.css';
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
   import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
@@ -381,6 +382,26 @@
     });
     observer.observe(el);
     return () => observer.disconnect();
+  });
+  // The button appears over the end of a selection made in the last lines of
+  // the note (the padding above runs the content under it rather than
+  // shortening it). Once the content is padded, the least scroll that puts
+  // the end clear of the button. Keyed on the measured height rather than
+  // `replyDocked`: that is the render the padding lands in.
+  let dockWasShown = false;
+  $effect(() => {
+    const height = dockHeight;
+    const appeared = height > 0 && !dockWasShown;
+    dockWasShown = height > 0;
+    if (!appeared) return;
+    untrack(() => {
+      const container = contentEl;
+      const current = document.getSelection();
+      if (!container || !markdownEl || !current || current.rangeCount === 0) return;
+      const range = current.getRangeAt(0);
+      if (current.isCollapsed || !markdownEl.contains(range.commonAncestorContainer)) return;
+      scrollRangeEndIntoView(container, range, height);
+    });
   });
   let unregisterSearchTarget: (() => void) | null = null;
 

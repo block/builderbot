@@ -145,3 +145,28 @@ export function replyButtonOffset(box: ReplyButtonBox): { top: number; left: num
     left: Math.min(Math.max(wanted, REPLY_BUTTON_EDGE_GAP), maxLeft),
   };
 }
+
+/**
+ * Scroll `container` so the end of `range` is in view above a band of
+ * `clearance` px laid over the container's bottom edge (a phone's docked
+ * Reply button, which appears over the end of a selection made in the last
+ * lines). The least scroll that does it, as `scrollIntoView({ block:
+ * 'nearest' })` would for the end's rect: nothing when it is already in
+ * view. Returns the distance scrolled.
+ */
+export function scrollRangeEndIntoView(
+  container: HTMLElement,
+  range: Range,
+  clearance: number
+): number {
+  const rects = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+  const end = rects[rects.length - 1] ?? range.getBoundingClientRect();
+  if (end.width === 0 && end.height === 0) return 0;
+  const box = container.getBoundingClientRect();
+  const visibleBottom = box.bottom - clearance;
+  let delta = 0;
+  if (end.bottom > visibleBottom) delta = end.bottom - visibleBottom;
+  else if (end.top < box.top) delta = end.top - box.top;
+  if (delta !== 0) container.scrollTop += delta;
+  return delta;
+}

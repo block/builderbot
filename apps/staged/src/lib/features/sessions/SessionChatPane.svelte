@@ -467,10 +467,11 @@
   } | null = null;
   /**
    * Undo toasts for removed quote blocks still on screen (svelte-sonner
-   * keeps one up for seconds). A send clears the draft they were taken
-   * from, and a switch shows another session's; either dismisses them, so
-   * Undo can't put a block into a draft it never belonged to. `draftEpoch`
-   * counts the sends, for a click that lands as the toast is leaving.
+   * keeps one up for seconds). A send the backend accepts clears the draft
+   * they were taken from, and a switch shows another session's; either
+   * dismisses them, so Undo can't put a block into a draft it never belonged
+   * to. `draftEpoch` counts the sends, for a click that lands as the toast
+   * is leaving.
    */
   let quoteUndoToasts: Array<{ toastId: string | number; sessionId: string }> = [];
   let draftEpoch = 0;
@@ -587,6 +588,9 @@
       action: {
         label: 'Undo',
         onClick: () => {
+          // The toast goes with the press (svelte-sonner deletes it without
+          // `onDismiss`), so it is forgotten here.
+          forget();
           // The draft the block was taken from has been sent since.
           if (epoch !== draftEpoch) return;
           if (active && sessionId === sid) {
@@ -616,6 +620,18 @@
     if (going.length === 0) return;
     quoteUndoToasts = quoteUndoToasts.filter((entry) => keep(entry.sessionId));
     for (const entry of going) toast.dismiss(entry.toastId);
+  }
+
+  /**
+   * The draft has gone with a message the backend accepted: a block removed
+   * from it has nothing to go back into. Not before — a send that fails puts
+   * the draft back in the box, and the block's Undo should still hold then.
+   * (Pressed while the send is in flight, Undo puts the block into the
+   * emptied box, where it is a new draft.)
+   */
+  function draftSent() {
+    draftEpoch += 1;
+    dismissQuoteUndo();
   }
 
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
@@ -1792,10 +1808,6 @@
     if (!text) return;
     void replyDraftWriter.clearNow(replyDraftKey(sessionId));
     setDraft(emptyComposerDraft());
-    // The draft is gone with the message: a block removed from it has
-    // nothing to go back into.
-    draftEpoch += 1;
-    dismissQuoteUndo();
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];
     imagePreviews = new Map();
@@ -1804,7 +1816,7 @@
     tick().then(() => autoResize());
 
     if (sendControl.action === 'send-now') {
-      await sendMessageNow(text, imageIdsToSend, draft);
+      if (await sendMessageNow(text, imageIdsToSend, draft)) draftSent();
       return;
     }
 
@@ -1812,6 +1824,7 @@
       beginComposerAction();
       try {
         await queueSessionMessage(sessionId, text, imageIdsToSend, branchId ?? null);
+        draftSent();
         await refreshQueuedMessages();
       } catch (e) {
         sendError = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
@@ -1823,7 +1836,9 @@
 
     // Session is idle — send immediately. `sendMessage` reports the failure
     // itself; the draft goes back in the box so it can be retried.
-    if (!(await sendMessage(text, imageIdsToSend))) {
+    if (await sendMessage(text, imageIdsToSend)) {
+      draftSent();
+    } else {
       setDraft(draft);
       replyImageIds = imageIdsToSend ?? [];
     }
@@ -1840,20 +1855,20 @@
    * not delivered (`blocked`, `rejected_queued`, `not_resumable`, or a kind
    * this pane does not know) is reported and the draft restored — never
    * re-queued behind the user's back, since a blocked steer may already have
-   * landed.
+   * landed. Resolves whether the message was delivered.
    */
   async function sendMessageNow(
     text: string,
     imageIds: string[] | undefined,
     draft: ComposerDraft
-  ) {
-    if (!session || sending) return;
+  ): Promise<boolean> {
+    if (!session || sending) return false;
     const id = session.id;
     sending = true;
     beginComposerAction();
     try {
       const result = await sendSessionMessageNow(id, text, imageIds);
-      if (session?.id !== id) return;
+      if (session?.id !== id) return true;
       switch (result.delivery) {
         case 'injected':
         case 'interrupted_and_reprompted':
@@ -1862,7 +1877,7 @@
           // it up.
           startPolling();
           scrollToBottom();
-          return;
+          return true;
         case 'resumed':
           // The command does not resume (see `not_running`); the kind belongs
           // to the shared MCP spelling. Should it ever arrive, the row is
@@ -1872,7 +1887,7 @@
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
           startPolling();
           scrollToBottom();
-          return;
+          return true;
         case 'not_running':
           // Stopped since the last poll: resume it the way the idle composer
           // does, with the branch override and follow-up config. `sending` is
@@ -1881,7 +1896,7 @@
           // so the row is already running) has set `sendError`; fall through
           // to the draft restore below without overwriting it.
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
-          if (await sendMessage(text, imageIds, true)) return;
+          if (await sendMessage(text, imageIds, true)) return true;
           break;
         case 'rejected_queued':
           sendError = 'The session has not started yet; queue the message instead.';
@@ -1908,10 +1923,12 @@
       }
       setDraft(draft);
       replyImageIds = imageIds ?? [];
+      return false;
     } catch (e) {
       sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
       setDraft(draft);
       replyImageIds = imageIds ?? [];
+      return false;
     } finally {
       sending = false;
     }

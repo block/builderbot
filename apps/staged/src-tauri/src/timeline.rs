@@ -979,7 +979,7 @@ pub(crate) fn list_parent_branch_commits_impl(
 
 /// Fast-forward the branch to its upstream, right now.
 ///
-/// The immediate half of `prs::pull_or_queue_branch`, which owns the decision
+/// The immediate half of `prs::commands::pull_or_queue_branch`, which owns the decision
 /// between pulling now and queueing behind in-flight branch sessions. Callers run
 /// this inside `spawn_blocking`.
 pub(crate) fn pull_branch_ff_only_impl(store: &Arc<Store>, branch_id: &str) -> Result<(), String> {

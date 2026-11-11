@@ -8788,12 +8788,12 @@ mod tests {
                 "launch_resume(",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/commit.rs"),
                 "async fn start_queued_commit_pipeline_for_branch(",
                 "session_runner::start_pipeline_session(",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/git_pipeline.rs"),
                 "async fn start_queued_git_pipeline_for_branch(",
                 "session_runner::start_pipeline_session(",
             ),
@@ -8831,12 +8831,12 @@ mod tests {
                 "registry.hold(&session_id)",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/commit.rs"),
                 "async fn start_queued_commit_pipeline_for_branch(",
                 "registry.hold(&session.id)",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/git_pipeline.rs"),
                 "async fn start_queued_git_pipeline_for_branch(",
                 "registry.hold(&session.id)",
             ),

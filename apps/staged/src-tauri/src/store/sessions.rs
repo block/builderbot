@@ -16,6 +16,16 @@ const SESSION_COLUMNS: &str = "id, prompt, status, working_dir, provider, agent_
     created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id,
     completion_effects_at, parent_session_id, pre_head_sha, blox_command_id, started_by";
 
+/// [`SESSION_COLUMNS`], each qualified with a table alias, for queries that
+/// join `sessions` with another table carrying an `id`.
+fn qualified_session_columns(alias: &str) -> String {
+    SESSION_COLUMNS
+        .split(',')
+        .map(|column| format!("{alias}.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// An in-flight session spawned by another session: the branch it works on
 /// and the title the branch timeline would give it. `status` is `"queued"` or
 /// `"running"`.
@@ -756,8 +766,9 @@ impl Store {
         storing_claim_suffix: &str,
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        let columns = qualified_session_columns("s");
         let mut stmt = conn.prepare(&format!(
-            "SELECT {SESSION_COLUMNS}
+            "SELECT {columns}
              FROM sessions s
              INNER JOIN branches b ON b.id = s.branch_id
              WHERE s.status = 'completed' AND s.completion_reason = ?1

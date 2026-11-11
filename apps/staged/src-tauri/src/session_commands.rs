@@ -429,7 +429,7 @@ fn background_hold_from_overrides(
 /// How a note session hands its note back: the `write_note` MCP tool. Shared by
 /// every note-producing prompt (branch note, project session, note follow-up)
 /// so the contract is stated once. The tool is served over HTTP locally and by
-/// a stdio helper on Blox; the agent sees the same tool either way.
+/// the Staged MCP on Blox (stdio); the agent sees the same tool either way.
 ///
 /// The `---` separator contract this replaces is still parsed by the
 /// post-completion hooks as a logged fallback, but prompts no longer mention

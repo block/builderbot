@@ -31,6 +31,7 @@ https://github.com/block/builderbot/releases/download/staged-latest/latest.json
 
 Release and signing details live in [`docs/release-and-updates.md`](./docs/release-and-updates.md).
 How note sessions deliver their note (the `write_note` tool, the Blox outbox, and detached recovery) is described in [`docs/note-delivery.md`](./docs/note-delivery.md).
+The workstation-side MCP server that serves Staged's tools to remote (Blox) agents, `write_note` first, is described in [`docs/staged-mcp-on-blox.md`](./docs/staged-mcp-on-blox.md).
 
 ### Development Install From Source
 

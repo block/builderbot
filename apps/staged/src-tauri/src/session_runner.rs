@@ -59,7 +59,10 @@ use tokio_util::sync::CancellationToken;
 
 use acp_client::{AgentRunOutcome, McpServer, McpServerHttp, SessionSettleReason};
 
-use crate::remote_note_outbox::{self, OutboxState};
+use crate::remote_staged_mcp::{
+    self,
+    note_outbox::{self, OutboxState},
+};
 
 use crate::note_tool::{
     new_submission_slot, NoteSubmission, NoteSubmissionSlot, NoteSubmissionSource,
@@ -1785,8 +1788,8 @@ pub fn start_session(
         // drained by the post-completion hooks after it.
         let note_slot: NoteSubmissionSlot = new_submission_slot();
 
-        // Set when this run injected the workstation `write_note` helper: the
-        // id the helper stamps into its outbox, so the collector after the
+        // Set when this run injected the Staged MCP on Blox: the turn id its
+        // `write_note` stamps into the outbox, so the collector after the
         // run can tell this run's note from an older one.
         let remote_note_turn: std::cell::OnceCell<String> = std::cell::OnceCell::new();
         // Whether the last turn's settle already pulled the workstation
@@ -1795,11 +1798,11 @@ pub fn start_session(
         // ended in a connection error never got that far.
         let remote_outbox_collected_for_turn: Cell<bool> = Cell::new(false);
         // Whether the start-of-run outbox recovery saw the outbox through:
-        // false when the workstation dropped between installing the helper
-        // and reading the outbox, or when a finished note it found could not
-        // be stored. Either way an uncollected `done` from an earlier run may
-        // still be there unseen, and the end-of-run clear must not delete it
-        // (see `RemoteOutboxUse`).
+        // false when the workstation dropped between installing the Staged
+        // MCP on Blox and reading the outbox, or when a finished note it
+        // found could not be stored. Either way an uncollected `done` from
+        // an earlier run may still be there unseen, and the end-of-run clear
+        // must not delete it (see `RemoteOutboxUse`).
         let remote_outbox_recovery_settled: Cell<bool> = Cell::new(true);
         // Whether a collection during this run found this run's own note, so
         // whatever an earlier run left in the outbox has been overwritten.
@@ -1814,7 +1817,7 @@ pub fn start_session(
         // is only cleared at the end of the run, so during a repair or
         // follow-up turn the previous turn's `done` is still there; the
         // watchdog's probe uses this to tell it from a fresh delivery.
-        let remote_note_memory = remote_note_outbox::new_collected_note_memory();
+        let remote_note_memory = note_outbox::new_collected_note_memory();
         // How long the agent had been silent when the last turn settled. An
         // unacknowledged cancel on a connection that was still relaying
         // events is a slow agent, not a lost one (`lost_remote_agent_detail`).
@@ -2071,11 +2074,11 @@ pub fn start_session(
                 None
             };
 
-            // Remote note sessions get the same tool from a stdio helper on
-            // the workstation (see `remote_note_outbox`): install it, settle
-            // this session's outbox while the laptop is still connected, and
-            // hand it to `session/new` as a stdio MCP server. The helper is
-            // what lets the note survive a laptop disconnect, but a
+            // Remote note sessions get the same tool from the Staged MCP on
+            // Blox (see `remote_staged_mcp`): install it, settle this
+            // session's note outbox while the laptop is still connected, and
+            // hand it to `session/new` as a stdio MCP server. The workstation
+            // side is what lets the note survive a laptop disconnect, but a
             // workstation without `node` is not fatal — the agent falls
             // back to the `---` contract the hooks still parse.
             //
@@ -2086,7 +2089,7 @@ pub fn start_session(
             // It goes through the post-completion hooks — bound to this
             // session's note — before the outbox is emptied for this run.
             //
-            // The helper is attached whenever it installed, whatever the
+            // The server is attached whenever it installed, whatever the
             // settling did: a recovery that failed (the workstation dropped
             // between the two round trips) is logged, not a reason to run
             // this turn on the `---` fallback. Unusable content is cleared
@@ -2103,9 +2106,9 @@ pub fn start_session(
                     .and_then(|dir| dir.to_str())
                     .map(str::to_string);
                 let prepared = tokio::task::spawn_blocking(move || {
-                    let exec = remote_note_outbox::workspace_exec(&ws_name);
-                    let helper = remote_note_outbox::install_helper(&exec)?;
-                    let recovery_settled = match remote_note_outbox::recover_uncollected_outbox(
+                    let exec = remote_staged_mcp::workspace_exec(&ws_name);
+                    let staged_mcp = remote_staged_mcp::install(&exec)?;
+                    let recovery_settled = match note_outbox::recover_uncollected_outbox(
                         &exec,
                         &session_id,
                         &mut |submission| {
@@ -2126,7 +2129,7 @@ pub fn start_session(
                         Err(e) => {
                             log::warn!(
                                 "Session {session_id}: could not settle the workstation note \
-                                 outbox before this run (attaching the write_note helper \
+                                 outbox before this run (attaching the Staged MCP on Blox \
                                  anyway; the outbox is kept at the end of this run unless it \
                                  delivers this run's note): {e}"
                             );
@@ -2134,16 +2137,20 @@ pub fn start_session(
                         }
                     };
                     Ok::<_, String>((
-                        remote_note_outbox::stdio_mcp_server(&helper, &session_id, &turn_for_task),
+                        remote_staged_mcp::stdio_mcp_server(
+                            &staged_mcp,
+                            &session_id,
+                            &turn_for_task,
+                        ),
                         recovery_settled,
                     ))
                 })
                 .await
-                .map_err(|e| format!("remote write_note helper setup task failed: {e}"))?;
+                .map_err(|e| format!("Staged MCP on Blox setup task failed: {e}"))?;
                 match prepared {
                     Ok((server, recovery_settled)) => {
                         log::info!(
-                            "Session {}: remote write_note helper attached (turn {turn_id})",
+                            "Session {}: Staged MCP on Blox attached (turn {turn_id})",
                             config.session_id
                         );
                         required_mcp_servers.push(server);
@@ -2152,7 +2159,7 @@ pub fn start_session(
                     }
                     Err(e) => {
                         log::warn!(
-                            "Session {}: remote write_note helper unavailable \
+                            "Session {}: Staged MCP on Blox unavailable \
                              (continuing with the `---` fallback): {e}",
                             config.session_id
                         );
@@ -2188,7 +2195,7 @@ pub fn start_session(
                 // connection has gone silent — without that looking like a
                 // Stop to the terminal-state handling, which reads the parent.
                 let driver_cancel = cancel_token.child_token();
-                // Only a remote note session with the `write_note` helper
+                // Only a remote note session with the Staged MCP on Blox
                 // attached has an outbox for the watchdog to probe.
                 let watchdog = match (remote_note_turn.get(), config.workspace_name.clone()) {
                     (Some(turn_id), Some(ws_name)) => {
@@ -2377,8 +2384,8 @@ pub fn start_session(
                     let slot = Arc::clone(&note_slot);
                     let memory = Arc::clone(&remote_note_memory);
                     let collected = tokio::task::spawn_blocking(move || {
-                        let exec = remote_note_outbox::workspace_exec(&ws_name);
-                        remote_note_outbox::collect_turn_into_slot(
+                        let exec = remote_staged_mcp::workspace_exec(&ws_name);
+                        note_outbox::collect_turn_into_slot(
                             &exec,
                             &session_id,
                             &turn_id,
@@ -2535,7 +2542,7 @@ pub fn start_session(
         // agent that answered (auth required, a refused prompt), one that
         // never started (the startup timeout) or a local persistence error
         // is a plain crash, whatever the outbox holds; and without the
-        // `write_note` helper attached there is no outbox to rescue from.
+        // Staged MCP on Blox attached there is no outbox to rescue from.
         let lost_remote_agent = match (remote_note_turn.get(), config.workspace_name.as_deref()) {
             (Some(_), Some(_)) => lost_remote_agent_detail(
                 &result,
@@ -2575,8 +2582,8 @@ pub fn start_session(
                 } else {
                     "after the background hold was stopped"
                 };
-                let exec = remote_note_outbox::workspace_exec(ws_name);
-                match remote_note_outbox::collect_turn_into_slot(
+                let exec = remote_staged_mcp::workspace_exec(ws_name);
+                match note_outbox::collect_turn_into_slot(
                     &exec,
                     &session_id_for_status,
                     turn_id,
@@ -2678,19 +2685,19 @@ pub fn start_session(
         // detach — may still be running on the workstation, as may background
         // work a hold lost: record the row `disconnected`, with no hooks,
         // completion effects or queue drain.
-        // A remote note session with the workstation `write_note` helper
-        // attached whose agent was lost settles from its outbox instead
+        // A remote note session with the Staged MCP on Blox attached whose
+        // agent was lost settles from its outbox instead
         // (`detached` while the sweep keeps checking it; see
         // `lost_remote_agent_terminal_state` and `lost_remote_agent_detail`).
         // Judged on the result the run ended with: a reattach may have
         // changed it.
         let remote_outbox_use = RemoteOutboxUse {
-            helper_attached: remote_note_turn.get().is_some(),
+            staged_mcp_attached: remote_note_turn.get().is_some(),
             recovery_settled: remote_outbox_recovery_settled.get(),
             own_note_collected: remote_outbox_own_note_collected.get(),
         };
         let lost_remote_note_agent =
-            if remote_outbox_use.helper_attached && config.workspace_name.is_some() {
+            if remote_outbox_use.staged_mcp_attached && config.workspace_name.is_some() {
                 lost_remote_agent_detail(
                     &result,
                     settlement.settle_reason,
@@ -2924,8 +2931,8 @@ fn finish_disconnected_run(
 /// `note_submission` is the note the turn delivered through `write_note`, if
 /// any, for the post-completion hooks; `remote_outbox_use` is what the run did
 /// with the workstation outbox, which decides whether it is emptied at the
-/// end; `lost_remote_note_agent` says the run had the workstation `write_note`
-/// helper and lost its agent mid-turn (and how, see
+/// end; `lost_remote_note_agent` says the run had the Staged MCP on Blox
+/// attached and lost its agent mid-turn (and how, see
 /// [`lost_remote_agent_detail`]), so it settles from the outbox (see
 /// `lost_remote_agent_terminal_state`).
 #[allow(clippy::too_many_arguments)]
@@ -2963,8 +2970,8 @@ fn finish_session_run(
     let cancel_requested = cancel_token.is_cancelled();
     let cancelled_for_quit = cancellation_completion_reason == CompletionReason::AppQuit;
     let (new_status, error_msg, completion_reason, rate_limit_recovery) = match result {
-        // The remote agent was lost mid-turn while the workstation
-        // `write_note` helper was attached (`lost_remote_note_agent`: a
+        // The remote agent was lost mid-turn while the Staged MCP on Blox
+        // was attached (`lost_remote_note_agent`: a
         // transport error, a Stop it never acknowledged, or the inactivity
         // watchdog finding its note). The outbox decides: this run's
         // completed, valid note finishes the turn; anything else leaves the
@@ -3309,8 +3316,8 @@ fn finish_session_run(
         error_msg.as_deref(),
     ) {
         if let Some(ws_name) = config.workspace_name.as_deref() {
-            let exec = remote_note_outbox::workspace_exec(ws_name);
-            if let Err(e) = remote_note_outbox::clear_outbox(&exec, &session_id_for_status) {
+            let exec = remote_staged_mcp::workspace_exec(ws_name);
+            if let Err(e) = note_outbox::clear_outbox(&exec, &session_id_for_status) {
                 log::warn!(
                     "Session {session_id_for_status}: failed to clear the workstation note \
                      outbox at the end of the run: {e}"
@@ -3581,8 +3588,8 @@ fn note_turn_delivered(
 }
 
 /// Terminal state of a remote note session whose connection to the agent
-/// failed (`AgentRunError::Other`) while the workstation `write_note` helper
-/// was attached, given what the post-run outbox collection put in the slot.
+/// failed (`AgentRunError::Other`) while the Staged MCP on Blox was
+/// attached, given what the post-run outbox collection put in the slot.
 ///
 /// - This run's note, with every Pikchr block parsing: the deliverable is
 ///   intact, so the turn counts as finished.
@@ -3838,13 +3845,14 @@ fn debug_string_fields(text: &str, prefix: &str) -> Vec<String> {
 /// clear decision ([`remote_outbox_is_cleared_at_run_end`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RemoteOutboxUse {
-    /// The `write_note` helper was attached: the run owned the outbox.
-    helper_attached: bool,
+    /// The Staged MCP on Blox was attached: the run owned the outbox.
+    staged_mcp_attached: bool,
     /// The start-of-run recovery saw the outbox through (ingested a waiting
     /// note, discarded unusable content, or found it empty). False when the
-    /// workstation dropped between installing the helper and reading the
-    /// outbox, or a waiting note could not be stored: an uncollected `done`
-    /// from an earlier run may still be sitting there unseen.
+    /// workstation dropped between installing the Staged MCP on Blox and
+    /// reading the outbox, or a waiting note could not be stored: an
+    /// uncollected `done` from an earlier run may still be sitting there
+    /// unseen.
     recovery_settled: bool,
     /// A collection during this run found this run's own note, so whatever
     /// an earlier run left in the outbox has been overwritten by it.
@@ -3853,7 +3861,7 @@ struct RemoteOutboxUse {
 
 /// Whether the end of a run empties the session's workstation outbox.
 ///
-/// A run that attached the `write_note` helper owns the outbox for its
+/// A run that attached the Staged MCP on Blox owns the outbox for its
 /// duration and leaves it empty, whatever its terminal status: a stored note
 /// must not be re-ingested on resume, and neither must a note the run
 /// rejected (Pikchr repair exhausted) or discarded (Stop after the call).
@@ -3871,7 +3879,7 @@ fn remote_outbox_is_cleared_at_run_end(
     completion_reason: &CompletionReason,
     error_message: Option<&str>,
 ) -> bool {
-    outbox_use.helper_attached
+    outbox_use.staged_mcp_attached
         && (outbox_use.recovery_settled || outbox_use.own_note_collected)
         && !detached_note_poll_is_pending(completion_reason, error_message)
 }
@@ -6370,7 +6378,7 @@ fn recover_detached_remote_note_session(
     context: DetachedRemoteNoteContext,
 ) {
     let ws_name = context.workspace_name.as_str();
-    let exec = remote_note_outbox::workspace_exec(ws_name);
+    let exec = remote_staged_mcp::workspace_exec(ws_name);
     let target = detached_note_hooks_target(store, &context);
     let mut ingest = target.ingest(store, session_id, ws_name);
 
@@ -6489,7 +6497,7 @@ fn finalize_detached_remote_note_session(
     store: &Arc<Store>,
     session_id: &str,
     ws_name: &str,
-    exec: remote_note_outbox::RemoteExec,
+    exec: remote_staged_mcp::RemoteExec,
     ingest: &mut dyn FnMut(NoteSubmission) -> bool,
 ) -> Option<DetachedRecoveryOutcome> {
     let claim_message = format!(
@@ -6512,7 +6520,7 @@ fn finalize_detached_remote_note_session(
         return None;
     }
 
-    let outcome = match remote_note_outbox::collect(exec, session_id, None) {
+    let outcome = match note_outbox::collect(exec, session_id, None) {
         Ok(OutboxState::Delivered(submission)) => {
             log::info!(
                 "Recovered detached remote session {session_id}: note \"{}\" found in the \
@@ -6521,7 +6529,7 @@ fn finalize_detached_remote_note_session(
             );
             let title = submission.title.clone();
             if ingest(submission) {
-                if let Err(e) = remote_note_outbox::clear_outbox(exec, session_id) {
+                if let Err(e) = note_outbox::clear_outbox(exec, session_id) {
                     log::warn!(
                         "Recovered detached remote session {session_id}: failed to clear the \
                          workstation outbox after ingesting it: {e}"
@@ -7147,7 +7155,7 @@ fn poll_detached_remote_note_sessions(store: &Arc<Store>, app_handle: &AppHandle
         let app_handle = app_handle.clone();
         std::thread::spawn(move || {
             let ws_name = context.workspace_name.as_str();
-            let exec = remote_note_outbox::workspace_exec(ws_name);
+            let exec = remote_staged_mcp::workspace_exec(ws_name);
             let target = detached_note_hooks_target(&store, &context);
             let mut ingest = target.ingest(&store, &session_id, ws_name);
             let visit = poll_detached_remote_note_session(
@@ -7213,7 +7221,7 @@ fn poll_detached_remote_note_session(
     store: &Arc<Store>,
     session_id: &str,
     ws_name: &str,
-    exec: remote_note_outbox::RemoteExec,
+    exec: remote_staged_mcp::RemoteExec,
     ingest: &mut dyn FnMut(NoteSubmission) -> bool,
     plan: &DetachedNotePollPlan,
 ) -> DetachedNotePollVisit {
@@ -7252,7 +7260,7 @@ fn poll_detached_remote_note_session(
                             parked.label()
                         );
                         if parked.clears_outbox_on_expiry() {
-                            if let Err(e) = remote_note_outbox::clear_outbox(exec, session_id) {
+                            if let Err(e) = note_outbox::clear_outbox(exec, session_id) {
                                 log::warn!(
                                     "{} {session_id}: failed to clear the workstation outbox \
                                      after the poll window ran out: {e}",
@@ -7342,13 +7350,13 @@ fn poll_detached_remote_note_session_once(
     store: &Arc<Store>,
     session_id: &str,
     ws_name: &str,
-    exec: remote_note_outbox::RemoteExec,
+    exec: remote_staged_mcp::RemoteExec,
     ingest: &mut dyn FnMut(NoteSubmission) -> bool,
     observed: &ObservedDetachedRow,
 ) -> DetachedNotePoll {
     let parked = observed.parked;
     let label = parked.label();
-    match remote_note_outbox::collect_classified(exec, session_id, None) {
+    match note_outbox::collect_classified(exec, session_id, None) {
         Ok(OutboxState::Delivered(submission)) => {
             let claim = parked.storing_claim(ws_name);
             let Some(claim_stamp) = observed.settle(store, session_id, &claim) else {
@@ -7388,7 +7396,7 @@ fn poll_detached_remote_note_session_once(
                 return DetachedNotePoll::Taken;
             }
             if stored {
-                if let Err(e) = remote_note_outbox::clear_outbox(exec, session_id) {
+                if let Err(e) = note_outbox::clear_outbox(exec, session_id) {
                     log::warn!(
                         "{label} {session_id}: failed to clear the workstation outbox after \
                          ingesting it: {e}"
@@ -7405,11 +7413,11 @@ fn poll_detached_remote_note_session_once(
         // Retrying reads the same bytes until the agent writes again, so for
         // the sweep this is an outbox without a usable note, not an
         // unreachable one.
-        Err(remote_note_outbox::CollectError::Content(e)) => {
+        Err(note_outbox::CollectError::Content(e)) => {
             log::warn!("{label} {session_id}: the outbox on {ws_name} holds no usable note ({e})");
             DetachedNotePoll::NoNoteYet
         }
-        Err(remote_note_outbox::CollectError::Transport(e)) => DetachedNotePoll::Unreachable(e),
+        Err(note_outbox::CollectError::Transport(e)) => DetachedNotePoll::Unreachable(e),
     }
 }
 

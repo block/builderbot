@@ -10770,14 +10770,14 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(resolve_spawn_working_dir(&existing, true), existing);
     }
 
-    fn stdio_note_server() -> McpServer {
+    fn stdio_staged_mcp_server() -> McpServer {
         McpServer::Stdio(
             agent_client_protocol::schema::v1::McpServerStdio::new(
                 "staged",
-                PathBuf::from("/usr/bin/python3"),
+                PathBuf::from("/usr/bin/node"),
             )
             .args(vec![
-                "/home/bloxer/.staged/bin/staged-note-mcp.py".to_string(),
+                "/home/bloxer/.staged/bin/staged-mcp.cjs".to_string(),
                 "session-1".to_string(),
                 "turn-1".to_string(),
             ]),
@@ -10911,7 +10911,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             Some("goose"),
             "s1",
         )
-        .with_mcp_servers(vec![stdio_note_server()]);
+        .with_mcp_servers(vec![stdio_staged_mcp_server()]);
 
         assert!(
             matches!(driver.mcp_servers(), [McpServer::Stdio(server)] if server.name == "staged")

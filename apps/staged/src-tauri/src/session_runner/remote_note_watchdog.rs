@@ -23,7 +23,10 @@ use tokio::time::Instant;
 
 use crate::agent::ActivityClock;
 use crate::note_tool::NoteSubmissionSlot;
-use crate::remote_note_outbox::{self, OutboxState};
+use crate::remote_staged_mcp::{
+    self,
+    note_outbox::{self, OutboxState},
+};
 
 /// How long the agent must be silent before the outbox is probed, unless
 /// [`INACTIVITY_PROBE_ENV`] says otherwise. Long enough that a slow tool
@@ -86,7 +89,7 @@ impl RemoteNoteWatchdog {
         workspace_name: String,
         turn_id: String,
         slot: NoteSubmissionSlot,
-        memory: remote_note_outbox::CollectedNoteMemory,
+        memory: note_outbox::CollectedNoteMemory,
         activity: Arc<ActivityClock>,
         interval: Duration,
     ) -> Self {
@@ -96,8 +99,8 @@ impl RemoteNoteWatchdog {
             activity,
             interval,
             Arc::new(move || {
-                let exec = remote_note_outbox::workspace_exec(&workspace_name);
-                remote_note_outbox::probe_turn_into_slot(
+                let exec = remote_staged_mcp::workspace_exec(&workspace_name);
+                note_outbox::probe_turn_into_slot(
                     &exec,
                     &probe_session_id,
                     &turn_id,

@@ -16,9 +16,9 @@
 //! post-completion hooks read instead of parsing the transcript.
 //!
 //! Remote (Blox) sessions cannot reach a laptop-side server, so they get the
-//! same tool from a stdio helper installed on the workstation
-//! (`remote_note_outbox`), whose output the laptop collects into the same slot
-//! after the turn. The tool contract — name, schema, result text — is shared so
+//! same tool from the Staged MCP on Blox, a stdio server installed on the
+//! workstation (`remote_staged_mcp`), whose note outbox the laptop collects
+//! into the same slot after the turn (`remote_staged_mcp::note_outbox`). The tool contract — name, schema, result text — is shared so
 //! prompts do not care which transport served the call.
 
 use std::sync::{Arc, Mutex};
@@ -39,13 +39,13 @@ use tokio::task::JoinHandle;
 pub(crate) const NOTE_MCP_SERVER_NAME: &str = "staged";
 
 /// The tool's name as the agent sees it. The `#[tool]` attribute below and the
-/// remote helper spell it out; `tool_router_advertises_the_shared_contract`
+/// Staged MCP on Blox spell it out; `tool_router_advertises_the_shared_contract`
 /// keeps them in step.
 #[cfg(test)]
 pub(crate) const WRITE_NOTE_TOOL_NAME: &str = "write_note";
 
 /// Tool description shared by the HTTP server (the `#[tool]` attribute) and
-/// the remote stdio helper; tests compare both against this copy.
+/// the Staged MCP on Blox; tests compare both against this copy.
 #[cfg(test)]
 pub(crate) const WRITE_NOTE_DESCRIPTION: &str = "Save the note this session is producing. This call is the deliverable: \
 Staged stores exactly what you pass here and does not read your assistant text. Pass the full note each time \
@@ -83,8 +83,9 @@ impl SuggestedNextSteps {
 }
 
 /// Arguments of `write_note`. The schema is derived from this struct, so the
-/// remote helper's hand-written schema must stay in step with it (see the
-/// `helper_schema_matches_tool_schema` test in `remote_note_outbox`).
+/// Staged MCP on Blox's hand-written schema must stay in step with it (see the
+/// `write_note_schema_matches_the_rust_tool_schema` test in
+/// `remote_staged_mcp::note_outbox`).
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct WriteNoteParams {
     /// The note title, shown as its heading. Plain text, no markdown, no
@@ -104,7 +105,7 @@ pub struct WriteNoteParams {
 pub enum NoteSubmissionSource {
     /// The in-process HTTP `write_note` tool (local and project sessions).
     Tool,
-    /// The workstation outbox written by the remote stdio helper.
+    /// The workstation outbox written by the Staged MCP on Blox.
     Outbox,
 }
 
@@ -165,7 +166,7 @@ impl NoteSubmission {
     }
 }
 
-/// The `write_note` result text. Shared with the remote helper's wording so
+/// The `write_note` result text. Shared with the Staged MCP on Blox's wording so
 /// the agent sees the same instruction on both transports.
 pub(crate) fn saved_message(title: &str, body_len: usize) -> String {
     format!(

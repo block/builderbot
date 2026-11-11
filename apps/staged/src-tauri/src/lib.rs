@@ -46,7 +46,7 @@ pub mod project_transfer;
 pub mod prs;
 pub(crate) mod rate_limit_metrics;
 pub mod rate_limit_scheduler;
-pub mod remote_note_outbox;
+pub mod remote_staged_mcp;
 pub mod review_commands;
 pub mod session_commands;
 pub mod session_completion;

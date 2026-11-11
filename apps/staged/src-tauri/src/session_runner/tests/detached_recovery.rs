@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::note_tool::NoteSubmission;
-use crate::remote_note_outbox::clear_outbox_script;
+use crate::remote_staged_mcp::note_outbox::clear_outbox_script;
 use crate::store::{Branch, Note, Project, Session};
 use std::cell::RefCell;
 
@@ -744,9 +744,10 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
     );
 }
 
-/// A run that attached the helper, whose start-of-run recovery went through.
+/// A run that attached the Staged MCP on Blox, whose start-of-run recovery
+/// went through.
 const SETTLED_RUN: RemoteOutboxUse = RemoteOutboxUse {
-    helper_attached: true,
+    staged_mcp_attached: true,
     recovery_settled: true,
     own_note_collected: false,
 };
@@ -1425,13 +1426,13 @@ fn the_outbox_is_cleared_whenever_the_run_is_done_with_it() {
     assert!(
         !remote_outbox_is_cleared_at_run_end(
             RemoteOutboxUse {
-                helper_attached: false,
+                staged_mcp_attached: false,
                 ..SETTLED_RUN
             },
             &CompletionReason::TurnComplete,
             None
         ),
-        "a run without the helper never touched the outbox"
+        "a run without the Staged MCP on Blox never touched the outbox"
     );
 }
 

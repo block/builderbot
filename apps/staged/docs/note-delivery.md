@@ -41,7 +41,7 @@ with `ToolSearch select:mcp__staged__write_note` before calling it rather than
 calling it blind. The deferral is Claude Code's, not Staged's: claiming the
 tool was "available now" did not stop the bridge from deferring it (7 of 8
 sessions in the retest searched anyway), and one session called it
-schema-less with empty input, which the helper rejected. The search round
+schema-less with empty input, which `write_note` rejected. The search round
 trip is accepted; the rejected empty call is what the wording avoids. The
 Goose wording is unchanged.
 
@@ -74,20 +74,17 @@ carries the note), and the post-completion hooks.
 
 A remote agent cannot reach the laptop's loopback servers, and the laptop may
 disconnect before the agent finishes. Remote note sessions therefore get the
-same tool from a dependency-free stdio MCP helper that lives on the
-workstation (`src-tauri/resources/remote/staged-note-mcp.cjs`, Node standard
-library only). `node` was verified on a Blox workstation (`sq blox ws exec
-<ws> -- node --version`, v26); `python3` is present too but unused.
+same tool from the Staged MCP on Blox, Staged's stdio MCP server on the
+workstation. How it is installed, injected and spoken to is described in
+[`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md). This section covers what
+`write_note` does there and how the note gets back to the laptop.
 
-At remote session start, `remote_note_outbox::install_helper`:
+At remote note session start, the session runner:
 
-1. runs one `ws exec sh -c` probe that creates `~/.staged/bin`, and prints the
-   home directory, the recorded checksum and the path of `node`;
-2. uploads the embedded helper through the existing base64 chunked
-   `write_bytes_to_remote_with` path only when the recorded SHA-256 in
-   `~/.staged/bin/staged-note-mcp.sha256` differs from the embedded source,
-   then records the new checksum;
-3. settles this session's outbox (`recover_uncollected_outbox`): a `done`
+1. installs the Staged MCP on Blox (`remote_staged_mcp::install`: one probe,
+   plus an upload when the script changed);
+2. settles this session's outbox
+   (`remote_staged_mcp::note_outbox::recover_uncollected_outbox`): a `done`
    marker already waiting there is a note the agent finished that no run
    ingested (the previous run lost the workstation, the sweep could not reach
    it either, the row went `detached`, and this is the resume). It is handed
@@ -98,19 +95,18 @@ At remote session start, `remote_note_outbox::install_helper`:
    workstation leaves the outbox alone and is logged, while unusable content
    (`meta.json` that does not parse, a body that is not valid base64, a title
    the tool would reject) is logged, cleared and skipped, because nothing
-   will ever make it ingestible. Either way the helper is still attached and
+   will ever make it ingestible. Either way the server is still attached and
    the run starts: a recovery failure must not cost the session its tool;
-4. injects `McpServer::Stdio { command: <node>, args: [<helper>, <session id>,
-<turn id>] }` into `session/new` / `session/load`.
+3. injects the server into `session/new` / `session/load` with this run's
+   turn id.
 
-Steps 1 and 3 are two `ws exec` round trips before the agent starts (a
-third and fourth when the helper has to be uploaded or an uncollected note is
+Steps 1 and 2 are two `ws exec` round trips before the agent starts (a
+third and fourth when the script has to be uploaded or an uncollected note is
 waiting), each a few seconds on a cold `sq blox` connection. That is the
 price of a session whose deliverable survives the laptop disconnecting.
 
-The helper speaks newline-delimited JSON-RPC (`initialize`, `ping`,
-`tools/list`, `tools/call`, and ignores notifications). Each `write_note` call
-writes atomically (temp file + rename) into the outbox:
+Each `write_note` call writes atomically (temp file + rename) into the
+outbox, the note's three files in the session's scratch directory:
 
 ```text
 ~/.staged/sessions/<session-id>/note.md    body (markdown, no title)
@@ -121,22 +117,19 @@ writes atomically (temp file + rename) into the outbox:
 A rewrite (a second `write_note` call in the same turn) unlinks `done` before
 it touches `note.md`, and recreates it only after both files are renamed into
 place, so a reader that sees the marker — even the sweep, which can land at
-any moment — always gets a title and body from the same call. `initialize`
-answers with the client's MCP protocol version when the helper implements it
-(`2025-06-18`, `2025-03-26`, `2024-11-05`), otherwise with the newest one it
-speaks; it never echoes a version it does not implement.
+any moment — always gets a title and body from the same call.
 
-Session ids are validated to `[A-Za-z0-9_-]` before they are interpolated into
-remote paths. The `turn` value is a per-run id the helper was started with, so
-the collector can tell this run's note from an earlier one.
+The `turn` value is the per-run id the server was started with, so the
+collector can tell this run's note from an earlier one. `helperVersion` is
+the script's `SERVER_VERSION`, under the key earlier builds wrote.
 
 ### Collector
 
-When a turn settles cleanly, `remote_note_outbox::collect_turn_into_slot` runs
+When a turn settles cleanly, `note_outbox::collect_turn_into_slot` runs
 one `ws exec sh -c` that prints `done`/`pending`, `meta.json` and `note.md` as
 base64 lines (base64 keeps arbitrary markdown out of the line protocol), and
 then `done`/`pending` again. The marker is re-tested after the files were
-read because the helper unlinks it while a rewrite is in flight: if the two
+read because `write_note` unlinks it while a rewrite is in flight: if the two
 readings disagree the files may be from different calls, and the snapshot is
 treated as `Pending` and read again later rather than trusted. A
 `Delivered` result for this run's turn id becomes a `NoteSubmission` with
@@ -215,13 +208,13 @@ written, so it never holds the row in `running`, and it removes the now-empty
   into it and the sweep (or the next run's start-of-run recovery) is what
   reads it;
 - a run whose start-of-run recovery did not settle — the workstation dropped
-  between installing the helper and reading the outbox, or a waiting note
-  could not be stored — and that never collected its own note. An earlier
-  run's finished note may still be sitting there unread (the per-turn
+  between installing the Staged MCP on Blox and reading the outbox, or a
+  waiting note could not be stored — and that never collected its own note. An
+  earlier run's finished note may still be sitting there unread (the per-turn
   collector reports it as a stale turn and ignores it), and the clear would
-  delete the only copy; the next run's recovery gets another chance. Once
-  the run collects its own note the earlier one has been overwritten, and
-  the clear is back on.
+  delete the only copy; the next run's recovery gets another chance. Once the
+  run collects its own note the earlier one has been overwritten, and the
+  clear is back on.
 
 The outbox is never cleared at start, which is what lets that recovery tell
 an uncollected note from an old one.
@@ -301,7 +294,7 @@ Two mechanisms cover that:
   session that does not exist yet, so every stamped frame before
   `session/new` answers is dropped too.
 - **Silence triggers a probe.** Each connection of a remote note session with
-  the helper attached runs an inactivity watchdog
+  the Staged MCP on Blox attached runs an inactivity watchdog
   (`session_runner::remote_note_watchdog`) against the turn. The message
   writer bumps an `ActivityClock` on every event the driver hands it; once
   the agent has been silent for `DEFAULT_INACTIVITY_PROBE` (10 minutes,
@@ -319,19 +312,18 @@ Two mechanisms cover that:
   never interrupted. The watchdog races the prompt only; it is dropped the
   moment the turn ends on its own.
 
-  "A `done` for this turn" is read strictly. Every prompt turn of a run
-  shares one turn id (the helper is attached once) and the outbox is cleared
-  at the end of the run, not between turns, so during a Pikchr repair or a
-  `write_note` follow-up turn the previous turn's `done` is still on the
+  "A `done` for this turn" is read strictly. Every prompt turn of a run shares
+  one turn id (the Staged MCP on Blox is attached once) and the outbox is
+  cleared at the end of the run, not between turns, so during a Pikchr repair
+  or a `write_note` follow-up turn the previous turn's `done` is still on the
   workstation. The per-turn collector remembers the note it last pulled
-  (`remote_note_outbox::CollectedNote`: the helper's `writtenAt` plus title,
-  body and next steps) and the watchdog's probe
-  (`probe_turn_into_slot`) reports an identical snapshot as `pending`; only
-  a note that differs — a rewrite — ends the turn. Without that, a quiet
-  repair turn would be cancelled on the very body the collector had already
-  rejected, and the run would end `detached` with "that note was not
-  stored". The watchdog's own completion costs the same 10 s cancel deadline
-  as a Stop before the row settles.
+  (`note_outbox::CollectedNote`: the `writtenAt` stamp plus title, body and
+  next steps) and the watchdog's probe (`probe_turn_into_slot`) reports an
+  identical snapshot as `pending`; only a note that differs — a rewrite — ends
+  the turn. Without that, a quiet repair turn would be cancelled on the very
+  body the collector had already rejected, and the run would end `detached`
+  with "that note was not stored". The watchdog's own completion costs the
+  same 10 s cancel deadline as a Stop before the row settles.
 
 ### Background hold ends late for remote note sessions
 
@@ -635,12 +627,12 @@ them by accident:
   and Resume collects a late note, so the cost of expiring is one click,
   never a lost note.
 - **Only a lost agent detaches.** Auth failures, startup timeouts, refused
-  prompts and local persistence errors are `crashed`, not `detached`, even
-  on a remote note session with the helper attached: no agent is working on
-  the workstation in those cases, so polling would be 30 minutes of round
-  trips for nothing and the "may still be running" copy would be false. The
-  same goes for a bridge reporting its own agent subprocess exited: that is
-  the agent dying, relayed over a healthy transport, which is why "process
+  prompts and local persistence errors are `crashed`, not `detached`, even on
+  a remote note session with the Staged MCP on Blox attached: no agent is
+  working on the workstation in those cases, so polling would be 30 minutes of
+  round trips for nothing and the "may still be running" copy would be false.
+  The same goes for a bridge reporting its own agent subprocess exited: that
+  is the agent dying, relayed over a healthy transport, which is why "process
   exited" / "child exited" are not transport-loss phrases.
 - **Remote note sessions run unattended.** Permission prompts never route
   to the laptop (see _Permissions never block on the laptop_); the session's
@@ -668,13 +660,11 @@ Local:
 
 Blox:
 
-1. Confirm the workstation has `node`: `sq blox ws exec <ws> -- node --version`.
-2. Start a note session on a remote branch. The log shows
-   `remote write_note helper attached (turn <id>)`; on the workstation,
-   `~/.staged/bin/staged-note-mcp.cjs` and `.sha256` exist, and after the call
-   `~/.staged/sessions/<session-id>/` holds `note.md`, `meta.json`, `done`.
-   A second session logs no `Installed write_note helper` line and uploads
-   nothing (the probe's checksum matches).
+1. Check the Staged MCP on Blox first (`node`, install, the attach log line):
+   see _How to test manually_ in [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md).
+2. Start a note session on a remote branch. After the `write_note` call,
+   `~/.staged/sessions/<session-id>/` on the workstation holds `note.md`,
+   `meta.json` and `done`.
 3. Disconnect test: start a remote note session with a long prompt, then quit
    Staged (or kill the `sq blox acp` child). Relaunch Staged: the startup
    sweep logs `Recovered detached remote session … note "<title>" found` and
@@ -755,18 +745,19 @@ workstation outbox; storing it`, the note fills in on the timeline, the
    one of them logs `note "<title>" found in the workstation outbox` (or
    `appeared in the workstation outbox`); the other logs nothing for the
    session.
-5. Drive the helper by hand on the workstation:
-   `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node
-~/.staged/bin/staged-note-mcp.cjs test-session t1`.
+5. Write a note by hand on the workstation through the Staged MCP on Blox:
+   `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Hand","body":"Written by hand"}}}' | node
+~/.staged/bin/staged-mcp.cjs <session-id> <turn-id>`.
 
 Automated coverage: `note_tool::tests` (schema, handler, last-call-wins),
-`remote_note_outbox::tests` (install sequence, outbox parsing including a
+`remote_staged_mcp::tests` (the Staged MCP on Blox itself: install,
+injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),
+`remote_staged_mcp::note_outbox::tests` (outbox parsing including a
 marker that changed between the reads, transport vs content failures,
 per-turn collection into the slot, start-of-run recovery that discards
-unusable content, helper run as a subprocess with fake JSON-RPC including a
-rewrite blocked between its renames and protocol-version negotiation, local
-`sh` run of the install, collect, clear and recovery scripts, schema parity
-with the Rust tool), `session_runner::tests::detached_recovery` (claim-first
+unusable content, `write_note` run as a subprocess with fake JSON-RPC
+including a rewrite blocked between its renames, local `sh` run of the
+collect, clear and recovery scripts, schema parity with the Rust tool), `session_runner::tests::detached_recovery` (claim-first
 sweep: one winner, resume during collection; the poll window and its marker;
 a poll that finds the note claims with the storing marker, then ingests once,
 then completes; two instances that read the row before either claimed settle
@@ -787,8 +778,8 @@ count as a lost agent, an acknowledged Stop does not, and an unacknowledged
 interrupt counts only when the agent was silent throughout; the Stop copy
 promises no note; the crashed row's innermost sentence; the timeline flag;
 frontend marker parity for both suffixes and the Stop marker),
-`remote_note_outbox::tests` (a probe reports the note already collected as
-pending until its stamp or content changes),
+`remote_staged_mcp::note_outbox::tests` (a probe reports the note already
+collected as pending until its stamp or content changes),
 `session_runner::remote_note_watchdog::tests` (interval parsing, one probe
 per silent interval until the note appears, an active agent is never
 probed), `project_mcp::tests` (a completed child's status omits the sweep's

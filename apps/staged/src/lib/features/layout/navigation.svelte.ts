@@ -470,35 +470,59 @@ export async function initNavigation(): Promise<void> {
   await projectStateStore.pruneDeletedProjects(existingIds);
 }
 
-/** Navigate to the repos list view. */
+/**
+ * Navigate to the repos list view. Over a project it stacks, so Back returns
+ * to the project; a board and the repos view are sidebar siblings, so from a
+ * board it replaces (board → All repos → board would otherwise grow the stack
+ * on every round trip).
+ */
 export function showAllRepos(): void {
-  pushOrReplaceRoute({ kind: 'repos' });
+  if (currentRoute().kind === 'board') {
+    replaceCurrentRoute({ kind: 'repos' });
+  } else {
+    pushOrReplaceRoute({ kind: 'repos' });
+  }
 }
 
 /**
  * Navigate to a tag group's board (its pinned sidebar row). Like the repos
  * view it takes the project layer, and is not persisted as the last route.
+ * Mirrors selectProject: the board replaces a project, repos or board route
+ * and is pushed only over the root, so clicking between sidebar rows never
+ * stacks routes.
  */
 export function selectBoard(groupId: string): void {
-  pushOrReplaceRoute({ kind: 'board', groupId });
+  const current = currentRoute();
+  const route: DetailRoute = { kind: 'board', groupId };
+  if (current.kind === 'project' || current.kind === 'repos' || current.kind === 'board') {
+    replaceCurrentRoute(route);
+  } else if (current.kind === 'settings') {
+    setDetailStack([...navigation.detailStack.slice(0, -1), route]);
+  } else {
+    setDetailStack([rootRoute(), route]);
+  }
 }
 
 /**
  * The board for `groupId` is no longer offered (its group deleted, or its
- * board unpinned, here or in another window). Take its route out of the
- * stack wherever it sits, leaving whatever is above it — settings, where the
- * unpinning most likely happened, or a diff — in place over the home grid,
- * so the user isn't thrown out of what they were doing. On screen, that is
- * going home. A board only retained under home has no route; its layer is
- * released so it unmounts rather than show a board nobody offers.
+ * board unpinned, here or in another window). Take every route for it out of
+ * the stack, wherever they sit, leaving whatever is above them — settings,
+ * where the unpinning most likely happened, or a diff — in place, so the
+ * user isn't thrown out of what they were doing. What was under the board
+ * becomes the base route: home, or a project when the board was opened over
+ * one ([projects, project p1, board] lands back on p1, as Back would), and
+ * that is what's persisted. A board only retained under home has no route;
+ * its layer is released so it unmounts rather than show a board nobody
+ * offers.
  */
 export function leaveBoard(groupId: string): void {
   const stack = navigation.detailStack;
-  const index = stack.findIndex((route) => route.kind === 'board' && route.groupId === groupId);
-  if (index !== -1) {
-    setDetailStack(stack.filter((_, i) => i !== index));
-    // The base route is now home, as after goHome / a pop to the root.
-    if (workspaceRoute().kind === 'projects') persistLastProject(null);
+  const rest = stack.filter((route) => !(route.kind === 'board' && route.groupId === groupId));
+  if (rest.length !== stack.length) {
+    setDetailStack(rest);
+    const base = workspaceRoute();
+    if (base.kind === 'projects') persistLastProject(null);
+    else if (base.kind === 'project') persistLastProject(base.projectId);
   }
   releaseBoardLayer(groupId);
 }

@@ -678,6 +678,86 @@ describe('workspace layers', () => {
     expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g3' });
   });
 
+  it('keeps the stack bounded through board ↔ All repos ↔ board round trips', async () => {
+    const { restoreInitialRoute, selectBoard, showAllRepos, selectProject, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    selectBoard('g1');
+    showAllRepos();
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'repos']);
+    selectBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    for (let i = 0; i < 5; i++) {
+      showAllRepos();
+      selectBoard('g1');
+    }
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g1' });
+
+    // A board picked from a project replaces it too; All repos over a
+    // project still stacks, so Back returns to the project.
+    selectProject('p1');
+    selectBoard('g2');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    selectProject('p1');
+    showAllRepos();
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual([
+      'projects',
+      'project',
+      'repos',
+    ]);
+  });
+
+  it('leaves every route of an unpinned board, landing on what was under it', async () => {
+    const { restoreInitialRoute, selectBoard, showAllRepos, leaveBoard, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    // After a round trip the on-screen board goes, even with its route
+    // present more than once (a stack from before the replace rules, say).
+    selectBoard('g1');
+    showAllRepos();
+    selectBoard('g1');
+    leaveBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects']);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+
+    // Duplicates are all removed, and routes for other groups stay.
+    navigation.detailStack = [
+      { kind: 'projects' },
+      { kind: 'board', groupId: 'g1' },
+      { kind: 'repos' },
+      { kind: 'board', groupId: 'g1' },
+      { kind: 'board', groupId: 'g2' },
+    ];
+    leaveBoard('g1');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'repos' },
+      { kind: 'board', groupId: 'g2' },
+    ]);
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g2' });
+
+    // A board over a project lands back on the project, which is persisted.
+    navigation.detailStack = [
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+      { kind: 'board', groupId: 'g1' },
+    ];
+    setStoreValue.mockClear();
+    leaveBoard('g1');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.selectedProjectId).toBe('p1');
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'p1');
+  });
+
   it('keeps both layers through settings and a diff over home', async () => {
     vi.stubGlobal('window', { dispatchEvent: vi.fn() });
     const {

@@ -75,6 +75,8 @@ dev repo="": stage-sidecar
 
 # Run with the HTTPS web server enabled for phone/browser access.
 # Requires PEM cert/key files and a hostname covered by the certificate.
+# The server is unauthenticated and binds 0.0.0.0:5175: anyone who can reach
+# the port can run repo actions. Only use it on a network you trust.
 dev-web repo="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -103,6 +105,8 @@ dev-web repo="":
     pnpm exec tauri dev --config "$TAURI_CONFIG"
 
 # Build and run the release app with the HTTPS web server. Requires PEM cert/key files.
+# Same warning as `dev-web`: unauthenticated on 0.0.0.0:5175, anyone who can
+# reach the port can run repo actions.
 run-web:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -148,11 +152,9 @@ run-web:
 
     export STAGED_WEB_SERVER=1
 
-    # The server locates the frontend by trying <exe>/../dist, then
-    # <exe>/../../../../dist, then ../dist relative to the cwd. Only the last
-    # one resolves for a bundled release binary, so launch from src-tauri to
-    # make ../dist mean apps/staged/dist. Anywhere else serves 404s.
-    cd src-tauri
+    # A bundled release binary cannot find dist/ relative to itself, so point
+    # the server at it directly rather than relying on the launch cwd.
+    export STAGED_WEB_DIST="$(pwd)/dist"
 
     "$APP_BIN" &
     APP_PID=$!
@@ -174,7 +176,7 @@ run-web:
             echo "Web server ready on https://${STAGED_WEB_HOST:-$(hostname)}:5175"
             ;;
         404)
-            echo "Web server is up but dist/ did not resolve — it is serving 404s." >&2
+            echo "Web server is up but is serving 404s — check STAGED_WEB_DIST=$STAGED_WEB_DIST holds the built bundle." >&2
             ;;
         *)
             printf '%s\n' \

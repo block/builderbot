@@ -117,12 +117,13 @@ describe('web transport', () => {
 
   /**
    * Replace the `beforeEach` mock of `prPollingService` with one whose
-   * `getPrPollClientId` is `clientId`. vitest resolves a run of consecutive
-   * queued `doMock`s in parallel and registers each as its path resolves, so a
-   * second `doMock` of the same module queued straight after the `beforeEach`
-   * one races it and loses about half the time. The `doUnmock` in between
-   * splits the queue into groups that vitest applies in order, so this mock
-   * always lands last.
+   * `getPrPollClientId` is `clientId`. vitest batches consecutive queued
+   * `doMock`s: it resolves their paths in parallel and then applies them
+   * sequentially in queue order, so the installed version already guarantees
+   * that this later mock wins. The `doUnmock` in between splits the queue into
+   * groups that are applied one after another, which makes "this mock lands
+   * last" an ordering guarantee of our own rather than one that depends on
+   * vitest internals staying as they are.
    */
   function mockPrPollClientId(clientId: () => string): void {
     vi.doUnmock('./services/prPollingService');

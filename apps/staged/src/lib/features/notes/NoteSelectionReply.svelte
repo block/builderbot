@@ -17,10 +17,12 @@
   The quote is captured when the button appears, so the note re-rendering
   under an open popover (an agent editing it) leaves the popover, and the
   reply being typed, where they are; only the highlight goes with the old
-  text.
+  text. That holds across `enabled` dropping for the re-render too (the note
+  is unrendered while a new image's dimensions or the diagram renderer load):
+  an open popover waits it out; only a closed one is cleared.
 -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import MessageSquareQuote from '@lucide/svelte/icons/message-square-quote';
   import * as Popover from '$lib/components/ui/popover';
   import { Button } from '$lib/components/ui/button';
@@ -134,8 +136,15 @@
 
   $effect(() => {
     if (!enabled) {
-      open = false;
-      clearSelectionState();
+      // An open popover rides out a transient drop (the note between renders)
+      // with its reply; closing it later goes through `handleOpenChange`,
+      // which reads the selection again and finds the button off. With none
+      // open there is nothing to keep, the reply included, so a later popover
+      // starts blank.
+      if (!untrack(() => open)) {
+        clearSelectionState();
+        reply = '';
+      }
       return;
     }
     document.addEventListener('selectionchange', handleSelectionChange);

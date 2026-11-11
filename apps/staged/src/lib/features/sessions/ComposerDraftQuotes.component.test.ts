@@ -5,12 +5,15 @@ import type { DraftQuote } from './composerDraft';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
 
 // The quote list's keyboard and composition behaviour: Backspace in an empty
-// gap removes the quote below it, and a composition open in any gap or reply
-// is reported through one `composing` flag so the composer's Send gate sees
-// it — the main input isn't the only place a word can be half-typed.
+// gap removes the quote below it (or, once the quote has a reply, moves the
+// caret into the reply rather than deleting it), the X button leaves focus
+// where it was so the composer can move it on, and a composition open in any
+// gap or reply is reported through one `composing` flag so the composer's
+// Send gate sees it — the main input isn't the only place a word can be
+// half-typed.
 
-function quote(id: string, before = ''): DraftQuote {
-  return { id, before, quote: `Quoted ${id}`, headings: [], reply: '' };
+function quote(id: string, before = '', reply = ''): DraftQuote {
+  return { id, before, quote: `Quoted ${id}`, headings: [], reply };
 }
 
 let component: ReturnType<typeof mount> | null = null;
@@ -44,6 +47,14 @@ function replyOf(id: string): HTMLElement {
   );
   if (!reply) throw new Error(`no reply for ${id}`);
   return reply;
+}
+
+function removeButtonOf(id: string): HTMLElement {
+  const button = target.querySelector<HTMLElement>(
+    `[data-quote-entry="${id}"] .composer-quote-remove`
+  );
+  if (!button) throw new Error(`no remove button for ${id}`);
+  return button;
 }
 
 function backspace(el: HTMLElement, init: KeyboardEventInit = {}) {
@@ -85,6 +96,29 @@ describe('ComposerDraftQuotes Backspace', () => {
 
     backspace(gapOf('a'), { repeat: true });
     expect(onRemoveQuote).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a quote with a reply, moving the caret to the end of the reply', () => {
+    const { onRemoveQuote } = render([quote('a'), quote('b', '', 'typed reply')]);
+    gapOf('b').focus();
+
+    const event = backspace(gapOf('b'));
+
+    expect(onRemoveQuote).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(replyOf('b'));
+    const selection = window.getSelection();
+    if (!selection?.anchorNode) throw new Error('no selection');
+    expect(selection.isCollapsed).toBe(true);
+    // Everything in the reply is before the caret; nothing is after it.
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(replyOf('b'));
+    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
+    expect(beforeCaret.toString()).toBe('typed reply');
+    const afterCaret = document.createRange();
+    afterCaret.selectNodeContents(replyOf('b'));
+    afterCaret.setStart(selection.anchorNode, selection.anchorOffset);
+    expect(afterCaret.toString()).toBe('');
   });
 
   it('deletes text as usual while the gap holds any', () => {
@@ -138,6 +172,20 @@ describe('ComposerDraftQuotes composition', () => {
     flushSync();
 
     expect(props.composing).toBe(false);
+  });
+});
+
+describe('ComposerDraftQuotes remove button', () => {
+  it('does not take focus on mousedown, so the composer can see where it was', () => {
+    render([quote('a', '', 'typed reply')]);
+    replyOf('a').focus();
+
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    removeButtonOf('a').dispatchEvent(event);
+    flushSync();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(replyOf('a'));
   });
 });
 

@@ -2,6 +2,10 @@
   ComposerQuoteBlock.svelte — One quote block in the reply composer: the
   quoted note text with its heading path, an X to take it out of the draft,
   and the user's reply to it, editable in place.
+
+  Pressing the X doesn't take focus: `onRemove` moves focus on from the input
+  it was in, and WebKit would otherwise have blurred that input to the page
+  by the time the click lands.
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
@@ -43,6 +47,7 @@
     class="composer-quote-remove touch-hit size-5 rounded text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
     title="Remove quote"
     aria-label="Remove quote"
+    onmousedown={(event: MouseEvent) => event.preventDefault()}
     onclick={onRemove}
   >
     <X size={12} />

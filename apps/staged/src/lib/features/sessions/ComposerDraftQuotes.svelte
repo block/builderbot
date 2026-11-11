@@ -6,9 +6,11 @@
   (see composerDraft.ts). Each gap before a quote is an input of its own that
   takes no room beyond the spacing between blocks: its placeholder shows on
   hover or focus, and it grows as text goes in. Backspace in an empty gap
-  takes out the quote below it, the one the gap's text belongs to. The list
-  scrolls once a review outgrows the pane, and keeps its last quote, the
-  newest and the one beside the main input, in view as quotes arrive.
+  takes out the quote below it, the one the gap's text belongs to, as long
+  as nothing has been written under it; a quote with a reply is kept and the
+  caret moves to the end of that reply instead. The list scrolls once a
+  review outgrows the pane, and keeps its last quote, the newest and the one
+  beside the main input, in view as quotes arrive.
 -->
 <script lang="ts">
   import HashtagInput from './HashtagInput.svelte';
@@ -76,8 +78,11 @@
 
   /**
    * Backspace with nothing left in a gap removes the quote below it: the gap
-   * is that quote's leading text. A held key's repeats don't, so holding
-   * Backspace to clear the gap stops once it's empty.
+   * is that quote's leading text. Only an unanswered quote goes, though, as
+   * there is no undo: one with a reply stays, and the caret moves to the end
+   * of the reply, the way Backspace at the start of a block joins the one
+   * above. A held key's repeats do neither, so holding Backspace to clear
+   * the gap stops once it's empty.
    */
   function handleGapKeydown(event: KeyboardEvent, quote: DraftQuote) {
     if (
@@ -92,7 +97,8 @@
       !isImeKeydown(event)
     ) {
       event.preventDefault();
-      onRemoveQuote(quote.id);
+      if (quote.reply.trim() === '') onRemoveQuote(quote.id);
+      else focusAtEndSync(replyFor(quote.id));
       return;
     }
     onkeydown?.(event);
@@ -103,6 +109,10 @@
     return [...listEl.querySelectorAll<HTMLElement>('[data-quote-entry]')].find(
       (entry) => entry.dataset.quoteEntry === id
     );
+  }
+
+  function replyFor(id: string): HTMLElement | null {
+    return entryFor(id)?.querySelector<HTMLElement>('.composer-quote-reply') ?? null;
   }
 
   /** Whether focus is in a quote's block or the gap before it. */

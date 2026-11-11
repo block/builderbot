@@ -879,16 +879,21 @@ pub(crate) fn preferences_store(
         .map_err(|e| format!("Failed to load preferences store: {e}"))
 }
 
+pub(crate) mod control_scope;
+pub(crate) use control_scope::SCOPE_DENIED_PREFIX;
+
 /// Who is calling [`dispatch`]. A handful of commands encode same-host-only
 /// semantics — they take local file paths or launch local apps — which are
-/// valid from the loopback control server but a hole from a remote browser.
-/// Making the caller a parameter closes those arms by construction (see
-/// [`web_caller_rejection`]) instead of relying on `start()` staying stubbed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// valid from the control server but a hole from a remote browser. Making
+/// the caller a parameter closes those arms by construction (see
+/// [`web_caller_rejection`]) instead of relying on `start()` staying stubbed,
+/// and carries a control caller's grant so its scope can be enforced ahead
+/// of the arm table (see [`control_scope`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum DispatchCaller {
-    /// The `stagedctl` loopback control server (`control_server.rs`): the
-    /// caller is a process on the same machine as the app.
-    Control,
+    /// The `stagedctl` control server (`control_server.rs`): a same-user
+    /// process on the app's machine, holding this grant.
+    Control(crate::control_server::ControlGrant),
     /// The browser-facing web server: the caller may be a remote browser.
     /// (Its `start()` is currently stubbed, but rejection of same-host-only
     /// commands must not depend on that.)
@@ -901,8 +906,8 @@ pub(crate) enum DispatchCaller {
 /// "open an arbitrary path in an arbitrary local app" — so both are rejected
 /// before any dispatch arm runs, and restoring the web listener cannot
 /// silently inherit them.
-fn web_caller_rejection(cmd: &str, caller: DispatchCaller) -> Option<&'static str> {
-    if caller != DispatchCaller::Web {
+fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static str> {
+    if !matches!(caller, DispatchCaller::Web) {
         return None;
     }
     // `cmd`, not `command`: `web_dispatch_covers_tauri_commands` locates
@@ -974,7 +979,7 @@ pub(crate) async fn dispatch(
 ) -> Result<Value, String> {
     use tauri::Manager;
 
-    if let Some(reason) = web_caller_rejection(command, caller) {
+    if let Some(reason) = web_caller_rejection(command, &caller) {
         return Err(reason.to_string());
     }
 
@@ -984,6 +989,12 @@ pub(crate) async fn dispatch(
     let action_executor: &Arc<ActionExecutor> = &app_handle.state::<Arc<ActionExecutor>>();
     let action_registry: &Arc<ActionRegistry> = &app_handle.state::<Arc<ActionRegistry>>();
     let pr_scheduler: &Arc<PrPollScheduler> = &app_handle.state::<Arc<PrPollScheduler>>();
+
+    // A control caller's grant confines it to one project (and maybe to
+    // reads); refused here, before any arm, so no arm has to remember to.
+    if let DispatchCaller::Control(grant) = &caller {
+        control_scope::check(command, &args, grant, store_mutex)?;
+    }
 
     match command {
         // =====================================================================
@@ -1038,7 +1049,11 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "list_projects" => {
             let store = get_store(store_mutex)?;
-            let projects = store.list_projects().map_err(|e| e.to_string())?;
+            let mut projects = store.list_projects().map_err(|e| e.to_string())?;
+            // A project-scoped control credential sees only its own project.
+            if let Some(project_id) = control_scope::project_filter(&caller) {
+                projects.retain(|project| project.id == project_id);
+            }
             Ok(serde_json::to_value(projects).unwrap())
         }
         "create_project" => {
@@ -3383,8 +3398,13 @@ pub(crate) async fn dispatch(
         }
         "get_active_sessions" => {
             let store = get_store(store_mutex)?;
-            let sessions =
+            let mut sessions =
                 crate::session_commands::get_active_sessions_impl(&store, session_registry)?;
+            // A project-scoped control credential sees only its own
+            // project's sessions.
+            if let Some(project_id) = control_scope::project_filter(&caller) {
+                sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
+            }
             Ok(serde_json::to_value(sessions).unwrap())
         }
         "list_child_sessions" => {
@@ -4282,27 +4302,29 @@ mod tests {
 
     #[test]
     fn web_callers_cannot_reach_same_host_only_commands() {
+        let control =
+            DispatchCaller::Control(crate::control_server::ControlGrant::test_all_projects());
         for command in ["create_image", "open_in_app"] {
             assert!(
-                web_caller_rejection(command, DispatchCaller::Web).is_some(),
+                web_caller_rejection(command, &DispatchCaller::Web).is_some(),
                 "{command} takes local paths / launches local apps and must be \
                  rejected for web callers"
             );
             assert!(
-                web_caller_rejection(command, DispatchCaller::Control).is_none(),
+                web_caller_rejection(command, &control).is_none(),
                 "{command} must stay reachable from the same-host control server"
             );
         }
         // Everything else is unaffected by caller identity.
         assert_eq!(
-            web_caller_rejection("list_projects", DispatchCaller::Web),
+            web_caller_rejection("list_projects", &DispatchCaller::Web),
             None
         );
 
         // The check is only structural if dispatch() actually consults it
         // before running any arm: pin the call site. The needle is assembled
         // at runtime so this assertion's own source can't satisfy it.
-        let call_site = format!("web_caller_rejection({}, caller)", "command");
+        let call_site = format!("web_caller_rejection({}, &caller)", "command");
         assert!(
             include_str!("web_server.rs").contains(&call_site),
             "dispatch() must gate on web_caller_rejection before its match"

@@ -27,6 +27,18 @@
 //! Staged ships on macOS only, so this path exists for CI and for a home
 //! directory with a very long name; the Unix socket is the design.
 //!
+//! **Who may call, and with what reach.** Every `POST /api/invoke` must
+//! carry `Authorization: Bearer <token>` naming a live [`ControlGrant`] in
+//! the [`ControlGrants`] registry; the grant rides into
+//! `web_server::dispatch` as `DispatchCaller::Control(grant)`, where a scope
+//! table confines it to its project (and, for a read-only grant, to reads)
+//! ahead of the arm table. Today's only grants are class A: a local session
+//! start mints a read-write grant scoped to the session's own project,
+//! delivered through an owner-only per-session file (see [`grants`]), and
+//! revokes it when the run ends. A same-user caller with no grant — a user
+//! shell, say — is refused `authorization_required`; the consent-based
+//! class B grants come later and reuse the same registry.
+//!
 //! **What a caller can do.** The fixed verb table: [`ALLOWED_COMMANDS`] maps
 //! the `stagedctl` surface to specific dispatch commands — every one
 //! UI-visible and read-only or reversible — and nothing else is reachable.
@@ -40,9 +52,10 @@
 //! containing `{socket | port+token, pid, generation, protocolVersion}`. The
 //! per-pid directory exists because multiple Staged instances share
 //! `~/.staged`; stale directories from dead pids are swept on startup and our
-//! own is removed on exit. Agent sessions spawned by Staged receive a file
-//! path in `STAGEDCTL_LOCK` so the CLI finds its owning instance with zero
-//! configuration.
+//! own is removed on exit. Agent sessions spawned by Staged receive, in
+//! `STAGEDCTL_LOCK`, the path of their per-session file — the same shape
+//! plus their `token` — so the CLI finds its owning instance and its
+//! credential with zero configuration.
 //!
 //! **Sidecar reachability.** The `stagedctl` binary ships as a Tauri sidecar
 //! next to the app executable. At startup this module resolves it, exposes
@@ -52,14 +65,23 @@
 //! works. The shim lives in the instance directory and shares its lifecycle.
 
 mod files;
+mod grants;
 
 pub(crate) use files::ControlTransport;
+pub use grants::ControlGrants;
+pub(crate) use grants::{
+    session_grant_applies, Access, AuthorizationFailure, ControlGrant, SessionGrantRequest,
+    SessionLease,
+};
+// Named only by tests today; the class B grants mint them.
+#[allow(unused_imports)]
+pub(crate) use grants::{Actor, Scope};
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -77,7 +99,8 @@ use subtle::ConstantTimeEq;
 /// as "app updated — restart Staged".
 pub const PROTOCOL_VERSION: u32 = 2;
 
-/// Env var carrying the discovery-file path into spawned agent sessions.
+/// Env var carrying the per-session credential file's path into spawned
+/// agent sessions.
 pub const STAGEDCTL_LOCK_ENV: &str = "STAGEDCTL_LOCK";
 
 /// Env var carrying the absolute path of this instance's bundled `stagedctl`
@@ -139,10 +162,14 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// files and the PATH shim; removed whole on exit.
 static INSTANCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Discovery-file path, set once the listener is up. Consulted by the env
-/// injection in `session_runner` and the exit cleanup; `None` means the
-/// server never started (bind failure) and sessions get no `STAGEDCTL_LOCK`.
+/// Discovery-file path, set once the listener is up. `None` means the
+/// server never started (bind failure): no session is granted a credential
+/// and none gets `STAGEDCTL_LOCK`.
 static DISCOVERY_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+/// The bound transport and this start's generation, set with the discovery
+/// file. Per-session credential files repeat them so the CLI reads one file.
+static ENDPOINT: OnceLock<(ControlTransport, u64)> = OnceLock::new();
 
 /// Path of the bundled `stagedctl` sidecar, resolved at control-server start.
 /// `None` means the sidecar wasn't found next to the app executable (e.g. a
@@ -163,24 +190,57 @@ struct ControlState {
     app_handle: tauri::AppHandle,
     transport: Arc<ControlTransport>,
     generation: u64,
+    grants: ControlGrants,
 }
 
-/// The `STAGEDCTL_LOCK` env pair for spawned agent sessions, once the control
-/// server is up.
-pub fn stagedctl_lock_env() -> Option<(String, String)> {
-    DISCOVERY_FILE
-        .get()
-        .map(|path| (STAGEDCTL_LOCK_ENV.to_string(), path.display().to_string()))
-}
-
-/// All stagedctl env pairs for spawned agent sessions: `STAGEDCTL_LOCK` once
-/// the control server is up, plus `STAGEDCTL_BIN` when the sidecar resolved.
-pub fn stagedctl_env() -> Vec<(String, String)> {
-    let mut vars: Vec<(String, String)> = stagedctl_lock_env().into_iter().collect();
+/// The stagedctl env pairs for a spawned agent session holding `lease`:
+/// `STAGEDCTL_LOCK` naming its per-session credential file, plus
+/// `STAGEDCTL_BIN` when the sidecar resolved. A session with no lease gets
+/// nothing — there is no credential to point it at, and the CLI would only
+/// report `authorization_required`.
+pub(crate) fn stagedctl_env(lease: Option<&SessionLease>) -> Vec<(String, String)> {
+    let Some(lease) = lease else {
+        return Vec::new();
+    };
+    let mut vars = vec![(
+        STAGEDCTL_LOCK_ENV.to_string(),
+        lease.file().display().to_string(),
+    )];
     if let Some(bin) = STAGEDCTL_BIN.get() {
         vars.push((STAGEDCTL_BIN_ENV.to_string(), bin.display().to_string()));
     }
     vars
+}
+
+/// Mint a class A credential for a session this instance is starting: a
+/// read-write grant confined to the session's project, written to
+/// `~/.staged/control/<pid>/sessions/<session_id>.json` for `STAGEDCTL_LOCK`.
+/// `None` when the control server is not up or the grants registry is not
+/// managed, and on a write failure (logged) — the session then simply has
+/// no stagedctl.
+pub(crate) fn mint_session_lease(
+    app_handle: &tauri::AppHandle,
+    request: SessionGrantRequest,
+) -> Option<SessionLease> {
+    use tauri::Manager;
+    let instance_dir = INSTANCE_DIR.get()?;
+    let (transport, generation) = ENDPOINT.get()?;
+    let grants = app_handle.try_state::<ControlGrants>()?.inner().clone();
+    let session_id = request.session_id.clone();
+    match grants::mint_session_lease_at(
+        &grants,
+        &files::sessions_dir_path(instance_dir),
+        transport,
+        std::process::id(),
+        *generation,
+        request,
+    ) {
+        Ok(lease) => Some(lease),
+        Err(e) => {
+            log::warn!("[control_server] session {session_id} gets no stagedctl credential: {e}");
+            None
+        }
+    }
 }
 
 /// Prepend this instance's shim dir to a captured env snapshot's PATH so a
@@ -214,6 +274,14 @@ pub fn stagedctl_session_ready() -> bool {
 /// them so none of those sessions misses `STAGEDCTL_*`, the shim, or the
 /// guidance paragraph.
 pub fn start(app_handle: tauri::AppHandle) {
+    use tauri::Manager;
+    // The registry the bearer middleware resolves against and session
+    // starts mint into; `lib.rs` manages it ahead of this call (pinned).
+    let Some(grants) = app_handle.try_state::<ControlGrants>() else {
+        log::error!("[control_server] not started: ControlGrants is not managed");
+        return;
+    };
+    let grants = grants.inner().clone();
     let prepared = match prepare() {
         Ok(prepared) => prepared,
         Err(e) => {
@@ -222,7 +290,7 @@ pub fn start(app_handle: tauri::AppHandle) {
         }
     };
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = serve(prepared, app_handle).await {
+        if let Err(e) = serve(prepared, app_handle, grants).await {
             log::error!("[control_server] stopped: {e}");
             // Don't leave sessions and CLIs pointed at an endpoint nobody
             // answers.
@@ -256,9 +324,12 @@ fn prepare() -> Result<PreparedListener, String> {
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let prepared = bind_and_write_discovery(&data_dir, pid, generation)?;
     let instance_dir = files::instance_dir_path(&files::control_root(&data_dir), pid);
-    let _ = DISCOVERY_FILE.set(files::discovery_file_path(&instance_dir));
-    setup_stagedctl_shim(&instance_dir);
+    let _ = ENDPOINT.set((prepared.transport.clone(), generation));
     let _ = INSTANCE_DIR.set(instance_dir.clone());
+    setup_stagedctl_shim(&instance_dir);
+    // Last: `stagedctl_session_ready` keys off this, and a mint needs the
+    // two statics above.
+    let _ = DISCOVERY_FILE.set(files::discovery_file_path(&instance_dir));
     log::info!(
         "[control_server] listening on {}, instance dir {instance_dir:?}",
         prepared.transport.describe()
@@ -369,7 +440,11 @@ fn bind_tcp() -> Result<(BoundListener, ControlTransport), String> {
 }
 
 /// The async half of [`start`]: accept and route requests until the app exits.
-async fn serve(prepared: PreparedListener, app_handle: tauri::AppHandle) -> Result<(), String> {
+async fn serve(
+    prepared: PreparedListener,
+    app_handle: tauri::AppHandle,
+    grants: ControlGrants,
+) -> Result<(), String> {
     let PreparedListener {
         listener,
         transport,
@@ -379,10 +454,16 @@ async fn serve(prepared: PreparedListener, app_handle: tauri::AppHandle) -> Resu
         app_handle,
         transport: Arc::new(transport),
         generation,
+        grants: grants.clone(),
     };
     let router = Router::new()
         .route("/api/ping", get(ping))
-        .merge(invoke_router(invoke))
+        // The grant is resolved on the invoke route only (ping is the
+        // unauthenticated handshake), before the body is read.
+        .merge(
+            invoke_router(invoke)
+                .route_layer(middleware::from_fn_with_state(grants, require_grant)),
+        )
         .layer(middleware::from_fn(reject_browser_shaped_requests))
         .with_state(state.clone());
 
@@ -521,10 +602,18 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Why a TCP-fallback request may not proceed, or `None` if it carries this
-/// start's token.
-fn instance_token_violation(headers: &HeaderMap, expected: &str) -> Option<&'static str> {
+/// start's instance token or a live grant token. A grant token is as secret
+/// and as much this instance's as the per-start one, and accepting it here
+/// lets a session's per-session file name a single bearer on either
+/// transport.
+fn instance_token_violation(
+    headers: &HeaderMap,
+    expected: &str,
+    grants: &ControlGrants,
+) -> Option<&'static str> {
     match bearer_token(headers) {
         Some(token) if constant_time_eq(token, expected) => None,
+        Some(token) if grants.authorize(token).is_ok() => None,
         Some(_) => Some("the bearer token is not this Staged instance's"),
         None => Some("the loopback TCP fallback requires Authorization: Bearer <token>"),
     }
@@ -539,7 +628,7 @@ async fn require_instance_token(
     next: Next,
 ) -> Response {
     if let ControlTransport::Tcp { token, .. } = &*state.transport {
-        if let Some(reason) = instance_token_violation(request.headers(), token) {
+        if let Some(reason) = instance_token_violation(request.headers(), token, &state.grants) {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": reason })),
@@ -548,6 +637,59 @@ async fn require_instance_token(
         }
     }
     next.run(request).await
+}
+
+// =============================================================================
+// Grants
+// =============================================================================
+
+/// Middleware on the invoke route: resolve the bearer to a live
+/// [`ControlGrant`] and attach it to the request, or refuse with the
+/// failure's code. Runs ahead of the `Json` extractor, so an unauthorized
+/// body is never read.
+async fn require_grant(
+    State(grants): State<ControlGrants>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let resolved = match bearer_token(request.headers()) {
+        None => Err(AuthorizationFailure::Missing),
+        Some(token) => grants.authorize(token),
+    };
+    match resolved {
+        Ok(grant) => {
+            request.extensions_mut().insert(grant);
+            next.run(request).await
+        }
+        Err(failure) => {
+            authorization_response(StatusCode::UNAUTHORIZED, failure.code(), failure.message())
+        }
+    }
+}
+
+/// `{ "error", "code" }` for an authorization refusal. The `code` is what
+/// the CLI maps to exit 4 (report, don't retry); plain command errors carry
+/// no code.
+fn authorization_response(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({ "error": message, "code": code })),
+    )
+        .into_response()
+}
+
+/// How a `dispatch` error answers: a scope refusal (see
+/// `web_server::SCOPE_DENIED_PREFIX`) as `403 scope_denied`, anything else
+/// as a plain `400` command error.
+fn dispatch_error_response(message: &str) -> Response {
+    match message.strip_prefix(crate::web_server::SCOPE_DENIED_PREFIX) {
+        Some(denied) => authorization_response(StatusCode::FORBIDDEN, "scope_denied", denied),
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": message })),
+        )
+            .into_response(),
+    }
 }
 
 // =============================================================================
@@ -598,6 +740,7 @@ async fn ping(State(state): State<ControlState>) -> Response {
 async fn invoke(
     Path(command): Path<String>,
     State(state): State<ControlState>,
+    Extension(grant): Extension<ControlGrant>,
     Json(args): Json<Value>,
 ) -> Response {
     if !ALLOWED_COMMANDS.contains(&command.as_str()) {
@@ -614,16 +757,12 @@ async fn invoke(
         &command,
         args,
         &state.app_handle,
-        crate::web_server::DispatchCaller::Control,
+        crate::web_server::DispatchCaller::Control(grant),
     )
     .await
     {
         Ok(value) => Json(value).into_response(),
-        Err(msg) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": msg })),
-        )
-            .into_response(),
+        Err(msg) => dispatch_error_response(&msg),
     }
 }
 
@@ -782,11 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn instance_token_gate_requires_this_starts_bearer() {
+    fn instance_token_gate_requires_this_starts_bearer_or_a_live_grant() {
+        let grants = ControlGrants::default();
         let token = "ab".repeat(32);
         let mut headers = HeaderMap::new();
         assert!(
-            instance_token_violation(&headers, &token).is_some(),
+            instance_token_violation(&headers, &token, &grants).is_some(),
             "missing bearer must be refused"
         );
         headers.insert(
@@ -794,21 +934,175 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {}", "cd".repeat(32))).unwrap(),
         );
         assert!(
-            instance_token_violation(&headers, &token).is_some(),
+            instance_token_violation(&headers, &token, &grants).is_some(),
             "another token must be refused"
         );
         headers.insert(
             "authorization",
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
-        assert_eq!(instance_token_violation(&headers, &token), None);
+        assert_eq!(instance_token_violation(&headers, &token, &grants), None);
         headers.insert(
             "authorization",
             HeaderValue::from_str(&format!("Basic {token}")).unwrap(),
         );
         assert!(
-            instance_token_violation(&headers, &token).is_some(),
+            instance_token_violation(&headers, &token, &grants).is_some(),
             "only the Bearer scheme is a bearer"
+        );
+
+        // A session's grant token passes the transport gate too, so the
+        // per-session file names one bearer on either transport.
+        let grant_token = grants.mint(ControlGrant::test_all_projects());
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {grant_token}")).unwrap(),
+        );
+        assert_eq!(instance_token_violation(&headers, &token, &grants), None);
+        grants.revoke(&grant_token);
+        assert!(
+            instance_token_violation(&headers, &token, &grants).is_some(),
+            "a revoked grant token no longer passes"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Grants on the invoke route
+    // -------------------------------------------------------------------
+
+    /// Stands in for `invoke`: reports the grant the middleware attached.
+    async fn echo_grant(Extension(grant): Extension<ControlGrant>) -> Json<Value> {
+        Json(serde_json::json!({ "scope": grant.project_scope() }))
+    }
+
+    fn grant_router(grants: &ControlGrants) -> Router {
+        invoke_router(echo_grant).route_layer(middleware::from_fn_with_state(
+            grants.clone(),
+            require_grant,
+        ))
+    }
+
+    fn invoke_request_with_bearer(bearer: Option<&str>) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/invoke/list_projects")
+            .header("Content-Type", "application/json");
+        if let Some(bearer) = bearer {
+            builder = builder.header("Authorization", format!("Bearer {bearer}"));
+        }
+        builder.body(axum::body::Body::from("{}")).unwrap()
+    }
+
+    async fn json_body(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The invoke route resolves the bearer to a grant before the handler
+    /// (and its body extractor) runs; each failure carries the code the CLI
+    /// maps to exit 4.
+    #[tokio::test]
+    async fn invoke_route_requires_a_live_grant_and_codes_each_refusal() {
+        use tower::ServiceExt;
+        let grants = ControlGrants::default();
+        let router = grant_router(&grants);
+
+        let response = router
+            .clone()
+            .oneshot(invoke_request_with_bearer(None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(response).await["code"],
+            "authorization_required",
+            "no bearer"
+        );
+
+        let response = router
+            .clone()
+            .oneshot(invoke_request_with_bearer(Some(&"0".repeat(64))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(response).await["code"],
+            "authorization_required",
+            "a bearer this instance never minted"
+        );
+
+        let token = grants.mint(ControlGrant {
+            actor: Actor::Session {
+                session_id: "s1".to_string(),
+                epoch: 1,
+            },
+            scope: Scope::Project("p1".to_string()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        });
+        let response = router
+            .clone()
+            .oneshot(invoke_request_with_bearer(Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await["scope"],
+            "p1",
+            "the handler sees the resolved grant"
+        );
+
+        grants.revoke(&token);
+        let response = router
+            .oneshot(invoke_request_with_bearer(Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(response).await["code"],
+            "authorization_revoked",
+            "a revoked bearer"
+        );
+    }
+
+    /// A scope refusal from `dispatch` answers `403 scope_denied` with the
+    /// prefix stripped; any other dispatch error stays a plain `400`.
+    #[tokio::test]
+    async fn dispatch_errors_map_scope_refusals_to_403_with_a_code() {
+        let denied = format!(
+            "{}the branch belongs to another project",
+            crate::web_server::SCOPE_DENIED_PREFIX
+        );
+        let response = dispatch_error_response(&denied);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "scope_denied");
+        assert_eq!(body["error"], "the branch belongs to another project");
+
+        let response = dispatch_error_response("Branch not found: b1");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(response).await;
+        assert!(body.get("code").is_none(), "command errors carry no code");
+        assert_eq!(body["error"], "Branch not found: b1");
+    }
+
+    /// Every allowlisted command has a scope row — and only those — so a
+    /// new verb cannot reach `dispatch` without saying how its project is
+    /// resolved and whether it writes.
+    #[test]
+    fn allowlist_and_control_scope_table_name_the_same_commands() {
+        let mut scoped: Vec<&str> = crate::web_server::control_scope::CONTROL_SCOPE
+            .iter()
+            .map(|(name, ..)| *name)
+            .collect();
+        scoped.sort_unstable();
+        let mut allowed: Vec<&str> = ALLOWED_COMMANDS.to_vec();
+        allowed.sort_unstable();
+        assert_eq!(
+            scoped, allowed,
+            "CONTROL_SCOPE and ALLOWED_COMMANDS must list exactly the same commands"
         );
     }
 
@@ -1013,6 +1307,16 @@ mod tests {
             "lib.rs should start the control server exactly once"
         );
         let started_at = lib.find(start_call).unwrap();
+        // The grants registry is state `start` reads and the first session
+        // start mints into, so it is managed ahead of both.
+        let manage_call = "app.manage(control_server::ControlGrants::default());";
+        let managed_at = lib
+            .find(manage_call)
+            .expect("lib.rs should manage control_server::ControlGrants");
+        assert!(
+            managed_at < started_at,
+            "lib.rs must manage ControlGrants before control_server::start"
+        );
         for later in [
             "session_runner::recover_dead_sessions(",
             "session_runner::reconcile::reconcile_all(",

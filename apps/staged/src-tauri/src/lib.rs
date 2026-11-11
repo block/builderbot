@@ -2051,15 +2051,21 @@ pub fn run() {
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
 
+            // The stagedctl credentials: the control server resolves bearers
+            // against this registry and every local session start mints into
+            // it, so it is managed ahead of `start` and of the recovery
+            // below (pinned by a control_server test).
+            app.manage(control_server::ControlGrants::default());
+
             // Control server for stagedctl — always on. Listens on a Unix
             // socket in the owner-private ~/.staged/control/<pid>/ directory
             // and exposes only the fixed allowlist in
-            // `control_server::ALLOWED_COMMANDS`. After the state above is
+            // `control_server::ALLOWED_COMMANDS`, to callers holding a
+            // credential from the registry above. After the state above is
             // managed (its handlers dispatch against it) and before the
             // recovery below: the socket, discovery file and shim are ready
-            // when `start` returns, and a session the
-            // recovery or the startup kick starts keeps the env it launched
-            // with for life.
+            // when `start` returns, and a session the recovery or the
+            // startup kick starts keeps the env it launched with for life.
             control_server::start(app.handle().clone());
 
             // Startup queue recovery, once every piece of state a drain reads

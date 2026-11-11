@@ -4,9 +4,11 @@
 by Staged receive everything needed to use it with zero configuration:
 
 - `stagedctl` is on `PATH` (the exact binary path is also in `$STAGEDCTL_BIN`);
-- `$STAGEDCTL_LOCK` points at the control file of the app instance that
-  spawned this session (under `~/.staged/control/<pid>/`), so the CLI
-  always talks to the right instance even when several are running.
+- `$STAGEDCTL_LOCK` points at this session's credential file (under
+  `~/.staged/control/<pid>/sessions/`), so the CLI always talks to the
+  instance that spawned the session, even when several are running, and
+  authenticates as this session. The credential is confined to the
+  session's own project and is revoked when the session ends.
 
 ## Discover, don't memorize
 
@@ -44,4 +46,7 @@ start sessions only when the task genuinely calls for it.
 The CLI needs the spawning app instance to be alive and reachable over
 its control socket. Exit code 3 means "not running under a Staged app" (or a protocol
 mismatch after the app updated); that is not retryable from inside this
-session — report it instead of retrying.
+session — report it instead of retrying. Exit code 4 means the app refused
+this session's credential or the command addressed another project; that
+is a deliberate boundary, not a transient fault — report it, do not retry
+or work around it.

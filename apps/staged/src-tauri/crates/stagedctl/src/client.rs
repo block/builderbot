@@ -36,9 +36,21 @@ pub const HOST_LITERAL: &str = "stagedctl";
 /// files are a handful of short fields; anything bigger is not ours.
 const MAX_CONTROL_FILE_BYTES: u64 = 4096;
 
+/// The `code` values the app sends with a 401/403 that mean "the credential,
+/// not the transport, was refused". Exit 4 for each: an agent should report
+/// it rather than retry.
+pub const AUTHORIZATION_CODES: &[&str] = &[
+    "authorization_required",
+    "authorization_denied",
+    "authorization_revoked",
+    "authorization_expired",
+    "scope_denied",
+];
+
 /// How stagedctl failed, mapped onto the exit-code contract:
 /// 1 command error, 2 transport fault, 3 environment (not under a Staged
-/// app, app gone, or protocol version mismatch).
+/// app, app gone, or protocol version mismatch), 4 authorization (the app
+/// refused this credential, or the command is outside its scope).
 #[derive(Debug)]
 pub enum CtlError {
     /// The command reached the app (or was validated client-side) and
@@ -50,6 +62,11 @@ pub enum CtlError {
     /// No usable app: not spawned by Staged, the app exited or restarted,
     /// or the app speaks a different protocol version.
     Environment(String),
+    /// The app answered but refused the credential: none was sent, it was
+    /// revoked or expired, the user denied it, or the command addresses
+    /// something outside the credential's scope. `code` is one of
+    /// [`AUTHORIZATION_CODES`].
+    Authorization { code: String, message: String },
 }
 
 impl CtlError {
@@ -65,6 +82,7 @@ impl CtlError {
             Self::Command { .. } => 1,
             Self::Transport(_) => 2,
             Self::Environment(_) => 3,
+            Self::Authorization { .. } => 4,
         }
     }
 }
@@ -75,6 +93,7 @@ impl std::fmt::Display for CtlError {
             Self::Command { code, message } => write!(f, "{code}: {message}"),
             Self::Transport(message) => write!(f, "transport: {message}"),
             Self::Environment(message) => write!(f, "{message}"),
+            Self::Authorization { code, message } => write!(f, "{code}: {message}"),
         }
     }
 }
@@ -544,7 +563,9 @@ impl Client {
 
     /// POST one allowlisted command. Command-level failures come back as
     /// HTTP 400/404 with `{"error": message}` and map to exit code 1 with
-    /// the app's message verbatim; anything else is a transport fault.
+    /// the app's message verbatim; a 401/403 carrying one of
+    /// [`AUTHORIZATION_CODES`] is exit code 4; anything else is a transport
+    /// fault.
     pub fn invoke(&self, command: &str, args: Value) -> Result<Value, CtlError> {
         let response = self
             .http
@@ -558,10 +579,16 @@ impl Client {
         match status.as_u16() {
             200 => Ok(body),
             400 | 404 => Err(CtlError::command("app_error", error_message(&body))),
-            401 | 403 => Err(CtlError::Transport(format!(
-                "control server rejected the request: {}",
-                error_message(&body)
-            ))),
+            401 | 403 => match authorization_code(&body) {
+                Some(code) => Err(CtlError::Authorization {
+                    code: code.to_string(),
+                    message: error_message(&body),
+                }),
+                None => Err(CtlError::Transport(format!(
+                    "control server rejected the request: {}",
+                    error_message(&body)
+                ))),
+            },
             code => Err(CtlError::Transport(format!(
                 "unexpected HTTP {code} from control server: {}",
                 error_message(&body)
@@ -575,6 +602,15 @@ fn error_message(body: &Value) -> String {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| body.to_string())
+}
+
+/// The authorization code on a refusal, if the body carries a known one.
+/// A 401/403 without one is the transport's (header or peer rules), not a
+/// credential decision.
+fn authorization_code(body: &Value) -> Option<&str> {
+    body.get("code")
+        .and_then(Value::as_str)
+        .filter(|code| AUTHORIZATION_CODES.contains(code))
 }
 
 #[cfg(test)]
@@ -620,12 +656,48 @@ mod tests {
         assert_eq!(CtlError::command("app_error", "boom").exit_code(), 1);
         assert_eq!(CtlError::Transport("boom".into()).exit_code(), 2);
         assert_eq!(CtlError::Environment("boom".into()).exit_code(), 3);
+        assert_eq!(
+            CtlError::Authorization {
+                code: "scope_denied".into(),
+                message: "boom".into()
+            }
+            .exit_code(),
+            4
+        );
     }
 
     #[test]
     fn command_errors_render_as_code_colon_message() {
         let err = CtlError::command("app_error", "Branch not found: xyz");
         assert_eq!(err.to_string(), "app_error: Branch not found: xyz");
+        let err = CtlError::Authorization {
+            code: "authorization_revoked".into(),
+            message: "the session has ended".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "authorization_revoked: the session has ended"
+        );
+    }
+
+    #[test]
+    fn authorization_codes_match_the_control_server() {
+        // The server spells each code once; the CLI's list must cover the
+        // ones it sends today (the remaining codes are reserved for the
+        // consent-based grants).
+        let server = include_str!("../../../src/control_server.rs");
+        let grants = include_str!("../../../src/control_server/grants.rs");
+        for code in [
+            "authorization_required",
+            "authorization_revoked",
+            "scope_denied",
+        ] {
+            assert!(AUTHORIZATION_CODES.contains(&code));
+            assert!(
+                server.contains(&format!("\"{code}\"")) || grants.contains(&format!("\"{code}\"")),
+                "the app no longer sends {code}; update AUTHORIZATION_CODES"
+            );
+        }
     }
 
     // -------------------------------------------------------------------
@@ -1148,6 +1220,55 @@ mod tests {
         assert!(
             seen.iter().all(|a| *a == format!("Bearer {token}")),
             "got: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_coded_401_or_403_is_an_authorization_error() {
+        let pid = std::process::id();
+        let (port, _handle) = fake_server(move |head| {
+            if head.starts_with("GET /api/ping") {
+                (200, ping_body(pid, 1, PROTOCOL_VERSION))
+            } else if head.starts_with("POST /api/invoke/get_session") {
+                (
+                    403,
+                    r#"{"error":"the session belongs to another project","code":"scope_denied"}"#
+                        .to_string(),
+                )
+            } else if head.starts_with("POST /api/invoke/list_projects") {
+                (
+                    401,
+                    r#"{"error":"no credential","code":"authorization_required"}"#.to_string(),
+                )
+            } else {
+                // A made-up code is not an authorization decision.
+                (401, r#"{"error":"nope","code":"teapot"}"#.to_string())
+            }
+        });
+        let dir = private_tempdir();
+        let lock = write_tcp_discovery(dir.path(), pid, port, 1);
+
+        let client = Client::connect(&lock).unwrap();
+        let err = client
+            .invoke("get_session", serde_json::json!({"sessionId": "s1"}))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "scope_denied: the session belongs to another project"
+        );
+        let err = client
+            .invoke("list_projects", serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert!(err.to_string().starts_with("authorization_required: "));
+        let err = client
+            .invoke("cancel_session", serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(
+            err.exit_code(),
+            2,
+            "unknown code stays a transport fault: {err}"
         );
     }
 

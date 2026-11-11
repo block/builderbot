@@ -4,14 +4,52 @@ export type DraftEntry = {
   value: string;
   updatedAt: number;
   expiresAt: number;
+  /**
+   * The draft's own shape, for a composer that holds more than text (a reply
+   * with quote blocks). `value` is then its plain-text rendering, so every
+   * reader that only knows text — the expiry sweep, an older build — still
+   * gets a usable draft. The owner validates it; the cache only carries it.
+   */
+  structured?: unknown;
 };
+
+/** What a draft holds: text, or text plus the structured form it renders. */
+export type DraftContent = { value: string; structured?: unknown };
 
 /** Namespace every draft key shares, so expired entries can be swept. */
 export const DRAFT_KEY_PREFIX = 'draft:';
 export const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const DRAFT_WRITE_DEBOUNCE_MS = 350;
 
-function isDraftEntry(value: unknown): value is DraftEntry {
+/**
+ * Told about every write this client makes under `draft:*` — the new content,
+ * or `null` once the key is gone — so a view can track which drafts exist
+ * without reading the store back. Other clients' writes arrive as
+ * `store://change` events instead.
+ */
+type DraftWriteListener = (key: string, content: DraftContent | null) => void;
+
+const writeListeners = new Set<DraftWriteListener>();
+
+export function subscribeDraftWrites(listener: DraftWriteListener): () => void {
+  writeListeners.add(listener);
+  return () => writeListeners.delete(listener);
+}
+
+function notifyDraftWrite(key: string, content: DraftContent | null) {
+  for (const listener of writeListeners) listener(key, content);
+}
+
+function toDraftContent(content: string | DraftContent): DraftContent {
+  return typeof content === 'string' ? { value: content } : content;
+}
+
+/** Whether a draft entry holds anything: a non-empty value or a structured form. */
+function hasDraftContent(content: DraftContent): boolean {
+  return content.value.length > 0 || content.structured !== undefined;
+}
+
+export function isDraftEntry(value: unknown): value is DraftEntry {
   if (!value || typeof value !== 'object') return false;
   const entry = value as Partial<DraftEntry>;
   return (
@@ -22,32 +60,53 @@ function isDraftEntry(value: unknown): value is DraftEntry {
 }
 
 export async function loadDraft(key: string, now = Date.now()): Promise<string | null> {
+  return (await loadDraftContent(key, now))?.value ?? null;
+}
+
+/** Like `loadDraft`, with the structured form when the draft was saved with one. */
+export async function loadDraftContent(
+  key: string,
+  now = Date.now()
+): Promise<DraftContent | null> {
   const entry = await getStoreValue<unknown>(key);
   if (!isDraftEntry(entry)) return null;
 
   if (entry.expiresAt <= now) {
     await deleteStoreValue(key);
+    notifyDraftWrite(key, null);
     return null;
   }
 
-  return entry.value;
+  return entry.structured === undefined
+    ? { value: entry.value }
+    : { value: entry.value, structured: entry.structured };
 }
 
-export async function saveDraft(key: string, value: string, now = Date.now()): Promise<void> {
-  if (value.length === 0) {
+export async function saveDraft(
+  key: string,
+  content: string | DraftContent,
+  now = Date.now()
+): Promise<void> {
+  const draft = toDraftContent(content);
+  if (!hasDraftContent(draft)) {
     await deleteStoreValue(key);
+    notifyDraftWrite(key, null);
     return;
   }
 
-  await setStoreValue<DraftEntry>(key, {
-    value,
+  const entry: DraftEntry = {
+    value: draft.value,
     updatedAt: now,
     expiresAt: now + DRAFT_TTL_MS,
-  });
+  };
+  if (draft.structured !== undefined) entry.structured = draft.structured;
+  await setStoreValue<DraftEntry>(key, entry);
+  notifyDraftWrite(key, draft);
 }
 
 export async function clearDraft(key: string): Promise<void> {
   await deleteStoreValue(key);
+  notifyDraftWrite(key, null);
 }
 
 /**
@@ -70,6 +129,7 @@ export async function sweepExpiredDrafts(now = Date.now()): Promise<number> {
     const entry = await getStoreValue<unknown>(key);
     if (isDraftEntry(entry) && entry.expiresAt > now) continue;
     await deleteStoreValue(key);
+    notifyDraftWrite(key, null);
     deleted += 1;
   }
 
@@ -79,7 +139,7 @@ export async function sweepExpiredDrafts(now = Date.now()): Promise<number> {
 export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pendingKey: string | null = null;
-  let pendingValue = '';
+  let pendingValue: string | DraftContent = '';
   let writeQueue: Promise<void> = Promise.resolve();
 
   function enqueue(write: () => Promise<void>): Promise<void> {
@@ -122,7 +182,7 @@ export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
   }
 
   return {
-    scheduleSave(key: string, value: string) {
+    scheduleSave(key: string, value: string | DraftContent) {
       settleBeforeWrite(key);
       pendingKey = key;
       pendingValue = value;
@@ -132,13 +192,23 @@ export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
         void enqueue(() => saveDraft(key, value));
       }, delayMs);
     },
-    saveNow(key: string, value: string): Promise<void> {
+    saveNow(key: string, value: string | DraftContent): Promise<void> {
       settleBeforeWrite(key);
       return enqueue(() => saveDraft(key, value));
     },
     clearNow(key: string): Promise<void> {
       settleBeforeWrite(key);
       return enqueue(() => clearDraft(key));
+    },
+    /**
+     * Run `task` in this writer's queue: after every write scheduled before
+     * it (a pending debounced one is flushed first) and before any after. A
+     * read-modify-write of a draft goes here, so no write can land between
+     * its read and its write, and a `flush()` that starts later waits for it.
+     */
+    run(task: () => Promise<void>): Promise<void> {
+      void flushPending();
+      return enqueue(task);
     },
     flush: flushPending,
   };

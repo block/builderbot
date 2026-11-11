@@ -69,6 +69,7 @@
   import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { sweepExpiredDrafts } from './lib/shared/draftCache';
+  import { replyDraftPresence } from './lib/features/sessions/replyDrafts';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
@@ -425,6 +426,8 @@
     void sweepExpiredDrafts().catch((e) => {
       console.error('Failed to sweep expired drafts:', e);
     });
+    // Which sessions hold an unsent reply, for the draft icon on note rows.
+    replyDraftPresence.start();
 
     // Restore persisted unread state and sync the dock badge.
     try {

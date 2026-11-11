@@ -19,7 +19,9 @@ import {
   DRAFT_TTL_MS,
   DRAFT_WRITE_DEBOUNCE_MS,
   loadDraft,
+  loadDraftContent,
   saveDraft,
+  subscribeDraftWrites,
   sweepExpiredDrafts,
 } from './draftCache';
 
@@ -59,6 +61,58 @@ describe('draft cache', () => {
 
     await expect(loadDraft('draft:first', 5_001)).resolves.toBe('first');
     await expect(loadDraft('draft:second', 5_001)).resolves.toBe('second');
+  });
+});
+
+describe('structured drafts', () => {
+  beforeEach(() => {
+    store.clear();
+  });
+
+  it('round-trips the structured form beside its text', async () => {
+    const structured = { version: 1, parts: ['a', 'b'] };
+    await saveDraft('draft:rich', { value: 'a b', structured }, 1_000);
+
+    await expect(loadDraftContent('draft:rich', 1_001)).resolves.toEqual({
+      value: 'a b',
+      structured,
+    });
+    // Text-only readers still get the text.
+    await expect(loadDraft('draft:rich', 1_001)).resolves.toBe('a b');
+  });
+
+  it('keeps a plain draft free of a structured field', async () => {
+    await saveDraft('draft:plain', 'text', 1_000);
+
+    expect(store.get('draft:plain')).not.toHaveProperty('structured');
+    await expect(loadDraftContent('draft:plain', 1_001)).resolves.toEqual({ value: 'text' });
+  });
+});
+
+describe('draft write notifications', () => {
+  beforeEach(() => {
+    store.clear();
+  });
+
+  it('reports saves, clears and expiries to subscribers until they unsubscribe', async () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeDraftWrites(listener);
+
+    await saveDraft('draft:n', 'hello', 1_000);
+    await saveDraft('draft:n', '', 1_000);
+    await saveDraft('draft:old', 'stale', 0);
+    await loadDraftContent('draft:old', DRAFT_TTL_MS);
+
+    expect(listener.mock.calls).toEqual([
+      ['draft:n', { value: 'hello' }],
+      ['draft:n', null],
+      ['draft:old', { value: 'stale' }],
+      ['draft:old', null],
+    ]);
+
+    unsubscribe();
+    await saveDraft('draft:n', 'again', 1_000);
+    expect(listener).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -111,6 +165,22 @@ describe('draft write scheduler', () => {
   async function drainWrites() {
     await vi.advanceTimersByTimeAsync(DRAFT_WRITE_DEBOUNCE_MS);
   }
+
+  it('runs a task after the pending write and before later ones', async () => {
+    const scheduler = createDraftWriteScheduler();
+    const seen: unknown[] = [];
+
+    scheduler.scheduleSave('draft:a', 'pending');
+    const task = scheduler.run(async () => {
+      seen.push(store.get('draft:a'));
+    });
+    void scheduler.saveNow('draft:a', 'after');
+    await task;
+
+    expect(seen).toEqual([expect.objectContaining({ value: 'pending' })]);
+    await scheduler.flush();
+    expect(store.get('draft:a')).toMatchObject({ value: 'after' });
+  });
 
   it('debounces writes for the same key, keeping only the latest value', async () => {
     const scheduler = createDraftWriteScheduler();

@@ -79,21 +79,35 @@ async function openBackend(): Promise<void> {
   }
 }
 
+/**
+ * Listen for any preference changing in any client, including deletion
+ * (`value` is then `undefined`). For a family of keys no one caller can name
+ * up front, such as the drafts under `draft:`.
+ */
+export function listenToStoreChanges(
+  callback: (key: string, value: unknown) => void,
+  options?: ListenOptions
+): UnlistenFn {
+  return listenToEvent<{ path: string; key: string; value: unknown; exists: boolean }>(
+    'store://change',
+    (event) => {
+      if (event.path === storePath) {
+        callback(event.key, event.exists ? event.value : undefined);
+      }
+    },
+    options
+  );
+}
+
 /** Listen for a preference changing in any client, including deletion. */
 export function listenToStoreKeyChange(
   key: string,
   callback: (value: unknown) => void,
   options?: ListenOptions
 ): UnlistenFn {
-  return listenToEvent<{ path: string; key: string; value: unknown; exists: boolean }>(
-    'store://change',
-    (event) => {
-      if (event.path === storePath && event.key === key) {
-        callback(event.exists ? event.value : undefined);
-      }
-    },
-    options
-  );
+  return listenToStoreChanges((changedKey, value) => {
+    if (changedKey === key) callback(value);
+  }, options);
 }
 
 /**

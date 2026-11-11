@@ -548,9 +548,11 @@ mod tests {
     }
 
     /// A tool's `call` may return a promise. The server answers when it
-    /// settles, a rejection takes the same `failureText` path as a throw, and
-    /// a stray failure outside `callTool` (an unawaited rejection, a throwing
-    /// timer) is logged and the server keeps answering.
+    /// settles, a rejection takes the same `failureText` path as a throw, a
+    /// `failureText` that itself throws falls back to the default text, a
+    /// stray failure outside `callTool` (an unawaited rejection, a throwing
+    /// callback) is logged and the server keeps answering, and stdin closing
+    /// ends the process even while a tool holds a live interval handle.
     #[test]
     fn script_serves_asynchronous_tools_and_survives_stray_failures() {
         let Some(node) = node() else {
@@ -566,13 +568,36 @@ mod tests {
             format!(
                 r#"const server = require({script:?});
 const base = {{ description: "fixture", inputSchema: {{ type: "object" }} }};
+// `async_ok` settles only when `release` is called, so the order of its
+// reply against the requests after it follows from dispatch order alone.
+let releaseAsyncOk = null;
 server.TOOLS.push(
   Object.assign({{
     name: "async_ok",
     call: function () {{
       return new Promise(function (resolve) {{
-        setTimeout(function () {{ resolve({{ text: "resolved later", isError: false }}); }}, 250);
+        releaseAsyncOk = function () {{ resolve({{ text: "resolved later", isError: false }}); }};
       }});
+    }},
+  }}, base),
+  Object.assign({{
+    name: "release",
+    call: function () {{
+      releaseAsyncOk();
+      return {{ text: "released", isError: false }};
+    }},
+  }}, base),
+  Object.assign({{
+    name: "sync_throw_bad_failure",
+    failureText: function () {{ throw new Error("failureText itself broke"); }},
+    call: function () {{ throw new Error("sync boom"); }},
+  }}, base),
+  Object.assign({{
+    name: "hold_handle",
+    call: function () {{
+      // A live handle that would keep node running after stdin closes.
+      setInterval(function () {{}}, 1000);
+      return Promise.resolve({{ text: "holding", isError: false }});
     }},
   }}, base),
   Object.assign({{
@@ -592,7 +617,7 @@ server.TOOLS.push(
     name: "stray",
     call: function () {{
       Promise.reject(new Error("nobody awaited"));
-      setTimeout(function () {{ throw new Error("late throw"); }}, 0);
+      setImmediate(function () {{ throw new Error("late throw"); }});
       return {{ text: "stray ok", isError: false }};
     }},
   }}, base)
@@ -607,6 +632,9 @@ server.main(process.argv.slice(3));
             serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":{}}})
                 .to_string()
         };
+        // All lines go down in one write, so they reach readline as one
+        // chunk: the `ping` after the broken `failureText` proves the chunk
+        // was not abandoned.
         let lines = [
             call(1, "async_ok"),
             call(2, "async_fail"),
@@ -614,6 +642,10 @@ server.main(process.argv.slice(3));
             call(4, "async_empty"),
             call(5, "stray"),
             r#"{"jsonrpc":"2.0","id":6,"method":"tools/list"}"#.to_string(),
+            call(7, "sync_throw_bad_failure"),
+            r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#.to_string(),
+            call(9, "hold_handle"),
+            call(10, "release"),
         ];
         let run = test_support::run_node_lines(
             driver_path.to_str().unwrap(),
@@ -622,15 +654,17 @@ server.main(process.argv.slice(3));
             &node,
             &lines,
         );
-        // `run_node_lines` already asserted the exit status: the stray
-        // rejection and the late throw did not take node down.
+        // `run_node_lines` already asserted the exit status and that node
+        // exited within its timeout: the stray rejection and the late throw
+        // did not take node down, and `hold_handle`'s interval did not keep
+        // it alive once stdin closed.
         let by_id = |id: u32| {
             run.responses
                 .iter()
                 .find(|r| r["id"] == id)
                 .unwrap_or_else(|| panic!("no reply with id {id}: {:?}", run.responses))
         };
-        assert_eq!(run.responses.len(), 6, "{:?}", run.responses);
+        assert_eq!(run.responses.len(), 10, "{:?}", run.responses);
 
         assert_eq!(
             by_id(1)["result"],
@@ -661,6 +695,9 @@ server.main(process.argv.slice(3));
             [
                 "write_note",
                 "async_ok",
+                "release",
+                "sync_throw_bad_failure",
+                "hold_handle",
                 "async_fail",
                 "async_fail_default",
                 "async_empty",
@@ -668,9 +705,41 @@ server.main(process.argv.slice(3));
             ],
             "the server still answers after the rejections"
         );
-        // The pending 250 ms call did not block the list that followed it.
+        assert_eq!(
+            by_id(7)["result"],
+            serde_json::json!({"content":[{"type":"text","text":"sync_throw_bad_failure failed: sync boom"}],"isError":true}),
+            "a throwing failureText falls back to the default text instead of escaping"
+        );
+        assert_eq!(
+            by_id(8)["result"],
+            serde_json::json!({}),
+            "the ping in the same chunk as the broken failureText is still answered"
+        );
+        assert_eq!(by_id(9)["result"]["content"][0]["text"], "holding");
+        assert_eq!(by_id(10)["result"]["content"][0]["text"], "released");
+        // The pending call did not block anything after it: its reply came
+        // after the list, and after the `release` call that settled it.
         let position = |id: u32| run.responses.iter().position(|r| r["id"] == id).unwrap();
         assert!(position(6) < position(1), "{:?}", run.responses);
+        assert!(position(10) < position(1), "{:?}", run.responses);
+        assert!(
+            run.stderr
+                .contains("staged-mcp: sync_throw_bad_failure failed: Error: sync boom"),
+            "{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains(
+                "staged-mcp: sync_throw_bad_failure failed while describing its failure: Error: failureText itself broke"
+            ),
+            "{}",
+            run.stderr
+        );
+        assert!(
+            !run.stderr.contains("pending"),
+            "every call had settled when stdin closed: {}",
+            run.stderr
+        );
 
         assert!(
             run.stderr
@@ -688,6 +757,61 @@ server.main(process.argv.slice(3));
         assert!(
             run.stderr
                 .contains("staged-mcp: uncaught exception, server kept alive: Error: late throw"),
+            "{}",
+            run.stderr
+        );
+    }
+
+    /// A throw out of the request handler itself (here a tool whose
+    /// `description` getter throws during `tools/list`) answers `-32603` for
+    /// that request and leaves the rest of the stdin chunk served.
+    #[test]
+    fn script_answers_internal_error_when_a_request_handler_throws() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping request guard test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let driver_path = home.path().join("driver.cjs");
+        std::fs::write(
+            &driver_path,
+            format!(
+                r#"const server = require({script:?});
+server.TOOLS.push({{
+  name: "bad_description",
+  get description() {{ throw new Error("description exploded"); }},
+  inputSchema: {{ type: "object" }},
+  call: function () {{ return {{ text: "never listed", isError: false }}; }},
+}});
+server.main(process.argv.slice(3));
+"#,
+                script = test_support::SCRIPT_PATH
+            ),
+        )
+        .unwrap();
+        let lines = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.to_string(),
+            r#"{"jsonrpc":"2.0","id":"second","method":"ping"}"#.to_string(),
+        ];
+        let run = test_support::run_node_lines(
+            driver_path.to_str().unwrap(),
+            &[test_support::SCRIPT_PATH],
+            home.path(),
+            &node,
+            &lines,
+        );
+        assert_eq!(
+            run.responses,
+            vec![
+                serde_json::json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"Internal error: description exploded"}}),
+                serde_json::json!({"jsonrpc":"2.0","id":"second","result":{}}),
+            ],
+            "{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr
+                .contains("staged-mcp: request failed: Error: description exploded"),
             "{}",
             run.stderr
         );

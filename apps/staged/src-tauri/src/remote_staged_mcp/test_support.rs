@@ -1,8 +1,14 @@
 //! Shared by the Staged MCP on Blox tests: a local `node`, a local stand-in
 //! for `ws exec`, and a driver that talks to the script the way an agent does.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long [`run_node_lines`] waits for the script to exit after stdin
+/// closes. The script must end itself when stdin closes even while a tool
+/// holds a live handle; a run that outlives this is killed and fails.
+const SCRIPT_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The script in the source tree; [`super::SCRIPT_SOURCE`] embeds the same file.
 pub(super) const SCRIPT_PATH: &str = concat!(
@@ -61,6 +67,16 @@ pub(super) fn run_script_lines(
     run_node_lines(SCRIPT_PATH, &[], home, node, lines).responses
 }
 
+fn read_to_end_in_thread<R: Read + Send + 'static>(
+    mut pipe: R,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).unwrap();
+        bytes
+    })
+}
+
 /// What a run of the script (or a driver around it) produced.
 pub(super) struct ScriptRun {
     /// The parsed stdout frames, in the order they were written.
@@ -72,6 +88,7 @@ pub(super) struct ScriptRun {
 /// Run `node <script> <script_args...> sess-1 turn-1` with `HOME` at `home`,
 /// feeding `lines` on stdin. `script` is the server itself or a driver that
 /// requires it; a driver takes its own arguments before the session and turn.
+/// The script must exit 0 within [`SCRIPT_EXIT_TIMEOUT`] of stdin closing.
 pub(super) fn run_node_lines(
     script: &str,
     script_args: &[&str],
@@ -89,26 +106,41 @@ pub(super) fn run_node_lines(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the Staged MCP script");
+    // Drain both pipes on threads so a chatty script cannot block on a full
+    // pipe while the main thread waits for it to exit.
+    let stdout_reader = read_to_end_in_thread(child.stdout.take().unwrap());
+    let stderr_reader = read_to_end_in_thread(child.stderr.take().unwrap());
     {
         let mut stdin = child.stdin.take().unwrap();
         for line in lines {
             writeln!(stdin, "{line}").unwrap();
         }
     }
-    let output = child.wait_with_output().unwrap();
+    let closed_at = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if closed_at.elapsed() > SCRIPT_EXIT_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stderr = String::from_utf8_lossy(&stderr_reader.join().unwrap()).into_owned();
+            panic!(
+                "the Staged MCP script was still running {SCRIPT_EXIT_TIMEOUT:?} after stdin closed: {stderr}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = stdout_reader.join().unwrap();
+    let stderr = String::from_utf8_lossy(&stderr_reader.join().unwrap()).into_owned();
     assert!(
-        output.status.success(),
-        "the Staged MCP script exited {:?}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
+        status.success(),
+        "the Staged MCP script exited {status:?}: {stderr}"
     );
-    let responses = String::from_utf8(output.stdout)
+    let responses = String::from_utf8(stdout)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
         .collect();
-    ScriptRun {
-        responses,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
+    ScriptRun { responses, stderr }
 }

@@ -100,20 +100,35 @@ Newline-delimited JSON-RPC 2.0 on stdin/stdout, the MCP stdio transport:
   that throws or rejects is reported to the agent as an `isError` result (its
   `failureText`, or `<name> failed: <message>`) and logged, never a crash
   mid-turn; so is a tool that returns or resolves to something other than
-  `{ text, isError }`. A tool that returns a promise is answered when it
-  settles, and requests that arrive meanwhile are served first, so replies
-  can leave out of order (JSON-RPC matches them by id).
+  `{ text, isError }`. A `failureText` that itself throws is logged and the
+  default text is used, so a failing call always gets a reply. A tool that
+  returns a promise is answered when it settles, and requests that arrive
+  meanwhile are served first, so replies can leave out of order (JSON-RPC
+  matches them by id).
 - `resources/list` and `prompts/list` answer empty lists. Any other method
   is `-32601`. A line that is not JSON is `-32700` and a non-object is
   `-32600`. Notifications and responses are ignored.
+- Anything that still throws out of the request handler (a tool whose
+  property getter throws during `tools/list`, say) answers `-32603` for the
+  request's id, or is only logged when the line carried no id. The rest of
+  the stdin chunk is served either way; an exception that escaped the
+  readline listener used to make it drop the lines buffered behind the bad
+  one.
 
-The process ends when stdin closes. A closed stdout (`EPIPE`) exits 0; any
-other stdout failure exits 1, since nobody can be answered. A failure outside
-a `tools/call` (an unawaited rejection, a timer callback that throws) is
-logged as `server kept alive` and the server goes on serving: losing the
-process would lose `write_note` for the rest of the session. Diagnostics go
-to stderr with a `staged-mcp:` prefix. A session id that is empty, contains
-`/`, or is `.` or `..` is refused with exit code 2.
+The process ends when stdin closes: the server exits 0 as soon as every
+pending `tools/call` promise has settled and the replies have been flushed.
+A tool may hold a live handle (a child process, an interval) and still not
+keep the process alive after the agent has gone. For `write_note`, which is
+synchronous, nothing is ever pending and the exit is immediate. Calls still
+pending when stdin closes get 30 seconds (`SHUTDOWN_GRACE_MS`) to finish
+what they were writing; then they are logged as abandoned and the server
+exits anyway. A closed stdout (`EPIPE`) exits 0; any other stdout failure
+exits 1, since nobody can be answered. A failure outside a `tools/call` (an
+unawaited rejection, a timer callback that throws) is logged as `server kept
+alive` and the server goes on serving: losing the process would lose
+`write_note` for the rest of the session. Diagnostics go to stderr with a
+`staged-mcp:` prefix. A session id that is empty, contains `/`, or is `.` or
+`..` is refused with exit code 2.
 
 ## The per-session scratch area
 
@@ -152,7 +167,12 @@ On the workstation, in `staged-mcp.cjs`:
    replies when it settles. `context` carries `sessionId`, `turnId` and
    `sessionDir`. The optional `instructions` sentence is appended to the
    `initialize` instructions, and the optional `failureText(error)` is the
-   result text when `call` throws or its promise rejects.
+   result text when `call` throws or its promise rejects. Keep `failureText`
+   simple: if it throws, the agent gets the default `<name> failed:
+   <message>` text instead. A `call` that holds a long-lived handle need not
+   `unref()` it, since the server exits on stdin close once the call has
+   settled, but it should settle its promise even when what it started
+   hangs, or the call is abandoned after the shutdown grace.
 2. Add it to `TOOLS`.
 3. Use the shared plumbing for files: `ensureSessionDir`, `writeAtomic`,
    `removeIfPresent`.
@@ -177,9 +197,12 @@ On the laptop:
    reader against a recorded runner and against a local `sh`
    (`test_support::local_exec`), and add the tool to the expected list in
    `script_serves_the_tool_registry_over_mcp`. Required as a module instead
-   of run, the script exports `TOOLS`, `callTool`, `handleLine` and `main`,
-   which is how `script_serves_asynchronous_tools_and_survives_stray_failures`
-   adds throwaway tools through a driver before starting the server.
+   of run, the script exports `TOOLS`, `callTool`, `handleLine`, `serveLine`
+   and `main`, which is how
+   `script_serves_asynchronous_tools_and_survives_stray_failures` adds
+   throwaway tools through a driver before starting the server.
+   `test_support::run_node_lines` fails a run that is still alive 60 seconds
+   after stdin closed, so a tool that keeps the process alive fails its test.
 
 ## How to test manually
 
@@ -202,8 +225,13 @@ On the laptop:
   without `node`), the legacy cleanup (in the probe script, and against a
   local `sh` both on the first install and after an older build reinstalled
   its copy), the stdio injection, the install scripts against a local `sh`,
-  protocol-version negotiation, and the generic MCP methods over the tool
-  registry.
+  protocol-version negotiation, the generic MCP methods over the tool
+  registry, asynchronous tools (a promise settled by a later `release` call
+  is answered after the requests dispatched before it, rejections with and
+  without `failureText`, a `failureText` that throws, a resolve to nothing,
+  stray failures outside a call, and an interval handle that does not keep
+  the process alive after stdin closes), and a request-handler throw
+  answered with `-32603` while the rest of the chunk is served.
 - `remote_staged_mcp::note_outbox::tests`: `write_note` and its outbox (see
   [`note-delivery.md`](./note-delivery.md)).
 - `acp-client` driver tests: stdio servers pass through

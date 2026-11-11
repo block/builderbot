@@ -354,16 +354,30 @@ function toolResult(outcome) {
   return { content: [{ type: "text", text: outcome.text }], isError: outcome.isError };
 }
 
+/** `<name> failed: <message>`, the failure text a tool gets by default. */
+function defaultFailureText(tool, error) {
+  return tool.name + " failed: " + (error && error.message ? error.message : error);
+}
+
 /**
  * The `tools/call` result for `tool` failing with `error`: its `failureText`,
  * or `<name> failed: <message>`, as an `isError` result, logged.
+ *
+ * A `failureText` that itself throws falls back to the default text, so a
+ * failing tool always gets a reply and never escapes into the request
+ * handler.
  */
 function toolFailure(tool, error) {
   // Report every failure to the agent rather than dying mid-turn.
   log(tool.name + " failed: " + describeError(error));
-  const text = tool.failureText
-    ? tool.failureText(error)
-    : tool.name + " failed: " + (error && error.message ? error.message : error);
+  let text = defaultFailureText(tool, error);
+  if (tool.failureText) {
+    try {
+      text = tool.failureText(error);
+    } catch (textError) {
+      log(tool.name + " failed while describing its failure: " + describeError(textError));
+    }
+  }
   return toolResult({ text: text, isError: true });
 }
 
@@ -402,6 +416,88 @@ function callTool(tool, context, args) {
     );
   }
   return settleOutcome(tool, outcome);
+}
+
+/**
+ * How long the server keeps running after stdin closes while `tools/call`
+ * promises are still pending, so an asynchronous tool can finish what it was
+ * writing. The agent has already gone, so nobody reads a reply after this.
+ */
+const SHUTDOWN_GRACE_MS = 30000;
+
+/** Exit once every reply written so far has left stdout. */
+function exitAfterFlush(code) {
+  // Pipes are asynchronous on some platforms; the empty write's callback
+  // runs after everything queued before it has been written.
+  process.stdout.write("", function () {
+    process.exit(code);
+  });
+}
+
+/**
+ * The `tools/call` promises still pending, and whether stdin has closed.
+ * The server exits when both stdin is closed and nothing is pending, so a
+ * tool holding a live handle (a child process, an interval) cannot keep the
+ * process alive after the agent has gone.
+ */
+const shutdown = { pending: 0, closing: false, graceTimer: null };
+
+function trackPendingCall(promise) {
+  shutdown.pending += 1;
+  const settled = function () {
+    shutdown.pending -= 1;
+    if (shutdown.closing && shutdown.pending === 0) {
+      if (shutdown.graceTimer !== null) clearTimeout(shutdown.graceTimer);
+      exitAfterFlush(0);
+    }
+  };
+  promise.then(settled, settled);
+}
+
+/** stdin has closed: exit now, or once the pending calls have settled. */
+function beginShutdown() {
+  shutdown.closing = true;
+  if (shutdown.pending === 0) {
+    exitAfterFlush(0);
+    return;
+  }
+  log("stdin closed with " + shutdown.pending + " call(s) pending; waiting for them");
+  shutdown.graceTimer = setTimeout(function () {
+    log("abandoning " + shutdown.pending + " call(s) still pending after " + SHUTDOWN_GRACE_MS + " ms");
+    exitAfterFlush(0);
+  }, SHUTDOWN_GRACE_MS);
+}
+
+/**
+ * The `id` of the request on `rawLine`, for an error reply after
+ * `handleLine` threw, or `undefined` when the line carries none.
+ */
+function requestIdOf(rawLine) {
+  try {
+    const message = JSON.parse(rawLine);
+    if (message !== null && typeof message === "object" && !Array.isArray(message)) {
+      return Object.prototype.hasOwnProperty.call(message, "id") ? message.id : undefined;
+    }
+  } catch (_error) {
+    // Not JSON: handleLine already answered -32700 before it could throw.
+  }
+  return undefined;
+}
+
+/**
+ * Serve one stdin line. A throw out of `handleLine` (a tool whose property
+ * getter throws, say) answers `-32603` for the request's id, or is only
+ * logged when the line has none, so the request is never left unanswered.
+ */
+function serveLine(context, rawLine) {
+  try {
+    handleLine(context, rawLine);
+  } catch (error) {
+    log("request failed: " + describeError(error));
+    const id = requestIdOf(rawLine);
+    if (id === undefined) return;
+    replyError(id, -32603, "Internal error: " + (error && error.message ? error.message : error));
+  }
 }
 
 function handleLine(context, rawLine) {
@@ -448,16 +544,11 @@ function handleLine(context, rawLine) {
     if (isThenable(result)) {
       // An asynchronous tool answers when it settles; requests arriving in
       // the meantime are served first, so replies may leave out of order
-      // (JSON-RPC matches them by id).
-      result.then(
-        function (settled) {
+      // (JSON-RPC matches them by id). `callTool`'s promise never rejects.
+      trackPendingCall(
+        result.then(function (settled) {
           reply(id, settled);
-        },
-        function (error) {
-          // Only a `failureText` that itself throws gets here.
-          log(tool.name + " failed while reporting a failure: " + describeError(error));
-          replyError(id, -32603, tool.name + " failed: " + (error && error.message ? error.message : error));
-        }
+        })
       );
       return;
     }
@@ -503,13 +594,20 @@ function main(argv) {
   });
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   lines.on("line", function (line) {
-    handleLine(context, line);
+    serveLine(context, line);
   });
-  // stdin closing ends the server; the event loop drains stdout on its own.
+  // stdin closing ends the server once the pending calls have settled.
+  lines.on("close", beginShutdown);
 }
 
 if (require.main === module) {
   main(process.argv.slice(2));
 } else {
-  module.exports = { TOOLS: TOOLS, callTool: callTool, handleLine: handleLine, main: main };
+  module.exports = {
+    TOOLS: TOOLS,
+    callTool: callTool,
+    handleLine: handleLine,
+    serveLine: serveLine,
+    main: main,
+  };
 }

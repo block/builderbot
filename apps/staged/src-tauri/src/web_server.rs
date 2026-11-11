@@ -14,7 +14,11 @@
 //! when `STAGED_WEB_SERVER=1` is set, and there is no CORS layer, so a page
 //! on another origin cannot drive it from a browser that can reach the host:
 //! both `just run-web` (dist served from this origin) and `just dev-web`
-//! (Vite proxies `/api` to it) are same-origin.
+//! (Vite proxies `/api` to it) are same-origin. CORS does not cover WebSocket
+//! handshakes, so `/api/events` additionally refuses an upgrade whose `Origin`
+//! names another origin (see [`ws_origin_allowed`]); without that, a page on
+//! any origin could read the event stream. Non-browser clients send no
+//! `Origin` and are not restricted — there is no authentication to enforce.
 //!
 //! # Handler futures must not own queue state
 //!
@@ -36,7 +40,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::serve::Listener;
@@ -571,11 +575,79 @@ struct EventsQuery {
 
 async fn ws_events(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(query): Query<EventsQuery>,
     State(state): State<WebAppState>,
 ) -> Response {
+    let header_str = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    let origin = header_str(header::ORIGIN);
+    let host = header_str(header::HOST);
+    let dev_origin = vite_dev_authority();
+    if !ws_origin_allowed(origin, host, dev_origin.as_deref()) {
+        log::warn!(
+            "[web_server] refusing /api/events upgrade from Origin {:?} (Host {:?})",
+            origin,
+            host
+        );
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let client_id = normalize_ws_client_id(query.client_id);
     ws.on_upgrade(move |socket| handle_ws(socket, state, client_id))
+}
+
+/// Whether a WebSocket handshake with these `Origin` and `Host` headers may
+/// upgrade. `dev_origin` is the extra `host:port` authority the Vite dev
+/// server is reachable at, if any (see [`vite_dev_authority`]).
+///
+/// CORS never applies to WebSocket handshakes, so this is the only thing
+/// stopping a page on an arbitrary origin from opening
+/// `wss://<host>:5175/api/events` and reading every event. Browsers always
+/// send `Origin` on a handshake, and it is the one header a page cannot
+/// forge, so an `Origin` that is present must name this server's own origin
+/// exactly — host *and* port, since `evil.example:5175` and
+/// `evil.example:8080` are different origins and so are `host:5175` and
+/// `host:5176`. The scheme is ignored: the server only speaks TLS, so a
+/// matching authority is the same origin. A missing `Origin` is a
+/// non-browser client (curl, a script), which the server does not try to
+/// keep out: there is no authentication, and a browser page cannot omit the
+/// header, so letting it through costs nothing.
+///
+/// Under `just dev-web` the page lives on the Vite origin
+/// (`https://$STAGED_WEB_HOST:$VITE_PORT`) and reaches this server through
+/// Vite's `/api` proxy, which rewrites `Host` to `localhost:5175`
+/// (`changeOrigin: true`) but forwards the browser's `Origin` untouched — so
+/// `Origin` and `Host` never match there and the Vite authority is accepted
+/// as a second allowed value.
+fn ws_origin_allowed(origin: Option<&str>, host: Option<&str>, dev_origin: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    let Some(origin_authority) = origin_authority(origin) else {
+        // `Origin: null` (sandboxed iframe, file://) or garbage.
+        return false;
+    };
+    let same_authority = |candidate: Option<&str>| {
+        candidate.is_some_and(|c| c.trim().eq_ignore_ascii_case(origin_authority))
+    };
+    same_authority(host) || same_authority(dev_origin)
+}
+
+/// The `host[:port]` authority of an `Origin` header value such as
+/// `https://host:5175`, or `None` when it is not a `scheme://authority` form.
+fn origin_authority(origin: &str) -> Option<&str> {
+    let (_, rest) = origin.trim().split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    (!authority.is_empty()).then_some(authority)
+}
+
+/// The Vite dev server's `host:port` authority under `just dev-web`, which
+/// exports both `STAGED_WEB_HOST` and `VITE_PORT` into this process; `None`
+/// when either is unset (`just run-web`, plain `just dev`).
+fn vite_dev_authority() -> Option<String> {
+    let host = std::env::var("STAGED_WEB_HOST").ok()?;
+    let port = std::env::var("VITE_PORT").ok()?;
+    let (host, port) = (host.trim(), port.trim());
+    (!host.is_empty() && !port.is_empty()).then(|| format!("{host}:{port}"))
 }
 
 /// The scheduler client id a WS connection may claim, or `None` for "don't track
@@ -4611,7 +4683,8 @@ mod blocking_guard_tests;
 mod tests {
     use super::{
         broadcast_web_event, control_create_image_args, emit_to_all, event_gap_payload,
-        normalize_ws_client_id, web_caller_rejection, web_client_id, DispatchCaller, WebEvent,
+        normalize_ws_client_id, origin_authority, web_caller_rejection, web_client_id,
+        ws_origin_allowed, DispatchCaller, WebEvent,
     };
     use serde_json::{json, Value};
     use std::collections::{BTreeMap, BTreeSet};
@@ -4851,6 +4924,138 @@ mod tests {
             assert_eq!(project_id, "p1");
             assert_eq!(file_path, "/tmp/x.png");
         }
+    }
+
+    #[test]
+    fn ws_origin_same_origin_is_allowed() {
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // Hosts are case-insensitive; browsers lowercase `Origin` but a client
+        // may not lowercase `Host`.
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            Some("Mac.Example.com:5175"),
+            None
+        ));
+        // Default port on both sides: neither header carries one.
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com"),
+            Some("mac.example.com"),
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_different_host_is_rejected() {
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example:5175"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // A host that merely contains ours is still another origin.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com.evil.example:5175"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // `Origin: null` (sandboxed iframe) and malformed values never match.
+        assert!(!ws_origin_allowed(
+            Some("null"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some(""),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // No Host to compare against at all (HTTP/1.1 requires one, but the
+        // handler must not fall open if it is missing).
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_different_port_is_rejected() {
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5176"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // An explicit port is not the same authority as an implied one.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            Some("mac.example.com"),
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_absent_is_allowed() {
+        // Non-browser clients (curl, scripts) send no Origin.
+        assert!(ws_origin_allowed(None, Some("mac.example.com:5175"), None));
+        assert!(ws_origin_allowed(None, None, None));
+    }
+
+    #[test]
+    fn ws_origin_vite_dev_host_is_allowed_when_configured() {
+        // `just dev-web`: the page is on the Vite origin, and Vite's proxy
+        // rewrites Host to localhost:5175 while forwarding the browser's Origin.
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:23456"),
+            Some("localhost:5175"),
+            Some("mac.example.com:23456")
+        ));
+        // The dev authority is exact too: another port on the dev host, or
+        // another host on the dev port, is not the Vite origin.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:23457"),
+            Some("localhost:5175"),
+            Some("mac.example.com:23456")
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example:23456"),
+            Some("localhost:5175"),
+            Some("mac.example.com:23456")
+        ));
+        // Without the dev authority configured the same handshake is refused.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:23456"),
+            Some("localhost:5175"),
+            None
+        ));
+    }
+
+    #[test]
+    fn origin_authority_strips_scheme_and_anything_after_the_authority() {
+        assert_eq!(origin_authority("https://host:5175"), Some("host:5175"));
+        assert_eq!(origin_authority("http://host"), Some("host"));
+        assert_eq!(origin_authority(" https://host:5175 "), Some("host:5175"));
+        // Origins never carry a path, but a forged value must not smuggle one
+        // past the comparison.
+        assert_eq!(
+            origin_authority("https://host:5175/x?y#z"),
+            Some("host:5175")
+        );
+        assert_eq!(origin_authority("null"), None);
+        assert_eq!(origin_authority("https://"), None);
+        assert_eq!(origin_authority(""), None);
     }
 
     #[test]

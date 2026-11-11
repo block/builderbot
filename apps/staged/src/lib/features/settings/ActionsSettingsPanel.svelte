@@ -1292,6 +1292,16 @@
       display: none;
     }
 
+    /* The repo's panel scrolls under the home indicator: the inset moves
+       from the panel's padding to its scroller's, as the sidebar's. */
+    .main-panel {
+      padding-bottom: 0;
+    }
+
+    .main-panel-scroll {
+      padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    }
+
     .panel-body:not(.detail-open) .context-item.selected {
       background: transparent;
     }

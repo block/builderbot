@@ -253,6 +253,8 @@
     min-height: 0;
     overflow-y: auto;
     padding: 16px;
+    /* The phone layout's bottom inset (SettingsPage's `.panel-pad`). */
+    padding-bottom: calc(16px + var(--settings-panel-inset-bottom, 0px));
     display: flex;
     flex-direction: column;
     gap: 24px;

@@ -106,10 +106,11 @@
   --ui-danger-bg: rgba(248, 81, 73, 0.1);
   --ui-selection: rgba(255, 255, 255, 0.08);
 
-  /* ── Project status palette (see projectStatusDisplay.ts). Each colour
-   *    aliases the token it visually matches so the picker stays theme-aware,
-   *    while giving statuses their own tokens: retinting a diff/review colour
-   *    doesn't have to retint project statuses, and vice versa. ── */
+  /* ── Tag palette, named for the project statuses it first served (see
+   *    features/tags/tagColors.ts). Each colour aliases the token it visually
+   *    matches so the picker stays theme-aware, while giving tags their own
+   *    tokens: retinting a diff/review colour doesn't have to retint tags,
+   *    and vice versa. ── */
   --project-status-green: var(--ui-success);
   --project-status-red: var(--ui-danger);
   --project-status-amber: var(--status-modified);

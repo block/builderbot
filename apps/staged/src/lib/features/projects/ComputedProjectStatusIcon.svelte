@@ -1,7 +1,7 @@
 <!--
   ComputedProjectStatusIcon.svelte — the icon for a project's computed status:
-  its aggregate PR state. Used by ProjectStatusIcon when no status option is
-  chosen, and by the status picker's Default row.
+  its aggregate PR state. Used by ProjectStatusIcon when the project has no tag
+  in the icon group, and by the status picker's Default row.
 -->
 <script lang="ts">
   import GitPullRequest from '@lucide/svelte/icons/git-pull-request';

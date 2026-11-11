@@ -1,31 +1,28 @@
 <!--
   ProjectStatusPicker.svelte — the status pill beside a project's title.
 
-  The pill shows what the project's status icon shows everywhere else (see
-  ProjectStatusIcon) and opens a menu to pick one of the configured status
-  options, or Default to go back to the computed PR status. The Default
-  row previews that computed status, so the user sees what they'd fall back
-  to. The option list itself is edited in Settings > General. The sidebar and
-  grid context menus offer the same choices through ProjectStatusSubmenu.
+  Acts on the icon tag group (the imported Status group, unless the user
+  picks another) and renders nothing when there isn't one. The pill shows
+  what the project's status icon shows everywhere else (see
+  ProjectStatusIcon) and opens a menu to pick one of the group's tags, or
+  Default to go back to the computed PR status. The Default row previews
+  that computed status, so the user sees what they'd fall back to. The
+  group's tags are edited in Settings > General. The sidebar and grid
+  context menus offer the same choices through ProjectStatusSubmenu.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Settings2 from '@lucide/svelte/icons/settings-2';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import type { Branch, Project } from '../../types';
+  import { tagsStore } from '../../stores/tags.svelte';
   import { openSettings } from '../layout/navigation.svelte';
-  import { preferences } from '../settings/preferences.svelte';
+  import TagIcon from '../tags/TagIcon.svelte';
+  import { tagActions } from '../tags/tagActions.svelte';
+  import { TAG_COLOR_VARS } from '../tags/tagColors';
+  import { NO_TAG_MENU_VALUE } from '../tags/tagState';
   import ComputedProjectStatusIcon from './ComputedProjectStatusIcon.svelte';
-  import ProjectStatusOptionIcon from './ProjectStatusOptionIcon.svelte';
-  import { projectActions } from './projectActions.svelte';
-  import {
-    DEFAULT_STATUS_MENU_VALUE,
-    PROJECT_STATUS_COLOR_VARS,
-    computedStatusLabel,
-    findProjectStatusOverride,
-    projectStatusOptionLabel,
-    resolveComputedProjectStatus,
-  } from './projectStatusDisplay';
+  import { computedStatusLabel, resolveComputedProjectStatus } from './projectStatusDisplay';
 
   interface Props {
     project: Project;
@@ -35,62 +32,66 @@
 
   let { project, branches, disabled = false }: Props = $props();
 
-  let options = $derived(preferences.projectStatusOptions);
-  let override = $derived(findProjectStatusOverride(project, options));
+  let group = $derived(tagsStore.iconGroup);
+  let tags = $derived(group ? (tagsStore.tagsByGroup.get(group.id) ?? []) : []);
+  let current = $derived(group ? tagsStore.groupTagFor(project.id, group.id) : null);
   let computed = $derived(resolveComputedProjectStatus(branches));
   let computedLabel = $derived(computedStatusLabel(computed));
 
   function handleValueChange(value: string) {
-    const next = value === DEFAULT_STATUS_MENU_VALUE ? null : value;
-    void projectActions.setProjectStatusOverride(project, next);
+    if (!group) return;
+    const next = value === NO_TAG_MENU_VALUE ? null : value;
+    void tagActions.setProjectGroupTag(project, group.id, next);
   }
 </script>
 
-<DropdownMenu.Root>
-  <DropdownMenu.Trigger
-    class="project-status-pill touch-hit"
-    {disabled}
-    title="Set project status"
-    style={override ? `color: ${PROJECT_STATUS_COLOR_VARS[override.color]}` : undefined}
-  >
-    {#if override}
-      <ProjectStatusOptionIcon option={override} size={12} />
-      <span class="pill-label">{projectStatusOptionLabel(override)}</span>
-    {:else}
-      <ComputedProjectStatusIcon status={computed} size={12} />
-      <span class="pill-label">{computedLabel}</span>
-    {/if}
-    <ChevronDown size={12} class="pill-chevron" />
-  </DropdownMenu.Trigger>
-  <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
-    <DropdownMenu.RadioGroup
-      value={override?.id ?? DEFAULT_STATUS_MENU_VALUE}
-      onValueChange={handleValueChange}
+{#if group}
+  <DropdownMenu.Root>
+    <DropdownMenu.Trigger
+      class="project-status-pill touch-hit"
+      {disabled}
+      title={`Set project ${group.name.toLowerCase()}`}
+      style={current ? `color: ${TAG_COLOR_VARS[current.color]}` : undefined}
     >
-      <DropdownMenu.RadioItem value={DEFAULT_STATUS_MENU_VALUE}>
-        <ComputedProjectStatusIcon status={computed} size={14} />
-        <span class="flex min-w-0 flex-col">
-          <span>Default</span>
-          <span class="truncate text-xs text-muted-foreground">{computedLabel}</span>
-        </span>
-      </DropdownMenu.RadioItem>
-      {#if options.length > 0}
-        <DropdownMenu.Separator />
-        {#each options as option (option.id)}
-          <DropdownMenu.RadioItem value={option.id}>
-            <ProjectStatusOptionIcon {option} size={14} />
-            <span class="truncate">{projectStatusOptionLabel(option)}</span>
-          </DropdownMenu.RadioItem>
-        {/each}
+      {#if current}
+        <TagIcon tag={current} size={12} />
+        <span class="pill-label">{current.name}</span>
+      {:else}
+        <ComputedProjectStatusIcon status={computed} size={12} />
+        <span class="pill-label">{computedLabel}</span>
       {/if}
-    </DropdownMenu.RadioGroup>
-    <DropdownMenu.Separator />
-    <DropdownMenu.Item onSelect={() => openSettings('general')}>
-      <Settings2 size={14} />
-      Edit statuses…
-    </DropdownMenu.Item>
-  </DropdownMenu.Content>
-</DropdownMenu.Root>
+      <ChevronDown size={12} class="pill-chevron" />
+    </DropdownMenu.Trigger>
+    <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
+      <DropdownMenu.RadioGroup
+        value={current?.id ?? NO_TAG_MENU_VALUE}
+        onValueChange={handleValueChange}
+      >
+        <DropdownMenu.RadioItem value={NO_TAG_MENU_VALUE}>
+          <ComputedProjectStatusIcon status={computed} size={14} />
+          <span class="flex min-w-0 flex-col">
+            <span>Default</span>
+            <span class="truncate text-xs text-muted-foreground">{computedLabel}</span>
+          </span>
+        </DropdownMenu.RadioItem>
+        {#if tags.length > 0}
+          <DropdownMenu.Separator />
+          {#each tags as tag (tag.id)}
+            <DropdownMenu.RadioItem value={tag.id}>
+              <TagIcon {tag} size={14} />
+              <span class="truncate">{tag.name}</span>
+            </DropdownMenu.RadioItem>
+          {/each}
+        {/if}
+      </DropdownMenu.RadioGroup>
+      <DropdownMenu.Separator />
+      <DropdownMenu.Item onSelect={() => openSettings('general')}>
+        <Settings2 size={14} />
+        Edit statuses…
+      </DropdownMenu.Item>
+    </DropdownMenu.Content>
+  </DropdownMenu.Root>
+{/if}
 
 <style>
   :global(.project-status-pill) {

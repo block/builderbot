@@ -107,7 +107,6 @@ const project = {
   subpath: null,
   createdAt: 1,
   updatedAt: 1,
-  statusOverride: null,
 } as Project;
 
 const completedNote: ProjectNote = {

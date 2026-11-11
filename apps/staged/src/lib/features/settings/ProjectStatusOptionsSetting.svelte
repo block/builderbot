@@ -1,35 +1,28 @@
 <!--
   ProjectStatusOptionsSetting.svelte — edit the statuses a project can be set
-  to from its detail page (see ProjectStatusPicker).
+  to from its detail page (see ProjectStatusPicker): the tags of the icon tag
+  group. An interim editor until Settings › Tags replaces it.
 
-  One row per option: icon, label, color swatch and delete. Options render in
-  stored order and new ones append. Projects store an option's id, so
-  renaming or recoloring one updates every project using it, and deleting one
-  returns those projects to Default.
+  One row per tag: icon, name, colour swatch and delete. Tags render in group
+  order and new ones append. Projects carry a tag by id, so renaming or
+  recolouring one updates every project using it, and deleting one returns
+  those projects to Default. Each edit is a backend write, so a name saves on
+  blur or Enter rather than per keystroke.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
   import Info from '@lucide/svelte/icons/info';
   import Plus from '@lucide/svelte/icons/plus';
-  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
+  import type { Tag } from '../../types';
+  import { tagsStore } from '../../stores/tags.svelte';
   import IconPicker from '../actions/IconPicker.svelte';
-  import ProjectStatusOptionIcon from '../projects/ProjectStatusOptionIcon.svelte';
-  import {
-    NEW_PROJECT_STATUS_ICON,
-    PROJECT_STATUS_COLORS,
-    PROJECT_STATUS_COLOR_VARS,
-    isDefaultProjectStatusOptions,
-    type ProjectStatusOption,
-  } from '../projects/projectStatusDisplay';
-  import {
-    preferences,
-    resetProjectStatusOptions,
-    setProjectStatusOptions,
-  } from './preferences.svelte';
+  import TagIcon from '../tags/TagIcon.svelte';
+  import { tagActions, type TagValue } from '../tags/tagActions.svelte';
+  import { TAG_COLORS, TAG_COLOR_VARS } from '../tags/tagColors';
 
   /** The picker's empty-search shortlist: status-flavoured, not action-flavoured. */
   const STATUS_ICONS = [
@@ -48,143 +41,199 @@
     'shield-alert',
   ];
 
-  let options = $derived(preferences.projectStatusOptions);
-  /** Nothing to reset when the list already equals the defaults. */
-  let isDefault = $derived(isDefaultProjectStatusOptions(options));
+  /** The icon a new, user-added status starts with. */
+  const NEW_STATUS_ICON = 'circle-dot';
 
-  // Resetting discards user-added statuses for good (their ids are UUIDs that
-  // cannot be recreated) and returns projects using them to Default, so it
-  // asks first.
-  let showResetConfirm = $state(false);
+  let group = $derived(tagsStore.iconGroup);
+  let tags = $derived(group ? (tagsStore.tagsByGroup.get(group.id) ?? []) : []);
 
-  function confirmReset() {
-    resetProjectStatusOptions();
+  let adding = $state(false);
+
+  // Deleting a status takes it off every project using it, so it asks first
+  // and says how many that is. The target outlives the dialog's close so its
+  // text doesn't blank mid-animation.
+  let showDeleteConfirm = $state(false);
+  let deleteTarget = $state<Tag | null>(null);
+  let deleteTargetUsage = $derived(
+    deleteTarget ? (tagsStore.usageCount.get(deleteTarget.id) ?? 0) : 0
+  );
+
+  function labelInputId(tag: Tag): string {
+    return `project-status-label-${tag.id}`;
+  }
+
+  function save(tag: Tag, patch: Partial<TagValue>): Promise<boolean> {
+    return tagActions.updateTag(tag, {
+      name: tag.name,
+      color: tag.color,
+      icon: tag.icon,
+      ...patch,
+    });
+  }
+
+  async function commitName(tag: Tag, input: HTMLInputElement) {
+    const name = input.value.trim();
+    // A name can't be blank; an unchanged one needs no write.
+    if (!name || name === tag.name) {
+      input.value = tag.name;
+      return;
+    }
+    if (!(await save(tag, { name }))) input.value = tag.name;
+  }
+
+  function handleNameKeydown(tag: Tag, event: KeyboardEvent & { currentTarget: HTMLInputElement }) {
+    if (event.key === 'Enter') {
+      event.currentTarget.blur();
+    } else if (event.key === 'Escape') {
+      event.currentTarget.value = tag.name;
+      event.currentTarget.blur();
+    }
+  }
+
+  /** "New status", or the first "New status N" the group doesn't have yet. */
+  function newStatusName(): string {
+    const taken = new Set(tags.map((tag) => tag.name.toLowerCase()));
+    if (!taken.has('new status')) return 'New status';
+    for (let n = 2; ; n++) {
+      if (!taken.has(`new status ${n}`)) return `New status ${n}`;
+    }
+  }
+
+  async function addStatus() {
+    if (!group || adding) return;
+    adding = true;
+    try {
+      const tag = await tagActions.createTag({
+        name: newStatusName(),
+        groupId: group.id,
+        icon: NEW_STATUS_ICON,
+      });
+      if (!tag) return;
+      await tick();
+      const input = document.getElementById(labelInputId(tag));
+      if (input instanceof HTMLInputElement) {
+        input.focus();
+        input.select();
+      }
+    } finally {
+      adding = false;
+    }
+  }
+
+  function requestDelete(tag: Tag) {
+    deleteTarget = tag;
+    showDeleteConfirm = true;
+  }
+
+  async function confirmDelete() {
     // AlertDialog.Action does not close the dialog itself (only Cancel does),
     // so every confirm handler closes it explicitly.
-    showResetConfirm = false;
-  }
-
-  function labelInputId(option: ProjectStatusOption): string {
-    return `project-status-label-${option.id}`;
-  }
-
-  function updateOption(id: string, patch: Partial<Omit<ProjectStatusOption, 'id'>>) {
-    setProjectStatusOptions(options.map((o) => (o.id === id ? { ...o, ...patch } : o)));
-  }
-
-  function removeOption(id: string) {
-    setProjectStatusOptions(options.filter((o) => o.id !== id));
-  }
-
-  async function addOption() {
-    const option: ProjectStatusOption = {
-      id: crypto.randomUUID(),
-      label: '',
-      icon: NEW_PROJECT_STATUS_ICON,
-      color: 'gray',
-    };
-    setProjectStatusOptions([...options, option]);
-    await tick();
-    document.getElementById(labelInputId(option))?.focus();
+    showDeleteConfirm = false;
+    if (deleteTarget) await tagActions.deleteTag(deleteTarget);
   }
 </script>
 
 <div class="status-options-field">
   <span class="field-label">Project statuses</span>
 
-  {#if options.length > 0}
-    <ul class="status-option-list">
-      {#each options as option (option.id)}
-        <li class="status-option-row">
-          <IconPicker
-            icon={option.icon}
-            curated={STATUS_ICONS}
-            onSelect={(icon) => updateOption(option.id, { icon: icon ?? NEW_PROJECT_STATUS_ICON })}
-          >
-            {#snippet triggerIcon()}
-              <ProjectStatusOptionIcon {option} size={14} />
-            {/snippet}
-          </IconPicker>
-          <Input
-            id={labelInputId(option)}
-            type="text"
-            placeholder="Status name"
-            aria-label="Status name"
-            class="min-w-0 flex-1"
-            value={option.label}
-            oninput={(e) => updateOption(option.id, { label: e.currentTarget.value })}
-          />
-          <div class="swatches" role="radiogroup" aria-label="Status color">
-            {#each PROJECT_STATUS_COLORS as color (color)}
-              <button
-                type="button"
-                class="swatch"
-                class:selected={option.color === color}
-                role="radio"
-                aria-checked={option.color === color}
-                aria-label={color}
-                title={color}
-                style:--swatch-color={PROJECT_STATUS_COLOR_VARS[color]}
-                onclick={() => updateOption(option.id, { color })}
-              ></button>
-            {/each}
-          </div>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            class="hover:text-destructive"
-            title="Delete status"
-            aria-label="Delete status"
-            onclick={() => removeOption(option.id)}
-          >
-            <Trash2 size={13} />
-          </Button>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+  {#if !group}
+    <p class="field-description">
+      <Info size={12} />
+      There is no status group, so every project shows its PR status.
+    </p>
+  {:else}
+    {#if tags.length > 0}
+      <ul class="status-option-list">
+        {#each tags as tag (tag.id)}
+          <li class="status-option-row">
+            <IconPicker
+              icon={tag.icon}
+              curated={STATUS_ICONS}
+              onSelect={(icon) => {
+                if (icon !== tag.icon) void save(tag, { icon });
+              }}
+            >
+              {#snippet triggerIcon()}
+                <TagIcon {tag} size={14} />
+              {/snippet}
+            </IconPicker>
+            <Input
+              id={labelInputId(tag)}
+              type="text"
+              placeholder="Status name"
+              aria-label="Status name"
+              class="min-w-0 flex-1"
+              maxlength={64}
+              value={tag.name}
+              onblur={(e) => void commitName(tag, e.currentTarget)}
+              onkeydown={(e) => handleNameKeydown(tag, e)}
+            />
+            <div class="swatches" role="radiogroup" aria-label="Status color">
+              {#each TAG_COLORS as color (color)}
+                <button
+                  type="button"
+                  class="swatch"
+                  class:selected={tag.color === color}
+                  role="radio"
+                  aria-checked={tag.color === color}
+                  aria-label={color}
+                  title={color}
+                  style:--swatch-color={TAG_COLOR_VARS[color]}
+                  onclick={() => {
+                    if (color !== tag.color) void save(tag, { color });
+                  }}
+                ></button>
+              {/each}
+            </div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              class="hover:text-destructive"
+              title="Delete status"
+              aria-label="Delete status"
+              onclick={() => requestDelete(tag)}
+            >
+              <Trash2 size={13} />
+            </Button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
 
-  <div class="status-option-actions">
-    <Button variant="outline" size="sm" onclick={() => void addOption()}>
-      <Plus size={14} />
-      Add status
-    </Button>
-    <!--
-      The title lives on the wrapper: a disabled Button has pointer-events
-      none, so a title on the button itself would never show.
-    -->
-    <span class="inline-flex" title={isDefault ? 'Statuses already match the defaults' : undefined}>
-      <Button
-        variant="ghost"
-        size="sm"
-        disabled={isDefault}
-        onclick={() => (showResetConfirm = true)}
-      >
-        <RotateCcw size={14} />
-        Reset to defaults
+    <div class="status-option-actions">
+      <Button variant="outline" size="sm" disabled={adding} onclick={() => void addStatus()}>
+        <Plus size={14} />
+        Add status
       </Button>
-    </span>
-  </div>
+    </div>
 
-  <p class="field-description">
-    <Info size={12} />
-    Set a status from a project's page to show it in place of the PR status. Deleting a status returns
-    any project using it to Default.
-  </p>
+    <p class="field-description">
+      <Info size={12} />
+      Set a status from a project's page to show it in place of the PR status. Deleting a status returns
+      any project using it to Default.
+    </p>
+  {/if}
 </div>
 
-<AlertDialog.Root bind:open={showResetConfirm}>
+<AlertDialog.Root bind:open={showDeleteConfirm}>
   <AlertDialog.Content>
     <AlertDialog.Header>
-      <AlertDialog.Title>Reset Project Statuses</AlertDialog.Title>
+      <AlertDialog.Title>Delete Status</AlertDialog.Title>
       <AlertDialog.Description>
-        Restore the built-in statuses? Statuses you added will be removed and cannot be recovered,
-        and any project using one returns to Default.
+        Delete “{deleteTarget?.name}”?
+        {#if deleteTargetUsage === 0}
+          No project uses it.
+        {:else}
+          Used by {deleteTargetUsage}
+          {deleteTargetUsage === 1 ? 'project, which returns' : 'projects, which return'} to Default.
+        {/if}
       </AlertDialog.Description>
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={confirmReset}>Reset</AlertDialog.Action>
+      <AlertDialog.Action variant="destructive" onclick={() => void confirmDelete()}>
+        Delete
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

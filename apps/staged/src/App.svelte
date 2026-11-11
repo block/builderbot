@@ -67,6 +67,7 @@
   import { projectFiltersStore } from './lib/features/projects/projectFilters.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { projectsDataStore } from './lib/stores/projectsData.svelte';
+  import { tagsStore } from './lib/stores/tags.svelte';
   import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { sweepExpiredDrafts } from './lib/shared/draftCache';
@@ -381,6 +382,11 @@
     // Keep the shared project-list cache fresh for the app's lifetime — the
     // store dedupes, so starting before any view consumes it is safe.
     projectsDataStore.startListeners();
+    // Tags back every project's status icon, so they load alongside the
+    // project list rather than waiting on a view; icons stay placeholders
+    // until they land.
+    tagsStore.startListeners();
+    void tagsStore.load();
     // Run-action state feeds the shared project filters (Running chip,
     // filtered lists), which every route renders via the sidebar or the
     // landing grid — so its listeners are app-lifetime too. A view-scoped
@@ -629,6 +635,7 @@
     unlistenStoreReset?.();
     unlistenUpdaterOwnerAvailable?.();
     projectsDataStore.stopListeners();
+    tagsStore.stopListeners();
     projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();
     stopUpdaterMirror?.();

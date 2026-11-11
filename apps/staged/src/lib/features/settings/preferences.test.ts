@@ -1,18 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ListenOptions } from '../../transport';
-import {
-  DEFAULT_PROJECT_STATUS_OPTIONS,
-  type ProjectStatusOption,
-} from '../projects/projectStatusDisplay';
 
-const key = 'project-status-options';
+/** The synced key the generic sync tests exercise. */
+const key = 'composer-send-mode';
 const path = '/data/preferences.json';
-const custom: ProjectStatusOption = {
-  id: 'custom',
-  label: 'Testing',
-  icon: 'flask-conical',
-  color: 'cyan',
-};
 
 interface StoreEvent {
   path: string;
@@ -98,108 +89,68 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe.each([true, false])('project status synchronization (native=%s)', (native) => {
-  it('shares additions and edits between clients without losing the other client’s status', async () => {
-    const a = await newClient(native);
-    await a.initPreferences();
-    const b = await newClient(!native);
-    await b.initPreferences();
-
-    a.setProjectStatusOptions([...a.preferences.projectStatusOptions, custom]);
-    expect(b.preferences.projectStatusOptions).toContainEqual(custom);
-
-    const edited = b.preferences.projectStatusOptions.map((option) =>
-      option.id === custom.id ? { ...option, label: 'Validated', color: 'green' as const } : option
-    );
-    b.setProjectStatusOptions(edited);
-    expect(a.preferences.projectStatusOptions).toEqual(edited);
-    expect(values.get(key)).toEqual(edited);
-    // Receiving the event must not write it back and cause an echo loop.
-    expect(set).toHaveBeenCalledTimes(2);
-  });
-
-  it('respects empty lists and restores defaults on deletion or malformed values', async () => {
-    const client = await newClient(native);
-    await client.initPreferences();
-    emit([]);
-    expect(client.preferences.projectStatusOptions).toEqual([]);
-    emit([custom]);
-    emit(null, { exists: false });
-    expect(client.preferences.projectStatusOptions).toEqual(DEFAULT_PROJECT_STATUS_OPTIONS);
-    emit([custom]);
-    emit('invalid');
-    expect(client.preferences.projectStatusOptions).toEqual(DEFAULT_PROJECT_STATUS_OPTIONS);
-    expect(set).not.toHaveBeenCalled();
-  });
-
+describe.each([true, false])('synced preference plumbing (native=%s)', (native) => {
   it('ignores other keys and store files', async () => {
     const client = await newClient(native);
     await client.initPreferences();
-    emit([custom], { key: 'unrelated' });
-    emit([custom], { path: '/other/preferences.json' });
-    expect(client.preferences.projectStatusOptions).toEqual(DEFAULT_PROJECT_STATUS_OPTIONS);
+    emit('send', { key: 'unrelated' });
+    emit('send', { path: '/other/preferences.json' });
+    expect(client.preferences.composerSendMode).toBe('queue');
   });
 
   it('refreshes after registration and reconnection without duplicating listeners', async () => {
     const client = await newClient(native);
     await client.initPreferences();
     await client.initPreferences();
-    // One listener per synced key (project statuses first, then new-project
-    // location, then composer send mode, then the transfer dialog's
-    // uncommitted-changes and ignored-files answers, then agent env vars).
-    expect(listeners).toHaveLength(6);
+    // One listener per synced key (new-project location first, then composer
+    // send mode, then the transfer dialog's uncommitted-changes and
+    // ignored-files answers, then agent env vars).
+    expect(listeners).toHaveLength(5);
 
-    values.set(key, [custom]);
-    listeners[0].options?.onEstablished?.();
-    await vi.waitFor(() => expect(client.preferences.projectStatusOptions).toEqual([custom]));
+    values.set(key, 'send');
+    listeners[1].options?.onEstablished?.();
+    await vi.waitFor(() => expect(client.preferences.composerSendMode).toBe('send'));
 
-    values.set(key, []);
-    listeners[0].options?.onEstablished?.();
-    await vi.waitFor(() => expect(client.preferences.projectStatusOptions).toEqual([]));
+    values.set(key, 'queue');
+    listeners[1].options?.onEstablished?.();
+    await vi.waitFor(() => expect(client.preferences.composerSendMode).toBe('queue'));
   });
 
-  it.each(['notification', 'local edit'])(
-    'keeps a newer %s over a delayed initial read',
-    async (change) => {
-      let resolve!: (value: unknown) => void;
-      get.mockImplementationOnce(() => new Promise((done) => (resolve = done)));
-      const client = await newClient(native);
-      const initialized = client.initPreferences();
-      await vi.waitFor(() => expect(get).toHaveBeenCalledWith(key));
-
-      if (change === 'notification') emit([custom]);
-      else {
-        // The local write's event has not arrived yet either.
-        set.mockResolvedValueOnce(undefined);
-        client.setProjectStatusOptions([custom]);
-      }
-      resolve([]);
-      await initialized;
-      expect(client.preferences.projectStatusOptions).toEqual([custom]);
-    }
-  );
-
-  it('keeps a newer registration snapshot when the initial refresh finishes last', async () => {
+  it('keeps a newer notification over a delayed initial read', async () => {
     let resolve!: (value: unknown) => void;
-    get.mockImplementationOnce(() => new Promise((done) => (resolve = done)));
+    get.mockImplementation(async (changedKey: string) =>
+      changedKey === key
+        ? new Promise((done) => (resolve = done))
+        : structuredClone(values.get(changedKey))
+    );
     const client = await newClient(native);
     const initialized = client.initPreferences();
     await vi.waitFor(() => expect(get).toHaveBeenCalledWith(key));
-    values.set(key, [custom]);
-    listeners[0].options?.onEstablished?.();
-    await vi.waitFor(() => expect(client.preferences.projectStatusOptions).toEqual([custom]));
 
-    resolve([]);
+    emit('send');
+    resolve('queue');
     await initialized;
-    expect(client.preferences.projectStatusOptions).toEqual([custom]);
+    expect(client.preferences.composerSendMode).toBe('send');
   });
 
-  it('loads an explicitly empty list before enabling the UI', async () => {
-    values.set(key, []);
+  it('keeps a newer registration snapshot when the initial refresh finishes last', async () => {
+    const reads: ((value: unknown) => void)[] = [];
+    get.mockImplementation(async (changedKey: string) =>
+      changedKey === key
+        ? new Promise((done) => reads.push(done))
+        : structuredClone(values.get(changedKey))
+    );
     const client = await newClient(native);
-    await client.initPreferences();
-    expect(client.preferences.loaded).toBe(true);
-    expect(client.preferences.projectStatusOptions).toEqual([]);
+    const initialized = client.initPreferences();
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+    listeners[1].options?.onEstablished?.();
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    reads[1]('send');
+    await vi.waitFor(() => expect(client.preferences.composerSendMode).toBe('send'));
+
+    reads[0]('queue');
+    await initialized;
+    expect(client.preferences.composerSendMode).toBe('send');
   });
 });
 
@@ -258,7 +209,7 @@ describe.each([true, false])('composer send mode (native=%s)', (native) => {
     const client = await newClient(native);
     await client.initPreferences();
     values.set(modeKey, 'send');
-    listeners[2].options?.onEstablished?.();
+    listeners[1].options?.onEstablished?.();
     await vi.waitFor(() => expect(client.preferences.composerSendMode).toBe('send'));
   });
 
@@ -365,7 +316,7 @@ describe.each([true, false])('new project location (native=%s)', (native) => {
     // The subscription is established mid-read and its refresh supersedes the
     // first. The first read is still the freshest value when it lands, so it
     // applies and unblocks the UI without waiting on the second.
-    listeners[1].options?.onEstablished?.();
+    listeners[0].options?.onEstablished?.();
     await vi.waitFor(() => expect(reads).toHaveLength(2));
     reads[0]('remote');
     await initialized;

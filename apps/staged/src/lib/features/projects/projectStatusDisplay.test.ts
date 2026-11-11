@@ -1,31 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { Branch, Project } from '../../types';
+import type { Branch, Tag } from '../../types';
 import {
-  DEFAULT_PROJECT_STATUS_OPTIONS,
   computedStatusLabel,
-  isDefaultProjectStatusOptions,
-  normalizeProjectStatusOptions,
   resolveComputedProjectStatus,
   resolveProjectStatus,
   resolvedStatusLabel,
-  type ProjectStatusOption,
 } from './projectStatusDisplay';
 
 // ── Fixtures ──
-
-function project(overrides: Partial<Project> = {}): Project {
-  return {
-    id: 'p1',
-    name: 'Alpha',
-    githubRepo: 'org/alpha',
-    location: 'local',
-    subpath: null,
-    createdAt: 0,
-    updatedAt: 0,
-    statusOverride: null,
-    ...overrides,
-  };
-}
 
 function branch(overrides: Partial<Branch> = {}): Branch {
   return {
@@ -59,155 +41,58 @@ function branch(overrides: Partial<Branch> = {}): Branch {
   };
 }
 
-const blocked = DEFAULT_PROJECT_STATUS_OPTIONS.find((o) => o.id === 'blocked')!;
-
-// ── normalizeProjectStatusOptions ──
-
-describe('normalizeProjectStatusOptions', () => {
-  it('falls back (null) for absent or non-array values', () => {
-    expect(normalizeProjectStatusOptions(undefined)).toBeNull();
-    expect(normalizeProjectStatusOptions(null)).toBeNull();
-    expect(normalizeProjectStatusOptions({ id: 'x' })).toBeNull();
-    expect(normalizeProjectStatusOptions('done')).toBeNull();
-  });
-
-  it('respects an explicitly saved empty list', () => {
-    expect(normalizeProjectStatusOptions([])).toEqual([]);
-  });
-
-  it('falls back when no entry survives validation', () => {
-    expect(normalizeProjectStatusOptions([null, 3, { label: 'no id' }])).toBeNull();
-  });
-
-  it('drops malformed entries and keeps the rest in order', () => {
-    const result = normalizeProjectStatusOptions([
-      { id: 'a', label: 'A', icon: 'eye', color: 'red' },
-      { id: '', label: 'empty id', icon: 'eye', color: 'red' },
-      { id: 'b', label: 42, icon: 'eye', color: 'red' },
-      'nope',
-      { id: 'c', label: 'C', icon: 'ban', color: 'green' },
-    ]);
-    expect(result?.map((o) => o.id)).toEqual(['a', 'c']);
-  });
-
-  it('keeps the first of duplicate ids', () => {
-    const result = normalizeProjectStatusOptions([
-      { id: 'a', label: 'First', icon: 'eye', color: 'red' },
-      { id: 'a', label: 'Second', icon: 'ban', color: 'green' },
-    ]);
-    expect(result).toEqual([{ id: 'a', label: 'First', icon: 'eye', color: 'red' }]);
-  });
-
-  it('coerces unknown colors to gray and missing icons to the default', () => {
-    const result = normalizeProjectStatusOptions([{ id: 'a', label: 'A', color: '#ff0000' }]);
-    expect(result).toEqual([{ id: 'a', label: 'A', icon: 'circle-dot', color: 'gray' }]);
-  });
-
-  it('keeps a blank label so an option being typed survives a reload', () => {
-    const result = normalizeProjectStatusOptions([
-      { id: 'a', label: '', icon: 'eye', color: 'red' },
-    ]);
-    expect(result?.[0].label).toBe('');
-  });
-});
-
-// ── isDefaultProjectStatusOptions ──
-
-describe('isDefaultProjectStatusOptions', () => {
-  it('is true for the defaults, including an equal copy', () => {
-    expect(isDefaultProjectStatusOptions(DEFAULT_PROJECT_STATUS_OPTIONS)).toBe(true);
-    expect(
-      isDefaultProjectStatusOptions(DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o })))
-    ).toBe(true);
-  });
-
-  it('is false once an option is added, removed, edited or reordered', () => {
-    const defaults = DEFAULT_PROJECT_STATUS_OPTIONS;
-    const added: ProjectStatusOption = { id: 'uuid', label: 'QA', icon: 'bug', color: 'amber' };
-    expect(isDefaultProjectStatusOptions([...defaults, added])).toBe(false);
-    expect(isDefaultProjectStatusOptions(defaults.slice(1))).toBe(false);
-    expect(isDefaultProjectStatusOptions([])).toBe(false);
-    expect(
-      isDefaultProjectStatusOptions(
-        defaults.map((o) => (o.id === 'blocked' ? { ...o, label: 'Stuck' } : o))
-      )
-    ).toBe(false);
-    expect(
-      isDefaultProjectStatusOptions(
-        defaults.map((o) => (o.id === 'blocked' ? { ...o, color: 'gray' } : o))
-      )
-    ).toBe(false);
-    expect(isDefaultProjectStatusOptions([...defaults].reverse())).toBe(false);
-  });
-});
+const blocked: Tag = {
+  id: 'blocked',
+  groupId: 'status',
+  name: 'Blocked',
+  color: 'red',
+  icon: 'octagon-minus',
+  position: 6,
+  createdAt: 0,
+  updatedAt: 0,
+};
 
 // ── resolveProjectStatus ──
 
 describe('resolveProjectStatus', () => {
-  const options: ProjectStatusOption[] = DEFAULT_PROJECT_STATUS_OPTIONS;
-
-  it('uses the PR status when no override is set', () => {
-    const status = resolveProjectStatus(
-      project(),
-      [branch({ prNumber: 1, prState: 'MERGED' })],
-      options
-    );
+  it('uses the PR status when the project has no icon-group tag', () => {
+    const status = resolveProjectStatus(null, [branch({ prNumber: 1, prState: 'MERGED' })]);
     expect(status).toEqual({ kind: 'pr', prStatus: 'merged', hasCodeChanges: false });
   });
 
-  it('lets an override win over the PR status', () => {
-    const status = resolveProjectStatus(
-      project({ statusOverride: 'blocked' }),
-      [branch({ prNumber: 1, prState: 'MERGED' })],
-      options
-    );
-    expect(status).toEqual({ kind: 'override', option: blocked });
+  it('lets the icon-group tag win over the PR status', () => {
+    const status = resolveProjectStatus(blocked, [branch({ prNumber: 1, prState: 'MERGED' })]);
+    expect(status).toEqual({ kind: 'tag', tag: blocked });
   });
 
-  it('lets an override win for a remote project', () => {
-    const status = resolveProjectStatus(
-      project({ location: 'remote', statusOverride: 'blocked' }),
-      [branch({ branchType: 'remote', workspaceStatus: 'running' })],
-      options
-    );
-    expect(status).toEqual({ kind: 'override', option: blocked });
+  it('lets the tag win for a remote project', () => {
+    const status = resolveProjectStatus(blocked, [
+      branch({ branchType: 'remote', workspaceStatus: 'running' }),
+    ]);
+    expect(status).toEqual({ kind: 'tag', tag: blocked });
   });
 
-  it('shows an override before branches are hydrated', () => {
-    const status = resolveProjectStatus(project({ statusOverride: 'blocked' }), [], options, false);
-    expect(status.kind).toBe('override');
+  it('shows a tag before branches are hydrated', () => {
+    expect(resolveProjectStatus(blocked, [], false).kind).toBe('tag');
   });
 
-  it('treats an id with no matching option as Default', () => {
-    const status = resolveProjectStatus(
-      project({ statusOverride: 'deleted-option' }),
-      [branch({ commitCount: 2 })],
-      options
-    );
-    expect(status).toEqual({ kind: 'pr', prStatus: null, hasCodeChanges: true });
+  it('shows a placeholder until the tags have loaded, tag or not', () => {
+    const merged = [branch({ prNumber: 1, prState: 'MERGED' })];
+    expect(resolveProjectStatus(null, merged, true, false)).toEqual({ kind: 'placeholder' });
+    expect(resolveProjectStatus(blocked, merged, true, false)).toEqual({ kind: 'placeholder' });
   });
 
   it('resolves a remote project from its PR status, like a local one', () => {
-    const remote = project({ location: 'remote' });
     const remoteBranch = branch({ branchType: 'remote', workspaceStatus: 'running' });
-    expect(
-      resolveProjectStatus(remote, [{ ...remoteBranch, prNumber: 1, prState: 'OPEN' }], options)
-    ).toEqual({ kind: 'pr', prStatus: 'open', hasCodeChanges: false });
-    expect(resolveProjectStatus(remote, [{ ...remoteBranch, commitCount: 3 }], options)).toEqual({
+    expect(resolveProjectStatus(null, [{ ...remoteBranch, prNumber: 1, prState: 'OPEN' }])).toEqual(
+      { kind: 'pr', prStatus: 'open', hasCodeChanges: false }
+    );
+    expect(resolveProjectStatus(null, [{ ...remoteBranch, commitCount: 3 }])).toEqual({
       kind: 'pr',
       prStatus: null,
       hasCodeChanges: true,
     });
-    expect(resolveProjectStatus(remote, [], options, false)).toEqual({ kind: 'placeholder' });
-  });
-
-  it('shows a placeholder for an unhydrated local project', () => {
-    expect(resolveProjectStatus(project(), [], options, false)).toEqual({ kind: 'placeholder' });
-  });
-
-  it('treats a missing statusOverride (stale cached project) as Default', () => {
-    const stale = { ...project(), statusOverride: undefined } as unknown as Project;
-    expect(resolveProjectStatus(stale, [], options).kind).toBe('pr');
+    expect(resolveProjectStatus(null, [], false)).toEqual({ kind: 'placeholder' });
   });
 });
 
@@ -234,10 +119,11 @@ describe('computedStatusLabel', () => {
 });
 
 describe('resolvedStatusLabel', () => {
-  it('uses the option label, falling back for a blank one', () => {
-    expect(resolvedStatusLabel({ kind: 'override', option: blocked })).toBe('Blocked');
-    expect(resolvedStatusLabel({ kind: 'override', option: { ...blocked, label: '  ' } })).toBe(
-      'Untitled status'
+  it('uses the tag name, or the computed label without one', () => {
+    expect(resolvedStatusLabel({ kind: 'tag', tag: blocked })).toBe('Blocked');
+    expect(resolvedStatusLabel(resolveProjectStatus(null, [branch({ commitCount: 1 })]))).toBe(
+      'No PR yet'
     );
+    expect(resolvedStatusLabel(resolveProjectStatus(blocked, [], true, false))).toBe('Loading…');
   });
 });

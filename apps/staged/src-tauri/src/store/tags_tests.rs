@@ -873,7 +873,9 @@ fn the_frozen_defaults_are_the_seven_built_ins() {
 // Legacy import
 // =============================================================================
 
-/// Projects named after their (possibly missing) legacy selection.
+/// Projects named after their (possibly missing) legacy selection. The
+/// frozen `status_override` column is off the `Project` model, so it's
+/// written directly, the way pre-tags builds left it.
 fn projects_with_overrides(store: &Store, overrides: &[Option<&str>]) -> Vec<Project> {
     overrides
         .iter()
@@ -881,11 +883,30 @@ fn projects_with_overrides(store: &Store, overrides: &[Option<&str>]) -> Vec<Pro
         .map(|(i, selection)| {
             let p = project(store, &format!("p{i}"));
             store
-                .set_project_status_override(&p.id, *selection)
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE projects SET status_override = ?1 WHERE id = ?2",
+                    rusqlite::params![selection, p.id],
+                )
                 .unwrap();
             p
         })
         .collect()
+}
+
+fn frozen_status_override(store: &Store, project_id: &str) -> Option<String> {
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT status_override FROM projects WHERE id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn status_tags(store: &Store) -> Vec<Tag> {
@@ -1085,7 +1106,7 @@ fn a_second_import_is_a_no_op_and_status_override_stays_frozen() {
     assert_eq!(after.assignments, before.assignments);
     let overrides: Vec<Option<String>> = ps
         .iter()
-        .map(|p| store.get_project(&p.id).unwrap().unwrap().status_override)
+        .map(|p| frozen_status_override(&store, &p.id))
         .collect();
     assert_eq!(
         overrides,

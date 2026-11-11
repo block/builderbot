@@ -33,7 +33,6 @@ function mountItem(location: ProjectLocation): HTMLElement {
     subpath: null,
     createdAt: 1,
     updatedAt: 1,
-    statusOverride: null,
   } as Project;
   const target = document.createElement('div');
   document.body.appendChild(target);

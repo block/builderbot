@@ -3,7 +3,7 @@
  *
  * Listens for backend events (pr-status-changed and the store change feed's
  * project-changed / repos-changed / branch-changed / notes-changed /
- * review-changed) and
+ * review-changed / tags-changed) and
  * invalidates the corresponding caches so that stale data is never served
  * after the backend pushes an update. The store change feed publishes from
  * every mutating store method, so a write in any window (or the backend
@@ -11,7 +11,8 @@
  *
  * This is the cache leg only. The in-memory view stores subscribe to the
  * same feed themselves: projectsDataStore consumes project-changed,
- * branch-changed, and repos-changed for the project/branch/repo lists. Its
+ * branch-changed, and repos-changed for the project/branch/repo lists, and
+ * tagsStore consumes tags-changed. Their
  * event-driven refetches bypass cache reads, but this listener still protects
  * shared IDB data for the next non-forced read in this tab or another tab.
  *
@@ -31,6 +32,7 @@ import type {
   ReposChangedEvent,
   ReviewChangedEvent,
   SessionStatusPayload,
+  TagsChangedEvent,
 } from '../types';
 
 export function listenForCacheInvalidation(): UnlistenFn {
@@ -74,6 +76,16 @@ export function listenForCacheInvalidation(): UnlistenFn {
   unlisteners.push(
     listenToEvent<ReposChangedEvent>('repos-changed', () => {
       invalidateCache('get_all_repo_badges');
+    })
+  );
+
+  // Tags changed (any catalog or assignment write) → drop the one argless
+  // tag-state key, so a non-forced read that started before the write cannot
+  // land after tagsStore's forced reload and put the old snapshot back into
+  // IDB. Registered ahead of tagsStore's listener, like the others above.
+  unlisteners.push(
+    listenToEvent<TagsChangedEvent>('tags-changed', () => {
+      invalidateCache('get_tag_state');
     })
   );
 

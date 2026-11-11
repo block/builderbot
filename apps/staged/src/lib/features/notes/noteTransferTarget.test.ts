@@ -35,7 +35,6 @@ function project(overrides: Partial<Project> & Pick<Project, 'id' | 'name'>): Pr
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
-    statusOverride: null,
     ...overrides,
   };
 }

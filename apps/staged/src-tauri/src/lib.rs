@@ -710,19 +710,6 @@ async fn remove_project_repo(
     branch_teardown::remove_project_repo_impl(services, project_id, project_repo_id).await
 }
 
-/// Set or clear (`None`) the user-chosen status shown in place of a project's
-/// computed PR/cloud status.
-#[tauri::command(rename_all = "camelCase")]
-fn set_project_status_override(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    project_id: String,
-    status_override: Option<String>,
-) -> Result<(), String> {
-    get_store(&store)?
-        .set_project_status_override(&project_id, status_override.as_deref())
-        .map_err(|e| e.to_string())
-}
-
 #[tauri::command(rename_all = "camelCase")]
 fn set_primary_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2263,7 +2250,6 @@ pub fn run() {
             clear_project_repo_reason,
             remove_project_repo,
             set_primary_project_repo,
-            set_project_status_override,
             delete_project,
             // Tags
             tag_commands::get_tag_state,

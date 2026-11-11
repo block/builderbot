@@ -135,12 +135,15 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a project. Its `project_tags` rows go with it (FK cascade), so
+    /// this publishes [`StoreChange::Tags`] as well.
     pub fn delete_project(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
         self.publish(StoreChange::Project {
             project_id: Some(id.to_string()),
         });
+        self.publish(StoreChange::Tags);
         Ok(())
     }
 }

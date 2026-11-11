@@ -16,6 +16,7 @@
 //! | `Notes`       | `notes-changed`  | `{ branchId, projectId }`    |
 //! | `Review`      | `review-changed` | `{ reviewId, branchId }`     |
 //! | `Repos`       | `repos-changed`  | `{ githubRepo }`             |
+//! | `Tags`        | `tags-changed`   | `{}`                         |
 //!
 //! If the receiver falls behind the channel's capacity, the missed changes
 //! are gone — so instead of dropping them silently, the task emits
@@ -142,7 +143,8 @@ async fn run(
 /// represent them — a real mutation always knows its aggregate id, and
 /// loosening the enum would weaken that invariant across every publish site.
 /// So an all-null payload means exactly one thing: the feed lost track.
-fn lag_flush_events() -> [(&'static str, serde_json::Value); 5] {
+/// `tags-changed` carries no ids at all, so its flush payload is its usual one.
+fn lag_flush_events() -> [(&'static str, serde_json::Value); 6] {
     [
         ("project-changed", json!({ "projectId": null })),
         (
@@ -158,6 +160,7 @@ fn lag_flush_events() -> [(&'static str, serde_json::Value); 5] {
             json!({ "reviewId": null, "branchId": null }),
         ),
         ("repos-changed", json!({ "githubRepo": null })),
+        ("tags-changed", json!({})),
     ]
 }
 
@@ -191,6 +194,7 @@ fn event_for(change: &StoreChange) -> (&'static str, serde_json::Value) {
         StoreChange::Repos { github_repo } => {
             ("repos-changed", json!({ "githubRepo": github_repo }))
         }
+        StoreChange::Tags => ("tags-changed", json!({})),
     }
 }
 
@@ -265,7 +269,7 @@ mod tests {
     /// is added to this list — which forces
     /// [`the_lag_flush_covers_every_change_variants_event`] to be reconciled
     /// with [`lag_flush_events`] at the same time.
-    fn one_of_each_change() -> [StoreChange; 5] {
+    fn one_of_each_change() -> [StoreChange; 6] {
         let all = [
             StoreChange::Project { project_id: None },
             StoreChange::Branch {
@@ -281,6 +285,7 @@ mod tests {
                 branch_id: None,
             },
             StoreChange::Repos { github_repo: None },
+            StoreChange::Tags,
         ];
         for change in &all {
             match change {
@@ -289,7 +294,8 @@ mod tests {
                 | StoreChange::Branch { .. }
                 | StoreChange::Notes { .. }
                 | StoreChange::Review { .. }
-                | StoreChange::Repos { .. } => {}
+                | StoreChange::Repos { .. }
+                | StoreChange::Tags => {}
             }
         }
         all
@@ -308,6 +314,40 @@ mod tests {
             .map(|change| event_for(change).0)
             .collect();
         assert_eq!(flushed, emittable);
+    }
+
+    /// Tag writes reach the frontend as their own id-less event, never as
+    /// `project-changed` (which hard-reloads the project list), and the lag
+    /// flush covers them.
+    #[test]
+    fn tag_changes_map_to_an_empty_tags_changed_event() {
+        assert_eq!(event_for(&StoreChange::Tags), ("tags-changed", json!({})));
+        assert_eq!(lag_flush_events().len(), 6);
+        assert!(lag_flush_events().contains(&("tags-changed", json!({}))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tag_changes_coalesce_into_one_event_per_window() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(StoreChange::Tags).unwrap();
+        tx.send(StoreChange::Tags).unwrap();
+        tx.send(StoreChange::Project {
+            project_id: Some("p1".to_string()),
+        })
+        .unwrap();
+        tx.send(StoreChange::Tags).unwrap();
+        drop(tx);
+
+        let (emitted, sink) = collector();
+        run(rx, sink).await;
+
+        assert_eq!(
+            *emitted.lock().unwrap(),
+            vec![
+                ("tags-changed", json!({})),
+                ("project-changed", json!({ "projectId": "p1" })),
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]

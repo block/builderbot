@@ -29,6 +29,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use acp_client::AgentProcessEvent;
 use sha2::{Digest, Sha256};
 
 use super::enrol::Enrolment;
@@ -180,6 +181,10 @@ pub(crate) enum AuthorizationFailure {
     Expired,
     /// The user answered the consent prompt with Deny.
     Denied,
+    /// A reconnect proof that did not verify against the grant's stored
+    /// hash: the client's grant file no longer matches the row (a database
+    /// restored from elsewhere, or a file copied between machines).
+    ProofMismatch,
 }
 
 impl AuthorizationFailure {
@@ -189,6 +194,7 @@ impl AuthorizationFailure {
             Self::Revoked => "authorization_revoked",
             Self::Expired => "authorization_expired",
             Self::Denied => "authorization_denied",
+            Self::ProofMismatch => "authorization_proof_mismatch",
         }
     }
 
@@ -213,6 +219,10 @@ impl AuthorizationFailure {
                  `stagedctl connect` to ask again"
             }
             Self::Denied => "the user denied the connection request in the Staged window",
+            Self::ProofMismatch => {
+                "the reconnect proof did not verify: the local grant file does not match this \
+                 grant — run `stagedctl disconnect` then `stagedctl connect` to enrol afresh"
+            }
         }
     }
 }
@@ -417,6 +427,22 @@ impl ControlGrants {
         self.inner.lock().unwrap().agents.insert(pid, session);
     }
 
+    /// Forget `pid` if it is still registered as an agent process of
+    /// `session`'s run. A pid the kernel has since reused for another run's
+    /// agent (re-pointed by `register_agent_process`) is left to that run.
+    /// Returns whether it was forgotten.
+    pub(crate) fn deregister_agent_process(&self, pid: u32, session: &SpawnedSession) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let ours = inner
+            .agents
+            .get(&pid)
+            .is_some_and(|s| s.session_id == session.session_id && s.epoch == session.epoch);
+        if ours {
+            inner.agents.remove(&pid);
+        }
+        ours
+    }
+
     /// Forget every agent process registered for the run `(session_id,
     /// epoch)`; a successor run of the same session id keeps its own.
     /// Returns how many were forgotten.
@@ -490,19 +516,31 @@ impl SessionLease {
         &self.file
     }
 
-    /// A callback for the agent driver's spawn hook: registers each agent
-    /// process pid as this session's, so a `stagedctl` run anywhere in that
-    /// process tree is recognised as the session's whatever credential it
-    /// presents (see `ancestry`). The registrations go with the lease.
-    pub fn agent_process_observer(&self) -> Arc<dyn Fn(u32) + Send + Sync> {
+    /// A callback for the agent driver's process hook: registers each agent
+    /// process pid as this session's when it spawns, so a `stagedctl` run
+    /// anywhere in that process tree is recognised as the session's whatever
+    /// credential it presents (see `ancestry`), and forgets it when the
+    /// process exits, so a pid the kernel reuses cannot read as this
+    /// session's. Whatever is still registered goes with the lease.
+    pub fn agent_process_observer(&self) -> acp_client::AgentProcessObserver {
         let grants = self.grants.clone();
         let session = self.session.clone();
-        Arc::new(move |pid| {
-            log::info!(
-                "[control_server] session {} agent process {pid} registered",
-                session.session_id
-            );
-            grants.register_agent_process(pid, session.clone());
+        Arc::new(move |event| match event {
+            AgentProcessEvent::Spawned(pid) => {
+                log::info!(
+                    "[control_server] session {} agent process {pid} registered",
+                    session.session_id
+                );
+                grants.register_agent_process(pid, session.clone());
+            }
+            AgentProcessEvent::Exited(pid) => {
+                if grants.deregister_agent_process(pid, &session) {
+                    log::info!(
+                        "[control_server] session {} agent process {pid} exited; forgotten",
+                        session.session_id
+                    );
+                }
+            }
         })
     }
 
@@ -750,6 +788,10 @@ mod tests {
             "authorization_expired"
         );
         assert_eq!(AuthorizationFailure::Denied.code(), "authorization_denied");
+        assert_eq!(
+            AuthorizationFailure::ProofMismatch.code(),
+            "authorization_proof_mismatch"
+        );
         // Every code is one the CLI maps to exit 4 (pinned there too).
         let cli = include_str!("../../crates/stagedctl/src/client.rs");
         for failure in [
@@ -757,6 +799,7 @@ mod tests {
             AuthorizationFailure::Revoked,
             AuthorizationFailure::Expired,
             AuthorizationFailure::Denied,
+            AuthorizationFailure::ProofMismatch,
         ] {
             assert!(
                 cli.contains(&format!("\"{}\",", failure.code())),
@@ -1014,10 +1057,10 @@ mod tests {
             mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 7))
                 .unwrap();
         let observe = lease.agent_process_observer();
-        observe(500);
+        observe(AgentProcessEvent::Spawned(500));
         // A pikchr re-connect spawns a second agent process under the same
         // lease; both belong to the run.
-        observe(600);
+        observe(AgentProcessEvent::Spawned(600));
         let expected = SpawnedSession {
             session_id: "s1".to_string(),
             epoch: 7,
@@ -1032,7 +1075,7 @@ mod tests {
         let successor =
             mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 8))
                 .unwrap();
-        successor.agent_process_observer()(700);
+        successor.agent_process_observer()(AgentProcessEvent::Spawned(700));
         drop(lease);
         assert_eq!(grants.spawned_session_of(500), None);
         assert_eq!(grants.spawned_session_of(600), None);
@@ -1043,6 +1086,52 @@ mod tests {
         );
         assert_eq!(grants.deregister_session_processes("s1", 8), 1);
         assert_eq!(grants.spawned_session_of(700), None);
+    }
+
+    /// An agent process that exits is forgotten at once, while its lease
+    /// (and the session's other processes) live on; and an exit reported
+    /// for a pid the kernel has since handed to a successor run's agent
+    /// leaves the successor's registration alone.
+    #[test]
+    fn an_agent_exit_unregisters_its_pid_while_the_lease_still_lives() {
+        let (_root, sessions) = sessions_dir();
+        let grants = ControlGrants::default();
+        let transport = unix_transport(sessions.parent().unwrap());
+        let lease =
+            mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 7))
+                .unwrap();
+        let observe = lease.agent_process_observer();
+        observe(AgentProcessEvent::Spawned(500));
+        observe(AgentProcessEvent::Spawned(600));
+        observe(AgentProcessEvent::Exited(500));
+        assert_eq!(
+            grants.spawned_session_of(500),
+            None,
+            "the exited pid is gone"
+        );
+        assert_eq!(
+            grants.spawned_session_of(600).map(|s| s.epoch),
+            Some(7),
+            "the session's other process stays"
+        );
+        assert!(
+            grants.authorize(lease.token()).is_ok(),
+            "the lease is untouched by a process exit"
+        );
+
+        // Pid reuse: the successor run's agent gets pid 500 before the
+        // predecessor's exit for it is reported.
+        let successor =
+            mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 8))
+                .unwrap();
+        successor.agent_process_observer()(AgentProcessEvent::Spawned(500));
+        observe(AgentProcessEvent::Exited(500));
+        assert_eq!(
+            grants.spawned_session_of(500).map(|s| s.epoch),
+            Some(8),
+            "a reused pid belongs to the run that registered it last"
+        );
+        assert_eq!(grants.deregister_session_processes("s1", 8), 1);
     }
 
     #[test]

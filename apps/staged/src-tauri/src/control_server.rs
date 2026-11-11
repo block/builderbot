@@ -29,7 +29,10 @@
 //! owner-only discovery file. Every request must then carry it as
 //! `Authorization: Bearer`, checked in middleware before the body is read.
 //! Staged ships on macOS only, so this path exists for CI and for a home
-//! directory with a very long name; the Unix socket is the design.
+//! directory with a very long name; the Unix socket is the design. The
+//! process-ancestry gate below needs the peer pid only a socket reports, so
+//! it exists only on the Unix-socket transport: over the TCP fallback the
+//! enrolment routes keep the credential-keyed refusal alone.
 //!
 //! **Who may call, and with what reach.** Every `POST /api/invoke` must
 //! carry `Authorization: Bearer <token>` naming a live [`ControlGrant`] in
@@ -1106,6 +1109,7 @@ mod tests {
                         access: grants::Access::ReadWrite,
                         peer_pid: None,
                         peer_parent: None,
+                        peer_orphaned: false,
                     },
                     crate::store::now_timestamp(),
                 )
@@ -1222,6 +1226,7 @@ mod tests {
                         access: grants::Access::ReadWrite,
                         peer_pid: None,
                         peer_parent: None,
+                        peer_orphaned: false,
                     },
                     crate::store::now_timestamp(),
                 )

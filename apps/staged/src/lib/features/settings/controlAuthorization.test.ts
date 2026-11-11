@@ -12,6 +12,7 @@ function request(
     access: 'write',
     peerPid: 4242,
     peerParent: 'zsh',
+    orphaned: false,
     requestedAt: 1_000,
     expiresAt: Date.now() + 5 * 60_000,
     ...overrides,

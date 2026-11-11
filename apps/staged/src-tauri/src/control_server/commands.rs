@@ -33,15 +33,14 @@ pub fn list_pending_control_authorizations(
 /// `authorization_denied`. Dismissing the dialog denies.
 #[tauri::command]
 pub fn answer_control_authorization(
-    app_handle: AppHandle,
     grants: State<'_, ControlGrants>,
     request_id: String,
     approve: bool,
 ) -> Result<(), String> {
     if approve {
-        consent::approve(&app_handle, &grants, &request_id)
+        consent::approve(&grants, &request_id)
     } else {
-        consent::deny(&app_handle, &grants, &request_id)
+        consent::deny(&grants, &request_id)
     }
 }
 

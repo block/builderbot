@@ -1274,6 +1274,11 @@ export interface ControlAuthorizationRequest {
   /** The requesting process and its parent's command name, shown as information only. */
   peerPid: number | null;
   peerParent: string | null;
+  /**
+   * The asking process's parent has already exited (or could not be read):
+   * it may have been backgrounded from an agent session. A notice, never a decision.
+   */
+  orphaned: boolean;
   /** ms since the epoch. */
   requestedAt: number;
   /** ms since the epoch; the request lapses unanswered after this. */

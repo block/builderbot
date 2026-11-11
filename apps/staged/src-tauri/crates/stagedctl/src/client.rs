@@ -58,6 +58,7 @@ pub const AUTHORIZATION_CODES: &[&str] = &[
     "authorization_denied",
     "authorization_revoked",
     "authorization_expired",
+    "authorization_proof_mismatch",
     "scope_denied",
 ];
 
@@ -693,12 +694,14 @@ impl Client {
 
     /// Authenticate with the freshest usable grant on this machine, if any.
     /// A grant the app no longer knows (`authorization_required`: a reset
-    /// database, say) is skipped silently; one it revoked or let expire, or
-    /// one whose reconnect failed for any other reason (a transport fault,
-    /// a malformed answer, a renewal the client refused), is noted on stderr
-    /// — the user should hear that — and skipped for the next, since one
-    /// bad grant file must not block one approved later under another name
-    /// (grant files are only removed by `disconnect`). If nothing attaches,
+    /// database, say) is skipped silently; one it revoked or let expire, one
+    /// whose file no longer matches the app's record
+    /// (`authorization_proof_mismatch`), or one whose reconnect failed for
+    /// any other reason (a transport fault, a malformed answer, a renewal
+    /// the client refused), is noted on stderr — the user should hear that —
+    /// and skipped for the next, since one bad grant file must not block one
+    /// approved later under another name (grant files are only removed by
+    /// `disconnect`). If nothing attaches,
     /// the first authorization refusal is the error (exit 4), else the first
     /// other failure (exit 2); with only unknown grants, or none, the client
     /// keeps whatever bearer the control file gave it and the app's own
@@ -729,6 +732,19 @@ impl Client {
                 }
                 Err(CtlError::Authorization { code, .. }) if code == "authorization_required" => {
                     continue;
+                }
+                Err(e @ CtlError::Authorization { .. })
+                    if matches!(&e, CtlError::Authorization { code, .. }
+                        if code == "authorization_proof_mismatch") =>
+                {
+                    let client = shell_single_quote(&grant.client);
+                    eprintln!(
+                        "stagedctl: grant {} ({}) no longer matches the app's record ({e}); \
+                         trying the next grant — run `stagedctl disconnect --client {client}` \
+                         then `stagedctl connect --client {client}` to enrol afresh",
+                        grant.grant_id, grant.client
+                    );
+                    refused.get_or_insert(e);
                 }
                 Err(e @ CtlError::Authorization { .. }) => {
                     eprintln!(
@@ -1591,7 +1607,8 @@ mod tests {
                 } else {
                     (
                         401,
-                        r#"{"error":"bad proof","code":"authorization_required"}"#.to_string(),
+                        r#"{"error":"the reconnect proof did not verify","code":"authorization_proof_mismatch"}"#
+                            .to_string(),
                     )
                 }
             } else if head.starts_with("POST /api/disconnect") {
@@ -1912,6 +1929,60 @@ mod tests {
             err.to_string().starts_with("authorization_revoked:"),
             "{err}"
         );
+    }
+
+    /// A grant file whose secret no longer matches the app's row (the app
+    /// knows the grant id, so the challenge succeeds, but the proof fails)
+    /// is a refusal in its own right — `authorization_proof_mismatch`, not
+    /// the silent skip an unknown grant gets — so when nothing else
+    /// attaches the user learns to `disconnect` then `connect`, and a later
+    /// grant under another name still attaches.
+    #[test]
+    fn a_grant_file_that_no_longer_matches_is_a_refusal_not_a_silent_skip() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        // Only the mismatched grant: the refusal is the error, exit 4.
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("c0de".to_string(), "app-side-secret".to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(
+            dir.path(),
+            &grant_file("c0de", "stale-local-secret", now + 9_000),
+        )
+        .unwrap();
+        let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert!(
+            err.to_string().starts_with("authorization_proof_mismatch:"),
+            "{err}"
+        );
+
+        // A matching grant written earlier (so searched second) attaches.
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![
+                ("c0de".to_string(), "app-side-secret".to_string()),
+                ("600d".to_string(), "s2".to_string()),
+            ],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(
+            dir.path(),
+            &grant_file("c0de", "stale-local-secret", now + 9_000),
+        )
+        .unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("600d", "s2", now + 5_000))
+            .unwrap();
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.bearer(), Some("live-600d"));
     }
 
     #[test]

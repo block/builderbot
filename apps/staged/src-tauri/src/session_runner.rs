@@ -1786,10 +1786,10 @@ pub fn start_session(
                     session_env,
                 ))
                 // Each agent process the driver spawns is registered as this
-                // session's for the lease's life, so the control server can
-                // tell a `stagedctl` run from inside this session's process
-                // tree apart from the user's own, whatever credential it
-                // presents (see `control_server::ancestry`).
+                // session's until it exits (or the lease ends), so the
+                // control server can tell a `stagedctl` run from inside this
+                // session's process tree apart from the user's own, whatever
+                // credential it presents (see `control_server::ancestry`).
                 .with_agent_process_observer(
                     control_lease
                         .as_ref()

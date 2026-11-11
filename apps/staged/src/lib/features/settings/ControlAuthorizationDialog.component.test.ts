@@ -64,6 +64,7 @@ function request(
     access: 'read',
     peerPid: 4242,
     peerParent: 'zsh',
+    orphaned: false,
     requestedAt: 0,
     expiresAt: Date.now() + 60_000,
     ...overrides,
@@ -114,6 +115,20 @@ describe('ControlAuthorizationDialog', () => {
     ).toBe('the project “Widgets”');
     expect(host.querySelector('[data-testid="control-authorization-peer"]')?.textContent).toBe(
       'Requested by process 4242 (zsh) on this Mac.'
+    );
+    expect(host.querySelector('[data-testid="control-authorization-orphaned"]')).toBeNull();
+  });
+
+  it('warns when the asking process has been orphaned', async () => {
+    controller.pending = request({ peerParent: null, orphaned: true });
+    render();
+    await tick();
+    expect(host.querySelector('[data-testid="control-authorization-peer"]')?.textContent).toBe(
+      'Requested by process 4242 on this Mac.'
+    );
+    const notice = host.querySelector('[data-testid="control-authorization-orphaned"]');
+    expect(notice?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      "The asking process's parent has already exited, so where it was started from cannot be shown. It may have been backgrounded from an agent session; approve only if you ran this command yourself."
     );
   });
 

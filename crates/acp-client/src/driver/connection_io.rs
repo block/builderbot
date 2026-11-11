@@ -31,6 +31,26 @@ pub(super) fn spawn_stderr_reader(
     });
 }
 
+/// Tell `observer` the agent process `pid` has spawned, and — from a local
+/// task that waits on `exited` — that it has gone. The exit is observed
+/// through the stderr EOF that cancels `exited` (see
+/// [`spawn_stderr_reader`]), so it needs no extra wait on the child and
+/// fires whether the process died, was stopped, or was torn down with the
+/// connection.
+pub(super) fn observe_agent_process(
+    observer: &AgentProcessObserver,
+    pid: u32,
+    exited: &CancellationToken,
+) {
+    observer(AgentProcessEvent::Spawned(pid));
+    let observer = Arc::clone(observer);
+    let exited = exited.clone();
+    tokio::task::spawn_local(async move {
+        exited.cancelled().await;
+        observer(AgentProcessEvent::Exited(pid));
+    });
+}
+
 /// The agent's stdout as the JSON-RPC transport reads it, normalized on a
 /// local task.
 ///
@@ -170,4 +190,66 @@ pub(super) fn staged_client(
             },
             agent_client_protocol::on_receive_notification!(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::sync::Mutex;
+
+    /// The observer hears each local agent process twice: its pid when the
+    /// spawn returns, and the same pid once the stderr reader sees the
+    /// process gone. Staged keys its control-socket consent gate on the
+    /// first and forgets the pid on the second, so a reused pid cannot
+    /// read as a running session's agent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn observer_is_told_of_the_spawn_and_then_the_exit() {
+        let seen: Arc<Mutex<Vec<AgentProcessEvent>>> = Arc::default();
+        let observer: AgentProcessObserver = {
+            let seen = Arc::clone(&seen);
+            Arc::new(move |event| seen.lock().unwrap().push(event))
+        };
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut child = tokio::process::Command::new("sh")
+                    .args(["-c", "echo spawned >&2; exit 0"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("sh spawns");
+                let pid = child.id().expect("a pid before the child is reaped");
+                let exited = CancellationToken::new();
+                observe_agent_process(&observer, pid, &exited);
+                assert_eq!(
+                    *seen.lock().unwrap(),
+                    vec![AgentProcessEvent::Spawned(pid)],
+                    "the spawn is reported synchronously"
+                );
+                spawn_stderr_reader(
+                    child.stderr.take().expect("piped stderr"),
+                    "FakeAgent".to_string(),
+                    "s1".to_string(),
+                    exited.clone(),
+                    TransportMonitor::new(),
+                );
+                tokio::time::timeout(Duration::from_secs(10), exited.cancelled())
+                    .await
+                    .expect("the stderr reader sees the EOF");
+                // The exit task runs on the next scheduler pass.
+                while seen.lock().unwrap().len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    *seen.lock().unwrap(),
+                    vec![
+                        AgentProcessEvent::Spawned(pid),
+                        AgentProcessEvent::Exited(pid)
+                    ]
+                );
+                let _ = child.wait().await;
+            })
+            .await;
+    }
 }

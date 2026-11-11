@@ -32,8 +32,10 @@ Exit codes:
   3  no running Staged app, or the app was updated (restart Staged)
   4  not authorized: no credential (run `stagedctl connect` outside a
      session), the request was denied, the credential was revoked or
-     expired, or the command addresses something outside the
-     credential's scope (report it; do not retry)
+     expired, a grant file no longer matches the app's record (run
+     `stagedctl disconnect` then `stagedctl connect`), or the command
+     addresses something outside the credential's scope (report it; do
+     not retry)
 
 Usage: stagedctl [OPTIONS] <COMMAND>
 

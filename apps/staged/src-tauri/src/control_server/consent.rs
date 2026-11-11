@@ -130,9 +130,9 @@ fn ask_natively(app: &AppHandle, pending: &PendingAuthorization) {
             let approved =
                 matches!(result, MessageDialogResult::Custom(label) if label == APPROVE_BUTTON);
             let outcome = if approved {
-                approve(&app, &grants, &request_id)
+                approve(&grants, &request_id)
             } else {
-                deny(&app, &grants, &request_id)
+                deny(&grants, &request_id)
             };
             if let Err(e) = outcome {
                 log::warn!("[control_server] native consent answer not recorded: {e}");
@@ -151,9 +151,18 @@ fn native_prompt_message(pending: &PendingAuthorization) -> String {
         Access::ReadOnly => "read it",
         Access::ReadWrite => "read it and start, cancel and attach to work",
     };
-    let peer = match (request.peer_pid, &request.peer_parent) {
-        (Some(pid), Some(parent)) => format!("\n\nAsked by process {pid} (run from {parent})."),
-        (Some(pid), None) => format!("\n\nAsked by process {pid}."),
+    let peer = match (
+        request.peer_pid,
+        &request.peer_parent,
+        request.peer_orphaned,
+    ) {
+        (Some(pid), Some(parent), _) => format!("\n\nAsked by process {pid} (run from {parent})."),
+        (Some(pid), None, true) => format!(
+            "\n\nAsked by process {pid}, whose parent process has already exited — it may have \
+             been backgrounded from an agent session. Approve only if you ran this command \
+             yourself."
+        ),
+        (Some(pid), None, false) => format!("\n\nAsked by process {pid}."),
         _ => String::new(),
     };
     format!(
@@ -167,11 +176,7 @@ fn native_prompt_message(pending: &PendingAuthorization) -> String {
 /// Approve `request_id`: record the decision for the waiting CLI to
 /// collect. Nothing is minted here — see [`mint_collected_approval`] — so
 /// an approval nobody collects leaves no trace.
-pub(crate) fn approve(
-    app: &AppHandle,
-    grants: &ControlGrants,
-    request_id: &str,
-) -> Result<(), String> {
+pub(crate) fn approve(grants: &ControlGrants, request_id: &str) -> Result<(), String> {
     let pending = grants
         .enrolment()
         .answer(request_id, Decision::Approved, now_timestamp())
@@ -181,7 +186,6 @@ pub(crate) fn approve(
          minted when the client collects them",
         pending.request.client
     );
-    let _ = app;
     Ok(())
 }
 
@@ -234,11 +238,7 @@ pub(crate) fn mint_collected_approval(
 }
 
 /// Deny `request_id`; the waiting CLI reads `authorization_denied`.
-pub(crate) fn deny(
-    app: &AppHandle,
-    grants: &ControlGrants,
-    request_id: &str,
-) -> Result<(), String> {
+pub(crate) fn deny(grants: &ControlGrants, request_id: &str) -> Result<(), String> {
     let pending = grants
         .enrolment()
         .answer(request_id, Decision::Denied, now_timestamp())
@@ -247,7 +247,6 @@ pub(crate) fn deny(
         "[control_server] denied connected app {:?}",
         pending.request.client
     );
-    let _ = app;
     Ok(())
 }
 
@@ -261,17 +260,30 @@ fn answer_error_message(error: AnswerError) -> String {
     }
 }
 
-/// Revoke grant `grant_id`: stamp the row, drop every live bearer, tell the
-/// Settings panel. Returns whether the row was live.
+/// Revoke grant `grant_id` from the Settings panel: stamp the row (inline;
+/// a Tauri command runs off the async runtime already), then retire it.
+/// Returns whether the row was live.
 pub(crate) fn revoke_grant(
     app: &AppHandle,
     grants: &ControlGrants,
     grant_id: &str,
 ) -> Result<bool, String> {
-    let store = store_of(app)?;
-    let was_live = store
+    let was_live = store_of(app)?
         .revoke_control_grant(grant_id)
         .map_err(|e| e.to_string())?;
+    retire_revoked_grant(app, grants, grant_id, was_live);
+    Ok(was_live)
+}
+
+/// The in-memory half of a revocation, after the row has been stamped
+/// (`was_live` is what that write reported): drop every live bearer, forget
+/// the touch throttle, and tell the Settings panel when anything changed.
+pub(crate) fn retire_revoked_grant(
+    app: &AppHandle,
+    grants: &ControlGrants,
+    grant_id: &str,
+    was_live: bool,
+) {
     let bearers = grants.revoke_app_grant(grant_id);
     grants.enrolment().forget_touch(grant_id);
     if was_live || bearers > 0 {
@@ -280,7 +292,6 @@ pub(crate) fn revoke_grant(
         );
         emit_grants_changed(app);
     }
-    Ok(was_live)
 }
 
 /// The Settings rows: every unrevoked grant with its project's current name
@@ -361,6 +372,7 @@ mod tests {
                 access,
                 peer_pid: Some(4242),
                 peer_parent: Some("zsh".to_string()),
+                peer_orphaned: false,
             },
             requested_at: 0,
             expires_at: 1,
@@ -383,6 +395,31 @@ mod tests {
         let text = native_prompt_message(&pending(Scope::AllProjects, None, Access::ReadWrite));
         assert!(text.contains("every project"), "{text}");
         assert!(text.contains("start, cancel"), "{text}");
+    }
+
+    /// The native fallback says plainly when the asker's parent is gone —
+    /// the shape a `stagedctl connect` backgrounded from an agent session
+    /// takes — and says nothing extra for a peer that is merely unknown.
+    #[test]
+    fn native_prompt_flags_an_orphaned_asker() {
+        let mut orphaned = pending(Scope::AllProjects, None, Access::ReadWrite);
+        orphaned.request.peer_parent = None;
+        orphaned.request.peer_orphaned = true;
+        let text = native_prompt_message(&orphaned);
+        assert!(
+            text.contains("process 4242, whose parent process has already exited"),
+            "{text}"
+        );
+        assert!(
+            text.contains("backgrounded from an agent session"),
+            "{text}"
+        );
+
+        let mut unknown_parent = pending(Scope::AllProjects, None, Access::ReadWrite);
+        unknown_parent.request.peer_parent = None;
+        let text = native_prompt_message(&unknown_parent);
+        assert!(text.ends_with("Asked by process 4242."), "{text}");
+        assert!(!text.contains("already exited"), "{text}");
     }
 
     #[test]

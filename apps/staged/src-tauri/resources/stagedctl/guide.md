@@ -75,9 +75,11 @@ The CLI needs the spawning app instance to be alive and reachable over
 its control socket. Exit code 3 means "not running under a Staged app" (or a protocol
 mismatch after the app updated); that is not retryable from inside this
 session — report it instead of retrying. Exit code 4 means the app refused
-the credential (none, revoked, expired, or the user denied a `connect`
-request) or the command addressed something outside its scope; that is a
-deliberate boundary, not a transient fault — report it, do not retry or
-work around it. The one exception is `authorization_required` outside a
-spawned session, which simply means `stagedctl connect` has not been
-approved yet.
+the credential (none, revoked, expired, a grant file that no longer matches
+the app's record, or the user denied a `connect` request) or the command
+addressed something outside its scope; that is a deliberate boundary, not a
+transient fault — report it, do not retry or work around it. The one
+exception is `authorization_required` outside a spawned session, which
+simply means `stagedctl connect` has not been approved yet; a mismatched
+grant file (`authorization_proof_mismatch`) is cleared by the user running
+`stagedctl disconnect` then `stagedctl connect` from their own terminal.

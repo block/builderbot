@@ -83,6 +83,11 @@ pub(crate) struct ConnectRequest {
     /// The name of that process's parent (the shell or agent that ran the
     /// CLI), one level up. Information for the dialog only.
     pub peer_parent: Option<String>,
+    /// The peer's parent had already exited (it has re-parented to pid 1)
+    /// or could not be read — the shape a double-forked `stagedctl` from an
+    /// agent session takes, where the ancestry gate cannot see the session.
+    /// Shown to the user as a notice; never a decision.
+    pub peer_orphaned: bool,
 }
 
 /// An approval's credentials, handed to the CLI once.
@@ -126,6 +131,7 @@ impl PendingAuthorization {
             access: self.request.access.wire(),
             peer_pid: self.request.peer_pid,
             peer_parent: self.request.peer_parent.clone(),
+            orphaned: self.request.peer_orphaned,
             requested_at: self.requested_at,
             expires_at: self.expires_at,
         }
@@ -146,6 +152,9 @@ pub struct ControlAuthorizationRequest {
     pub access: &'static str,
     pub peer_pid: Option<i32>,
     pub peer_parent: Option<String>,
+    /// The asking process's parent has already exited (or could not be
+    /// read): it may have been backgrounded from an agent session.
+    pub orphaned: bool,
     pub requested_at: i64,
     pub expires_at: i64,
 }
@@ -716,6 +725,9 @@ pub(super) async fn connect(
             .flatten(),
         None => None,
     };
+    // A known peer with no readable parent has been orphaned: double-forked
+    // from a shell (an agent's included) so the ancestry walk ends at pid 1.
+    let peer_orphaned = peer_pid.is_some() && peer_parent.is_none();
     let request = ConnectRequest {
         client,
         scope,
@@ -723,6 +735,7 @@ pub(super) async fn connect(
         access,
         peer_pid,
         peer_parent,
+        peer_orphaned,
     };
     let pending = match state.grants.enrolment().request(request, now_timestamp()) {
         Ok(pending) => pending,
@@ -939,12 +952,9 @@ async fn verify_proof(
         &body.nonce,
         &body.proof,
     ) {
-        return Err(Box::new(authorization_response(
-            StatusCode::UNAUTHORIZED,
-            AuthorizationFailure::Unknown.code(),
-            "the reconnect proof did not verify; the local grant file does not match this \
-             grant — run `stagedctl disconnect` then `stagedctl connect`",
-        )));
+        // Its own code, so the CLI can tell a stale grant file apart from a
+        // grant the app simply never issued and say so on stderr.
+        return Err(Box::new(refusal(AuthorizationFailure::ProofMismatch)));
     }
     Ok(record)
 }
@@ -1024,8 +1034,18 @@ pub(super) async fn disconnect(
         Ok(record) => record,
         Err(response) => return *response,
     };
-    match consent::revoke_grant(&state.app_handle, &state.grants, &record.id) {
-        Ok(revoked) => Json(serde_json::json!({ "revoked": revoked })).into_response(),
+    let grant_id = record.id.clone();
+    let revoked = with_store(&state, move |store| {
+        store
+            .revoke_control_grant(&grant_id)
+            .map_err(|e| e.to_string())
+    })
+    .await;
+    match revoked {
+        Ok(was_live) => {
+            consent::retire_revoked_grant(&state.app_handle, &state.grants, &record.id, was_live);
+            Json(serde_json::json!({ "revoked": was_live })).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
@@ -1127,7 +1147,33 @@ mod tests {
             access: Access::ReadWrite,
             peer_pid: Some(4242),
             peer_parent: Some("zsh".to_string()),
+            peer_orphaned: false,
         }
+    }
+
+    /// The dialog payload carries the orphan flag explicitly, so both the
+    /// native text and the Svelte dialog can say the asker's parent is gone
+    /// (the one cheap way round the ancestry gate) without re-deriving it.
+    #[test]
+    fn the_dialog_payload_flags_an_orphaned_asker() {
+        let mut orphaned = request("bg-agent");
+        orphaned.peer_parent = None;
+        orphaned.peer_orphaned = true;
+        let enrol = Enrolment::default();
+        let parked = enrol.request(orphaned, 1_000).unwrap();
+        let summary = parked.summary();
+        assert!(summary.orphaned);
+        assert_eq!(summary.peer_pid, Some(4242));
+        assert_eq!(summary.peer_parent, None);
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["orphaned"], serde_json::Value::Bool(true));
+
+        let parked = enrol.request(request("fg-agent"), 1_001).unwrap();
+        assert!(!parked.summary().orphaned);
+        assert_eq!(
+            serde_json::to_value(parked.summary()).unwrap()["orphaned"],
+            serde_json::Value::Bool(false)
+        );
     }
 
     #[test]

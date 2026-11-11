@@ -4,8 +4,8 @@
 // ones, opened and clicked the way a user would.
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DeleteTagGroupMode, NewTag, TagState } from '../../../types';
-import { withTagMoved, withoutGroup, withoutTag } from '../../tags/tagCatalogPatches';
+import type { DeleteTagGroupMode, NewTag, TagColor, TagState } from '../../../types';
+import { withTagMoved, withTagValue, withoutGroup, withoutTag } from '../../tags/tagCatalogPatches';
 import { scopeIds, tagState } from '../../tags/testStubs/tagFixtures';
 
 const { backend, toastError } = vi.hoisted(() => ({
@@ -33,7 +33,9 @@ const commandsMock = vi.hoisted(() => ({
   deleteTagGroup: vi.fn(async (_groupId: string, _mode: DeleteTagGroupMode) => {}),
   moveTag: vi.fn(async (_tagId: string, _groupId: string | null, _index: number) => {}),
   createTag: vi.fn(),
-  updateTag: vi.fn(async () => {}),
+  updateTag: vi.fn(
+    async (_tagId: string, _value: { name: string; color: TagColor; icon: string | null }) => {}
+  ),
   deleteTag: vi.fn(async (_tagId: string) => {}),
   renameTagGroup: vi.fn(async () => {}),
   setIconTagGroup: vi.fn(async () => {}),
@@ -150,6 +152,9 @@ beforeEach(() => {
   commandsMock.deleteTag.mockImplementation(async (tagId: string) => {
     backend.state = withoutTag(backend.state, tagId);
   });
+  commandsMock.updateTag.mockImplementation(async (tagId, value) => {
+    backend.state = withTagValue(backend.state, tagId, value);
+  });
 });
 
 afterEach(() => {
@@ -247,7 +252,94 @@ describe('TagsSettingsPanel', () => {
     });
   });
 
+  describe('editing a tag', () => {
+    it('keeps a rename when a colour is picked before the rename has saved', async () => {
+      let finishRename!: () => void;
+      commandsMock.updateTag.mockImplementationOnce(
+        (tagId, value) =>
+          new Promise<void>((resolve) => {
+            finishRename = () => {
+              backend.state = withTagValue(backend.state, tagId, value);
+              resolve();
+            };
+          })
+      );
+      await mountPanel(tagState());
+      const input = row('idea').querySelector<HTMLInputElement>('input[aria-label="Tag name"]')!;
+
+      // Rename, then tap a swatch before the rename's write has come back:
+      // on touch, blur and click fire back to back.
+      input.value = 'Spark';
+      input.dispatchEvent(new FocusEvent('blur'));
+      row('idea').querySelector<HTMLButtonElement>('button[aria-label="red"]')!.click();
+      await settle();
+
+      // The colour pick waits for the rename rather than racing it.
+      expect(commandsMock.updateTag.mock.calls).toEqual([
+        ['idea', { name: 'Spark', color: 'gray', icon: null }],
+      ]);
+
+      finishRename();
+      await settle();
+
+      // Then it is built on the rename's result, so neither edit is lost.
+      expect(commandsMock.updateTag.mock.calls).toEqual([
+        ['idea', { name: 'Spark', color: 'gray', icon: null }],
+        ['idea', { name: 'Spark', color: 'red', icon: null }],
+      ]);
+      expect(input.value).toBe('Spark');
+      expect(tagsStore.tagsById.get('idea')).toMatchObject({ name: 'Spark', color: 'red' });
+    });
+  });
+
   describe('moving a tag', () => {
+    it('queues quick Move down presses, each from where the last left the tag', async () => {
+      const finishes: (() => void)[] = [];
+      commandsMock.moveTag.mockImplementation(
+        (tagId, groupId, index) =>
+          new Promise<void>((resolve) => {
+            finishes.push(() => {
+              backend.state = withTagMoved(backend.state, { tagId, groupId, index });
+              resolve();
+            });
+          })
+      );
+      const root = await mountPanel(tagState());
+
+      for (let i = 0; i < 2; i++) {
+        const content = await openMenu(
+          row('idea').querySelector<HTMLElement>('.tag-row-menu-trigger')!
+        );
+        menuItem(content, 'Move down').click();
+        await settle();
+      }
+
+      // Both presses show at once, the second stepping from where the first
+      // put the tag, and the backend sees them one at a time, in order.
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Done', 'Idea']);
+      expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+
+      finishes[0]();
+      await settle();
+      expect(commandsMock.moveTag.mock.calls).toEqual([
+        ['idea', 'status', 1],
+        ['idea', 'status', 2],
+      ]);
+      // The first write landing doesn't throw the second's move away.
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Done', 'Idea']);
+
+      finishes[1]();
+      await settle();
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Done', 'Idea']);
+      expect(scopeIds(tagsStore.snapshot, 'status')).toEqual(['doing', 'done', 'idea']);
+
+      // Nowhere further down to go.
+      const content = await openMenu(
+        row('idea').querySelector<HTMLElement>('.tag-row-menu-trigger')!
+      );
+      expect(menuItem(content, 'Move down').hasAttribute('data-disabled')).toBe(true);
+    });
+
     it('reorders within a group by drag, showing the new order at once', async () => {
       let finish!: () => void;
       commandsMock.moveTag.mockImplementationOnce(

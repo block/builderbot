@@ -185,7 +185,7 @@
   // window-local; see windowTitle.ts for the format and the IPC guards.
   // =========================================================================
   $effect(() => {
-    void applyWindowTitle(formatWindowTitle(projectFiltersStore.activeFilters));
+    void applyWindowTitle(formatWindowTitle(projectFiltersStore.activeFilters, tagsStore.tagsById));
   });
 
   // Refresh git state (TTL-gated) for the selected project's branches when the

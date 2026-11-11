@@ -4,9 +4,12 @@
 
   Projects carry a tag by id, so an edit here shows on every project at once.
   Each edit is a backend write, so the name saves on blur or Enter rather
-  than per keystroke, and Escape puts it back. The handle drags the row to
-  reorder it or move it to another group; the ⋯ menu does the same from the
-  keyboard or a touch screen.
+  than per keystroke, and Escape puts it back. Edits send only the field
+  they change (tagActions.editTag fills in the rest from the store once the
+  writes before it settle), so a rename followed at once by a colour or icon
+  pick keeps both. The handle drags the row to reorder it or move it to
+  another group; the ⋯ menu does the same from the keyboard or a touch
+  screen.
 -->
 <script lang="ts">
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
@@ -64,12 +67,7 @@
   let dropPlace = $derived(editor.dropPlaceFor(tag.id));
 
   function save(patch: Partial<TagValue>): Promise<boolean> {
-    return tagActions.updateTag(tag, {
-      name: tag.name,
-      color: tag.color,
-      icon: tag.icon,
-      ...patch,
-    });
+    return tagActions.editTag(tag.id, patch);
   }
 
   async function commitName(input: HTMLInputElement) {

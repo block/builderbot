@@ -2,11 +2,14 @@
  * Settings › Tags' state and actions, shared by the panel's sections and
  * rows so they don't thread a dozen callbacks through each other.
  *
- * Catalog writes go through tagActions, which awaits the backend and then
- * patches tagsStore. Tag moves (drag and the row menu) also show at once:
- * the editor's view of the catalog follows the store's snapshot but a move
- * reassigns it ahead of the write (the PinnedRepoCards derived-override
- * pattern), until the store catches up or the write fails.
+ * Catalog writes go through tagActions, which queues them, awaits the
+ * backend and then patches tagsStore. Tag moves (drag and the row menu) also
+ * show at once: the editor's view of the catalog is the store's snapshot
+ * with the moves still in flight applied on top, in order. Each move is
+ * resolved against that view, so Move down pressed three times quickly
+ * steps from where the last press left the tag, and leaves the list once its
+ * write lands (the store then holds it). A failed move clears them all, since
+ * the later ones were resolved against an order that never happened.
  *
  * Create one per mounted panel; its $derived fields belong to that
  * component.
@@ -18,7 +21,7 @@ import type { DeleteTagGroupMode, Tag, TagGroup } from '../../../types';
 import { projectsDataStore } from '../../../stores/projectsData.svelte';
 import { tagsStore } from '../../../stores/tags.svelte';
 import { tagActions } from '../../tags/tagActions.svelte';
-import { withTagMoved } from '../../tags/tagCatalogPatches';
+import { withTagMoved, type TagMove } from '../../tags/tagCatalogPatches';
 import {
   resolveTagDrop,
   stepTarget,
@@ -55,8 +58,13 @@ export const UNGROUPED_LABEL = 'Ungrouped';
 const NEW_TAG_NAME = 'New tag';
 
 export class TagsEditor {
-  /** The store's snapshot, or a tag move applied ahead of it. */
-  private view = $derived(tagsStore.snapshot);
+  /** Moves whose writes are in flight, oldest first. */
+  private pendingMoves = $state<readonly TagMove[]>([]);
+
+  /** The store's snapshot with the pending moves applied on top. */
+  private readonly view = $derived(
+    this.pendingMoves.reduce((state, move) => withTagMoved(state, move), tagsStore.snapshot)
+  );
 
   /** The catalog every section renders. */
   readonly catalog: TagCatalog = $derived(indexTagCatalog(this.view));
@@ -184,11 +192,16 @@ export class TagsEditor {
   }
 
   private async applyMove(move: ResolvedTagMove, refocus: boolean): Promise<void> {
-    this.view = withTagMoved(this.view, move);
+    const pending: TagMove = { tagId: move.tagId, groupId: move.groupId, index: move.index };
+    this.pendingMoves = [...this.pendingMoves, pending];
     // WebKit drops focus from a node a keyed {#each} moves; put it back on
     // the row's menu so Move up / Move down can repeat from the keyboard.
     if (refocus) void focusAfterRender(tagMenuTriggerId(move.tagId));
-    if (!(await tagActions.moveTag(move))) this.view = tagsStore.snapshot;
+    const moved = await tagActions.moveTag(pending);
+    // Once it lands the store's own patch holds the move, so the overlay
+    // can go. A failure's refetch brings server truth; the later moves were
+    // resolved against an order that never happened, so they go too.
+    this.pendingMoves = moved ? this.pendingMoves.filter((m) => m !== pending) : [];
   }
 
   // ── Drag and drop ──

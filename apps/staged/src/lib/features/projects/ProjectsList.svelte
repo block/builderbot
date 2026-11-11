@@ -5,8 +5,6 @@
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import Columns3 from '@lucide/svelte/icons/columns-3';
-  import LayoutGrid from '@lucide/svelte/icons/layout-grid';
   import Plus from '@lucide/svelte/icons/plus';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import type { Project } from '../../types';
@@ -39,7 +37,6 @@
   import SplashScreen from './SplashScreen.svelte';
   import SearchField from '../../shared/SearchField.svelte';
   import { Button } from '$lib/components/ui/button';
-  import * as ToggleGroup from '$lib/components/ui/toggle-group';
   import { tagsStore } from '../../stores/tags.svelte';
   import ProjectsBoard from '../board/ProjectsBoard.svelte';
   import BoardToolbar from '../board/BoardToolbar.svelte';
@@ -53,6 +50,7 @@
   } from './projectsListViewState.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
+  import ProjectsViewToggle from './ProjectsViewToggle.svelte';
   import {
     projectShortcutNumbers,
     searchOrderHold,
@@ -426,8 +424,11 @@
       verifyCommandKeyState(e);
     }
 
-    // Command+1-9 to open projects by number
-    if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+    // Command+1-9 to open projects by number. Grid only: the numbers are
+    // the grid's reading order, which the board's columns don't share, and
+    // only grid cards show them, so on the board the shortcut would open a
+    // project the user can't see numbered anywhere.
+    if (!boardMode && (e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
       e.preventDefault();
       const index = parseInt(e.key) - 1;
       if (index < filteredProjects.length) {
@@ -540,26 +541,7 @@
             onfocus={() => projectSearchIndex.ensureLoaded()}
             onkeydown={cardOrder.fieldKeydown}
           />
-          <ToggleGroup.Root
-            type="single"
-            variant="outline"
-            size="sm"
-            value={boardViewPrefs.viewMode}
-            onValueChange={(value) => {
-              if (value === 'grid' || value === 'board') setProjectsViewMode(value);
-            }}
-            class="view-toggle w-fit shrink-0"
-            aria-label="Projects view"
-          >
-            <ToggleGroup.Item value="grid" aria-label="Grid" title="Grid">
-              <LayoutGrid size={14} />
-              <span class="view-toggle-label">Grid</span>
-            </ToggleGroup.Item>
-            <ToggleGroup.Item value="board" aria-label="Board" title="Board">
-              <Columns3 size={14} />
-              <span class="view-toggle-label">Board</span>
-            </ToggleGroup.Item>
-          </ToggleGroup.Root>
+          <ProjectsViewToggle value={boardViewPrefs.viewMode} onChange={setProjectsViewMode} />
           {#if boardMode && boardGroup && tagsStore.loaded && !viewport.isMobile}
             <BoardToolbar group={boardGroup} />
           {/if}
@@ -792,13 +774,6 @@
   .search-row > :global(.search-field) {
     flex: 1 1 240px;
     min-width: 0;
-  }
-
-  /* Icon-only on a phone, where the search field needs the room. */
-  @media (max-width: 640px) {
-    .view-toggle-label {
-      display: none;
-    }
   }
 
   /* A grid, not just for the columns: until a query settles, each shown

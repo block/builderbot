@@ -342,11 +342,11 @@ fn get_store_status(db_state: tauri::State<'_, DbState>) -> Option<StoreIncompat
 /// Status group too.
 ///
 /// The import reads the frontend's `preferences.json` from beside the
-/// database (where `preferences_store_path_buf` points in the app); a
-/// missing or unparseable file counts as no preferences. The backend never
-/// writes that file. An import failure is logged, not fatal: the marker
-/// stays, so it retries next launch, and meanwhile projects show their
-/// computed status.
+/// database (where `preferences_store_path_buf` points in the app). Only a
+/// missing file counts as no preferences; see [`read_legacy_preferences`].
+/// The backend never writes that file. An import failure, or an unreadable
+/// file, is logged, not fatal: the marker stays, so it retries next launch,
+/// and meanwhile projects show their computed status.
 fn open_store(
     db_path: &Path,
     tx: tokio::sync::broadcast::Sender<store::StoreChange>,
@@ -354,14 +354,40 @@ fn open_store(
     let store = Store::new(db_path)
         .map_err(|e| e.to_string())?
         .with_change_sender(tx);
-    let prefs = std::fs::read_to_string(db_path.with_file_name("preferences.json"))
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
-    let options = store::parse_legacy_status_options(prefs.as_ref());
-    if let Err(e) = store.import_legacy_project_statuses(&options) {
-        log::error!("Legacy project status import failed; it will retry next launch: {e}");
+    match read_legacy_preferences(&db_path.with_file_name("preferences.json")) {
+        Ok(prefs) => {
+            let options = store::parse_legacy_status_options(prefs.as_ref());
+            if let Err(e) = store.import_legacy_project_statuses(&options) {
+                log::error!("Legacy project status import failed; it will retry next launch: {e}");
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "Skipping the legacy project status import until preferences.json can be read; \
+                 it will retry next launch: {e}"
+            );
+        }
     }
     Ok(store)
+}
+
+/// Read the frontend's `preferences.json` for the legacy status import.
+///
+/// `Ok(None)` only when the file doesn't exist (a fresh install never had
+/// custom statuses). Any other read error, or a parse error, is `Err`: a
+/// transient failure, or a half-written file from another instance saving
+/// at that moment, must not import the seven defaults over a user's custom
+/// list, since the import runs once and then drops every selection that
+/// names a custom id.
+fn read_legacy_preferences(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|e| format!("parsing {}: {e}", path.display()))
 }
 
 /// Delete the old database and create a fresh store.
@@ -2521,7 +2547,11 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch_menu_event, reset_store, DbState, MenuDispatch, StoreIncompatibility};
+    use super::{
+        dispatch_menu_event, open_store, read_legacy_preferences, reset_store, DbState,
+        MenuDispatch, StoreIncompatibility,
+    };
+    use crate::store::{LegacyImportOutcome, LegacyStatusOptions};
     use std::sync::{Arc, Barrier, Mutex};
 
     fn reset_info(kind: &str) -> StoreIncompatibility {
@@ -2568,6 +2598,84 @@ mod tests {
         assert!(store_slot.lock().unwrap().is_some());
         assert!(db_state.needs_reset.lock().unwrap().is_none());
         assert!(db_state.db_path.exists());
+    }
+
+    #[test]
+    fn legacy_preferences_are_none_only_when_the_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+
+        assert_eq!(read_legacy_preferences(&path), Ok(None));
+
+        std::fs::write(&path, "{\"project-status-options\": [").unwrap();
+        let error = read_legacy_preferences(&path).unwrap_err();
+        assert!(error.contains("parsing"), "{error}");
+
+        std::fs::write(&path, "{\"project-status-options\": []}").unwrap();
+        let prefs = read_legacy_preferences(&path).unwrap().unwrap();
+        assert_eq!(prefs["project-status-options"], serde_json::json!([]));
+
+        // A directory where the file should be is an error, not "missing".
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(read_legacy_preferences(&path).is_err());
+    }
+
+    #[test]
+    fn open_store_imports_the_defaults_when_there_are_no_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+
+        let store = open_store(&dir.path().join("data.db"), tx).unwrap();
+
+        // The marker is gone, so a second import is a no-op...
+        assert_eq!(
+            store
+                .import_legacy_project_statuses(&LegacyStatusOptions::Defaults)
+                .unwrap(),
+            LegacyImportOutcome::AlreadyImported
+        );
+        // ...and the Status group holds the seven defaults.
+        let state = store.get_tag_state().unwrap();
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.tags.len(), 7);
+    }
+
+    #[test]
+    fn open_store_holds_the_import_while_preferences_are_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let prefs_path = dir.path().join("preferences.json");
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+
+        // A half-written file: another instance may be saving it right now.
+        std::fs::write(&prefs_path, "{\"project-status-options\": [{\"id\": \"cu").unwrap();
+        let store = open_store(&db_path, tx.clone()).unwrap();
+
+        // Nothing was imported and the marker is still there.
+        assert!(store.get_tag_state().unwrap().groups.is_empty());
+        drop(store);
+
+        // Next launch, the file is whole: the user's custom list is imported.
+        std::fs::write(
+            &prefs_path,
+            "{\"project-status-options\": [{\"id\": \"custom\", \"label\": \"Custom\"}]}",
+        )
+        .unwrap();
+        let store = open_store(&db_path, tx).unwrap();
+
+        let state = store.get_tag_state().unwrap();
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(
+            state.tags.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["custom"]
+        );
+        assert_eq!(
+            store
+                .import_legacy_project_statuses(&LegacyStatusOptions::Defaults)
+                .unwrap(),
+            LegacyImportOutcome::AlreadyImported
+        );
     }
 
     #[test]

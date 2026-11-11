@@ -11,7 +11,9 @@
  * the view falls back to server truth.
  *
  * Catalog writes are rare, so they await the backend and then patch the
- * snapshot with the result; a failure toasts and refetches.
+ * snapshot with the result; a failure toasts and refetches. They run one at
+ * a time, in call order, so two quick edits reach the backend in the order
+ * they were made and each sees the snapshot the one before it left.
  */
 
 import { toast } from 'svelte-sonner';
@@ -55,6 +57,8 @@ export interface TagValue {
 class TagActionsController {
   /** Per project and slot, the tail of its write chain. */
   private readonly slotTails = new Map<string, Promise<void>>();
+  /** The tail of the catalog write chain. */
+  private catalogTail: Promise<void> = Promise.resolve();
 
   /**
    * Set a project's tag in a group, or clear it with null. No-op when the
@@ -146,12 +150,25 @@ class TagActionsController {
     return tag;
   }
 
-  /** Replace a tag's name, colour and icon. Resolves to whether it saved. */
-  updateTag(tag: Tag, value: TagValue): Promise<boolean> {
+  /**
+   * Change some of a tag's name, colour and icon. The rest is taken from the
+   * tag as the store has it once the catalog writes ahead of this one have
+   * settled, so a rename followed at once by a colour pick keeps both: the
+   * second write is built on the first's result, not on the row's stale
+   * props. Resolves to whether it saved; a tag that has gone meanwhile
+   * fails with a toast.
+   */
+  editTag(tagId: string, patch: Partial<TagValue>): Promise<boolean> {
+    let value: TagValue | null = null;
     return this.catalogWrite(
       'Unable to update tag',
-      () => commands.updateTag(tag.id, value),
-      (state) => withTagValue(state, tag.id, value)
+      async () => {
+        const tag = tagsStore.tagsById.get(tagId);
+        if (!tag) throw new Error('The tag no longer exists.');
+        value = { name: tag.name, color: tag.color, icon: tag.icon, ...patch };
+        await commands.updateTag(tagId, value);
+      },
+      (state) => (value ? withTagValue(state, tagId, value) : state)
     );
   }
 
@@ -230,23 +247,28 @@ class TagActionsController {
   }
 
   /**
-   * Await a catalog write, then patch the snapshot with what it did. A
-   * failure toasts and refetches. Resolves to whether it succeeded.
+   * Queue a catalog write behind the earlier ones, await it, then patch the
+   * snapshot with what it did. A failure toasts and refetches. Resolves to
+   * whether it succeeded; never rejects.
    */
-  private async catalogWrite(
+  private catalogWrite(
     failure: string,
     write: () => Promise<void>,
     patch: (state: TagState) => TagState
   ): Promise<boolean> {
-    try {
-      await write();
-    } catch (e) {
-      toast.error(failure, { description: errorMessage(e) });
-      void tagsStore.requestRefresh();
-      return false;
-    }
-    tagsStore.patchLocal(patch);
-    return true;
+    const run = this.catalogTail.then(async () => {
+      try {
+        await write();
+      } catch (e) {
+        toast.error(failure, { description: errorMessage(e) });
+        void tagsStore.requestRefresh();
+        return false;
+      }
+      tagsStore.patchLocal(patch);
+      return true;
+    });
+    this.catalogTail = run.then(() => undefined);
+    return run;
   }
 
   // ── Plumbing ──

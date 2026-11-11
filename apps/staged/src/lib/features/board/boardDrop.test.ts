@@ -26,29 +26,32 @@ function dataTransfer(data: Record<string, string> = {}): DataTransfer {
 }
 
 describe('writeProjectDrag', () => {
-  it('carries the project under its own type and as text, as a move', () => {
+  it('carries the project under its own type only, as a move', () => {
     const dt = dataTransfer();
     writeProjectDrag(dt, 'p1');
 
     expect(dt.effectAllowed).toBe('move');
     expect(dt.getData(PROJECT_DRAG_TYPE)).toBe('p1');
-    expect(dt.getData('text/plain')).toBe('p1');
+    // No text copy: a card released over the search field, or any text
+    // input, must not paste its id there.
+    expect(dt.types).toEqual([PROJECT_DRAG_TYPE]);
+    expect(dt.getData('text/plain')).toBe('');
   });
 });
 
 describe('readProjectDrag', () => {
   const ids = new Set(['p1', 'p2']);
 
-  it('reads the project type first, then text, then the fallback', () => {
+  it('reads the project type first, then the fallback', () => {
     expect(readProjectDrag(dataTransfer({ [PROJECT_DRAG_TYPE]: 'p1' }), 'p2', ids)).toBe('p1');
-    expect(readProjectDrag(dataTransfer({ 'text/plain': 'p2' }), null, ids)).toBe('p2');
     // An engine that drops the data on the way: the board saw the drag start.
     expect(readProjectDrag(dataTransfer(), 'p2', ids)).toBe('p2');
     expect(readProjectDrag(null, 'p1', ids)).toBe('p1');
   });
 
   it('ignores anything that isn’t one of the projects', () => {
-    expect(readProjectDrag(dataTransfer({ 'text/plain': 'hello' }), null, ids)).toBeNull();
+    // Text that happens to spell a project id is not a card.
+    expect(readProjectDrag(dataTransfer({ 'text/plain': 'p2' }), null, ids)).toBeNull();
     expect(readProjectDrag(dataTransfer({ 'text/plain': 'hello' }), 'p1', ids)).toBe('p1');
     expect(readProjectDrag(dataTransfer(), 'gone', ids)).toBeNull();
   });

@@ -15,13 +15,15 @@ import type { TagCatalog } from '../tags/tagState';
 export const PROJECT_DRAG_TYPE = 'application/x-staged-project';
 
 /**
- * Put a card's project on a drag. The `text/plain` copy is for engines that
- * drop custom types, and that only start a drag carrying data.
+ * Put a card's project on a drag, under its own type only. No `text/plain`
+ * copy: a card released over the search field, or any text input, would
+ * paste the project's id into it. The board's own fallback for engines that
+ * drop custom types is the card it saw the drag start on (see
+ * `readProjectDrag`), so the copy isn't needed to move a card.
  */
 export function writeProjectDrag(dataTransfer: DataTransfer, projectId: string): void {
   dataTransfer.effectAllowed = 'move';
   dataTransfer.setData(PROJECT_DRAG_TYPE, projectId);
-  dataTransfer.setData('text/plain', projectId);
 }
 
 /**
@@ -34,11 +36,7 @@ export function readProjectDrag(
   fallback: string | null,
   projectIds: ReadonlySet<string>
 ): string | null {
-  const candidates = [
-    dataTransfer?.getData(PROJECT_DRAG_TYPE),
-    dataTransfer?.getData('text/plain'),
-    fallback,
-  ];
+  const candidates = [dataTransfer?.getData(PROJECT_DRAG_TYPE), fallback];
   return candidates.find((id): id is string => !!id && projectIds.has(id)) ?? null;
 }
 

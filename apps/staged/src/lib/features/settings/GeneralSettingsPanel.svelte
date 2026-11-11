@@ -94,11 +94,14 @@
   <div class="panel-body">
     <div class="field">
       <span class="field-label">Appearance</span>
+      <!-- A function binding: bits-ui clears a single toggle group when its
+           pressed item is clicked again, and with a one-way value that '' would
+           stick in the wrapper and leave no segment pressed. The setter ignores
+           it and the getter hands the real mode back. -->
       <ToggleGroup.Root
         type="single"
         variant="outline"
-        value={preferences.mode}
-        onValueChange={(v) => v && setMode(v as AppMode)}
+        bind:value={() => preferences.mode, (v) => v && setMode(v as AppMode)}
         class="w-fit"
       >
         {#each modeOptions as opt (opt.value)}

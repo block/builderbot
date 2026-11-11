@@ -37,11 +37,7 @@
   function setColor(value: string) {
     const tag = column.tag;
     if (!tag || value === tag.color) return;
-    void tagActions.updateTag(tag, {
-      name: tag.name,
-      color: value as TagColor,
-      icon: tag.icon,
-    });
+    void tagActions.editTag(tag.id, { color: value as TagColor });
   }
 
   function handleCloseAutoFocus(event: Event) {

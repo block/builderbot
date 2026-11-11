@@ -64,7 +64,7 @@
     renaming = false;
     const name = input.value.trim();
     if (!tag || !name || name === tag.name) return;
-    await tagActions.updateTag(tag, { name, color: tag.color, icon: tag.icon });
+    await tagActions.editTag(tag.id, { name });
   }
 
   function handleNameKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }) {

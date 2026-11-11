@@ -110,6 +110,54 @@ describe('formatWindowTitle', () => {
     const { formatWindowTitle } = await importWindowTitle();
     expect(formatWindowTitle(new Set(['archived']))).toBe('Staged');
   });
+
+  describe('tag filters', () => {
+    const tagsById = new Map([
+      ['t-blocked', { name: 'Blocked' }],
+      ['t-done', { name: 'Done' }],
+      ['t-q4', { name: 'q4-launch' }],
+      ['t-infra', { name: 'infra' }],
+    ]);
+
+    it('names a tag filter by its tag, so two tag-filtered windows differ', async () => {
+      const { formatWindowTitle } = await importWindowTitle();
+      expect(formatWindowTitle(new Set(['tag:t-blocked']), tagsById)).toBe('Blocked');
+      expect(formatWindowTitle(new Set(['tag:t-done']), tagsById)).toBe('Done');
+    });
+
+    it('puts tags after status and repo filters, sorted by name', async () => {
+      const { formatWindowTitle } = await importWindowTitle();
+      expect(
+        formatWindowTitle(
+          new Set(['tag:t-q4', 'repo:block/mark:', 'unread', 'tag:t-blocked']),
+          tagsById
+        )
+      ).toBe('Unread · mark · Blocked, q4-launch');
+    });
+
+    it('collapses everything past the second tag into "+N more"', async () => {
+      const { formatWindowTitle } = await importWindowTitle();
+      expect(
+        formatWindowTitle(
+          new Set(['tag:t-q4', 'tag:t-blocked', 'tag:t-done', 'tag:t-infra']),
+          tagsById
+        )
+      ).toBe('Blocked, Done, +2 more');
+    });
+
+    it('skips a tag the catalog no longer holds, like the chips do', async () => {
+      const { formatWindowTitle } = await importWindowTitle();
+      expect(formatWindowTitle(new Set(['tag:gone']), tagsById)).toBe('Staged');
+      expect(formatWindowTitle(new Set(['tag:gone', 'tag:t-done']), tagsById)).toBe('Done');
+      // Without a catalog yet, only the other filters title the window.
+      expect(formatWindowTitle(new Set(['tag:t-done', 'running']))).toBe('Running');
+    });
+
+    it('never reads a tag key as a repo', async () => {
+      const { formatWindowTitle } = await importWindowTitle();
+      expect(formatWindowTitle(new Set(['tag:block/mark:']), tagsById)).toBe('Staged');
+    });
+  });
 });
 
 describe('applyWindowTitle', () => {

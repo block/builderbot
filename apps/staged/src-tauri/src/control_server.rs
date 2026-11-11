@@ -44,9 +44,16 @@
 //! B, `stagedctl connect`, asks the user by name in a consent dialog and,
 //! once approved, holds a durable thirty-day grant it reconnects to with a
 //! proof of its secret ([`enrol`], [`consent`]). Both classes share the
-//! registry and the scope table, but never cross: a session's bearer is
-//! refused on every enrolment route, so a spawned agent cannot ask the user
-//! for a wider grant than the one it was spawned with.
+//! registry and the scope table, but never cross: every enrolment route
+//! refuses a caller traceable to a running session — by its bearer, or by
+//! its process ancestry reaching a pid the session runner registered as a
+//! live session's agent ([`ancestry`]) — and the invoke route refuses a
+//! class B bearer presented from inside a session, so a spawned agent can
+//! neither ask the user for a wider grant than the one it was spawned with
+//! nor borrow one the user approved for a client outside any session. The
+//! ancestry check is best effort (same-uid processes are not a hard
+//! security boundary): it never refuses an unrelated user process, and the
+//! agent-facing docs state the rule as a rule, not as a sandbox.
 //!
 //! **What a caller can do.** The fixed verb table: [`ALLOWED_COMMANDS`] maps
 //! the `stagedctl` surface to specific dispatch commands — every one
@@ -73,6 +80,7 @@
 //! prepends to every local agent session's PATH so a bare `stagedctl` just
 //! works. The shim lives in the instance directory and shares its lifecycle.
 
+mod ancestry;
 pub mod commands;
 mod consent;
 mod enrol;
@@ -165,6 +173,9 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
 /// would otherwise apply implicitly, and a cap that exists only by default
 /// is one a refactor can lose.
 const CONTROL_BODY_LIMIT: usize = 1024 * 1024;
+// The cap must stay under axum's implicit default (2 MiB), or a refactor
+// that drops the explicit layer would silently widen it.
+const _: () = assert!(CONTROL_BODY_LIMIT <= 2 * 1024 * 1024);
 
 /// Monotonic per-process start counter, mirrored into the discovery file and
 /// the ping response so the CLI can detect a restart between file-read and
@@ -205,6 +216,18 @@ struct ControlState {
     transport: Arc<ControlTransport>,
     generation: u64,
     grants: ControlGrants,
+    /// The process table the session gate classifies peers against.
+    ancestry: ancestry::Ancestry,
+}
+
+impl ControlState {
+    /// The caller classifier the enrolment routes and `invoke` share.
+    fn session_gate(&self) -> enrol::SessionGate {
+        enrol::SessionGate {
+            grants: self.grants.clone(),
+            ancestry: self.ancestry.clone(),
+        }
+    }
 }
 
 /// The stagedctl env pairs for a spawned agent session holding `lease`:
@@ -470,14 +493,15 @@ async fn serve(
         transport: Arc::new(transport),
         generation,
         grants: grants.clone(),
+        ancestry: ancestry::Ancestry::system(),
     };
     let router = Router::new()
         .route("/api/ping", get(ping))
         // Enrolment and reconnect need no grant — they are how one is
         // obtained — but sit behind the transport gate and header rules
-        // like everything else, with the same body cap, and refuse a
-        // session's bearer outright.
-        .merge(enrolment_router(grants.clone()))
+        // like everything else, with the same body cap, and refuse any
+        // caller traceable to a running session outright.
+        .merge(enrolment_router(state.session_gate()))
         // The grant is resolved on the invoke route only (ping is the
         // unauthenticated handshake), before the body is read.
         .merge(
@@ -520,9 +544,9 @@ async fn serve(
 }
 
 /// The class B routes (see [`enrol`]), each under [`CONTROL_BODY_LIMIT`]
-/// and behind [`enrol::reject_session_bearer`]: a spawned session's
-/// credential buys nothing here.
-fn enrolment_router(grants: ControlGrants) -> Router<ControlState> {
+/// and behind [`enrol::reject_spawned_session`]: a caller inside a running
+/// session — by credential or by process — gets nothing here.
+fn enrolment_router(gate: enrol::SessionGate) -> Router<ControlState> {
     Router::new()
         .route("/api/connect", post(enrol::connect))
         .route("/api/connect/{request_id}", get(enrol::poll_connect))
@@ -530,8 +554,8 @@ fn enrolment_router(grants: ControlGrants) -> Router<ControlState> {
         .route("/api/reconnect", post(enrol::reconnect))
         .route("/api/disconnect", post(enrol::disconnect))
         .route_layer(middleware::from_fn_with_state(
-            grants,
-            enrol::reject_session_bearer,
+            gate,
+            enrol::reject_spawned_session,
         ))
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT))
 }
@@ -781,6 +805,7 @@ async fn invoke(
     Path(command): Path<String>,
     State(state): State<ControlState>,
     Extension(grant): Extension<ControlGrant>,
+    parts: axum::http::request::Parts,
     Json(args): Json<Value>,
 ) -> Response {
     if !ALLOWED_COMMANDS.contains(&command.as_str()) {
@@ -791,6 +816,22 @@ async fn invoke(
             })),
         )
             .into_response();
+    }
+
+    // A connected app's bearer presented from inside a running session's
+    // process tree is the session trying to widen itself; refuse it before
+    // the scope table ever sees the grant.
+    #[cfg(unix)]
+    let peer_pid = parts.extensions.get::<UdsPeer>().and_then(|peer| peer.pid);
+    #[cfg(not(unix))]
+    let peer_pid: Option<i32> = {
+        let _ = &parts;
+        None
+    };
+    if let Some(response) =
+        enrol::refuse_app_bearer_from_session(&state.session_gate(), peer_pid, &grant)
+    {
+        return response;
     }
 
     // A class B grant confined to a project that has since been deleted
@@ -1032,6 +1073,17 @@ mod tests {
         assert_eq!(HANDLED.load(Ordering::SeqCst), 1);
     }
 
+    /// A gate whose process table is `parents` (pid → parent pid).
+    fn fake_gate(
+        grants: &ControlGrants,
+        parents: std::collections::HashMap<i32, i32>,
+    ) -> enrol::SessionGate {
+        enrol::SessionGate {
+            grants: grants.clone(),
+            ancestry: ancestry::Ancestry::fake(parents),
+        }
+    }
+
     /// The enrolment routes refuse a session's bearer before the handler
     /// runs: nothing is parked, no prompt is shown. A caller with no bearer,
     /// an unknown one, or an approved app's bearer reaches the handler.
@@ -1065,8 +1117,8 @@ mod tests {
             .route("/api/connect", post(stand_in))
             .route("/api/reconnect/challenge", post(stand_in))
             .route_layer(middleware::from_fn_with_state(
-                grants.clone(),
-                enrol::reject_session_bearer,
+                fake_gate(&grants, Default::default()),
+                enrol::reject_spawned_session,
             ))
             .with_state(grants.clone());
         let request = |path: &str, bearer: Option<&str>| {
@@ -1143,6 +1195,199 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK, "{bearer:?}");
         }
         assert_eq!(HANDLED.load(Ordering::SeqCst), 3);
+    }
+
+    /// The gate is process-keyed as well as credential-keyed: a `connect`
+    /// with no bearer at all (the agent unset or emptied `STAGEDCTL_LOCK`)
+    /// from a process whose ancestry reaches a live session's agent is
+    /// refused before the handler, with nothing parked and no prompt. The
+    /// same request from a process outside every session's tree, or whose
+    /// ancestry cannot be read, reaches the handler.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn enrolment_routes_refuse_a_peer_inside_a_running_session_without_a_credential() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tower::ServiceExt;
+
+        static HANDLED: AtomicUsize = AtomicUsize::new(0);
+        async fn stand_in(State(grants): State<ControlGrants>) -> Json<Value> {
+            HANDLED.fetch_add(1, Ordering::SeqCst);
+            let pending = grants
+                .enrolment()
+                .request(
+                    enrol::ConnectRequest {
+                        client: "Claude Code".to_string(),
+                        scope: Scope::AllProjects,
+                        project_name: None,
+                        access: grants::Access::ReadWrite,
+                        peer_pid: None,
+                        peer_parent: None,
+                    },
+                    crate::store::now_timestamp(),
+                )
+                .unwrap();
+            Json(serde_json::json!({ "requestId": pending.id }))
+        }
+        let grants = ControlGrants::default();
+        // Session s-1's agent is pid 500; stagedctl 503 ← sh 502 ← tool 501
+        // ← agent 500. Pid 900 is the user's own shell under launchd.
+        grants.register_agent_process(
+            500,
+            grants::SpawnedSession {
+                session_id: "s-1".to_string(),
+                epoch: 1,
+                project_id: "p".to_string(),
+            },
+        );
+        let parents = std::collections::HashMap::from([
+            (503, 502),
+            (502, 501),
+            (501, 500),
+            (500, std::process::id() as i32),
+            (900, 800),
+            (800, 1),
+        ]);
+        let router = Router::new()
+            .route("/api/connect", post(stand_in))
+            .route("/api/reconnect/challenge", post(stand_in))
+            .route("/api/reconnect", post(stand_in))
+            .route("/api/disconnect", post(stand_in))
+            .route_layer(middleware::from_fn_with_state(
+                fake_gate(&grants, parents),
+                enrol::reject_spawned_session,
+            ))
+            .with_state(grants.clone());
+        let ours = files::current_uid();
+        let request = |path: &str, pid: Option<i32>| {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(r#"{"client":"Claude Code"}"#))
+                .unwrap();
+            // What `reject_foreign_peer` attaches for an admitted peer.
+            request.extensions_mut().insert(UdsPeer {
+                uid: Some(ours),
+                gid: Some(0),
+                pid,
+            });
+            request
+        };
+
+        for path in [
+            "/api/connect",
+            "/api/reconnect/challenge",
+            "/api/reconnect",
+            "/api/disconnect",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(request(path, Some(503)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "scope_denied", "{path}");
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.starts_with("spawned sessions cannot request connected-app access"),
+                "{error}"
+            );
+            assert!(error.contains("session s-1"), "{error}");
+        }
+        assert_eq!(
+            HANDLED.load(Ordering::SeqCst),
+            0,
+            "refused before the handler"
+        );
+        assert!(
+            grants
+                .enrolment()
+                .pending(crate::store::now_timestamp())
+                .is_empty(),
+            "no request was parked, so no prompt could be shown"
+        );
+
+        // Unrelated ancestry, an unreadable one (pid absent from the table)
+        // and no pid at all pass through.
+        for (pid, what) in [
+            (Some(900), "the user's own shell"),
+            (Some(31337), "a pid whose parent cannot be read"),
+            (None, "no peer pid reported"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(request("/api/connect", pid))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{what}");
+        }
+        assert_eq!(HANDLED.load(Ordering::SeqCst), 3);
+    }
+
+    /// On the invoke route the same classification refuses a connected
+    /// app's bearer presented from inside a session's process tree, so an
+    /// agent that drops its own credential cannot borrow the user's grant;
+    /// the session's own bearer, and the app bearer from outside any
+    /// session, pass.
+    #[test]
+    fn a_connected_app_bearer_from_inside_a_session_is_refused_on_invoke() {
+        let grants = ControlGrants::default();
+        grants.register_agent_process(
+            500,
+            grants::SpawnedSession {
+                session_id: "s-1".to_string(),
+                epoch: 1,
+                project_id: "p".to_string(),
+            },
+        );
+        let gate = fake_gate(
+            &grants,
+            std::collections::HashMap::from([(503, 502), (502, 500), (900, 1)]),
+        );
+        let app_token = grants.mint_app_bearer(
+            "g-1",
+            "Claude Code",
+            Scope::AllProjects,
+            grants::Access::ReadWrite,
+            i64::MAX,
+        );
+        let app_grant = grants.authorize(&app_token).unwrap();
+        let session_grant = ControlGrant {
+            actor: Actor::Session {
+                session_id: "s-1".to_string(),
+                epoch: 1,
+            },
+            scope: Scope::Project("p".to_string()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        };
+
+        let refused = enrol::refuse_app_bearer_from_session(&gate, Some(503), &app_grant)
+            .expect("a class B bearer from inside session s-1 is refused");
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let body = tauri::async_runtime::block_on(json_body(refused));
+        assert_eq!(body["code"], "scope_denied");
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("session s-1"), "{error}");
+        assert!(error.contains("\"Claude Code\""), "{error}");
+        assert!(
+            grants.authorize(&app_token).is_ok(),
+            "the user's grant itself stays live; only this caller is refused"
+        );
+
+        assert!(
+            enrol::refuse_app_bearer_from_session(&gate, Some(503), &session_grant).is_none(),
+            "the session's own credential is what it should use"
+        );
+        assert!(
+            enrol::refuse_app_bearer_from_session(&gate, Some(900), &app_grant).is_none(),
+            "the connected app from the user's shell"
+        );
+        assert!(
+            enrol::refuse_app_bearer_from_session(&gate, None, &app_grant).is_none(),
+            "no peer pid: fail open"
+        );
     }
 
     #[test]
@@ -1400,11 +1645,6 @@ mod tests {
     async fn invoke_route_caps_the_body_well_below_the_web_upload_limit() {
         use tower::ServiceExt;
         let router: Router = invoke_router(echo_len);
-
-        assert!(
-            CONTROL_BODY_LIMIT <= 2 * 1024 * 1024,
-            "the cap must not exceed axum's default"
-        );
 
         let envelope = r#"{"prompt":""}"#.len();
         let body = format!(

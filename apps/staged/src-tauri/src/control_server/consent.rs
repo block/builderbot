@@ -7,14 +7,17 @@
 //! stream and would broadcast consent prompts to remote clients if that
 //! server is ever re-enabled — and the main window is shown and focused so
 //! the dialog is seen. When no window exists to show, the native alert the
-//! quit gate uses asks instead. Approval mints the durable row and the live
-//! bearer; approval, denial and revocation all end in
-//! [`GRANTS_CHANGED_EVENT`] so the Settings panel refreshes.
+//! quit gate uses asks instead.
 //!
-//! An approval the CLI never collects (it gave up before the user answered)
-//! is retired when its request expires — row revoked, bearers dropped — by
-//! [`retire_abandoned_approvals`]; `approve` schedules that check for the
-//! request's expiry so it happens even if nothing else touches the server.
+//! Approval records the decision on the pending request and nothing else:
+//! the durable `control_grants` row, the reconnect secret and the live
+//! bearer are minted by [`mint_collected_approval`] only when the CLI's poll
+//! collects the answer (`enrol::poll_connect`). An approval the CLI never
+//! collects — it gave up before the user answered, or the app quit first —
+//! therefore persists nothing: no "connected" client can exist that nobody
+//! holds the secret for, across a restart included. Collection, denial and
+//! revocation end in [`GRANTS_CHANGED_EVENT`] so the Settings panel
+//! refreshes.
 
 use std::sync::{Arc, Mutex};
 
@@ -24,9 +27,7 @@ use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 
-use super::enrol::{
-    secret_hash, AnswerError, ApprovedGrant, Decision, PendingAuthorization, PENDING_TTL_MS,
-};
+use super::enrol::{secret_hash, AnswerError, ApprovedGrant, Decision, PendingAuthorization};
 use super::grants::{Access, Scope};
 use super::ControlGrants;
 use crate::store::{now_timestamp, renewed_expiry, ControlGrantRecord, Store};
@@ -163,19 +164,39 @@ fn native_prompt_message(pending: &PendingAuthorization) -> String {
     )
 }
 
-/// Approve `request_id`: write the durable row, mint this run's bearer and
-/// hand both to the waiting CLI.
+/// Approve `request_id`: record the decision for the waiting CLI to
+/// collect. Nothing is minted here — see [`mint_collected_approval`] — so
+/// an approval nobody collects leaves no trace.
 pub(crate) fn approve(
     app: &AppHandle,
     grants: &ControlGrants,
     request_id: &str,
 ) -> Result<(), String> {
-    let now = now_timestamp();
     let pending = grants
         .enrolment()
-        .get_unanswered(request_id, now)
+        .answer(request_id, Decision::Approved, now_timestamp())
         .map_err(answer_error_message)?;
-    let store = store_of(app)?;
+    log::info!(
+        "[control_server] approved connected app {:?} (request {request_id}); credentials are \
+         minted when the client collects them",
+        pending.request.client
+    );
+    let _ = app;
+    Ok(())
+}
+
+/// Mint the credentials for an approval the CLI is collecting right now:
+/// the durable row (storing only the secret's hash), the reconnect secret
+/// the client is handed once, and this run's live bearer. Runs when
+/// `poll_connect` hands the answer over, never at approval time, so the row
+/// exists only once a client holds its secret. The caller emits
+/// [`GRANTS_CHANGED_EVENT`].
+pub(crate) fn mint_collected_approval(
+    store: &Store,
+    grants: &ControlGrants,
+    pending: &PendingAuthorization,
+    now: i64,
+) -> Result<ApprovedGrant, String> {
     let request = &pending.request;
     let grant_id = uuid::Uuid::new_v4().to_string();
     let reconnect_secret = crate::web_server::generate_token();
@@ -200,79 +221,16 @@ pub(crate) fn approve(
         request.access,
         record.expires_at,
     );
-    let approved = ApprovedGrant {
-        grant_id: grant_id.clone(),
+    log::info!(
+        "[control_server] connected app {:?} collected its approval as grant {grant_id}",
+        request.client
+    );
+    Ok(ApprovedGrant {
+        grant_id,
         token,
         reconnect_secret,
         expires_at: record.expires_at,
-    };
-    if let Err(e) =
-        grants
-            .enrolment()
-            .answer(request_id, Decision::Approved(approved), now_timestamp())
-    {
-        // The CLI can no longer receive these credentials; nothing must
-        // keep them alive.
-        grants.revoke_app_grant(&grant_id);
-        let _ = store.revoke_control_grant(&grant_id);
-        return Err(answer_error_message(e));
-    }
-    log::info!(
-        "[control_server] approved connected app {:?} as grant {grant_id}",
-        request.client
-    );
-    emit_grants_changed(app);
-    schedule_abandonment_check(app, grants, pending.expires_at);
-    Ok(())
-}
-
-/// Once request `expires_at` has passed, retire the approval if the CLI
-/// never collected it. The enrolment routes sweep too, but a CLI that gave
-/// up never calls again, so the check must not depend on traffic.
-fn schedule_abandonment_check(app: &AppHandle, grants: &ControlGrants, expires_at: i64) {
-    let app = app.clone();
-    let grants = grants.clone();
-    let wait_ms = (expires_at - now_timestamp()).clamp(0, PENDING_TTL_MS) as u64 + 1_000;
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-        let _ = tokio::task::spawn_blocking(move || sweep_abandoned_approvals(&app, &grants)).await;
-    });
-}
-
-/// Retire every approval whose request expired before the CLI collected it:
-/// the `control_grants` row is revoked and its live bearers dropped, so no
-/// "connected" client lingers whose secret nobody holds. Returns the grant
-/// ids retired.
-pub(crate) fn retire_abandoned_approvals(
-    store: &Store,
-    grants: &ControlGrants,
-    now: i64,
-) -> Vec<String> {
-    let abandoned = grants.enrolment().take_abandoned(now);
-    for grant_id in &abandoned {
-        let bearers = grants.revoke_app_grant(grant_id);
-        grants.enrolment().forget_touch(grant_id);
-        match store.revoke_control_grant(grant_id) {
-            Ok(_) => log::info!(
-                "[control_server] retired uncollected approval {grant_id} ({bearers} live bearers)"
-            ),
-            Err(e) => {
-                log::warn!("[control_server] could not revoke uncollected approval {grant_id}: {e}")
-            }
-        }
-    }
-    abandoned
-}
-
-/// [`retire_abandoned_approvals`] against the app's store, telling the
-/// Settings panel when anything was retired.
-pub(crate) fn sweep_abandoned_approvals(app: &AppHandle, grants: &ControlGrants) {
-    let Ok(store) = store_of(app) else {
-        return;
-    };
-    if !retire_abandoned_approvals(&store, grants, now_timestamp()).is_empty() {
-        emit_grants_changed(app);
-    }
+    })
 }
 
 /// Deny `request_id`; the waiting CLI reads `authorization_denied`.
@@ -457,84 +415,117 @@ mod tests {
         assert!(by_id("g-all").live);
     }
 
-    /// The approval path as `approve` runs it, minus the `AppHandle`: row
-    /// written, bearer minted, decision parked. If the CLI never polls, the
-    /// request's expiry must take the row and the bearer with it.
+    /// An approval is only a parked decision until the CLI collects it:
+    /// if the CLI never polls, the request expires with no row, no secret
+    /// and no bearer ever having existed — nothing to retire, and nothing
+    /// for a restart to resurrect.
     #[test]
-    fn an_approval_the_cli_never_collects_is_retired_at_expiry() {
-        use crate::control_server::enrol::{ApprovedGrant, Decision};
-        use crate::control_server::grants::AuthorizationFailure;
-        use crate::store::renewed_expiry;
+    fn an_uncollected_approval_persists_nothing() {
+        use crate::control_server::enrol::PollOutcome;
 
         let store = Store::in_memory().unwrap();
         let grants = ControlGrants::default();
         let enrol = grants.enrolment();
         let now = 1_000;
-        let pending = enrol
+        let parked = enrol
             .request(
                 pending(Scope::AllProjects, None, Access::ReadWrite).request,
                 now,
             )
             .unwrap();
-        let record = ControlGrantRecord {
-            id: "g-abandoned".to_string(),
-            client: "my-agent".to_string(),
-            scope_project_id: None,
-            access: "write".to_string(),
-            reconnect_secret_hash: secret_hash("secret"),
-            created_at: now,
-            expires_at: renewed_expiry(now),
-            last_used_at: Some(now),
-            revoked_at: None,
-        };
-        store.create_control_grant(&record).unwrap();
-        let token = grants.mint_app_bearer(
-            "g-abandoned",
-            "my-agent",
-            Scope::AllProjects,
-            Access::ReadWrite,
-            record.expires_at,
-        );
         enrol
-            .answer(
-                &pending.id,
-                Decision::Approved(ApprovedGrant {
-                    grant_id: "g-abandoned".to_string(),
-                    token: token.clone(),
-                    reconnect_secret: "secret".to_string(),
-                    expires_at: record.expires_at,
-                }),
-                now + 1,
+            .answer(&parked.id, Decision::Approved, now + 1)
+            .unwrap();
+
+        // Approved, but not collected: still nothing anywhere but the
+        // pending map.
+        assert!(store.list_control_grants().unwrap().is_empty());
+        assert_eq!(grants.live_count(), 0);
+        assert!(
+            enrol.pending(now + 2).is_empty(),
+            "answered: no longer prompts"
+        );
+
+        // The CLI gave up; the request expires unanswered-for-collection.
+        assert_eq!(
+            enrol.poll(&parked.id, parked.expires_at),
+            PollOutcome::Expired
+        );
+        assert!(store.list_control_grants().unwrap().is_empty());
+        assert_eq!(grants.live_count(), 0);
+        assert_eq!(
+            enrol.poll(&parked.id, parked.expires_at + 1),
+            PollOutcome::Unknown
+        );
+    }
+
+    /// Collection mints exactly what the CLI is handed: a row keyed by the
+    /// secret's hash, one lifetime out, and a live class B bearer.
+    #[test]
+    fn collecting_an_approval_mints_the_row_and_the_bearer() {
+        use crate::control_server::enrol::PollOutcome;
+        use crate::store::renewed_expiry;
+
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::named("Widgets");
+        store.create_project(&project).unwrap();
+        let grants = ControlGrants::default();
+        let enrol = grants.enrolment();
+        let now = 1_000;
+        let parked = enrol
+            .request(
+                pending(
+                    Scope::Project(project.id.clone()),
+                    Some("Widgets"),
+                    Access::ReadOnly,
+                )
+                .request,
+                now,
             )
             .unwrap();
-        assert!(grants.app_grant_is_live("g-abandoned"));
+        enrol
+            .answer(&parked.id, Decision::Approved, now + 1)
+            .unwrap();
+        let PollOutcome::Approved(collected) = enrol.poll(&parked.id, now + 2) else {
+            panic!("approved request is handed over");
+        };
+        let approved = mint_collected_approval(&store, &grants, &collected, now + 2).unwrap();
 
-        // Before expiry nothing is retired, however often the sweep runs.
-        assert!(retire_abandoned_approvals(&store, &grants, pending.expires_at - 1).is_empty());
-        assert!(grants.authorize_at(&token, pending.expires_at - 1).is_ok());
-
-        let retired = retire_abandoned_approvals(&store, &grants, pending.expires_at);
-        assert_eq!(retired, vec!["g-abandoned".to_string()]);
-        assert!(
-            store
-                .get_control_grant("g-abandoned")
-                .unwrap()
-                .unwrap()
-                .is_revoked(),
-            "the row is revoked, not left as a phantom connected app"
-        );
-        assert!(
-            store.list_control_grants().unwrap().is_empty(),
-            "Settings no longer lists it"
-        );
+        let record = store
+            .get_control_grant(&approved.grant_id)
+            .unwrap()
+            .expect("row written at collection");
+        assert_eq!(record.client, "my-agent");
         assert_eq!(
-            grants.authorize_at(&token, pending.expires_at).unwrap_err(),
-            AuthorizationFailure::Revoked
+            record.scope_project_id.as_deref(),
+            Some(project.id.as_str())
         );
-        assert!(!grants.app_grant_is_live("g-abandoned"));
-        assert!(
-            retire_abandoned_approvals(&store, &grants, pending.expires_at + 1).is_empty(),
-            "retired once"
+        assert_eq!(record.access, "read");
+        assert_eq!(
+            record.reconnect_secret_hash,
+            secret_hash(&approved.reconnect_secret),
+            "only the hash is stored"
+        );
+        assert_eq!(record.expires_at, renewed_expiry(now + 2));
+        assert_eq!(approved.expires_at, record.expires_at);
+        assert_eq!(record.last_used_at, Some(now + 2));
+        assert!(!record.is_revoked());
+
+        let grant = grants.authorize_at(&approved.token, now + 3).unwrap();
+        assert_eq!(
+            grant.actor,
+            crate::control_server::Actor::App {
+                grant_id: approved.grant_id.clone(),
+                client: "my-agent".to_string(),
+            }
+        );
+        assert_eq!(grant.scope, Scope::Project(project.id.clone()));
+        assert_eq!(grant.access, Access::ReadOnly);
+        assert!(grants.app_grant_is_live(&approved.grant_id));
+        assert_eq!(
+            enrol.poll(&parked.id, now + 3),
+            PollOutcome::Unknown,
+            "handed over once"
         );
     }
 

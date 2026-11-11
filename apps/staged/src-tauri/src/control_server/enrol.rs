@@ -6,28 +6,38 @@
 //! server takes beyond `ping`. The request is parked here as a
 //! [`PendingAuthorization`], the app shows the consent dialog (or, with no
 //! window to show it in, the native alert the quit gate uses), and the CLI
-//! long-polls `GET /api/connect/{id}` for the answer. Approval mints a live
-//! bearer for this run of the app *and* a durable row in `control_grants`
-//! keyed by a reconnect secret the client is handed exactly once; on later
-//! launches the client proves it still holds the secret
+//! long-polls `GET /api/connect/{id}` for the answer. Approval only records
+//! the decision; when the poll collects it, the app mints a live bearer for
+//! this run *and* a durable row in `control_grants` keyed by a reconnect
+//! secret the client is handed exactly once (`consent::mint_collected_approval`).
+//! On later launches the client proves it still holds the secret
 //! (`POST /api/reconnect`) and gets a fresh bearer without another prompt.
 //!
 //! **Pending requests** are capped at [`PENDING_CAP`] and expire after
 //! [`PENDING_TTL_MS`], so an unattended app cannot be made to accumulate
 //! prompts. An approval the CLI never collects — it gave up before the user
-//! answered — expires with its request, and the grant it minted is retired
-//! with it (row revoked, bearer dropped; see `consent::retire_abandoned_approvals`)
-//! so no "connected" client exists that nobody holds the secret for.
-//! **Nonces** for the reconnect proof are single-use and expire after
+//! answered, or the app quit first — expires with its request having
+//! persisted nothing: the row and secret exist only once a client holds
+//! them. **Nonces** for the reconnect proof are single-use and expire after
 //! [`NONCE_TTL_MS`].
 //!
-//! **Who may enrol.** Only a caller with no session credential. A
+//! **Who may enrol.** Only a caller outside every running session. A
 //! Staged-spawned session (class A) holds a bearer confined to its own
 //! project; letting it `connect` would let a prompt-injected agent ask the
 //! user for an all-projects grant under any name it likes, attributed only
-//! to a `node`/`claude` process. [`reject_session_bearer`] refuses every
-//! enrolment route to such a bearer before any request is parked or prompt
-//! shown.
+//! to a `node`/`claude` process. [`reject_spawned_session`] refuses every
+//! enrolment route before any request is parked or prompt shown when the
+//! caller is traceable to a running session, two ways: by *credential* (its
+//! bearer resolves to a session grant) and by *process* (the connecting
+//! peer's ancestry reaches a pid the session runner registered as a live
+//! session's agent; see `ancestry`). The second holds whether or not the
+//! caller presents, strips or empties its `STAGEDCTL_LOCK`, and
+//! [`refuse_app_bearer_from_session`] applies the same classification on
+//! `/api/invoke`, so a session cannot widen itself to a connected-app grant
+//! the user approved for something else. Ancestry is best effort — same-uid
+//! processes are not a hard security boundary, and a process that escapes
+//! its tree is not recognised — so unrelated user processes are never
+//! refused on it, and the docs an agent reads say so plainly.
 //!
 //! **The proof.** The durable row stores `hash = SHA-256(secret)` and the
 //! client proves possession with `HMAC-SHA256(key = hash, msg =
@@ -86,9 +96,12 @@ pub(crate) struct ApprovedGrant {
     pub expires_at: i64,
 }
 
+/// The user's answer, as parked on the request. `Approved` carries nothing:
+/// the credentials are minted when the CLI collects the answer, from the
+/// request's own client, scope and access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Decision {
-    Approved(ApprovedGrant),
+    Approved,
     Denied,
 }
 
@@ -143,7 +156,9 @@ pub(crate) enum PollOutcome {
     Pending {
         expires_at: i64,
     },
-    Approved(ApprovedGrant),
+    /// The user approved; the request (with the client, scope and access to
+    /// mint from) is handed over exactly once.
+    Approved(PendingAuthorization),
     Denied,
     /// The request expired unanswered (or was collected already).
     Expired,
@@ -169,9 +184,6 @@ pub(super) struct EnrolInner {
     nonces: VecDeque<(String, String, i64)>,
     /// grant id → last `last_used_at` write.
     touched: HashMap<String, i64>,
-    /// Grant ids of approvals that expired uncollected, awaiting retirement
-    /// by [`Enrolment::take_abandoned`].
-    abandoned: Vec<String>,
 }
 
 /// The enrolment state, shared by the control server's handlers and the
@@ -185,31 +197,11 @@ pub struct Enrolment {
 impl Enrolment {
     fn prune(inner: &mut EnrolInner, now: i64) {
         // An answered request stays until the CLI collects it, but not past
-        // its expiry: a CLI that gave up must not leave credentials parked.
-        // An approval that goes uncollected is remembered so its grant can
-        // be retired — the row and bearer already exist by the time the
-        // user's answer is parked.
-        let mut abandoned = Vec::new();
-        inner.pending.retain(|_, p| {
-            if p.expires_at > now {
-                return true;
-            }
-            if let Some(Decision::Approved(grant)) = &p.decision {
-                abandoned.push(grant.grant_id.clone());
-            }
-            false
-        });
-        inner.abandoned.extend(abandoned);
+        // its expiry: a CLI that gave up must not leave an approval parked.
+        // Nothing beyond this map exists for an uncollected approval, so
+        // forgetting it is the whole of the cleanup.
+        inner.pending.retain(|_, p| p.expires_at > now);
         inner.nonces.retain(|(_, _, expires)| *expires > now);
-    }
-
-    /// The grant ids of approvals that expired before the CLI collected
-    /// them, each handed over once. The caller retires them (row and
-    /// bearers); see `consent::retire_abandoned_approvals`.
-    pub(crate) fn take_abandoned(&self, now: i64) -> Vec<String> {
-        let mut inner = self.inner.lock().unwrap();
-        Self::prune(&mut inner, now);
-        std::mem::take(&mut inner.abandoned)
     }
 
     /// Park a request. Refused when [`PENDING_CAP`] unanswered requests are
@@ -254,21 +246,6 @@ impl Enrolment {
         list
     }
 
-    /// The unanswered request `id`, for the approver to build a grant from.
-    pub(crate) fn get_unanswered(
-        &self,
-        id: &str,
-        now: i64,
-    ) -> Result<PendingAuthorization, AnswerError> {
-        let mut inner = self.inner.lock().unwrap();
-        Self::prune(&mut inner, now);
-        match inner.pending.get(id) {
-            None => Err(AnswerError::Unknown),
-            Some(p) if p.decision.is_some() => Err(AnswerError::AlreadyAnswered),
-            Some(p) => Ok(p.clone()),
-        }
-    }
-
     /// Record the user's answer. A request that expired while the dialog
     /// was open is `Expired`; a second answer is `AlreadyAnswered`.
     pub(crate) fn answer(
@@ -311,10 +288,18 @@ impl Enrolment {
             None => PollOutcome::Pending {
                 expires_at: pending.expires_at,
             },
-            Some(_) => match inner.pending.remove(id).and_then(|p| p.decision) {
-                Some(Decision::Approved(grant)) => PollOutcome::Approved(grant),
-                Some(Decision::Denied) => PollOutcome::Denied,
-                None => PollOutcome::Unknown,
+            Some(_) => match inner.pending.remove(id) {
+                Some(
+                    pending @ PendingAuthorization {
+                        decision: Some(Decision::Approved),
+                        ..
+                    },
+                ) => PollOutcome::Approved(pending),
+                Some(PendingAuthorization {
+                    decision: Some(Decision::Denied),
+                    ..
+                }) => PollOutcome::Denied,
+                _ => PollOutcome::Unknown,
             },
         }
     }
@@ -463,8 +448,9 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
+use super::ancestry::Ancestry;
 use super::consent;
-use super::grants::{Actor, AuthorizationFailure, ControlGrant};
+use super::grants::{Actor, AuthorizationFailure, ControlGrant, SpawnedSession};
 use super::{authorization_response, bearer_token, ControlState};
 use crate::store::{now_timestamp, ControlGrantRecord, Store};
 
@@ -546,23 +532,70 @@ pub(crate) fn resolve_project(store: &Store, needle: &str) -> Result<(String, St
     }
 }
 
-/// Middleware on every enrolment route: a bearer that resolves to a
-/// session grant is refused `scope_denied` before the handler runs, so a
-/// spawned session can neither ask the user for a connected-app grant nor
-/// reconnect or revoke one. Callers with no bearer, an unknown one, or an
-/// approved app's bearer pass through — enrolment is how they get or renew
-/// a credential, and an approved app re-running `connect` is the user's to
-/// answer.
-pub(super) async fn reject_session_bearer(
-    State(grants): State<super::ControlGrants>,
+/// What the enrolment gate and the invoke route classify a caller with:
+/// the live grants (for its bearer) and the process table (for its pid).
+#[derive(Clone)]
+pub(crate) struct SessionGate {
+    pub grants: super::ControlGrants,
+    pub ancestry: Ancestry,
+}
+
+impl SessionGate {
+    /// The running session `peer_pid`'s process is in, if any (see
+    /// [`Ancestry::spawned_session_of`]). `None` for no pid.
+    fn session_of_peer(&self, peer_pid: Option<i32>) -> Option<SpawnedSession> {
+        self.ancestry.spawned_session_of(peer_pid?, &self.grants)
+    }
+}
+
+/// The connecting peer's pid, when the transport reported one.
+fn peer_pid_of(request: &Request) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        request
+            .extensions()
+            .get::<super::UdsPeer>()
+            .and_then(|peer| peer.pid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = request;
+        None
+    }
+}
+
+/// Middleware on every enrolment route: a caller traceable to a running
+/// session is refused `scope_denied` before the handler runs, so a spawned
+/// session can neither ask the user for a connected-app grant nor reconnect
+/// or revoke one. Two classifications, either suffices: the bearer resolves
+/// to a session grant, or the peer's process ancestry reaches a live
+/// session's agent (credential stripped or not). Callers with no bearer, an
+/// unknown one, or an approved app's bearer — and an ancestry that is
+/// unreadable or reaches no agent — pass through: enrolment is how they get
+/// or renew a credential, and an approved app re-running `connect` is the
+/// user's to answer.
+pub(super) async fn reject_spawned_session(
+    State(gate): State<SessionGate>,
     request: Request,
     next: Next,
 ) -> Response {
-    if let Some(session_id) = session_bearer(&grants, request.headers()) {
+    if let Some(session_id) = session_bearer(&gate.grants, request.headers()) {
         return authorization_response(
             StatusCode::FORBIDDEN,
             "scope_denied",
             &session_enrolment_refusal(&session_id),
+        );
+    }
+    if let Some(session) = gate.session_of_peer(peer_pid_of(&request)) {
+        log::info!(
+            "[control_server] enrolment refused: peer pid {:?} runs inside session {}",
+            peer_pid_of(&request),
+            session.session_id
+        );
+        return authorization_response(
+            StatusCode::FORBIDDEN,
+            "scope_denied",
+            &session_process_refusal(&session),
         );
     }
     next.run(request).await
@@ -580,9 +613,9 @@ fn session_bearer(
     }
 }
 
-/// The refusal a spawned session reads on an enrolment route. The CLI
-/// prints the same explanation locally when `$STAGEDCTL_LOCK` is a
-/// per-session file, without a round trip.
+/// The refusal a spawned session reads on an enrolment route when its own
+/// bearer gives it away. The CLI prints the same explanation locally when
+/// `$STAGEDCTL_LOCK` is a per-session file, without a round trip.
 pub(crate) fn session_enrolment_refusal(session_id: &str) -> String {
     format!(
         "spawned sessions cannot request connected-app access: this credential belongs to \
@@ -591,14 +624,54 @@ pub(crate) fn session_enrolment_refusal(session_id: &str) -> String {
     )
 }
 
-/// Retire any approvals that expired uncollected, off the runtime.
-async fn sweep_abandoned(state: &ControlState) {
-    let app = state.app_handle.clone();
-    let grants = state.grants.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        consent::sweep_abandoned_approvals(&app, &grants);
-    })
-    .await;
+/// The refusal when the caller's process, not its credential, places it in
+/// a running session. Same opening sentence as the credential refusal, so an
+/// agent reads one explanation whichever way it was recognised.
+pub(crate) fn session_process_refusal(session: &SpawnedSession) -> String {
+    format!(
+        "spawned sessions cannot request connected-app access: this process runs inside Staged \
+         session {} (its agent's process tree), whose own credential is confined to that \
+         session's project; `stagedctl connect` and `disconnect` are for clients the user runs \
+         outside a session",
+        session.session_id
+    )
+}
+
+/// On `/api/invoke`: a class B (connected-app) bearer presented by a process
+/// inside a running session is refused `scope_denied`, so a spawned agent
+/// that strips its own credential cannot borrow a grant the user approved
+/// for a client outside any session. Session bearers and callers outside
+/// every session pass (`None`). The bearer itself stays live: it is the
+/// user's client's, not this session's.
+pub(super) fn refuse_app_bearer_from_session(
+    gate: &SessionGate,
+    peer_pid: Option<i32>,
+    grant: &ControlGrant,
+) -> Option<Response> {
+    let Actor::App { client, .. } = &grant.actor else {
+        return None;
+    };
+    let session = gate.session_of_peer(peer_pid)?;
+    log::info!(
+        "[control_server] connected-app bearer ({client:?}) refused: peer pid {peer_pid:?} runs \
+         inside session {}",
+        session.session_id
+    );
+    Some(authorization_response(
+        StatusCode::FORBIDDEN,
+        "scope_denied",
+        &app_bearer_in_session_refusal(&session, client),
+    ))
+}
+
+/// The text a session reads when it presents a connected app's credential.
+pub(crate) fn app_bearer_in_session_refusal(session: &SpawnedSession, client: &str) -> String {
+    format!(
+        "spawned sessions cannot use connected-app credentials: this process runs inside Staged \
+         session {} and presented the grant approved for {client:?}; use the session's own \
+         credential ($STAGEDCTL_LOCK), which is confined to the session's project",
+        session.session_id
+    )
 }
 
 /// `POST /api/connect`: park a request and prompt the user.
@@ -607,7 +680,6 @@ pub(super) async fn connect(
     parts: Parts,
     Json(body): Json<ConnectBody>,
 ) -> Response {
-    sweep_abandoned(&state).await;
     let client = match validate_client_name(&body.client) {
         Ok(client) => client,
         Err(e) => return bad_request(e),
@@ -699,14 +771,33 @@ pub(super) async fn poll_connect(
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(LONG_POLL_STEP_MS)).await;
             }
-            PollOutcome::Approved(grant) => {
-                return Json(approved_payload(&state, &grant).await).into_response();
+            PollOutcome::Approved(pending) => {
+                // The approval is handed over once; mint its credentials
+                // now, so an approval nobody collected never had any.
+                let grants = state.grants.clone();
+                let minted = with_store(&state, move |store| {
+                    consent::mint_collected_approval(store, &grants, &pending, now_timestamp())
+                })
+                .await;
+                return match minted {
+                    Ok(grant) => {
+                        consent::emit_grants_changed(&state.app_handle);
+                        Json(approved_payload(&state, &grant).await).into_response()
+                    }
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "the approval could not be recorded ({e}); run `stagedctl \
+                                 connect` again"
+                            )
+                        })),
+                    )
+                        .into_response(),
+                };
             }
             PollOutcome::Denied => return refusal(AuthorizationFailure::Denied),
             PollOutcome::Expired => {
-                // If the user approved after the CLI's own deadline, that
-                // approval is now abandoned; retire it before answering.
-                sweep_abandoned(&state).await;
                 return authorization_response(
                     StatusCode::UNAUTHORIZED,
                     AuthorizationFailure::Missing.code(),
@@ -1039,15 +1130,6 @@ mod tests {
         }
     }
 
-    fn approved(grant_id: &str) -> ApprovedGrant {
-        ApprovedGrant {
-            grant_id: grant_id.to_string(),
-            token: "t".repeat(64),
-            reconnect_secret: "s".repeat(64),
-            expires_at: 99,
-        }
-    }
-
     #[test]
     fn requests_are_parked_listed_oldest_first_and_capped() {
         let enrol = Enrolment::default();
@@ -1084,19 +1166,21 @@ mod tests {
             }
         );
         let answered = enrol
-            .answer(&pending.id, Decision::Approved(approved("g1")), 1_002)
+            .answer(&pending.id, Decision::Approved, 1_002)
             .unwrap();
-        assert_eq!(answered.decision, Some(Decision::Approved(approved("g1"))));
+        assert_eq!(answered.decision, Some(Decision::Approved));
         assert_eq!(
             enrol
                 .answer(&pending.id, Decision::Denied, 1_003)
                 .unwrap_err(),
             AnswerError::AlreadyAnswered
         );
-        assert_eq!(
-            enrol.poll(&pending.id, 1_004),
-            PollOutcome::Approved(approved("g1"))
-        );
+        let PollOutcome::Approved(collected) = enrol.poll(&pending.id, 1_004) else {
+            panic!("approved request is handed over");
+        };
+        assert_eq!(collected.id, pending.id);
+        assert_eq!(collected.request, request("agent"));
+        assert_eq!(collected.decision, Some(Decision::Approved));
         assert_eq!(
             enrol.poll(&pending.id, 1_005),
             PollOutcome::Unknown,
@@ -1129,52 +1213,20 @@ mod tests {
             "an answer after expiry is refused, not recorded"
         );
         assert_eq!(
-            enrol.get_unanswered(&late.id, after + 1).unwrap_err(),
-            AnswerError::Unknown
+            enrol
+                .answer(&late.id, Decision::Approved, after + 1)
+                .unwrap_err(),
+            AnswerError::Unknown,
+            "forgotten once pruned"
         );
-        // An approval the CLI never collected does not outlive the request,
-        // and its grant id is handed over once for retirement.
+        // An approval the CLI never collected does not outlive the request;
+        // nothing was minted for it, so expiry is the whole of the cleanup.
         let abandoned = enrol.request(request("abandoned"), 1_000).unwrap();
         enrol
-            .answer(&abandoned.id, Decision::Approved(approved("g2")), 1_001)
+            .answer(&abandoned.id, Decision::Approved, 1_001)
             .unwrap();
         assert_eq!(enrol.poll(&abandoned.id, after), PollOutcome::Expired);
-        assert_eq!(enrol.take_abandoned(after), vec!["g2".to_string()]);
-        assert!(
-            enrol.take_abandoned(after + 1).is_empty(),
-            "handed over once"
-        );
-    }
-
-    #[test]
-    fn only_uncollected_approvals_are_abandoned() {
-        let enrol = Enrolment::default();
-        let after = 1_000 + PENDING_TTL_MS;
-        // Collected in time: nothing to retire.
-        let collected = enrol.request(request("collected"), 1_000).unwrap();
-        enrol
-            .answer(
-                &collected.id,
-                Decision::Approved(approved("g-collected")),
-                1_001,
-            )
-            .unwrap();
-        assert!(matches!(
-            enrol.poll(&collected.id, 1_002),
-            PollOutcome::Approved(_)
-        ));
-        // Denied, or never answered: no grant was minted.
-        let denied = enrol.request(request("denied"), 1_000).unwrap();
-        enrol.answer(&denied.id, Decision::Denied, 1_001).unwrap();
-        enrol.request(request("ignored"), 1_000).unwrap();
-        // Approved and left: retire.
-        let left = enrol.request(request("left"), 1_000).unwrap();
-        enrol
-            .answer(&left.id, Decision::Approved(approved("g-left")), 1_001)
-            .unwrap();
-        // Any pruning call surfaces it, not just a poll of that id.
-        assert!(enrol.pending(after).is_empty());
-        assert_eq!(enrol.take_abandoned(after), vec!["g-left".to_string()]);
+        assert_eq!(enrol.poll(&abandoned.id, after + 1), PollOutcome::Unknown);
     }
 
     #[test]
@@ -1223,6 +1275,21 @@ mod tests {
         let text = session_enrolment_refusal("s-1");
         assert!(text.starts_with("spawned sessions cannot request connected-app access"));
         assert!(text.contains("session s-1"), "{text}");
+        // Recognised by process rather than credential: same opening
+        // sentence, and it says how the session was identified.
+        let session = SpawnedSession {
+            session_id: "s-2".to_string(),
+            epoch: 1,
+            project_id: "p".to_string(),
+        };
+        let text = session_process_refusal(&session);
+        assert!(text.starts_with("spawned sessions cannot request connected-app access"));
+        assert!(text.contains("session s-2"), "{text}");
+        assert!(text.contains("process tree"), "{text}");
+        let text = app_bearer_in_session_refusal(&session, "Claude Code");
+        assert!(text.contains("session s-2"), "{text}");
+        assert!(text.contains("\"Claude Code\""), "{text}");
+        assert!(text.contains("$STAGEDCTL_LOCK"), "{text}");
         // The CLI's local refusal must open with the same sentence (pinned
         // there too), so an agent reads one explanation either way.
         let cli = include_str!("../../crates/stagedctl/src/commands.rs");

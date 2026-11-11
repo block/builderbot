@@ -5,13 +5,16 @@ stagedctl is built for agents running inside Staged-spawned sessions: the
 app injects $STAGEDCTL_LOCK into those sessions — a per-session credential
 file — and stagedctl uses it to find the app and authenticate with zero
 configuration. The credential is confined to the session's own project
-and is revoked when the session ends. Outside a session it tries each
+and is revoked when the session ends; it is the only credential a
+spawned session is issued, and a session must not try to obtain wider
+access (see `stagedctl connect --help`). Outside a session it tries each
 running Staged instance (~/.staged/control/<pid>/discovery.json), newest
 first, until one answers, and authenticates with a connected-app grant
 if `stagedctl connect` has been approved on this machine; without any
 credential the app refuses commands (exit 4). Control files are read
 only when they are owner-private (0600 inside a 0700 directory, no
-symlinks).
+symlinks). An empty $STAGEDCTL_LOCK is an error (exit 3), never a
+fallback to the instance file.
 
 Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
@@ -417,10 +420,15 @@ left unanswered for five minutes expires in the app; the default
 --timeout gives up a minute earlier so an approval never lands after
 this command has stopped listening for it.
 
-Not available from inside a Staged-spawned session: a session's
-credential is confined to its own project and cannot request
-connected-app access (exit 4, `scope_denied`). If a task needs wider
-access, ask the user to run this command from their own terminal.
+Not for Staged-spawned sessions. A spawned session is issued only its
+own project-scoped credential and must not try to obtain wider access:
+the app refuses `connect` (exit 4, `scope_denied`) when the caller
+presents a session credential or when its process is traceable to a
+running session's agent, and the CLI refuses it locally under a
+per-session $STAGEDCTL_LOCK. That check is a strong default, not a
+sandbox — same-user processes are not a hard security boundary — and
+the rule holds either way. If a task needs wider access, say so and let
+the user run this command from their own terminal.
 
 Usage: stagedctl connect [OPTIONS] --client <NAME>
 
@@ -455,9 +463,10 @@ working at once. With --client only the grants approved under that name
 are removed. Grants a Staged app cannot be reached for are still removed
 locally; revoke them in Settings ▸ Connected apps if needed.
 
-Not available from inside a Staged-spawned session (exit 4,
-`scope_denied`): a session's credential is its own, not a connected-app
-grant.
+Not for Staged-spawned sessions (exit 4, `scope_denied`, when the
+caller presents a session credential or its process is traceable to a
+running session): a session's credential is its own, not a
+connected-app grant.
 
 Usage: stagedctl disconnect [OPTIONS]
 

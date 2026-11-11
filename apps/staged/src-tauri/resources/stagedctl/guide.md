@@ -19,11 +19,24 @@ without asking again. It lasts thirty days from its last use; the user can
 revoke it any time under Settings ▸ Connected apps, and
 `stagedctl disconnect` forgets and revokes it from this side.
 
-Inside a spawned session, `stagedctl connect` is refused (exit 4,
-`scope_denied`): the session's credential is the only one it gets, and it
-cannot ask the user for a wider one. If a task genuinely needs access
-beyond this session's project, say so in your output and let the user run
-`stagedctl connect` themselves.
+## The boundary for spawned sessions
+
+A spawned session is issued exactly one credential: its own, scoped to its
+project. That is the credential to use, as is. Do not try to obtain wider
+access from inside a session — not by running `stagedctl connect`, not by
+unsetting or emptying `$STAGEDCTL_LOCK` to reach the instance file, and not
+by using a connected-app grant the user approved for something else.
+
+The app enforces this where it can see it: `stagedctl connect` and
+`disconnect`, and reconnects to a connected-app grant, are refused (exit 4,
+`scope_denied`) when the caller presents a session credential *or* when the
+calling process is traceable to a running session's agent process. Be
+clear about what that is: processes running as the same user are not a hard
+security boundary, so this is a strong default and an honest attribution,
+not a sandbox. The rule stands regardless of whether a given attempt would
+be caught. If a task genuinely needs access beyond this session's project,
+say so in your output and let the user run `stagedctl connect` from their
+own terminal.
 
 ## Discover, don't memorize
 

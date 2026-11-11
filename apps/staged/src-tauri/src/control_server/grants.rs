@@ -61,6 +61,17 @@ impl Actor {
     }
 }
 
+/// A running session this instance spawned, as the session runner
+/// registered its agent process: what a connecting process's ancestry
+/// resolves to (see `ancestry`). The registration lives exactly as long as
+/// the session's [`SessionLease`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnedSession {
+    pub session_id: String,
+    pub epoch: u64,
+    pub project_id: String,
+}
+
 /// Which projects a grant reaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Scope {
@@ -229,6 +240,10 @@ struct GrantsInner {
     retired_reason: HashMap<String, AuthorizationFailure>,
     /// Class B: grant id → its live token hashes, oldest first.
     app_bearers: HashMap<String, VecDeque<String>>,
+    /// Agent process pid → the running session it belongs to, kept in step
+    /// with the session leases: registered when the driver spawns the
+    /// process, removed when the lease drops.
+    agents: HashMap<u32, SpawnedSession>,
 }
 
 impl GrantsInner {
@@ -396,6 +411,29 @@ impl ControlGrants {
             .is_some_and(|hashes| !hashes.is_empty())
     }
 
+    /// Record that `pid` is an agent process of `session`. A pid already
+    /// registered (reused by the kernel for a new agent) is re-pointed.
+    pub(crate) fn register_agent_process(&self, pid: u32, session: SpawnedSession) {
+        self.inner.lock().unwrap().agents.insert(pid, session);
+    }
+
+    /// Forget every agent process registered for the run `(session_id,
+    /// epoch)`; a successor run of the same session id keeps its own.
+    /// Returns how many were forgotten.
+    pub(crate) fn deregister_session_processes(&self, session_id: &str, epoch: u64) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.agents.len();
+        inner
+            .agents
+            .retain(|_, s| !(s.session_id == session_id && s.epoch == epoch));
+        before - inner.agents.len()
+    }
+
+    /// The running session whose agent process is `pid`, if any.
+    pub(crate) fn spawned_session_of(&self, pid: u32) -> Option<SpawnedSession> {
+        self.inner.lock().unwrap().agents.get(&pid).cloned()
+    }
+
     /// Number of live grants.
     #[cfg(test)]
     pub(crate) fn live_count(&self) -> usize {
@@ -442,12 +480,30 @@ pub struct SessionLease {
     token: String,
     file: PathBuf,
     grants: ControlGrants,
+    /// The run this lease belongs to; what its agent processes register as.
+    session: SpawnedSession,
 }
 
 impl SessionLease {
     /// The per-session file, to inject as `STAGEDCTL_LOCK`.
     pub fn file(&self) -> &Path {
         &self.file
+    }
+
+    /// A callback for the agent driver's spawn hook: registers each agent
+    /// process pid as this session's, so a `stagedctl` run anywhere in that
+    /// process tree is recognised as the session's whatever credential it
+    /// presents (see `ancestry`). The registrations go with the lease.
+    pub fn agent_process_observer(&self) -> Arc<dyn Fn(u32) + Send + Sync> {
+        let grants = self.grants.clone();
+        let session = self.session.clone();
+        Arc::new(move |pid| {
+            log::info!(
+                "[control_server] session {} agent process {pid} registered",
+                session.session_id
+            );
+            grants.register_agent_process(pid, session.clone());
+        })
     }
 
     #[cfg(test)]
@@ -468,6 +524,8 @@ impl std::fmt::Debug for SessionLease {
 impl Drop for SessionLease {
     fn drop(&mut self) {
         self.grants.revoke(&self.token);
+        self.grants
+            .deregister_session_processes(&self.session.session_id, self.session.epoch);
         if let Err(e) = std::fs::remove_file(&self.file) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!(
@@ -493,6 +551,11 @@ pub(crate) fn mint_session_lease_at(
     request: SessionGrantRequest,
 ) -> Result<SessionLease, String> {
     let file = session_file_path(sessions_dir, &request.session_id, request.epoch);
+    let session = SpawnedSession {
+        session_id: request.session_id.clone(),
+        epoch: request.epoch,
+        project_id: request.project_id.clone(),
+    };
     let grant = ControlGrant {
         actor: Actor::Session {
             session_id: request.session_id,
@@ -515,6 +578,7 @@ pub(crate) fn mint_session_lease_at(
         token,
         file,
         grants: grants.clone(),
+        session,
     })
 }
 
@@ -939,6 +1003,46 @@ mod tests {
             "the credential file is retired with the grant"
         );
         assert_eq!(grants.live_count(), 0);
+    }
+
+    #[test]
+    fn a_lease_registers_its_agent_processes_and_forgets_them_on_drop() {
+        let (_root, sessions) = sessions_dir();
+        let grants = ControlGrants::default();
+        let transport = unix_transport(sessions.parent().unwrap());
+        let lease =
+            mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 7))
+                .unwrap();
+        let observe = lease.agent_process_observer();
+        observe(500);
+        // A pikchr re-connect spawns a second agent process under the same
+        // lease; both belong to the run.
+        observe(600);
+        let expected = SpawnedSession {
+            session_id: "s1".to_string(),
+            epoch: 7,
+            project_id: "project-a".to_string(),
+        };
+        assert_eq!(grants.spawned_session_of(500), Some(expected.clone()));
+        assert_eq!(grants.spawned_session_of(600), Some(expected));
+        assert_eq!(grants.spawned_session_of(700), None);
+
+        // A successor run of the same session id keeps its own processes
+        // when the predecessor's lease drops.
+        let successor =
+            mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 8))
+                .unwrap();
+        successor.agent_process_observer()(700);
+        drop(lease);
+        assert_eq!(grants.spawned_session_of(500), None);
+        assert_eq!(grants.spawned_session_of(600), None);
+        assert_eq!(
+            grants.spawned_session_of(700).map(|s| s.epoch),
+            Some(8),
+            "the successor's registration is untouched"
+        );
+        assert_eq!(grants.deregister_session_processes("s1", 8), 1);
+        assert_eq!(grants.spawned_session_of(700), None);
     }
 
     #[test]

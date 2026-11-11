@@ -651,6 +651,7 @@ mod fake_proxy {
             remote_working_dir: Some(PathBuf::from("/home/bloxer/repo")),
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,

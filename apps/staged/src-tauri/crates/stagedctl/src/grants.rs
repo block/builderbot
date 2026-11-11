@@ -86,8 +86,28 @@ pub fn grants_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("control").join("grants")
 }
 
-pub fn grant_file_path(data_dir: &Path, grant_id: &str) -> PathBuf {
-    grants_dir(data_dir).join(format!("{grant_id}.json"))
+/// A grant id the app issued is a lowercase hex UUID; nothing else is
+/// joined into a path. Defence in depth — the server is same-uid and
+/// generates the ids — and what keeps the `<id>.json` listing honest.
+pub fn validate_grant_id(grant_id: &str) -> Result<(), CtlError> {
+    let well_formed = !grant_id.is_empty()
+        && grant_id.len() <= 64
+        && grant_id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase() || b == b'-');
+    if well_formed {
+        Ok(())
+    } else {
+        Err(CtlError::Transport(format!(
+            "refusing grant id {grant_id:?}: not of the form the app issues ([0-9a-f-])"
+        )))
+    }
+}
+
+/// `~/.staged/control/grants/<grant-id>.json`, for a validated id.
+pub fn grant_file_path(data_dir: &Path, grant_id: &str) -> Result<PathBuf, CtlError> {
+    validate_grant_id(grant_id)?;
+    Ok(grants_dir(data_dir).join(format!("{grant_id}.json")))
 }
 
 /// ms since the epoch.
@@ -151,7 +171,10 @@ pub fn read_grant_files(data_dir: &Path) -> Vec<(PathBuf, GrantFile)> {
         }
         match crate::client::read_private_file_lossy(&path) {
             Ok(contents) => match serde_json::from_str::<GrantFile>(&contents) {
-                Ok(grant) => grants.push((path, grant)),
+                Ok(grant) => match validate_grant_id(&grant.grant_id) {
+                    Ok(()) => grants.push((path, grant)),
+                    Err(e) => eprintln!("stagedctl: ignoring grant file {}: {e}", path.display()),
+                },
                 Err(e) => eprintln!(
                     "stagedctl: ignoring malformed grant file {}: {e}",
                     path.display()
@@ -170,10 +193,10 @@ pub fn read_grant_files(data_dir: &Path) -> Vec<(PathBuf, GrantFile)> {
 
 /// Write `grant` as `0600` inside a `0700` grants directory, atomically.
 pub fn write_grant_file(data_dir: &Path, grant: &GrantFile) -> Result<PathBuf, CtlError> {
+    let path = grant_file_path(data_dir, &grant.grant_id)?;
     let dir = grants_dir(data_dir);
     ensure_private_dir(dir.parent().expect("grants dir has a parent"))?;
     ensure_private_dir(&dir)?;
-    let path = grant_file_path(data_dir, &grant.grant_id);
     let contents = serde_json::to_vec_pretty(grant)
         .map_err(|e| CtlError::Environment(format!("serialize grant: {e}")))?;
     write_private_file(&path, &contents)?;
@@ -390,11 +413,63 @@ mod tests {
     }
 
     #[test]
+    fn grant_ids_are_hex_uuids_before_any_path_is_built() {
+        for ok in ["0f3a", "7c9e2b10-1d2f-4a8b-9c3d-0e1f2a3b4c5d", "a-b-c"] {
+            assert!(validate_grant_id(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "../x",
+            "g/1",
+            "G1",
+            "0F3A",
+            "g1.json",
+            "a b",
+            &"a".repeat(65),
+        ] {
+            let err = validate_grant_id(bad).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+            assert!(grant_file_path(Path::new("/d"), bad).is_err(), "{bad:?}");
+        }
+        let dir = private_tempdir();
+        let mut traversal = grant("aaaa", 1);
+        traversal.grant_id = "../escape".to_string();
+        assert!(write_grant_file(dir.path(), &traversal).is_err());
+        assert!(!dir.path().join("escape.json").exists());
+        assert!(!grants_dir(dir.path()).exists(), "nothing was created");
+
+        // A file whose content names an id outside the alphabet is ignored
+        // on read, even though the file itself is well placed.
+        write_grant_file(dir.path(), &grant("bbbb", 1)).unwrap();
+        let mut odd = grant("cccc", 1);
+        odd.grant_id = "../odd".to_string();
+        std::fs::write(
+            grants_dir(dir.path()).join("odd.json"),
+            serde_json::to_vec(&odd).unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                grants_dir(dir.path()).join("odd.json"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        let read: Vec<String> = read_grant_files(dir.path())
+            .into_iter()
+            .map(|(_, g)| g.grant_id)
+            .collect();
+        assert_eq!(read, ["bbbb"]);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_world_readable_grant_file_is_not_trusted() {
         use std::os::unix::fs::PermissionsExt;
         let dir = private_tempdir();
-        let path = write_grant_file(dir.path(), &grant("open", 1)).unwrap();
+        let path = write_grant_file(dir.path(), &grant("0e", 1)).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_grant_files(dir.path()).is_empty());
     }

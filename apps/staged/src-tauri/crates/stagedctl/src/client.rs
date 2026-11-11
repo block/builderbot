@@ -176,9 +176,17 @@ pub fn resolve_lock_candidates(
         return Ok(vec![path.to_path_buf()]);
     }
     if let Some(value) = env_value {
-        if !value.is_empty() {
-            return Ok(vec![PathBuf::from(value)]);
+        // An empty value is set, not unset: inside a spawned session,
+        // `STAGEDCTL_LOCK= stagedctl …` must not quietly fall back to the
+        // instance file and shed the session's credential.
+        if value.is_empty() {
+            return Err(CtlError::Environment(format!(
+                "${STAGEDCTL_LOCK_ENV} is set but empty; inside a Staged-spawned session it \
+                 names the session's credential file — unset it only if you are not in one, or \
+                 pass --lock-path"
+            )));
         }
+        return Ok(vec![PathBuf::from(value)]);
     }
     let candidates = data_dir.map(live_discovery_files).unwrap_or_default();
     if candidates.is_empty() {
@@ -685,17 +693,20 @@ impl Client {
 
     /// Authenticate with the freshest usable grant on this machine, if any.
     /// A grant the app no longer knows (`authorization_required`: a reset
-    /// database, say) is skipped silently; one it revoked or let expire is
-    /// noted on stderr — the user should hear that — and skipped for the
-    /// next, since a client revoked in Settings must not block one approved
-    /// later under another name (grant files are only removed by
-    /// `disconnect`). If nothing attaches, the first such refusal is the
-    /// error (exit 4); with only unknown grants, or none, the client keeps
-    /// whatever bearer the control file gave it and the app's own
+    /// database, say) is skipped silently; one it revoked or let expire, or
+    /// one whose reconnect failed for any other reason (a transport fault,
+    /// a malformed answer, a renewal the client refused), is noted on stderr
+    /// — the user should hear that — and skipped for the next, since one
+    /// bad grant file must not block one approved later under another name
+    /// (grant files are only removed by `disconnect`). If nothing attaches,
+    /// the first authorization refusal is the error (exit 4), else the first
+    /// other failure (exit 2); with only unknown grants, or none, the client
+    /// keeps whatever bearer the control file gave it and the app's own
     /// `authorization_required` message explains what to do.
     pub fn attach_grant_credential(&mut self, data_dir: &Path) -> Result<(), CtlError> {
         let now = crate::grants::now_ms();
         let mut refused: Option<CtlError> = None;
+        let mut failed: Option<CtlError> = None;
         for (path, grant) in crate::grants::read_grant_files(data_dir) {
             if grant.is_expired_at(now) {
                 continue;
@@ -722,16 +733,24 @@ impl Client {
                 Err(e @ CtlError::Authorization { .. }) => {
                     eprintln!(
                         "stagedctl: grant {} ({}) is no longer accepted by the app ({e}); \
-                         trying the next grant — `stagedctl disconnect --client {:?}` removes \
-                         it",
-                        grant.grant_id, grant.client, grant.client
+                         trying the next grant — `stagedctl disconnect --client {}` removes it",
+                        grant.grant_id,
+                        grant.client,
+                        shell_single_quote(&grant.client)
                     );
                     refused.get_or_insert(e);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    eprintln!(
+                        "stagedctl: grant {} ({}) could not be reconnected ({e}); trying the \
+                         next grant",
+                        grant.grant_id, grant.client
+                    );
+                    failed.get_or_insert(e);
+                }
             }
         }
-        match refused {
+        match refused.or(failed) {
             Some(err) => Err(err),
             None => Ok(()),
         }
@@ -877,6 +896,13 @@ impl Client {
     pub(crate) fn bearer(&self) -> Option<&str> {
         self.bearer.as_deref()
     }
+}
+
+/// `value` as one POSIX shell word, so a suggested command line stays
+/// literal whatever the server-stored name contains: single quotes, with
+/// each embedded `'` closed, escaped and reopened.
+pub(crate) fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// What a successful reconnect returned.
@@ -1133,12 +1159,34 @@ mod tests {
     }
 
     #[test]
-    fn empty_env_value_is_ignored() {
+    fn empty_env_value_is_set_but_invalid_not_unset() {
         let dir = private_tempdir();
-        let fallback = write_tcp_discovery(dir.path(), std::process::id(), 1, 1);
-        let got = resolve_lock_candidates(None, Some(std::ffi::OsString::new()), Some(dir.path()))
-            .unwrap();
-        assert_eq!(got, vec![fallback]);
+        write_tcp_discovery(dir.path(), std::process::id(), 1, 1);
+        let err = resolve_lock_candidates(None, Some(std::ffi::OsString::new()), Some(dir.path()))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 3, "{err}");
+        assert!(
+            err.to_string().contains("set but empty"),
+            "never falls back to the instance file: {err}"
+        );
+        // The flag still wins over an empty env value.
+        let flag = PathBuf::from("/flag/discovery.json");
+        let got = resolve_lock_candidates(
+            Some(&flag),
+            Some(std::ffi::OsString::new()),
+            Some(dir.path()),
+        )
+        .unwrap();
+        assert_eq!(got, vec![flag]);
+    }
+
+    #[test]
+    fn shell_single_quoting_keeps_a_name_literal() {
+        assert_eq!(shell_single_quote("Claude Code"), "'Claude Code'");
+        assert_eq!(shell_single_quote("$(rm -rf ~)"), "'$(rm -rf ~)'");
+        assert_eq!(shell_single_quote("`id`"), "'`id`'");
+        assert_eq!(shell_single_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_single_quote(""), "''");
     }
 
     #[test]
@@ -1461,6 +1509,12 @@ mod tests {
     /// A `known` secret with this value stands for a grant the fake app has
     /// revoked: its challenge answers `authorization_revoked`.
     const REVOKED_SECRET: &str = "<revoked>";
+    /// A `known` secret with this value stands for a grant whose thirty
+    /// days ran out app-side: its challenge answers `authorization_expired`.
+    const EXPIRED_SECRET: &str = "<expired>";
+    /// A `known` secret with this value stands for a grant whose challenge
+    /// fails inside the app (an HTTP 500 — a transport fault to the CLI).
+    const BROKEN_SECRET: &str = "<broken>";
 
     /// A fake app that knows the grants in `known` (id → secret) and issues
     /// one fixed nonce per challenge, checking the proof on reconnect
@@ -1490,6 +1544,14 @@ mod tests {
                         r#"{"error":"the grant was revoked in Staged","code":"authorization_revoked"}"#
                             .to_string(),
                     ),
+                    Some(secret) if secret == EXPIRED_SECRET => (
+                        401,
+                        r#"{"error":"the approval expired","code":"authorization_expired"}"#
+                            .to_string(),
+                    ),
+                    Some(secret) if secret == BROKEN_SECRET => {
+                        (500, r#"{"error":"store task failed"}"#.to_string())
+                    }
                     Some(_) => (
                         200,
                         serde_json::json!({ "nonce": format!("nonce-for-{grant_id}"), "expiresAt": 0 })
@@ -1549,31 +1611,31 @@ mod tests {
         let (port, _handle) = grant_aware_server(
             pid,
             vec![
-                ("older".to_string(), "s-older".to_string()),
-                ("newer".to_string(), "s-newer".to_string()),
+                ("01de5".to_string(), "s-older".to_string()),
+                ("4e77e4".to_string(), "s-newer".to_string()),
             ],
             renew_to,
             std::sync::Arc::clone(&seen),
         );
         let dir = private_tempdir();
         write_tcp_discovery(dir.path(), pid, port, 1);
-        crate::grants::write_grant_file(dir.path(), &grant_file("older", "s-older", now + 1000))
+        crate::grants::write_grant_file(dir.path(), &grant_file("01de5", "s-older", now + 1000))
             .unwrap();
-        crate::grants::write_grant_file(dir.path(), &grant_file("newer", "s-newer", now + 2000))
+        crate::grants::write_grant_file(dir.path(), &grant_file("4e77e4", "s-newer", now + 2000))
             .unwrap();
         // An expired grant is never tried, however fresh it looks.
-        crate::grants::write_grant_file(dir.path(), &grant_file("stale", "s-stale", now - 1))
+        crate::grants::write_grant_file(dir.path(), &grant_file("5a1e", "s-stale", now - 1))
             .unwrap();
 
         let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
-        assert_eq!(client.bearer(), Some("live-newer"));
+        assert_eq!(client.bearer(), Some("live-4e77e4"));
         client
             .invoke("list_projects", serde_json::json!({}))
             .unwrap();
         let seen = seen.lock().unwrap();
         // ping (instance token), challenge, reconnect, invoke (grant bearer).
         assert_eq!(seen.len(), 4, "{seen:?}");
-        assert_eq!(seen[3], "Bearer live-newer");
+        assert_eq!(seen[3], "Bearer live-4e77e4");
 
         // The renewed expiry was recorded; the others are untouched.
         let files: Vec<(String, i64)> = crate::grants::read_grant_files(dir.path())
@@ -1583,9 +1645,9 @@ mod tests {
         assert_eq!(
             files,
             [
-                ("newer".to_string(), renew_to),
-                ("older".to_string(), now + 1000),
-                ("stale".to_string(), now - 1),
+                ("4e77e4".to_string(), renew_to),
+                ("01de5".to_string(), now + 1000),
+                ("5a1e".to_string(), now - 1),
             ]
         );
     }
@@ -1597,22 +1659,19 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let (port, _handle) = grant_aware_server(
             pid,
-            vec![("known".to_string(), "s-known".to_string())],
+            vec![("c0de".to_string(), "s-known".to_string())],
             now + crate::grants::GRANT_LIFETIME_MS,
             seen,
         );
         let dir = private_tempdir();
         write_tcp_discovery(dir.path(), pid, port, 1);
-        crate::grants::write_grant_file(dir.path(), &grant_file("known", "s-known", now + 1000))
+        crate::grants::write_grant_file(dir.path(), &grant_file("c0de", "s-known", now + 1000))
             .unwrap();
-        crate::grants::write_grant_file(
-            dir.path(),
-            &grant_file("forgotten", "s-forgotten", now + 5000),
-        )
-        .unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("f046", "s-forgotten", now + 5000))
+            .unwrap();
 
         let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
-        assert_eq!(client.bearer(), Some("live-known"));
+        assert_eq!(client.bearer(), Some("live-c0de"));
     }
 
     #[test]
@@ -1632,7 +1691,7 @@ mod tests {
         });
         let dir = private_tempdir();
         write_tcp_discovery(dir.path(), pid, port, 1);
-        crate::grants::write_grant_file(dir.path(), &grant_file("g", "s", now + 1000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("a1", "s", now + 1000)).unwrap();
         let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
         assert_eq!(err.exit_code(), 4, "{err}");
         assert_eq!(
@@ -1645,13 +1704,13 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (port, _handle) = grant_aware_server(
             pid,
-            vec![("g".to_string(), "s".to_string())],
+            vec![("a1".to_string(), "s".to_string())],
             now + crate::grants::GRANT_LIFETIME_MS + 24 * 60 * 60 * 1000,
             seen,
         );
         let dir = private_tempdir();
         write_tcp_discovery(dir.path(), pid, port, 1);
-        crate::grants::write_grant_file(dir.path(), &grant_file("g", "s", now + 1000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("a1", "s", now + 1000)).unwrap();
         let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("thirty days"), "{err}");
@@ -1659,44 +1718,43 @@ mod tests {
 
     #[test]
     fn a_revoked_grant_file_is_noted_and_the_next_grant_attaches() {
-        // The user revoked "old" in Settings and later approved "new"; the
-        // stale file stays until `disconnect`, and must not block "new".
+        // The user revoked "01d0" in Settings and later approved "4e77"; the
+        // stale file stays until `disconnect`, and must not block "4e77".
         let pid = std::process::id();
         let now = crate::grants::now_ms();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let (port, _handle) = grant_aware_server(
             pid,
             vec![
-                ("old".to_string(), REVOKED_SECRET.to_string()),
-                ("new".to_string(), "s-new".to_string()),
+                ("01d0".to_string(), REVOKED_SECRET.to_string()),
+                ("4e77".to_string(), "s-new".to_string()),
             ],
             now + crate::grants::GRANT_LIFETIME_MS,
             std::sync::Arc::clone(&seen),
         );
         let dir = private_tempdir();
         write_tcp_discovery(dir.path(), pid, port, 1);
-        crate::grants::write_grant_file(dir.path(), &grant_file("new", "s-new", now + 1000))
+        crate::grants::write_grant_file(dir.path(), &grant_file("4e77", "s-new", now + 1000))
             .unwrap();
         // Fresher, so tried first.
-        crate::grants::write_grant_file(dir.path(), &grant_file("old", "x", now + 5000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("01d0", "x", now + 5000)).unwrap();
 
         let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
-        assert_eq!(client.bearer(), Some("live-new"));
+        assert_eq!(client.bearer(), Some("live-4e77"));
         // ping, old's challenge (refused), new's challenge, new's reconnect.
         assert_eq!(seen.lock().unwrap().len(), 4);
 
         // With only refused grants, the first refusal is the error.
         let (port, _handle) = grant_aware_server(
             pid,
-            vec![("old".to_string(), REVOKED_SECRET.to_string())],
+            vec![("01d0".to_string(), REVOKED_SECRET.to_string())],
             now + crate::grants::GRANT_LIFETIME_MS,
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         );
         let dir = private_tempdir();
         write_tcp_discovery(dir.path(), pid, port, 1);
-        crate::grants::write_grant_file(dir.path(), &grant_file("old", "x", now + 5000)).unwrap();
-        crate::grants::write_grant_file(dir.path(), &grant_file("forgotten", "y", now + 1000))
-            .unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("01d0", "x", now + 5000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("f046", "y", now + 1000)).unwrap();
         let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
         assert_eq!(err.exit_code(), 4, "{err}");
         assert!(
@@ -1719,10 +1777,140 @@ mod tests {
             "$STAGEDCTL_LOCK is how a spawned session gets its credential"
         );
         assert_eq!(session_credential_in_use(Some(&instance), None, None), None);
+        // The data-dir fallback finds a live instance here, and still says
+        // no: it yields only instance files.
+        let dir = private_tempdir();
+        let live = write_tcp_discovery(dir.path(), std::process::id(), 1, 1);
+        assert!(is_instance_discovery_file(&live));
         assert_eq!(
-            session_credential_in_use(None, None, Some(Path::new("/nonexistent"))),
+            resolve_lock_candidates(None, None, Some(dir.path())).unwrap(),
+            vec![live],
+            "the fallback does see the live instance"
+        );
+        assert_eq!(
+            session_credential_in_use(None, None, Some(dir.path())),
             None,
-            "the data-dir fallback yields only instance files (or nothing)"
+            "…and an instance file is not a session credential"
+        );
+        // An empty $STAGEDCTL_LOCK is not a session credential either (it
+        // is an error at discovery), so connect's local check defers to
+        // the environment error rather than inventing a path.
+        assert_eq!(
+            session_credential_in_use(None, Some(std::ffi::OsString::new()), Some(dir.path())),
+            None
+        );
+    }
+
+    /// `authorization_expired` continues to the next grant like a revoked
+    /// one, and when nothing attaches the *first* refusal is reported
+    /// whatever came after it.
+    #[test]
+    fn an_expired_grant_file_is_noted_and_the_first_refusal_wins() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![
+                ("5a1e".to_string(), EXPIRED_SECRET.to_string()),
+                ("600d".to_string(), "s".to_string()),
+            ],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::clone(&seen),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        // The expired-app-side grant is fresher locally (its file never
+        // learnt of the expiry), so it is tried first and passed over.
+        crate::grants::write_grant_file(dir.path(), &grant_file("5a1e", "x", now + 9_000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("600d", "s", now + 5_000)).unwrap();
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.bearer(), Some("live-600d"));
+        // ping, stale's challenge (expired), good's challenge, good's reconnect.
+        assert_eq!(seen.lock().unwrap().len(), 4);
+
+        // Two refusals: expired first, revoked second → expired is reported.
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![
+                ("5a1e".to_string(), EXPIRED_SECRET.to_string()),
+                ("60e0".to_string(), REVOKED_SECRET.to_string()),
+            ],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("5a1e", "x", now + 9_000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("60e0", "y", now + 5_000)).unwrap();
+        let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert!(
+            err.to_string().starts_with("authorization_expired:"),
+            "first refusal wins: {err}"
+        );
+    }
+
+    /// A reconnect that fails for a non-authorization reason on one grant
+    /// (here the app's challenge 500s) is noted and the search continues;
+    /// it is the reported error only when no grant attaches and none was
+    /// refused outright.
+    #[test]
+    fn a_transport_failure_on_one_grant_does_not_hide_the_next() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![
+                ("b40c".to_string(), BROKEN_SECRET.to_string()),
+                ("600d".to_string(), "s".to_string()),
+            ],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::clone(&seen),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("b40c", "x", now + 9_000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("600d", "s", now + 5_000)).unwrap();
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.bearer(), Some("live-600d"));
+        assert_eq!(seen.lock().unwrap().len(), 4);
+
+        // Only a broken grant: the transport error is reported (exit 2)…
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("b40c".to_string(), BROKEN_SECRET.to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("b40c", "x", now + 9_000)).unwrap();
+        let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("HTTP 500"), "{err}");
+
+        // …unless some grant was refused outright, which is the more
+        // specific answer whatever the order.
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![
+                ("b40c".to_string(), BROKEN_SECRET.to_string()),
+                ("60e0".to_string(), REVOKED_SECRET.to_string()),
+            ],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("b40c", "x", now + 9_000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("60e0", "y", now + 5_000)).unwrap();
+        let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert!(
+            err.to_string().starts_with("authorization_revoked:"),
+            "{err}"
         );
     }
 
@@ -1734,12 +1922,12 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let (port, _handle) = grant_aware_server(
             pid,
-            vec![("g".to_string(), "s".to_string())],
+            vec![("a1".to_string(), "s".to_string())],
             now + crate::grants::GRANT_LIFETIME_MS,
             std::sync::Arc::clone(&seen),
         );
         let dir = private_tempdir();
-        crate::grants::write_grant_file(dir.path(), &grant_file("g", "s", now + 1000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("a1", "s", now + 1000)).unwrap();
         let session_file = instance_dir(dir.path(), pid)
             .join("sessions")
             .join("abc.json");
@@ -1874,14 +2062,14 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (port, _handle) = grant_aware_server(
             pid,
-            vec![("g".to_string(), "s".to_string())],
+            vec![("a1".to_string(), "s".to_string())],
             now + crate::grants::GRANT_LIFETIME_MS,
             seen,
         );
         let dir = private_tempdir();
         write_tcp_discovery(dir.path(), pid, port, 1);
         let (client, _) = discover_instance(None, None, Some(dir.path())).unwrap();
-        assert!(client.revoke_grant(&grant_file("g", "s", now)).unwrap());
+        assert!(client.revoke_grant(&grant_file("a1", "s", now)).unwrap());
 
         let (port, _handle) = fake_server(move |head| {
             if head.starts_with("GET /api/ping") {
@@ -1897,7 +2085,7 @@ mod tests {
         write_tcp_discovery(dir.path(), pid, port, 1);
         let (client, _) = discover_instance(None, None, Some(dir.path())).unwrap();
         assert!(
-            !client.revoke_grant(&grant_file("g", "s", now)).unwrap(),
+            !client.revoke_grant(&grant_file("a1", "s", now)).unwrap(),
             "nothing left to revoke"
         );
     }

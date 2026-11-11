@@ -902,6 +902,15 @@ pub struct BackgroundHoldTask {
 /// thread: keep it cheap and non-blocking (emit an event, don't do I/O).
 pub type BackgroundHoldObserver = Arc<dyn Fn(BackgroundHoldStatus) + Send + Sync>;
 
+/// Callback invoked with the pid of every local agent process a driver
+/// spawns, the moment `spawn` returns. The pid is the agent itself — or the
+/// login shell that will `exec` it, which keeps the pid — so a client can
+/// recognise the process tree a session's commands run in. Never called for
+/// remote sessions, whose process lives on the workstation.
+///
+/// Called from the connection task: keep it cheap and non-blocking.
+pub type AgentProcessObserver = Arc<dyn Fn(u32) + Send + Sync>;
+
 /// Session-connection lifetime states.
 ///
 /// `TurnLive` and `BackgroundHolding` are the two live states; the rest are
@@ -1185,6 +1194,9 @@ pub struct AcpDriver {
     /// hold, so the client can present the wait. Only ever called with a
     /// `background_hold` configured.
     background_hold_observer: Option<BackgroundHoldObserver>,
+    /// Told the pid of each local agent process this driver spawns. See
+    /// [`AcpDriver::with_agent_process_observer`].
+    agent_process_observer: Option<AgentProcessObserver>,
     /// Treat the agent as not advertising steering even when it does, so
     /// every [`TurnControlHandle::steer`] is refused locally and callers take
     /// the interrupt-and-reprompt path. See
@@ -1221,6 +1233,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
                 blox_process: None,
@@ -1243,6 +1256,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
                 blox_process: None,
@@ -1266,6 +1280,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -1325,6 +1340,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: agent_id
                 .and_then(blox_unattended_session_mode)
@@ -1415,6 +1431,15 @@ impl AcpDriver {
         observer: Option<BackgroundHoldObserver>,
     ) -> Self {
         self.background_hold_observer = observer;
+        self
+    }
+
+    /// Observe the pid of every local agent process this driver spawns, so
+    /// the client can tell which running session a process descends from
+    /// (Staged keys its control-socket consent gate on it). Not called for
+    /// remote sessions.
+    pub fn with_agent_process_observer(mut self, observer: Option<AgentProcessObserver>) -> Self {
+        self.agent_process_observer = observer;
         self
     }
 
@@ -2828,6 +2853,9 @@ impl AcpDriver {
             )
         } else {
             let mut child = cmd.spawn().map_err(spawn_error)?;
+            if let (Some(observer), Some(pid)) = (&self.agent_process_observer, child.id()) {
+                observer(pid);
+            }
             let child_exited = CancellationToken::new();
             if let Some(stderr) = child.stderr.take() {
                 spawn_stderr_reader(
@@ -10793,6 +10821,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -10810,6 +10839,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -10838,6 +10868,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -10855,6 +10886,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,

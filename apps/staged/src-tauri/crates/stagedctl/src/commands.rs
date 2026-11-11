@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 
 use crate::cli::{Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, TimelineVerb};
 use crate::client::{
-    default_data_dir, discover_and_connect, discover_instance, session_credential_in_use, Client,
-    CtlError, STAGEDCTL_LOCK_ENV,
+    default_data_dir, discover_and_connect, discover_instance, session_credential_in_use, Approval,
+    Client, CtlError, STAGEDCTL_LOCK_ENV,
 };
 use crate::grants::{self, GrantFile};
 
@@ -221,10 +221,32 @@ fn connect(
 ) -> Result<CmdOutput, CtlError> {
     let (request_id, _) = app.request_authorization(client_name.trim(), project, read_only)?;
     eprintln!("Waiting for approval in Staged… (request {request_id})");
-    let deadline = Instant::now() + timeout;
-    let approval = loop {
-        match app.poll_authorization(&request_id)? {
-            Some(approval) => break approval,
+    let approval = wait_for_approval(
+        || app.poll_authorization(&request_id),
+        Instant::now() + timeout,
+        timeout,
+        CONNECT_POLL_PAUSE,
+    )?;
+    let path = grants::write_grant_file(data_dir, &approval.grant)?;
+    Ok(render_connected(&approval.grant, &path))
+}
+
+/// The `connect` wait: re-issue `poll` (one long poll of the request) until
+/// it yields the approval, fails, or `deadline` passes with the user still
+/// silent, which is the `connect_timeout` command error (exit 1). `timeout`
+/// is only quoted in that message.
+fn wait_for_approval<P>(
+    mut poll: P,
+    deadline: Instant,
+    timeout: Duration,
+    pause: Duration,
+) -> Result<Approval, CtlError>
+where
+    P: FnMut() -> Result<Option<Approval>, CtlError>,
+{
+    loop {
+        match poll()? {
+            Some(approval) => return Ok(approval),
             None if Instant::now() >= deadline => {
                 return Err(CtlError::command(
                     "connect_timeout",
@@ -235,11 +257,9 @@ fn connect(
                     ),
                 ));
             }
-            None => std::thread::sleep(CONNECT_POLL_PAUSE),
+            None => std::thread::sleep(pause),
         }
-    };
-    let path = grants::write_grant_file(data_dir, &approval.grant)?;
-    Ok(render_connected(&approval.grant, &path))
+    }
 }
 
 fn render_connected(grant: &GrantFile, path: &std::path::Path) -> CmdOutput {
@@ -1583,19 +1603,92 @@ mod tests {
         assert!(validate(&Noun::Disconnect { client: None }).is_ok());
     }
 
+    /// The wait loop against an app that never approves: every poll comes
+    /// back pending, the loop keeps asking until the deadline, then exits 1
+    /// with `connect_timeout` (the request itself stays with the app). A
+    /// poll that fails ends the wait with that error; one that approves
+    /// ends it with the approval.
+    #[test]
+    fn connect_waits_until_the_deadline_then_reports_a_timeout() {
+        let polls = std::cell::Cell::new(0usize);
+        let never = || {
+            polls.set(polls.get() + 1);
+            Ok(None)
+        };
+        let err = wait_for_approval(
+            never,
+            Instant::now() + Duration::from_millis(30),
+            Duration::from_secs(240),
+            Duration::from_millis(5),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "connect_timeout: no answer from the Staged user within 240 seconds; the request \
+             stays in the app until it expires"
+        );
+        assert!(
+            polls.get() >= 2,
+            "kept polling until the deadline: {}",
+            polls.get()
+        );
+
+        // A deadline already passed still polls once (the answer may be
+        // waiting) and times out on `None`.
+        polls.set(0);
+        let err = wait_for_approval(
+            never,
+            Instant::now() - Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+        )
+        .unwrap_err();
+        assert_eq!(polls.get(), 1);
+        assert!(err.to_string().starts_with("connect_timeout:"), "{err}");
+
+        let approved = wait_for_approval(
+            || {
+                Ok(Some(Approval {
+                    grant: stored_grant("g-1", "alpha"),
+                    token: "live".to_string(),
+                }))
+            },
+            Instant::now() - Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+        assert_eq!(approved.token, "live");
+
+        let err = wait_for_approval(
+            || {
+                Err(CtlError::Authorization {
+                    code: "authorization_denied".to_string(),
+                    message: "denied".to_string(),
+                })
+            },
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(60),
+            Duration::from_millis(5),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 4, "a poll failure ends the wait: {err}");
+    }
+
     #[test]
     fn disconnect_without_an_app_still_forgets_the_grants_and_honours_the_filter() {
         let dir = private_tempdir();
-        grants::write_grant_file(dir.path(), &stored_grant("g-a", "alpha")).unwrap();
-        grants::write_grant_file(dir.path(), &stored_grant("g-b", "beta")).unwrap();
+        grants::write_grant_file(dir.path(), &stored_grant("a-a", "alpha")).unwrap();
+        grants::write_grant_file(dir.path(), &stored_grant("b-b", "beta")).unwrap();
 
         let out = disconnect(None, dir.path(), Some("alpha")).unwrap();
         assert_eq!(out.json["removed"].as_array().unwrap().len(), 1);
-        assert_eq!(out.json["removed"][0]["grantId"], "g-a");
+        assert_eq!(out.json["removed"][0]["grantId"], "a-a");
         assert_eq!(out.json["removed"][0]["revokedInApp"], Value::Null);
-        assert_eq!(out.json["notRevokedInApp"], json!(["g-a"]));
+        assert_eq!(out.json["notRevokedInApp"], json!(["a-a"]));
         assert!(
-            out.human.starts_with("removed 1 grant\n  g-a (alpha)"),
+            out.human.starts_with("removed 1 grant\n  a-a (alpha)"),
             "{}",
             out.human
         );
@@ -1608,7 +1701,7 @@ mod tests {
             .into_iter()
             .map(|(_, g)| g.grant_id)
             .collect();
-        assert_eq!(left, ["g-b"]);
+        assert_eq!(left, ["b-b"]);
 
         let out = disconnect(None, dir.path(), None).unwrap();
         assert_eq!(out.json["removed"].as_array().unwrap().len(), 1);

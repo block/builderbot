@@ -363,8 +363,25 @@
   let markdownEl = $state<HTMLDivElement>();
   /** The dialog's box, which the phone's reply sheet is laid over. */
   let dialogEl = $state<HTMLElement | null>(null);
-  /** Where a phone's Reply button docks: between the note and its bottom bar. */
+  /** Where a phone's Reply button docks: over the bottom of the note, above its bottom bar. */
   let dockEl = $state<HTMLElement | null>(null);
+  /**
+   * The docked button's height while it shows, else 0. The note's content
+   * is padded by it (`--selection-dock-height`) so the end of a selection
+   * near the bottom of the note can scroll clear of the button rather than
+   * sit behind it. Observed rather than measured on `replyDocked`, so it
+   * follows the button in and out whatever the order of the two renders.
+   */
+  let dockHeight = $state(0);
+  $effect(() => {
+    const el = dockEl;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      dockHeight = el.offsetHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
   let unregisterSearchTarget: (() => void) | null = null;
 
   // Register the global search-shortcut target only while the visible note pane can be searched.
@@ -932,42 +949,45 @@
         aria-hidden={chatOnly}
         aria-label="Note content"
       >
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          class="modal-content"
-          bind:this={contentEl}
-          onclick={handleContentClick}
-          onkeydown={handleContentKeydown}
-        >
-          {#if hasNoteContent}
-            {#if renderedNoteHtml !== null}
-              <div class="markdown-content" bind:this={markdownEl}>
-                {@html renderedNoteHtml}
-              </div>
+        <div class="note-scroll" style:--selection-dock-height="{dockHeight}px">
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="modal-content"
+            bind:this={contentEl}
+            onclick={handleContentClick}
+            onkeydown={handleContentKeydown}
+          >
+            {#if hasNoteContent}
+              {#if renderedNoteHtml !== null}
+                <div class="markdown-content" bind:this={markdownEl}>
+                  {@html renderedNoteHtml}
+                </div>
+              {/if}
+            {:else}
+              <p class="empty-note">This note has no content.</p>
             {/if}
-          {:else}
-            <p class="empty-note">This note has no content.</p>
-          {/if}
-          {#if canOpenSession && hasNoteContent}
-            <NoteSelectionReply
-              scrollEl={contentEl}
-              contentEl={markdownEl}
-              enabled={open && !chatOnly && renderedNoteHtml !== null}
-              {chatOpen}
-              chatVisible={splitChatOpen}
-              sheetHost={dialogEl}
-              dockHost={dockEl}
-              onDockedChange={(docked) => (replyDocked = docked)}
-              ignoreHeading={isTitleHeading}
-              onAdd={handleQuoteAdd}
-              onReply={handleQuoteReply}
-            />
-          {/if}
-        </div>
+            {#if canOpenSession && hasNoteContent}
+              <NoteSelectionReply
+                scrollEl={contentEl}
+                contentEl={markdownEl}
+                enabled={open && !chatOnly && renderedNoteHtml !== null}
+                {chatOpen}
+                chatVisible={splitChatOpen}
+                sheetHost={dialogEl}
+                dockHost={dockEl}
+                onDockedChange={(docked) => (replyDocked = docked)}
+                ignoreHeading={isTitleHeading}
+                onAdd={handleQuoteAdd}
+                onReply={handleQuoteReply}
+              />
+            {/if}
+          </div>
 
-        <!-- A phone's Reply button docks here, above the bottom bar (NoteSelectionReply). -->
-        <div class="selection-dock" bind:this={dockEl}></div>
+          <!-- A phone's Reply button docks here, over the bottom of the note and
+               above the bottom bar (NoteSelectionReply). -->
+          <div class="selection-dock" bind:this={dockEl}></div>
+        </div>
 
         {#if showReplyDraft || showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
           <div class="next-steps">
@@ -1210,8 +1230,22 @@
     border-left: none;
   }
 
+  /* The note's scroll area with the docked Reply button laid over its
+     bottom edge (see `.selection-dock`); the bottom bar, if any, follows
+     below both. */
+  .note-scroll {
+    position: relative;
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+  }
+
   /* The note spans a full-screen dialog's width, so a swipe over the side
-     insets still scrolls it; its text clears them. */
+     insets still scrolls it; its text clears them. While the Reply button
+     is docked over the bottom edge the text clears that too
+     (`--selection-dock-height`, measured above), so a selection ending in
+     the last lines can scroll out from behind it. */
   /* Positioned for the selection's Reply button, which scrolls with the text. */
   .modal-content {
     position: relative;
@@ -1220,15 +1254,20 @@
     padding: 24px;
     padding-left: calc(24px + var(--dialog-safe-left, 0px));
     padding-right: calc(24px + var(--dialog-safe-right, 0px));
+    padding-bottom: calc(24px + var(--selection-dock-height, 0px));
     min-height: 0;
     background: var(--bg-primary);
   }
 
   /* With no next steps below it the note ends the dialog: it scrolls behind
      the home indicator of a full-screen dialog, and its last line can still
-     scroll clear of it (`--dialog-safe-bottom`, see dialog-content). */
-  .modal-content:last-child {
-    padding-bottom: calc(24px + var(--dialog-safe-bottom, 0px));
+     scroll clear of it (`--dialog-safe-bottom`, see dialog-content). The
+     docked button clears the indicator itself, so its height stands in for
+     the inset while it shows. */
+  .note-scroll:last-child .modal-content {
+    padding-bottom: calc(
+      24px + max(var(--selection-dock-height, 0px), var(--dialog-safe-bottom, 0px))
+    );
   }
 
   .modal-content::-webkit-scrollbar {
@@ -1429,13 +1468,19 @@
     gap: 8px;
   }
 
-  /* Holds the docked Reply button on a phone; nothing otherwise. Ending the
-     pane (no bottom bar under it), it clears the home indicator. */
+  /* Holds the docked Reply button on a phone; nothing otherwise. Laid over
+     the bottom of the note's scroll area rather than in the pane's flow, so
+     its arrival takes no height from the note (the content is padded by
+     its height instead, and keeps scrolling under it). Ending the pane (no
+     bottom bar under it), it clears the home indicator. */
   .selection-dock {
-    flex-shrink: 0;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
   }
 
-  .selection-dock:last-child:not(:empty) {
+  .note-scroll:last-child .selection-dock:not(:empty) {
     padding-bottom: var(--dialog-safe-bottom, 0px);
     background: var(--bg-chrome);
   }

@@ -437,12 +437,11 @@
     } else if (event.key === 'Escape') {
       event.preventDefault();
       // Not the note dialog's to close as well: its escape layer listens on
-      // the document and would take this key from the sheet.
+      // the document and would take this key from the sheet. The popover's
+      // own layer listens there too, so the field closes here, not through
+      // bits-ui; the selection goes with it, as the user asked.
       event.stopPropagation();
       closeReply(true);
-      // bits-ui may have closed the popover on this key already; the
-      // selection still goes, as the user asked.
-      document.getSelection()?.removeAllRanges();
     }
   }
 </script>

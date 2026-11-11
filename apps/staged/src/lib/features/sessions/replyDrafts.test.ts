@@ -26,7 +26,7 @@ vi.mock('../../shared/persistentStore', () => ({
 
 import { setStoreValue } from '../../shared/persistentStore';
 import { saveDraft, DRAFT_TTL_MS } from '../../shared/draftCache';
-import { serializeComposerDraft } from './composerDraft';
+import { composerDraftContent, serializeComposerDraft, takeDraftQuote } from './composerDraft';
 import {
   addQuoteToReplyDraft,
   focusReplyDraftQuote,
@@ -35,6 +35,7 @@ import {
   replyDraftKey,
   replyDraftPresence,
   replyDraftWriter,
+  restoreQuoteInReplyDraft,
   setReplyDraftQuoteReply,
   startLiveQuoteReply,
   type ReplyComposerTarget,
@@ -135,9 +136,44 @@ function fakeComposer(): { [K in keyof ReplyComposerTarget]: Mock<ReplyComposerT
   return {
     addQuote: vi.fn<ReplyComposerTarget['addQuote']>(),
     setQuoteReply: vi.fn<ReplyComposerTarget['setQuoteReply']>(),
+    restoreQuote: vi.fn<ReplyComposerTarget['restoreQuote']>(),
     focusQuoteReply: vi.fn<ReplyComposerTarget['focusQuoteReply']>(),
   };
 }
+
+describe('restoreQuoteInReplyDraft', () => {
+  beforeEach(() => {
+    store.clear();
+  });
+
+  it('puts a removed block back into the stored draft when no composer shows it', async () => {
+    await addQuoteToReplyDraft('u1', quote, 'first');
+    await addQuoteToReplyDraft('u1', { ...quote, quote: 'Second.' }, 'second');
+    const before = await loadReplyDraft('u1');
+    const taken = takeDraftQuote(before, 'first')!;
+    await saveDraft(replyDraftKey('u1'), composerDraftContent(taken.draft));
+    expect((await loadReplyDraft('u1')).quotes.map((q) => q.id)).toEqual(['second']);
+
+    await restoreQuoteInReplyDraft('u1', taken.removed);
+
+    expect(await loadReplyDraft('u1')).toEqual(before);
+  });
+
+  it('goes to the open composer instead of the store', async () => {
+    const composer = fakeComposer();
+    const unregister = registerReplyComposer('u2', composer);
+    const removed = takeDraftQuote(
+      { quotes: [{ id: 'q', before: '', ...quote }], text: '' },
+      'q'
+    )!.removed;
+
+    await restoreQuoteInReplyDraft('u2', removed);
+
+    expect(composer.restoreQuote).toHaveBeenCalledWith(removed);
+    expect(store.has(replyDraftKey('u2'))).toBe(false);
+    unregister();
+  });
+});
 
 describe('setReplyDraftQuoteReply', () => {
   beforeEach(() => {

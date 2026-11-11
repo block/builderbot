@@ -29,11 +29,13 @@ import {
   composerDraftContent,
   composerDraftFromContent,
   newDraftQuoteId,
+  restoreDraftQuote,
   setDraftQuoteReply,
   summarizeComposerDraft,
   type ComposerDraft,
   type ComposerDraftSummary,
   type NewDraftQuote,
+  type RemovedDraftQuote,
 } from './composerDraft';
 
 const REPLY_DRAFT_KEY_PREFIX = 'draft:session-reply:';
@@ -64,6 +66,8 @@ export type ReplyComposerTarget = {
   addQuote(quote: NewDraftQuote, id: string): void;
   /** Replace the reply of the quote with this id; nothing if it has been removed. */
   setQuoteReply(id: string, reply: string): void;
+  /** Put a removed quote block back where it was (the composer's Undo). */
+  restoreQuote(removed: RemovedDraftQuote): void;
   /** Put the caret in that quote's reply input, if the block is shown. */
   focusQuoteReply(id: string): void;
 };
@@ -123,6 +127,26 @@ export function setReplyDraftQuoteReply(
     return Promise.resolve();
   }
   return amendStoredReplyDraft(sessionId, (draft) => setDraftQuoteReply(draft, id, reply));
+}
+
+/**
+ * Put a quote block a composer removed back into the session's reply draft
+ * (its Undo; see `takeDraftQuote`), wherever the draft is now: the composer
+ * showing it — this one, mid-load or not, or another pane's with the same
+ * session — or else the stored draft. A write to the store under an open
+ * composer would be overwritten by its next save, as with
+ * `addQuoteToReplyDraft`. Rejects when the stored draft couldn't be written.
+ */
+export function restoreQuoteInReplyDraft(
+  sessionId: string,
+  removed: RemovedDraftQuote
+): Promise<void> {
+  const composer = composers.get(sessionId);
+  if (composer) {
+    composer.restoreQuote(removed);
+    return Promise.resolve();
+  }
+  return amendStoredReplyDraft(sessionId, (draft) => restoreDraftQuote(draft, removed));
 }
 
 /**

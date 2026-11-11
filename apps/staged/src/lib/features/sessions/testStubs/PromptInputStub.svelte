@@ -8,7 +8,8 @@
   down is split (`data-send-split`), takes its bindable `quotes`, whose
   count it shows as `data-quote-count`, and offers a remove button per quote
   (`data-testid="remove-quote-<id>"`) that calls `onRemoveQuote` as the
-  composer's X would, and a `focusQuoteReply` that places no caret.
+  composer's X would, a Send button (`data-testid="composer-send"`) that
+  calls `onSend`, and a `focusQuoteReply` that places no caret.
 -->
 <script lang="ts">
   let {
@@ -20,6 +21,7 @@
     onStartNewSession,
     newSessionDisabled = false,
     onRemoveQuote,
+    onSend,
   }: {
     value?: string;
     quotes?: Array<{ id: string }>;
@@ -29,6 +31,7 @@
     onStartNewSession?: (kind: 'note' | 'commit') => void;
     newSessionDisabled?: boolean;
     onRemoveQuote?: (id: string) => void;
+    onSend?: () => void;
   } = $props();
 
   /** The composer's caret placement, which the stub lays nothing out for. */
@@ -57,6 +60,8 @@
     onclick={() => onRemoveQuote?.(quote.id)}
   ></button>
 {/each}
+<button type="button" data-testid="composer-send" onclick={() => onSend?.()}>Send</button>
+
 {#if sendError}
   <p data-testid="composer-send-error">{sendError}</p>
 {/if}

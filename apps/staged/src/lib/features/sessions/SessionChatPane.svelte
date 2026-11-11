@@ -237,6 +237,7 @@
   import {
     loadReplyDraft as loadStoredReplyDraft,
     amendStoredReplyDraft,
+    restoreQuoteInReplyDraft,
     registerReplyComposer,
     replyDraftKey,
     replyDraftWriter,
@@ -464,6 +465,15 @@
     sessionId: string;
     edits: Array<(draft: ComposerDraft) => ComposerDraft>;
   } | null = null;
+  /**
+   * Undo toasts for removed quote blocks still on screen (svelte-sonner
+   * keeps one up for seconds). A send clears the draft they were taken
+   * from, and a switch shows another session's; either dismisses them, so
+   * Undo can't put a block into a draft it never belonged to. `draftEpoch`
+   * counts the sends, for a click that lands as the toast is leaving.
+   */
+  let quoteUndoToasts: Array<{ toastId: string | number; sessionId: string }> = [];
+  let draftEpoch = 0;
 
   /** The composer's draft as one value (live `$state`; clone before keeping it). */
   function currentDraft(): ComposerDraft {
@@ -567,24 +577,45 @@
 
   function offerQuoteUndo(sid: string | null, removed: RemovedDraftQuote) {
     if (!sid) return;
-    toast('Quote removed from your reply', {
+    const epoch = draftEpoch;
+    const forget = () => {
+      quoteUndoToasts = quoteUndoToasts.filter((entry) => entry.toastId !== toastId);
+    };
+    const toastId = toast('Quote removed from your reply', {
+      onDismiss: forget,
+      onAutoClose: forget,
       action: {
         label: 'Undo',
         onClick: () => {
-          if (active && sessionId === sid && loadedDraftSessionId === sid) {
-            setDraft(restoreDraftQuote(currentDraft(), removed));
+          // The draft the block was taken from has been sent since.
+          if (epoch !== draftEpoch) return;
+          if (active && sessionId === sid) {
+            // The same way in as a quote a note adds: applied to the
+            // composer, or held until this session's draft has loaded, so a
+            // load in flight can't land over it.
+            receiveDraftEdit(sid, (draft) => restoreDraftQuote(draft, removed));
             tick().then(() => autoResize());
             focusDraftQuoteReply(removed.quote.id);
             return;
           }
-          // The composer has moved on: the stored draft gets it back.
-          amendStoredReplyDraft(sid, (draft) => restoreDraftQuote(draft, removed)).catch((err) => {
+          // This pane has moved on: another pane showing the draft takes it,
+          // or else the stored draft.
+          restoreQuoteInReplyDraft(sid, removed).catch((err) => {
             console.error('[SessionChatPane] Failed to restore the quote:', err);
             toast.error('Could not restore the quote');
           });
         },
       },
     });
+    quoteUndoToasts = [...quoteUndoToasts, { toastId, sessionId: sid }];
+  }
+
+  /** Take down the Undo toasts whose draft is gone or off screen (all, by default). */
+  function dismissQuoteUndo(keep: (sessionId: string) => boolean = () => false) {
+    const going = quoteUndoToasts.filter((entry) => !keep(entry.sessionId));
+    if (going.length === 0) return;
+    quoteUndoToasts = quoteUndoToasts.filter((entry) => keep(entry.sessionId));
+    for (const entry of going) toast.dismiss(entry.toastId);
   }
 
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
@@ -1123,6 +1154,9 @@
     const draftWhenLoadStarted = untrack(() => cloneComposerDraft(currentDraft()));
     suppressNextReplySave = false;
     loadedDraftSessionId = null;
+    // Another session's draft is coming up: an Undo for a block removed from
+    // the previous one would read as this one's.
+    dismissQuoteUndo((sid) => sid === id);
     replyDraftLoad = loadReplyDraft(id, generation, draftWhenLoadStarted);
   });
 
@@ -1166,6 +1200,7 @@
         receiveDraftEdit(id, (draft) => appendDraftQuote(draft, quote, quoteId)),
       setQuoteReply: (quoteId, reply) =>
         receiveDraftEdit(id, (draft) => setDraftQuoteReply(draft, quoteId, reply)),
+      restoreQuote: (removed) => receiveDraftEdit(id, (draft) => restoreDraftQuote(draft, removed)),
       focusQuoteReply: focusDraftQuoteReply,
     });
     return () => {
@@ -1757,6 +1792,10 @@
     if (!text) return;
     void replyDraftWriter.clearNow(replyDraftKey(sessionId));
     setDraft(emptyComposerDraft());
+    // The draft is gone with the message: a block removed from it has
+    // nothing to go back into.
+    draftEpoch += 1;
+    dismissQuoteUndo();
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];
     imagePreviews = new Map();

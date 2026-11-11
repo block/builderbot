@@ -100,7 +100,7 @@
       {project}
       transferring={status.kind === 'transferring'}
       onRemove={() => handlers.remove(project)}
-      moveToGroupId={group.id}
+      moveToGroup={group}
       onMoved={(projectId) => handlers.moved(projectId)}
     />
   </ContextMenu.Root>

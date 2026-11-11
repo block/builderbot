@@ -266,6 +266,7 @@ fn a_group_is_created_last_with_its_tags_in_order() {
     group(&store, "First", &[]);
     let second = group(&store, "Second", &["P0", "P1", "P2"]);
     assert_eq!(second.position, 1);
+    // First already drives the icon.
     assert!(!second.is_icon_group);
     assert_eq!(scope_names(&store, Some(&second.id)), ["P0", "P1", "P2"]);
 
@@ -543,21 +544,53 @@ fn deleting_a_tag_cascades_its_assignments() {
 // Icon group
 // =============================================================================
 
+fn icon_groups(store: &Store) -> Vec<String> {
+    store
+        .get_tag_state()
+        .unwrap()
+        .groups
+        .into_iter()
+        .filter(|g| g.is_icon_group)
+        .map(|g| g.name)
+        .collect()
+}
+
+#[test]
+fn a_group_created_when_none_drives_the_icon_does() {
+    let store = store();
+    assert!(icon_groups(&store).is_empty());
+
+    // Into an empty catalog: the board's empty-state templates land here.
+    let a = group(&store, "A", &["x"]);
+    assert!(a.is_icon_group);
+    assert_eq!(icon_groups(&store), ["A"]);
+
+    // Once a group drives the icon, later groups don't take it over.
+    let b = group(&store, "B", &[]);
+    assert!(!b.is_icon_group);
+    assert_eq!(icon_groups(&store), ["A"]);
+
+    // With the icon group turned off, the next group picks it up again.
+    store.set_icon_tag_group(None).unwrap();
+    let c = group(&store, "C", &[]);
+    assert!(c.is_icon_group);
+    assert_eq!(icon_groups(&store), ["C"]);
+
+    // Deleting the icon group leaves none; the next group becomes it.
+    store
+        .delete_tag_group(&c.id, DeleteTagGroupMode::DeleteTags)
+        .unwrap();
+    assert!(icon_groups(&store).is_empty());
+    let d = group(&store, "D", &[]);
+    assert!(d.is_icon_group);
+    assert_eq!(icon_groups(&store), ["D"]);
+}
+
 #[test]
 fn at_most_one_group_drives_the_icon() {
     let store = store();
     let a = group(&store, "A", &[]);
     let b = group(&store, "B", &[]);
-    let icon_groups = |store: &Store| -> Vec<String> {
-        store
-            .get_tag_state()
-            .unwrap()
-            .groups
-            .into_iter()
-            .filter(|g| g.is_icon_group)
-            .map(|g| g.name)
-            .collect()
-    };
 
     store.set_icon_tag_group(Some(&a.id)).unwrap();
     assert_eq!(icon_groups(&store), ["A"]);

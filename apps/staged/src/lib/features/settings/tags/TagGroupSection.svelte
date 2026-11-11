@@ -6,8 +6,12 @@
   The menu renames, makes the group the project icon (its tag's icon then
   leads every sidebar row and grid card), moves the group up or down, and
   deletes it after asking what happens to its tags.
+
+  Like a tag's name (TagRow), the group name keeps what's being typed while
+  it has focus, whatever catalog echoes arrive meanwhile.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
@@ -34,20 +38,28 @@
   // than letting the menu hand focus back to its trigger.
   let renameRequested = false;
 
-  async function commitName(input: HTMLInputElement) {
-    const name = input.value.trim();
+  let nameDraft = $state(untrack(() => group.name));
+  let nameFocused = $state(false);
+  $effect(() => {
+    const name = group.name;
+    if (!untrack(() => nameFocused)) nameDraft = name;
+  });
+
+  async function commitName() {
+    nameFocused = false;
+    const name = nameDraft.trim();
     if (!name || name === group.name) {
-      input.value = group.name;
+      nameDraft = group.name;
       return;
     }
-    if (!(await editor.renameGroup(group, name))) input.value = group.name;
+    if (!(await editor.renameGroup(group, name))) nameDraft = group.name;
   }
 
   function handleNameKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }) {
     if (event.key === 'Enter') {
       event.currentTarget.blur();
     } else if (event.key === 'Escape') {
-      event.currentTarget.value = group.name;
+      nameDraft = group.name;
       event.currentTarget.blur();
     }
   }
@@ -72,8 +84,9 @@
       type="text"
       aria-label="Group name"
       maxlength={MAX_TAG_NAME_CHARS}
-      value={group.name}
-      onblur={(e) => void commitName(e.currentTarget)}
+      bind:value={nameDraft}
+      onfocus={() => (nameFocused = true)}
+      onblur={() => void commitName()}
       onkeydown={handleNameKeydown}
     />
     {#if group.isIconGroup}

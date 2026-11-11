@@ -1,8 +1,9 @@
 <!--
   ProjectTagPills.svelte — the row of tags under a project's title.
 
-  One pill per tag group, in group order, each switching the project's tag in
-  that group in one click (TagGroupPill); then the project's ungrouped tags as
+  One pill per tag group, the icon group first then group order (as the
+  context menus and the board order them), each switching the project's tag
+  in that group in one click (TagGroupPill); then the project's ungrouped tags as
   removable chips; then `+ Tag`, the searchable picker that can also create a
   tag (TagPicker). The T shortcut opens that picker: ProjectHome bumps
   `pickerRequest`, and each bump after mount opens it once.
@@ -16,6 +17,7 @@
   import TagChip from '../tags/TagChip.svelte';
   import TagPicker from '../tags/TagPicker.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
+  import { iconGroupFirst } from '../tags/tagState';
   import TagGroupPill from './TagGroupPill.svelte';
 
   interface Props {
@@ -31,6 +33,7 @@
   let pickerOpen = $state(false);
   let handledRequest = untrack(() => pickerRequest);
 
+  let groups = $derived(iconGroupFirst(tagsStore.groups, tagsStore.iconGroup));
   let tagIds = $derived(tagsStore.tagIdsFor(project.id));
   let ungrouped = $derived((tagsStore.tagsByGroup.get(null) ?? []).filter((t) => tagIds.has(t.id)));
 
@@ -47,7 +50,7 @@
 
 {#if tagsStore.loaded}
   <div class="project-tag-pills" role="group" aria-label="Project tags">
-    {#each tagsStore.groups as group (group.id)}
+    {#each groups as group (group.id)}
       <TagGroupPill {project} {group} {branches} {disabled} />
     {/each}
     {#each ungrouped as tag (tag.id)}

@@ -6,6 +6,7 @@ import {
   currentIntent,
   effectiveProjectTagIds,
   groupTag,
+  iconGroupFirst,
   indexAssignments,
   indexTagCatalog,
   intentSlot,
@@ -355,5 +356,25 @@ describe('numberedName', () => {
     const name = numberedName(base, new Set([base]));
     expect(name).toBe(`${'x'.repeat(MAX_TAG_NAME_CHARS - 2)} 2`);
     expect(name).toHaveLength(MAX_TAG_NAME_CHARS);
+  });
+});
+
+describe('iconGroupFirst', () => {
+  const groups: TagGroup[] = ['a', 'b', 'c'].map((id, position) => ({
+    id,
+    name: id.toUpperCase(),
+    position,
+    isIconGroup: id === 'b',
+    createdAt: 0,
+    updatedAt: 0,
+  }));
+
+  it('puts the icon group first and keeps the rest in position order', () => {
+    expect(iconGroupFirst(groups, groups[1]).map((g) => g.id)).toEqual(['b', 'a', 'c']);
+  });
+
+  it('keeps position order when no group drives the icon', () => {
+    expect(iconGroupFirst(groups, null).map((g) => g.id)).toEqual(['a', 'b', 'c']);
+    expect(iconGroupFirst([], null)).toEqual([]);
   });
 });

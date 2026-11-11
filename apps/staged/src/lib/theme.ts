@@ -92,6 +92,13 @@ export interface Theme {
     selection: string; // Selected items background (theme-derived)
   };
 
+  // The tag palette (features/tags/tagColors.ts). Six of its colours alias
+  // UI tokens in app.css; blue has its own, because the UI's blues follow the
+  // git "modified" colour and dark syntax themes paint that amber.
+  tags: {
+    blue: string;
+  };
+
   // Diagram previews
   diagram: {
     canvasBg: string; // Canvas behind rendered diagrams
@@ -533,6 +540,11 @@ export function createAdaptiveTheme(
       selection: overlay(syntaxFg, isDark ? 0.08 : 0.1),
     },
 
+    tags: {
+      // Today the UI accent's blue in both modes; fixed, never the git palette.
+      blue: isDark ? '#58a6ff' : '#2188ff',
+    },
+
     diagram: pikchrPalette,
 
     scrollbar: {
@@ -634,6 +646,8 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--ui-warning-bg': t.ui.warningBg,
     '--ui-info': t.ui.info,
     '--ui-selection': t.ui.selection,
+
+    '--tag-blue': t.tags.blue,
 
     '--diagram-canvas-bg': t.diagram.canvasBg,
     '--diagram-stage-bg': t.diagram.stageBg,

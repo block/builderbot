@@ -2,7 +2,8 @@
  * A board's columns: "No ‹group›" first, then one per tag in the group's
  * order, each with the projects whose tag in the group it is. Hidden columns
  * are left out (with their cards) and listed separately so the board header
- * can bring them back.
+ * can bring them back; the layout also counts the showing cards they hold,
+ * so a board with nothing on it can say where its matches went.
  *
  * Cards keep the order the projects come in, which is the grid's: newest
  * first. Every card the filter chips allow is in its column, search matches
@@ -35,6 +36,8 @@ export interface HiddenBoardColumn {
 export interface BoardLayout {
   columns: BoardColumn[];
   hidden: HiddenBoardColumn[];
+  /** The cards a search leaves showing that sit in hidden columns. */
+  hiddenCount: number;
 }
 
 /** The name of the column for projects without a tag in `group`. */
@@ -88,18 +91,21 @@ export function buildBoardColumns({
 
   const columns: BoardColumn[] = [];
   const hidden: HiddenBoardColumn[] = [];
+  let hiddenCount = 0;
   for (const head of columnHeads(group, tags)) {
+    const cards = byKey.get(head.key)!;
+    const count = cards.filter((project) => isVisible(project.id)).length;
     if (prefs.hidden.has(head.key)) {
       hidden.push(head);
+      hiddenCount += count;
       continue;
     }
-    const cards = byKey.get(head.key)!;
     columns.push({
       ...head,
       projects: cards,
-      count: cards.filter((project) => isVisible(project.id)).length,
+      count,
       collapsed: prefs.collapsed.has(head.key),
     });
   }
-  return { columns, hidden };
+  return { columns, hidden, hiddenCount };
 }

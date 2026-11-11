@@ -276,7 +276,7 @@ describe('SidebarFilterMenu tags', () => {
     document.body.innerHTML = '';
   });
 
-  it('lists the tags under a heading per group, then Tags, after the status filters', async () => {
+  it('lists the tags under a heading per group, then Tags, after the activity filters', async () => {
     const content = await openMenu();
     await placeOn(content, 'bottom');
 
@@ -293,7 +293,8 @@ describe('SidebarFilterMenu tags', () => {
     const headings = [...content.querySelectorAll('[data-slot="dropdown-menu-label"]')].map((el) =>
       el.textContent?.trim()
     );
-    expect(headings).toEqual(['Status', 'Status', 'Tags']);
+    // The built-in section isn't "Status": the default tag group is.
+    expect(headings).toEqual(['Activity', 'Status', 'Tags']);
     const q4 = [...content.querySelectorAll('[role="menuitemcheckbox"]')].find(
       (el) => label(el) === 'q4'
     );

@@ -1,8 +1,9 @@
 <!--
   SidebarFilterMenu.svelte - "Filter ▾" dropdown for the sidebar's projects header.
 
-  A Status group (Unread, Running), a Repo group, and the tags under a heading
-  per tag group then "Tags" for the ungrouped ones (as in the tag picker), all
+  An Activity group (Unread, Running; not "Status", which the default tag
+  group is called), a Repo group, and the tags under a heading per tag group
+  then "Tags" for the ungrouped ones (as in the tag picker), all
   with project counts, reading and toggling projectFiltersStore so the landing
   page's chip bar and this menu can never drift. Menu checkboxes toggle
   additively (the chips' shift-click semantics): a menu is a place to stack
@@ -126,7 +127,7 @@
       {@render clearItem()}
       <DropdownMenu.Separator />
     {/if}
-    <DropdownMenu.Label>Status</DropdownMenu.Label>
+    <DropdownMenu.Label>Activity</DropdownMenu.Label>
     <DropdownMenu.CheckboxItem
       checked={projectFiltersStore.isFilterActive('unread')}
       closeOnSelect={false}

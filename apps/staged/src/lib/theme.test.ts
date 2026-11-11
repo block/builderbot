@@ -43,6 +43,31 @@ describe('createAdaptiveTheme', () => {
     expect(vars['--pikchr-yellow']).not.toBe(vars['--pikchr-orange']);
   });
 
+  it('gives tags a blue apart from the git palette, which paints "modified" amber in the dark', () => {
+    const dark = themeToVarMap(
+      createAdaptiveTheme('#27212e', '#ffffff', '#91889b', {
+        added: '#3fb950',
+        deleted: '#f85149',
+        modified: '#d29922',
+      })
+    );
+    // The git blues follow "modified" here, so they are the amber swatch.
+    expect(dark['--status-renamed']).toBe('#d29922');
+    expect(dark['--status-modified']).toBe(dark['--status-renamed']);
+    expect(dark['--tag-blue']).toBe('#58a6ff');
+
+    const light = themeToVarMap(
+      createAdaptiveTheme('#ffffff', '#24292e', '#6e7781', {
+        added: '#28a745',
+        deleted: '#d73a49',
+        modified: '#2188ff',
+      })
+    );
+    // Light keeps the blue the tags had before they got their own token.
+    expect(light['--tag-blue']).toBe('#2188ff');
+    expect(light['--tag-blue']).not.toBe(light['--ui-warning']);
+  });
+
   it('paints inputs white on light chrome and on the lifted surface on dark chrome', () => {
     const light = themeToVarMap(createAdaptiveTheme('#ffffff', '#24292e', '#6e7781'));
     expect(light['--bg-input']).toBe('#ffffff');

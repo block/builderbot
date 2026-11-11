@@ -11,7 +11,9 @@
   so the card moves at once, and focus follows it to its new column. A move
   the tag chips rule out (onto Done with only In progress's chip on) takes
   the card off the board, and focus goes to its neighbour instead. Collapsed
-  and hidden columns are remembered per group (boardViewPrefs).
+  and hidden columns are remembered per group (boardViewPrefs). When every
+  showing card is in a hidden column (a tag chip for a hidden column's tag,
+  say), the board says so over the columns, with a way to show them.
 
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, never as a
@@ -79,6 +81,10 @@
     });
   });
   let activeKey = $derived(layout?.columns[activeIndex]?.key ?? null);
+  // Nothing on the board, but matches behind hidden columns.
+  let allMatchesHidden = $derived(
+    !!layout && layout.hiddenCount > 0 && layout.columns.every((column) => column.count === 0)
+  );
 
   function cardElement(projectId: string): HTMLElement | null {
     for (const el of boardEl?.querySelectorAll<HTMLElement>('[data-board-card]') ?? []) {
@@ -192,6 +198,13 @@
     setBoardColumnFlag(group.id, key, 'hidden', true, tagsStore.catalog);
   }
 
+  function showHiddenColumns() {
+    if (!group || !layout) return;
+    for (const column of layout.hidden) {
+      setBoardColumnFlag(group.id, column.key, 'hidden', false, tagsStore.catalog);
+    }
+  }
+
   function handleColumnsScroll() {
     if (!paged || !columnsEl || columnsEl.clientWidth === 0) return;
     activeIndex = Math.round(columnsEl.scrollLeft / columnsEl.clientWidth);
@@ -218,6 +231,16 @@
   {:else}
     {#if paged}
       <BoardPhonePager {group} columns={layout.columns} {activeKey} onSelect={pageTo} />
+    {/if}
+    {#if allMatchesHidden}
+      <p class="board-hint" role="status">
+        {layout.hiddenCount === 1
+          ? 'The matching project is in a hidden column.'
+          : `All ${layout.hiddenCount} matching projects are in hidden columns.`}
+        <button type="button" class="board-hint-action" onclick={showHiddenColumns}>
+          Show hidden columns
+        </button>
+      </p>
     {/if}
     <div
       class="board-columns"
@@ -258,6 +281,32 @@
   .board-state {
     color: var(--text-muted);
     padding: 16px 2px;
+  }
+
+  .board-hint {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px dashed var(--border-muted);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+  }
+
+  .board-hint-action {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-accent);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .board-hint-action:hover {
+    text-decoration: underline;
   }
 
   .board-columns {

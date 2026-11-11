@@ -329,8 +329,14 @@ describe('ProjectsBoard', () => {
     );
     await settle();
     const menu = document.querySelector<HTMLElement>('[data-slot="context-menu-content"]')!;
+    // On a board, changing column is the card's main action: "Move to" is
+    // the first item, ahead of Mark as Unread and the tag submenus.
+    const items = [...menu.querySelectorAll<HTMLElement>('[role^="menuitem"]')].map((el) =>
+      el.textContent?.trim()
+    );
+    expect(items[0]).toContain('Move to');
+    expect(items[1]).toContain('Mark as Unread');
     const triggers = [...menu.querySelectorAll<HTMLElement>('[data-tag-group-trigger]')];
-    // "Move to" leads the tag items.
     expect(triggers[0].dataset.tagGroupTrigger).toBe('move-to');
 
     triggers[0].focus();
@@ -369,6 +375,27 @@ describe('ProjectsBoard', () => {
 
     expect(setStoreValue).toHaveBeenLastCalledWith('projects-board-columns', {});
     expect(cardsIn(root, 'done')).toEqual(['p1']);
+  });
+
+  it('tints a collapsed column’s strip while a card is dragged over it', async () => {
+    boardViewPrefs.columns = { status: { collapsed: ['done'], hidden: [] } };
+    const root = await mountBoard();
+    const done = column(root, 'done');
+    const strip = done.querySelector<HTMLButtonElement>('.collapsed-strip')!;
+
+    card(root, 'p3').dispatchEvent(dragEvent('dragstart', {}));
+    done.dispatchEvent(dragEvent('dragover', { [PROJECT_DRAG_TYPE]: 'p3' }));
+    await settle();
+
+    expect(done.classList.contains('drop-target')).toBe(true);
+    expect(strip.classList.contains('drop-target')).toBe(true);
+
+    done.dispatchEvent(dragEvent('drop', { [PROJECT_DRAG_TYPE]: 'p3' }));
+    await settle();
+
+    expect(strip.classList.contains('drop-target')).toBe(false);
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p3', 'status', 'done');
+    expect(strip.textContent).toContain('2');
   });
 
   it('hides a column from its menu, "No ‹group›" included', async () => {
@@ -447,6 +474,35 @@ describe('ProjectsBoard under the tag filters', () => {
     await settle();
     expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual([]);
     expect(cardsIn(root, 'done')).toEqual(['p1']);
+  });
+
+  it('says when every match sits in a hidden column, and shows them on request', async () => {
+    boardViewPrefs.columns = { status: { collapsed: [], hidden: ['done'] } };
+    const root = await mountFiltered(
+      tagState([
+        { projectId: 'p1', tagId: 'done' },
+        { projectId: 'p2', tagId: 'doing' },
+        { projectId: 'p3', tagId: 'idea' },
+      ])
+    );
+    expect(root.querySelector('.board-hint')).toBeNull();
+
+    projectFiltersStore.toggleFilter({ tagId: 'done' });
+    await settle();
+
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing']);
+    const hint = root.querySelector<HTMLElement>('.board-hint')!;
+    expect(hint.textContent).toContain('The matching project is in a hidden column.');
+
+    [...hint.querySelectorAll('button')]
+      .find((el) => el.textContent?.includes('Show hidden'))!
+      .click();
+    await settle();
+
+    expect(setStoreValue).toHaveBeenLastCalledWith('projects-board-columns', {});
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+    expect(cardsIn(root, 'done')).toEqual(['p1']);
+    expect(root.querySelector('.board-hint')).toBeNull();
   });
 
   it('takes a card a move rules out off the board, and focuses its neighbour', async () => {

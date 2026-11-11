@@ -92,6 +92,22 @@ describe('buildBoardColumns', () => {
       [NO_TAG_COLUMN_KEY, 'No Status'],
       ['done', 'Done'],
     ]);
+    // a (Done) and b (no status) are behind the hidden columns.
+    expect(layout.hiddenCount).toBe(2);
+  });
+
+  it('counts only the showing cards behind hidden columns', () => {
+    const hidden = { collapsed: new Set<string>(), hidden: new Set(['done']) };
+
+    const searched = build(
+      { a: 'done', b: 'done', c: 'doing' },
+      { prefs: hidden, visible: (id) => id === 'a' }
+    );
+    expect(searched.hiddenCount).toBe(1);
+    expect(searched.columns.every((column) => column.count === 0)).toBe(true);
+
+    expect(build({ c: 'doing' }, { prefs: hidden }).hiddenCount).toBe(0);
+    expect(build({}, { prefs: NO_PREFS }).hiddenCount).toBe(0);
   });
 
   it('marks collapsed columns, which keep their cards and count', () => {

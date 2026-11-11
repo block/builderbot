@@ -95,6 +95,19 @@ export function indexTagCatalog(state: TagState): TagCatalog {
   };
 }
 
+/**
+ * The groups with the icon group first, then the rest in position order: how
+ * the header pills, the context menus and the board offer them, so the group
+ * that shows on every row and card is the one nearest to hand.
+ */
+export function iconGroupFirst(
+  groups: readonly TagGroup[],
+  iconGroup: TagGroup | null
+): TagGroup[] {
+  if (!iconGroup) return [...groups];
+  return [iconGroup, ...groups.filter((group) => group.id !== iconGroup.id)];
+}
+
 /** The server's assignments by project, with assignments to unknown tags dropped. */
 export function indexAssignments(
   state: TagState,

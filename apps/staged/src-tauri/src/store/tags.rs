@@ -258,7 +258,8 @@ fn tag_write_error(
 }
 
 /// Map a group name insert/update error. Only `idx_tag_groups_name` can fire:
-/// these writes never set `is_icon_group`.
+/// the one write that sets `is_icon_group` (`create_tag_group`) does so only
+/// after seeing no icon group in the same immediate transaction.
 fn group_name_error(error: rusqlite::Error, name: &str) -> StoreError {
     if is_unique_violation(&error) {
         StoreError(format!("A group named “{name}” already exists"))
@@ -525,6 +526,10 @@ impl Store {
     }
 
     /// Create a group, appended last, with `tags` created in the order given.
+    ///
+    /// When no group drives the project icon, the new one does: a catalog
+    /// started from the board's empty state (or rebuilt after the last group
+    /// was deleted) gives projects an icon without a second step.
     pub fn create_tag_group(&self, name: &str, tags: &[NewTag]) -> Result<TagGroup, StoreError> {
         self.tag_write(|tx| {
             let name = validated_name(name, "Group")?;
@@ -534,11 +539,16 @@ impl Store {
                 [],
                 |row| row.get(0),
             )?;
+            let has_icon_group: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tag_groups WHERE is_icon_group = 1)",
+                [],
+                |row| row.get(0),
+            )?;
             let group = TagGroup {
                 id: Uuid::new_v4().to_string(),
                 name,
                 position,
-                is_icon_group: false,
+                is_icon_group: !has_icon_group,
                 created_at: now,
                 updated_at: now,
             };

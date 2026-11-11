@@ -119,6 +119,23 @@ function drag(eventName: string, el: HTMLElement) {
   el.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, clientY: 10 }));
 }
 
+/** Focus a field and type `text` into it, as keystrokes would (no Enter). */
+function type(input: HTMLInputElement, text: string) {
+  input.focus();
+  input.value = text;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/**
+ * Another writer changed the catalog: the backend's `tags-changed` echo
+ * drops the cache and the store refetches.
+ */
+async function echo(state: TagState) {
+  backend.state = state;
+  await tagsStore.load({ force: true });
+  await settle();
+}
+
 beforeAll(() => {
   // jsdom lacks the layout APIs the menus' positioning and viewport use.
   window.matchMedia = ((query: string) => ({
@@ -269,7 +286,7 @@ describe('TagsSettingsPanel', () => {
 
       // Rename, then tap a swatch before the rename's write has come back:
       // on touch, blur and click fire back to back.
-      input.value = 'Spark';
+      type(input, 'Spark');
       input.dispatchEvent(new FocusEvent('blur'));
       row('idea').querySelector<HTMLButtonElement>('button[aria-label="red"]')!.click();
       await settle();
@@ -289,6 +306,53 @@ describe('TagsSettingsPanel', () => {
       ]);
       expect(input.value).toBe('Spark');
       expect(tagsStore.tagsById.get('idea')).toMatchObject({ name: 'Spark', color: 'red' });
+    });
+
+    it('keeps a focused tag name draft through a catalog echo, and saves it on blur', async () => {
+      await mountPanel(tagState());
+      const input = row('idea').querySelector<HTMLInputElement>('input[aria-label="Tag name"]')!;
+      type(input, 'Idea-draft');
+
+      // Another window recolours a different tag.
+      await echo(withTagValue(backend.state, 'done', { name: 'Done', color: 'red', icon: null }));
+
+      expect(document.activeElement).toBe(input);
+      expect(input.value).toBe('Idea-draft');
+      // The echo itself landed.
+      expect(tagsStore.tagsById.get('done')?.color).toBe('red');
+
+      input.dispatchEvent(new FocusEvent('blur'));
+      await settle();
+      expect(commandsMock.updateTag).toHaveBeenCalledWith('idea', {
+        name: 'Idea-draft',
+        color: 'gray',
+        icon: null,
+      });
+    });
+
+    it('follows a rename echo in a tag name field that isn’t focused', async () => {
+      await mountPanel(tagState());
+      const input = row('idea').querySelector<HTMLInputElement>('input[aria-label="Tag name"]')!;
+
+      await echo(withTagValue(backend.state, 'idea', { name: 'Spark', color: 'gray', icon: null }));
+
+      expect(input.value).toBe('Spark');
+    });
+
+    it('keeps a focused group name draft through a catalog echo', async () => {
+      const root = await mountPanel(tagState());
+      const input = root.querySelector<HTMLInputElement>('input[aria-label="Group name"]')!;
+      expect(input.value).toBe('Status');
+      type(input, 'Stage');
+
+      await echo(withTagValue(backend.state, 'done', { name: 'Done', color: 'red', icon: null }));
+
+      expect(document.activeElement).toBe(input);
+      expect(input.value).toBe('Stage');
+
+      input.dispatchEvent(new FocusEvent('blur'));
+      await settle();
+      expect(commandsMock.renameTagGroup).toHaveBeenCalledWith('status', 'Stage');
     });
   });
 

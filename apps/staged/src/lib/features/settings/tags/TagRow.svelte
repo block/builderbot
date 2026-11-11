@@ -4,7 +4,10 @@
 
   Projects carry a tag by id, so an edit here shows on every project at once.
   Each edit is a backend write, so the name saves on blur or Enter rather
-  than per keystroke, and Escape puts it back. Edits send only the field
+  than per keystroke, and Escape puts it back. While the name field has
+  focus it keeps what's being typed: a `tags-changed` echo (another window
+  recolouring some tag) re-renders the row from the fresh catalog, and must
+  not put the saved name back over the draft. Edits send only the field
   they change (tagActions.editTag fills in the rest from the store once the
   writes before it settle), so a rename followed at once by a colour or icon
   pick keeps both. The handle drags the row to reorder it or move it to
@@ -12,6 +15,7 @@
   screen.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
@@ -66,25 +70,35 @@
   let usage = $derived(editor.usage(tag.id));
   let dropPlace = $derived(editor.dropPlaceFor(tag.id));
 
+  // The name field's draft. It follows the catalog except while the field
+  // has focus, when it is the user's.
+  let nameDraft = $state(untrack(() => tag.name));
+  let nameFocused = $state(false);
+  $effect(() => {
+    const name = tag.name;
+    if (!untrack(() => nameFocused)) nameDraft = name;
+  });
+
   function save(patch: Partial<TagValue>): Promise<boolean> {
     return tagActions.editTag(tag.id, patch);
   }
 
-  async function commitName(input: HTMLInputElement) {
-    const name = input.value.trim();
+  async function commitName() {
+    nameFocused = false;
+    const name = nameDraft.trim();
     // A name can't be blank; an unchanged one needs no write.
     if (!name || name === tag.name) {
-      input.value = tag.name;
+      nameDraft = tag.name;
       return;
     }
-    if (!(await save({ name }))) input.value = tag.name;
+    if (!(await save({ name }))) nameDraft = tag.name;
   }
 
   function handleNameKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }) {
     if (event.key === 'Enter') {
       event.currentTarget.blur();
     } else if (event.key === 'Escape') {
-      event.currentTarget.value = tag.name;
+      nameDraft = tag.name;
       event.currentTarget.blur();
     }
   }
@@ -163,8 +177,9 @@
     aria-label="Tag name"
     class="tag-name-input min-w-0"
     maxlength={MAX_TAG_NAME_CHARS}
-    value={tag.name}
-    onblur={(e) => void commitName(e.currentTarget)}
+    bind:value={nameDraft}
+    onfocus={() => (nameFocused = true)}
+    onblur={() => void commitName()}
     onkeydown={handleNameKeydown}
   />
   <TagColorSwatches color={tag.color} onSelect={(color) => void save({ color })} />

@@ -3,7 +3,9 @@
   a ⋯ menu, and the cards. A drop zone while a card is dragged.
 
   Collapsed, it is a narrow strip with the name running down it and the
-  count; clicking it expands the column. "Rename" in the menu edits the
+  count; clicking it expands the column, and a card dragged over it tints
+  the strip itself (the column's thin accent border is too little to read
+  on a 40px strip). "Rename" in the menu edits the
   name in the header: Enter or leaving the field saves, Escape puts it back.
 -->
 <script lang="ts">
@@ -102,6 +104,7 @@
     <button
       type="button"
       class="collapsed-strip"
+      class:drop-target={dropTarget}
       title={`Expand ${column.name}`}
       aria-label={`Expand ${column.name}`}
       onclick={() => onCollapse(false)}
@@ -196,6 +199,15 @@
 
   .collapsed-strip:hover {
     background: var(--bg-hover);
+  }
+
+  /* The drop feedback a card gets from the column's border, made visible on
+     the strip: :hover doesn't apply during a drag, and the strip is the
+     whole column. */
+  .collapsed-strip.drop-target {
+    background: color-mix(in srgb, var(--ui-accent) 14%, transparent);
+    color: var(--ui-accent);
+    box-shadow: inset 0 0 0 1px var(--ui-accent);
   }
 
   .collapsed-name {

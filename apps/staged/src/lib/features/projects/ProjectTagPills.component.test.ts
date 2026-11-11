@@ -215,6 +215,18 @@ describe('ProjectTagPills', () => {
     expect(addTagButton(root).textContent).toContain('Tag');
   });
 
+  it('puts the icon group’s pill first, as the menus and the board do', async () => {
+    const state = tagState([
+      { projectId: 'p1', tagId: 'doing' },
+      { projectId: 'p1', tagId: 'p0' },
+    ]);
+    // Make Priority the icon group, though it sorts second.
+    state.groups = state.groups.map((g) => ({ ...g, isIconGroup: g.id === 'priority' }));
+    const { root } = await mountPills(state);
+
+    expect(pills(root).map((pill) => pill.textContent?.trim())).toEqual(['P0', 'Doing']);
+  });
+
   it('shows the computed status in the icon group pill when it has no tag', async () => {
     const { root } = await mountPills(tagState());
 

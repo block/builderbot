@@ -124,16 +124,63 @@ export function appendDraftQuote(
  * and stays: the text before it joins the text after it.
  */
 export function removeDraftQuote(draft: ComposerDraft, id: string): ComposerDraft {
+  return takeDraftQuote(draft, id)?.draft ?? draft;
+}
+
+/**
+ * A quote block taken out of the draft, with what it takes to put it back
+ * where it was (`restoreDraftQuote`): its place, and the free text its
+ * `before` was merged into, as that text read before and after the merge.
+ */
+export type RemovedDraftQuote = {
+  quote: DraftQuote;
+  index: number;
+  /** The text after the block (the next quote's `before`, or the main input) before the merge. */
+  unmerged: string;
+  /** That text with the block's `before` joined on, as the draft reads after the removal. */
+  merged: string;
+};
+
+/** `removeDraftQuote`, also returning what was removed; null for an unknown id. */
+export function takeDraftQuote(
+  draft: ComposerDraft,
+  id: string
+): { draft: ComposerDraft; removed: RemovedDraftQuote } | null {
   const index = draft.quotes.findIndex((quote) => quote.id === id);
-  if (index === -1) return draft;
-  const removed = draft.quotes[index];
+  if (index === -1) return null;
+  const quote = draft.quotes[index];
   const quotes = draft.quotes.filter((_, i) => i !== index);
   const next = quotes[index];
+  const unmerged = next ? next.before : draft.text;
+  const merged = joinFreeText(quote.before, unmerged);
+  if (next) quotes[index] = { ...next, before: merged };
+  return {
+    draft: { quotes, text: next ? draft.text : merged },
+    removed: { quote: { ...quote, headings: [...quote.headings] }, index, unmerged, merged },
+  };
+}
+
+/**
+ * Put a removed quote block back (an undo). The block returns to its place
+ * with its reply and its `before` text, and the text it was merged into is
+ * split again — as long as that text still reads as the merge left it. Text
+ * edited since stays whole where it is, and the block comes back with no
+ * leading text, so nothing typed is lost or doubled.
+ */
+export function restoreDraftQuote(draft: ComposerDraft, removed: RemovedDraftQuote): ComposerDraft {
+  const index = Math.min(removed.index, draft.quotes.length);
+  const quotes = [...draft.quotes];
+  const next = quotes[index];
+  const target = next ? next.before : draft.text;
+  const untouched = target === removed.merged;
+  const quote = untouched ? removed.quote : { ...removed.quote, before: '' };
+  const after = untouched ? removed.unmerged : target;
+  quotes.splice(index, 0, { ...quote, headings: [...quote.headings] });
   if (next) {
-    quotes[index] = { ...next, before: joinFreeText(removed.before, next.before) };
+    quotes[index + 1] = { ...next, before: after };
     return { quotes, text: draft.text };
   }
-  return { quotes, text: joinFreeText(removed.before, draft.text) };
+  return { quotes, text: after };
 }
 
 /**

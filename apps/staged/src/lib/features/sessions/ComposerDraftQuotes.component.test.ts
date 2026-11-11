@@ -189,6 +189,18 @@ describe('ComposerDraftQuotes remove button', () => {
   });
 });
 
+describe('ComposerDraftQuotes keyboard cap', () => {
+  it('scrolls the input that takes focus into view', () => {
+    render([quote('a'), quote('b')]);
+    const reveal = vi.spyOn(replyOf('b'), 'scrollIntoView');
+
+    replyOf('b').focus();
+    flushSync();
+
+    expect(reveal).toHaveBeenCalledWith({ block: 'nearest' });
+  });
+});
+
 describe('ComposerDraftQuotes focus helpers', () => {
   it('puts the caret at the end of a quote’s reply, for a quote just added from the note', () => {
     render([quote('a', '', 'so far')]);

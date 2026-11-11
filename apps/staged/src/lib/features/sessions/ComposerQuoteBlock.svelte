@@ -106,7 +106,9 @@
 
   /* Finger-sized: the X is drawn at 32px (its `touch-hit` area makes up
      44px) with the excerpt kept clear of it, and the reply row is 44px tall
-     so a tap on it lands in the input rather than beside it. */
+     (border-box: the 1.5em line plus 12px above and below, the min-height
+     making up the half pixel) so a tap on it lands in the input rather than
+     beside it. */
   @media (pointer: coarse) {
     .composer-quote {
       gap: 4px;
@@ -130,8 +132,8 @@
     }
 
     .composer-quote :global(.composer-quote-reply) {
-      --hashtag-input-min-height: 1.5em;
-      padding: 12px 0 8px;
+      --hashtag-input-min-height: 44px;
+      padding: 12px 0;
     }
   }
 </style>

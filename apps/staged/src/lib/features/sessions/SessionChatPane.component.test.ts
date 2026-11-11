@@ -2,15 +2,21 @@ import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from '../../types';
 
-const { writer, loadDraftMock } = vi.hoisted(() => ({
-  writer: {
-    scheduleSave: vi.fn(),
-    saveNow: vi.fn(async () => {}),
-    clearNow: vi.fn(async () => {}),
-    flush: vi.fn(async () => {}),
-  },
-  loadDraftMock: vi.fn(async (_key: string): Promise<string | null> => null),
-}));
+const { writer, loadDraftMock, toastMock } = vi.hoisted(() => {
+  const toastMock = Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn() });
+  return {
+    writer: {
+      scheduleSave: vi.fn(),
+      saveNow: vi.fn(async () => {}),
+      clearNow: vi.fn(async () => {}),
+      flush: vi.fn(async () => {}),
+    },
+    loadDraftMock: vi.fn(async (_key: string): Promise<string | null> => null),
+    toastMock,
+  };
+});
+
+vi.mock('svelte-sonner', () => ({ toast: toastMock }));
 
 // Heavy leaf components are stubbed out: the tests exercise the pane's
 // reply-draft effect wiring, not the transcript/composer internals.
@@ -204,6 +210,46 @@ describe('SessionChatPane quoted replies', () => {
     expect(draft.quotes[0]).toMatchObject({ before: 'Before the quote', ...quote });
     expect(draft.text).toBe('');
     expect(saved.value).toBe(serializeComposerDraft(draft));
+
+    unmount(pane);
+  });
+
+  it('offers to undo removing a quote with a reply, putting it back in its place', async () => {
+    toastMock.mockClear();
+    const { pane } = mountPane('session-undo');
+    flushSync();
+    await settle();
+
+    await addQuoteToReplyDraft('session-undo', { ...quote, quote: 'First.' });
+    await addQuoteToReplyDraft('session-undo', { ...quote, quote: 'Second.' });
+    await addQuoteToReplyDraft('session-undo', { ...quote, quote: 'Third.', reply: '' });
+    await settle();
+    const before = composerDraftFromContent(lastSaved(replyKey('session-undo')));
+    const [, second] = before.quotes;
+
+    document.querySelector<HTMLElement>(`[data-testid="remove-quote-${second.id}"]`)!.click();
+    await settle();
+
+    expect(quoteCount()).toBe(2);
+    expect(toastMock).toHaveBeenCalledTimes(1);
+    const [, options] = toastMock.mock.calls[0] as [string, { action: { onClick: () => void } }];
+    expect(options.action).toMatchObject({ label: 'Undo' });
+
+    options.action.onClick();
+    await settle();
+
+    expect(quoteCount()).toBe(3);
+    const restored = composerDraftFromContent(lastSaved(replyKey('session-undo')));
+    expect(restored.quotes.map((q) => q.quote)).toEqual(['First.', 'Second.', 'Third.']);
+    expect(restored.quotes[1]).toMatchObject({ id: second.id, reply: 'Which one?' });
+    expect(restored).toEqual(before);
+
+    // An unanswered quote just goes.
+    const third = restored.quotes[2];
+    document.querySelector<HTMLElement>(`[data-testid="remove-quote-${third.id}"]`)!.click();
+    await settle();
+    expect(quoteCount()).toBe(2);
+    expect(toastMock).toHaveBeenCalledTimes(1);
 
     unmount(pane);
   });

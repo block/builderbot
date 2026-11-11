@@ -14,12 +14,15 @@
   unread; see `NoteReadTracker` for when the viewer marks it on its own.
 
   A note with a chat can be replied to a passage at a time: selecting text
-  offers a Reply button (`NoteSelectionReply`), and each reply lands in the
-  chat's draft as a quote block (see sessions/replyDrafts.ts) — straight into
-  the composer when the chat shows beside the note, otherwise typed in the
-  note and written to the stored draft as it goes. While the chat is hidden
+  offers a Reply button (`NoteSelectionReply`; on a phone it is docked above
+  the bottom bar, out of the way of the system's edit menu), and each reply
+  lands in the chat's draft as a quote block (see sessions/replyDrafts.ts) —
+  straight into the composer when the chat shows beside the note, otherwise
+  typed in the note and written to the stored draft as it goes, the user
+  staying on the note to select the next passage. While the chat is hidden
   and the draft holds anything, the note's bottom bar offers it: one button
-  that opens the chat with the composer.
+  that opens the chat with the composer. The docked Reply button stands in
+  for it while a selection is being offered a reply.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -218,8 +221,12 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
   let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
+  /** The docked Reply button (a phone, a selection standing) has the bottom bar's place. */
+  let replyDocked = $state(false);
   /** The chat is hidden and its draft holds something: the bottom bar offers it. */
-  let showReplyDraft = $derived(canOpenSession && !chatOpen && replyDraftLabel !== null);
+  let showReplyDraft = $derived(
+    canOpenSession && !chatOpen && replyDraftLabel !== null && !replyDocked
+  );
   const readTracker = new NoteReadTracker();
   let readToggleLabel = $derived(readTracker.unread ? 'Mark as read' : 'Mark as unread');
 
@@ -356,6 +363,8 @@
   let markdownEl = $state<HTMLDivElement>();
   /** The dialog's box, which the phone's reply sheet is laid over. */
   let dialogEl = $state<HTMLElement | null>(null);
+  /** Where a phone's Reply button docks: between the note and its bottom bar. */
+  let dockEl = $state<HTMLElement | null>(null);
   let unregisterSearchTarget: (() => void) | null = null;
 
   // Register the global search-shortcut target only while the visible note pane can be searched.
@@ -594,10 +603,9 @@
   /**
    * With the chat hidden, the reply to a selected passage is typed in the
    * note and the draft follows it (see replyDrafts.startLiveQuoteReply).
-   * Once the field closes, a dialog wide enough to split opens the chat
-   * beside the note so the block is seen landing. Narrower, the chat would
-   * cover the note mid-review: the bottom bar's draft button offers it
-   * instead (`showReplyDraft`).
+   * Closing the field leaves the user on the note, whatever the width, so
+   * the next passage can be selected without the view changing underfoot;
+   * the bottom bar's draft button offers the chat (`showReplyDraft`).
    */
   function handleQuoteReply(quote: NewDraftQuote): LiveQuoteReply {
     const sid = sessionId;
@@ -613,9 +621,7 @@
         } catch (error) {
           console.error('Failed to save the reply draft', error);
           toast.error('Could not save your reply draft');
-          return;
         }
-        if (open && sessionId === sid && !chatOpen && viewport.canSplit) setChatOpen(true);
       },
     };
   }
@@ -948,14 +954,20 @@
               scrollEl={contentEl}
               contentEl={markdownEl}
               enabled={open && !chatOnly && renderedNoteHtml !== null}
+              {chatOpen}
               chatVisible={splitChatOpen}
               sheetHost={dialogEl}
+              dockHost={dockEl}
+              onDockedChange={(docked) => (replyDocked = docked)}
               ignoreHeading={isTitleHeading}
               onAdd={handleQuoteAdd}
               onReply={handleQuoteReply}
             />
           {/if}
         </div>
+
+        <!-- A phone's Reply button docks here, above the bottom bar (NoteSelectionReply). -->
+        <div class="selection-dock" bind:this={dockEl}></div>
 
         {#if showReplyDraft || showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
           <div class="next-steps">
@@ -964,7 +976,7 @@
                 {#if showReplyDraft}
                   <Button
                     variant="outline"
-                    class="reply-draft-button h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-11"
+                    class="reply-draft-button h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
                     title={viewport.canSplit
                       ? 'Open the chat to finish your reply'
                       : 'View the chat to finish your reply'}
@@ -977,7 +989,7 @@
                 {#if showChatInfo}
                   <Button
                     variant="outline"
-                    class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-11"
+                    class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
                     onclick={() => setChatOpen(true)}
                   >
                     <MessageCircle size={16} aria-hidden="true" />
@@ -1415,6 +1427,17 @@
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
+  }
+
+  /* Holds the docked Reply button on a phone; nothing otherwise. Ending the
+     pane (no bottom bar under it), it clears the home indicator. */
+  .selection-dock {
+    flex-shrink: 0;
+  }
+
+  .selection-dock:last-child:not(:empty) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
+    background: var(--bg-chrome);
   }
 
   /* One button on a phone fills the bar, a finger-sized row. */

@@ -10,7 +10,10 @@
   as nothing has been written under it; a quote with a reply is kept and the
   caret moves to the end of that reply instead. The list scrolls once a
   review outgrows the pane, and keeps its last quote, the newest and the one
-  beside the main input, in view as quotes arrive.
+  beside the main input, in view as quotes arrive. With the on-screen
+  keyboard up the list is capped to a share of what is left on screen
+  (`visibleViewport`), so the main input and Send stay in view under it, and
+  the input being typed in scrolls into view as the cap moves.
 -->
 <script lang="ts">
   import HashtagInput from './HashtagInput.svelte';
@@ -19,6 +22,7 @@
   import type { HashtagItem } from '../../types';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { focusAtEndSync, focusAtStartSync } from '../../shared/focusAtEnd';
+  import { visibleViewport, watchVisualViewport } from '../../shared/visualViewport.svelte';
 
   interface Props {
     quotes: DraftQuote[];
@@ -46,6 +50,31 @@
   // From nothing, so the first run — the list mounting with a restored
   // draft, or with the quote that started it — counts as growth too.
   let shownCount = 0;
+
+  /** Of the screen left above the on-screen keyboard, how much the list may take. */
+  const KEYBOARD_LIST_SHARE = 0.4;
+
+  // The cap follows the visual viewport while a keyboard is up (its height is
+  // known only then; otherwise the stylesheet's cap stands). Subscribed from
+  // here too, so a composer outside a full-screen dialog is covered.
+  $effect(() => watchVisualViewport());
+  let maxHeight = $derived(
+    visibleViewport.height !== null
+      ? `${Math.round(visibleViewport.height * KEYBOARD_LIST_SHARE)}px`
+      : null
+  );
+
+  /** Bring the input being typed in into view: on focus, and as the cap moves under it. */
+  function revealFocused() {
+    const active = document.activeElement;
+    if (!listEl || !(active instanceof HTMLElement) || !listEl.contains(active)) return;
+    active.scrollIntoView({ block: 'nearest' });
+  }
+
+  $effect(() => {
+    void maxHeight;
+    revealFocused();
+  });
 
   // A quote added at the end scrolls into view, and so does the end of a
   // draft restored with quotes in it; edits and removals don't move the list.
@@ -139,7 +168,14 @@
   }
 </script>
 
-<div class="composer-draft-quotes" bind:this={listEl} role="group" aria-label="Quoted replies">
+<div
+  class="composer-draft-quotes"
+  bind:this={listEl}
+  role="group"
+  aria-label="Quoted replies"
+  style:max-height={maxHeight}
+  onfocusin={revealFocused}
+>
   {#each quotes as quote, index (quote.id)}
     <div class="composer-draft-entry" data-quote-entry={quote.id}>
       <HashtagInput
@@ -200,45 +236,49 @@
     line-height: 1.5;
   }
 
-  /* An empty gap is just the space between blocks until it is pointed at. */
-  .composer-draft-quotes :global(.composer-gap-input.is-empty) {
-    --hashtag-input-min-height: 8px;
-    padding-block: 2px;
-    line-height: 1;
-    cursor: text;
-  }
+  /* With a pointer that hovers, an empty gap is just the space between
+     blocks until it is pointed at or focused. Fine pointers only: a touch
+     leaves `:hover` stuck on and focus is a tap, so compacting on either
+     would shrink the row under the finger. */
+  @media (hover: hover) and (pointer: fine) {
+    .composer-draft-quotes :global(.composer-gap-input.is-empty) {
+      --hashtag-input-min-height: 8px;
+      padding-block: 2px;
+      line-height: 1;
+      cursor: text;
+    }
 
-  .composer-draft-quotes :global(.composer-gap-input.is-empty::before) {
-    opacity: 0;
-    transition: opacity 0.1s;
-  }
+    .composer-draft-quotes :global(.composer-gap-input.is-empty::before) {
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
 
-  .composer-draft-quotes :global(.composer-gap-input.is-empty:hover),
-  .composer-draft-quotes :global(.composer-gap-input:focus) {
-    --hashtag-input-min-height: 1.5em;
-    padding-block: 3px;
-    line-height: 1.5;
-    background: var(--bg-hover);
-  }
+    .composer-draft-quotes :global(.composer-gap-input.is-empty:hover),
+    .composer-draft-quotes :global(.composer-gap-input:focus) {
+      --hashtag-input-min-height: 1.5em;
+      padding-block: 3px;
+      line-height: 1.5;
+      background: var(--bg-hover);
+    }
 
-  .composer-draft-quotes :global(.composer-gap-input.is-empty:hover::before),
-  .composer-draft-quotes :global(.composer-gap-input:focus::before) {
-    opacity: 1;
+    .composer-draft-quotes :global(.composer-gap-input.is-empty:hover::before),
+    .composer-draft-quotes :global(.composer-gap-input:focus::before) {
+      opacity: 1;
+    }
   }
 
   @media (hover: none), (pointer: coarse) {
-    /* No hover to reveal a gap: each one is a finger-sized row (44px) with
-       its placeholder showing, so text between quotes has a visible place. */
+    /* No hover to reveal a gap: each one is a finger-sized row (44px,
+       border-box) with its placeholder showing, so text between quotes has
+       a visible place, and it keeps that size when tapped or focused. */
     .composer-draft-quotes :global(.composer-gap-input) {
-      --hashtag-input-min-height: 1.5em;
+      --hashtag-input-min-height: 44px;
       padding: 12px 8px;
       line-height: 1.5;
     }
 
-    .composer-draft-quotes :global(.composer-gap-input.is-empty) {
-      --hashtag-input-min-height: 1.5em;
-      padding-block: 12px;
-      line-height: 1.5;
+    .composer-draft-quotes :global(.composer-gap-input:focus) {
+      background: var(--bg-hover);
     }
 
     .composer-draft-quotes :global(.composer-gap-input.is-empty::before) {

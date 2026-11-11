@@ -5,8 +5,10 @@
   echoes the composer's `sendError` where tests can read it, renders a
   button per new-session action when the pane offers them, mirrors what
   the pane put in the box (`data-value`) and whether the control it handed
-  down is split (`data-send-split`), and takes its bindable `quotes`, whose
-  count it shows as `data-quote-count`.
+  down is split (`data-send-split`), takes its bindable `quotes`, whose
+  count it shows as `data-quote-count`, and offers a remove button per quote
+  (`data-testid="remove-quote-<id>"`) that calls `onRemoveQuote` as the
+  composer's X would, and a `focusQuoteReply` that places no caret.
 -->
 <script lang="ts">
   let {
@@ -17,15 +19,22 @@
     sendControl,
     onStartNewSession,
     newSessionDisabled = false,
+    onRemoveQuote,
   }: {
     value?: string;
-    quotes?: unknown[];
+    quotes?: Array<{ id: string }>;
     textareaEl?: HTMLElement | null;
     sendError?: string | null;
     sendControl?: { split: boolean };
     onStartNewSession?: (kind: 'note' | 'commit') => void;
     newSessionDisabled?: boolean;
+    onRemoveQuote?: (id: string) => void;
   } = $props();
+
+  /** The composer's caret placement, which the stub lays nothing out for. */
+  export function focusQuoteReply(_id: string): boolean {
+    return false;
+  }
 </script>
 
 <div
@@ -40,6 +49,14 @@
   data-quote-count={quotes.length}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
+{#each quotes as quote (quote.id)}
+  <button
+    type="button"
+    aria-label="Remove quote"
+    data-testid="remove-quote-{quote.id}"
+    onclick={() => onRemoveQuote?.(quote.id)}
+  ></button>
+{/each}
 {#if sendError}
   <p data-testid="composer-send-error">{sendError}</p>
 {/if}

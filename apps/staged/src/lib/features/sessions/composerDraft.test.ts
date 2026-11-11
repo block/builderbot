@@ -10,9 +10,11 @@ import {
   normalizeQuoteText,
   parseQuotedMessage,
   removeDraftQuote,
+  restoreDraftQuote,
   serializeComposerDraft,
   setDraftQuoteReply,
   summarizeComposerDraft,
+  takeDraftQuote,
   type ComposerDraft,
   type NewDraftQuote,
 } from './composerDraft';
@@ -91,6 +93,57 @@ describe('removeDraftQuote', () => {
     const draft = review();
 
     expect(removeDraftQuote(draft, 'missing')).toBe(draft);
+  });
+});
+
+describe('takeDraftQuote and restoreDraftQuote', () => {
+  it('puts a middle quote back in its place and splits the merged text again', () => {
+    const taken = takeDraftQuote(review(), 'q1')!;
+    expect(taken.draft).toEqual(removeDraftQuote(review(), 'q1'));
+    expect(taken.removed).toMatchObject({
+      index: 0,
+      unmerged: 'And one more.',
+      merged: 'A few comments:\n\nAnd one more.',
+    });
+
+    expect(restoreDraftQuote(taken.draft, taken.removed)).toEqual(review());
+  });
+
+  it('puts the last quote back before the main input', () => {
+    const taken = takeDraftQuote(review(), 'q2')!;
+    expect(taken.draft.text).toBe('And one more.\n\nThanks!');
+
+    expect(restoreDraftQuote(taken.draft, taken.removed)).toEqual(review());
+  });
+
+  it('keeps text edited since the removal whole, and brings the quote back without its lead-in', () => {
+    const taken = takeDraftQuote(review(), 'q1')!;
+    const edited = {
+      ...taken.draft,
+      quotes: [{ ...taken.draft.quotes[0], before: 'Rewritten while the quote was out.' }],
+    };
+
+    const restored = restoreDraftQuote(edited, taken.removed);
+
+    expect(restored.quotes.map((q) => q.id)).toEqual(['q1', 'q2']);
+    expect(restored.quotes[0]).toMatchObject({ before: '', reply: dataFlow.reply });
+    expect(restored.quotes[1].before).toBe('Rewritten while the quote was out.');
+    expect(restored.text).toBe('Thanks!');
+  });
+
+  it('appends the quote when the draft has grown shorter than its place', () => {
+    const taken = takeDraftQuote(review(), 'q2')!;
+    const shorter = emptyComposerDraft();
+
+    const restored = restoreDraftQuote(shorter, taken.removed);
+
+    expect(restored.quotes.map((q) => q.id)).toEqual(['q2']);
+    expect(restored.quotes[0].before).toBe('');
+    expect(restored.text).toBe('');
+  });
+
+  it('is null for an unknown id', () => {
+    expect(takeDraftQuote(review(), 'missing')).toBeNull();
   });
 });
 

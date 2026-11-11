@@ -250,11 +250,13 @@
     hasQuotedParts,
     isComposerDraftEmpty,
     parseQuotedMessage,
-    removeDraftQuote,
+    restoreDraftQuote,
     serializeComposerDraft,
     setDraftQuoteReply,
+    takeDraftQuote,
     type ComposerDraft,
     type DraftQuote,
+    type RemovedDraftQuote,
   } from './composerDraft';
   import QuoteExcerpt from './QuoteExcerpt.svelte';
   import NoteActivityCard from './NoteActivityCard.svelte';
@@ -548,10 +550,41 @@
     });
   }
 
+  /**
+   * Take a quote block out of the draft. One with a reply typed under it is
+   * offered back in a toast (there is no other undo for a block): Undo puts
+   * it back where it was, reply and lead-in text included, and the caret in
+   * its reply. An unanswered block just goes.
+   */
   function removeQuote(id: string) {
+    const taken = takeDraftQuote(currentDraft(), id);
+    if (!taken) return;
     sendError = null;
-    setDraft(removeDraftQuote(currentDraft(), id));
+    setDraft(taken.draft);
     tick().then(() => autoResize());
+    if (taken.removed.quote.reply.trim() !== '') offerQuoteUndo(sessionId, taken.removed);
+  }
+
+  function offerQuoteUndo(sid: string | null, removed: RemovedDraftQuote) {
+    if (!sid) return;
+    toast('Quote removed from your reply', {
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          if (active && sessionId === sid && loadedDraftSessionId === sid) {
+            setDraft(restoreDraftQuote(currentDraft(), removed));
+            tick().then(() => autoResize());
+            focusDraftQuoteReply(removed.quote.id);
+            return;
+          }
+          // The composer has moved on: the stored draft gets it back.
+          amendStoredReplyDraft(sid, (draft) => restoreDraftQuote(draft, removed)).catch((err) => {
+            console.error('[SessionChatPane] Failed to restore the quote:', err);
+            toast.error('Could not restore the quote');
+          });
+        },
+      },
+    });
   }
 
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);

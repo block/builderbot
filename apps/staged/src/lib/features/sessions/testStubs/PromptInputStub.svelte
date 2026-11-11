@@ -3,13 +3,15 @@
   `value` binding, so component tests can simulate typing without pulling in
   the hashtag editor's dependencies. Stands in for ChatComposer too, so it
   echoes the composer's `sendError` where tests can read it, renders a
-  button per new-session action when the pane offers them, and mirrors what
+  button per new-session action when the pane offers them, mirrors what
   the pane put in the box (`data-value`) and whether the control it handed
-  down is split (`data-send-split`).
+  down is split (`data-send-split`), and takes its bindable `quotes`, whose
+  count it shows as `data-quote-count`.
 -->
 <script lang="ts">
   let {
     value = $bindable(''),
+    quotes = $bindable([]),
     textareaEl = $bindable(null),
     sendError = null,
     sendControl,
@@ -17,6 +19,7 @@
     newSessionDisabled = false,
   }: {
     value?: string;
+    quotes?: unknown[];
     textareaEl?: HTMLElement | null;
     sendError?: string | null;
     sendControl?: { split: boolean };
@@ -34,6 +37,7 @@
   data-testid="prompt-input"
   data-value={value}
   data-send-split={sendControl?.split}
+  data-quote-count={quotes.length}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
 {#if sendError}

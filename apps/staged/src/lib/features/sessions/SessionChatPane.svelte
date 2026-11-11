@@ -225,7 +225,6 @@
   import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { getNoteFollowupLabel, noteActivityLabel, type LinkedNoteContext } from './noteFreshness';
-  import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
   import {
     offerUnstartedDraftBox,
     otherUnstartedDraftBox,
@@ -234,6 +233,29 @@
     unstartedDraftMessage,
     unstartedDraftToast,
   } from './unstartedDraft';
+  import {
+    loadReplyDraft as loadStoredReplyDraft,
+    amendStoredReplyDraft,
+    registerReplyComposer,
+    replyDraftKey,
+    replyDraftWriter,
+  } from './replyDrafts';
+  import {
+    appendDraftQuote,
+    cloneComposerDraft,
+    composerDraftContent,
+    composerDraftsEqual,
+    emptyComposerDraft,
+    hasQuotedParts,
+    isComposerDraftEmpty,
+    parseQuotedMessage,
+    removeDraftQuote,
+    serializeComposerDraft,
+    type ComposerDraft,
+    type DraftQuote,
+    type NewDraftQuote,
+  } from './composerDraft';
+  import QuoteExcerpt from './QuoteExcerpt.svelte';
   import NoteActivityCard from './NoteActivityCard.svelte';
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
@@ -397,7 +419,10 @@
     getSession: () => session,
   });
 
+  /** The draft's free text after its last quote — the composer's main input. */
   let inputText = $state('');
+  /** The draft's quote blocks, each with the free text before it (see composerDraft.ts). */
+  let draftQuotes = $state<DraftQuote[]>([]);
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
   let queueActionIds = $state<Set<string>>(new Set());
   let copiedId = $state<number | string | null>(null);
@@ -405,7 +430,9 @@
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
 
-  const replyDraftWriter = createDraftWriteScheduler();
+  // Reply drafts persist through the writer every pane shares (see
+  // replyDrafts.ts), so a quote added from a note while no composer shows the
+  // draft can amend the stored copy without racing this pane's debounced save.
   // $state so the save effect re-runs when a finished load opens the gate —
   // otherwise a keystroke typed during the load window is never scheduled.
   let loadedDraftSessionId = $state<string | null>(null);
@@ -423,9 +450,21 @@
   // may still hold the previously shown session's text; the save effect skips
   // exactly that run so inherited text isn't filed under this session's key.
   let suppressNextReplySave = false;
+  /**
+   * Quotes a note sent to this session's draft while its load was still in
+   * flight: they go in once the stored draft has landed, rather than being
+   * replaced by it. Keyed to the session they were sent for.
+   */
+  let pendingDraftQuotes: { sessionId: string; quotes: NewDraftQuote[] } | null = null;
 
-  function replyDraftKey(id: string): string {
-    return `draft:session-reply:${id}`;
+  /** The composer's draft as one value (live `$state`; clone before keeping it). */
+  function currentDraft(): ComposerDraft {
+    return { quotes: draftQuotes, text: inputText };
+  }
+
+  function setDraft(draft: ComposerDraft) {
+    draftQuotes = draft.quotes;
+    inputText = draft.text;
   }
 
   /**
@@ -436,15 +475,20 @@
    * direct store read would restore the stale value — which the save effect
    * below would then write back, superseding the pending newer text.
    */
-  async function loadReplyDraft(id: string, generation: number, textWhenLoadStarted: string) {
+  async function loadReplyDraft(
+    id: string,
+    generation: number,
+    draftWhenLoadStarted: ComposerDraft
+  ) {
     try {
       await replyDraftWriter.flush();
-      const draft = await loadDraft(replyDraftKey(id));
+      const draft = await loadStoredReplyDraft(id);
       if (generation !== draftLoadGeneration || !active || sessionId !== id) return;
-      if (inputText === textWhenLoadStarted) {
-        inputText = draft ?? '';
+      if (composerDraftsEqual(cloneComposerDraft(currentDraft()), draftWhenLoadStarted)) {
+        setDraft(draft);
       }
       loadedDraftSessionId = id;
+      applyPendingDraftQuotes(id);
       await tick();
       autoResize();
     } catch (err) {
@@ -452,16 +496,47 @@
       // Leave the composer as the user left it, but re-enable saving so
       // further keystrokes still reach the store. Re-enabling fires the save
       // effect once immediately: when the composer still holds exactly the
-      // text from before this load began, that text was inherited from the
+      // draft from before this load began, that draft was inherited from the
       // previously shown session (a switch A → B where B's load failed), and
       // letting that run through would overwrite B's stored draft with A's
       // text. Suppress it — text typed during the load window was written
       // while this session was displayed, so it still saves.
       if (generation === draftLoadGeneration && active && sessionId === id) {
-        suppressNextReplySave = inputText === textWhenLoadStarted;
+        suppressNextReplySave = composerDraftsEqual(
+          cloneComposerDraft(currentDraft()),
+          draftWhenLoadStarted
+        );
         loadedDraftSessionId = id;
+        applyPendingDraftQuotes(id);
       }
     }
+  }
+
+  /** A note added a quote to this session's draft while the composer shows it. */
+  function receiveDraftQuote(id: string, quote: NewDraftQuote) {
+    if (loadedDraftSessionId !== id) {
+      if (pendingDraftQuotes?.sessionId !== id) pendingDraftQuotes = { sessionId: id, quotes: [] };
+      pendingDraftQuotes.quotes.push(quote);
+      return;
+    }
+    // Typing into the quote is a draft edit: the last failure line has been read.
+    sendError = null;
+    setDraft(appendDraftQuote(currentDraft(), quote));
+  }
+
+  function applyPendingDraftQuotes(id: string) {
+    const pending = pendingDraftQuotes;
+    pendingDraftQuotes = null;
+    if (pending?.sessionId !== id) return;
+    let draft = currentDraft();
+    for (const quote of pending.quotes) draft = appendDraftQuote(draft, quote);
+    setDraft(draft);
+  }
+
+  function removeQuote(id: string) {
+    sendError = null;
+    setDraft(removeDraftQuote(currentDraft(), id));
+    tick().then(() => autoResize());
   }
 
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
@@ -997,10 +1072,10 @@
     }
 
     const generation = ++draftLoadGeneration;
-    const inputTextWhenLoadStarted = untrack(() => inputText);
+    const draftWhenLoadStarted = untrack(() => cloneComposerDraft(currentDraft()));
     suppressNextReplySave = false;
     loadedDraftSessionId = null;
-    replyDraftLoad = loadReplyDraft(id, generation, inputTextWhenLoadStarted);
+    replyDraftLoad = loadReplyDraft(id, generation, draftWhenLoadStarted);
   });
 
   // While this pane has the session's composer on screen, a draft returned
@@ -1020,13 +1095,36 @@
   $effect(() => {
     const isActive = active;
     const id = sessionId;
-    const text = inputText;
+    // Reads every field of the draft, so any edit — the main input, a gap,
+    // a quote's reply — schedules a save.
+    const content = composerDraftContent(currentDraft());
     if (!isActive || !id || loadedDraftSessionId !== id) return;
     if (suppressNextReplySave) {
       suppressNextReplySave = false;
       return;
     }
-    replyDraftWriter.scheduleSave(replyDraftKey(id), text);
+    replyDraftWriter.scheduleSave(replyDraftKey(id), content);
+  });
+
+  // While this pane shows a session's draft it takes the quotes a note adds
+  // to it (see replyDrafts.ts). Quotes still waiting on the draft's load when
+  // the pane moves on go to the stored draft instead of being dropped.
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id) return;
+    const unregister = registerReplyComposer(id, {
+      addQuote: (quote) => receiveDraftQuote(id, quote),
+    });
+    return () => {
+      unregister();
+      const pending = pendingDraftQuotes;
+      if (pending?.sessionId !== id) return;
+      pendingDraftQuotes = null;
+      void amendStoredReplyDraft(id, pending.quotes).catch((err) => {
+        console.error('[SessionChatPane] Failed to save quoted reply:', err);
+      });
+    };
   });
 
   $effect(() => {
@@ -1597,10 +1695,13 @@
     // until it settles; a second Cmd+Enter meanwhile must not clear the draft
     // typed since, so the guard comes before anything is taken out of the box.
     if (sending) return;
-    const text = inputText.trim();
+    // Kept whole so a failed send puts the quote blocks back, not just text.
+    const draft = cloneComposerDraft(currentDraft());
+    if (isComposerDraftEmpty(draft)) return;
+    const text = serializeComposerDraft(draft);
     if (!text) return;
     void replyDraftWriter.clearNow(replyDraftKey(sessionId));
-    inputText = '';
+    setDraft(emptyComposerDraft());
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];
     imagePreviews = new Map();
@@ -1609,7 +1710,7 @@
     tick().then(() => autoResize());
 
     if (sendControl.action === 'send-now') {
-      await sendMessageNow(text, imageIdsToSend);
+      await sendMessageNow(text, imageIdsToSend, draft);
       return;
     }
 
@@ -1620,7 +1721,7 @@
         await refreshQueuedMessages();
       } catch (e) {
         sendError = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
-        inputText = text;
+        setDraft(draft);
         replyImageIds = imageIdsToSend ?? [];
       }
       return;
@@ -1629,7 +1730,7 @@
     // Session is idle — send immediately. `sendMessage` reports the failure
     // itself; the draft goes back in the box so it can be retried.
     if (!(await sendMessage(text, imageIdsToSend))) {
-      inputText = text;
+      setDraft(draft);
       replyImageIds = imageIdsToSend ?? [];
     }
   }
@@ -1647,7 +1748,11 @@
    * re-queued behind the user's back, since a blocked steer may already have
    * landed.
    */
-  async function sendMessageNow(text: string, imageIds?: string[]) {
+  async function sendMessageNow(
+    text: string,
+    imageIds: string[] | undefined,
+    draft: ComposerDraft
+  ) {
     if (!session || sending) return;
     const id = session.id;
     sending = true;
@@ -1707,11 +1812,11 @@
           break;
         }
       }
-      inputText = text;
+      setDraft(draft);
       replyImageIds = imageIds ?? [];
     } catch (e) {
       sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
-      inputText = text;
+      setDraft(draft);
       replyImageIds = imageIds ?? [];
     } finally {
       sending = false;
@@ -1804,11 +1909,13 @@
     if (!start || newSessionDisabled) return;
     // Same gates as `handleSend`: a row to act on, no send in flight, text.
     if (composerBlock || sending) return;
-    const text = inputText.trim();
+    const draft = cloneComposerDraft(currentDraft());
+    if (isComposerDraftEmpty(draft)) return;
+    const text = serializeComposerDraft(draft);
     if (!text) return;
     const id = sessionId;
     void replyDraftWriter.clearNow(replyDraftKey(id));
-    inputText = '';
+    setDraft(emptyComposerDraft());
     const imageIds = [...replyImageIds];
     replyImageIds = [];
     imagePreviews = new Map();
@@ -1883,10 +1990,12 @@
         await replyDraftLoad;
       }
       if (onScreen()) {
+        // The message goes above the main input; quote blocks added since
+        // stay where they are, ahead of it.
         const restored = restoreUnstartedDraft(text, inputText);
         inputText = restored.text;
         replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
-        void replyDraftWriter.saveNow(draftKey, restored.text);
+        void replyDraftWriter.saveNow(draftKey, composerDraftContent(currentDraft()));
         sendError = unstartedDraftMessage({ reason, keptNewerText: restored.keptNewerText });
         tick().then(() => autoResize());
         return;
@@ -1897,27 +2006,28 @@
       // Every open starts a draft load, so this also tells an open that came
       // and went again while the store was being read.
       const loadsBeforeRead = draftLoadGeneration;
-      let stored: string;
+      let stored: ComposerDraft;
       try {
         await replyDraftWriter.flush();
-        stored = (await loadDraft(draftKey)) ?? '';
+        stored = await loadStoredReplyDraft(id);
       } catch (err) {
         console.error('[SessionChatPane] Failed to read the reply draft to restore into:', err);
-        stored = parkedBox ? inputText : '';
+        stored = parkedBox ? cloneComposerDraft(currentDraft()) : emptyComposerDraft();
       }
       // Reopened while the store was read, here or in another pane: a box is
       // the place after all. Or, if this pane was closed again too, the store
       // may hold newer text now.
       if (onScreen() || draftLoadGeneration !== loadsBeforeRead || boxElsewhere()) continue;
-      const restored = restoreUnstartedDraft(text, stored);
-      void replyDraftWriter.saveNow(draftKey, restored.text);
+      const restored = restoreUnstartedDraft(text, stored.text);
+      const restoredDraft: ComposerDraft = { quotes: stored.quotes, text: restored.text };
+      void replyDraftWriter.saveNow(draftKey, composerDraftContent(restoredDraft));
       const boxGone = destroyed || sessionId !== id;
       if (!boxGone) {
         // Kept with the parked pane for its next open. That open reloads the
         // box from the store; until it has, and if it cannot, the box holds
-        // the same text (a parked pane's autosave does not run, so this
+        // the same draft (a parked pane's autosave does not run, so this
         // writes nothing). Attachments are not stored.
-        inputText = restored.text;
+        setDraft(cloneComposerDraft(restoredDraft));
         replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
         sendError = unstartedDraftMessage({ reason, keptNewerText: restored.keptNewerText });
       }
@@ -2996,6 +3106,8 @@
 
   let slashCommands = $derived.by(() => latestAvailableCommands(acpMetadataMessages));
   let slashQuery = $derived.by(() => {
+    // A command starts the message; with quotes above it the input doesn't.
+    if (draftQuotes.length > 0) return null;
     const trimmed = inputText.trimStart();
     return trimmed.startsWith('/') ? trimmed.slice(1).toLowerCase() : null;
   });
@@ -3254,9 +3366,24 @@
                 <div class="message-row human-message">
                   <div class="group/bubble human-bubble">
                     {#if userText.trim()}
-                      <span class="human-text"
-                        >{@html renderHashtagTokens(userText.trim(), hashtagItems)}</span
-                      >
+                      {@const userParts = parseQuotedMessage(userText.trim())}
+                      {#if hasQuotedParts(userParts)}
+                        <div class="human-quoted">
+                          {#each userParts as part, partIdx (partIdx)}
+                            {#if part.type === 'quote'}
+                              <QuoteExcerpt quote={part.quote} headings={part.headings} />
+                            {:else}
+                              <span class="human-text"
+                                >{@html renderHashtagTokens(part.text, hashtagItems)}</span
+                              >
+                            {/if}
+                          {/each}
+                        </div>
+                      {:else}
+                        <span class="human-text"
+                          >{@html renderHashtagTokens(userText.trim(), hashtagItems)}</span
+                        >
+                      {/if}
                     {/if}
                     {#if group.message.imageIds && group.message.imageIds.length > 0}
                       <div class="message-images">
@@ -3676,6 +3803,8 @@
       <ChatComposer
         bind:textareaEl={inputEl}
         bind:value={inputText}
+        bind:quotes={draftQuotes}
+        onRemoveQuote={removeQuote}
         {sendControl}
         {hashtagItems}
         onkeydown={handleInputKeydown}
@@ -3892,6 +4021,17 @@
   .human-text {
     display: block;
     white-space: pre-wrap;
+  }
+
+  /* A reply built from note quotes: each quote, then the text around it. */
+  .human-quoted {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .human-quoted :global(.quote-excerpt + .quote-excerpt) {
+    margin-top: 4px;
   }
 
   /* Images attached to user messages */

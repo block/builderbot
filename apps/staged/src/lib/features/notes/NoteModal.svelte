@@ -12,6 +12,11 @@
 
   Showing a note marks it read, and the header's toggle marks it read or
   unread; see `NoteReadTracker` for when the viewer marks it on its own.
+
+  A note with a chat can be replied to a passage at a time: selecting text
+  offers a Reply button (`NoteSelectionReply`), and each reply lands in the
+  chat's draft as a quote block (see sessions/replyDrafts.ts) — live in the
+  chat pane when it is open, in the stored draft otherwise.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -24,6 +29,8 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
+  import PencilLine from '@lucide/svelte/icons/pencil-line';
+  import { toast } from 'svelte-sonner';
   import * as Dialog from '$lib/components/ui/dialog';
   import {
     createDialogWidth,
@@ -80,6 +87,9 @@
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
+  import NoteSelectionReply from './NoteSelectionReply.svelte';
+  import type { NewDraftQuote } from '../sessions/composerDraft';
+  import { addQuoteToReplyDraft, replyDraftPresence } from '../sessions/replyDrafts';
   import { isSessionActive } from '../../shared/sessionStatus';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
@@ -174,6 +184,7 @@
   let chatAutoOpenDecisionKey = $state<string | null>(null);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
   let canOpenSession = $derived(Boolean(sessionId));
+  let hasReplyDraft = $derived(replyDraftPresence.has(sessionId));
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0 && !chatOpen);
   let displayTitle = $derived(liveNote?.title ?? title);
   let displayContent = $derived(liveNote?.content ?? content);
@@ -223,13 +234,13 @@
         : 'View chat'
   );
   let chatToggleAriaLabel = $derived(
-    chatOpen
+    (chatOpen
       ? viewport.canSplit
         ? 'Hide chat pane'
         : 'View note pane'
       : viewport.canSplit
         ? 'Show chat pane'
-        : 'View chat pane'
+        : 'View chat pane') + (!chatOpen && hasReplyDraft ? ' — unsent reply draft' : '')
   );
   // The note pane sizes to its content up to most of the window, so a short
   // note gets a short dialog and a long one scrolls inside a tall one. With the
@@ -328,7 +339,8 @@
   let matchCount = $state(0);
   let currentMatchIndex = $state(0);
   let matchElements: HTMLElement[] = [];
-  let contentEl: HTMLDivElement | undefined;
+  let contentEl = $state<HTMLDivElement>();
+  let markdownEl = $state<HTMLDivElement>();
   let unregisterSearchTarget: (() => void) | null = null;
 
   // Register the global search-shortcut target only while the visible note pane can be searched.
@@ -533,6 +545,40 @@
     previousSessionStatus = next?.status ?? null;
   }
 
+  /** The title heading the note is rendered under heads every path, so it is left out. */
+  function isTitleHeading(heading: Element): boolean {
+    return (
+      !!displayTitle.trim() &&
+      heading.tagName === 'H1' &&
+      heading.parentElement === markdownEl &&
+      heading === markdownEl?.firstElementChild
+    );
+  }
+
+  /**
+   * A reply to a selected passage goes into the chat's draft as a quote
+   * block. Split view opens the chat beside the note so the block is seen
+   * landing; elsewhere the chat would cover the note mid-review, so a toast
+   * confirms it instead.
+   */
+  function handleQuoteReply(quote: NewDraftQuote) {
+    const sid = sessionId;
+    if (!sid) return;
+    // Queued before the chat opens: a pane that opens next loads it.
+    addQuoteToReplyDraft(sid, quote).catch((error) => {
+      console.error('Failed to add quote to reply draft', error);
+      toast.error('Could not add the quote to your reply draft');
+    });
+    if (chatOpen) return;
+    if (viewport.canSplit) {
+      setChatOpen(true);
+      return;
+    }
+    toast('Added to your reply draft', {
+      action: { label: 'View chat', onClick: () => setChatOpen(true) },
+    });
+  }
+
   function handleChatToggle() {
     if (!canOpenSession) return;
     if (chatOpen && !viewport.canSplit) {
@@ -733,6 +779,9 @@
         <PanelRightOpen size={15} aria-hidden="true" />
       {/if}
       <span>{chatToggleLabel}</span>
+      {#if !chatOpen && hasReplyDraft}
+        <PencilLine size={12} class="text-[var(--ui-accent)]" aria-hidden="true" />
+      {/if}
     </Button>
   {/if}
 {/snippet}
@@ -848,12 +897,21 @@
         >
           {#if hasNoteContent}
             {#if renderedNoteHtml !== null}
-              <div class="markdown-content">
+              <div class="markdown-content" bind:this={markdownEl}>
                 {@html renderedNoteHtml}
               </div>
             {/if}
           {:else}
             <p class="empty-note">This note has no content.</p>
+          {/if}
+          {#if canOpenSession && hasNoteContent}
+            <NoteSelectionReply
+              scrollEl={contentEl}
+              contentEl={markdownEl}
+              enabled={open && !chatOnly && renderedNoteHtml !== null}
+              ignoreHeading={isTitleHeading}
+              onAdd={handleQuoteReply}
+            />
           {/if}
         </div>
 
@@ -1085,7 +1143,9 @@
 
   /* The note spans a full-screen dialog's width, so a swipe over the side
      insets still scrolls it; its text clears them. */
+  /* Positioned for the selection's Reply button, which scrolls with the text. */
   .modal-content {
+    position: relative;
     flex: 1;
     overflow-y: auto;
     padding: 24px;

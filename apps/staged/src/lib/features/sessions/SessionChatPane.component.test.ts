@@ -42,6 +42,10 @@ vi.mock('../../transport', async (importOriginal) => ({
 vi.mock('../../shared/draftCache', () => ({
   createDraftWriteScheduler: () => writer,
   loadDraft: (key: string) => loadDraftMock(key),
+  loadDraftContent: async (key: string) => {
+    const value = await loadDraftMock(key);
+    return value === null ? null : { value };
+  },
 }));
 vi.mock('../../commands', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../commands')>()),
@@ -56,6 +60,8 @@ vi.mock('../../commands', async (importOriginal) => ({
 
 import SessionChatPane from './SessionChatPane.svelte';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
+import { addQuoteToReplyDraft } from './replyDrafts';
+import { composerDraftFromContent, serializeComposerDraft } from './composerDraft';
 
 function replyKey(id: string): string {
   return `draft:session-reply:${id}`;
@@ -157,6 +163,73 @@ describe('SessionChatPane reply draft autosave', () => {
     rejectLoad(new Error('store unavailable'));
     await settle();
     expect(writer.scheduleSave).toHaveBeenCalledWith(replyKey('session-b'), 'typed during load');
+
+    unmount(pane);
+  });
+});
+
+describe('SessionChatPane quoted replies', () => {
+  const quote = { quote: 'Ship behind a flag.', headings: ['Rollout'], reply: 'Which one?' };
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    writer.scheduleSave.mockClear();
+    loadDraftMock.mockReset();
+    loadDraftMock.mockImplementation(async () => null);
+  });
+
+  function quoteCount(): number {
+    const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
+    return Number(input?.dataset.quoteCount ?? NaN);
+  }
+
+  function lastSaved(key: string) {
+    const calls = writer.scheduleSave.mock.calls.filter(([savedKey]) => savedKey === key);
+    return calls[calls.length - 1]?.[1];
+  }
+
+  it('takes a note quote into the open composer and saves it with the draft', async () => {
+    loadDraftMock.mockImplementation(async () => 'Before the quote');
+    const { pane } = mountPane('session-q');
+    flushSync();
+    await settle();
+
+    await addQuoteToReplyDraft('session-q', quote);
+    await settle();
+
+    expect(quoteCount()).toBe(1);
+    const saved = lastSaved(replyKey('session-q'));
+    expect(saved).toMatchObject({ structured: expect.anything() });
+    const draft = composerDraftFromContent(saved);
+    expect(draft.quotes[0]).toMatchObject({ before: 'Before the quote', ...quote });
+    expect(draft.text).toBe('');
+    expect(saved.value).toBe(serializeComposerDraft(draft));
+
+    unmount(pane);
+  });
+
+  it('holds a quote that arrives during the draft load until the draft lands', async () => {
+    let resolveLoad!: (value: string | null) => void;
+    loadDraftMock.mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveLoad = resolve;
+        })
+    );
+    const { pane } = mountPane('session-slow');
+    flushSync();
+    await settle();
+
+    await addQuoteToReplyDraft('session-slow', quote);
+    await settle();
+    expect(quoteCount()).toBe(0);
+
+    resolveLoad('stored text');
+    await settle();
+
+    expect(quoteCount()).toBe(1);
+    const draft = composerDraftFromContent(lastSaved(replyKey('session-slow')));
+    expect(draft.quotes[0]).toMatchObject({ before: 'stored text', reply: 'Which one?' });
 
     unmount(pane);
   });

@@ -26,6 +26,11 @@
   queue change that failed) are shown on a `ComposerError` line inside the
   composer, next to the attachment error, rather than in the pane's
   transcript slot — the transcript stays readable behind them.
+
+  A draft can hold quote blocks — passages of a note the user selected and
+  replied to (see composerDraft.ts). They are listed above the text input,
+  each with its reply and the free text before it editable in place; the
+  text input is the free text after the last one.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -68,12 +73,17 @@
   import ComposerError from './ComposerError.svelte';
   import type { AttachmentPreview } from './attachmentPreview';
   import HashtagInput from './HashtagInput.svelte';
+  import ComposerDraftQuotes from './ComposerDraftQuotes.svelte';
+  import type { DraftQuote } from './composerDraft';
   import { createCompositionSendGate, createTouchPressFocusGuard } from './composerSendPress';
   import type { HashtagItem } from '../../types';
 
   interface Props {
-    /** Raw input text including #type:id tokens. */
+    /** Raw input text including #type:id tokens — the free text after any quotes. */
     value: string;
+    /** The draft's quote blocks, in order, each with the free text before it. */
+    quotes?: DraftQuote[];
+    onRemoveQuote?: (id: string) => void;
     /** The contenteditable input element (for focus/resize from the parent). */
     textareaEl?: HTMLElement | null;
     /**
@@ -131,6 +141,8 @@
 
   let {
     value = $bindable(''),
+    quotes = $bindable([]),
+    onRemoveQuote,
     textareaEl = $bindable(null),
     sendControl,
     hashtagItems = [],
@@ -157,7 +169,11 @@
   let fileInputEl = $state<HTMLInputElement>();
 
   let submitBlock = $derived(
-    composerSubmitBlock({ sessionBlock, sending, hasText: value.trim().length > 0 })
+    composerSubmitBlock({
+      sessionBlock,
+      sending,
+      hasText: value.trim().length > 0 || quotes.length > 0,
+    })
   );
   let sendDisabled = $derived(submitBlock !== null);
   let sendTitle = $derived(composerSubmitBlockTitle(submitBlock) ?? sendControl.title);
@@ -256,6 +272,15 @@
     <ComposerError message={attachError} />
   {/if}
   <ComposerError message={sendError} />
+  {#if quotes.length > 0}
+    <ComposerDraftQuotes
+      bind:quotes
+      {hashtagItems}
+      {onkeydown}
+      {oninput}
+      onRemoveQuote={(id) => onRemoveQuote?.(id)}
+    />
+  {/if}
   <HashtagInput
     bind:textareaEl
     bind:value

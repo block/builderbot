@@ -74,7 +74,7 @@
         {/if}
       </ContextMenu.RadioGroup>
       <ContextMenu.Separator />
-      <ContextMenu.Item onSelect={() => openSettings('general')}>
+      <ContextMenu.Item onSelect={() => openSettings('tags')}>
         <Settings2 size={14} />
         Edit statuses…
       </ContextMenu.Item>

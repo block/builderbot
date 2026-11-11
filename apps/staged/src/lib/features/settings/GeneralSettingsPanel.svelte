@@ -9,7 +9,6 @@
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import DiagramConfigSetting from './DiagramConfigSetting.svelte';
-  import ProjectStatusOptionsSetting from './ProjectStatusOptionsSetting.svelte';
   import UpdateSettings from './UpdateSettings.svelte';
   import { isTauri } from '../../transport';
   import { updaterState, checkForUpdatesNow } from '../../services/updater.svelte';
@@ -199,10 +198,6 @@
           This prefix will be added to branch names along with a slash separator.
         {/if}
       </p>
-    </div>
-
-    <div class="field">
-      <ProjectStatusOptionsSetting />
     </div>
   </div>
 </div>

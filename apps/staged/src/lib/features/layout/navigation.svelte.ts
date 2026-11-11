@@ -37,7 +37,8 @@ const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
  */
 export const INITIAL_ROUTE_TIMEOUT_MS = 300;
 
-export type SettingsSection = 'general' | 'repo' | 'keyboard' | 'doctor' | 'connected-apps';
+export type SettingsSection =
+  'general' | 'repo' | 'tags' | 'keyboard' | 'doctor' | 'connected-apps';
 
 export type DiffDetailRoute = {
   kind: 'diff';

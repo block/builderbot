@@ -9,7 +9,10 @@ import {
   indexAssignments,
   indexTagCatalog,
   intentSlot,
+  MAX_TAG_NAME_CHARS,
+  numberedName,
   pruneConfirmedIntents,
+  tagNameKey,
   usageCounts,
   withConfirmedIntent,
   withIntent,
@@ -298,5 +301,34 @@ describe('usageCounts', () => {
     ]);
     const counts = usageCounts(byProject, ['a', 'b', 'c']);
     expect(Object.fromEntries(counts)).toEqual({ idea: 2, q4: 1 });
+  });
+});
+
+describe('tagNameKey', () => {
+  it('folds ASCII case only, as SQLite NOCASE does', () => {
+    expect(tagNameKey('Infra')).toBe(tagNameKey('infra'));
+    expect(tagNameKey('É')).not.toBe(tagNameKey('é'));
+  });
+
+  it('ignores surrounding whitespace, which the backend trims', () => {
+    expect(tagNameKey('  High ')).toBe('high');
+  });
+});
+
+describe('numberedName', () => {
+  it('keeps a free name', () => {
+    expect(numberedName('Status', new Set(['priority']))).toBe('Status');
+  });
+
+  it('numbers a taken name from 2, ignoring case', () => {
+    expect(numberedName('Status', new Set(['status']))).toBe('Status 2');
+    expect(numberedName('Status', new Set(['status', 'status 2']))).toBe('Status 3');
+  });
+
+  it('cuts the base so the number still fits the name limit', () => {
+    const base = 'x'.repeat(MAX_TAG_NAME_CHARS);
+    const name = numberedName(base, new Set([base]));
+    expect(name).toBe(`${'x'.repeat(MAX_TAG_NAME_CHARS - 2)} 2`);
+    expect(name).toHaveLength(MAX_TAG_NAME_CHARS);
   });
 });

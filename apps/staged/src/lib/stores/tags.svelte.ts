@@ -100,6 +100,15 @@ class TagsStore {
     return this._loaded;
   }
 
+  /**
+   * The backend's snapshot as last applied or patched, without pending
+   * assignment writes. For editors that layer their own optimistic view over
+   * the catalog (Settings › Tags' drag reorder).
+   */
+  get snapshot(): TagState {
+    return this._snapshot;
+  }
+
   /** Every group, in position order. */
   get groups(): TagGroup[] {
     return this.catalog.groups;

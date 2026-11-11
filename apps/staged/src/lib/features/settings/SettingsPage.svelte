@@ -5,6 +5,7 @@
   import Plug from '@lucide/svelte/icons/plug';
   import Settings2 from '@lucide/svelte/icons/settings-2';
   import Stethoscope from '@lucide/svelte/icons/stethoscope';
+  import TagsIcon from '@lucide/svelte/icons/tags';
   import { navigation, openSettings } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
@@ -12,9 +13,20 @@
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
   import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
+  import TagsSettingsPanel from './tags/TagsSettingsPanel.svelte';
+  import { tagsStore } from '../../stores/tags.svelte';
   import { isTauri } from '../../transport';
 
   let appVersion = $state(__APP_VERSION__);
+
+  let groupCount = $derived(tagsStore.groups.length);
+  let tagsMeta = $derived(
+    !tagsStore.loaded
+      ? 'Project tags and groups'
+      : groupCount === 0
+        ? 'No groups yet'
+        : `${groupCount} ${groupCount === 1 ? 'group' : 'groups'}`
+  );
 
   onMount(async () => {
     if (!isTauri) return;
@@ -57,6 +69,19 @@
             <div class="nav-text">
               <span class="nav-name">Repos</span>
               <span class="nav-meta">Per-repo actions and cleanup</span>
+            </div>
+          </div>
+        </button>
+        <button
+          class="nav-item"
+          class:active={navigation.settingsSection === 'tags'}
+          onclick={() => openSettings('tags')}
+        >
+          <div class="nav-main">
+            <TagsIcon size={14} />
+            <div class="nav-text">
+              <span class="nav-name">Tags</span>
+              <span class="nav-meta">{tagsMeta}</span>
             </div>
           </div>
         </button>
@@ -111,6 +136,8 @@
         <div class="panel-pad">
           {#if navigation.settingsSection === 'general'}
             <GeneralSettingsPanel />
+          {:else if navigation.settingsSection === 'tags'}
+            <TagsSettingsPanel />
           {:else if navigation.settingsSection === 'keyboard'}
             <KeyboardSettingsPanel />
           {:else if navigation.settingsSection === 'connected-apps'}
@@ -269,8 +296,8 @@
     /* `1fr` alone is `minmax(auto, 1fr)`: the nav row's `max-content` items
        set the column's minimum, and on a 402px phone the column (and every
        panel in it) grew to 413px, past the viewport. `minmax(0, 1fr)` keeps
-       it at the width available; the four tabs fit a 402px phone at this
-       padding, and the nav list scrolls sideways should they not. */
+       it at the width available, and the nav list scrolls sideways when the
+       tabs don't fit. */
     .settings-body {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: auto 1fr;

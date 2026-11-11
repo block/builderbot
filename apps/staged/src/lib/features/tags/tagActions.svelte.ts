@@ -16,9 +16,29 @@
 
 import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
-import type { Project, Tag, TagColor, TagState } from '../../types';
+import type {
+  DeleteTagGroupMode,
+  NewTag,
+  Project,
+  Tag,
+  TagColor,
+  TagGroup,
+  TagState,
+} from '../../types';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { tagsStore } from '../../stores/tags.svelte';
+import {
+  withGroup,
+  withGroupName,
+  withGroupOrder,
+  withIconGroup,
+  withTag,
+  withTagMoved,
+  withTagValue,
+  withoutGroup,
+  withoutTag,
+  type TagMove,
+} from './tagCatalogPatches';
 import { intentSlot, type TagIntent } from './tagState';
 
 function errorMessage(e: unknown): string {
@@ -91,7 +111,7 @@ class TagActionsController {
         return;
       }
       created = tag;
-      tagsStore.patchLocal((state) => insertTag(state, tag));
+      tagsStore.patchLocal((state) => withTag(state, tag));
       // Shown through a committed intent, which also supersedes any older
       // pick in the group, until a snapshot requested from here on lands.
       const intent: TagIntent =
@@ -115,48 +135,117 @@ class TagActionsController {
     color?: TagColor | null;
     icon?: string | null;
   }): Promise<Tag | null> {
-    try {
-      const tag = await commands.createTag(input);
-      tagsStore.patchLocal((state) => insertTag(state, tag));
-      return tag;
-    } catch (e) {
-      toast.error('Unable to create tag', { description: errorMessage(e) });
-      void tagsStore.requestRefresh();
-      return null;
-    }
+    let tag: Tag | null = null;
+    await this.catalogWrite(
+      'Unable to create tag',
+      async () => {
+        tag = await commands.createTag(input);
+      },
+      (state) => (tag ? withTag(state, tag) : state)
+    );
+    return tag;
   }
 
   /** Replace a tag's name, colour and icon. Resolves to whether it saved. */
-  async updateTag(tag: Tag, value: TagValue): Promise<boolean> {
-    try {
-      await commands.updateTag(tag.id, value);
-    } catch (e) {
-      toast.error('Unable to update tag', { description: errorMessage(e) });
-      void tagsStore.requestRefresh();
-      return false;
-    }
-    const next = { ...value, name: value.name.trim() };
-    tagsStore.patchLocal((state) => ({
-      ...state,
-      tags: state.tags.map((t) => (t.id === tag.id ? { ...t, ...next } : t)),
-    }));
-    return true;
+  updateTag(tag: Tag, value: TagValue): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to update tag',
+      () => commands.updateTag(tag.id, value),
+      (state) => withTagValue(state, tag.id, value)
+    );
+  }
+
+  /**
+   * Move a tag within its scope or into another (see `move_tag`). Moving
+   * into a group drops it from projects that already have a tag there.
+   * Resolves to whether it moved.
+   */
+  moveTag(move: TagMove): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to move tag',
+      () => commands.moveTag(move.tagId, move.groupId, move.index),
+      (state) => withTagMoved(state, move)
+    );
   }
 
   /** Delete a tag; projects carrying it lose it. Resolves to whether it went. */
-  async deleteTag(tag: Tag): Promise<boolean> {
+  deleteTag(tag: Tag): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to delete tag',
+      () => commands.deleteTag(tag.id),
+      (state) => withoutTag(state, tag.id)
+    );
+  }
+
+  /**
+   * Create a group, appended last, with `tags` in order. Resolves to the
+   * group, or null on failure. The command returns only the group, so its
+   * tags show once the refetch that follows lands.
+   */
+  async createTagGroup(name: string, tags: readonly NewTag[] = []): Promise<TagGroup | null> {
+    let group: TagGroup | null = null;
+    await this.catalogWrite(
+      'Unable to create group',
+      async () => {
+        group = await commands.createTagGroup(name, [...tags]);
+      },
+      (state) => (group ? withGroup(state, group) : state)
+    );
+    return group;
+  }
+
+  renameTagGroup(group: TagGroup, name: string): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to rename group',
+      () => commands.renameTagGroup(group.id, name),
+      (state) => withGroupName(state, group.id, name)
+    );
+  }
+
+  /** Make a group drive the project icon, or turn that off with null. */
+  setIconTagGroup(groupId: string | null): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to change the project icon group',
+      () => commands.setIconTagGroup(groupId),
+      (state) => withIconGroup(state, groupId)
+    );
+  }
+
+  /** Reorder the groups; `groupIds` must list every group once. */
+  reorderTagGroups(groupIds: string[]): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to reorder groups',
+      () => commands.reorderTagGroups(groupIds),
+      (state) => withGroupOrder(state, groupIds)
+    );
+  }
+
+  /** Delete a group, keeping its tags as ungrouped ones or deleting them too. */
+  deleteTagGroup(group: TagGroup, mode: DeleteTagGroupMode): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to delete group',
+      () => commands.deleteTagGroup(group.id, mode),
+      (state) => withoutGroup(state, group.id, mode)
+    );
+  }
+
+  /**
+   * Await a catalog write, then patch the snapshot with what it did. A
+   * failure toasts and refetches. Resolves to whether it succeeded.
+   */
+  private async catalogWrite(
+    failure: string,
+    write: () => Promise<void>,
+    patch: (state: TagState) => TagState
+  ): Promise<boolean> {
     try {
-      await commands.deleteTag(tag.id);
+      await write();
     } catch (e) {
-      toast.error('Unable to delete tag', { description: errorMessage(e) });
+      toast.error(failure, { description: errorMessage(e) });
       void tagsStore.requestRefresh();
       return false;
     }
-    tagsStore.patchLocal((state) => ({
-      ...state,
-      tags: state.tags.filter((t) => t.id !== tag.id),
-      assignments: state.assignments.filter((a) => a.tagId !== tag.id),
-    }));
+    tagsStore.patchLocal(patch);
     return true;
   }
 
@@ -189,12 +278,6 @@ class TagActionsController {
     });
     return run;
   }
-}
-
-/** Add a just-created tag to the snapshot, unless a refetch already has it. */
-function insertTag(state: TagState, tag: Tag): TagState {
-  if (state.tags.some((t) => t.id === tag.id)) return state;
-  return { ...state, tags: [...state.tags, tag] };
 }
 
 export const tagActions = new TagActionsController();

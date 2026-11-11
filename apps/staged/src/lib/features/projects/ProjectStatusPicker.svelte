@@ -7,7 +7,7 @@
   ProjectStatusIcon) and opens a menu to pick one of the group's tags, or
   Default to go back to the computed PR status. The Default row previews
   that computed status, so the user sees what they'd fall back to. The
-  group's tags are edited in Settings > General. The sidebar and grid
+  group's tags are edited in Settings › Tags. The sidebar and grid
   context menus offer the same choices through ProjectStatusSubmenu.
 -->
 <script lang="ts">
@@ -85,7 +85,7 @@
         {/if}
       </DropdownMenu.RadioGroup>
       <DropdownMenu.Separator />
-      <DropdownMenu.Item onSelect={() => openSettings('general')}>
+      <DropdownMenu.Item onSelect={() => openSettings('tags')}>
         <Settings2 size={14} />
         Edit statuses…
       </DropdownMenu.Item>

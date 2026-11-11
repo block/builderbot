@@ -35,8 +35,40 @@ export interface TagCatalog {
   iconGroup: TagGroup | null;
 }
 
-function byPosition<T extends { position: number; createdAt: number }>(a: T, b: T): number {
+/** Catalog order: by position, then creation (the backend's `ORDER BY`). */
+export function byPosition<T extends { position: number; createdAt: number }>(a: T, b: T): number {
   return a.position - b.position || a.createdAt - b.createdAt;
+}
+
+/** Longest tag or group name, in characters (the backend rejects longer). */
+export const MAX_TAG_NAME_CHARS = 64;
+
+/**
+ * The key tag and group names are unique by within their scope: SQLite's
+ * `NOCASE`, which folds ASCII letters only, so "Infra" and "infra" collide
+ * but "É" and "é" don't.
+ */
+export function tagNameKey(name: string): string {
+  return name.trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/** `base` cut so that `base + suffix` fits the name limit. */
+function fitName(base: string, suffix: string): string {
+  const room = Math.max(0, MAX_TAG_NAME_CHARS - [...suffix].length);
+  return `${[...base].slice(0, room).join('').trimEnd()}${suffix}`;
+}
+
+/**
+ * `base`, else "base 2", "base 3", … — the first whose name key isn't in
+ * `taken`, each cut to fit the name limit. Mirrors the backend's rule.
+ */
+export function numberedName(base: string, taken: ReadonlySet<string>): string {
+  const first = fitName(base, '');
+  if (!taken.has(tagNameKey(first))) return first;
+  for (let n = 2; ; n++) {
+    const candidate = fitName(base, ` ${n}`);
+    if (!taken.has(tagNameKey(candidate))) return candidate;
+  }
 }
 
 export function indexTagCatalog(state: TagState): TagCatalog {

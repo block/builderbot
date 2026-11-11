@@ -1,9 +1,12 @@
 <!--
   ProjectFilterChips.svelte - Shared project-filter chip bar.
 
-  Unread/running status chips plus one chip per repo, reading and toggling
+  Unread/running status chips, one chip per repo, then one per tag in catalog
+  order (in its own colour, like TagChip), reading and toggling
   projectFiltersStore directly so the landing page and the sidebar's Filter
-  menu can never drift.
+  menu can never drift. Tag chips OR within a group and AND across groups and
+  ungrouped tags (filterProjects); a tag's tooltip names its group, since two
+  groups can each have a "High".
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
@@ -11,6 +14,8 @@
   import { badgeBg, badgeBgHover, badgeFg } from '../../shared/badgeColors';
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import TagIcon from '../tags/TagIcon.svelte';
+  import { TAG_COLOR_VARS } from '../tags/tagColors';
   import { projectFiltersStore } from './projectFilters.svelte';
 </script>
 
@@ -51,12 +56,30 @@
       <span class="filter-count">{rf.count}</span>
     </button>
   {/each}
+  {#each projectFiltersStore.tagFilters as tf (tf.tag.id)}
+    {@const filter = { tagId: tf.tag.id }}
+    {@const active = projectFiltersStore.isFilterActive(filter)}
+    <button
+      class="filter-chip tag-filter"
+      class:active
+      title={tf.group ? `${tf.group.name}: ${tf.tag.name}` : tf.tag.name}
+      style:--tag-chip-color={TAG_COLOR_VARS[tf.tag.color]}
+      onclick={(e: MouseEvent) => projectFiltersStore.toggleFilter(filter, e)}
+    >
+      {#if tf.tag.icon !== null}
+        <TagIcon tag={tf.tag} size={12} />
+      {/if}
+      <span class="tag-filter-name">{tf.tag.name}</span>
+      <span class="filter-count">{tf.count}</span>
+    </button>
+  {/each}
   <!--
     The filters outlive this bar's chips, so clearing has to be reachable from
     the bar itself: repo chips only exist for repos computeRepoFilters still
     sees (delete the last project using one and its filter stays active with
     no chip to click), and both status chips go disabled when their counts hit
-    0. The sidebar's Filter menu has its own Clear filters item, but the
+    0. A deleted tag's filter doesn't count (effectiveActiveFilters): it
+    filters nothing, so it doesn't keep Clear up either. The sidebar's Filter menu has its own Clear filters item, but the
     sidebar is hidden on mobile.
   -->
   {#if projectFiltersStore.hasActiveFilters}
@@ -134,6 +157,43 @@
     background: var(--repo-bg, var(--ui-accent));
     color: var(--repo-fg, white);
     border-color: transparent;
+  }
+
+  /* A tag's colour over a faint wash of it, as TagChip draws it. */
+  .filter-chip.tag-filter {
+    max-width: 220px;
+    background: color-mix(in srgb, var(--tag-chip-color) 16%, transparent);
+    color: var(--tag-chip-color);
+    border-color: transparent;
+    font-weight: 600;
+  }
+
+  .filter-chip.tag-filter:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--tag-chip-color) 24%, transparent);
+    border-color: transparent;
+  }
+
+  .filter-chip.tag-filter.active,
+  .filter-chip.tag-filter.active:hover:not(:disabled) {
+    box-shadow: 0 0 0 2px var(--tag-chip-color);
+    background: color-mix(in srgb, var(--tag-chip-color) 16%, transparent);
+    color: var(--tag-chip-color);
+    border-color: transparent;
+  }
+
+  .filter-chip.tag-filter :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .tag-filter-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .filter-chip.tag-filter .filter-count,
+  .filter-chip.tag-filter.active .filter-count {
+    background: color-mix(in srgb, var(--tag-chip-color) 18%, transparent);
   }
 
   .filter-chip.clear-chip {

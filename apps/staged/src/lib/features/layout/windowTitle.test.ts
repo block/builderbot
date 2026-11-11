@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 //
 // windowTitle.ts imports parseRepoFilterKey from projectFilters.svelte.ts,
 // which also instantiates the filter-store singleton and pulls in the global
-// data stores — mock those out and stub the runes the way projectFilters.test.ts
+// data stores, tags included — mock those out and stub the runes the way projectFilters.test.ts
 // does. The transport is mocked so applyWindowTitle's IPC is observable.
 
 let setTitle: ReturnType<typeof vi.fn>;
@@ -29,6 +29,14 @@ beforeEach(() => {
   vi.doMock('../projects/workspaceLifecycle.svelte', () => ({
     workspaceLifecycle: { getWorktreeErrors: () => new Map() },
   }));
+  vi.doMock('../../stores/tags.svelte', () => ({
+    tagsStore: {
+      tagsById: new Map(),
+      catalog: { groups: [], tagsByGroup: new Map([[null, []]]) },
+      usageCount: new Map(),
+      tagIdsFor: () => new Set(),
+    },
+  }));
 
   setTitle = vi.fn().mockResolvedValue(undefined);
   vi.doMock('../../transport', () => ({ getWindowSync: () => ({ setTitle }) }));
@@ -39,6 +47,7 @@ afterEach(() => {
   vi.doUnmock('../../stores/projectState.svelte');
   vi.doUnmock('../projects/projectStatus');
   vi.doUnmock('../projects/workspaceLifecycle.svelte');
+  vi.doUnmock('../../stores/tags.svelte');
   vi.doUnmock('../../transport');
   vi.unstubAllGlobals();
 });

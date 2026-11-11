@@ -1,7 +1,9 @@
 // Mounts the real board over the real tagsStore, tagActions and board
 // preferences, with the backend commands and the preference store mocked: a
 // drop or a "Move to" ends in `set_project_group_tag` and moves the card at
-// once, and a collapsed column is saved to `projects-board-columns`.
+// once, and a collapsed column is saved to `projects-board-columns`. The last
+// block puts the real projectFiltersStore in front of it, as ProjectsList
+// does, so the tag chips decide which cards it shows.
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, TagState } from '../../types';
@@ -75,6 +77,9 @@ vi.mock('../projects/projectStatus', () => ({
 vi.mock('../projects/workspaceLifecycle.svelte', () => ({
   workspaceLifecycle: { getWorktreeErrors: () => new Map() },
 }));
+vi.mock('../../stores/projectState.svelte', () => ({
+  projectStateStore: { isUnread: () => false },
+}));
 vi.mock(
   '../projects/ProjectTransferMenuItem.svelte',
   () => import('../sessions/testStubs/EmptyStub.svelte')
@@ -91,6 +96,8 @@ vi.mock('../layout/navigation.svelte', () => ({ openSettings: vi.fn() }));
 vi.mock('svelte-sonner', () => ({ toast: { error: vi.fn() } }));
 
 import { tagsStore } from '../../stores/tags.svelte';
+import { projectFiltersStore } from '../projects/projectFilters.svelte';
+import FilteredBoardHarness from './testStubs/FilteredBoardHarness.svelte';
 import { PROJECT_DRAG_TYPE } from './boardDrop';
 import { NO_TAG_COLUMN_KEY } from './boardPrefs';
 import { boardViewPrefs } from './boardViewPrefs.svelte';
@@ -187,6 +194,22 @@ function menuItem(content: ParentNode, text: string): HTMLElement {
   );
   if (!found) throw new Error(`No menu item "${text}"`);
   return found;
+}
+
+/** Pick `tagName` from a card's "Move to" submenu. */
+async function moveWithMenu(root: ParentNode, projectId: string, tagName: string) {
+  card(root, projectId).dispatchEvent(
+    new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })
+  );
+  await settle();
+  const menu = document.querySelector<HTMLElement>('[data-slot="context-menu-content"]')!;
+  const moveTo = menu.querySelector<HTMLElement>('[data-tag-group-trigger="move-to"]')!;
+  moveTo.focus();
+  moveTo.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  await settle();
+  const subs = document.querySelectorAll<HTMLElement>('[data-slot="context-menu-sub-content"]');
+  menuItem(subs[subs.length - 1], tagName).click();
+  await settle();
 }
 
 async function openColumnMenu(root: ParentNode, key: string): Promise<HTMLElement> {
@@ -375,5 +398,74 @@ describe('ProjectsBoard', () => {
       expect.arrayContaining([expect.objectContaining({ name: 'Idea' })])
     );
     expect(setStoreValue).toHaveBeenCalledWith('projects-board-group', 'new-group');
+  });
+});
+
+describe('ProjectsBoard under the tag filters', () => {
+  /** The Status board behind the shared filters, over p1, p2 and p3. */
+  async function mountFiltered(state: TagState) {
+    backend.state = state;
+    await tagsStore.load({ force: true });
+    projects.splice(0, projects.length, project('p1'), project('p2'), project('p3'));
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    component = mount(FilteredBoardHarness, {
+      target,
+      props: { group: tagsStore.catalog.groupsById.get('status') ?? null, onOpen: openProject },
+    });
+    await settle();
+    return target;
+  }
+
+  afterEach(() => {
+    projectFiltersStore.clearFilters();
+  });
+
+  it('shows only the cards the tag chips keep, and counts only them', async () => {
+    const root = await mountFiltered(
+      tagState([
+        { projectId: 'p1', tagId: 'done' },
+        { projectId: 'p1', tagId: 'q4' },
+        { projectId: 'p2', tagId: 'q4' },
+        { projectId: 'p3', tagId: 'idea' },
+      ])
+    );
+    expect(cardsIn(root, 'idea')).toEqual(['p3']);
+
+    projectFiltersStore.toggleFilter({ tagId: 'q4' });
+    await settle();
+
+    // Every column stays, to drop on; only q4's projects are in them.
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+    expect(cardsIn(root, 'done')).toEqual(['p1']);
+    expect(cardsIn(root, 'idea')).toEqual([]);
+    expect(column(root, 'idea').querySelector('.column-count')?.textContent).toBe('0');
+
+    // A board-group chip ANDs with the ungrouped one.
+    projectFiltersStore.toggleFilter({ tagId: 'done' }, { additive: true });
+    await settle();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual([]);
+    expect(cardsIn(root, 'done')).toEqual(['p1']);
+  });
+
+  it('takes a card a move rules out off the board, and focuses its neighbour', async () => {
+    const root = await mountFiltered(
+      tagState([
+        { projectId: 'p1', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'doing' },
+        { projectId: 'p3', tagId: 'idea' },
+      ])
+    );
+    projectFiltersStore.toggleFilter({ tagId: 'doing' });
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p2']);
+
+    await moveWithMenu(root, 'p1', 'Done');
+
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p1', 'status', 'done');
+    expect(cardsIn(root, 'doing')).toEqual(['p2']);
+    expect(cardsIn(root, 'done')).toEqual([]);
+    expect(document.activeElement).toBe(card(root, 'p2'));
   });
 });

@@ -3,13 +3,15 @@
   group ("No ‹group›" first), each holding the projects with that tag, then a
   + column that adds a tag to the group.
 
-  It shows the grid's projects (the filter chips narrow them) in the grid's
-  newest-first order, and a search hides cards rather than unmounting them,
-  as in the grid. Moving a card between columns changes the project's tag in
-  the group: by drag and drop with a fine pointer on desktop, else by "Move
-  to" in the card's context menu. Both are optimistic, so the card moves at
-  once, and focus follows it to its new column. Collapsed and hidden columns
-  are remembered per group (boardViewPrefs).
+  It shows the grid's projects (the filter chips, tag chips included, narrow
+  them) in the grid's newest-first order, and a search hides cards rather
+  than unmounting them, as in the grid. Moving a card between columns changes
+  the project's tag in the group: by drag and drop with a fine pointer on
+  desktop, else by "Move to" in the card's context menu. Both are optimistic,
+  so the card moves at once, and focus follows it to its new column. A move
+  the tag chips rule out (onto Done with only In progress's chip on) takes
+  the card off the board, and focus goes to its neighbour instead. Collapsed
+  and hidden columns are remembered per group (boardViewPrefs).
 
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, never as a
@@ -89,15 +91,21 @@
    * Put focus on a card that just changed column. WebKit drops focus when a
    * keyed list moves the focused node, and here the card is a new node in
    * another column; the closing menu may also hand focus back to the old,
-   * now detached, card a frame later.
+   * now detached, card a frame later. Called as the move is made, so the
+   * card's neighbours can still be read: when the move took it off the
+   * board (filtered out, or into a collapsed column), they take focus.
    */
   async function focusCard(projectId: string) {
+    const neighbour = neighbourAfterRemove(renderedCardIds, projectId, cardElement);
     await tick();
     const card = cardElement(projectId);
-    if (!card) return;
-    card.focus({ preventScroll: true });
-    card.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    requestAnimationFrame(() => focusIfDropped(() => cardElement(projectId)));
+    if (card) {
+      card.focus({ preventScroll: true });
+      card.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } else {
+      neighbour(null)?.focus({ preventScroll: true });
+    }
+    requestAnimationFrame(() => focusIfDropped(() => cardElement(projectId) ?? neighbour(null)));
   }
 
   /** The cards on screen, column by column: the order focus moves through after a remove. */
@@ -109,6 +117,15 @@
         : column.projects.filter((project) => isVisible(project.id)).map((project) => project.id)
     );
   }
+
+  // The cards on screen as last rendered. A move takes its fallback focus
+  // target from these rather than from `layout`: the write is optimistic, so
+  // by the time "Move to" reports it, `layout` may already have dropped the
+  // card for the filter chips, and with it the card's place.
+  let renderedCardIds: string[] = [];
+  $effect(() => {
+    renderedCardIds = shownCardIds();
+  });
 
   const handlers: BoardCardHandlers = {
     get dragEnabled() {

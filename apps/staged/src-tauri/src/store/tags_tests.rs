@@ -1118,6 +1118,96 @@ fn importing_an_empty_list_creates_an_empty_status_group() {
 }
 
 #[test]
+fn importing_into_a_catalog_built_during_a_held_import_appends_a_numbered_group() {
+    // The import was held (preferences.json unreadable) and meanwhile the
+    // user built a Status group from the board's empty state, which made it
+    // the icon group. The retried import must not collide with it.
+    let (store, mut rx) = store_with_feed();
+    let ps = projects_with_overrides(&store, &[Some("done"), Some("blocked"), None]);
+    let theirs = group(&store, "Status", &["Todo", "Done"]);
+    store
+        .set_project_group_tag(
+            &ps[2].id,
+            &theirs.id,
+            Some(&scope_tag_id(&store, &theirs.id, "Todo")),
+        )
+        .unwrap();
+    drain(&mut rx);
+
+    let outcome = store
+        .import_legacy_project_statuses(&LegacyStatusOptions::Defaults)
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        LegacyImportOutcome::Imported {
+            tags: 7,
+            assignments: 2,
+            dropped_dangling: 0,
+        }
+    );
+    assert_eq!(drain(&mut rx), vec![StoreChange::Tags]);
+
+    // Theirs stays first and keeps the icon; the legacy group comes after it
+    // under a free name.
+    assert_eq!(group_names(&store), vec!["Status", "Status 2"]);
+    assert_eq!(icon_groups(&store), vec!["Status"]);
+    let state = store.get_tag_state().unwrap();
+    let legacy = state
+        .groups
+        .iter()
+        .find(|g| g.id == LEGACY_STATUS_GROUP_ID)
+        .unwrap();
+    assert_eq!((legacy.name.as_str(), legacy.position), ("Status 2", 1));
+    assert!(!legacy.is_icon_group);
+
+    // Option ids are still the tag ids, so the selections copy across, and
+    // the user's own assignment is untouched. Each scope keeps its own
+    // "Done".
+    assert_eq!(
+        status_tags(&store)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect::<Vec<_>>(),
+        LEGACY_DEFAULT_STATUSES
+            .iter()
+            .map(|(id, ..)| *id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(tag_ids_of(&store, &ps[0].id), vec!["done"]);
+    assert_eq!(tag_ids_of(&store, &ps[1].id), vec!["blocked"]);
+    assert_eq!(
+        tag_ids_of(&store, &ps[2].id),
+        vec![scope_tag_id(&store, &theirs.id, "Todo")]
+    );
+    assert_eq!(scope_names(&store, Some(&theirs.id)), vec!["Todo", "Done"]);
+
+    // The marker went with it: the next launch doesn't import again.
+    assert_eq!(
+        store
+            .import_legacy_project_statuses(&LegacyStatusOptions::Defaults)
+            .unwrap(),
+        LegacyImportOutcome::AlreadyImported
+    );
+}
+
+#[test]
+fn importing_into_a_catalog_with_no_icon_group_makes_the_legacy_group_drive_the_icon() {
+    let store = store();
+    let theirs = group(&store, "Priority", &["P0", "P1"]);
+    store.set_icon_tag_group(None).unwrap();
+    assert!(icon_groups(&store).is_empty());
+
+    store
+        .import_legacy_project_statuses(&LegacyStatusOptions::Defaults)
+        .unwrap();
+
+    assert_eq!(group_names(&store), vec!["Priority", "Status"]);
+    assert_eq!(icon_groups(&store), vec!["Status"]);
+    assert_eq!(scope_names(&store, Some(&theirs.id)), vec!["P0", "P1"]);
+}
+
+#[test]
 fn a_second_import_is_a_no_op_and_status_override_stays_frozen() {
     let (store, mut rx) = store_with_feed();
     let ps = projects_with_overrides(&store, &[Some("done"), Some("gone")]);

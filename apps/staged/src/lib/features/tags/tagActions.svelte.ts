@@ -47,11 +47,30 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+function noop(): void {}
+
 /** The value `updateTag` replaces a tag's with. */
 export interface TagValue {
   name: string;
   color: TagColor;
   icon: string | null;
+}
+
+/**
+ * How a caller that queues several catalog writes follows them. Both run
+ * inside the chain, so `onSettled` for one write always runs before
+ * `stillWanted` for the next, whatever order the callers' own awaits resume
+ * in. Neither may throw.
+ */
+export interface CatalogWriteHooks {
+  /**
+   * Asked once the writes ahead have settled, just before this one is
+   * issued. False skips it quietly: nothing is sent or patched, no toast,
+   * and the write resolves false.
+   */
+  stillWanted?: () => boolean;
+  /** Told whether the write landed (false for a failure or a skip). */
+  onSettled?: (ok: boolean) => void;
 }
 
 class TagActionsController {
@@ -176,12 +195,18 @@ class TagActionsController {
    * Move a tag within its scope or into another (see `move_tag`). Moving
    * into a group drops it from projects that already have a tag there.
    * Resolves to whether it moved.
+   *
+   * A move's index means something only against the order the moves before
+   * it produced, so a caller queuing several can pass `hooks`: `onSettled`
+   * tells it each outcome inside the chain, and `stillWanted` lets it skip
+   * the moves it queued behind one that failed (see CatalogWriteHooks).
    */
-  moveTag(move: TagMove): Promise<boolean> {
+  moveTag(move: TagMove, hooks?: CatalogWriteHooks): Promise<boolean> {
     return this.catalogWrite(
       'Unable to move tag',
       () => commands.moveTag(move.tagId, move.groupId, move.index),
-      (state) => withTagMoved(state, move)
+      (state) => withTagMoved(state, move),
+      hooks
     );
   }
 
@@ -250,25 +275,49 @@ class TagActionsController {
    * Queue a catalog write behind the earlier ones, await it, then patch the
    * snapshot with what it did. A failure toasts and refetches. Resolves to
    * whether it succeeded; never rejects.
+   *
+   * The chain's tail swallows everything, including anything the step could
+   * throw outside its try blocks, so one bad step can't leave every later
+   * catalog write waiting on a rejected promise. A patch that throws (the
+   * write itself landed) is logged and the refetch brings the truth.
    */
   private catalogWrite(
     failure: string,
     write: () => Promise<void>,
-    patch: (state: TagState) => TagState
+    patch: (state: TagState) => TagState,
+    hooks: CatalogWriteHooks = {}
   ): Promise<boolean> {
     const run = this.catalogTail.then(async () => {
-      try {
-        await write();
-      } catch (e) {
-        toast.error(failure, { description: errorMessage(e) });
-        void tagsStore.requestRefresh();
-        return false;
-      }
-      tagsStore.patchLocal(patch);
-      return true;
+      const ok = await this.performCatalogWrite(failure, write, patch, hooks);
+      hooks.onSettled?.(ok);
+      return ok;
     });
-    this.catalogTail = run.then(() => undefined);
+    this.catalogTail = run.then(noop, noop);
     return run;
+  }
+
+  /** One step of the catalog chain: skip, or write and patch. */
+  private async performCatalogWrite(
+    failure: string,
+    write: () => Promise<void>,
+    patch: (state: TagState) => TagState,
+    hooks: CatalogWriteHooks
+  ): Promise<boolean> {
+    if (hooks.stillWanted && !hooks.stillWanted()) return false;
+    try {
+      await write();
+    } catch (e) {
+      toast.error(failure, { description: errorMessage(e) });
+      void tagsStore.requestRefresh();
+      return false;
+    }
+    try {
+      tagsStore.patchLocal(patch);
+    } catch (e) {
+      console.error('Failed to apply a tag catalog patch locally; refetching', e);
+      void tagsStore.requestRefresh();
+    }
+    return true;
   }
 
   // ── Plumbing ──

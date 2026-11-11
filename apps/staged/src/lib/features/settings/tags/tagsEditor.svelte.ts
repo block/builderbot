@@ -8,8 +8,9 @@
  * with the moves still in flight applied on top, in order. Each move is
  * resolved against that view, so Move down pressed three times quickly
  * steps from where the last press left the tag, and leaves the list once its
- * write lands (the store then holds it). A failed move clears them all, since
- * the later ones were resolved against an order that never happened.
+ * write lands (the store then holds it). A failed move clears them all and
+ * starts a new generation: the later ones were resolved against an order
+ * that never happened, so the ones still queued are skipped, not sent.
  *
  * Create one per mounted panel; its $derived fields belong to that
  * component.
@@ -57,13 +58,26 @@ export const UNGROUPED_LABEL = 'Ungrouped';
 
 const NEW_TAG_NAME = 'New tag';
 
+/** A move in flight. The token finds it again once its write settles. */
+interface PendingMove {
+  token: number;
+  move: TagMove;
+}
+
 export class TagsEditor {
-  /** Moves whose writes are in flight, oldest first. */
-  private pendingMoves = $state<readonly TagMove[]>([]);
+  /**
+   * Moves whose writes are in flight, oldest first. Raw, and replaced
+   * wholesale: a deep `$state` proxy would hand back proxies, not the objects
+   * pushed in, and the list is only ever read as a whole.
+   */
+  private pendingMoves = $state.raw<readonly PendingMove[]>([]);
+  /** Bumped when a move fails; moves queued under an older one are skipped. */
+  private moveGeneration = 0;
+  private nextMoveToken = 0;
 
   /** The store's snapshot with the pending moves applied on top. */
   private readonly view = $derived(
-    this.pendingMoves.reduce((state, move) => withTagMoved(state, move), tagsStore.snapshot)
+    this.pendingMoves.reduce((state, { move }) => withTagMoved(state, move), tagsStore.snapshot)
   );
 
   /** The catalog every section renders. */
@@ -192,16 +206,36 @@ export class TagsEditor {
   }
 
   private async applyMove(move: ResolvedTagMove, refocus: boolean): Promise<void> {
-    const pending: TagMove = { tagId: move.tagId, groupId: move.groupId, index: move.index };
+    const generation = this.moveGeneration;
+    const pending: PendingMove = {
+      token: this.nextMoveToken++,
+      move: { tagId: move.tagId, groupId: move.groupId, index: move.index },
+    };
     this.pendingMoves = [...this.pendingMoves, pending];
     // WebKit drops focus from a node a keyed {#each} moves; put it back on
     // the row's menu so Move up / Move down can repeat from the keyboard.
     if (refocus) void focusAfterRender(tagMenuTriggerId(move.tagId));
-    const moved = await tagActions.moveTag(pending);
-    // Once it lands the store's own patch holds the move, so the overlay
-    // can go. A failure's refetch brings server truth; the later moves were
-    // resolved against an order that never happened, so they go too.
-    this.pendingMoves = moved ? this.pendingMoves.filter((m) => m !== pending) : [];
+    // The bookkeeping runs inside tagActions' chain, so a failure is seen
+    // here before the next queued move asks whether it's still wanted.
+    await tagActions.moveTag(pending.move, {
+      stillWanted: () => this.moveGeneration === generation,
+      onSettled: (moved) => {
+        // An earlier move of this generation failed: the overlay already
+        // went, and this one was skipped.
+        if (this.moveGeneration !== generation) return;
+        if (moved) {
+          // Once it lands the store's own patch holds the move, so the
+          // overlay entry can go.
+          this.pendingMoves = this.pendingMoves.filter((m) => m.token !== pending.token);
+        } else {
+          // The failure's refetch brings server truth. The later moves were
+          // resolved against an order that never happened, so they go too,
+          // and the ones still queued see the new generation and aren't sent.
+          this.moveGeneration++;
+          this.pendingMoves = [];
+        }
+      },
+    });
   }
 
   // ── Drag and drop ──

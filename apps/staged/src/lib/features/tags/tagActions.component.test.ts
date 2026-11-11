@@ -79,6 +79,8 @@ let server: TagState;
 let setProjectGroupTag: ReturnType<typeof vi.fn>;
 let setProjectTagAssigned: ReturnType<typeof vi.fn>;
 let createTag: ReturnType<typeof vi.fn>;
+let deleteTag: ReturnType<typeof vi.fn>;
+let moveTag: ReturnType<typeof vi.fn>;
 let toastError: ReturnType<typeof vi.fn>;
 let deleting: Set<string>;
 
@@ -120,12 +122,18 @@ beforeEach(() => {
     commitTagAssigned(projectId, tagId, assigned)
   );
   createTag = vi.fn();
+  deleteTag = vi.fn(async (tagId: string) => {
+    server = { ...server, tags: server.tags.filter((t) => t.id !== tagId) };
+  });
+  moveTag = vi.fn(async () => {});
 
   const commandsMock = {
     getTagState: vi.fn(async () => ({ data: structuredClone(server), revalidating: null })),
     setProjectGroupTag,
     setProjectTagAssigned,
     createTag,
+    deleteTag,
+    moveTag,
   };
   vi.doMock('../../commands', () => commandsMock);
   vi.doMock('../../api/commands', () => commandsMock);
@@ -423,5 +431,72 @@ describe('createTagForProject', () => {
     expect(toastError).toHaveBeenCalledWith('Unable to create tag', {
       description: 'A tag named “q4” already exists',
     });
+  });
+});
+
+describe('catalog writes', () => {
+  it('keeps the chain going when a patch throws, and refetches instead', async () => {
+    const shipping = tag('shipping', null, 2);
+    createTag.mockImplementation(async () => {
+      server = { ...server, tags: [...server.tags, shipping] };
+      return shipping;
+    });
+    const { tagsStore, tagActions } = await setup();
+    vi.spyOn(tagsStore, 'patchLocal').mockImplementationOnce(() => {
+      throw new Error('bad patch');
+    });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // The write landed, so the create still resolves to its tag...
+    expect(await tagActions.createTag({ name: 'shipping', groupId: null })).toEqual(shipping);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(toastError).not.toHaveBeenCalled();
+    // ...and the refetch, not the patch, shows it.
+    await tick();
+    expect(tagsStore.tagsById.has('shipping')).toBe(true);
+
+    // The catalog chain is still alive: the next write runs.
+    expect(await tagActions.deleteTag(shipping)).toBe(true);
+    expect(deleteTag).toHaveBeenCalledWith('shipping');
+    await tick();
+    expect(tagsStore.tagsById.has('shipping')).toBe(false);
+    logged.mockRestore();
+  });
+
+  it('skips a move its caller no longer wants, without a toast or a write', async () => {
+    const { tagsStore, tagActions } = await setup();
+    const move = { tagId: 'idea', groupId: 'status', index: 2 };
+    expect(await tagActions.moveTag(move, { stillWanted: () => false })).toBe(false);
+    expect(moveTag).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+    expect(tagsStore.tagsById.get('idea')?.position).toBe(0);
+
+    // The chain carries on past it.
+    expect(await tagActions.moveTag(move)).toBe(true);
+    expect(moveTag).toHaveBeenCalledWith('idea', 'status', 2);
+  });
+
+  it('settles one write with its caller before asking whether the next is wanted', async () => {
+    moveTag.mockRejectedValueOnce(new Error('db locked'));
+    const { tagActions } = await setup();
+    const order: string[] = [];
+    const first = tagActions.moveTag(
+      { tagId: 'idea', groupId: 'status', index: 2 },
+      { onSettled: (ok) => order.push(`first settled ${ok}`) }
+    );
+    const second = tagActions.moveTag(
+      { tagId: 'done', groupId: 'status', index: 0 },
+      {
+        stillWanted: () => {
+          order.push('second asked');
+          return false;
+        },
+        onSettled: (ok) => order.push(`second settled ${ok}`),
+      }
+    );
+    expect(await Promise.all([first, second])).toEqual([false, false]);
+    expect(order).toEqual(['first settled false', 'second asked', 'second settled false']);
+    expect(moveTag).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledTimes(1);
   });
 });

@@ -404,6 +404,72 @@ describe('TagsSettingsPanel', () => {
       expect(menuItem(content, 'Move down').hasAttribute('data-disabled')).toBe(true);
     });
 
+    it('lets a landed move go from the overlay, so the catalog can diverge after it', async () => {
+      const root = await mountPanel(tagState());
+      const content = await openMenu(
+        row('idea').querySelector<HTMLElement>('.tag-row-menu-trigger')!
+      );
+      menuItem(content, 'Move down').click();
+      await settle();
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Idea', 'Done']);
+      expect(scopeIds(tagsStore.snapshot, 'status')).toEqual(['doing', 'idea', 'done']);
+
+      // Another window puts Idea back on top. With the move still overlaid
+      // it would be re-applied over the echo and Idea would stay second.
+      await echo(withTagMoved(backend.state, { tagId: 'idea', groupId: 'status', index: 0 }));
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Idea', 'Doing', 'Done']);
+    });
+
+    it('skips the moves queued behind one that fails, and sends later ones afresh', async () => {
+      const writes: { land: () => void; fail: (e: Error) => void }[] = [];
+      commandsMock.moveTag.mockImplementation(
+        (tagId, groupId, index) =>
+          new Promise<void>((resolve, reject) => {
+            writes.push({
+              land: () => {
+                backend.state = withTagMoved(backend.state, { tagId, groupId, index });
+                resolve();
+              },
+              fail: reject,
+            });
+          })
+      );
+      const root = await mountPanel(tagState());
+      const moveDown = async () => {
+        const content = await openMenu(
+          row('idea').querySelector<HTMLElement>('.tag-row-menu-trigger')!
+        );
+        menuItem(content, 'Move down').click();
+        await settle();
+      };
+
+      await moveDown();
+      await moveDown();
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Done', 'Idea']);
+      expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+
+      writes[0].fail(new Error('db locked'));
+      await settle();
+      // Server truth is back, the second move (resolved against an order
+      // that never happened) was never sent, and the one failure toasted.
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Idea', 'Doing', 'Done']);
+      expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+      expect(toastError).toHaveBeenCalledTimes(1);
+      expect(toastError).toHaveBeenCalledWith('Unable to move tag', { description: 'db locked' });
+
+      // A move made after the failure starts over from the server's order.
+      await moveDown();
+      expect(commandsMock.moveTag.mock.calls).toEqual([
+        ['idea', 'status', 1],
+        ['idea', 'status', 1],
+      ]);
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Idea', 'Done']);
+      writes[1].land();
+      await settle();
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Idea', 'Done']);
+      expect(scopeIds(tagsStore.snapshot, 'status')).toEqual(['doing', 'idea', 'done']);
+    });
+
     it('reorders within a group by drag, showing the new order at once', async () => {
       let finish!: () => void;
       commandsMock.moveTag.mockImplementationOnce(

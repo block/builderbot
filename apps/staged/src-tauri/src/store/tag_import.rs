@@ -9,6 +9,13 @@
 //! marker, all in one transaction. `projects.status_override` stays, frozen,
 //! as a recovery source.
 //!
+//! The import can be held across launches (an unreadable `preferences.json`
+//! keeps the marker), and meanwhile the user can build a catalog of their
+//! own, so it never assumes `tag_groups` is empty: the legacy group takes a
+//! free name ("Status 2"), the next position, and drives the icon only when
+//! no group does yet. Option ids become tag ids either way, so selections
+//! still copy across.
+//!
 //! The backend never writes `preferences.json` (the Tauri store plugin owns
 //! it and would overwrite changes), so the old key is left orphaned.
 
@@ -162,7 +169,7 @@ pub fn parse_legacy_status_options(prefs: Option<&Value>) -> LegacyStatusOptions
 }
 
 impl Store {
-    /// Seed the Status icon group from `options` and copy every project's
+    /// Seed the Status group from `options` and copy every project's
     /// `status_override` into it, once.
     ///
     /// One `BEGIN IMMEDIATE` transaction: the marker check happens inside it,
@@ -171,6 +178,10 @@ impl Store {
     /// "Untitled status", and a repeated one (ignoring case) gets " 2", " 3", …
     /// A selection naming no imported option drops out. Not run by
     /// [`Store::new`]: partial fixture databases have no `projects` table.
+    ///
+    /// Groups the user made while the import was held stay as they are: the
+    /// legacy group is appended after them under a free name, and becomes
+    /// the icon group only when none of them is.
     pub fn import_legacy_project_statuses(
         &self,
         options: &LegacyStatusOptions,
@@ -190,10 +201,32 @@ impl Store {
         }
 
         let now = now_timestamp();
+        let taken_group_names: HashSet<String> = tx
+            .prepare("SELECT name FROM tag_groups")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|name| name.map(|name| name_key(&name)))
+            .collect::<Result<_, _>>()?;
+        let group_name = numbered_name(LEGACY_STATUS_GROUP_NAME, &taken_group_names);
+        let group_position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM tag_groups",
+            [],
+            |row| row.get(0),
+        )?;
+        let has_icon_group: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tag_groups WHERE is_icon_group = 1)",
+            [],
+            |row| row.get(0),
+        )?;
         tx.execute(
             "INSERT INTO tag_groups (id, name, position, is_icon_group, created_at, updated_at)
-             VALUES (?1, ?2, 0, 1, ?3, ?3)",
-            params![LEGACY_STATUS_GROUP_ID, LEGACY_STATUS_GROUP_NAME, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                LEGACY_STATUS_GROUP_ID,
+                group_name,
+                group_position,
+                !has_icon_group,
+                now
+            ],
         )?;
 
         let options = options.options();
@@ -245,7 +278,7 @@ impl Store {
             assignments,
             dropped_dangling: (selections as usize).saturating_sub(assignments),
         };
-        log::info!("Imported legacy project statuses into tags: {outcome:?}");
+        log::info!("Imported legacy project statuses into tag group {group_name:?}: {outcome:?}");
         Ok(outcome)
     }
 }

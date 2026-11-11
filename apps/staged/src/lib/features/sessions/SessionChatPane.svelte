@@ -508,8 +508,6 @@
       }
       loadedDraftSessionId = id;
       applyPendingDraftEdits(id);
-      await tick();
-      autoResize();
     } catch (err) {
       console.error('[SessionChatPane] Failed to load reply draft:', err);
       // Leave the composer as the user left it, but re-enable saving so
@@ -572,7 +570,6 @@
     if (!taken) return;
     sendError = null;
     setDraft(taken.draft);
-    tick().then(() => autoResize());
     if (taken.removed.quote.reply.trim() !== '') offerQuoteUndo(sessionId, taken.removed);
   }
 
@@ -598,7 +595,6 @@
             // composer, or held until this session's draft has loaded, so a
             // load in flight can't land over it.
             receiveDraftEdit(sid, (draft) => restoreDraftQuote(draft, removed));
-            tick().then(() => autoResize());
             focusDraftQuoteReply(removed.quote.id);
             return;
           }
@@ -1812,8 +1808,6 @@
     replyImageIds = [];
     imagePreviews = new Map();
     attachError = null;
-    // Reset textarea height after clearing (oninput won't fire for programmatic changes)
-    tick().then(() => autoResize());
 
     if (sendControl.action === 'send-now') {
       if (await sendMessageNow(text, imageIdsToSend, draft)) draftSent();
@@ -2365,20 +2359,6 @@
   /** The draft changed: the last failure line has been read, so drop it. */
   function handleInput() {
     sendError = null;
-    autoResize();
-  }
-
-  function autoResize() {
-    if (!inputEl) return;
-    inputEl.style.height = 'auto';
-    inputEl.style.overflow = 'hidden';
-    const borderY = inputEl.offsetHeight - inputEl.clientHeight;
-    const maxHeight = 120;
-    const height = Math.min(inputEl.scrollHeight + borderY, maxHeight);
-    inputEl.style.height = height + 'px';
-    if (height >= maxHeight) {
-      inputEl.style.overflow = 'auto';
-    }
   }
 
   // =========================================================================
@@ -3252,10 +3232,7 @@
 
   function insertSlashCommand(command: AcpCommand) {
     inputText = `/${command.name}${command.inputHint ? ' ' : ''}`;
-    tick().then(() => {
-      inputEl?.focus();
-      autoResize();
-    });
+    tick().then(() => inputEl?.focus());
   }
 
   function acpEventSummary(event: AcpTranscriptEvent): string {

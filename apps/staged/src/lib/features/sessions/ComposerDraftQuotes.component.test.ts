@@ -10,7 +10,9 @@ import { reactiveProps } from './testStubs/reactiveProps.svelte';
 // where it was so the composer can move it on, and a composition open in any
 // gap or reply is reported through one `composing` flag so the composer's
 // Send gate sees it — the main input isn't the only place a word can be
-// half-typed.
+// half-typed. A click on a block's own padding puts the caret in its reply.
+// The field around the list (its box, cap and arrows) is covered by
+// ChatComposer.component.test.ts.
 
 function quote(id: string, before = '', reply = ''): DraftQuote {
   return { id, before, quote: `Quoted ${id}`, headings: [], reply };
@@ -189,15 +191,47 @@ describe('ComposerDraftQuotes remove button', () => {
   });
 });
 
-describe('ComposerDraftQuotes keyboard cap', () => {
-  it('scrolls the input that takes focus into view', () => {
-    render([quote('a'), quote('b')]);
-    const reveal = vi.spyOn(replyOf('b'), 'scrollIntoView');
+describe('ComposerDraftQuotes block surface', () => {
+  function blockOf(id: string): HTMLElement {
+    const block = target.querySelector<HTMLElement>(`[data-quote-entry="${id}"] .composer-quote`);
+    if (!block) throw new Error(`no block for ${id}`);
+    return block;
+  }
 
-    replyOf('b').focus();
+  it('puts the caret at the end of the reply on a click on its own padding', () => {
+    render([quote('a', '', 'so far')]);
+
+    blockOf('a').dispatchEvent(new MouseEvent('click', { bubbles: true }));
     flushSync();
 
-    expect(reveal).toHaveBeenCalledWith({ block: 'nearest' });
+    expect(document.activeElement).toBe(replyOf('a'));
+    const selection = window.getSelection();
+    if (!selection?.anchorNode) throw new Error('no selection');
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(replyOf('a'));
+    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
+    expect(beforeCaret.toString()).toBe('so far');
+  });
+
+  it('leaves a click on the quote text and one that ends a drag alone', () => {
+    render([quote('a', '', 'so far')]);
+    const text = blockOf('a').querySelector<HTMLElement>('.quote-text');
+    if (!text) throw new Error('no quote text');
+
+    text.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    flushSync();
+    expect(document.activeElement).not.toBe(replyOf('a'));
+
+    // A drag over the quote text that ends on the padding keeps its selection.
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    blockOf('a').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    flushSync();
+    expect(document.activeElement).not.toBe(replyOf('a'));
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+    window.getSelection()?.removeAllRanges();
   });
 });
 

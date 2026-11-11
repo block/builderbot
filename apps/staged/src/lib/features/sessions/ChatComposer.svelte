@@ -28,10 +28,17 @@
   transcript slot — the transcript stays readable behind them.
 
   A draft can hold quote blocks — passages of a note the user selected and
-  replied to (see composerDraft.ts). They are listed above the text input,
-  each with its reply and the free text before it editable in place; the
-  text input is the free text after the last one. Removing a quote moves
-  focus that was in it to the input its text joined.
+  replied to (see composerDraft.ts). The text input is one field
+  (`.composer-field`) that holds them all in order: the free text before each
+  quote, the quote block with its reply, and the free text after the last
+  one, which is the main input. The field draws the box and its focus ring;
+  the inputs in it are borderless, so the whole reads as one message, and the
+  field grows with its content up to a cap, then scrolls as one. ArrowUp on
+  the first line of an input and ArrowDown on the last move the caret into
+  the neighbouring input (composerCaretNav.ts), a click on the field's own
+  surface puts the caret in the nearest input, and only the last input shows
+  a placeholder, while nothing has been typed anywhere. Removing a quote
+  moves focus that was in it to the input its text joined.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -77,6 +84,9 @@
   import ComposerDraftQuotes from './ComposerDraftQuotes.svelte';
   import type { DraftQuote } from './composerDraft';
   import { focusAtEndSync, focusAtStartSync } from '../../shared/focusAtEnd';
+  import { isImeKeydown } from '../../shared/imeKeydown';
+  import { visibleViewport, watchVisualViewport } from '../../shared/visualViewport.svelte';
+  import { adjacentEditor, caretLineEdges, isPlainVerticalArrow } from './composerCaretNav';
   import { createCompositionSendGate, createTouchPressFocusGuard } from './composerSendPress';
   import type { HashtagItem } from '../../types';
 
@@ -170,6 +180,95 @@
 
   let fileInputEl = $state<HTMLInputElement>();
   let draftQuotesView = $state<ReturnType<typeof ComposerDraftQuotes>>();
+  let fieldEl = $state<HTMLDivElement>();
+
+  /** Of the screen left above the on-screen keyboard, how much the field may take. */
+  const KEYBOARD_FIELD_SHARE = 0.4;
+
+  // With the keyboard up the field is capped to a share of what is left on
+  // screen (its height is known only then; otherwise the stylesheet's cap
+  // stands), so the controls under it stay in view. Subscribed from here, so
+  // a composer outside a full-screen dialog is covered too.
+  $effect(() => watchVisualViewport());
+  let fieldCap = $derived(
+    visibleViewport.height !== null
+      ? `${Math.round(visibleViewport.height * KEYBOARD_FIELD_SHARE)}px`
+      : null
+  );
+
+  /** Something has been typed somewhere in the draft, so the field's one placeholder is hidden. */
+  let hasDraftText = $derived(
+    value !== '' || quotes.some((quote) => quote.before !== '' || quote.reply !== '')
+  );
+
+  /** Bring the input being typed in into view: on focus, and as the cap moves under it. */
+  function revealFocused() {
+    const active = document.activeElement;
+    if (!fieldEl || !(active instanceof HTMLElement) || !fieldEl.contains(active)) return;
+    active.scrollIntoView({ block: 'nearest' });
+  }
+
+  $effect(() => {
+    void fieldCap;
+    revealFocused();
+  });
+
+  /** The field's inputs — gaps, replies and the main input — in document order. */
+  function fieldEditors(): HTMLElement[] {
+    return fieldEl ? [...fieldEl.querySelectorAll<HTMLElement>('.hashtag-editor')] : [];
+  }
+
+  /**
+   * A click on the field's own surface — its box outside any input or block,
+   * or the quote list's — puts the caret in the input nearest the pointer,
+   * at the end nearest it, as a click in a textarea's margin does. Clicks on
+   * an input, a block or a button mean those, and a drag that ends on the
+   * surface keeps the text it selected.
+   */
+  function handleFieldClick(event: MouseEvent) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target !== fieldEl && !target.classList.contains('composer-draft-quotes')) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    let nearest: { editor: HTMLElement; distance: number; below: boolean } | null = null;
+    for (const editor of fieldEditors()) {
+      const box = editor.getBoundingClientRect();
+      const below = event.clientY >= box.bottom;
+      const distance =
+        event.clientY < box.top ? box.top - event.clientY : below ? event.clientY - box.bottom : 0;
+      // Ties go to the later input: the main input, for a click under everything.
+      if (!nearest || distance <= nearest.distance) nearest = { editor, distance, below };
+    }
+    if (!nearest) return;
+    if (nearest.below) focusAtEndSync(nearest.editor);
+    else focusAtStartSync(nearest.editor);
+  }
+
+  /**
+   * ArrowUp on the first line of an input moves the caret to the end of the
+   * input before it; ArrowDown on the last line, to the start of the one
+   * after, so the segments walk like the lines of one editor. Anything else
+   * — a modifier, an IME candidate, the hashtag dropdown's own arrows (which
+   * arrive prevented), a caret in the middle — is left to the input.
+   */
+  function handleFieldKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || !isPlainVerticalArrow(event)) return;
+    if (anyComposing || isImeKeydown(event)) return;
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.classList.contains('hashtag-editor')) return;
+    const editors = fieldEditors();
+    if (!editors.includes(target)) return;
+    const edges = caretLineEdges(target);
+    if (!edges) return;
+    const direction = event.key === 'ArrowUp' ? 'up' : 'down';
+    if (direction === 'up' ? !edges.first : !edges.last) return;
+    const next = adjacentEditor(editors, target, direction);
+    if (!next) return;
+    event.preventDefault();
+    if (direction === 'up') focusAtEndSync(next);
+    else focusAtStartSync(next);
+  }
 
   /**
    * Take a quote out of the draft (the parent merges the text around it).
@@ -311,30 +410,44 @@
     <ComposerError message={attachError} />
   {/if}
   <ComposerError message={sendError} />
-  {#if quotes.length > 0}
-    <ComposerDraftQuotes
-      bind:this={draftQuotesView}
-      bind:quotes
-      bind:composing={quotesComposing}
+  <!-- The field's click is a pointer convenience; its inputs are reached by Tab. -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="composer-field"
+    class:has-quotes={quotes.length > 0}
+    class:has-draft-text={hasDraftText}
+    bind:this={fieldEl}
+    style:--composer-field-cap={fieldCap}
+    onfocusin={revealFocused}
+    onkeydown={handleFieldKeydown}
+    onclick={handleFieldClick}
+  >
+    {#if quotes.length > 0}
+      <ComposerDraftQuotes
+        bind:this={draftQuotesView}
+        bind:quotes
+        bind:composing={quotesComposing}
+        oncompositionend={handleCompositionEnd}
+        {hashtagItems}
+        {onkeydown}
+        {oninput}
+        onRemoveQuote={(id) => void removeQuote(id)}
+      />
+    {/if}
+    <HashtagInput
+      bind:textareaEl
+      bind:value
+      bind:composing
       oncompositionend={handleCompositionEnd}
-      {hashtagItems}
+      class="message-input"
+      placeholder={sendControl.placeholder}
+      rows={1}
       {onkeydown}
       {oninput}
-      onRemoveQuote={(id) => void removeQuote(id)}
+      items={hashtagItems}
     />
-  {/if}
-  <HashtagInput
-    bind:textareaEl
-    bind:value
-    bind:composing
-    oncompositionend={handleCompositionEnd}
-    class="message-input"
-    placeholder={sendControl.placeholder}
-    rows={1}
-    {onkeydown}
-    {oninput}
-    items={hashtagItems}
-  />
+  </div>
   <div class="composer-controls">
     {@render configPicker?.()}
     {#if canAttachImages}
@@ -503,26 +616,65 @@
     }
   }
 
-  /* ----- Text input -------------------------------------------------------- */
+  /* ----- The field ------------------------------------------------------- */
 
-  .chat-composer :global(.message-input) {
-    padding: 7px 12px;
+  /* One box for every input in the draft. It grows with its content to a cap
+     — the main input's old 120px alone, more once quotes are in it — and
+     then scrolls as one; with the on-screen keyboard up the cap is a share
+     of the visible viewport instead (`--composer-field-cap`). The 1px border
+     is the field's, so the inputs are measured 2px short of the heights the
+     single input used to have. */
+  .composer-field {
+    --composer-field-max: 120px;
+    display: flex;
+    flex-direction: column;
+    max-height: min(var(--composer-field-max), var(--composer-field-cap, 100vh));
+    overflow-y: auto;
+    overscroll-behavior: contain;
     background: var(--bg-primary);
     border: 1px solid var(--border-muted);
     border-radius: 10px;
+    cursor: text;
+    transition: border-color 0.1s;
+  }
+
+  .composer-field.has-quotes {
+    --composer-field-max: min(50vh, 480px);
+  }
+
+  .composer-field:focus-within {
+    border-color: var(--border-emphasis);
+  }
+
+  .chat-composer :global(.message-input) {
+    --hashtag-input-min-height: 34px;
+    padding: 7px 12px;
+    background: transparent;
+    border: none;
     color: var(--text-primary);
     font-size: var(--size-md);
     font-family: inherit;
     line-height: 1.5;
     resize: none;
-    overflow-y: hidden;
-    min-height: 36px;
-    max-height: 120px;
+    flex-shrink: 0;
   }
 
-  .chat-composer :global(.message-input):focus {
-    outline: none;
-    border-color: var(--border-emphasis);
+  /* After a quote block the main input is the text under it. */
+  .composer-field.has-quotes :global(.message-input) {
+    --hashtag-input-min-height: 30px;
+    padding-top: 3px;
+  }
+
+  /* The one placeholder, in the last segment, only while nothing has been typed. */
+  .composer-field.has-draft-text :global(.message-input.is-empty::before) {
+    content: none;
+  }
+
+  @media (pointer: coarse) {
+    .composer-field.has-quotes :global(.message-input) {
+      --hashtag-input-min-height: 44px;
+      padding: 12px;
+    }
   }
 
   /* ----- Control row -------------------------------------------------------- */
@@ -556,7 +708,7 @@
     grid-column: 1 / -1;
   }
 
-  :global([data-cramped]) .chat-composer > :global(.hashtag-input-wrapper) {
+  :global([data-cramped]) .chat-composer > .composer-field {
     grid-column: 1;
   }
 

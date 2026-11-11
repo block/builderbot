@@ -190,6 +190,23 @@ describe('ComposerDraftQuotes remove button', () => {
 });
 
 describe('ComposerDraftQuotes focus helpers', () => {
+  it('puts the caret at the end of a quote’s reply, for a quote just added from the note', () => {
+    render([quote('a', '', 'so far')]);
+    const list = component as unknown as { focusReply(id: string): boolean };
+
+    expect(list.focusReply('a')).toBe(true);
+    expect(document.activeElement).toBe(replyOf('a'));
+    const selection = window.getSelection();
+    if (!selection?.anchorNode) throw new Error('no selection');
+    expect(selection.isCollapsed).toBe(true);
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(replyOf('a'));
+    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
+    expect(beforeCaret.toString()).toBe('so far');
+
+    expect(list.focusReply('missing')).toBe(false);
+  });
+
   it('tells which quote holds focus and can focus a gap at either end', () => {
     render([quote('a', 'before a'), quote('b')]);
     const list = component as unknown as {

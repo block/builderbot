@@ -193,6 +193,11 @@
     else focusAtEndSync(textareaEl);
   }
 
+  /** Put the caret at the end of a quote block's reply; false if the block isn't shown. */
+  export function focusQuoteReply(id: string): boolean {
+    return draftQuotesView?.focusReply(id) ?? false;
+  }
+
   let submitBlock = $derived(
     composerSubmitBlock({
       sessionBlock,

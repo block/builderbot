@@ -103,4 +103,35 @@
     line-height: 1.5;
     min-height: 1.5em;
   }
+
+  /* Finger-sized: the X is drawn at 32px (its `touch-hit` area makes up
+     44px) with the excerpt kept clear of it, and the reply row is 44px tall
+     so a tap on it lands in the input rather than beside it. */
+  @media (pointer: coarse) {
+    .composer-quote {
+      gap: 4px;
+      padding: 10px 12px;
+    }
+
+    .composer-quote-excerpt {
+      padding-right: 34px;
+    }
+
+    .composer-quote :global(.composer-quote-remove) {
+      top: 4px;
+      right: 4px;
+      width: 32px;
+      height: 32px;
+    }
+
+    .composer-quote :global(.composer-quote-remove svg) {
+      width: 16px;
+      height: 16px;
+    }
+
+    .composer-quote :global(.composer-quote-reply) {
+      --hashtag-input-min-height: 1.5em;
+      padding: 12px 0 8px;
+    }
+  }
 </style>

@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
-import { headingPathFor, quoteFromSelection, rangeStartNode } from './noteSelection';
+import {
+  headingPathFor,
+  quoteFromSelection,
+  rangeStartNode,
+  replyButtonOffset,
+  REPLY_BUTTON_EDGE_GAP,
+} from './noteSelection';
 
 let root: HTMLElement;
 
@@ -138,5 +144,59 @@ describe('quoteFromSelection', () => {
 
   it('is null without a selection', () => {
     expect(quoteFromSelection(null, root)).toBeNull();
+  });
+});
+
+describe('replyButtonOffset', () => {
+  const container = { top: 100, left: 50, scrollTop: 200, scrollLeft: 0, clientWidth: 400 };
+
+  it('centres the button under the end of the selection with a mouse', () => {
+    const offset = replyButtonOffset({
+      end: { right: 250, bottom: 300 },
+      container,
+      buttonWidth: 72,
+      touch: false,
+    });
+
+    // 300 - 100 + 200 + the mouse gap; 250 - 50 centred on a 72px button.
+    expect(offset).toEqual({ top: 406, left: 164 });
+  });
+
+  it('keeps the button inside the container either way', () => {
+    const atLeft = replyButtonOffset({
+      end: { right: 55, bottom: 300 },
+      container,
+      buttonWidth: 72,
+      touch: false,
+    });
+    expect(atLeft.left).toBe(REPLY_BUTTON_EDGE_GAP);
+
+    const atRight = replyButtonOffset({
+      end: { right: 449, bottom: 300 },
+      container,
+      buttonWidth: 72,
+      touch: false,
+    });
+    expect(atRight.left).toBe(400 - 72 - REPLY_BUTTON_EDGE_GAP);
+  });
+
+  it('by touch sits lower and ends left of the selection’s end, clear of the handle', () => {
+    const mouse = replyButtonOffset({
+      end: { right: 250, bottom: 300 },
+      container,
+      buttonWidth: 92,
+      touch: false,
+    });
+    const touch = replyButtonOffset({
+      end: { right: 250, bottom: 300 },
+      container,
+      buttonWidth: 92,
+      touch: true,
+    });
+
+    expect(touch.top).toBeGreaterThan(mouse.top + 10);
+    // The button's right edge is well left of where the end handle is drawn.
+    expect(touch.left + 92).toBeLessThanOrEqual(250 - 50 - 20);
+    expect(touch.left).toBeGreaterThanOrEqual(REPLY_BUTTON_EDGE_GAP);
   });
 });

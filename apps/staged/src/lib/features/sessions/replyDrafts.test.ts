@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 const { store, changeListeners, establishers } = vi.hoisted(() => ({
   store: new Map<string, unknown>(),
@@ -29,11 +29,15 @@ import { saveDraft, DRAFT_TTL_MS } from '../../shared/draftCache';
 import { serializeComposerDraft } from './composerDraft';
 import {
   addQuoteToReplyDraft,
+  focusReplyDraftQuote,
   loadReplyDraft,
   registerReplyComposer,
   replyDraftKey,
   replyDraftPresence,
   replyDraftWriter,
+  setReplyDraftQuoteReply,
+  startLiveQuoteReply,
+  type ReplyComposerTarget,
 } from './replyDrafts';
 
 const quote = { quote: 'The cache is invalidated.', headings: ['Architecture'], reply: 'Why?' };
@@ -49,18 +53,19 @@ describe('addQuoteToReplyDraft', () => {
     store.clear();
   });
 
-  it('amends the stored draft when no composer shows it', async () => {
+  it('amends the stored draft when no composer shows it, under the id it resolves', async () => {
     await saveDraft(replyDraftKey('s1'), 'Some thoughts first.');
 
-    await addQuoteToReplyDraft('s1', quote);
-    await addQuoteToReplyDraft('s1', { ...quote, reply: 'And this?' });
+    const first = await addQuoteToReplyDraft('s1', quote);
+    const second = await addQuoteToReplyDraft('s1', { ...quote, reply: 'And this?' }, 'given-id');
 
     const draft = await loadReplyDraft('s1');
     expect(draft.text).toBe('');
-    expect(draft.quotes.map((q) => [q.before, q.reply])).toEqual([
-      ['Some thoughts first.', 'Why?'],
-      ['', 'And this?'],
+    expect(draft.quotes.map((q) => [q.id, q.before, q.reply])).toEqual([
+      [first, 'Some thoughts first.', 'Why?'],
+      ['given-id', '', 'And this?'],
     ]);
+    expect(second).toBe('given-id');
     expect(store.get(replyDraftKey('s1'))).toMatchObject({ value: serializeComposerDraft(draft) });
   });
 
@@ -98,31 +103,162 @@ describe('addQuoteToReplyDraft', () => {
   });
 
   it('hands the quote to the open composer instead of the store', async () => {
-    const addQuote = vi.fn();
-    const unregister = registerReplyComposer('s3', { addQuote });
+    const composer = fakeComposer();
+    const unregister = registerReplyComposer('s3', composer);
 
-    await addQuoteToReplyDraft('s3', quote);
+    const id = await addQuoteToReplyDraft('s3', quote);
 
-    expect(addQuote).toHaveBeenCalledWith(quote);
+    expect(composer.addQuote).toHaveBeenCalledWith(quote, id);
     expect(store.has(replyDraftKey('s3'))).toBe(false);
 
     unregister();
     await addQuoteToReplyDraft('s3', quote);
-    expect(addQuote).toHaveBeenCalledTimes(1);
+    expect(composer.addQuote).toHaveBeenCalledTimes(1);
     expect((await loadReplyDraft('s3')).quotes).toHaveLength(1);
   });
 
   it('keeps a newer composer registered when an older one unregisters', async () => {
-    const older = vi.fn();
-    const newer = vi.fn();
-    const unregisterOlder = registerReplyComposer('s4', { addQuote: older });
-    registerReplyComposer('s4', { addQuote: newer });
+    const older = fakeComposer();
+    const newer = fakeComposer();
+    const unregisterOlder = registerReplyComposer('s4', older);
+    registerReplyComposer('s4', newer);
     unregisterOlder();
 
-    await addQuoteToReplyDraft('s4', quote);
+    const id = await addQuoteToReplyDraft('s4', quote);
 
-    expect(older).not.toHaveBeenCalled();
-    expect(newer).toHaveBeenCalledWith(quote);
+    expect(older.addQuote).not.toHaveBeenCalled();
+    expect(newer.addQuote).toHaveBeenCalledWith(quote, id);
+  });
+});
+
+function fakeComposer(): { [K in keyof ReplyComposerTarget]: Mock<ReplyComposerTarget[K]> } {
+  return {
+    addQuote: vi.fn<ReplyComposerTarget['addQuote']>(),
+    setQuoteReply: vi.fn<ReplyComposerTarget['setQuoteReply']>(),
+    focusQuoteReply: vi.fn<ReplyComposerTarget['focusQuoteReply']>(),
+  };
+}
+
+describe('setReplyDraftQuoteReply', () => {
+  beforeEach(() => {
+    store.clear();
+  });
+
+  it('rewrites the reply of a stored quote and leaves a removed one removed', async () => {
+    const id = await addQuoteToReplyDraft('r1', { ...quote, reply: '' });
+    await addQuoteToReplyDraft('r1', quote, 'other');
+
+    await setReplyDraftQuoteReply('r1', id, 'Because of the cache.');
+    await setReplyDraftQuoteReply('r1', 'gone', 'nowhere');
+
+    const draft = await loadReplyDraft('r1');
+    expect(draft.quotes.map((q) => [q.id, q.reply])).toEqual([
+      [id, 'Because of the cache.'],
+      ['other', 'Why?'],
+    ]);
+  });
+
+  it('goes to the open composer, as does focusing the quote', async () => {
+    const composer = fakeComposer();
+    const unregister = registerReplyComposer('r2', composer);
+
+    await setReplyDraftQuoteReply('r2', 'q', 'typed');
+    expect(composer.setQuoteReply).toHaveBeenCalledWith('q', 'typed');
+    expect(store.has(replyDraftKey('r2'))).toBe(false);
+
+    expect(focusReplyDraftQuote('r2', 'q')).toBe(true);
+    expect(composer.focusQuoteReply).toHaveBeenCalledWith('q');
+
+    unregister();
+    expect(focusReplyDraftQuote('r2', 'q')).toBe(false);
+  });
+});
+
+describe('startLiveQuoteReply', () => {
+  beforeEach(() => {
+    store.clear();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('adds the block at once and writes the reply after each pause in typing', async () => {
+    const live = startLiveQuoteReply('l1', { ...quote, reply: '' }, 100);
+    await vi.runAllTimersAsync();
+    expect((await loadReplyDraft('l1')).quotes).toMatchObject([{ reply: '' }]);
+
+    live.setReply('Wh');
+    live.setReply('Why');
+    await vi.advanceTimersByTimeAsync(99);
+    expect((await loadReplyDraft('l1')).quotes[0].reply).toBe('');
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.runAllTimersAsync();
+    expect((await loadReplyDraft('l1')).quotes[0].reply).toBe('Why');
+
+    live.setReply('Why not?');
+    await live.finish();
+    const draft = await loadReplyDraft('l1');
+    expect(draft.quotes).toHaveLength(1);
+    expect(draft.quotes[0].reply).toBe('Why not?');
+  });
+
+  it('keeps one block when the chat opens mid-reply, finishing into its composer', async () => {
+    const live = startLiveQuoteReply('l2', { ...quote, reply: '' }, 100);
+    await vi.runAllTimersAsync();
+    const stored = await loadReplyDraft('l2');
+    expect(stored.quotes).toHaveLength(1);
+
+    // The composer opens: it loads the stored block, then takes the edits.
+    const composer = fakeComposer();
+    registerReplyComposer('l2', composer);
+    live.setReply('Typed after the chat opened');
+    await live.finish();
+
+    expect(composer.addQuote).not.toHaveBeenCalled();
+    expect(composer.setQuoteReply).toHaveBeenCalledWith(
+      stored.quotes[0].id,
+      'Typed after the chat opened'
+    );
+    expect((await loadReplyDraft('l2')).quotes).toHaveLength(1);
+  });
+
+  it('retries from finish when the first write failed, so the typed reply still lands', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      vi.mocked(setStoreValue).mockRejectedValueOnce(new Error('store unavailable'));
+      const live = startLiveQuoteReply('l3', { ...quote, reply: '' }, 100);
+      await vi.runAllTimersAsync();
+      expect(store.has(replyDraftKey('l3'))).toBe(false);
+
+      live.setReply('Still typed');
+      await live.finish();
+
+      const draft = await loadReplyDraft('l3');
+      expect(draft.quotes).toHaveLength(1);
+      expect(draft.quotes[0]).toMatchObject({ quote: quote.quote, reply: 'Still typed' });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('rejects from finish when nothing could be written', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const failure = new Error('store unavailable');
+      vi.mocked(setStoreValue).mockRejectedValue(failure);
+      const live = startLiveQuoteReply('l4', quote, 100);
+      await vi.runAllTimersAsync();
+
+      await expect(live.finish()).rejects.toBe(failure);
+    } finally {
+      vi.mocked(setStoreValue).mockReset();
+      vi.mocked(setStoreValue).mockImplementation(async (key: string, value: unknown) => {
+        store.set(key, value);
+      });
+      consoleError.mockRestore();
+    }
   });
 });
 
@@ -143,6 +279,7 @@ describe('replyDraftPresence', () => {
     await settle();
 
     expect(replyDraftPresence.has('stored')).toBe(true);
+    expect(replyDraftPresence.summary('stored')).toEqual({ quotes: 0, hasText: true });
     expect(replyDraftPresence.has('expired')).toBe(false);
     expect(replyDraftPresence.has('blank')).toBe(false);
     expect(replyDraftPresence.has('p1')).toBe(false);
@@ -163,9 +300,14 @@ describe('replyDraftPresence', () => {
     await replyDraftWriter.clearNow(replyDraftKey('typed'));
     expect(replyDraftPresence.has('typed')).toBe(false);
 
-    // A quote amended into a stored draft.
-    await addQuoteToReplyDraft('quoted', quote);
+    // A quote amended into a stored draft, counted for the note's bottom bar.
+    await addQuoteToReplyDraft('quoted', { ...quote, reply: '' });
     expect(replyDraftPresence.has('quoted')).toBe(true);
+    expect(replyDraftPresence.summary('quoted')).toEqual({ quotes: 1, hasText: false });
+    await addQuoteToReplyDraft('quoted', quote);
+    expect(replyDraftPresence.summary('quoted')).toEqual({ quotes: 2, hasText: true });
+    expect(replyDraftPresence.summary('typed')).toBeNull();
+    expect(replyDraftPresence.summary('stored')).toBeNull();
 
     // Another client's write, then its delete.
     for (const listener of changeListeners) {

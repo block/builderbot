@@ -88,3 +88,60 @@ export function quoteFromSelection(
     range: range.cloneRange(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Where the Reply button goes
+// ---------------------------------------------------------------------------
+
+/** Width the button is kept clear of the container's edges by. */
+export const REPLY_BUTTON_EDGE_GAP = 8;
+/** Below the selection's last line, with a mouse. */
+const MOUSE_BUTTON_GAP = 6;
+/**
+ * Below the selection's last line, by touch: iOS hangs the end handle's knob
+ * about 12px under the baseline, and the button sits below that.
+ */
+const TOUCH_BUTTON_GAP = 18;
+/**
+ * By touch the button ends this far left of the selection's end, clear of
+ * the end handle (its bar and knob) that iOS draws there. The callout menu
+ * (Copy, Look Up…) sits above the selection, so below it is clear of that.
+ */
+const TOUCH_HANDLE_CLEARANCE = 28;
+
+export type ReplyButtonBox = {
+  /** The selection's last non-empty client rect. */
+  end: Pick<DOMRectReadOnly, 'right' | 'bottom'>;
+  /** The scroll container's client rect and scroll position. */
+  container: Pick<DOMRectReadOnly, 'top' | 'left'> & {
+    scrollTop: number;
+    scrollLeft: number;
+    clientWidth: number;
+  };
+  buttonWidth: number;
+  /** A coarse pointer: see the touch constants above. */
+  touch: boolean;
+};
+
+/**
+ * The button's offset inside the scroll container: under the end of the
+ * selection, centred on it with a mouse, or to the left of the end handle
+ * by touch, and kept inside the container's width either way.
+ */
+export function replyButtonOffset(box: ReplyButtonBox): { top: number; left: number } {
+  const { end, container, buttonWidth, touch } = box;
+  const endX = end.right - container.left + container.scrollLeft;
+  const wanted = touch ? endX - TOUCH_HANDLE_CLEARANCE - buttonWidth : endX - buttonWidth / 2;
+  const maxLeft = Math.max(
+    REPLY_BUTTON_EDGE_GAP,
+    container.clientWidth - buttonWidth - REPLY_BUTTON_EDGE_GAP
+  );
+  return {
+    top:
+      end.bottom -
+      container.top +
+      container.scrollTop +
+      (touch ? TOUCH_BUTTON_GAP : MOUSE_BUTTON_GAP),
+    left: Math.min(Math.max(wanted, REPLY_BUTTON_EDGE_GAP), maxLeft),
+  };
+}

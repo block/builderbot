@@ -136,6 +136,36 @@ export function removeDraftQuote(draft: ComposerDraft, id: string): ComposerDraf
   return { quotes, text: joinFreeText(removed.before, draft.text) };
 }
 
+/**
+ * Replace a quote's reply, as the note's reply field types it: the block is
+ * already in the draft (`appendDraftQuote`) and only its reply moves. The
+ * draft is returned as it was for an unknown id — the quote was taken out of
+ * the composer meanwhile — or an unchanged reply.
+ */
+export function setDraftQuoteReply(draft: ComposerDraft, id: string, reply: string): ComposerDraft {
+  const index = draft.quotes.findIndex((quote) => quote.id === id);
+  if (index === -1 || draft.quotes[index].reply === reply) return draft;
+  const quotes = [...draft.quotes];
+  quotes[index] = { ...quotes[index], reply };
+  return { quotes, text: draft.text };
+}
+
+/** What a note's row or bottom bar says of a draft: how many quotes, and whether any text. */
+export type ComposerDraftSummary = {
+  quotes: number;
+  /** Free text, or a reply to a quote, beyond whitespace. */
+  hasText: boolean;
+};
+
+/** `null` when the draft holds nothing worth marking. */
+export function summarizeComposerDraft(draft: ComposerDraft): ComposerDraftSummary | null {
+  if (isComposerDraftEmpty(draft)) return null;
+  const hasText =
+    draft.text.trim().length > 0 ||
+    draft.quotes.some((quote) => quote.before.trim().length > 0 || quote.reply.trim().length > 0);
+  return { quotes: draft.quotes.length, hasText };
+}
+
 function joinFreeText(first: string, second: string): string {
   const a = first.trimEnd();
   const b = second.trimStart();

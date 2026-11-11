@@ -15,8 +15,11 @@
 
   A note with a chat can be replied to a passage at a time: selecting text
   offers a Reply button (`NoteSelectionReply`), and each reply lands in the
-  chat's draft as a quote block (see sessions/replyDrafts.ts) — live in the
-  chat pane when it is open, in the stored draft otherwise.
+  chat's draft as a quote block (see sessions/replyDrafts.ts) — straight into
+  the composer when the chat shows beside the note, otherwise typed in the
+  note and written to the stored draft as it goes. While the chat is hidden
+  and the draft holds anything, the note's bottom bar offers it: one button
+  that opens the chat with the composer.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -89,7 +92,14 @@
   import NoteTransferMenu from './NoteTransferMenu.svelte';
   import NoteSelectionReply from './NoteSelectionReply.svelte';
   import type { NewDraftQuote } from '../sessions/composerDraft';
-  import { addQuoteToReplyDraft, replyDraftPresence } from '../sessions/replyDrafts';
+  import {
+    addQuoteToReplyDraft,
+    focusReplyDraftQuote,
+    replyDraftPresence,
+    startLiveQuoteReply,
+    type LiveQuoteReply,
+  } from '../sessions/replyDrafts';
+  import { formatReplyDraftLabel } from './replyDraftLabel';
   import { isSessionActive } from '../../shared/sessionStatus';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
@@ -184,7 +194,8 @@
   let chatAutoOpenDecisionKey = $state<string | null>(null);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
   let canOpenSession = $derived(Boolean(sessionId));
-  let hasReplyDraft = $derived(replyDraftPresence.has(sessionId));
+  let replyDraftSummary = $derived(replyDraftPresence.summary(sessionId));
+  let replyDraftLabel = $derived(formatReplyDraftLabel(replyDraftSummary));
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0 && !chatOpen);
   let displayTitle = $derived(liveNote?.title ?? title);
   let displayContent = $derived(liveNote?.content ?? content);
@@ -207,6 +218,8 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
   let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
+  /** The chat is hidden and its draft holds something: the bottom bar offers it. */
+  let showReplyDraft = $derived(canOpenSession && !chatOpen && replyDraftLabel !== null);
   const readTracker = new NoteReadTracker();
   let readToggleLabel = $derived(readTracker.unread ? 'Mark as read' : 'Mark as unread');
 
@@ -234,13 +247,13 @@
         : 'View chat'
   );
   let chatToggleAriaLabel = $derived(
-    (chatOpen
+    chatOpen
       ? viewport.canSplit
         ? 'Hide chat pane'
         : 'View note pane'
       : viewport.canSplit
         ? 'Show chat pane'
-        : 'View chat pane') + (!chatOpen && hasReplyDraft ? ' — unsent reply draft' : '')
+        : 'View chat pane'
   );
   // The note pane sizes to its content up to most of the window, so a short
   // note gets a short dialog and a long one scrolls inside a tall one. With the
@@ -341,6 +354,8 @@
   let matchElements: HTMLElement[] = [];
   let contentEl = $state<HTMLDivElement>();
   let markdownEl = $state<HTMLDivElement>();
+  /** The dialog's box, which the phone's reply sheet is laid over. */
+  let dialogEl = $state<HTMLElement | null>(null);
   let unregisterSearchTarget: (() => void) | null = null;
 
   // Register the global search-shortcut target only while the visible note pane can be searched.
@@ -556,32 +571,53 @@
   }
 
   /**
-   * A reply to a selected passage goes into the chat's draft as a quote
-   * block. Split view opens the chat beside the note so the block is seen
-   * landing; elsewhere the chat would cover the note mid-review, so a toast
-   * confirms it instead — once the draft is saved, so it never claims a
-   * quote that didn't land. Returns whether it did: on failure the popover
-   * stays open with the reply, for another try.
+   * With the composer showing beside the note, a selected passage goes
+   * straight into it as a quote block and the caret lands in the block's
+   * reply. Returns whether it was added: on failure the Reply button stays
+   * for another try.
    */
-  async function handleQuoteReply(quote: NewDraftQuote): Promise<boolean> {
+  async function handleQuoteAdd(quote: NewDraftQuote): Promise<boolean> {
     const sid = sessionId;
     if (!sid) return false;
+    let id: string;
     try {
-      await addQuoteToReplyDraft(sid, quote);
+      id = await addQuoteToReplyDraft(sid, quote);
     } catch (error) {
       console.error('Failed to add quote to reply draft', error);
       toast.error('Could not add the quote to your reply draft');
       return false;
     }
-    if (chatOpen) return true;
-    if (viewport.canSplit) {
-      setChatOpen(true);
-      return true;
-    }
-    toast('Added to your reply draft', {
-      action: { label: 'View chat', onClick: () => setChatOpen(true) },
-    });
+    focusReplyDraftQuote(sid, id);
     return true;
+  }
+
+  /**
+   * With the chat hidden, the reply to a selected passage is typed in the
+   * note and the draft follows it (see replyDrafts.startLiveQuoteReply).
+   * Once the field closes, a dialog wide enough to split opens the chat
+   * beside the note so the block is seen landing. Narrower, the chat would
+   * cover the note mid-review: the bottom bar's draft button offers it
+   * instead (`showReplyDraft`).
+   */
+  function handleQuoteReply(quote: NewDraftQuote): LiveQuoteReply {
+    const sid = sessionId;
+    if (!sid) {
+      return { setReply() {}, finish: async () => {} };
+    }
+    const live = startLiveQuoteReply(sid, quote);
+    return {
+      setReply: live.setReply,
+      finish: async () => {
+        try {
+          await live.finish();
+        } catch (error) {
+          console.error('Failed to save the reply draft', error);
+          toast.error('Could not save your reply draft');
+          return;
+        }
+        if (open && sessionId === sid && !chatOpen && viewport.canSplit) setChatOpen(true);
+      },
+    };
   }
 
   function handleChatToggle() {
@@ -784,9 +820,6 @@
         <PanelRightOpen size={15} aria-hidden="true" />
       {/if}
       <span>{chatToggleLabel}</span>
-      {#if !chatOpen && hasReplyDraft}
-        <PencilLine size={12} class="text-[var(--ui-accent)]" aria-hidden="true" />
-      {/if}
     </Button>
   {/if}
 {/snippet}
@@ -816,6 +849,7 @@
   }}
 >
   <Dialog.Content
+    bind:ref={dialogEl}
     class={contentClass}
     style={dialogWidthStyle(totalWidth)}
     showCloseButton={false}
@@ -914,24 +948,42 @@
               scrollEl={contentEl}
               contentEl={markdownEl}
               enabled={open && !chatOnly && renderedNoteHtml !== null}
+              chatVisible={splitChatOpen}
+              sheetHost={dialogEl}
               ignoreHeading={isTitleHeading}
-              onAdd={handleQuoteReply}
+              onAdd={handleQuoteAdd}
+              onReply={handleQuoteReply}
             />
           {/if}
         </div>
 
-        {#if showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
+        {#if showReplyDraft || showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
           <div class="next-steps">
-            {#if showChatInfo}
+            {#if showReplyDraft || showChatInfo}
               <div class="chat-info-row">
-                <Button
-                  variant="outline"
-                  class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  onclick={() => setChatOpen(true)}
-                >
-                  <MessageCircle size={16} aria-hidden="true" />
-                  <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span>
-                </Button>
+                {#if showReplyDraft}
+                  <Button
+                    variant="outline"
+                    class="reply-draft-button h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-11"
+                    title={viewport.canSplit
+                      ? 'Open the chat to finish your reply'
+                      : 'View the chat to finish your reply'}
+                    onclick={() => setChatOpen(true)}
+                  >
+                    <PencilLine size={16} class="text-[var(--ui-accent)]" aria-hidden="true" />
+                    <span class="min-w-0 truncate">{replyDraftLabel}</span>
+                  </Button>
+                {/if}
+                {#if showChatInfo}
+                  <Button
+                    variant="outline"
+                    class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-11"
+                    onclick={() => setChatOpen(true)}
+                  >
+                    <MessageCircle size={16} aria-hidden="true" />
+                    <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span>
+                  </Button>
+                {/if}
               </div>
             {/if}
             {#if nextSteps && onStartSession && nextSteps.noteStep}
@@ -1360,6 +1412,15 @@
 
   .chat-info-row {
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
+    gap: 8px;
+  }
+
+  /* One button on a phone fills the bar, a finger-sized row. */
+  @media (pointer: coarse) {
+    .chat-info-row > :global(.reply-draft-button:only-child) {
+      width: 100%;
+    }
   }
 </style>

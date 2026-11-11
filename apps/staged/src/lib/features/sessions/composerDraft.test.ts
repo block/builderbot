@@ -11,6 +11,8 @@ import {
   parseQuotedMessage,
   removeDraftQuote,
   serializeComposerDraft,
+  setDraftQuoteReply,
+  summarizeComposerDraft,
   type ComposerDraft,
   type NewDraftQuote,
 } from './composerDraft';
@@ -89,6 +91,50 @@ describe('removeDraftQuote', () => {
     const draft = review();
 
     expect(removeDraftQuote(draft, 'missing')).toBe(draft);
+  });
+});
+
+describe('setDraftQuoteReply', () => {
+  it('replaces one quote’s reply and nothing else', () => {
+    const draft = review();
+
+    const next = setDraftQuoteReply(draft, 'q1', 'Batched, please.');
+
+    expect(next.quotes.map((q) => q.reply)).toEqual(['Batched, please.', 'Which flag system?']);
+    expect(next.quotes[0]).toMatchObject({ before: 'A few comments:', quote: dataFlow.quote });
+    expect(next.text).toBe('Thanks!');
+    expect(draft.quotes[0].reply).toBe('Could we batch those?');
+  });
+
+  it('returns the draft itself for an unknown id or an unchanged reply', () => {
+    const draft = review();
+
+    expect(setDraftQuoteReply(draft, 'removed', 'anything')).toBe(draft);
+    expect(setDraftQuoteReply(draft, 'q2', 'Which flag system?')).toBe(draft);
+  });
+});
+
+describe('summarizeComposerDraft', () => {
+  it('is null for an empty draft', () => {
+    expect(summarizeComposerDraft(emptyComposerDraft())).toBeNull();
+    expect(summarizeComposerDraft({ quotes: [], text: ' \n' })).toBeNull();
+  });
+
+  it('counts quotes and tells text from none', () => {
+    expect(summarizeComposerDraft({ quotes: [], text: 'hi' })).toEqual({
+      quotes: 0,
+      hasText: true,
+    });
+    const quoteOnly = appendDraftQuote(emptyComposerDraft(), {
+      quote: 'x',
+      headings: [],
+      reply: '',
+    });
+    expect(summarizeComposerDraft(quoteOnly)).toEqual({ quotes: 1, hasText: false });
+    expect(
+      summarizeComposerDraft(setDraftQuoteReply(quoteOnly, quoteOnly.quotes[0].id, 'why'))
+    ).toEqual({ quotes: 1, hasText: true });
+    expect(summarizeComposerDraft(review())).toEqual({ quotes: 2, hasText: true });
   });
 });
 

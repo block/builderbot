@@ -2,35 +2,53 @@
   NoteSelectionReply.svelte — "Select to reply" for a rendered note.
 
   Selecting text in the note shows a small Reply button by the end of the
-  selection. It opens a popover with the quote (and the heading path it sits
-  under) and a reply box: Enter (or "Add to reply") hands the quote and reply
-  to `onAdd`, which puts them in the note chat's draft as a quote block;
-  Escape or a click away cancels. The popover closes once `onAdd` reports the
-  block added, and stays open with the reply if it couldn't be. Each
-  selection makes one block, so a review of the whole note builds up one
-  selection at a time.
+  selection. Pressing it quotes the selection into the note chat's draft as
+  a quote block; nothing has to be confirmed afterwards.
+
+  - With the chat composer showing beside the note (`chatVisible`), the block
+    goes straight into it (`onAdd`) and the caret lands in its reply input.
+  - Otherwise a reply field opens here — a popover by the button, or on a
+    phone a sheet at the bottom of the dialog (`sheetHost`), above the
+    keyboard — with the quote and its heading path. The block is already in
+    the draft when the field opens (`onReply`, see
+    replyDrafts.startLiveQuoteReply), and the reply typed into it is written
+    as it goes, so dismissing the field only closes it: Escape, Enter, a
+    click or tap away, scrolling the note, or the chat opening. An empty
+    reply leaves the quote block in the draft all the same.
+
+  Each selection makes one block, so a review of the whole note builds up
+  one selection at a time.
 
   Rendered inside the note's scroll container (`scrollEl`, which must be
   positioned), so the button scrolls with the text it belongs to. While the
-  popover is open the selection is frozen — focus moving into the reply box
-  drops the page selection — and painted with a CSS highlight in its place.
-  The quote is captured when the button appears, so the note re-rendering
-  under an open popover (an agent editing it) leaves the popover, and the
-  reply being typed, where they are; only the highlight goes with the old
-  text. That holds across `enabled` dropping for the re-render too (the note
-  is unrendered while a new image's dimensions or the diagram renderer load):
-  an open popover waits it out; only a closed one is cleared.
+  field is open the selection is frozen — focus moving into the field drops
+  the page selection — and painted with a CSS highlight in its place. The
+  quote is captured when the button appears, so the note re-rendering under
+  an open field (an agent editing it) leaves the field, and the reply being
+  typed, where they are; only the highlight goes with the old text. That
+  holds across `enabled` dropping for the re-render too (the note is
+  unrendered while a new image's dimensions or the diagram renderer load):
+  an open field waits it out; only a closed one is cleared.
+
+  By touch the button appears once the selection's handles have been still
+  for a moment (iOS sends no pointer events for the gestures that select
+  text), clear of the end handle's knob (see replyButtonOffset), and a tap on
+  it collapses the page selection before its click: the captured quote is
+  kept through the press so the tap still lands.
 -->
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { flushSync, onDestroy, untrack } from 'svelte';
+  import { Portal } from 'bits-ui';
   import MessageSquareQuote from '@lucide/svelte/icons/message-square-quote';
+  import PencilLine from '@lucide/svelte/icons/pencil-line';
   import * as Popover from '$lib/components/ui/popover';
-  import { Button } from '$lib/components/ui/button';
+  import { createScrimDismiss } from '$lib/components/ui/menu-sheet/scrimDismiss';
   import QuoteExcerpt from '../sessions/QuoteExcerpt.svelte';
   import type { NewDraftQuote } from '../sessions/composerDraft';
+  import type { LiveQuoteReply } from '../sessions/replyDrafts';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { viewport } from '../../shared/viewport.svelte';
-  import { quoteFromSelection, type NoteSelectionQuote } from './noteSelection';
+  import { quoteFromSelection, replyButtonOffset, type NoteSelectionQuote } from './noteSelection';
 
   interface Props {
     /** The note's scroll container; the button is positioned in it. */
@@ -39,30 +57,57 @@
     contentEl: HTMLElement | undefined;
     /** Off while the note is hidden or has no chat to reply in. */
     enabled: boolean;
+    /** The chat composer shows the draft beside the note: quotes go straight into it. */
+    chatVisible: boolean;
+    /** On a phone the reply field is a sheet in this element (the dialog) rather than a popover. */
+    sheetHost?: HTMLElement | null;
     /** Headings left out of the path (the note's title). */
     ignoreHeading?: (heading: Element) => boolean;
-    /** Adds the block; resolves whether it was added. */
+    /** Chat visible: add the block and focus its reply. Resolves whether it was added. */
     onAdd: (quote: NewDraftQuote) => Promise<boolean> | boolean;
+    /** Chat hidden: add the block and keep its reply current as it is typed here. */
+    onReply: (quote: NewDraftQuote) => LiveQuoteReply;
   }
 
-  let { scrollEl, contentEl, enabled, ignoreHeading, onAdd }: Props = $props();
+  let {
+    scrollEl,
+    contentEl,
+    enabled,
+    chatVisible,
+    sheetHost = null,
+    ignoreHeading,
+    onAdd,
+    onReply,
+  }: Props = $props();
 
   /** Wait this long after the last selection change before showing the button. */
   const SETTLE_MS = 150;
-  /** Width the button is kept clear of the container's edges by. */
-  const EDGE_GAP = 8;
+  /** By touch the handles are dragged in stops and starts; wait a little longer. */
+  const TOUCH_SETTLE_MS = 350;
+  /** How long a press on the button may take to reach its click. */
+  const PRESS_MS = 600;
   const HIGHLIGHT_NAME = 'note-reply-selection';
 
   let selection = $state.raw<NoteSelectionQuote | null>(null);
   let anchor = $state<{ top: number; left: number } | null>(null);
   let open = $state(false);
   let reply = $state('');
-  /** `onAdd` is still saving the block. */
+  /** `onAdd` is still putting the block in the composer. */
   let adding = $state(false);
+  /** The block the open field is typing the reply of. */
+  let live: LiveQuoteReply | null = null;
   let replyEl = $state<HTMLTextAreaElement | null>(null);
   let buttonEl = $state<HTMLElement | null>(null);
-  let pointerDown = false;
+  /** A mouse drag is selecting; the button waits for its release. */
+  let mouseDown = false;
+  /** A press on the button is under way (see the header). */
+  let pressingButton = false;
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  let pressTimer: ReturnType<typeof setTimeout> | undefined;
+
+  let sheetMode = $derived(viewport.sheetMenus && sheetHost !== null);
+  // A tap on the scrim is the user's own dismissal: the selection goes with it.
+  const scrim = createScrimDismiss(() => closeReply(true));
 
   function clearSelectionState() {
     selection = null;
@@ -70,25 +115,29 @@
   }
 
   /**
-   * Where the button goes: just below the end of the selection, in scroll
-   * coordinates. None for a collapsed range — the selected text was replaced,
-   * and the range fell back to where it had been.
+   * Where the button goes, in scroll coordinates. None for a collapsed range
+   * — the selected text was replaced, and the range fell back to where it
+   * had been.
    */
   function anchorFor(range: Range, container: HTMLElement): { top: number; left: number } | null {
     if (range.collapsed) return null;
     const rects = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
     const last = rects[rects.length - 1] ?? range.getBoundingClientRect();
     if (last.width === 0 && last.height === 0) return null;
+    const touch = viewport.hasCoarsePointer;
     const box = container.getBoundingClientRect();
-    const buttonWidth = buttonEl?.offsetWidth ?? 72;
-    const maxLeft = Math.max(EDGE_GAP, container.clientWidth - buttonWidth - EDGE_GAP);
-    return {
-      top: last.bottom - box.top + container.scrollTop + 6,
-      left: Math.min(
-        Math.max(last.right - box.left + container.scrollLeft - buttonWidth / 2, EDGE_GAP),
-        maxLeft
-      ),
-    };
+    return replyButtonOffset({
+      end: last,
+      container: {
+        top: box.top,
+        left: box.left,
+        scrollTop: container.scrollTop,
+        scrollLeft: container.scrollLeft,
+        clientWidth: container.clientWidth,
+      },
+      buttonWidth: buttonEl?.offsetWidth ?? (touch ? 92 : 72),
+      touch,
+    });
   }
 
   function readSelection() {
@@ -114,33 +163,54 @@
     // the drag or the keyboard to settle before showing the button.
     if (!current || current.isCollapsed || !contentEl?.contains(current.anchorNode)) {
       clearTimeout(settleTimer);
+      // A touch on the button collapses the page selection before the
+      // button's click: the captured quote is what the click quotes.
+      if (pressingButton) return;
       clearSelectionState();
       return;
     }
     clearTimeout(settleTimer);
-    if (pointerDown) return;
-    settleTimer = setTimeout(readSelection, SETTLE_MS);
+    if (mouseDown) return;
+    settleTimer = setTimeout(
+      readSelection,
+      viewport.hasCoarsePointer ? TOUCH_SETTLE_MS : SETTLE_MS
+    );
   }
 
   function handlePointerDown(event: PointerEvent) {
-    if (buttonEl?.contains(event.target as Node)) return;
-    pointerDown = true;
+    if (buttonEl?.contains(event.target as Node)) {
+      pressingButton = true;
+      clearTimeout(pressTimer);
+      pressTimer = setTimeout(endPress, PRESS_MS);
+      return;
+    }
+    // Only a mouse drag holds the button back until its release: iOS sends
+    // no pointerup for a long press that selects, or for dragging a handle.
+    if (event.pointerType === 'mouse') mouseDown = true;
   }
 
   function handlePointerUp() {
-    if (!pointerDown) return;
-    pointerDown = false;
+    if (!mouseDown) return;
+    mouseDown = false;
     // After the browser has settled the selection the press made.
     setTimeout(readSelection, 0);
   }
 
+  /** The press ended without its click (dragged off, cancelled, or just slow). */
+  function endPress() {
+    clearTimeout(pressTimer);
+    pressTimer = undefined;
+    if (!pressingButton) return;
+    pressingButton = false;
+    if (!open && !adding) readSelection();
+  }
+
   $effect(() => {
     if (!enabled) {
-      // An open popover rides out a transient drop (the note between renders)
-      // with its reply; closing it later goes through `handleOpenChange`,
-      // which reads the selection again and finds the button off. With none
-      // open there is nothing to keep, the reply included, so a later popover
-      // starts blank.
+      // An open field rides out a transient drop (the note between renders)
+      // with its reply; closing it later goes through `closeReply`. With
+      // none open there is nothing to keep, the reply included, so a later
+      // field starts blank.
       if (!untrack(() => open)) {
         clearSelectionState();
         reply = '';
@@ -163,7 +233,7 @@
   // Text reflowing under the selection (the dialog resized, the chat pane
   // opened beside it) moves the selection's end; the button follows. The
   // note re-rendering replaces the selected text and leaves no end to
-  // follow: an open popover then stays where it is rather than unmounting
+  // follow: an open field then stays where it is rather than unmounting
   // with the reply in it.
   $effect(() => {
     const el = contentEl;
@@ -177,7 +247,7 @@
     return () => observer.disconnect();
   });
 
-  // Paint the frozen selection while the popover holds it.
+  // Paint the frozen selection while the field holds it.
   $effect(() => {
     const range = open ? selection?.range : null;
     const registry = globalThis.CSS?.highlights;
@@ -188,107 +258,188 @@
     };
   });
 
-  onDestroy(() => clearTimeout(settleTimer));
+  // The chat opening (beside the note, or over it on a phone) takes the
+  // block over: the field closes and the reply so far goes with it.
+  $effect(() => {
+    if (!chatVisible) return;
+    untrack(() => closeReply(true));
+  });
 
-  function handleOpenChange(next: boolean) {
-    open = next;
-    if (next) return;
-    reply = '';
-    // Cancelled: the page selection may still be there to reply to again.
-    setTimeout(readSelection, 0);
-  }
+  // Scrolling the note away from the selection closes the field. A wheel
+  // (the user's own scrolling) rather than `scroll`: the keyboard opening
+  // can shorten the note's box and clamp its scroll under the field.
+  $effect(() => {
+    const el = scrollEl;
+    if (!open || !el) return;
+    const close = () => closeReply(true);
+    el.addEventListener('wheel', close, { passive: true });
+    return () => el.removeEventListener('wheel', close);
+  });
 
-  async function confirm() {
-    const current = selection;
-    if (!current || adding) return;
-    const quote: NewDraftQuote = {
-      quote: current.quote,
-      headings: current.headings,
-      reply: reply.trim(),
-    };
-    adding = true;
-    let added = false;
-    try {
-      added = await onAdd(quote);
-    } catch (error) {
-      console.error('[NoteSelectionReply] Failed to add the quote:', error);
-    } finally {
-      adding = false;
-    }
-    // Not added (`onAdd` has said why): keep the reply for another try.
-    if (!added) {
-      if (open) replyEl?.focus();
-      return;
-    }
-    // Cancelled and another selection made while it saved: leave that one be.
-    if (selection !== current) return;
-    open = false;
-    reply = '';
+  onDestroy(() => {
+    clearTimeout(settleTimer);
+    clearTimeout(pressTimer);
+    // The dialog closing on an open field: whatever was typed still lands.
+    const pending = live;
+    live = null;
+    if (pending) void pending.finish();
+  });
+
+  /** The selection has been quoted; nothing is left to reply to. */
+  function finishSelection() {
     clearSelectionState();
     document.getSelection()?.removeAllRanges();
+  }
+
+  async function handleButtonClick() {
+    clearTimeout(pressTimer);
+    pressTimer = undefined;
+    pressingButton = false;
+    const current = selection;
+    if (!current || adding || open) return;
+    const quote: NewDraftQuote = { quote: current.quote, headings: current.headings, reply: '' };
+    if (chatVisible) {
+      adding = true;
+      let added = false;
+      try {
+        added = await onAdd(quote);
+      } catch (error) {
+        console.error('[NoteSelectionReply] Failed to add the quote:', error);
+      } finally {
+        adding = false;
+      }
+      // Not added (`onAdd` has said why): the button stays for another try.
+      if (!added || selection !== current) return;
+      finishSelection();
+      return;
+    }
+    reply = '';
+    live = onReply(quote);
+    open = true;
+    if (sheetMode) {
+      // Mounted and focused within the tap's own task, which is what lets
+      // iOS raise the keyboard for it.
+      flushSync();
+      replyEl?.focus();
+    }
+  }
+
+  /**
+   * Close the field. The block stays in the draft with the reply typed so
+   * far (`finish` writes what is still pending). `clearPageSelection` when
+   * the user's own action closed it; a pointer press elsewhere may be the
+   * start of the next selection, which is left alone.
+   */
+  function closeReply(clearPageSelection: boolean) {
+    if (!open) return;
+    open = false;
+    const pending = live;
+    live = null;
+    if (pending) void pending.finish();
+    reply = '';
+    if (clearPageSelection) finishSelection();
+    else clearSelectionState();
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) closeReply(false);
+  }
+
+  function handleReplyInput(event: Event) {
+    const value = (event.currentTarget as HTMLTextAreaElement).value;
+    reply = value;
+    live?.setReply(value);
   }
 
   function handleReplyKeydown(event: KeyboardEvent) {
     if (isImeKeydown(event)) return;
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      void confirm();
+      closeReply(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeReply(true);
+      // bits-ui may have closed the popover on this key already; the
+      // selection still goes, as the user asked.
+      document.getSelection()?.removeAllRanges();
     }
   }
 </script>
 
+{#snippet replyField()}
+  <QuoteExcerpt quote={selection!.quote} headings={selection!.headings} clampLines={3} />
+  <textarea
+    bind:this={replyEl}
+    value={reply}
+    class="selection-reply-input"
+    rows="2"
+    placeholder="Reply to this selection…"
+    aria-label="Reply to the selected text"
+    oninput={handleReplyInput}
+    onkeydown={handleReplyKeydown}></textarea>
+  <div class="selection-reply-status">
+    <PencilLine size={11} aria-hidden="true" />
+    <span>
+      Kept in your reply draft{#if viewport.showShortcutHints}
+        · Enter or Esc to close{/if}
+    </span>
+  </div>
+{/snippet}
+
 {#if selection && anchor}
   <div class="selection-reply-anchor" style:top="{anchor.top}px" style:left="{anchor.left}px">
-    <Popover.Root {open} onOpenChange={handleOpenChange}>
-      <Popover.Trigger
-        bind:ref={buttonEl}
-        class="selection-reply-button"
-        title="Reply to the selected text"
-        aria-label="Reply to the selected text"
-        onmousedown={(event: MouseEvent) => event.preventDefault()}
-      >
-        <MessageSquareQuote size={12} aria-hidden="true" />
-        <span>Reply</span>
-      </Popover.Trigger>
-      <Popover.Content
-        side="bottom"
-        align="start"
-        sideOffset={6}
-        class="w-[min(340px,calc(100vw-32px))] gap-2.5 p-3"
-        onOpenAutoFocus={(event: Event) => {
-          event.preventDefault();
-          replyEl?.focus();
-        }}
-        onCloseAutoFocus={(event: Event) => event.preventDefault()}
-      >
-        <QuoteExcerpt quote={selection.quote} headings={selection.headings} clampLines={4} />
-        <textarea
-          bind:this={replyEl}
-          bind:value={reply}
-          class="selection-reply-input"
-          rows="3"
-          placeholder="Reply to this selection…"
-          aria-label="Reply to the selected text"
-          onkeydown={handleReplyKeydown}></textarea>
-        <div class="selection-reply-actions">
-          {#if viewport.showShortcutHints}
-            <span class="selection-reply-hint">Enter to add · Esc to cancel</span>
-          {/if}
-          <Button
-            variant="ghost"
-            size="sm"
-            class="text-muted-foreground"
-            onclick={() => handleOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button variant="accent" size="sm" disabled={adding} onclick={confirm}>
-            Add to reply
-          </Button>
-        </div>
-      </Popover.Content>
-    </Popover.Root>
+    <button
+      type="button"
+      bind:this={buttonEl}
+      class="selection-reply-button touch-hit"
+      class:is-open={open}
+      title="Reply to the selected text"
+      aria-label="Reply to the selected text"
+      aria-busy={adding}
+      onmousedown={(event: MouseEvent) => event.preventDefault()}
+      onclick={handleButtonClick}
+    >
+      <MessageSquareQuote size={12} aria-hidden="true" />
+      <span>Reply</span>
+    </button>
+    {#if !sheetMode}
+      <Popover.Root {open} onOpenChange={handleOpenChange}>
+        <Popover.Content
+          customAnchor={buttonEl}
+          side="bottom"
+          align="start"
+          sideOffset={6}
+          collisionPadding={12}
+          class="selection-reply-popover w-[min(340px,calc(100vw-24px))] gap-2.5 p-3"
+          onOpenAutoFocus={(event: Event) => {
+            event.preventDefault();
+            replyEl?.focus();
+          }}
+          onCloseAutoFocus={(event: Event) => event.preventDefault()}
+        >
+          {@render replyField()}
+        </Popover.Content>
+      </Popover.Root>
+    {/if}
   </div>
+{/if}
+
+{#if sheetMode && open && selection}
+  <Portal to={sheetHost!}>
+    <div class="selection-reply-sheet" role="dialog" aria-label="Reply to the selected text">
+      <!-- Decorative: Escape and Enter in the field are the accessible dismissal. -->
+      <div
+        class="selection-reply-scrim"
+        aria-hidden="true"
+        onpointerdown={scrim.onpointerdown}
+        onpointercancel={scrim.onpointercancel}
+        onclick={scrim.onclick}
+      ></div>
+      <div class="selection-reply-panel">
+        {@render replyField()}
+      </div>
+    </div>
+  </Portal>
 {/if}
 
 <style>
@@ -297,7 +448,7 @@
     z-index: 2;
   }
 
-  .selection-reply-anchor :global(.selection-reply-button) {
+  .selection-reply-button {
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -307,6 +458,7 @@
     border-radius: 999px;
     background: var(--bg-chrome);
     color: var(--text-secondary);
+    font-family: inherit;
     font-size: var(--size-xs);
     font-weight: 500;
     box-shadow: var(--shadow-raised);
@@ -317,16 +469,36 @@
       background-color 0.1s;
   }
 
-  .selection-reply-anchor :global(.selection-reply-button:hover),
-  .selection-reply-anchor :global(.selection-reply-button[data-state='open']) {
+  .selection-reply-button:hover,
+  .selection-reply-button.is-open {
     border-color: var(--border-emphasis);
     background: var(--bg-hover);
     color: var(--text-primary);
   }
 
-  .selection-reply-anchor :global(.selection-reply-button:focus-visible) {
+  .selection-reply-button:focus-visible {
     outline: 2px solid var(--ui-accent);
     outline-offset: 1px;
+  }
+
+  .selection-reply-button[aria-busy='true'] {
+    cursor: progress;
+    opacity: 0.7;
+  }
+
+  /* A finger's target, with the `touch-hit` area around it making up 44px. */
+  @media (pointer: coarse) {
+    .selection-reply-button {
+      height: 32px;
+      padding: 0 13px;
+      gap: 6px;
+      font-size: var(--size-sm);
+    }
+
+    .selection-reply-button :global(svg) {
+      width: 14px;
+      height: 14px;
+    }
   }
 
   .selection-reply-input {
@@ -351,17 +523,83 @@
     border-color: var(--border-emphasis);
   }
 
-  .selection-reply-actions {
+  .selection-reply-status {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 6px;
-  }
-
-  .selection-reply-hint {
-    margin-right: auto;
+    gap: 5px;
     color: var(--text-faint);
     font-size: var(--size-xs);
+    line-height: 1.4;
+  }
+
+  .selection-reply-status :global(svg) {
+    flex-shrink: 0;
+    color: var(--ui-accent);
+  }
+
+  /* The sheet covers the dialog it is portalled into (`position: fixed`,
+     sized to the visual viewport, so the panel sits on the keyboard's top
+     edge); the scrim takes the tap that dismisses it (see scrimDismiss.ts). */
+  .selection-reply-sheet {
+    position: absolute;
+    inset: 0;
+    z-index: var(--z-index-floating);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
+
+  .selection-reply-scrim {
+    position: absolute;
+    inset: 0;
+    background: var(--shadow-overlay);
+    animation: selection-reply-fade 0.2s ease-out;
+  }
+
+  .selection-reply-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0 8px;
+    margin-bottom: calc(8px + var(--dialog-safe-bottom, 0px));
+    padding: 12px 14px;
+    border-radius: 16px;
+    background: var(--popover);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-raised);
+    animation: selection-reply-rise 0.2s ease-out;
+  }
+
+  /* 16px, so iOS doesn't zoom the page to the field. */
+  .selection-reply-panel .selection-reply-input {
+    padding: 10px 12px;
+    font-size: 16px;
+    line-height: 1.4;
+  }
+
+  .selection-reply-panel .selection-reply-status {
+    font-size: var(--size-sm);
+  }
+
+  @keyframes selection-reply-fade {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @keyframes selection-reply-rise {
+    from {
+      translate: 0 16px;
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .selection-reply-scrim,
+    .selection-reply-panel {
+      animation: none;
+    }
   }
 
   /* The note's own tint, as on the rule beside each quote. */

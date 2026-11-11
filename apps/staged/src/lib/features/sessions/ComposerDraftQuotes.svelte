@@ -121,6 +121,14 @@
     return !!active && !!entryFor(id)?.contains(active);
   }
 
+  /** Focus a quote's reply with the caret at its end, for a quote just added from the note. */
+  export function focusReply(id: string): boolean {
+    const reply = replyFor(id);
+    if (!reply) return false;
+    focusAtEndSync(reply);
+    return true;
+  }
+
   /** Focus the gap before a quote, with the caret at its start or end. */
   export function focusGap(id: string, caret: 'start' | 'end'): boolean {
     const gap = entryFor(id)?.querySelector<HTMLElement>('.composer-gap-input') ?? null;
@@ -219,10 +227,17 @@
   }
 
   @media (hover: none), (pointer: coarse) {
-    /* No hover to reveal a gap: keep each one a tappable line. */
+    /* No hover to reveal a gap: each one is a finger-sized row (44px) with
+       its placeholder showing, so text between quotes has a visible place. */
+    .composer-draft-quotes :global(.composer-gap-input) {
+      --hashtag-input-min-height: 1.5em;
+      padding: 12px 8px;
+      line-height: 1.5;
+    }
+
     .composer-draft-quotes :global(.composer-gap-input.is-empty) {
       --hashtag-input-min-height: 1.5em;
-      padding-block: 3px;
+      padding-block: 12px;
       line-height: 1.5;
     }
 

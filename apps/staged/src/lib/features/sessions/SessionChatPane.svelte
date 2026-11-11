@@ -252,9 +252,9 @@
     parseQuotedMessage,
     removeDraftQuote,
     serializeComposerDraft,
+    setDraftQuoteReply,
     type ComposerDraft,
     type DraftQuote,
-    type NewDraftQuote,
   } from './composerDraft';
   import QuoteExcerpt from './QuoteExcerpt.svelte';
   import NoteActivityCard from './NoteActivityCard.svelte';
@@ -374,6 +374,7 @@
   let observedDisconnect = $state<{ sessionId: string; userMessageId: number | null } | null>(null);
   let messagesEl: HTMLDivElement;
   let inputEl: HTMLElement | null = $state(null);
+  let composerView = $state<ReturnType<typeof ChatComposer>>();
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   /** A terminal status arrived while a tick was in flight; poll once more
@@ -452,11 +453,15 @@
   // exactly that run so inherited text isn't filed under this session's key.
   let suppressNextReplySave = false;
   /**
-   * Quotes a note sent to this session's draft while its load was still in
-   * flight: they go in once the stored draft has landed, rather than being
-   * replaced by it. Keyed to the session they were sent for.
+   * Edits a note made to this session's draft (a quote added, its reply
+   * typed) while the draft's load was still in flight: they are applied once
+   * the stored draft has landed, rather than being replaced by it. Keyed to
+   * the session they were made for.
    */
-  let pendingDraftQuotes: { sessionId: string; quotes: NewDraftQuote[] } | null = null;
+  let pendingDraftEdits: {
+    sessionId: string;
+    edits: Array<(draft: ComposerDraft) => ComposerDraft>;
+  } | null = null;
 
   /** The composer's draft as one value (live `$state`; clone before keeping it). */
   function currentDraft(): ComposerDraft {
@@ -489,7 +494,7 @@
         setDraft(draft);
       }
       loadedDraftSessionId = id;
-      applyPendingDraftQuotes(id);
+      applyPendingDraftEdits(id);
       await tick();
       autoResize();
     } catch (err) {
@@ -508,30 +513,39 @@
           draftWhenLoadStarted
         );
         loadedDraftSessionId = id;
-        applyPendingDraftQuotes(id);
+        applyPendingDraftEdits(id);
       }
     }
   }
 
-  /** A note added a quote to this session's draft while the composer shows it. */
-  function receiveDraftQuote(id: string, quote: NewDraftQuote) {
+  /**
+   * A note edited this session's draft while the composer shows it (see
+   * replyDrafts.ts): applied to the composer, or held until its draft has
+   * loaded.
+   */
+  function receiveDraftEdit(id: string, edit: (draft: ComposerDraft) => ComposerDraft) {
     if (loadedDraftSessionId !== id) {
-      if (pendingDraftQuotes?.sessionId !== id) pendingDraftQuotes = { sessionId: id, quotes: [] };
-      pendingDraftQuotes.quotes.push(quote);
+      if (pendingDraftEdits?.sessionId !== id) pendingDraftEdits = { sessionId: id, edits: [] };
+      pendingDraftEdits.edits.push(edit);
       return;
     }
-    // Typing into the quote is a draft edit: the last failure line has been read.
+    // Quoting is a draft edit: the last failure line has been read.
     sendError = null;
-    setDraft(appendDraftQuote(currentDraft(), quote));
+    setDraft(edit(currentDraft()));
   }
 
-  function applyPendingDraftQuotes(id: string) {
-    const pending = pendingDraftQuotes;
-    pendingDraftQuotes = null;
+  function applyPendingDraftEdits(id: string) {
+    const pending = pendingDraftEdits;
+    pendingDraftEdits = null;
     if (pending?.sessionId !== id) return;
-    let draft = currentDraft();
-    for (const quote of pending.quotes) draft = appendDraftQuote(draft, quote);
-    setDraft(draft);
+    setDraft(pending.edits.reduce((draft, edit) => edit(draft), currentDraft()));
+  }
+
+  /** Put the caret in a quote block's reply, once the block is rendered. */
+  function focusDraftQuoteReply(quoteId: string) {
+    tick().then(() => {
+      if (!closed && active) composerView?.focusQuoteReply(quoteId);
+    });
   }
 
   function removeQuote(id: string) {
@@ -1115,20 +1129,22 @@
     const id = sessionId;
     if (!isActive || !id) return;
     const unregister = registerReplyComposer(id, {
-      addQuote: (quote) => receiveDraftQuote(id, quote),
+      addQuote: (quote, quoteId) =>
+        receiveDraftEdit(id, (draft) => appendDraftQuote(draft, quote, quoteId)),
+      setQuoteReply: (quoteId, reply) =>
+        receiveDraftEdit(id, (draft) => setDraftQuoteReply(draft, quoteId, reply)),
+      focusQuoteReply: focusDraftQuoteReply,
     });
     return () => {
       unregister();
-      const pending = pendingDraftQuotes;
+      const pending = pendingDraftEdits;
       if (pending?.sessionId !== id) return;
-      pendingDraftQuotes = null;
-      amendStoredReplyDraft(id, pending.quotes).catch((err) => {
+      pendingDraftEdits = null;
+      amendStoredReplyDraft(id, (draft) =>
+        pending.edits.reduce((next, edit) => edit(next), draft)
+      ).catch((err) => {
         console.error('[SessionChatPane] Failed to save quoted reply:', err);
-        toast.error(
-          pending.quotes.length === 1
-            ? 'Could not add the quote to your reply draft'
-            : 'Could not add the quotes to your reply draft'
-        );
+        toast.error('Could not save the quote in your reply draft');
       });
     };
   });
@@ -3807,6 +3823,7 @@
         </div>
       {/if}
       <ChatComposer
+        bind:this={composerView}
         bind:textareaEl={inputEl}
         bind:value={inputText}
         bind:quotes={draftQuotes}

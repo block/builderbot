@@ -172,7 +172,7 @@ Commands:
   status  Show one session's status (works for finished sessions too)
   wait    Block until a session finishes (default timeout 240s)
   cancel  Cancel a queued or running session
-  list    List queued and running sessions
+  list    List queued, running, and disconnected sessions
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -233,8 +233,12 @@ Options:
           Print help (see a summary with '-h')
 
 === stagedctl session status --help ===
-Show one session: status (queued, running, completed, error, cancelled),
-why it ended, its provider, prompt, and working directory.
+Show one session: status (queued, running, disconnected, completed, error,
+cancelled), why it ended, its provider, prompt, and working directory.
+
+disconnected means Staged lost its connection to a remote (Blox) session
+mid-turn. It is not finished: the remote turn may still be running, and
+the session returns to running when Staged reattaches it.
 
 Session ids come from `session start`, `session list`, or the [session ...]
 suffixes in `timeline show`.
@@ -256,12 +260,16 @@ Options:
           Print help (see a summary with '-h')
 
 === stagedctl session wait --help ===
-Poll the app until the session reaches a terminal state.
+Poll the app until the session reaches a terminal state: completed, error,
+or cancelled. Waiting continues through queued, running, and disconnected
+(a remote session whose connection dropped; its turn may still be running).
 
 Exit 0 when the session completes. Exits 1 with `session_error` or
 `session_cancelled` when it ends any other way, and with `wait_timeout`
 when --timeout elapses — in that case the session KEEPS RUNNING; waiting
-never cancels anything.
+never cancels anything. If the session is disconnected when --timeout
+elapses, the code is `session_disconnected` instead. A status this
+stagedctl doesn't recognize exits 1 with `unknown_status`.
 
 Usage: stagedctl session wait [OPTIONS] <SESSION_ID>
 
@@ -305,10 +313,10 @@ Options:
           Print help (see a summary with '-h')
 
 === stagedctl session list --help ===
-List every queued and running session in the app, optionally narrowed to
-one project or one repo. Completed sessions are not listed — find them
-through their artifact in `timeline show`, or directly with
-`session status <id>`.
+List every queued, running, and disconnected session in the app,
+optionally narrowed to one project or one repo. Completed sessions are not
+listed — find them through their artifact in `timeline show`, or directly
+with `session status <id>`.
 
 Usage: stagedctl session list [OPTIONS]
 

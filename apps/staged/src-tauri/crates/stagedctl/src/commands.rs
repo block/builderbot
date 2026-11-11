@@ -16,6 +16,7 @@ use crate::cli::{Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, Ti
 use crate::client::{default_data_dir, discover_and_connect, Client, CtlError, STAGEDCTL_LOCK_ENV};
 
 /// One command's result: the value `--json` prints, and the human rendering.
+#[derive(Debug)]
 pub struct CmdOutput {
     pub json: Value,
     pub human: String,
@@ -1014,24 +1015,58 @@ fn session_wait(
     session_id: &str,
     timeout_secs: u64,
 ) -> Result<CmdOutput, CtlError> {
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    wait_for_session(
+        session_id,
+        Duration::from_secs(timeout_secs),
+        WAIT_POLL_INTERVAL,
+        || fetch_session(client, session_id),
+    )
+}
+
+/// The poll loop behind `session wait`, over an injected fetch so tests can
+/// script a session's status sequence.
+fn wait_for_session(
+    session_id: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    mut fetch: impl FnMut() -> Result<(SessionRow, Value), CtlError>,
+) -> Result<CmdOutput, CtlError> {
+    let timeout_secs = timeout.as_secs();
+    let deadline = Instant::now() + timeout;
     loop {
-        let (session, raw) = fetch_session(client, session_id)?;
+        let (session, raw) = fetch()?;
         match session.status.as_str() {
-            "queued" | "running" => {
+            // Not finished. `disconnected` is a Blox session whose connection
+            // dropped mid-turn: the remote turn may still be running, and
+            // Staged's reconcile can reattach it to `running`.
+            "queued" | "running" | "disconnected" => {
                 if Instant::now() >= deadline {
-                    return Err(CtlError::command(
-                        "wait_timeout",
-                        format!(
-                            "session {session_id} is still {} after {timeout_secs}s; it keeps \
-                             running (waiting never cancels) — wait again or check \
-                             `stagedctl session status {session_id}`",
-                            session.status
-                        ),
-                    ));
+                    return Err(if session.status == "disconnected" {
+                        CtlError::command(
+                            "session_disconnected",
+                            format!(
+                                "session {session_id} is still disconnected after \
+                                 {timeout_secs}s: Staged lost its connection to the Blox \
+                                 workstation, but the remote turn may still be running and \
+                                 Staged reattaches it when the connection returns (waiting \
+                                 never cancels) — wait again or check \
+                                 `stagedctl session status {session_id}`"
+                            ),
+                        )
+                    } else {
+                        CtlError::command(
+                            "wait_timeout",
+                            format!(
+                                "session {session_id} is still {} after {timeout_secs}s; it \
+                                 keeps running (waiting never cancels) — wait again or check \
+                                 `stagedctl session status {session_id}`",
+                                session.status
+                            ),
+                        )
+                    });
                 }
                 std::thread::sleep(
-                    WAIT_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                    poll_interval.min(deadline.saturating_duration_since(Instant::now())),
                 );
             }
             "completed" => {
@@ -1063,12 +1098,16 @@ fn session_wait(
                 ));
             }
             other => {
-                // Unknown terminal-looking status: surface it rather than
-                // spinning forever against a newer app.
-                return Ok(CmdOutput {
-                    human: format!("session {session_id} ended with status {other}"),
-                    json: raw,
-                });
+                // A status this build doesn't know. Neither success (it may
+                // not be finished at all) nor a reason to spin forever.
+                return Err(CtlError::command(
+                    "unknown_status",
+                    format!(
+                        "session {session_id} has status {other:?}, which this stagedctl \
+                         doesn't recognize; it may not be finished — check \
+                         `stagedctl session status {session_id}`"
+                    ),
+                ));
             }
         }
     }
@@ -1185,7 +1224,7 @@ fn session_list(
     Ok(CmdOutput {
         json: Value::Array(kept_raw),
         human: if lines.is_empty() {
-            "no queued or running sessions".to_string()
+            "no queued, running, or disconnected sessions".to_string()
         } else {
             lines.join("\n")
         },
@@ -1396,6 +1435,127 @@ mod tests {
     #[test]
     fn timestamps_render_as_rfc3339() {
         assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
+    }
+
+    // -------------------------------------------------------------------
+    // session wait
+    // -------------------------------------------------------------------
+
+    fn session_row(status: &str) -> (SessionRow, Value) {
+        let raw = json!({"id": "s1", "status": status, "errorMessage": "agent crashed"});
+        (parse(&raw, "session").unwrap(), raw)
+    }
+
+    /// Run the wait loop against a scripted status sequence, polling without
+    /// sleeps. Returns the outcome and how many times the session was read.
+    fn wait_over(statuses: &[&str], timeout: Duration) -> (Result<CmdOutput, CtlError>, usize) {
+        let mut polls = 0;
+        let result = wait_for_session("s1", timeout, Duration::ZERO, || {
+            let status = statuses
+                .get(polls)
+                .unwrap_or_else(|| panic!("polled past the script {statuses:?}"));
+            polls += 1;
+            Ok(session_row(status))
+        });
+        (result, polls)
+    }
+
+    fn command_code(err: &CtlError) -> &'static str {
+        match err {
+            CtlError::Command { code, .. } => code,
+            other => panic!("expected a command error, got {other:?}"),
+        }
+    }
+
+    const LONG: Duration = Duration::from_secs(600);
+
+    #[test]
+    fn wait_polls_through_disconnected_until_the_session_finishes() {
+        let script = [
+            "queued",
+            "running",
+            "disconnected",
+            "disconnected",
+            "running",
+            "completed",
+        ];
+        let (result, polls) = wait_over(&script, LONG);
+        let output = result.expect("a completed session exits 0");
+        assert_eq!(polls, script.len(), "disconnected must not end the wait");
+        assert_eq!(output.human, "session s1 completed");
+
+        // Reconcile can also settle a disconnected turn without reattaching.
+        let (result, _) = wait_over(&["disconnected", "error"], LONG);
+        assert_eq!(command_code(&result.unwrap_err()), "session_error");
+    }
+
+    #[test]
+    fn wait_timeout_while_disconnected_has_its_own_code() {
+        let (result, polls) = wait_over(&["disconnected"], Duration::ZERO);
+        let err = result.unwrap_err();
+        assert_eq!(polls, 1);
+        assert_eq!(command_code(&err), "session_disconnected");
+        assert_eq!(err.exit_code(), 1);
+        assert!(
+            err.to_string().contains("may still be running"),
+            "the message should say the remote turn may continue: {err}"
+        );
+    }
+
+    #[test]
+    fn wait_timeout_while_queued_or_running_is_wait_timeout() {
+        for status in ["queued", "running"] {
+            let (result, _) = wait_over(&[status], Duration::ZERO);
+            let err = result.unwrap_err();
+            assert_eq!(command_code(&err), "wait_timeout", "{status}");
+            assert!(err.to_string().contains(&format!("still {status}")));
+        }
+        // The code follows the status seen at the deadline, not earlier ones.
+        let mut polls = 0;
+        let start = Instant::now();
+        let result = wait_for_session(
+            "s1",
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+            || {
+                polls += 1;
+                let status = if polls == 1 {
+                    "disconnected"
+                } else {
+                    "running"
+                };
+                Ok(session_row(status))
+            },
+        );
+        assert!(start.elapsed() >= Duration::from_millis(50));
+        assert_eq!(command_code(&result.unwrap_err()), "wait_timeout");
+    }
+
+    #[test]
+    fn wait_reports_unknown_statuses_as_errors() {
+        let (result, polls) = wait_over(&["running", "paused"], LONG);
+        let err = result.unwrap_err();
+        assert_eq!(
+            polls, 2,
+            "an unknown status ends the wait rather than spinning"
+        );
+        assert_eq!(command_code(&err), "unknown_status");
+        assert_eq!(err.exit_code(), 1);
+        assert!(err.to_string().contains("\"paused\""), "{err}");
+    }
+
+    #[test]
+    fn wait_maps_terminal_statuses_to_their_exits() {
+        let (result, _) = wait_over(&["completed"], Duration::ZERO);
+        assert!(result.is_ok(), "completed exits 0 even at the deadline");
+
+        let (result, _) = wait_over(&["error"], LONG);
+        let err = result.unwrap_err();
+        assert_eq!(command_code(&err), "session_error");
+        assert_eq!(err.to_string(), "session_error: agent crashed");
+
+        let (result, _) = wait_over(&["cancelled"], LONG);
+        assert_eq!(command_code(&result.unwrap_err()), "session_cancelled");
     }
 
     // -------------------------------------------------------------------

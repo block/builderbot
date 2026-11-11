@@ -3688,22 +3688,32 @@ pub(crate) async fn dispatch(
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let acp_config_selection: Option<store::AcpConfigSelection> =
                 opt_arg(&args, "acpConfigSelection")?;
-
-            let result = session_commands::start_project_session_for_store(
-                store,
-                Arc::clone(session_registry),
-                Arc::clone(action_executor),
-                Arc::clone(action_registry),
-                app_handle.clone(),
-                project_id,
-                prompt,
-                provider,
-                image_ids,
-                acp_config_selection,
-            )
-            .await?;
-
-            Ok(serde_json::to_value(result).unwrap())
+            let app_handle = app_handle.clone();
+            let session_registry = Arc::clone(session_registry);
+            let action_executor = Arc::clone(action_executor);
+            let action_registry = Arc::clone(action_registry);
+            // The desktop command's body. It writes the `running` row and
+            // then runs the rest of the start (note stub, runner, failure
+            // recording); detached, so a client that goes mid-start can't
+            // drop it between the write and its release — whatever that
+            // body's await points become.
+            detached(async move {
+                let result = session_commands::start_project_session_for_store(
+                    store,
+                    session_registry,
+                    action_executor,
+                    action_registry,
+                    app_handle,
+                    project_id,
+                    prompt,
+                    provider,
+                    image_ids,
+                    acp_config_selection,
+                )
+                .await?;
+                Ok(serde_json::to_value(result).unwrap())
+            })
+            .await
         }
         "queue_branch_session" => {
             let store = get_store(store_mutex)?;
@@ -4561,6 +4571,7 @@ mod tests {
             "start_queued_session_now_for_branch(",
             "resume_session_for_store(",
             "resume_or_queue_session_for_store(",
+            "start_project_session_for_store(",
         ];
         /// Arms whose bodies run through `detached`.
         const DETACHED: &[&str] = &[
@@ -4569,6 +4580,7 @@ mod tests {
             "pull_or_queue_branch",
             "resume_session",
             "start_queued_session_now",
+            "start_project_session",
             "push_branch",
             "rebase_branch",
             "squash_commits",
@@ -4578,11 +4590,8 @@ mod tests {
         /// same synchronous stretch: a drop before the write has written
         /// nothing (the polls redo it next tick), and nothing is left
         /// half-written.
-        const WRITES_AFTER_LAST_AWAIT: &[&str] = &[
-            "poll_workspace_status",
-            "poll_all_workspace_statuses",
-            "start_project_session",
-        ];
+        const WRITES_AFTER_LAST_AWAIT: &[&str] =
+            &["poll_workspace_status", "poll_all_workspace_statuses"];
 
         let source = include_str!("web_server.rs");
         for (commands, arm) in dispatch_arms(source) {

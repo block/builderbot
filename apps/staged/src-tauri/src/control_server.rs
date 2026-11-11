@@ -28,8 +28,9 @@
 //! peer-credential (`LOCAL_PEERCRED`/`SO_PEERCRED`) check on this listener
 //! — not a reintroduced token.
 //!
-//! **Discovery:** on listener start the server atomically writes
-//! `~/.staged/control-<pid>.json` (0600) containing
+//! **Discovery:** once the listener is bound — synchronously at app setup,
+//! before anything can start a session (see [`start`]) — the server
+//! atomically writes `~/.staged/control-<pid>.json` (0600) containing
 //! `{port, pid, generation, protocolVersion}`. The pid suffix exists because
 //! multiple Staged instances share `~/.staged`; stale files from dead pids
 //! are swept on startup and our own file is removed on exit. Agent sessions
@@ -161,36 +162,99 @@ pub fn stagedctl_session_ready() -> bool {
     DISCOVERY_FILE.get().is_some() && STAGEDCTL_BIN.get().is_some()
 }
 
-/// Start the control server in a background task. Called unconditionally at
-/// app setup; a failure to bind or to write the discovery file is logged and
-/// leaves the app fully functional without a control surface.
+/// Start the control server. Called unconditionally at app setup, after every
+/// piece of state a dispatch reads is managed; a failure to bind or to write
+/// the discovery file is logged and leaves the app fully functional without a
+/// control surface.
+///
+/// Everything a session start reads — the discovery file, the sidecar path,
+/// the PATH shim — is in place when this returns; only accepting connections
+/// runs on a background task, and a connection that arrives first waits in
+/// the listen backlog. That matters because an agent's env is fixed for its
+/// whole life, and startup recovery and the `KickSource::Startup` queue drain
+/// start local sessions with no window open: `lib.rs` calls this ahead of
+/// them so none of those sessions misses `STAGEDCTL_*`, the shim, or the
+/// guidance paragraph.
 pub fn start(app_handle: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = run(app_handle).await {
+    let prepared = match prepare() {
+        Ok(prepared) => prepared,
+        Err(e) => {
             log::error!("[control_server] not started: {e}");
+            return;
+        }
+    };
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = serve(prepared, app_handle).await {
+            log::error!("[control_server] stopped: {e}");
+            // Don't leave sessions and CLIs pointed at a port nobody answers.
+            remove_instance_files();
         }
     });
 }
 
-async fn run(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let dir = crate::paths::data_dir().ok_or("cannot determine ~/.staged")?;
-    sweep_stale_discovery_files(&dir);
+/// A bound control listener whose discovery file is written. Built by
+/// [`prepare`]; [`serve`] only has to accept on it.
+struct PreparedListener {
+    listener: std::net::TcpListener,
+    port: u16,
+    generation: u64,
+}
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
+/// The synchronous half of [`start`]: sweep, bind, write the discovery file,
+/// build the shim, and publish them to [`stagedctl_env`] and
+/// [`stagedctl_session_ready`].
+fn prepare() -> Result<PreparedListener, String> {
+    let dir = crate::paths::data_dir().ok_or("cannot determine ~/.staged")?;
+    let pid = std::process::id();
+    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let prepared = bind_and_write_discovery(&dir, pid, generation)?;
+    let path = discovery_file_path(&dir, pid);
+    let _ = DISCOVERY_FILE.set(path.clone());
+    setup_stagedctl_shim(&dir, pid);
+    log::info!(
+        "[control_server] bound 127.0.0.1:{}, discovery file {path:?}",
+        prepared.port
+    );
+    Ok(prepared)
+}
+
+/// The filesystem and socket work of [`prepare`], kept free of the
+/// process-wide statics so tests can run it against a temp dir.
+fn bind_and_write_discovery(
+    dir: &std::path::Path,
+    pid: u32,
+    generation: u64,
+) -> Result<PreparedListener, String> {
+    sweep_stale_discovery_files(dir);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("failed to bind control listener: {e}"))?;
+    // `serve` hands the socket to tokio, which requires non-blocking mode.
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("failed to make control listener non-blocking: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("failed to get local address: {e}"))?
         .port();
 
-    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let pid = std::process::id();
-    let path = discovery_file_path(&dir, pid);
-    write_discovery_file(&path, port, pid, generation)?;
-    let _ = DISCOVERY_FILE.set(path.clone());
-    setup_stagedctl_shim(&dir, pid);
-    log::info!("[control_server] listening on 127.0.0.1:{port}, discovery file {path:?}");
+    write_discovery_file(&discovery_file_path(dir, pid), port, pid, generation)?;
+    Ok(PreparedListener {
+        listener,
+        port,
+        generation,
+    })
+}
+
+/// The async half of [`start`]: accept and route requests until the app exits.
+async fn serve(prepared: PreparedListener, app_handle: tauri::AppHandle) -> Result<(), String> {
+    let PreparedListener {
+        listener,
+        port,
+        generation,
+    } = prepared;
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|e| format!("failed to adopt control listener: {e}"))?;
 
     let state = ControlState {
         app_handle,
@@ -432,7 +496,7 @@ fn sweep_stale_discovery_files(dir: &std::path::Path) {
         let Some(pid) = stale_sweep_candidate_pid(name) else {
             continue;
         };
-        if pid == std::process::id() || crate::session_runner::is_process_alive(pid) {
+        if pid == std::process::id() || pid_is_alive(pid) {
             continue;
         }
         let path = entry.path();
@@ -447,6 +511,31 @@ fn sweep_stale_discovery_files(dir: &std::path::Path) {
             log::info!("[control_server] swept stale control entry {name}");
         }
     }
+}
+
+/// Whether `pid` names a running process. The sweep runs on the app's setup
+/// thread, so this is a `kill(pid, 0)` syscall — the probe `stagedctl` uses —
+/// rather than `session_runner::is_process_alive`'s `kill -0` child process
+/// per entry. `EPERM` still proves something runs under that pid; a value
+/// that isn't a positive `pid_t` would address a process group, so it counts
+/// as dead.
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 performs only the existence and permission checks;
+    // nothing is delivered.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn pid_is_alive(pid: u32) -> bool {
+    crate::session_runner::is_process_alive(pid)
 }
 
 /// Parse the pid out of a `control-<pid>.json`, `control-<pid>.json.tmp`, or
@@ -644,6 +733,86 @@ mod tests {
         assert!(alive.exists(), "live-pid discovery file must survive");
         assert!(alive_shim.exists(), "live-pid shim dir must survive");
         assert!(foreign.exists(), "unrelated files must survive");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pid_is_alive_probes_without_a_child_process() {
+        assert!(pid_is_alive(std::process::id()));
+        assert!(!pid_is_alive(999_999_999), "beyond any pid range");
+        // Not positive `pid_t`s: kill() would address a process group.
+        assert!(!pid_is_alive(0));
+        assert!(!pid_is_alive(u32::MAX));
+    }
+
+    // -------------------------------------------------------------------
+    // Startup readiness
+    // -------------------------------------------------------------------
+
+    /// The discovery file names a port that already accepts connections by
+    /// the time the synchronous half returns — no runtime, no `serve` task —
+    /// so a session started right after `start()` can reach the app.
+    #[test]
+    fn bind_and_write_discovery_is_ready_before_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = discovery_file_path(dir.path(), 999_999_999);
+        std::fs::write(&stale, "{}").unwrap();
+
+        let prepared = bind_and_write_discovery(dir.path(), 1234, 3).unwrap();
+
+        assert!(!stale.exists(), "the sweep runs before the bind");
+        let contents: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(discovery_file_path(dir.path(), 1234)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(contents["port"], prepared.port);
+        assert_eq!(contents["generation"], 3);
+        // The connection waits in the listen backlog until `serve` accepts.
+        std::net::TcpStream::connect(("127.0.0.1", prepared.port))
+            .expect("the bound listener should take connections before serve runs");
+    }
+
+    /// Startup recovery and the `KickSource::Startup` drain start local
+    /// sessions with no window open, and an agent's env is fixed for its
+    /// life: setup must make the control server discoverable before any of
+    /// them, and `start` must do that work before it spawns anything.
+    #[test]
+    fn startup_prepares_the_control_server_before_recovery_and_the_queue_kick() {
+        let lib = include_str!("lib.rs");
+        let start_call = "control_server::start(";
+        assert_eq!(
+            lib.matches(start_call).count(),
+            1,
+            "lib.rs should start the control server exactly once"
+        );
+        let started_at = lib.find(start_call).unwrap();
+        for later in [
+            "session_runner::recover_dead_sessions(",
+            "session_runner::reconcile::reconcile_all(",
+            "launch_resume::detect_at_launch(",
+            "session_queue::flush_follow_ups_for_project(",
+            "session_queue::kick_all_with_queued_work(",
+        ] {
+            let at = lib
+                .find(later)
+                .unwrap_or_else(|| panic!("lib.rs no longer calls {later}; update this pin"));
+            assert!(
+                started_at < at,
+                "lib.rs calls {later} before {start_call}; a session it starts would \
+                 never get STAGEDCTL_* or the PATH shim"
+            );
+        }
+
+        let source = include_str!("control_server.rs");
+        let body_at = source.find("pub fn start(").unwrap();
+        let body = &source[body_at..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let prepare_at = body.find("prepare()").expect("start should call prepare()");
+        let spawn_at = body.find("spawn(").expect("start should spawn serve");
+        assert!(
+            prepare_at < spawn_at,
+            "start must prepare the discovery file and shim before spawning: {body}"
+        );
     }
 
     #[test]

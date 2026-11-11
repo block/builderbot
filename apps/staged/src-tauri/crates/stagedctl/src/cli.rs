@@ -166,8 +166,12 @@ with `stagedctl session wait <sessionId>` to block until it finishes.")]
 
     /// Show one session's status (works for finished sessions too)
     #[command(long_about = "\
-Show one session: status (queued, running, completed, error, cancelled),
-why it ended, its provider, prompt, and working directory.
+Show one session: status (queued, running, disconnected, completed, error,
+cancelled), why it ended, its provider, prompt, and working directory.
+
+disconnected means Staged lost its connection to a remote (Blox) session
+mid-turn. It is not finished: the remote turn may still be running, and
+the session returns to running when Staged reattaches it.
 
 Session ids come from `session start`, `session list`, or the [session ...]
 suffixes in `timeline show`.")]
@@ -179,12 +183,16 @@ suffixes in `timeline show`.")]
 
     /// Block until a session finishes (default timeout 240s)
     #[command(long_about = "\
-Poll the app until the session reaches a terminal state.
+Poll the app until the session reaches a terminal state: completed, error,
+or cancelled. Waiting continues through queued, running, and disconnected
+(a remote session whose connection dropped; its turn may still be running).
 
 Exit 0 when the session completes. Exits 1 with `session_error` or
 `session_cancelled` when it ends any other way, and with `wait_timeout`
 when --timeout elapses — in that case the session KEEPS RUNNING; waiting
-never cancels anything.")]
+never cancels anything. If the session is disconnected when --timeout
+elapses, the code is `session_disconnected` instead. A status this
+stagedctl doesn't recognize exits 1 with `unknown_status`.")]
     Wait {
         /// Session id
         #[arg(value_name = "SESSION_ID")]
@@ -205,12 +213,12 @@ in the timeline marked as cancelled. Undo by starting a new session.")]
         session_id: String,
     },
 
-    /// List queued and running sessions
+    /// List queued, running, and disconnected sessions
     #[command(long_about = "\
-List every queued and running session in the app, optionally narrowed to
-one project or one repo. Completed sessions are not listed — find them
-through their artifact in `timeline show`, or directly with
-`session status <id>`.")]
+List every queued, running, and disconnected session in the app,
+optionally narrowed to one project or one repo. Completed sessions are not
+listed — find them through their artifact in `timeline show`, or directly
+with `session status <id>`.")]
     List {
         /// Only sessions in this project (name or id)
         #[arg(long, value_name = "PROJECT")]

@@ -2051,6 +2051,16 @@ pub fn run() {
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
 
+            // Loopback control server for stagedctl — always on. Writes a
+            // pid-suffixed discovery file under ~/.staged and exposes only
+            // the fixed allowlist in `control_server::ALLOWED_COMMANDS`.
+            // After the state above is managed (its handlers dispatch
+            // against it) and before the recovery below: the discovery file
+            // and shim are ready when `start` returns, and a session the
+            // recovery or the startup kick starts keeps the env it launched
+            // with for life.
+            control_server::start(app.handle().clone());
+
             // Startup queue recovery, once every piece of state a drain reads
             // is managed: the kicks below run drains on their own tasks, and
             // those resolve the store and registry from the handle.
@@ -2097,11 +2107,6 @@ pub fn run() {
                 }
                 project_transfer::prune_backups(transfer_store.as_deref());
             });
-
-            // Loopback control server for stagedctl — always on. Writes a
-            // pid-suffixed discovery file under ~/.staged and exposes only
-            // the fixed allowlist in `control_server::ALLOWED_COMMANDS`.
-            control_server::start(app.handle().clone());
 
             // Web server startup is stubbed out in this build.
             // TODO(web): restore web server startup from the `mobile-web` branch.

@@ -118,7 +118,11 @@ describe('stagedMediaView', () => {
   it('leaves other images on the plain img the preset draws', async () => {
     await createEditor('# Note\n\n![Screenshot](shot.png)');
     expect(figures()).toHaveLength(0);
-    expect(document.querySelector('.ProseMirror img')?.getAttribute('src')).toBe('shot.png');
+    // ProseMirror pads an inline image at the start of a line with a
+    // `ProseMirror-separator` img for cursor placement.
+    expect(
+      document.querySelector('.ProseMirror img:not(.ProseMirror-separator)')?.getAttribute('src')
+    ).toBe('shot.png');
   });
 
   it('keeps media in place while text is edited around it', async () => {

@@ -161,15 +161,17 @@ describe('renderMarkdown', () => {
     ['Para\n<pre>\n![S](p)\n</pre>', 0],
     ['- <pre>\n  ![S](p)\n  </pre>', 0],
     ['- <div>\n  ![S](p)\n\n  ![T](p)', 1],
+    // A dedented line directly after the start line ends the list item.
+    ['- <pre>\nlazy ![S](p)\n</pre>', 1],
     ['> <pre>\n> ![S](p)\n![T](p)\n> </pre>\n![U](p)', 2],
-    // Conditions 3-5 end only on their own closer and do not interrupt
-    // paragraphs or list items.
+    // Conditions 3-5 end only on their own closer and, like the others,
+    // interrupt paragraphs and list items.
     ['<![CDATA[\n![S](p)\n]]>', 0],
     ['<![CDATA[\nfoo > bar\n![S](p)\n]]>\n![T](p)', 1],
     ['<?\n![S](p)\n>\n![T](p)', 0],
     ['<!1\n![S](p)\n>\n![T](p)', 2],
-    ['Para\n<!DOCTYPE\n![S](p)\n>\n![T](p)', 2],
-    ['- a\n  ```\n  code\n<![CDATA[\n![S](p)\n  ```\n![T](p)', 1],
+    ['Para\n<!DOCTYPE\n![S](p)\n>\n![T](p)', 1],
+    ['- a\n  ```\n  code\n<![CDATA[\n![S](p)\n  ```\n![T](p)', 0],
   ])('renders indented images by container rules: %j', (source, images) => {
     expect(renderMarkdown(source).match(/<img/g)?.length ?? 0).toBe(images);
   });

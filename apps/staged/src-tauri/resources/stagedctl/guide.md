@@ -4,9 +4,9 @@
 by Staged receive everything needed to use it with zero configuration:
 
 - `stagedctl` is on `PATH` (the exact binary path is also in `$STAGEDCTL_BIN`);
-- `$STAGEDCTL_LOCK` points at the discovery file of the app instance that
-  spawned this session, so the CLI always talks to the right instance even
-  when several are running.
+- `$STAGEDCTL_LOCK` points at the control file of the app instance that
+  spawned this session (under `~/.staged/control/<pid>/`), so the CLI
+  always talks to the right instance even when several are running.
 
 ## Discover, don't memorize
 
@@ -42,6 +42,6 @@ start sessions only when the task genuinely calls for it.
 ## When stagedctl is unavailable
 
 The CLI needs the spawning app instance to be alive and reachable over
-loopback. Exit code 3 means "not running under a Staged app" (or a protocol
+its control socket. Exit code 3 means "not running under a Staged app" (or a protocol
 mismatch after the app updated); that is not retryable from inside this
 session — report it instead of retrying.

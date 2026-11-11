@@ -11,8 +11,9 @@ Control a running Staged app from the command line.
 stagedctl is built for agents running inside Staged-spawned sessions: the
 app injects $STAGEDCTL_LOCK into those sessions, and stagedctl uses it to
 find the app with zero configuration. Outside a session it tries each
-running Staged instance (control-<pid>.json under ~/.staged), newest
-first, until one answers.
+running Staged instance (~/.staged/control/<pid>/discovery.json), newest
+first, until one answers. Control files are read only when they are
+owner-private (0600 inside a 0700 directory, no symlinks).
 
 Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
@@ -38,7 +39,7 @@ Exit codes:
 )]
 pub struct Cli {
     /// Path to the app's control file (defaults to $STAGEDCTL_LOCK, then
-    /// live control-<pid>.json files under ~/.staged, newest first)
+    /// live ~/.staged/control/<pid>/discovery.json files, newest first)
     #[arg(long, global = true, value_name = "PATH")]
     pub lock_path: Option<std::path::PathBuf>,
 

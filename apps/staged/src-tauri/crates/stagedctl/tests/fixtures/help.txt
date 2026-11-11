@@ -4,8 +4,9 @@ Control a running Staged app from the command line.
 stagedctl is built for agents running inside Staged-spawned sessions: the
 app injects $STAGEDCTL_LOCK into those sessions, and stagedctl uses it to
 find the app with zero configuration. Outside a session it tries each
-running Staged instance (control-<pid>.json under ~/.staged), newest
-first, until one answers.
+running Staged instance (~/.staged/control/<pid>/discovery.json), newest
+first, until one answers. Control files are read only when they are
+owner-private (0600 inside a 0700 directory, no symlinks).
 
 Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
@@ -33,7 +34,7 @@ Commands:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -56,7 +57,7 @@ Commands:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -75,7 +76,7 @@ Usage: stagedctl project list [OPTIONS]
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -99,7 +100,7 @@ Arguments:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -118,7 +119,7 @@ Commands:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -148,7 +149,7 @@ Arguments:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --repo <REPO>
           Repo address <owner>/<repo>[:<subpath>] (see `stagedctl project get`)
@@ -177,7 +178,7 @@ Commands:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -207,7 +208,7 @@ Arguments:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --repo <REPO>
           Repo address <owner>/<repo>[:<subpath>]; omit to start a project-level session
@@ -251,7 +252,7 @@ Arguments:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -279,7 +280,7 @@ Arguments:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --timeout <SECONDS>
           Seconds to wait before giving up (the session keeps running)
@@ -304,7 +305,7 @@ Arguments:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -322,7 +323,7 @@ Usage: stagedctl session list [OPTIONS]
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --project <PROJECT>
           Only sessions in this project (name or id)
@@ -347,7 +348,7 @@ Commands:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -370,7 +371,7 @@ Arguments:
 
 Options:
       --lock-path <PATH>
-          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live control-<pid>.json files under ~/.staged, newest first)
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 
       --repo <REPO>
           Repo address <owner>/<repo>[:<subpath>] (see `stagedctl project get`)

@@ -1,53 +1,63 @@
-//! Loopback control server for `stagedctl`.
+//! Control server for `stagedctl`.
 //!
-//! A plain-HTTP listener on `127.0.0.1:0` that lets a same-host CLI drive the
-//! running app through the existing `web_server::dispatch()` logic:
+//! An HTTP listener on a Unix domain socket that lets a same-user CLI drive
+//! the running app through the existing `web_server::dispatch()` logic:
 //!
 //! - `GET  /api/ping`              — handshake: pid, generation, protocolVersion
 //! - `POST /api/invoke/{command}`  — dispatch, restricted to [`ALLOWED_COMMANDS`]
 //!
-//! **Security model (berd's):** no token. Every request is rejected with 403
-//! if it carries an `Origin` header, any `Sec-Fetch-*` header, or a `Host`
-//! other than the literal `127.0.0.1:<port>`. That closes browser-JS-to-
-//! localhost and DNS rebinding; it deliberately does not exclude other
-//! same-user processes. What makes that sound is the fixed verb table:
-//! [`ALLOWED_COMMANDS`] maps the v1 `stagedctl` surface to specific dispatch
-//! commands — every one UI-visible and read-only or reversible — and nothing
-//! else is reachable. No deletes, no history rewrites, no `create_pr` /
-//! `push_branch`. Exposing a destructive verb reopens the auth design and
-//! must come with a `PROTOCOL_VERSION` bump.
+//! **Transport and who can connect.** The socket lives in
+//! `~/.staged/control/<pid>/`, a `0700` directory the app creates and refuses
+//! to use if it is a symlink or owned by someone else (see [`files`]). Other
+//! local accounts therefore cannot connect at all — this is what v1's
+//! loopback TCP port could not promise, and why berd abandoned the same
+//! design. Every connection's peer credentials are read (`LOCAL_PEERCRED` /
+//! `SO_PEERCRED`, via tokio's `peer_cred`) and a peer whose uid is not the
+//! app's is refused before any request is read; the peer pid is kept on the
+//! request for consent prompts and audit text, never as the decision. A
+//! browser cannot open a Unix socket, so the v1 header rules — any `Origin`,
+//! any `Sec-Fetch-*`, a `Host` other than the literal [`HOST_LITERAL`] — are
+//! now belt and braces, and stay.
 //!
-//! Loopback TCP bounds callers to the same *host*, not the same *user*:
-//! another local account can find this listener with a port scan of
-//! 127.0.0.1 and pass every header check — the 0600 discovery file only
-//! hides the port, it does not gate the connection. v1 accepts that,
-//! matching berd: Staged targets effectively single-user dev machines, and
-//! the allowlist caps what such a caller gets (timeline reads and session
-//! starts, nothing destructive). If that assumption stops holding, the
-//! upgrade path is a Unix-domain socket with 0600 perms — or a
-//! peer-credential (`LOCAL_PEERCRED`/`SO_PEERCRED`) check on this listener
-//! — not a reintroduced token.
+//! **TCP fallback.** Where a Unix socket is unavailable — a non-unix build,
+//! or a socket path over the platform limit — the server binds
+//! `127.0.0.1:0` instead and mints a 256-bit per-start token into the
+//! owner-only discovery file. Every request must then carry it as
+//! `Authorization: Bearer`, checked in middleware before the body is read.
+//! Staged ships on macOS only, so this path exists for CI and for a home
+//! directory with a very long name; the Unix socket is the design.
 //!
-//! **Discovery:** once the listener is bound — synchronously at app setup,
+//! **What a caller can do.** The fixed verb table: [`ALLOWED_COMMANDS`] maps
+//! the `stagedctl` surface to specific dispatch commands — every one
+//! UI-visible and read-only or reversible — and nothing else is reachable.
+//! No deletes, no history rewrites, no `create_pr` / `push_branch`. Exposing
+//! a destructive verb reopens the auth design and must come with a
+//! [`PROTOCOL_VERSION`] bump.
+//!
+//! **Discovery.** Once the listener is bound — synchronously at app setup,
 //! before anything can start a session (see [`start`]) — the server
-//! atomically writes `~/.staged/control-<pid>.json` (0600) containing
-//! `{port, pid, generation, protocolVersion}`. The pid suffix exists because
-//! multiple Staged instances share `~/.staged`; stale files from dead pids
-//! are swept on startup and our own file is removed on exit. Agent sessions
-//! spawned by Staged receive the file's path in `STAGEDCTL_LOCK` so the CLI
-//! finds its owning instance with zero configuration.
+//! atomically writes `~/.staged/control/<pid>/discovery.json` (0600)
+//! containing `{socket | port+token, pid, generation, protocolVersion}`. The
+//! per-pid directory exists because multiple Staged instances share
+//! `~/.staged`; stale directories from dead pids are swept on startup and our
+//! own is removed on exit. Agent sessions spawned by Staged receive a file
+//! path in `STAGEDCTL_LOCK` so the CLI finds its owning instance with zero
+//! configuration.
 //!
-//! **Sidecar reachability:** the `stagedctl` binary ships as a Tauri sidecar
+//! **Sidecar reachability.** The `stagedctl` binary ships as a Tauri sidecar
 //! next to the app executable. At startup this module resolves it, exposes
-//! its path to sessions as `STAGEDCTL_BIN`, and builds a per-instance PATH
-//! shim dir (`~/.staged/control-bin-<pid>/stagedctl` symlink) that
-//! `session_runner` prepends to every local agent session's PATH so a bare
-//! `stagedctl` just works. Shim dirs follow the discovery file's lifecycle
-//! (pid-suffixed, swept when dead, removed on exit).
+//! its path to sessions as `STAGEDCTL_BIN`, and builds a PATH shim dir
+//! (`~/.staged/control/<pid>/bin/stagedctl` symlink) that `session_runner`
+//! prepends to every local agent session's PATH so a bare `stagedctl` just
+//! works. The shim lives in the instance directory and shares its lifecycle.
+
+mod files;
+
+pub(crate) use files::ControlTransport;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -56,11 +66,16 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
+use subtle::ConstantTimeEq;
 
 /// Version of the CLI ↔ app wire contract. Bump on any breaking reshape of
 /// the discovery file, the endpoints, or the semantics of an allowlisted
 /// command — the CLI refuses to talk to a mismatched app.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// v2: Unix-socket transport under `~/.staged/control/<pid>/`, the literal
+/// `Host`, and the bearer on the TCP fallback. A v1 CLI reads the mismatch
+/// as "app updated — restart Staged".
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Env var carrying the discovery-file path into spawned agent sessions.
 pub const STAGEDCTL_LOCK_ENV: &str = "STAGEDCTL_LOCK";
@@ -71,7 +86,18 @@ pub const STAGEDCTL_LOCK_ENV: &str = "STAGEDCTL_LOCK";
 /// `BERDCTL_BIN` equivalent).
 pub const STAGEDCTL_BIN_ENV: &str = "STAGEDCTL_BIN";
 
-/// The dispatch commands backing the v1 `stagedctl` command table — the only
+/// The `Host` every request must carry, verbatim. The CLI sets it on both
+/// transports; a browser (or anything built on a URL) sends the address it
+/// connected to instead, so the rule excludes them without naming a port.
+pub const HOST_LITERAL: &str = "stagedctl";
+
+/// Longest socket path the server binds: `sun_path` is 104 bytes on macOS
+/// including the terminator (108 on Linux), so 103 is the portable bound.
+/// `~/.staged/control/<pid>/sock` is ~45 bytes for a normal home directory;
+/// a longer path falls back to loopback TCP rather than failing to start.
+const MAX_SOCKET_PATH_LEN: usize = 103;
+
+/// The dispatch commands backing the `stagedctl` command table — the only
 /// verbs reachable through the control server. Every entry must be visible in
 /// the UI and either read-only or reversible (berd's eligibility rule); a
 /// destructive verb cannot be added here without reopening the auth design
@@ -108,6 +134,11 @@ const CONTROL_BODY_LIMIT: usize = 1024 * 1024;
 /// call.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// This instance's directory (`~/.staged/control/<pid>`), set once the
+/// listener is up. Holds the socket, the discovery file, the per-session
+/// files and the PATH shim; removed whole on exit.
+static INSTANCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
 /// Discovery-file path, set once the listener is up. Consulted by the env
 /// injection in `session_runner` and the exit cleanup; `None` means the
 /// server never started (bind failure) and sessions get no `STAGEDCTL_LOCK`.
@@ -119,19 +150,18 @@ static DISCOVERY_FILE: OnceLock<PathBuf> = OnceLock::new();
 /// `STAGEDCTL_BIN` or PATH shim.
 static STAGEDCTL_BIN: OnceLock<PathBuf> = OnceLock::new();
 
-/// Per-instance PATH shim dir (`~/.staged/control-bin-<pid>/`) holding a
+/// This instance's PATH shim dir (`~/.staged/control/<pid>/bin/`) holding a
 /// `stagedctl` symlink to the sidecar, prepended to every local agent
-/// session's PATH. Pid-suffixed for the same reason as the discovery file:
+/// session's PATH. Per instance for the same reason as the discovery file:
 /// `~/.staged` is shared, and a dev instance and a production install must
 /// never point each other's sessions at the wrong binary (or at a symlink
-/// dangling into a cleaned dev target dir). Swept and removed alongside the
-/// discovery file.
+/// dangling into a cleaned dev target dir).
 static STAGEDCTL_SHIM_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone)]
 struct ControlState {
     app_handle: tauri::AppHandle,
-    port: u16,
+    transport: Arc<ControlTransport>,
     generation: u64,
 }
 
@@ -194,7 +224,8 @@ pub fn start(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = serve(prepared, app_handle).await {
             log::error!("[control_server] stopped: {e}");
-            // Don't leave sessions and CLIs pointed at a port nobody answers.
+            // Don't leave sessions and CLIs pointed at an endpoint nobody
+            // answers.
             remove_instance_files();
         }
     });
@@ -203,25 +234,34 @@ pub fn start(app_handle: tauri::AppHandle) {
 /// A bound control listener whose discovery file is written. Built by
 /// [`prepare`]; [`serve`] only has to accept on it.
 struct PreparedListener {
-    listener: std::net::TcpListener,
-    port: u16,
+    listener: BoundListener,
+    transport: ControlTransport,
     generation: u64,
 }
 
-/// The synchronous half of [`start`]: sweep, bind, write the discovery file,
-/// build the shim, and publish them to [`stagedctl_env`] and
-/// [`stagedctl_session_ready`].
+/// The listener [`prepare`] bound, still a std socket: `serve` hands it to
+/// tokio once the runtime is running the accept loop.
+enum BoundListener {
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixListener),
+    Tcp(std::net::TcpListener),
+}
+
+/// The synchronous half of [`start`]: sweep, create the instance directory,
+/// bind, write the discovery file, build the shim, and publish them to
+/// [`stagedctl_env`] and [`stagedctl_session_ready`].
 fn prepare() -> Result<PreparedListener, String> {
-    let dir = crate::paths::data_dir().ok_or("cannot determine ~/.staged")?;
+    let data_dir = crate::paths::data_dir().ok_or("cannot determine ~/.staged")?;
     let pid = std::process::id();
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let prepared = bind_and_write_discovery(&dir, pid, generation)?;
-    let path = discovery_file_path(&dir, pid);
-    let _ = DISCOVERY_FILE.set(path.clone());
-    setup_stagedctl_shim(&dir, pid);
+    let prepared = bind_and_write_discovery(&data_dir, pid, generation)?;
+    let instance_dir = files::instance_dir_path(&files::control_root(&data_dir), pid);
+    let _ = DISCOVERY_FILE.set(files::discovery_file_path(&instance_dir));
+    setup_stagedctl_shim(&instance_dir);
+    let _ = INSTANCE_DIR.set(instance_dir.clone());
     log::info!(
-        "[control_server] bound 127.0.0.1:{}, discovery file {path:?}",
-        prepared.port
+        "[control_server] listening on {}, instance dir {instance_dir:?}",
+        prepared.transport.describe()
     );
     Ok(prepared)
 }
@@ -229,15 +269,89 @@ fn prepare() -> Result<PreparedListener, String> {
 /// The filesystem and socket work of [`prepare`], kept free of the
 /// process-wide statics so tests can run it against a temp dir.
 fn bind_and_write_discovery(
-    dir: &std::path::Path,
+    data_dir: &std::path::Path,
     pid: u32,
     generation: u64,
 ) -> Result<PreparedListener, String> {
-    sweep_stale_discovery_files(dir);
+    std::fs::create_dir_all(data_dir).map_err(|e| format!("create {data_dir:?}: {e}"))?;
+    let root = files::control_root(data_dir);
+    files::ensure_private_dir(&root)?;
+    files::sweep_legacy_v1_entries(data_dir);
+    files::sweep_stale_instances(&root);
 
+    let instance_dir = files::instance_dir_path(&root, pid);
+    files::create_fresh_instance_dir(&instance_dir)?;
+    let (listener, transport) = bind_listener(&instance_dir)?;
+    files::write_discovery_file(
+        &files::discovery_file_path(&instance_dir),
+        &transport,
+        pid,
+        generation,
+    )?;
+    Ok(PreparedListener {
+        listener,
+        transport,
+        generation,
+    })
+}
+
+/// Bind the Unix socket inside the instance directory, or fall back to
+/// loopback TCP with a per-start token where that is impossible.
+fn bind_listener(
+    instance_dir: &std::path::Path,
+) -> Result<(BoundListener, ControlTransport), String> {
+    #[cfg(unix)]
+    {
+        let socket = files::socket_path(instance_dir);
+        if socket_path_fits(&socket) {
+            match bind_unix(&socket) {
+                Ok(listener) => {
+                    return Ok((
+                        BoundListener::Unix(listener),
+                        ControlTransport::Unix { socket },
+                    ))
+                }
+                Err(e) => log::warn!(
+                    "[control_server] cannot bind {socket:?} ({e}); falling back to loopback TCP"
+                ),
+            }
+        } else {
+            log::warn!(
+                "[control_server] socket path {socket:?} exceeds {MAX_SOCKET_PATH_LEN} bytes; \
+                 falling back to loopback TCP"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = instance_dir;
+    bind_tcp()
+}
+
+fn socket_path_fits(socket: &std::path::Path) -> bool {
+    socket.as_os_str().len() <= MAX_SOCKET_PATH_LEN
+}
+
+#[cfg(unix)]
+fn bind_unix(socket: &std::path::Path) -> Result<std::os::unix::net::UnixListener, String> {
+    use std::os::unix::fs::PermissionsExt;
+    // `create_fresh_instance_dir` emptied the directory, so no stale socket
+    // file can make the bind fail with EADDRINUSE.
+    let listener = std::os::unix::net::UnixListener::bind(socket)
+        .map_err(|e| format!("failed to bind control socket: {e}"))?;
+    // `serve` hands the socket to tokio, which requires non-blocking mode.
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("failed to make control socket non-blocking: {e}"))?;
+    // The 0700 directory already excludes other users; the socket's own mode
+    // is belt and braces.
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod 0600 {socket:?}: {e}"))?;
+    Ok(listener)
+}
+
+fn bind_tcp() -> Result<(BoundListener, ControlTransport), String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("failed to bind control listener: {e}"))?;
-    // `serve` hands the socket to tokio, which requires non-blocking mode.
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("failed to make control listener non-blocking: {e}"))?;
@@ -245,42 +359,63 @@ fn bind_and_write_discovery(
         .local_addr()
         .map_err(|e| format!("failed to get local address: {e}"))?
         .port();
-
-    write_discovery_file(&discovery_file_path(dir, pid), port, pid, generation)?;
-    Ok(PreparedListener {
-        listener,
-        port,
-        generation,
-    })
+    Ok((
+        BoundListener::Tcp(listener),
+        ControlTransport::Tcp {
+            port,
+            token: crate::web_server::generate_token(),
+        },
+    ))
 }
 
 /// The async half of [`start`]: accept and route requests until the app exits.
 async fn serve(prepared: PreparedListener, app_handle: tauri::AppHandle) -> Result<(), String> {
     let PreparedListener {
         listener,
-        port,
+        transport,
         generation,
     } = prepared;
-    let listener = tokio::net::TcpListener::from_std(listener)
-        .map_err(|e| format!("failed to adopt control listener: {e}"))?;
-
     let state = ControlState {
         app_handle,
-        port,
+        transport: Arc::new(transport),
         generation,
     };
     let router = Router::new()
         .route("/api/ping", get(ping))
         .merge(invoke_router(invoke))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            reject_non_local,
-        ))
-        .with_state(state);
+        .layer(middleware::from_fn(reject_browser_shaped_requests))
+        .with_state(state.clone());
 
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| format!("control server error: {e}"))
+    match listener {
+        #[cfg(unix)]
+        BoundListener::Unix(listener) => {
+            let listener = tokio::net::UnixListener::from_std(listener)
+                .map_err(|e| format!("failed to adopt control socket: {e}"))?;
+            // Outermost, so a foreign peer is refused before any header or
+            // body is looked at.
+            let router = router.layer(middleware::from_fn(reject_foreign_peer));
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<UdsPeer>(),
+            )
+            .await
+            .map_err(|e| format!("control server error: {e}"))
+        }
+        BoundListener::Tcp(listener) => {
+            let listener = tokio::net::TcpListener::from_std(listener)
+                .map_err(|e| format!("failed to adopt control listener: {e}"))?;
+            // Outermost: the per-start token is the TCP fallback's stand-in
+            // for the peer-uid check, so it is verified before the body is
+            // read.
+            let router = router.layer(middleware::from_fn_with_state(
+                state,
+                require_instance_token,
+            ));
+            axum::serve(listener, router)
+                .await
+                .map_err(|e| format!("control server error: {e}"))
+        }
+    }
 }
 
 /// The invoke route with [`CONTROL_BODY_LIMIT`] applied to it. Generic over
@@ -299,16 +434,129 @@ where
 }
 
 // =============================================================================
-// Request handling
+// Peer credentials (Unix socket)
 // =============================================================================
 
-/// Middleware applying the header rules on every route (see module docs).
-async fn reject_non_local(
+/// The connecting process, as the kernel reports it at `accept` time. The
+/// peer is the `stagedctl` process itself — not the agent or terminal that
+/// ran it — so the pid is informational (consent prompts, audit text) and
+/// only the uid gates anything. `None` fields mean the lookup failed, which
+/// the uid gate treats as a foreign peer.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UdsPeer {
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub pid: Option<i32>,
+}
+
+#[cfg(unix)]
+impl
+    axum::extract::connect_info::Connected<
+        axum::serve::IncomingStream<'_, tokio::net::UnixListener>,
+    > for UdsPeer
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        match stream.io().peer_cred() {
+            Ok(cred) => UdsPeer {
+                uid: Some(cred.uid()),
+                gid: Some(cred.gid()),
+                pid: cred.pid(),
+            },
+            Err(e) => {
+                log::warn!("[control_server] cannot read peer credentials: {e}");
+                UdsPeer {
+                    uid: None,
+                    gid: None,
+                    pid: None,
+                }
+            }
+        }
+    }
+}
+
+/// Why a Unix-socket peer may not proceed, or `None` if it may: anything but
+/// the app's own effective uid. Unreadable credentials fail closed.
+#[cfg(unix)]
+fn peer_violation(peer: &UdsPeer) -> Option<&'static str> {
+    match peer.uid {
+        Some(uid) if uid == files::current_uid() => None,
+        Some(_) => Some("the connecting process belongs to another user"),
+        None => Some("the connecting process's credentials could not be read"),
+    }
+}
+
+/// Middleware refusing connections from other users on the Unix socket.
+#[cfg(unix)]
+async fn reject_foreign_peer(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<UdsPeer>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(reason) = peer_violation(&peer) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": reason })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+// =============================================================================
+// Per-start token (TCP fallback)
+// =============================================================================
+
+/// The `Authorization: Bearer` value on a request, if any.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+/// Why a TCP-fallback request may not proceed, or `None` if it carries this
+/// start's token.
+fn instance_token_violation(headers: &HeaderMap, expected: &str) -> Option<&'static str> {
+    match bearer_token(headers) {
+        Some(token) if constant_time_eq(token, expected) => None,
+        Some(_) => Some("the bearer token is not this Staged instance's"),
+        None => Some("the loopback TCP fallback requires Authorization: Bearer <token>"),
+    }
+}
+
+/// Middleware applying [`instance_token_violation`] when the transport is
+/// TCP. On the Unix socket the peer-uid check is the gate and this passes
+/// everything through.
+async fn require_instance_token(
     State(state): State<ControlState>,
     request: Request,
     next: Next,
 ) -> Response {
-    if let Some(reason) = header_violation(request.headers(), state.port) {
+    if let ControlTransport::Tcp { token, .. } = &*state.transport {
+        if let Some(reason) = instance_token_violation(request.headers(), token) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
+}
+
+// =============================================================================
+// Request handling
+// =============================================================================
+
+/// Middleware applying the header rules on every route (see module docs).
+async fn reject_browser_shaped_requests(request: Request, next: Next) -> Response {
+    if let Some(reason) = header_violation(request.headers()) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": reason })),
@@ -320,8 +568,8 @@ async fn reject_non_local(
 
 /// Returns why a request must be rejected, or `None` if it may proceed:
 /// any `Origin` header, any `Sec-Fetch-*` header, or a `Host` other than
-/// the literal `127.0.0.1:<port>`.
-fn header_violation(headers: &HeaderMap, port: u16) -> Option<&'static str> {
+/// the literal [`HOST_LITERAL`].
+fn header_violation(headers: &HeaderMap) -> Option<&'static str> {
     if headers.contains_key("origin") {
         return Some("requests with an Origin header are not allowed");
     }
@@ -331,10 +579,9 @@ fn header_violation(headers: &HeaderMap, port: u16) -> Option<&'static str> {
     {
         return Some("requests with Sec-Fetch-* headers are not allowed");
     }
-    let expected_host = format!("127.0.0.1:{port}");
     match headers.get("host").and_then(|v| v.to_str().ok()) {
-        Some(host) if host == expected_host => None,
-        _ => Some("Host header must be the literal loopback address"),
+        Some(host) if host == HOST_LITERAL => None,
+        _ => Some("Host header must be the literal `stagedctl`"),
     }
 }
 
@@ -398,7 +645,7 @@ fn locate_stagedctl_sidecar() -> Option<PathBuf> {
 /// Resolve the sidecar and build this instance's PATH shim dir. A missing
 /// sidecar or failed shim is logged and degrades gracefully: sessions still
 /// get `STAGEDCTL_LOCK`, just no `STAGEDCTL_BIN` / bare-name resolution.
-fn setup_stagedctl_shim(dir: &std::path::Path, pid: u32) {
+fn setup_stagedctl_shim(instance_dir: &std::path::Path) {
     let Some(bin) = locate_stagedctl_sidecar() else {
         log::warn!(
             "[control_server] stagedctl sidecar not found next to the app executable; \
@@ -406,174 +653,33 @@ fn setup_stagedctl_shim(dir: &std::path::Path, pid: u32) {
         );
         return;
     };
-    match create_stagedctl_shim_dir(&stagedctl_shim_dir_path(dir, pid), &bin) {
+    let shim_dir = files::shim_dir_path(instance_dir);
+    match files::create_shim_dir(&shim_dir, &bin) {
         Ok(()) => {
-            let _ = STAGEDCTL_SHIM_DIR.set(stagedctl_shim_dir_path(dir, pid));
+            let _ = STAGEDCTL_SHIM_DIR.set(shim_dir);
         }
         Err(e) => log::warn!("[control_server] failed to create stagedctl PATH shim: {e}"),
     }
     let _ = STAGEDCTL_BIN.set(bin);
 }
 
-fn stagedctl_shim_dir_path(dir: &std::path::Path, pid: u32) -> PathBuf {
-    dir.join(format!("control-bin-{pid}"))
-}
-
-/// Create (or refresh, after a same-pid restart of the control server) the
-/// shim dir containing a `stagedctl` symlink to the bundled sidecar.
-#[cfg(unix)]
-fn create_stagedctl_shim_dir(
-    shim_dir: &std::path::Path,
-    bin: &std::path::Path,
-) -> Result<(), String> {
-    std::fs::create_dir_all(shim_dir).map_err(|e| format!("create {shim_dir:?}: {e}"))?;
-    let link = shim_dir.join("stagedctl");
-    match std::fs::remove_file(&link) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("remove existing {link:?}: {e}")),
-    }
-    std::os::unix::fs::symlink(bin, &link).map_err(|e| format!("symlink {link:?} -> {bin:?}: {e}"))
-}
-
-#[cfg(not(unix))]
-fn create_stagedctl_shim_dir(
-    _shim_dir: &std::path::Path,
-    _bin: &std::path::Path,
-) -> Result<(), String> {
-    Err("stagedctl PATH shim is only supported on unix".to_string())
-}
-
 // =============================================================================
-// Discovery file
+// Exit
 // =============================================================================
 
-fn discovery_file_path(dir: &std::path::Path, pid: u32) -> PathBuf {
-    dir.join(format!("control-{pid}.json"))
-}
-
-/// Atomically write the discovery file: temp file in the same directory with
-/// 0600 permissions, fsync, then rename — so a reader never sees partial
-/// JSON and other users never see the port at all.
-fn write_discovery_file(
-    path: &std::path::Path,
-    port: u16,
-    pid: u32,
-    generation: u64,
-) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "port": port,
-        "pid": pid,
-        "generation": generation,
-        "protocolVersion": PROTOCOL_VERSION,
-    });
-    let contents =
-        serde_json::to_vec_pretty(&payload).map_err(|e| format!("serialize discovery: {e}"))?;
-
-    let tmp = path.with_extension("json.tmp");
-    {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&tmp)
-            .map_err(|e| format!("create {tmp:?}: {e}"))?;
-        file.write_all(&contents)
-            .map_err(|e| format!("write {tmp:?}: {e}"))?;
-        file.sync_all().map_err(|e| format!("fsync {tmp:?}: {e}"))?;
-    }
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))
-}
-
-/// Remove this instance's discovery file and PATH-shim dir. Called from the
-/// app exit handler.
+/// Remove this instance's directory — socket, discovery file, per-session
+/// files and PATH shim. Called from the app exit handler.
 pub fn remove_instance_files() {
-    if let Some(path) = DISCOVERY_FILE.get() {
-        if let Err(e) = std::fs::remove_file(path) {
-            log::warn!("[control_server] failed to remove discovery file {path:?}: {e}");
-        }
-    }
-    if let Some(dir) = STAGEDCTL_SHIM_DIR.get() {
+    if let Some(dir) = INSTANCE_DIR.get() {
         if let Err(e) = std::fs::remove_dir_all(dir) {
-            log::warn!("[control_server] failed to remove shim dir {dir:?}: {e}");
+            log::warn!("[control_server] failed to remove instance dir {dir:?}: {e}");
         }
     }
-}
-
-/// Delete `control-<pid>.json` files (plus orphaned temp files) and
-/// `control-bin-<pid>` shim dirs left behind by instances that are no longer
-/// running. `~/.staged` is shared by every Staged instance, so only entries
-/// whose embedded pid is dead are touched.
-fn sweep_stale_discovery_files(dir: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(pid) = stale_sweep_candidate_pid(name) else {
-            continue;
-        };
-        if pid == std::process::id() || pid_is_alive(pid) {
-            continue;
-        }
-        let path = entry.path();
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        if let Err(e) = result {
-            log::warn!("[control_server] failed to sweep stale {name}: {e}");
-        } else {
-            log::info!("[control_server] swept stale control entry {name}");
-        }
-    }
-}
-
-/// Whether `pid` names a running process. The sweep runs on the app's setup
-/// thread, so this is a `kill(pid, 0)` syscall — the probe `stagedctl` uses —
-/// rather than `session_runner::is_process_alive`'s `kill -0` child process
-/// per entry. `EPERM` still proves something runs under that pid; a value
-/// that isn't a positive `pid_t` would address a process group, so it counts
-/// as dead.
-#[cfg(unix)]
-fn pid_is_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    if pid <= 0 {
-        return false;
-    }
-    // SAFETY: signal 0 performs only the existence and permission checks;
-    // nothing is delivered.
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(unix))]
-fn pid_is_alive(pid: u32) -> bool {
-    crate::session_runner::is_process_alive(pid)
-}
-
-/// Parse the pid out of a `control-<pid>.json`, `control-<pid>.json.tmp`, or
-/// `control-bin-<pid>` filename; `None` for anything else.
-fn stale_sweep_candidate_pid(filename: &str) -> Option<u32> {
-    let rest = filename.strip_prefix("control-")?;
-    let pid = rest
-        .strip_suffix(".json")
-        .or_else(|| rest.strip_suffix(".json.tmp"))
-        .or_else(|| rest.strip_prefix("bin-"))?;
-    pid.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::files::tests::private_tempdir;
     use super::*;
     use axum::http::HeaderValue;
 
@@ -581,27 +687,24 @@ mod tests {
     // Header rejection rules
     // -------------------------------------------------------------------
 
-    fn loopback_headers(port: u16) -> HeaderMap {
+    fn literal_host_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "host",
-            HeaderValue::from_str(&format!("127.0.0.1:{port}")).unwrap(),
-        );
+        headers.insert("host", HeaderValue::from_static(HOST_LITERAL));
         headers
     }
 
     #[test]
-    fn accepts_plain_loopback_request() {
-        assert_eq!(header_violation(&loopback_headers(4242), 4242), None);
+    fn accepts_a_request_with_the_literal_host() {
+        assert_eq!(header_violation(&literal_host_headers()), None);
     }
 
     #[test]
     fn rejects_any_origin_header() {
-        for origin in ["http://evil.example", "http://127.0.0.1:4242", "null"] {
-            let mut headers = loopback_headers(4242);
+        for origin in ["http://evil.example", "http://stagedctl", "null"] {
+            let mut headers = literal_host_headers();
             headers.insert("origin", HeaderValue::from_str(origin).unwrap());
             assert!(
-                header_violation(&headers, 4242).is_some(),
+                header_violation(&headers).is_some(),
                 "Origin {origin:?} should be rejected"
             );
         }
@@ -610,28 +713,30 @@ mod tests {
     #[test]
     fn rejects_any_sec_fetch_header() {
         for name in ["sec-fetch-mode", "sec-fetch-site", "sec-fetch-dest"] {
-            let mut headers = loopback_headers(4242);
+            let mut headers = literal_host_headers();
             headers.insert(name, HeaderValue::from_static("cors"));
             assert!(
-                header_violation(&headers, 4242).is_some(),
+                header_violation(&headers).is_some(),
                 "{name} should be rejected"
             );
         }
     }
 
     #[test]
-    fn rejects_host_other_than_literal_loopback() {
+    fn rejects_host_other_than_the_literal() {
         for host in [
             "localhost:4242", // DNS name — rebinding surface
-            "127.0.0.1:9999", // wrong port
-            "127.0.0.1",      // missing port
-            "[::1]:4242",     // IPv6 loopback is not the literal
-            "staged.example:4242",
+            "127.0.0.1:4242", // what a browser sends to the TCP fallback
+            "127.0.0.1",      // v1's literal, minus the port
+            "[::1]:4242",     // IPv6 loopback
+            "stagedctl:80",   // the literal with a port is not the literal
+            "Stagedctl",      // case matters: the CLI sends it verbatim
+            "staged.example",
         ] {
             let mut headers = HeaderMap::new();
             headers.insert("host", HeaderValue::from_str(host).unwrap());
             assert!(
-                header_violation(&headers, 4242).is_some(),
+                header_violation(&headers).is_some(),
                 "Host {host:?} should be rejected"
             );
         }
@@ -639,7 +744,72 @@ mod tests {
 
     #[test]
     fn rejects_missing_host_header() {
-        assert!(header_violation(&HeaderMap::new(), 4242).is_some());
+        assert!(header_violation(&HeaderMap::new()).is_some());
+    }
+
+    // -------------------------------------------------------------------
+    // Transport gates
+    // -------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn peer_gate_admits_only_the_apps_own_uid() {
+        let ours = files::current_uid();
+        let same = UdsPeer {
+            uid: Some(ours),
+            gid: Some(0),
+            pid: Some(1),
+        };
+        assert_eq!(peer_violation(&same), None);
+        let other = UdsPeer {
+            uid: Some(ours.wrapping_add(1)),
+            gid: Some(0),
+            pid: Some(1),
+        };
+        assert!(
+            peer_violation(&other).is_some(),
+            "another uid must be refused"
+        );
+        let unknown = UdsPeer {
+            uid: None,
+            gid: None,
+            pid: None,
+        };
+        assert!(
+            peer_violation(&unknown).is_some(),
+            "unreadable credentials must fail closed"
+        );
+    }
+
+    #[test]
+    fn instance_token_gate_requires_this_starts_bearer() {
+        let token = "ab".repeat(32);
+        let mut headers = HeaderMap::new();
+        assert!(
+            instance_token_violation(&headers, &token).is_some(),
+            "missing bearer must be refused"
+        );
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {}", "cd".repeat(32))).unwrap(),
+        );
+        assert!(
+            instance_token_violation(&headers, &token).is_some(),
+            "another token must be refused"
+        );
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        assert_eq!(instance_token_violation(&headers, &token), None);
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Basic {token}")).unwrap(),
+        );
+        assert!(
+            instance_token_violation(&headers, &token).is_some(),
+            "only the Bearer scheme is a bearer"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -742,115 +912,91 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Discovery file lifecycle
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn discovery_file_is_written_atomically_with_owner_only_perms() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = discovery_file_path(dir.path(), 1234);
-
-        write_discovery_file(&path, 4242, 1234, 7).unwrap();
-
-        let contents: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(contents["port"], 4242);
-        assert_eq!(contents["pid"], 1234);
-        assert_eq!(contents["generation"], 7);
-        assert_eq!(contents["protocolVersion"], PROTOCOL_VERSION);
-
-        // No temp file left behind.
-        assert!(!path.with_extension("json.tmp").exists());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "discovery file must be 0600");
-        }
-    }
-
-    #[test]
-    fn discovery_file_rewrite_replaces_contents() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = discovery_file_path(dir.path(), 1234);
-        write_discovery_file(&path, 4242, 1234, 1).unwrap();
-        write_discovery_file(&path, 5353, 1234, 2).unwrap();
-
-        let contents: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(contents["port"], 5353);
-        assert_eq!(contents["generation"], 2);
-    }
-
-    #[test]
-    fn sweep_removes_dead_pid_files_and_keeps_live_and_foreign_ones() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // A pid that cannot exist (beyond macOS/Linux pid ranges) — dead.
-        let dead = dir.path().join("control-999999999.json");
-        std::fs::write(&dead, "{}").unwrap();
-        let dead_tmp = dir.path().join("control-999999998.json.tmp");
-        std::fs::write(&dead_tmp, "{").unwrap();
-        let dead_shim = stagedctl_shim_dir_path(dir.path(), 999999997);
-        std::fs::create_dir_all(&dead_shim).unwrap();
-        std::fs::write(dead_shim.join("stagedctl"), "").unwrap();
-
-        // Our own pid — alive.
-        let alive = discovery_file_path(dir.path(), std::process::id());
-        std::fs::write(&alive, "{}").unwrap();
-        let alive_shim = stagedctl_shim_dir_path(dir.path(), std::process::id());
-        std::fs::create_dir_all(&alive_shim).unwrap();
-
-        // Non-discovery files are never touched.
-        let foreign = dir.path().join("data.db");
-        std::fs::write(&foreign, "not json").unwrap();
-
-        sweep_stale_discovery_files(dir.path());
-
-        assert!(!dead.exists(), "dead-pid discovery file should be swept");
-        assert!(!dead_tmp.exists(), "orphaned temp file should be swept");
-        assert!(!dead_shim.exists(), "dead-pid shim dir should be swept");
-        assert!(alive.exists(), "live-pid discovery file must survive");
-        assert!(alive_shim.exists(), "live-pid shim dir must survive");
-        assert!(foreign.exists(), "unrelated files must survive");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn pid_is_alive_probes_without_a_child_process() {
-        assert!(pid_is_alive(std::process::id()));
-        assert!(!pid_is_alive(999_999_999), "beyond any pid range");
-        // Not positive `pid_t`s: kill() would address a process group.
-        assert!(!pid_is_alive(0));
-        assert!(!pid_is_alive(u32::MAX));
-    }
-
-    // -------------------------------------------------------------------
     // Startup readiness
     // -------------------------------------------------------------------
 
-    /// The discovery file names a port that already accepts connections by
-    /// the time the synchronous half returns — no runtime, no `serve` task —
-    /// so a session started right after `start()` can reach the app.
+    /// The discovery file names an endpoint that already accepts connections
+    /// by the time the synchronous half returns — no runtime, no `serve`
+    /// task — so a session started right after `start()` can reach the app.
     #[test]
     fn bind_and_write_discovery_is_ready_before_serving() {
-        let dir = tempfile::tempdir().unwrap();
-        let stale = discovery_file_path(dir.path(), 999_999_999);
-        std::fs::write(&stale, "{}").unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = files::control_root(data_dir.path());
+        // Leftovers of a dead instance in the v2 layout and of a v1 build.
+        let stale = files::instance_dir_path(&root, 999_999_999);
+        std::fs::create_dir_all(&stale).unwrap();
+        let legacy = data_dir.path().join("control-999999998.json");
+        std::fs::write(&legacy, "{}").unwrap();
 
-        let prepared = bind_and_write_discovery(dir.path(), 1234, 3).unwrap();
+        let prepared = bind_and_write_discovery(data_dir.path(), 1234, 3).unwrap();
 
         assert!(!stale.exists(), "the sweep runs before the bind");
+        assert!(!legacy.exists(), "v1 leftovers are swept too");
+        let instance_dir = files::instance_dir_path(&root, 1234);
+        assert!(files::sessions_dir_path(&instance_dir).is_dir());
         let contents: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(discovery_file_path(dir.path(), 1234)).unwrap(),
+            &std::fs::read_to_string(files::discovery_file_path(&instance_dir)).unwrap(),
         )
         .unwrap();
-        assert_eq!(contents["port"], prepared.port);
         assert_eq!(contents["generation"], 3);
+        assert_eq!(contents["pid"], 1234);
+
         // The connection waits in the listen backlog until `serve` accepts.
-        std::net::TcpStream::connect(("127.0.0.1", prepared.port))
-            .expect("the bound listener should take connections before serve runs");
+        match (&prepared.listener, &prepared.transport) {
+            #[cfg(unix)]
+            (BoundListener::Unix(_), ControlTransport::Unix { socket }) => {
+                assert_eq!(socket, &files::socket_path(&instance_dir));
+                assert_eq!(contents["socket"], socket.display().to_string());
+                std::os::unix::net::UnixStream::connect(socket)
+                    .expect("the bound socket should take connections before serve runs");
+            }
+            (BoundListener::Tcp(_), ControlTransport::Tcp { port, token }) => {
+                assert_eq!(contents["port"], *port);
+                assert_eq!(contents["token"], token.as_str());
+                std::net::TcpStream::connect(("127.0.0.1", *port))
+                    .expect("the bound listener should take connections before serve runs");
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("listener and transport disagree"),
+        }
+        #[cfg(unix)]
+        assert!(
+            matches!(prepared.transport, ControlTransport::Unix { .. }),
+            "a short socket path must bind the Unix socket, not fall back"
+        );
+    }
+
+    /// `sun_path` is finite; an instance directory whose socket path would
+    /// overflow it falls back to loopback TCP with a per-start token rather
+    /// than failing to start.
+    #[test]
+    fn over_long_socket_path_falls_back_to_tcp_with_a_token() {
+        let root = private_tempdir();
+        let long = root.path().join("x".repeat(MAX_SOCKET_PATH_LEN));
+        std::fs::create_dir_all(&long).unwrap();
+        assert!(!socket_path_fits(&files::socket_path(&long)));
+
+        let (listener, transport) = bind_listener(&long).unwrap();
+        assert!(matches!(listener, BoundListener::Tcp(_)));
+        let ControlTransport::Tcp { port, token } = transport else {
+            panic!("expected the TCP fallback, got {transport:?}");
+        };
+        assert_ne!(port, 0);
+        assert_eq!(token.len(), 64, "a 256-bit hex token");
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(
+            !files::socket_path(&long).exists(),
+            "no socket file is left behind"
+        );
+    }
+
+    #[test]
+    fn socket_path_fits_bounds_at_the_portable_sun_path_limit() {
+        let fits = PathBuf::from("/".to_string() + &"a".repeat(MAX_SOCKET_PATH_LEN - 1));
+        assert_eq!(fits.as_os_str().len(), MAX_SOCKET_PATH_LEN);
+        assert!(socket_path_fits(&fits));
+        let over = PathBuf::from("/".to_string() + &"a".repeat(MAX_SOCKET_PATH_LEN));
+        assert!(!socket_path_fits(&over));
     }
 
     /// Startup recovery and the `KickSource::Startup` drain start local
@@ -896,53 +1042,79 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stale_sweep_candidate_pid_parses_only_control_entry_names() {
-        assert_eq!(stale_sweep_candidate_pid("control-123.json"), Some(123));
-        assert_eq!(stale_sweep_candidate_pid("control-123.json.tmp"), Some(123));
-        assert_eq!(stale_sweep_candidate_pid("control-bin-123"), Some(123));
-        assert_eq!(stale_sweep_candidate_pid("control-abc.json"), None);
-        assert_eq!(stale_sweep_candidate_pid("control-.json"), None);
-        assert_eq!(stale_sweep_candidate_pid("control-bin-"), None);
-        assert_eq!(stale_sweep_candidate_pid("preferences.json"), None);
-        assert_eq!(stale_sweep_candidate_pid("data.db"), None);
-    }
-
     // -------------------------------------------------------------------
-    // stagedctl PATH shim
+    // Unix socket end to end
     // -------------------------------------------------------------------
 
-    #[test]
+    /// One raw HTTP/1.1 request over the socket, returning the response body.
     #[cfg(unix)]
-    fn shim_dir_holds_a_stagedctl_symlink_to_the_sidecar() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("stagedctl-sidecar");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-
-        let shim_dir = stagedctl_shim_dir_path(dir.path(), 1234);
-        create_stagedctl_shim_dir(&shim_dir, &bin).unwrap();
-
-        let link = shim_dir.join("stagedctl");
-        assert_eq!(std::fs::read_link(&link).unwrap(), bin);
+    async fn unix_http_get(socket: &std::path::Path, path: &str, host: &str) -> (u16, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8(raw).unwrap();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        let status: u16 = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap();
+        (status, body.to_string())
     }
 
-    #[test]
+    /// axum serves the tokio `UnixListener` as is, the connect-info carries
+    /// the kernel's peer credentials for the connecting process (us), and the
+    /// uid gate plus the header rules sit in front of the handler exactly as
+    /// `serve` stacks them.
+    #[tokio::test]
     #[cfg(unix)]
-    fn shim_dir_refresh_replaces_an_existing_symlink() {
-        // Pids are reused across app restarts of the same process image; a
-        // stale symlink from an earlier start of this pid must be replaced,
-        // not error the setup.
-        let dir = tempfile::tempdir().unwrap();
-        let old_bin = dir.path().join("old-sidecar");
-        let new_bin = dir.path().join("new-sidecar");
-        std::fs::write(&old_bin, "").unwrap();
-        std::fs::write(&new_bin, "").unwrap();
+    async fn unix_socket_serves_requests_with_the_peers_credentials() {
+        use axum::extract::ConnectInfo;
+        let root = private_tempdir();
+        let instance_dir = files::instance_dir_path(root.path(), 1234);
+        files::create_fresh_instance_dir(&instance_dir).unwrap();
+        let socket = files::socket_path(&instance_dir);
+        let listener = tokio::net::UnixListener::from_std(bind_unix(&socket).unwrap()).unwrap();
 
-        let shim_dir = stagedctl_shim_dir_path(dir.path(), 1234);
-        create_stagedctl_shim_dir(&shim_dir, &old_bin).unwrap();
-        create_stagedctl_shim_dir(&shim_dir, &new_bin).unwrap();
+        async fn echo_peer(ConnectInfo(peer): ConnectInfo<UdsPeer>) -> Json<Value> {
+            Json(serde_json::json!({ "uid": peer.uid, "pid": peer.pid }))
+        }
+        let router = Router::new()
+            .route("/peer", get(echo_peer))
+            .layer(middleware::from_fn(reject_browser_shaped_requests))
+            .layer(middleware::from_fn(reject_foreign_peer));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<UdsPeer>(),
+            )
+            .await
+            .unwrap();
+        });
 
-        let link = shim_dir.join("stagedctl");
-        assert_eq!(std::fs::read_link(&link).unwrap(), new_bin);
+        let (status, body) = unix_http_get(&socket, "/peer", HOST_LITERAL).await;
+        assert_eq!(status, 200, "body: {body}");
+        let peer: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(peer["uid"], files::current_uid());
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert_eq!(
+            peer["pid"],
+            std::process::id(),
+            "LOCAL_PEEREPID / SO_PEERCRED report the connecting process"
+        );
+
+        // The header rules still apply on the socket (belt and braces).
+        let (status, body) = unix_http_get(&socket, "/peer", "127.0.0.1:80").await;
+        assert_eq!(status, 403, "body: {body}");
+
+        server.abort();
     }
 }

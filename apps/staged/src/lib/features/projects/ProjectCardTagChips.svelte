@@ -3,7 +3,8 @@
   for the tags its status icon doesn't already show (every group but the icon
   group, in group order, then the ungrouped tags), then "+N" for the rest.
   Renders nothing for a project without such tags. Sidebar rows have no room
-  for chips and show only the icon.
+  for chips and show only the icon. A board card also leaves out the board's
+  group (`excludeGroupId`), which its column already shows.
 -->
 <script lang="ts">
   import { tagsStore } from '../../stores/tags.svelte';
@@ -15,12 +16,16 @@
 
   interface Props {
     projectId: string;
+    /** A group to leave out besides the icon group. */
+    excludeGroupId?: string | null;
   }
 
-  let { projectId }: Props = $props();
+  let { projectId, excludeGroupId = null }: Props = $props();
 
   let allChips = $derived(
-    tagsStore.chipTagsFor(projectId, { excludeGroupIds: [tagsStore.iconGroup?.id] })
+    tagsStore.chipTagsFor(projectId, {
+      excludeGroupIds: [tagsStore.iconGroup?.id, excludeGroupId],
+    })
   );
   let chips = $derived(limitChips(allChips, MAX_CARD_CHIPS));
   let hiddenNames = $derived(

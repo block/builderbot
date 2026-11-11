@@ -1,0 +1,268 @@
+<!--
+  ProjectsBoard.svelte — the home page's Board view: a column per tag in one
+  group ("No ‹group›" first), each holding the projects with that tag, then a
+  + column that adds a tag to the group.
+
+  It shows the grid's projects (the filter chips narrow them) in the grid's
+  newest-first order, and a search hides cards rather than unmounting them,
+  as in the grid. Moving a card between columns changes the project's tag in
+  the group: by drag and drop with a fine pointer on desktop, else by "Move
+  to" in the card's context menu. Both are optimistic, so the card moves at
+  once, and focus follows it to its new column. Collapsed and hidden columns
+  are remembered per group (boardViewPrefs).
+
+  On a phone the columns are full-width pages swiped sideways, under
+  BoardPhonePager. Mounted inside the home layer like the grid, never as a
+  layer of its own.
+-->
+<script lang="ts">
+  import { tick } from 'svelte';
+  import type { Project, TagGroup } from '../../types';
+  import { tagsStore } from '../../stores/tags.svelte';
+  import { viewport } from '../../shared/viewport.svelte';
+  import { tagActions } from '../tags/tagActions.svelte';
+  import { projectActions } from '../projects/projectActions.svelte';
+  import { focusIfDropped, neighbourAfterRemove } from '../projects/focusAfterRemove';
+  import type { BoardCardHandlers } from './BoardCard.svelte';
+  import BoardAddColumn from './BoardAddColumn.svelte';
+  import BoardColumn from './BoardColumn.svelte';
+  import BoardEmptyState from './BoardEmptyState.svelte';
+  import BoardPhonePager from './BoardPhonePager.svelte';
+  import { buildBoardColumns } from './boardColumns';
+  import {
+    PROJECT_DRAG_TYPE,
+    readProjectDrag,
+    resolveBoardDrop,
+    writeProjectDrag,
+  } from './boardDrop';
+  import { columnPrefsFor } from './boardPrefs';
+  import { boardViewPrefs, setBoardColumnFlag } from './boardViewPrefs.svelte';
+
+  interface Props {
+    /** The group the board is by; null when there are no groups. */
+    group: TagGroup | null;
+    /** The projects to show, in card order. */
+    projects: Project[];
+    /** The projects a search leaves showing (its rank), or null when not searching. */
+    searchRank: { has(projectId: string): boolean } | null;
+    onOpen: (projectId: string) => void;
+  }
+
+  let { group, projects, searchRank, onOpen }: Props = $props();
+
+  let boardEl = $state<HTMLElement | null>(null);
+  let columnsEl = $state<HTMLElement | null>(null);
+  let draggingId = $state<string | null>(null);
+  let dropKey = $state<string | null>(null);
+  let activeIndex = $state(0);
+
+  let paged = $derived(viewport.isMobile);
+  let dragEnabled = $derived(!paged && !viewport.hasCoarsePointer);
+  let projectsById = $derived(new Map(projects.map((project) => [project.id, project])));
+
+  function isVisible(projectId: string): boolean {
+    return searchRank === null || searchRank.has(projectId);
+  }
+
+  let layout = $derived.by(() => {
+    if (!group) return null;
+    const groupId = group.id;
+    return buildBoardColumns({
+      group,
+      tags: tagsStore.tagsByGroup.get(groupId) ?? [],
+      projects,
+      groupTagIdOf: (projectId) => tagsStore.groupTagFor(projectId, groupId)?.id ?? null,
+      isVisible,
+      prefs: columnPrefsFor(boardViewPrefs.columns, groupId, tagsStore.catalog),
+    });
+  });
+  let activeKey = $derived(layout?.columns[activeIndex]?.key ?? null);
+
+  function cardElement(projectId: string): HTMLElement | null {
+    for (const el of boardEl?.querySelectorAll<HTMLElement>('[data-board-card]') ?? []) {
+      if (el.dataset.boardCard === projectId) return el;
+    }
+    return null;
+  }
+
+  /**
+   * Put focus on a card that just changed column. WebKit drops focus when a
+   * keyed list moves the focused node, and here the card is a new node in
+   * another column; the closing menu may also hand focus back to the old,
+   * now detached, card a frame later.
+   */
+  async function focusCard(projectId: string) {
+    await tick();
+    const card = cardElement(projectId);
+    if (!card) return;
+    card.focus({ preventScroll: true });
+    card.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    requestAnimationFrame(() => focusIfDropped(() => cardElement(projectId)));
+  }
+
+  /** The cards on screen, column by column: the order focus moves through after a remove. */
+  function shownCardIds(): string[] {
+    if (!layout) return [];
+    return layout.columns.flatMap((column) =>
+      column.collapsed && !paged
+        ? []
+        : column.projects.filter((project) => isVisible(project.id)).map((project) => project.id)
+    );
+  }
+
+  const handlers: BoardCardHandlers = {
+    get dragEnabled() {
+      return dragEnabled;
+    },
+    get draggingId() {
+      return draggingId;
+    },
+    open: (projectId) => onOpen(projectId),
+    startDrag(projectId, event) {
+      if (!dragEnabled || !event.dataTransfer) return;
+      writeProjectDrag(event.dataTransfer, projectId);
+      draggingId = projectId;
+    },
+    endDrag() {
+      draggingId = null;
+      dropKey = null;
+    },
+    remove(project) {
+      const focusAfterRemove = neighbourAfterRemove(shownCardIds(), project.id, cardElement);
+      void projectActions.requestRemoveProject(project, focusAfterRemove);
+    },
+    moved: (projectId) => void focusCard(projectId),
+  };
+
+  /** Only card drags count: files and text dragged over the board pass through. */
+  function isCardDrag(event: DragEvent): boolean {
+    return draggingId !== null || !!event.dataTransfer?.types.includes(PROJECT_DRAG_TYPE);
+  }
+
+  function handleDragOver(key: string, event: DragEvent) {
+    if (!dragEnabled || !isCardDrag(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    dropKey = key;
+  }
+
+  function handleDragLeave(key: string, event: DragEvent) {
+    const next = event.relatedTarget;
+    if (next instanceof Node && (event.currentTarget as Node).contains(next)) return;
+    if (dropKey === key) dropKey = null;
+  }
+
+  function handleDrop(key: string, event: DragEvent) {
+    if (!dragEnabled || !isCardDrag(event)) return;
+    event.preventDefault();
+    const projectId = readProjectDrag(event.dataTransfer, draggingId, new Set(projectsById.keys()));
+    handlers.endDrag();
+    if (!projectId || !group) return;
+    const write = resolveBoardDrop(key, group.id, tagsStore.catalog);
+    const project = projectsById.get(projectId);
+    if (!write || !project) return;
+    void tagActions.setProjectGroupTag(project, write.groupId, write.tagId);
+    void focusCard(projectId);
+  }
+
+  function setCollapsed(key: string, collapsed: boolean) {
+    if (!group) return;
+    setBoardColumnFlag(group.id, key, 'collapsed', collapsed, tagsStore.catalog);
+  }
+
+  function hideColumn(key: string) {
+    if (!group) return;
+    setBoardColumnFlag(group.id, key, 'hidden', true, tagsStore.catalog);
+  }
+
+  function handleColumnsScroll() {
+    if (!paged || !columnsEl || columnsEl.clientWidth === 0) return;
+    activeIndex = Math.round(columnsEl.scrollLeft / columnsEl.clientWidth);
+  }
+
+  function pageTo(key: string) {
+    const column = [
+      ...(columnsEl?.querySelectorAll<HTMLElement>('[data-board-column]') ?? []),
+    ].find((el) => el.dataset.boardColumn === key);
+    column?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
+  }
+
+  /** The card element for a project, for the home page's scroll restore. */
+  export function cardFor(projectId: string): HTMLElement | null {
+    return cardElement(projectId);
+  }
+</script>
+
+<div class="projects-board" class:paged bind:this={boardEl}>
+  {#if !tagsStore.loaded}
+    <div class="board-state">Loading tags…</div>
+  {:else if !group || !layout}
+    <BoardEmptyState />
+  {:else}
+    {#if paged}
+      <BoardPhonePager {group} columns={layout.columns} {activeKey} onSelect={pageTo} />
+    {/if}
+    <div
+      class="board-columns"
+      class:paged
+      bind:this={columnsEl}
+      onscroll={handleColumnsScroll}
+      aria-label={`Projects by ${group.name}`}
+      role="group"
+    >
+      {#each layout.columns as column (column.key)}
+        <BoardColumn
+          {column}
+          {group}
+          {handlers}
+          {isVisible}
+          {paged}
+          dropTarget={draggingId !== null && dropKey === column.key}
+          onDragOver={(event) => handleDragOver(column.key, event)}
+          onDragLeave={(event) => handleDragLeave(column.key, event)}
+          onDrop={(event) => handleDrop(column.key, event)}
+          onCollapse={(collapsed) => setCollapsed(column.key, collapsed)}
+          onHide={() => hideColumn(column.key)}
+        />
+      {/each}
+      <BoardAddColumn {group} {paged} />
+    </div>
+  {/if}
+</div>
+
+<style>
+  .projects-board {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .board-state {
+    color: var(--text-muted);
+    padding: 16px 2px;
+  }
+
+  .board-columns {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    min-width: 0;
+    overflow-x: auto;
+    padding-bottom: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-muted) transparent;
+  }
+
+  /* One column per page, swiped sideways. */
+  .board-columns.paged {
+    gap: 0;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .board-columns.paged::-webkit-scrollbar {
+    display: none;
+  }
+</style>

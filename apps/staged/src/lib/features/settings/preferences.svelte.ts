@@ -26,6 +26,7 @@ import { darkMode } from '../../stores/isDark.svelte';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
 import { normalizeAgentEnvVars, type AgentEnvVar, type AgentEnvVars } from './agentEnvVars';
 import type { AcpConfigValueSelection, ProjectLocation } from '../../types';
+import { loadBoardViewPrefs } from '../board/boardViewPrefs.svelte';
 import {
   DEFAULT_COMPOSER_SEND_MODE,
   normalizeComposerSendMode,
@@ -356,11 +357,13 @@ export async function initPreferences(): Promise<void> {
   await initPersistentStore();
 
   // The new-project location seeds forms that can be in the first paint (the
-  // splash screen's), so it loads alongside these rather than after `loaded`.
+  // splash screen's), and the home page's Grid/Board choice decides what it
+  // paints, so they load alongside these rather than after `loaded`.
   const [savedSize, savedMode] = await Promise.all([
     getStoreValue<number>(SIZE_STORE_KEY),
     getStoreValue<AppMode>(APP_MODE_STORE_KEY),
     newProjectLocationSync.start(),
+    loadBoardViewPrefs(),
   ]);
 
   // Load size

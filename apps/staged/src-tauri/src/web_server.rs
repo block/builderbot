@@ -943,7 +943,19 @@ fn control_create_image_args(args: &Value) -> Result<(String, String, String), S
                 .to_string(),
         );
     };
-    Ok((branch_id, arg(args, "projectId")?, arg(args, "filePath")?))
+    let file_path: String = arg(args, "filePath")?;
+    // Nothing downstream (`create_image_impl`, `read_local_attachment`)
+    // canonicalizes or checks this, so a relative path would resolve against
+    // the app's own working directory — not the caller's. The CLI always
+    // sends an absolute path; a raw POST must too.
+    if !std::path::Path::new(&file_path).is_absolute() {
+        return Err(format!(
+            "create_image requires an absolute filePath through the control surface \
+             (got {file_path:?}): a relative path would resolve against the app's \
+             working directory, not the caller's"
+        ));
+    }
+    Ok((branch_id, arg(args, "projectId")?, file_path))
 }
 
 /// The big dispatcher. Maps command names to handler logic.
@@ -3007,15 +3019,22 @@ pub(crate) async fn dispatch(
             // a UI-invisible image.
             let (branch_id, project_id, file_path) = control_create_image_args(&args)?;
             let store = get_store(store_mutex)?;
-            let image = crate::image_commands::create_image_impl(
-                store,
-                Some(branch_id),
-                project_id,
-                file_path,
-                Some(false),
-            )?;
-            crate::image_commands::emit_image_created(app_handle, &image);
-            Ok(serde_json::to_value(image).unwrap())
+            let app_handle = app_handle.clone();
+            // Reading and validating the file (a 50 MB PDF, say) is not
+            // runtime-worker work; the event goes out from the same closure
+            // so it follows the write it announces.
+            blocking_json(move || {
+                let image = crate::image_commands::create_image_impl(
+                    store,
+                    Some(branch_id),
+                    project_id,
+                    file_path,
+                    Some(false),
+                )?;
+                crate::image_commands::emit_image_created(&app_handle, &image);
+                Ok::<_, String>(image)
+            })
+            .await
         }
         "create_image_from_data" => {
             let store = get_store(store_mutex)?;
@@ -4317,6 +4336,23 @@ mod tests {
         ] {
             let err = control_create_image_args(&args).unwrap_err();
             assert!(err.contains("branchId"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn control_create_image_rejects_relative_file_paths() {
+        // The path is opened by the app process, so a relative one would
+        // resolve against the app's cwd rather than the caller's; the CLI
+        // sends absolute paths and a raw POST gets the same rule.
+        for file_path in ["rel/x.png", "./x.png", "x.png", "../x.png", ""] {
+            let err = control_create_image_args(&json!({
+                "branchId": "b1", "projectId": "p1", "filePath": file_path,
+            }))
+            .unwrap_err();
+            assert!(
+                err.contains("absolute"),
+                "{file_path:?} should be rejected as non-absolute, got: {err}"
+            );
         }
     }
 

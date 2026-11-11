@@ -231,11 +231,7 @@ impl Client {
     /// port. One re-read + retry absorbs an app restart between file-read
     /// and ping.
     pub fn connect(lock_path: &Path) -> Result<Client, CtlError> {
-        let http = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(120))
-            .build()
-            .map_err(|e| CtlError::Transport(format!("cannot build HTTP client: {e}")))?;
+        let http = http_client()?;
 
         let mut discovery = read_discovery(lock_path)?;
         for attempt in 0..2 {
@@ -306,6 +302,20 @@ impl Client {
             ))),
         }
     }
+}
+
+/// The HTTP client every call goes through. No proxy — an `HTTP_PROXY` in
+/// the agent's environment must never route a loopback control call (and
+/// whatever it carries) through a third party — and no redirects, so the
+/// app's answer can't send a request elsewhere.
+fn http_client() -> Result<reqwest::blocking::Client, CtlError> {
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| CtlError::Transport(format!("cannot build HTTP client: {e}")))
 }
 
 fn ping(http: &reqwest::blocking::Client, port: u16) -> Result<PingResponse, String> {
@@ -490,6 +500,17 @@ mod tests {
     where
         F: FnMut(&str) -> (u16, String) + Send + 'static,
     {
+        fake_server_with_headers(move |request_line| {
+            let (status, body) = handler(request_line);
+            (status, body, Vec::new())
+        })
+    }
+
+    /// [`fake_server`] whose handler also returns extra response headers.
+    fn fake_server_with_headers<F>(mut handler: F) -> (u16, std::thread::JoinHandle<()>)
+    where
+        F: FnMut(&str) -> (u16, String, Vec<(String, String)>) + Send + 'static,
+    {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
@@ -528,10 +549,14 @@ mod tests {
                     }
                 }
                 let request_line = head.lines().next().unwrap_or_default().to_string();
-                let (status, body) = handler(&request_line);
+                let (status, body, extra) = handler(&request_line);
+                let extra: String = extra
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect();
                 let response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                     Content-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
@@ -698,6 +723,50 @@ mod tests {
         let err = Client::connect(&lock).unwrap_err();
         assert_eq!(err.exit_code(), 3);
         assert!(err.to_string().contains("cannot reach"), "got: {err}");
+    }
+
+    #[test]
+    fn client_never_follows_redirects() {
+        // A redirect from the control port would carry the request (and,
+        // from protocol v2 on, its bearer) wherever `Location` points. The
+        // decoy records whether anything reached it.
+        let decoy_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (decoy_port, _decoy) = {
+            let hits = std::sync::Arc::clone(&decoy_hits);
+            fake_server(move |_| {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (200, "[]".to_string())
+            })
+        };
+        let pid = std::process::id();
+        let (port, _handle) = fake_server_with_headers(move |request_line| {
+            if request_line.starts_with("GET /api/ping") {
+                (200, ping_body(pid, 1, PROTOCOL_VERSION), Vec::new())
+            } else {
+                (
+                    302,
+                    String::new(),
+                    vec![(
+                        "Location".to_string(),
+                        format!("http://127.0.0.1:{decoy_port}/api/invoke/list_projects"),
+                    )],
+                )
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let lock = write_discovery_json(dir.path(), pid, port, 1);
+
+        let client = Client::connect(&lock).unwrap();
+        let err = client
+            .invoke("list_projects", serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 2, "a redirect is a transport fault: {err}");
+        assert!(err.to_string().contains("302"), "got: {err}");
+        assert_eq!(
+            decoy_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the client followed the redirect"
+        );
     }
 
     #[test]

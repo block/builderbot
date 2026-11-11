@@ -49,7 +49,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -94,6 +94,14 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     // image add
     "create_image",
 ];
+
+/// Request body cap for `POST /api/invoke/{command}`. Control payloads are
+/// prompts and ids — `create_image` takes a *path*, never file bytes — so
+/// this sits far below `web_server`'s cap for base64 PDF uploads, and well
+/// above any prompt an agent would reasonably send. axum's default (2 MiB)
+/// would otherwise apply implicitly, and a cap that exists only by default
+/// is one a refactor can lose.
+const CONTROL_BODY_LIMIT: usize = 1024 * 1024;
 
 /// Monotonic per-process start counter, mirrored into the discovery file and
 /// the ping response so the CLI can detect a restart between file-read and
@@ -263,7 +271,7 @@ async fn serve(prepared: PreparedListener, app_handle: tauri::AppHandle) -> Resu
     };
     let router = Router::new()
         .route("/api/ping", get(ping))
-        .route("/api/invoke/{command}", post(invoke))
+        .merge(invoke_router(invoke))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             reject_non_local,
@@ -273,6 +281,21 @@ async fn serve(prepared: PreparedListener, app_handle: tauri::AppHandle) -> Resu
     axum::serve(listener, router)
         .await
         .map_err(|e| format!("control server error: {e}"))
+}
+
+/// The invoke route with [`CONTROL_BODY_LIMIT`] applied to it. Generic over
+/// the handler so a test can mount a stand-in without a Tauri `AppHandle`
+/// and exercise the exact layering [`serve`] uses.
+fn invoke_router<S, H, T>(handler: H) -> Router<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new().route(
+        "/api/invoke/{command}",
+        post(handler).layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT)),
+    )
 }
 
 // =============================================================================
@@ -658,6 +681,64 @@ mod tests {
                 "allowlisted command {command} has no dispatch arm in web_server.rs"
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Body cap
+    // -------------------------------------------------------------------
+
+    /// Stands in for `invoke` with the same body extractor, reporting what
+    /// reached it so the test can tell a parsed body from a refused one.
+    async fn echo_len(Path(command): Path<String>, Json(args): Json<Value>) -> Json<Value> {
+        let prompt_len = args["prompt"].as_str().map_or(0, str::len);
+        Json(serde_json::json!({ "command": command, "promptLen": prompt_len }))
+    }
+
+    fn invoke_request(body: String) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/invoke/start_project_session")
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap()
+    }
+
+    /// The control surface never carries file bytes, so its cap is a fixed
+    /// small number rather than axum's implicit default: a body at the cap
+    /// reaches the handler, one byte over is refused before any extractor
+    /// runs.
+    #[tokio::test]
+    async fn invoke_route_caps_the_body_well_below_the_web_upload_limit() {
+        use tower::ServiceExt;
+        let router: Router = invoke_router(echo_len);
+
+        assert!(
+            CONTROL_BODY_LIMIT <= 2 * 1024 * 1024,
+            "the cap must not exceed axum's default"
+        );
+
+        let envelope = r#"{"prompt":""}"#.len();
+        let body = format!(
+            r#"{{"prompt":"{}"}}"#,
+            "A".repeat(CONTROL_BODY_LIMIT - envelope)
+        );
+        assert_eq!(body.len(), CONTROL_BODY_LIMIT);
+        let response = router.clone().oneshot(invoke_request(body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["command"], "start_project_session");
+        assert_eq!(reply["promptLen"], CONTROL_BODY_LIMIT - envelope);
+
+        let body = format!(
+            r#"{{"prompt":"{}"}}"#,
+            "A".repeat(CONTROL_BODY_LIMIT - envelope + 1)
+        );
+        assert_eq!(body.len(), CONTROL_BODY_LIMIT + 1);
+        let response = router.oneshot(invoke_request(body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     // -------------------------------------------------------------------

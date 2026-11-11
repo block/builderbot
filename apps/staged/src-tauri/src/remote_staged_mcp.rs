@@ -546,4 +546,150 @@ mod tests {
             "no tool ran, so no session directory was created"
         );
     }
+
+    /// A tool's `call` may return a promise. The server answers when it
+    /// settles, a rejection takes the same `failureText` path as a throw, and
+    /// a stray failure outside `callTool` (an unawaited rejection, a throwing
+    /// timer) is logged and the server keeps answering.
+    #[test]
+    fn script_serves_asynchronous_tools_and_survives_stray_failures() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping async tool test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        // The script exports its registry when required, so a driver can add
+        // throwaway tools before starting the server.
+        let driver_path = home.path().join("driver.cjs");
+        std::fs::write(
+            &driver_path,
+            format!(
+                r#"const server = require({script:?});
+const base = {{ description: "fixture", inputSchema: {{ type: "object" }} }};
+server.TOOLS.push(
+  Object.assign({{
+    name: "async_ok",
+    call: function () {{
+      return new Promise(function (resolve) {{
+        setTimeout(function () {{ resolve({{ text: "resolved later", isError: false }}); }}, 250);
+      }});
+    }},
+  }}, base),
+  Object.assign({{
+    name: "async_fail",
+    failureText: function (error) {{ return "async_fail could not: " + error.message; }},
+    call: function () {{ return Promise.reject(new Error("boom")); }},
+  }}, base),
+  Object.assign({{
+    name: "async_fail_default",
+    call: async function () {{ throw new Error("kaboom"); }},
+  }}, base),
+  Object.assign({{
+    name: "async_empty",
+    call: async function () {{ return undefined; }},
+  }}, base),
+  Object.assign({{
+    name: "stray",
+    call: function () {{
+      Promise.reject(new Error("nobody awaited"));
+      setTimeout(function () {{ throw new Error("late throw"); }}, 0);
+      return {{ text: "stray ok", isError: false }};
+    }},
+  }}, base)
+);
+server.main(process.argv.slice(3));
+"#,
+                script = test_support::SCRIPT_PATH
+            ),
+        )
+        .unwrap();
+        let call = |id: u32, name: &str| {
+            serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":{}}})
+                .to_string()
+        };
+        let lines = [
+            call(1, "async_ok"),
+            call(2, "async_fail"),
+            call(3, "async_fail_default"),
+            call(4, "async_empty"),
+            call(5, "stray"),
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/list"}"#.to_string(),
+        ];
+        let run = test_support::run_node_lines(
+            driver_path.to_str().unwrap(),
+            &[test_support::SCRIPT_PATH],
+            home.path(),
+            &node,
+            &lines,
+        );
+        // `run_node_lines` already asserted the exit status: the stray
+        // rejection and the late throw did not take node down.
+        let by_id = |id: u32| {
+            run.responses
+                .iter()
+                .find(|r| r["id"] == id)
+                .unwrap_or_else(|| panic!("no reply with id {id}: {:?}", run.responses))
+        };
+        assert_eq!(run.responses.len(), 6, "{:?}", run.responses);
+
+        assert_eq!(
+            by_id(1)["result"],
+            serde_json::json!({"content":[{"type":"text","text":"resolved later"}],"isError":false}),
+            "a resolved promise is the tool's result"
+        );
+        assert_eq!(
+            by_id(2)["result"],
+            serde_json::json!({"content":[{"type":"text","text":"async_fail could not: boom"}],"isError":true}),
+            "a rejection goes through failureText"
+        );
+        assert_eq!(
+            by_id(3)["result"],
+            serde_json::json!({"content":[{"type":"text","text":"async_fail_default failed: kaboom"}],"isError":true}),
+            "a rejection without failureText gets the default text"
+        );
+        assert_eq!(
+            by_id(4)["result"],
+            serde_json::json!({"content":[{"type":"text","text":"async_empty failed: returned no { text, isError } result"}],"isError":true}),
+            "resolving to nothing is a failure, not an empty content block"
+        );
+        assert_eq!(by_id(5)["result"]["content"][0]["text"], "stray ok");
+
+        let tools = by_id(6)["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "write_note",
+                "async_ok",
+                "async_fail",
+                "async_fail_default",
+                "async_empty",
+                "stray"
+            ],
+            "the server still answers after the rejections"
+        );
+        // The pending 250 ms call did not block the list that followed it.
+        let position = |id: u32| run.responses.iter().position(|r| r["id"] == id).unwrap();
+        assert!(position(6) < position(1), "{:?}", run.responses);
+
+        assert!(
+            run.stderr
+                .contains("staged-mcp: async_fail failed: Error: boom"),
+            "{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains(
+                "staged-mcp: unhandled rejection, server kept alive: Error: nobody awaited"
+            ),
+            "{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr
+                .contains("staged-mcp: uncaught exception, server kept alive: Error: late throw"),
+            "{}",
+            run.stderr
+        );
+    }
 }

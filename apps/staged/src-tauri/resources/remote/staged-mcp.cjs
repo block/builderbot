@@ -33,10 +33,14 @@
  * Adding a tool: write an object with `name`, `description`, `inputSchema`,
  * an optional `instructions` sentence (appended to the `initialize`
  * instructions), an optional `failureText(error)` (the result text when
- * `call` throws), and `call(context, args)` returning `{ text, isError }`.
- * `context` carries `sessionId`, `turnId` and `sessionDir`. Then add the
- * object to `TOOLS`. See `apps/staged/docs/staged-mcp-on-blox.md` for the
- * laptop side.
+ * `call` throws or rejects), and `call(context, args)` returning
+ * `{ text, isError }` or a promise of it. `context` carries `sessionId`,
+ * `turnId` and `sessionDir`. Then add the object to `TOOLS`. See
+ * `apps/staged/docs/staged-mcp-on-blox.md` for the laptop side.
+ *
+ * Required as a module (`require("./staged-mcp.cjs")`) the file exports its
+ * registry and server functions instead of starting, so a test driver can add
+ * fixture tools before calling `main`.
  *
  * No third-party dependencies: Node's standard library only, CommonJS (the
  * `.cjs` extension keeps it CommonJS whatever `package.json` is nearby), and
@@ -337,20 +341,67 @@ function initializeResult(requestedVersion) {
   return result;
 }
 
-/** Run `tool` and turn its outcome (or failure) into a `tools/call` result. */
+function isThenable(value) {
+  return value !== null && typeof value === "object" && typeof value.then === "function";
+}
+
+function describeError(error) {
+  return error && error.stack ? error.stack : String(error);
+}
+
+/** A `tools/call` result carrying `outcome.text` and `outcome.isError`. */
+function toolResult(outcome) {
+  return { content: [{ type: "text", text: outcome.text }], isError: outcome.isError };
+}
+
+/**
+ * The `tools/call` result for `tool` failing with `error`: its `failureText`,
+ * or `<name> failed: <message>`, as an `isError` result, logged.
+ */
+function toolFailure(tool, error) {
+  // Report every failure to the agent rather than dying mid-turn.
+  log(tool.name + " failed: " + describeError(error));
+  const text = tool.failureText
+    ? tool.failureText(error)
+    : tool.name + " failed: " + (error && error.message ? error.message : error);
+  return toolResult({ text: text, isError: true });
+}
+
+/** The result for what `tool.call` returned or resolved to. */
+function settleOutcome(tool, outcome) {
+  if (outcome === null || typeof outcome !== "object" || typeof outcome.text !== "string") {
+    return toolFailure(tool, new Error("returned no { text, isError } result"));
+  }
+  return toolResult(outcome);
+}
+
+/**
+ * Run `tool` and turn its outcome (or failure) into a `tools/call` result.
+ *
+ * `tool.call` may return the outcome or a promise of it. A synchronous tool
+ * (`write_note`) gets its result back synchronously; an asynchronous one
+ * gets a promise that resolves to the result once the tool settles. A throw
+ * and a rejection take the same `failureText` path, so the promise never
+ * rejects.
+ */
 function callTool(tool, context, args) {
   let outcome;
   try {
     outcome = tool.call(context, args);
   } catch (error) {
-    // Report every failure to the agent rather than dying mid-turn.
-    log(tool.name + " failed: " + (error && error.stack ? error.stack : error));
-    const text = tool.failureText
-      ? tool.failureText(error)
-      : tool.name + " failed: " + (error && error.message ? error.message : error);
-    outcome = { text: text, isError: true };
+    return toolFailure(tool, error);
   }
-  return { content: [{ type: "text", text: outcome.text }], isError: outcome.isError };
+  if (isThenable(outcome)) {
+    return outcome.then(
+      function (settled) {
+        return settleOutcome(tool, settled);
+      },
+      function (error) {
+        return toolFailure(tool, error);
+      }
+    );
+  }
+  return settleOutcome(tool, outcome);
 }
 
 function handleLine(context, rawLine) {
@@ -393,7 +444,24 @@ function handleLine(context, rawLine) {
       replyError(id, -32602, "Unknown tool: " + params.name);
       return;
     }
-    reply(id, callTool(tool, context, params.arguments || {}));
+    const result = callTool(tool, context, params.arguments || {});
+    if (isThenable(result)) {
+      // An asynchronous tool answers when it settles; requests arriving in
+      // the meantime are served first, so replies may leave out of order
+      // (JSON-RPC matches them by id).
+      result.then(
+        function (settled) {
+          reply(id, settled);
+        },
+        function (error) {
+          // Only a `failureText` that itself throws gets here.
+          log(tool.name + " failed while reporting a failure: " + describeError(error));
+          replyError(id, -32603, tool.name + " failed: " + (error && error.message ? error.message : error));
+        }
+      );
+      return;
+    }
+    reply(id, result);
   } else if (method === "resources/list" || method === "prompts/list") {
     const result = {};
     result[method.split("/")[0]] = [];
@@ -417,9 +485,21 @@ function main(argv) {
     return;
   }
   const context = { sessionId: sessionId, turnId: turnId, sessionDir: sessionDir(sessionId) };
+  // A tool's stray failure (a timer callback that throws, a promise nobody
+  // awaited) must not take the server down for the rest of the session: log
+  // it and keep serving. The agent still gets its reply, or a failure result,
+  // through `callTool`.
+  process.on("uncaughtException", function (error) {
+    log("uncaught exception, server kept alive: " + describeError(error));
+  });
+  process.on("unhandledRejection", function (reason) {
+    log("unhandled rejection, server kept alive: " + describeError(reason));
+  });
   process.stdout.on("error", function (error) {
     if (error && error.code === "EPIPE") process.exit(0);
-    throw error;
+    // Without stdout there is nobody to answer; leave rather than linger.
+    log("stdout failed: " + describeError(error));
+    process.exit(1);
   });
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   lines.on("line", function (line) {
@@ -428,4 +508,8 @@ function main(argv) {
   // stdin closing ends the server; the event loop drains stdout on its own.
 }
 
-main(process.argv.slice(2));
+if (require.main === module) {
+  main(process.argv.slice(2));
+} else {
+  module.exports = { TOOLS: TOOLS, callTool: callTool, handleLine: handleLine, main: main };
+}

@@ -97,16 +97,23 @@ Newline-delimited JSON-RPC 2.0 on stdin/stdout, the MCP stdio transport:
 - `ping` answers `{}`.
 - `tools/list` lists `TOOLS` in order. `tools/call` runs the named tool and
   returns its text with `isError`. An unknown tool is error `-32602`. A tool
-  that throws is reported to the agent as an `isError` result (its
+  that throws or rejects is reported to the agent as an `isError` result (its
   `failureText`, or `<name> failed: <message>`) and logged, never a crash
-  mid-turn.
+  mid-turn; so is a tool that returns or resolves to something other than
+  `{ text, isError }`. A tool that returns a promise is answered when it
+  settles, and requests that arrive meanwhile are served first, so replies
+  can leave out of order (JSON-RPC matches them by id).
 - `resources/list` and `prompts/list` answer empty lists. Any other method
   is `-32601`. A line that is not JSON is `-32700` and a non-object is
   `-32600`. Notifications and responses are ignored.
 
-The process ends when stdin closes. A closed stdout (`EPIPE`) exits 0.
-Diagnostics go to stderr with a `staged-mcp:` prefix. A session id that is
-empty, contains `/`, or is `.` or `..` is refused with exit code 2.
+The process ends when stdin closes. A closed stdout (`EPIPE`) exits 0; any
+other stdout failure exits 1, since nobody can be answered. A failure outside
+a `tools/call` (an unawaited rejection, a timer callback that throws) is
+logged as `server kept alive` and the server goes on serving: losing the
+process would lose `write_note` for the rest of the session. Diagnostics go
+to stderr with a `staged-mcp:` prefix. A session id that is empty, contains
+`/`, or is `.` or `..` is refused with exit code 2.
 
 ## The per-session scratch area
 
@@ -139,10 +146,13 @@ Its layout, collector and clear policy are described in
 On the workstation, in `staged-mcp.cjs`:
 
 1. Add a tool object in part 2 of the file, with `name`, `description`,
-   `inputSchema`, and `call(context, args)` returning `{ text, isError }`.
-   `context` carries `sessionId`, `turnId` and `sessionDir`. The optional
-   `instructions` sentence is appended to the `initialize` instructions, and
-   the optional `failureText(error)` is the result text when `call` throws.
+   `inputSchema`, and `call(context, args)` returning `{ text, isError }` or
+   a promise of it. A synchronous `call` is answered at once; one that
+   spawns a process or awaits I/O can return a promise and the server
+   replies when it settles. `context` carries `sessionId`, `turnId` and
+   `sessionDir`. The optional `instructions` sentence is appended to the
+   `initialize` instructions, and the optional `failureText(error)` is the
+   result text when `call` throws or its promise rejects.
 2. Add it to `TOOLS`.
 3. Use the shared plumbing for files: `ensureSessionDir`, `writeAtomic`,
    `removeIfPresent`.
@@ -166,7 +176,10 @@ On the laptop:
 4. Test the tool as a subprocess with `test_support::run_script`, test the
    reader against a recorded runner and against a local `sh`
    (`test_support::local_exec`), and add the tool to the expected list in
-   `script_serves_the_tool_registry_over_mcp`.
+   `script_serves_the_tool_registry_over_mcp`. Required as a module instead
+   of run, the script exports `TOOLS`, `callTool`, `handleLine` and `main`,
+   which is how `script_serves_asynchronous_tools_and_survives_stray_failures`
+   adds throwaway tools through a driver before starting the server.
 
 ## How to test manually
 

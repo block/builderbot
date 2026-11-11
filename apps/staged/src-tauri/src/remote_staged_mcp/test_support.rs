@@ -58,8 +58,30 @@ pub(super) fn run_script_lines(
     node: &str,
     lines: &[String],
 ) -> Vec<serde_json::Value> {
+    run_node_lines(SCRIPT_PATH, &[], home, node, lines).responses
+}
+
+/// What a run of the script (or a driver around it) produced.
+pub(super) struct ScriptRun {
+    /// The parsed stdout frames, in the order they were written.
+    pub(super) responses: Vec<serde_json::Value>,
+    /// Everything the script logged.
+    pub(super) stderr: String,
+}
+
+/// Run `node <script> <script_args...> sess-1 turn-1` with `HOME` at `home`,
+/// feeding `lines` on stdin. `script` is the server itself or a driver that
+/// requires it; a driver takes its own arguments before the session and turn.
+pub(super) fn run_node_lines(
+    script: &str,
+    script_args: &[&str],
+    home: &std::path::Path,
+    node: &str,
+    lines: &[String],
+) -> ScriptRun {
     let mut child = Command::new(node)
-        .arg(SCRIPT_PATH)
+        .arg(script)
+        .args(script_args)
         .args(["sess-1", "turn-1"])
         .env("HOME", home)
         .stdin(Stdio::piped())
@@ -80,9 +102,13 @@ pub(super) fn run_script_lines(
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout)
+    let responses = String::from_utf8(output.stdout)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
-        .collect()
+        .collect();
+    ScriptRun {
+        responses,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
 }

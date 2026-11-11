@@ -33,6 +33,7 @@ import {
   withGroup,
   withGroupName,
   withGroupOrder,
+  withGroupSidebar,
   withIconGroup,
   withTag,
   withTagMoved,
@@ -250,6 +251,15 @@ class TagActionsController {
       'Unable to change the project icon group',
       () => commands.setIconTagGroup(groupId),
       (state) => withIconGroup(state, groupId)
+    );
+  }
+
+  /** Pin a group's board to the projects sidebar, or unpin it. */
+  setTagGroupSidebar(group: TagGroup, shown: boolean): Promise<boolean> {
+    return this.catalogWrite(
+      'Unable to change the sidebar boards',
+      () => commands.setTagGroupSidebar(group.id, shown),
+      (state) => withGroupSidebar(state, group.id, shown)
     );
   }
 

@@ -1394,6 +1394,15 @@ pub(crate) async fn dispatch(
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
+        "set_tag_group_sidebar" => {
+            let store = get_store(store_mutex)?;
+            let group_id: String = arg(&args, "groupId")?;
+            let shown: bool = arg(&args, "shown")?;
+            store
+                .set_tag_group_sidebar(&group_id, shown)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "reorder_tag_groups" => {
             let store = get_store(store_mutex)?;
             let group_ids: Vec<String> = arg(&args, "groupIds")?;

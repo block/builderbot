@@ -8,6 +8,7 @@ export function group(id: string, position: number, overrides: Partial<TagGroup>
     name: id,
     position,
     isIconGroup: false,
+    showInSidebar: false,
     createdAt: 0,
     updatedAt: 0,
     ...overrides,

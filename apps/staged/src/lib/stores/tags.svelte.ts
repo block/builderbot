@@ -128,6 +128,11 @@ class TagsStore {
     return this.catalog.iconGroup;
   }
 
+  /** The groups whose boards are pinned to the sidebar, in position order. */
+  get sidebarGroups(): TagGroup[] {
+    return this.catalog.sidebarGroups;
+  }
+
   tagIdsFor(projectId: string): ReadonlySet<string> {
     return this.projectTagIds.get(projectId) ?? EMPTY_TAG_IDS;
   }

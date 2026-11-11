@@ -33,6 +33,7 @@ function group(id: string, position: number, overrides: Partial<TagGroup> = {}):
     name: id,
     position,
     isIconGroup: false,
+    showInSidebar: false,
     createdAt: 0,
     updatedAt: 0,
     ...overrides,
@@ -95,6 +96,16 @@ describe('indexTagCatalog', () => {
     expect(catalog.tagsByGroup.get(null)!.map((t) => t.id)).toEqual(['infra', 'q4']);
     expect(catalog.iconGroup?.id).toBe('status');
     expect(catalog.tagsById.get('p1')?.groupId).toBe('priority');
+  });
+
+  it('lists the groups whose boards are pinned to the sidebar, in group order', () => {
+    expect(catalog.sidebarGroups).toEqual([]);
+    const base = state();
+    const pinned = indexTagCatalog({
+      ...base,
+      groups: base.groups.map((g) => ({ ...g, showInSidebar: true })),
+    });
+    expect(pinned.sidebarGroups.map((g) => g.id)).toEqual(['status', 'priority']);
   });
 
   it('breaks position ties by creation time', () => {
@@ -365,6 +376,7 @@ describe('iconGroupFirst', () => {
     name: id.toUpperCase(),
     position,
     isIconGroup: id === 'b',
+    showInSidebar: false,
     createdAt: 0,
     updatedAt: 0,
   }));

@@ -98,6 +98,8 @@ pub struct TagGroup {
     pub position: i64,
     /// Whether this group's tag drives the project icon. At most one group.
     pub is_icon_group: bool,
+    /// Whether the group's board is pinned to the projects sidebar (0045).
+    pub show_in_sidebar: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -272,7 +274,8 @@ fn group_name_error(error: rusqlite::Error, name: &str) -> StoreError {
 // Row access
 // =============================================================================
 
-const GROUP_COLUMNS: &str = "id, name, position, is_icon_group, created_at, updated_at";
+const GROUP_COLUMNS: &str =
+    "id, name, position, is_icon_group, show_in_sidebar, created_at, updated_at";
 const TAG_COLUMNS: &str = "id, group_id, name, color, icon, position, created_at, updated_at";
 
 fn group_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TagGroup> {
@@ -281,8 +284,9 @@ fn group_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TagGroup> {
         name: row.get(1)?,
         position: row.get(2)?,
         is_icon_group: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        show_in_sidebar: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -549,18 +553,20 @@ impl Store {
                 name,
                 position,
                 is_icon_group: !has_icon_group,
+                show_in_sidebar: false,
                 created_at: now,
                 updated_at: now,
             };
             tx.execute(
                 &format!(
-                    "INSERT INTO tag_groups ({GROUP_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                    "INSERT INTO tag_groups ({GROUP_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
                 ),
                 params![
                     group.id,
                     group.name,
                     group.position,
                     group.is_icon_group,
+                    group.show_in_sidebar,
                     group.created_at,
                     group.updated_at,
                 ],
@@ -612,6 +618,22 @@ impl Store {
                 None => 0,
             };
             Ok(((), cleared + set > 0))
+        })
+    }
+
+    /// Pin the group's board to the projects sidebar, or unpin it. Any number
+    /// of groups may be pinned; the sidebar lists them in group order.
+    pub fn set_tag_group_sidebar(&self, group_id: &str, shown: bool) -> Result<(), StoreError> {
+        self.tag_write(|tx| {
+            let group = find_group(tx, group_id)?;
+            if group.show_in_sidebar == shown {
+                return Ok(((), false));
+            }
+            tx.execute(
+                "UPDATE tag_groups SET show_in_sidebar = ?1, updated_at = ?2 WHERE id = ?3",
+                params![shown, now_timestamp(), group_id],
+            )?;
+            Ok(((), true))
         })
     }
 

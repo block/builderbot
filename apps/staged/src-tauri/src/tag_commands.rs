@@ -52,6 +52,17 @@ pub fn set_icon_tag_group(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn set_tag_group_sidebar(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    group_id: String,
+    shown: bool,
+) -> Result<(), String> {
+    get_store(&store)?
+        .set_tag_group_sidebar(&group_id, shown)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn reorder_tag_groups(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     group_ids: Vec<String>,

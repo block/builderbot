@@ -11,17 +11,19 @@
 
   interface Props {
     group: TagGroup;
+    /** Passed to the toolbar: off where the route fixes the group. */
+    groupPicker?: boolean;
     columns: BoardColumn[];
     /** The column on screen. */
     activeKey: string | null;
     onSelect: (key: string) => void;
   }
 
-  let { group, columns, activeKey, onSelect }: Props = $props();
+  let { group, groupPicker = true, columns, activeKey, onSelect }: Props = $props();
 </script>
 
 <div class="board-pager">
-  <BoardToolbar {group} />
+  <BoardToolbar {group} {groupPicker} />
   <div class="pager-strip" aria-label={`${group.name} columns`}>
     {#each columns as column (column.key)}
       <button

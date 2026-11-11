@@ -33,6 +33,8 @@ export interface TagGroup {
   /** Dense 0..n-1 order of groups. */
   position: number;
   isIconGroup: boolean;
+  /** The group's board is pinned to the projects sidebar. Any number may be. */
+  showInSidebar: boolean;
   createdAt: number;
   updatedAt: number;
 }

@@ -51,12 +51,18 @@ const MAX_NAMED = 2;
  * doesn't hold is skipped: `effectiveActiveFilters` ignores it too, so it
  * narrows nothing and the chips don't show it. Until the catalog loads, that
  * means a tag-filtered window is briefly titled by its other filters only.
+ *
+ * A window showing a pinned board (the sidebar's board route) leads with the
+ * board's name — "Status board" — since that, not a filter, is what the
+ * window is looking at; the filters that narrow the board follow.
  */
 export function formatWindowTitle(
   activeFilters: Set<string>,
-  tagsById: ReadonlyMap<string, { name: string }> = new Map()
+  tagsById: ReadonlyMap<string, { name: string }> = new Map(),
+  boardName: string | null = null
 ): string {
   const segments: string[] = [];
+  if (boardName) segments.push(`${boardName} board`);
   if (activeFilters.has('unread')) segments.push('Unread');
   if (activeFilters.has('running')) segments.push('Running');
 

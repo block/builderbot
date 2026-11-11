@@ -18,8 +18,9 @@
   more (BoardScrollEdges).
 
   On a phone the columns are full-width pages swiped sideways, under
-  BoardPhonePager. Mounted inside the home layer like the grid, never as a
-  layer of its own.
+  BoardPhonePager. Mounted inside the home layer like the grid, or inside
+  the project layer by a pinned board's view (BoardView), never as a layer
+  of its own.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -53,9 +54,11 @@
     /** The projects a search leaves showing (its rank), or null when not searching. */
     searchRank: { has(projectId: string): boolean } | null;
     onOpen: (projectId: string) => void;
+    /** Whether the phone pager's toolbar offers "Board by"; off when the route fixes the group. */
+    groupPicker?: boolean;
   }
 
-  let { group, projects, searchRank, onOpen }: Props = $props();
+  let { group, projects, searchRank, onOpen, groupPicker = true }: Props = $props();
 
   let boardEl = $state<HTMLElement | null>(null);
   let columnsEl = $state<HTMLElement | null>(null);
@@ -233,7 +236,13 @@
     <BoardEmptyState />
   {:else}
     {#if paged}
-      <BoardPhonePager {group} columns={layout.columns} {activeKey} onSelect={pageTo} />
+      <BoardPhonePager
+        {group}
+        {groupPicker}
+        columns={layout.columns}
+        {activeKey}
+        onSelect={pageTo}
+      />
     {/if}
     {#if allMatchesHidden}
       <p class="board-hint" role="status">

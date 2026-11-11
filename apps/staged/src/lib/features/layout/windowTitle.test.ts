@@ -111,6 +111,22 @@ describe('formatWindowTitle', () => {
     expect(formatWindowTitle(new Set(['archived']))).toBe('Staged');
   });
 
+  describe('a pinned board', () => {
+    it('leads with the board name, then the filters', async () => {
+      const { formatWindowTitle } = await importWindowTitle();
+      expect(formatWindowTitle(new Set(), new Map(), 'Status')).toBe('Status board');
+      expect(
+        formatWindowTitle(
+          new Set(['unread', 'tag:t-q4']),
+          new Map([['t-q4', { name: 'q4' }]]),
+          'Status'
+        )
+      ).toBe('Status board · Unread · q4');
+      // Off the board route the title is the filters' alone.
+      expect(formatWindowTitle(new Set(), new Map(), null)).toBe('Staged');
+    });
+  });
+
   describe('tag filters', () => {
     const tagsById = new Map([
       ['t-blocked', { name: 'Blocked' }],

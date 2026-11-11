@@ -1,7 +1,8 @@
 <!--
   BoardToolbar.svelte — the board's own controls: "Board by [group ▾]", and
   "Hidden columns (n)" to bring back columns hidden from their menus. In the
-  home page's search row on desktop; at the top of the phone pager.
+  home page's search row on desktop; at the top of the phone pager. A pinned
+  board (BoardView) fixes its group by route, so it leaves the picker out.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -20,9 +21,11 @@
 
   interface Props {
     group: TagGroup;
+    /** Offer "Board by [group ▾]"; off where the route fixes the group. */
+    groupPicker?: boolean;
   }
 
-  let { group }: Props = $props();
+  let { group, groupPicker = true }: Props = $props();
 
   let hidden = $derived(
     hiddenBoardColumns(
@@ -40,31 +43,33 @@
 </script>
 
 <div class="board-toolbar">
-  <DropdownMenu.Root>
-    <DropdownMenu.Trigger
-      class="board-toolbar-trigger touch-hit"
-      title="Choose the group to board by"
-    >
-      <span class="trigger-label">Board by</span>
-      <span class="trigger-value">{group.name}</span>
-      <ChevronDown size={13} class="board-toolbar-chevron" />
-    </DropdownMenu.Trigger>
-    <DropdownMenu.Content align="start" class="min-w-[180px]">
-      <DropdownMenu.Label>Board by</DropdownMenu.Label>
-      <DropdownMenu.RadioGroup value={group.id} onValueChange={(value) => setBoardGroup(value)}>
-        {#each tagsStore.groups as option (option.id)}
-          <DropdownMenu.RadioItem value={option.id}>
-            <span class="truncate">{option.name}</span>
-          </DropdownMenu.RadioItem>
-        {/each}
-      </DropdownMenu.RadioGroup>
-      <DropdownMenu.Separator />
-      <DropdownMenu.Item onSelect={() => openSettings('tags')}>
-        <Settings2 size={14} />
-        Manage tags…
-      </DropdownMenu.Item>
-    </DropdownMenu.Content>
-  </DropdownMenu.Root>
+  {#if groupPicker}
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger
+        class="board-toolbar-trigger touch-hit"
+        title="Choose the group to board by"
+      >
+        <span class="trigger-label">Board by</span>
+        <span class="trigger-value">{group.name}</span>
+        <ChevronDown size={13} class="board-toolbar-chevron" />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content align="start" class="min-w-[180px]">
+        <DropdownMenu.Label>Board by</DropdownMenu.Label>
+        <DropdownMenu.RadioGroup value={group.id} onValueChange={(value) => setBoardGroup(value)}>
+          {#each tagsStore.groups as option (option.id)}
+            <DropdownMenu.RadioItem value={option.id}>
+              <span class="truncate">{option.name}</span>
+            </DropdownMenu.RadioItem>
+          {/each}
+        </DropdownMenu.RadioGroup>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item onSelect={() => openSettings('tags')}>
+          <Settings2 size={14} />
+          Manage tags…
+        </DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+  {/if}
 
   {#if hidden.length > 0}
     <DropdownMenu.Root>

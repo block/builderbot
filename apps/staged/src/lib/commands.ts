@@ -2637,6 +2637,12 @@ export async function setIconTagGroup(groupId: string | null): Promise<void> {
   await invalidateCache('get_tag_state');
 }
 
+/** Pin a group's board to the projects sidebar, or unpin it. */
+export async function setTagGroupSidebar(groupId: string, shown: boolean): Promise<void> {
+  await invokeCommand('set_tag_group_sidebar', { groupId, shown });
+  await invalidateCache('get_tag_state');
+}
+
 /** Reorder groups; `groupIds` must name every group exactly once. */
 export async function reorderTagGroups(groupIds: string[]): Promise<void> {
   await invokeCommand('reorder_tag_groups', { groupIds });

@@ -3,6 +3,7 @@ import {
   withGroup,
   withGroupName,
   withGroupOrder,
+  withGroupSidebar,
   withIconGroup,
   withTag,
   withTagMoved,
@@ -119,6 +120,17 @@ describe('group patches', () => {
     expect(moved.groups.filter((g) => g.isIconGroup).map((g) => g.id)).toEqual(['priority']);
     const off = withIconGroup(moved, null);
     expect(off.groups.some((g) => g.isIconGroup)).toBe(false);
+  });
+
+  it("pins and unpins a group's board, keeping the identity of untouched groups", () => {
+    const base = tagState();
+    const pinned = withGroupSidebar(base, 'priority', true);
+    expect(pinned.groups.filter((g) => g.showInSidebar).map((g) => g.id)).toEqual(['priority']);
+    expect(pinned.groups[0]).toBe(base.groups[0]);
+    // A no-op keeps every group object.
+    expect(withGroupSidebar(pinned, 'priority', true).groups[1]).toBe(pinned.groups[1]);
+    const off = withGroupSidebar(pinned, 'priority', false);
+    expect(off.groups.some((g) => g.showInSidebar)).toBe(false);
   });
 
   it('numbers groups in the given order', () => {

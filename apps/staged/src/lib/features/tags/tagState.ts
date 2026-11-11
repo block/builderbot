@@ -33,6 +33,8 @@ export interface TagCatalog {
   tagsByGroup: ReadonlyMap<string | null, Tag[]>;
   /** The group whose tag stands in for a project's computed status icon. */
   iconGroup: TagGroup | null;
+  /** The groups whose boards are pinned to the sidebar, in position order. */
+  sidebarGroups: TagGroup[];
 }
 
 /** Catalog order: by position, then creation (the backend's `ORDER BY`). */
@@ -92,6 +94,7 @@ export function indexTagCatalog(state: TagState): TagCatalog {
     tagsById,
     tagsByGroup,
     iconGroup: groups.find((group) => group.isIconGroup) ?? null,
+    sidebarGroups: groups.filter((group) => group.showInSidebar),
   };
 }
 

@@ -2282,6 +2282,7 @@ pub fn run() {
             tag_commands::create_tag_group,
             tag_commands::rename_tag_group,
             tag_commands::set_icon_tag_group,
+            tag_commands::set_tag_group_sidebar,
             tag_commands::reorder_tag_groups,
             tag_commands::delete_tag_group,
             tag_commands::create_tag,

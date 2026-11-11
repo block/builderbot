@@ -596,6 +596,88 @@ describe('workspace layers', () => {
     expect(navigation.projectLayer).toBe(repos);
   });
 
+  it('shows a pinned board in the project layer, and releases it only under home', async () => {
+    const {
+      restoreInitialRoute,
+      selectBoard,
+      selectProject,
+      goHome,
+      releaseBoardLayer,
+      navigation,
+    } = await importNavigation();
+    await restoreInitialRoute();
+
+    selectBoard('g1');
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g1' });
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.selectedProjectId).toBeNull();
+    expect(navigation.showReposList).toBe(false);
+    const board = navigation.projectLayer;
+    expect(board).toEqual({ kind: 'board', groupId: 'g1' });
+    // The board is never the persisted route.
+    expect(setStoreValue).not.toHaveBeenCalledWith('last-viewed-project', 'g1');
+
+    // On screen, the view itself leaves for home; a release here is ignored.
+    releaseBoardLayer('g1');
+    expect(navigation.projectLayer).toBe(board);
+
+    // Another board replaces the route rather than stacking on it.
+    selectBoard('g2');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    expect(navigation.projectLayer).toEqual({ kind: 'board', groupId: 'g2' });
+
+    // A project opened from the board replaces it, as from the repos view.
+    selectProject('p1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'project']);
+
+    selectBoard('g2');
+    goHome();
+    const retained = navigation.projectLayer;
+    expect(retained).toEqual({ kind: 'board', groupId: 'g2' });
+    releaseBoardLayer('other');
+    expect(navigation.projectLayer).toBe(retained);
+    releaseBoardLayer('g2');
+    expect(navigation.projectLayer).toBeNull();
+  });
+
+  it('leaves a board that is no longer offered from wherever it sits in the stack', async () => {
+    const { restoreInitialRoute, selectBoard, openSettings, goHome, leaveBoard, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    // On screen: home.
+    selectBoard('g1');
+    leaveBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects']);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
+
+    // Under settings (where the unpinning was done): settings stays open,
+    // over the home grid, so Back lands on home.
+    selectBoard('g1');
+    openSettings('tags');
+    leaveBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'settings']);
+    expect(navigation.currentRoute.kind).toBe('settings');
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+
+    // Retained under home: the layer is released, the stack untouched.
+    goHome();
+    selectBoard('g2');
+    goHome();
+    expect(navigation.projectLayer).toEqual({ kind: 'board', groupId: 'g2' });
+    leaveBoard('g2');
+    expect(navigation.projectLayer).toBeNull();
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects']);
+
+    // Another group's board: nothing changes.
+    selectBoard('g3');
+    leaveBoard('g2');
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g3' });
+  });
+
   it('keeps both layers through settings and a diff over home', async () => {
     vi.stubGlobal('window', { dispatchEvent: vi.fn() });
     const {

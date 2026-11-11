@@ -607,6 +607,56 @@ fn at_most_one_group_drives_the_icon() {
     assert_eq!(icon_groups(&store), ["A"]);
 }
 
+fn sidebar_groups(store: &Store) -> Vec<String> {
+    store
+        .get_tag_state()
+        .unwrap()
+        .groups
+        .into_iter()
+        .filter(|g| g.show_in_sidebar)
+        .map(|g| g.name)
+        .collect()
+}
+
+#[test]
+fn any_number_of_groups_can_pin_their_board_to_the_sidebar() {
+    let (store, mut rx) = store_with_feed();
+    let a = group(&store, "A", &["x"]);
+    let b = group(&store, "B", &[]);
+    // Off by default, for new groups and (0045) for existing ones.
+    assert!(!a.show_in_sidebar && !b.show_in_sidebar);
+    assert!(sidebar_groups(&store).is_empty());
+    drain(&mut rx);
+
+    store.set_tag_group_sidebar(&a.id, true).unwrap();
+    assert_eq!(drain(&mut rx), vec![StoreChange::Tags]);
+    store.set_tag_group_sidebar(&b.id, true).unwrap();
+    assert_eq!(sidebar_groups(&store), ["A", "B"]);
+
+    // Pinning a pinned group changes nothing and publishes nothing.
+    store.set_tag_group_sidebar(&a.id, true).unwrap();
+    drain(&mut rx);
+    store.set_tag_group_sidebar(&a.id, true).unwrap();
+    assert_eq!(drain(&mut rx), vec![]);
+
+    store.set_tag_group_sidebar(&a.id, false).unwrap();
+    assert_eq!(drain(&mut rx), vec![StoreChange::Tags]);
+    assert_eq!(sidebar_groups(&store), ["B"]);
+
+    // The flag is the group's own: the icon group is unaffected either way.
+    assert_eq!(icon_groups(&store), ["A"]);
+
+    assert_eq!(
+        err(store.set_tag_group_sidebar("nope", true)),
+        "Tag group not found: nope"
+    );
+    // Deleting a pinned group takes its sidebar row with it.
+    store
+        .delete_tag_group(&b.id, DeleteTagGroupMode::Ungroup)
+        .unwrap();
+    assert!(sidebar_groups(&store).is_empty());
+}
+
 // =============================================================================
 // Errors, state shape and the change feed
 // =============================================================================

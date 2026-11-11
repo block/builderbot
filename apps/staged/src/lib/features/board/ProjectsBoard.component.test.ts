@@ -26,6 +26,7 @@ const commandsMock = vi.hoisted(() => ({
     name,
     position: 0,
     isIconGroup: false,
+    showInSidebar: false,
     createdAt: 1,
     updatedAt: 1,
   })),

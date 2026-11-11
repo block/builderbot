@@ -62,6 +62,8 @@ export type DetailRoute =
   | { kind: 'projects' }
   | { kind: 'repos' }
   | { kind: 'project'; projectId: string }
+  /** A tag group's board, opened from its pinned row in the sidebar. */
+  | { kind: 'board'; groupId: string }
   | { kind: 'settings'; section: SettingsSection }
   | DiffDetailRoute;
 
@@ -85,11 +87,12 @@ const initialDetailStack: DetailRoute[] = initialProject
   : [rootRoute()];
 
 /**
- * The non-home view the workspace's project layer holds: the last project or
- * repos base route. It outlives the base route so the layer can stay mounted
- * (covered or clipped) while home is shown.
+ * The non-home view the workspace's project layer holds: the last project,
+ * repos or board base route. It outlives the base route so the layer can stay
+ * mounted (covered or clipped) while home is shown.
  */
-export type ProjectLayer = { kind: 'project'; projectId: string } | { kind: 'repos' };
+export type ProjectLayer =
+  { kind: 'project'; projectId: string } | { kind: 'repos' } | { kind: 'board'; groupId: string };
 
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
@@ -262,6 +265,9 @@ function syncCompatibilityState(): void {
       navigation.projectLayer = { kind: 'project', projectId: base.projectId };
   } else if (base.kind === 'repos') {
     if (layer?.kind !== 'repos') navigation.projectLayer = { kind: 'repos' };
+  } else if (base.kind === 'board') {
+    if (!(layer?.kind === 'board' && layer.groupId === base.groupId))
+      navigation.projectLayer = { kind: 'board', groupId: base.groupId };
   }
 }
 
@@ -295,6 +301,18 @@ function settleInitialRoute(): void {
 export function releaseProjectLayer(projectId: string): void {
   const layer = navigation.projectLayer;
   if (!navigation.homeActive || layer?.kind !== 'project' || layer.projectId !== projectId) return;
+  navigation.projectLayer = null;
+}
+
+/**
+ * Drop the retained board layer for `groupId` — because the group was deleted
+ * or its board unpinned — so the layer unmounts rather than showing a board
+ * that is no longer offered. Only while home is active, as for projects: on
+ * screen, the board's route is what goes (leaveBoard).
+ */
+export function releaseBoardLayer(groupId: string): void {
+  const layer = navigation.projectLayer;
+  if (!navigation.homeActive || layer?.kind !== 'board' || layer.groupId !== groupId) return;
   navigation.projectLayer = null;
 }
 
@@ -457,12 +475,40 @@ export function showAllRepos(): void {
   pushOrReplaceRoute({ kind: 'repos' });
 }
 
+/**
+ * Navigate to a tag group's board (its pinned sidebar row). Like the repos
+ * view it takes the project layer, and is not persisted as the last route.
+ */
+export function selectBoard(groupId: string): void {
+  pushOrReplaceRoute({ kind: 'board', groupId });
+}
+
+/**
+ * The board for `groupId` is no longer offered (its group deleted, or its
+ * board unpinned, here or in another window). Take its route out of the
+ * stack wherever it sits, leaving whatever is above it — settings, where the
+ * unpinning most likely happened, or a diff — in place over the home grid,
+ * so the user isn't thrown out of what they were doing. On screen, that is
+ * going home. A board only retained under home has no route; its layer is
+ * released so it unmounts rather than show a board nobody offers.
+ */
+export function leaveBoard(groupId: string): void {
+  const stack = navigation.detailStack;
+  const index = stack.findIndex((route) => route.kind === 'board' && route.groupId === groupId);
+  if (index !== -1) {
+    setDetailStack(stack.filter((_, i) => i !== index));
+    // The base route is now home, as after goHome / a pop to the root.
+    if (workspaceRoute().kind === 'projects') persistLastProject(null);
+  }
+  releaseBoardLayer(groupId);
+}
+
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
   const current = currentRoute();
   if (current.kind === 'projects') {
     setDetailStack([rootRoute(), { kind: 'project', projectId }]);
-  } else if (current.kind === 'project' || current.kind === 'repos') {
+  } else if (current.kind === 'project' || current.kind === 'repos' || current.kind === 'board') {
     replaceCurrentRoute({ kind: 'project', projectId });
   } else if (current.kind === 'settings') {
     setDetailStack([...navigation.detailStack.slice(0, -1), { kind: 'project', projectId }]);

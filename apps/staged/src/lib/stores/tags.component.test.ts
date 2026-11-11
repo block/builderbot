@@ -28,6 +28,7 @@ function state(assignments: ProjectTag[] = []): TagState {
         name: 'Status',
         position: 0,
         isIconGroup: true,
+        showInSidebar: false,
         createdAt: 0,
         updatedAt: 0,
       },

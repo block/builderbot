@@ -36,12 +36,21 @@ function tag(id: string, groupId: string | null, position: number): Tag {
 function catalog(assignments: ProjectTag[] = []): TagState {
   return {
     groups: [
-      { id: 'status', name: 'Status', position: 0, isIconGroup: true, createdAt: 0, updatedAt: 0 },
+      {
+        id: 'status',
+        name: 'Status',
+        position: 0,
+        isIconGroup: true,
+        showInSidebar: false,
+        createdAt: 0,
+        updatedAt: 0,
+      },
       {
         id: 'priority',
         name: 'Priority',
         position: 1,
         isIconGroup: false,
+        showInSidebar: false,
         createdAt: 0,
         updatedAt: 0,
       },

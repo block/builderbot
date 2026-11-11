@@ -216,6 +216,8 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(index_exists(&conn, "idx_tag_groups_name"));
     assert!(index_exists(&conn, "idx_tag_groups_icon"));
     assert!(index_exists(&conn, "idx_tags_scope_name"));
+    // 0045: a group's board can be pinned to the sidebar.
+    assert!(column_exists(&conn, "tag_groups", "show_in_sidebar"));
     // The legacy status import's marker, until the app runs the import.
     assert!(table_exists(&conn, "legacy_project_status_import"));
     let marker_rows: i64 = conn
@@ -1750,6 +1752,98 @@ fn test_project_tags_migration_then_import_moves_status_overrides_into_tags() {
         ]
     );
     drop(stmt);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_tag_group_sidebar_migration_adds_the_column_off_for_existing_groups() {
+    let path = temp_db_path("tag-group-sidebar");
+    let conn = Connection::open(&path).unwrap();
+    // The tag tables as of 0044, with a group already in them.
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 44;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        CREATE TABLE projects (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            github_repo     TEXT,
+            location        TEXT NOT NULL DEFAULT 'local',
+            subpath         TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            status_override TEXT
+        );
+        CREATE TABLE tag_groups (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            position      INTEGER NOT NULL,
+            is_icon_group INTEGER NOT NULL DEFAULT 0 CHECK (is_icon_group IN (0, 1)),
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_tag_groups_name ON tag_groups (name COLLATE NOCASE);
+        CREATE UNIQUE INDEX idx_tag_groups_icon ON tag_groups (is_icon_group) WHERE is_icon_group = 1;
+        CREATE TABLE tags (
+            id         TEXT PRIMARY KEY,
+            group_id   TEXT REFERENCES tag_groups (id),
+            name       TEXT NOT NULL,
+            color      TEXT NOT NULL CHECK (color IN ('green','red','amber','blue','purple','cyan','gray')),
+            icon       TEXT,
+            position   INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_tags_scope_name ON tags (ifnull(group_id, ''), name COLLATE NOCASE);
+        CREATE INDEX idx_tags_group ON tags (group_id, position);
+        CREATE TABLE project_tags (
+            project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+            tag_id     TEXT NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
+            sort_order INTEGER,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (project_id, tag_id)
+        );
+        CREATE INDEX idx_project_tags_tag ON project_tags (tag_id);
+        INSERT INTO tag_groups (id, name, position, is_icon_group, created_at, updated_at)
+            VALUES ('status', 'Status', 0, 1, 1, 1);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    let state = store.get_tag_state().unwrap();
+    assert_eq!(state.groups.len(), 1);
+    // An existing group's board starts unpinned, and the icon flag is kept.
+    assert!(!state.groups[0].show_in_sidebar);
+    assert!(state.groups[0].is_icon_group);
+    store.set_tag_group_sidebar("status", true).unwrap();
+    assert!(store.get_tag_state().unwrap().groups[0].show_in_sidebar);
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 45);
+    assert!(column_exists(&conn, "tag_groups", "show_in_sidebar"));
+    let shown: i64 = conn
+        .query_row(
+            "SELECT show_in_sidebar FROM tag_groups WHERE id = 'status'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(shown, 1);
+    // The CHECK admits only 0 and 1.
+    assert!(conn
+        .execute("UPDATE tag_groups SET show_in_sidebar = 2", [])
+        .is_err());
 
     cleanup_db(&path);
 }

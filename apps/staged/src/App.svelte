@@ -25,6 +25,7 @@
   import ControlAuthorizationDialog from './lib/features/settings/ControlAuthorizationDialog.svelte';
   import { resumeOnLaunch } from './lib/features/sessions/resumeOnLaunch.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
+  import BoardView from './lib/features/board/BoardView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import DiffModal from './lib/features/diff/DiffModal.svelte';
@@ -185,7 +186,16 @@
   // window-local; see windowTitle.ts for the format and the IPC guards.
   // =========================================================================
   $effect(() => {
-    void applyWindowTitle(formatWindowTitle(projectFiltersStore.activeFilters, tagsStore.tagsById));
+    // The base route's board, if that's what the workspace shows: under
+    // settings or a diff the board is still the window's view.
+    const layer = navigation.projectLayer;
+    const boardName =
+      !navigation.homeActive && layer?.kind === 'board'
+        ? (tagsStore.catalog.groupsById.get(layer.groupId)?.name ?? null)
+        : null;
+    void applyWindowTitle(
+      formatWindowTitle(projectFiltersStore.activeFilters, tagsStore.tagsById, boardName)
+    );
   });
 
   // Refresh git state (TTL-gated) for the selected project's branches when the
@@ -795,10 +805,12 @@
               {#if navigation.projectLayer}
                 {@const projectLayer = navigation.projectLayer}
                 <!-- Hoisted out of ProjectHome so it survives project↔repos
-                     transitions. -->
+                     and project↔board transitions. -->
                 <ProjectsSidebar />
                 {#if projectLayer.kind === 'repos'}
                   <ReposListView />
+                {:else if projectLayer.kind === 'board'}
+                  <BoardView groupId={projectLayer.groupId} />
                 {:else}
                   <ProjectHome selectedProjectId={projectLayer.projectId} />
                 {/if}

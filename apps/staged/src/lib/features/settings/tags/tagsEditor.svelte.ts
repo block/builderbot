@@ -300,6 +300,12 @@ export class TagsEditor {
     void tagActions.setIconTagGroup(on ? group.id : null);
   }
 
+  /** Pin the group's board to the projects sidebar, or unpin it. */
+  setSidebarBoard(group: TagGroup, on: boolean): void {
+    if (group.showInSidebar === on) return;
+    void tagActions.setTagGroupSidebar(group, on);
+  }
+
   async moveGroup(group: TagGroup, step: -1 | 1): Promise<void> {
     const order = steppedGroupOrder(this.catalog.groups, group.id, step);
     if (!order) return;

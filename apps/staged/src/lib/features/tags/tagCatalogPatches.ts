@@ -110,6 +110,16 @@ export function withIconGroup(state: TagState, groupId: string | null): TagState
   };
 }
 
+/** Pin `groupId`'s board to the sidebar, or unpin it. */
+export function withGroupSidebar(state: TagState, groupId: string, shown: boolean): TagState {
+  return {
+    ...state,
+    groups: state.groups.map((g) =>
+      g.id === groupId && g.showInSidebar !== shown ? { ...g, showInSidebar: shown } : g
+    ),
+  };
+}
+
 /** Number the groups in `groupIds` order. Groups not listed keep their position. */
 export function withGroupOrder(state: TagState, groupIds: readonly string[]): TagState {
   const placed = new Map(groupIds.map((id, position) => [id, position]));

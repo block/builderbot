@@ -24,6 +24,7 @@ const commandsMock = vi.hoisted(() => ({
       name,
       position: backend.state.groups.length,
       isIconGroup: false,
+      showInSidebar: false,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -39,6 +40,7 @@ const commandsMock = vi.hoisted(() => ({
   deleteTag: vi.fn(async (_tagId: string) => {}),
   renameTagGroup: vi.fn(async () => {}),
   setIconTagGroup: vi.fn(async () => {}),
+  setTagGroupSidebar: vi.fn(async (_groupId: string, _shown: boolean) => {}),
   reorderTagGroups: vi.fn(async () => {}),
 }));
 
@@ -225,6 +227,42 @@ describe('TagsSettingsPanel', () => {
       { name: 'P3', icon: 'chevron-down', color: 'gray' },
     ]);
     expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Priority 2']);
+  });
+
+  describe('pinning a board to the sidebar', () => {
+    function groupMenuTrigger(groupName: string): HTMLElement {
+      return document.querySelector<HTMLElement>(`[aria-label="Actions for ${groupName}"]`)!;
+    }
+
+    it('toggles the group flag from its menu and shows the badge', async () => {
+      commandsMock.setTagGroupSidebar.mockImplementation(async (groupId, shown) => {
+        backend.state = {
+          ...backend.state,
+          groups: backend.state.groups.map((g) =>
+            g.id === groupId ? { ...g, showInSidebar: shown } : g
+          ),
+        };
+      });
+      const root = await mountPanel(tagState());
+      expect(root.textContent).not.toContain('In sidebar');
+
+      let item = menuItem(await openMenu(groupMenuTrigger('Priority')), 'Show board in sidebar');
+      expect(item.getAttribute('aria-checked')).toBe('false');
+      item.click();
+      await settle();
+      expect(commandsMock.setTagGroupSidebar).toHaveBeenCalledWith('priority', true);
+      // The local patch lands at once, and the icon flag is untouched.
+      const priority = root.querySelector<HTMLElement>('[aria-labelledby$="priority"]')!;
+      expect(priority.textContent).toContain('In sidebar');
+      expect(priority.textContent).not.toContain('Project icon');
+
+      item = menuItem(await openMenu(groupMenuTrigger('Priority')), 'Show board in sidebar');
+      expect(item.getAttribute('aria-checked')).toBe('true');
+      item.click();
+      await settle();
+      expect(commandsMock.setTagGroupSidebar).toHaveBeenLastCalledWith('priority', false);
+      expect(root.textContent).not.toContain('In sidebar');
+    });
   });
 
   describe('deleting a group', () => {

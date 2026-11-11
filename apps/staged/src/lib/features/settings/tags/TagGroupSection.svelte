@@ -4,8 +4,9 @@
   order).
 
   The menu renames, makes the group the project icon (its tag's icon then
-  leads every sidebar row and grid card), moves the group up or down, and
-  deletes it after asking what happens to its tags.
+  leads every sidebar row and grid card), pins the group's board to the
+  projects sidebar (a row under the Projects heading opens it), moves the
+  group up or down, and deletes it after asking what happens to its tags.
 
   Like a tag's name (TagRow), the group name keeps what's being typed while
   it has focus, whatever catalog echoes arrive meanwhile.
@@ -16,6 +17,7 @@
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import Pencil from '@lucide/svelte/icons/pencil';
+  import SquareKanban from '@lucide/svelte/icons/square-kanban';
   import Star from '@lucide/svelte/icons/star';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -95,6 +97,12 @@
         Project icon
       </span>
     {/if}
+    {#if group.showInSidebar}
+      <span class="icon-badge" title="This group's board is pinned to the projects sidebar">
+        <SquareKanban size={11} />
+        In sidebar
+      </span>
+    {/if}
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
         id={groupMenuTriggerId(group.id)}
@@ -118,6 +126,12 @@
           onCheckedChange={(checked) => editor.setIconGroup(group, checked)}
         >
           Show as project icon
+        </DropdownMenu.CheckboxItem>
+        <DropdownMenu.CheckboxItem
+          checked={group.showInSidebar}
+          onCheckedChange={(checked) => editor.setSidebarBoard(group, checked)}
+        >
+          Show board in sidebar
         </DropdownMenu.CheckboxItem>
         <DropdownMenu.Separator />
         <DropdownMenu.Item disabled={!canMoveUp} onSelect={() => void editor.moveGroup(group, -1)}>

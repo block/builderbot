@@ -14,8 +14,20 @@
 //!
 //! **Pending requests** are capped at [`PENDING_CAP`] and expire after
 //! [`PENDING_TTL_MS`], so an unattended app cannot be made to accumulate
-//! prompts. **Nonces** for the reconnect proof are single-use and expire
-//! after [`NONCE_TTL_MS`].
+//! prompts. An approval the CLI never collects — it gave up before the user
+//! answered — expires with its request, and the grant it minted is retired
+//! with it (row revoked, bearer dropped; see `consent::retire_abandoned_approvals`)
+//! so no "connected" client exists that nobody holds the secret for.
+//! **Nonces** for the reconnect proof are single-use and expire after
+//! [`NONCE_TTL_MS`].
+//!
+//! **Who may enrol.** Only a caller with no session credential. A
+//! Staged-spawned session (class A) holds a bearer confined to its own
+//! project; letting it `connect` would let a prompt-injected agent ask the
+//! user for an all-projects grant under any name it likes, attributed only
+//! to a `node`/`claude` process. [`reject_session_bearer`] refuses every
+//! enrolment route to such a bearer before any request is parked or prompt
+//! shown.
 //!
 //! **The proof.** The durable row stores `hash = SHA-256(secret)` and the
 //! client proves possession with `HMAC-SHA256(key = hash, msg =
@@ -157,6 +169,9 @@ pub(super) struct EnrolInner {
     nonces: VecDeque<(String, String, i64)>,
     /// grant id → last `last_used_at` write.
     touched: HashMap<String, i64>,
+    /// Grant ids of approvals that expired uncollected, awaiting retirement
+    /// by [`Enrolment::take_abandoned`].
+    abandoned: Vec<String>,
 }
 
 /// The enrolment state, shared by the control server's handlers and the
@@ -171,8 +186,30 @@ impl Enrolment {
     fn prune(inner: &mut EnrolInner, now: i64) {
         // An answered request stays until the CLI collects it, but not past
         // its expiry: a CLI that gave up must not leave credentials parked.
-        inner.pending.retain(|_, p| p.expires_at > now);
+        // An approval that goes uncollected is remembered so its grant can
+        // be retired — the row and bearer already exist by the time the
+        // user's answer is parked.
+        let mut abandoned = Vec::new();
+        inner.pending.retain(|_, p| {
+            if p.expires_at > now {
+                return true;
+            }
+            if let Some(Decision::Approved(grant)) = &p.decision {
+                abandoned.push(grant.grant_id.clone());
+            }
+            false
+        });
+        inner.abandoned.extend(abandoned);
         inner.nonces.retain(|(_, _, expires)| *expires > now);
+    }
+
+    /// The grant ids of approvals that expired before the CLI collected
+    /// them, each handed over once. The caller retires them (row and
+    /// bearers); see `consent::retire_abandoned_approvals`.
+    pub(crate) fn take_abandoned(&self, now: i64) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap();
+        Self::prune(&mut inner, now);
+        std::mem::take(&mut inner.abandoned)
     }
 
     /// Park a request. Refused when [`PENDING_CAP`] unanswered requests are
@@ -419,15 +456,16 @@ pub(crate) fn validate_client_name(client: &str) -> Result<String, String> {
 // HTTP: the enrolment routes
 // =============================================================================
 
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, Path, Request, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use super::consent;
-use super::grants::AuthorizationFailure;
-use super::{authorization_response, ControlState};
+use super::grants::{Actor, AuthorizationFailure, ControlGrant};
+use super::{authorization_response, bearer_token, ControlState};
 use crate::store::{now_timestamp, ControlGrantRecord, Store};
 
 /// How long `GET /api/connect/{id}` holds a pending request before
@@ -508,12 +546,68 @@ pub(crate) fn resolve_project(store: &Store, needle: &str) -> Result<(String, St
     }
 }
 
+/// Middleware on every enrolment route: a bearer that resolves to a
+/// session grant is refused `scope_denied` before the handler runs, so a
+/// spawned session can neither ask the user for a connected-app grant nor
+/// reconnect or revoke one. Callers with no bearer, an unknown one, or an
+/// approved app's bearer pass through — enrolment is how they get or renew
+/// a credential, and an approved app re-running `connect` is the user's to
+/// answer.
+pub(super) async fn reject_session_bearer(
+    State(grants): State<super::ControlGrants>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(session_id) = session_bearer(&grants, request.headers()) {
+        return authorization_response(
+            StatusCode::FORBIDDEN,
+            "scope_denied",
+            &session_enrolment_refusal(&session_id),
+        );
+    }
+    next.run(request).await
+}
+
+/// The session id a request's bearer resolves to, if it is a session's.
+fn session_bearer(
+    grants: &super::ControlGrants,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    let grant = grants.authorize(bearer_token(headers)?).ok()?;
+    match grant.actor {
+        Actor::Session { session_id, .. } => Some(session_id),
+        Actor::App { .. } => None,
+    }
+}
+
+/// The refusal a spawned session reads on an enrolment route. The CLI
+/// prints the same explanation locally when `$STAGEDCTL_LOCK` is a
+/// per-session file, without a round trip.
+pub(crate) fn session_enrolment_refusal(session_id: &str) -> String {
+    format!(
+        "spawned sessions cannot request connected-app access: this credential belongs to \
+         Staged session {session_id} and is confined to that session's project; `stagedctl \
+         connect` and `disconnect` are for clients the user runs outside a session"
+    )
+}
+
+/// Retire any approvals that expired uncollected, off the runtime.
+async fn sweep_abandoned(state: &ControlState) {
+    let app = state.app_handle.clone();
+    let grants = state.grants.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        consent::sweep_abandoned_approvals(&app, &grants);
+    })
+    .await;
+}
+
 /// `POST /api/connect`: park a request and prompt the user.
 pub(super) async fn connect(
     State(state): State<ControlState>,
     parts: Parts,
     Json(body): Json<ConnectBody>,
 ) -> Response {
+    sweep_abandoned(&state).await;
     let client = match validate_client_name(&body.client) {
         Ok(client) => client,
         Err(e) => return bad_request(e),
@@ -610,6 +704,9 @@ pub(super) async fn poll_connect(
             }
             PollOutcome::Denied => return refusal(AuthorizationFailure::Denied),
             PollOutcome::Expired => {
+                // If the user approved after the CLI's own deadline, that
+                // approval is now abandoned; retire it before answering.
+                sweep_abandoned(&state).await;
                 return authorization_response(
                     StatusCode::UNAUTHORIZED,
                     AuthorizationFailure::Missing.code(),
@@ -763,6 +860,12 @@ async fn verify_proof(
 
 /// `POST /api/reconnect`: prove possession of the secret, renew the grant,
 /// get this run's bearer.
+///
+/// Every `stagedctl` invocation from an approved client reconnects, so the
+/// renewal write is throttled like `last_used_at` (one per
+/// [`TOUCH_INTERVAL_MS`] per grant; a skipped renewal keeps the row's
+/// current expiry) and the Settings panel is told only when its row visibly
+/// changes — the expiry moved, or the grant just went live.
 pub(super) async fn reconnect(
     State(state): State<ControlState>,
     Json(body): Json<ProofBody>,
@@ -772,23 +875,29 @@ pub(super) async fn reconnect(
         Err(response) => return *response,
     };
     let now = now_timestamp();
-    let grant_id = record.id.clone();
-    let renewed = with_store(&state, move |store| {
-        store
-            .renew_control_grant(&grant_id, now)
-            .map_err(|e| e.to_string())
-    })
-    .await;
-    let expires_at = match renewed {
-        Ok(Some(expires_at)) => expires_at,
-        Ok(None) => return refusal(AuthorizationFailure::Revoked),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response()
+    let was_live = state.grants.app_grant_is_live(&record.id);
+    let renew_now = state.grants.enrolment().touch_due(&record.id, now);
+    let expires_at = if renew_now {
+        let grant_id = record.id.clone();
+        let renewed = with_store(&state, move |store| {
+            store
+                .renew_control_grant(&grant_id, now)
+                .map_err(|e| e.to_string())
+        })
+        .await;
+        match renewed {
+            Ok(Some(expires_at)) => expires_at,
+            Ok(None) => return refusal(AuthorizationFailure::Revoked),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
         }
+    } else {
+        record.expires_at
     };
     let Some(access) = Access::from_wire(&record.access) else {
         return bad_request(format!("grant has unknown access {:?}", record.access));
@@ -798,9 +907,11 @@ pub(super) async fn reconnect(
         &record.client,
         Scope::from_project_id(record.scope_project_id.clone()),
         access,
+        expires_at,
     );
-    state.grants.enrolment().touch_due(&record.id, now);
-    consent::emit_grants_changed(&state.app_handle);
+    if reconnect_changes_summary(renew_now, was_live) {
+        consent::emit_grants_changed(&state.app_handle);
+    }
     Json(serde_json::json!({
         "grantId": record.id,
         "token": token,
@@ -829,6 +940,67 @@ pub(super) async fn disconnect(
             Json(serde_json::json!({ "error": e })),
         )
             .into_response(),
+    }
+}
+
+/// Whether a reconnect changed what Settings ▸ Connected apps shows for the
+/// grant: a renewal moved `expires_at` / `last_used_at`, or the grant was
+/// not live before this bearer. A throttled reconnect of an already-live
+/// grant changes nothing visible and emits nothing.
+fn reconnect_changes_summary(renewed: bool, was_live: bool) -> bool {
+    renewed || !was_live
+}
+
+/// Whether the project a class B grant is confined to still exists. The
+/// `control_grants` row cascades away with its project (migration 0043), so
+/// a live bearer minted before the delete would otherwise outlive its row;
+/// `invoke` runs this ahead of dispatch and retires the grant when it says
+/// no. Unconfined grants and session grants are always `Ok(true)`.
+pub(crate) fn app_grant_scope_exists(store: &Store, grant: &ControlGrant) -> Result<bool, String> {
+    let (Actor::App { .. }, Some(project_id)) = (&grant.actor, grant.project_scope()) else {
+        return Ok(true);
+    };
+    store
+        .get_project(project_id)
+        .map(|project| project.is_some())
+        .map_err(|e| e.to_string())
+}
+
+/// The refusal for a class B bearer whose scope project is gone, after
+/// dropping the grant's live bearers; `None` when the grant is fine (or
+/// the check itself failed, which is logged and lets dispatch proceed —
+/// the scope table then refuses anything addressing the missing project).
+pub(super) async fn refuse_orphaned_app_grant(
+    state: &ControlState,
+    grant: &ControlGrant,
+) -> Option<Response> {
+    let Actor::App { grant_id, .. } = &grant.actor else {
+        return None;
+    };
+    grant.project_scope()?;
+    let probe = grant.clone();
+    let exists = with_store(state, move |store| app_grant_scope_exists(store, &probe)).await;
+    match exists {
+        Ok(true) => None,
+        Ok(false) => {
+            let dropped = state.grants.revoke_app_grant(grant_id);
+            state.grants.enrolment().forget_touch(grant_id);
+            log::info!(
+                "[control_server] connected app grant {grant_id} lost its project; dropped \
+                 {dropped} live bearers"
+            );
+            consent::emit_grants_changed(&state.app_handle);
+            Some(authorization_response(
+                StatusCode::UNAUTHORIZED,
+                AuthorizationFailure::Unknown.code(),
+                "the project this connected app was confined to no longer exists, so its \
+                 approval is gone; run `stagedctl connect` to ask again",
+            ))
+        }
+        Err(e) => {
+            log::warn!("[control_server] could not check grant {grant_id}'s project: {e}");
+            None
+        }
     }
 }
 
@@ -960,12 +1132,101 @@ mod tests {
             enrol.get_unanswered(&late.id, after + 1).unwrap_err(),
             AnswerError::Unknown
         );
-        // An approval the CLI never collected does not outlive the request.
+        // An approval the CLI never collected does not outlive the request,
+        // and its grant id is handed over once for retirement.
         let abandoned = enrol.request(request("abandoned"), 1_000).unwrap();
         enrol
             .answer(&abandoned.id, Decision::Approved(approved("g2")), 1_001)
             .unwrap();
         assert_eq!(enrol.poll(&abandoned.id, after), PollOutcome::Expired);
+        assert_eq!(enrol.take_abandoned(after), vec!["g2".to_string()]);
+        assert!(
+            enrol.take_abandoned(after + 1).is_empty(),
+            "handed over once"
+        );
+    }
+
+    #[test]
+    fn only_uncollected_approvals_are_abandoned() {
+        let enrol = Enrolment::default();
+        let after = 1_000 + PENDING_TTL_MS;
+        // Collected in time: nothing to retire.
+        let collected = enrol.request(request("collected"), 1_000).unwrap();
+        enrol
+            .answer(
+                &collected.id,
+                Decision::Approved(approved("g-collected")),
+                1_001,
+            )
+            .unwrap();
+        assert!(matches!(
+            enrol.poll(&collected.id, 1_002),
+            PollOutcome::Approved(_)
+        ));
+        // Denied, or never answered: no grant was minted.
+        let denied = enrol.request(request("denied"), 1_000).unwrap();
+        enrol.answer(&denied.id, Decision::Denied, 1_001).unwrap();
+        enrol.request(request("ignored"), 1_000).unwrap();
+        // Approved and left: retire.
+        let left = enrol.request(request("left"), 1_000).unwrap();
+        enrol
+            .answer(&left.id, Decision::Approved(approved("g-left")), 1_001)
+            .unwrap();
+        // Any pruning call surfaces it, not just a poll of that id.
+        assert!(enrol.pending(after).is_empty());
+        assert_eq!(enrol.take_abandoned(after), vec!["g-left".to_string()]);
+    }
+
+    #[test]
+    fn a_reconnect_emits_only_when_the_summary_changes() {
+        assert!(reconnect_changes_summary(true, true), "renewal written");
+        assert!(reconnect_changes_summary(true, false));
+        assert!(reconnect_changes_summary(false, false), "went live");
+        assert!(
+            !reconnect_changes_summary(false, true),
+            "a throttled reconnect of a live grant changes nothing visible"
+        );
+    }
+
+    #[test]
+    fn app_grants_confined_to_a_deleted_project_are_orphaned() {
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::named("Widgets");
+        store.create_project(&project).unwrap();
+        let app = |scope: Scope| ControlGrant {
+            actor: Actor::App {
+                grant_id: "g".to_string(),
+                client: "agent".to_string(),
+            },
+            scope,
+            branch_id: None,
+            access: Access::ReadWrite,
+        };
+        assert!(app_grant_scope_exists(&store, &app(Scope::Project(project.id.clone()))).unwrap());
+        assert!(app_grant_scope_exists(&store, &app(Scope::AllProjects)).unwrap());
+        assert!(!app_grant_scope_exists(&store, &app(Scope::Project("gone".to_string()))).unwrap());
+        // A session grant is the lease's business, never orphaned here.
+        let session = ControlGrant {
+            actor: Actor::Session {
+                session_id: "s".to_string(),
+                epoch: 1,
+            },
+            scope: Scope::Project("gone".to_string()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        };
+        assert!(app_grant_scope_exists(&store, &session).unwrap());
+    }
+
+    #[test]
+    fn the_session_enrolment_refusal_names_the_session_and_the_rule() {
+        let text = session_enrolment_refusal("s-1");
+        assert!(text.starts_with("spawned sessions cannot request connected-app access"));
+        assert!(text.contains("session s-1"), "{text}");
+        // The CLI's local refusal must open with the same sentence (pinned
+        // there too), so an agent reads one explanation either way.
+        let cli = include_str!("../../crates/stagedctl/src/commands.rs");
+        assert!(cli.contains("spawned sessions cannot request connected-app access"));
     }
 
     #[test]

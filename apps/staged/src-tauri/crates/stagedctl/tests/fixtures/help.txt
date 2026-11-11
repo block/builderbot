@@ -413,7 +413,14 @@ its last use and can be revoked at any time in the app under
 Settings ▸ Connected apps, or with `stagedctl disconnect`.
 
 Exit 4 with `authorization_denied` when the user declines. A request
-left unanswered for five minutes expires.
+left unanswered for five minutes expires in the app; the default
+--timeout gives up a minute earlier so an approval never lands after
+this command has stopped listening for it.
+
+Not available from inside a Staged-spawned session: a session's
+credential is confined to its own project and cannot request
+connected-app access (exit 4, `scope_denied`). If a task needs wider
+access, ask the user to run this command from their own terminal.
 
 Usage: stagedctl connect [OPTIONS] --client <NAME>
 
@@ -436,7 +443,7 @@ Options:
       --timeout <SECONDS>
           Seconds to wait for the user's answer
           
-          [default: 300]
+          [default: 240]
 
   -h, --help
           Print help (see a summary with '-h')
@@ -447,6 +454,10 @@ app is running, revoke them there too so their live credentials stop
 working at once. With --client only the grants approved under that name
 are removed. Grants a Staged app cannot be reached for are still removed
 locally; revoke them in Settings ▸ Connected apps if needed.
+
+Not available from inside a Staged-spawned session (exit 4,
+`scope_denied`): a session's credential is its own, not a connected-app
+grant.
 
 Usage: stagedctl disconnect [OPTIONS]
 

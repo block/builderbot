@@ -44,7 +44,9 @@
 //! B, `stagedctl connect`, asks the user by name in a consent dialog and,
 //! once approved, holds a durable thirty-day grant it reconnects to with a
 //! proof of its secret ([`enrol`], [`consent`]). Both classes share the
-//! registry and the scope table.
+//! registry and the scope table, but never cross: a session's bearer is
+//! refused on every enrolment route, so a spawned agent cannot ask the user
+//! for a wider grant than the one it was spawned with.
 //!
 //! **What a caller can do.** The fixed verb table: [`ALLOWED_COMMANDS`] maps
 //! the `stagedctl` surface to specific dispatch commands — every one
@@ -226,7 +228,8 @@ pub(crate) fn stagedctl_env(lease: Option<&SessionLease>) -> Vec<(String, String
 
 /// Mint a class A credential for a session this instance is starting: a
 /// read-write grant confined to the session's project, written to
-/// `~/.staged/control/<pid>/sessions/<session_id>.json` for `STAGEDCTL_LOCK`.
+/// `~/.staged/control/<pid>/sessions/<session_id>-<epoch>.json` for
+/// `STAGEDCTL_LOCK`.
 /// `None` when the control server is not up or the grants registry is not
 /// managed, and on a write failure (logged) — the session then simply has
 /// no stagedctl.
@@ -472,8 +475,9 @@ async fn serve(
         .route("/api/ping", get(ping))
         // Enrolment and reconnect need no grant — they are how one is
         // obtained — but sit behind the transport gate and header rules
-        // like everything else, with the same body cap.
-        .merge(enrolment_router())
+        // like everything else, with the same body cap, and refuse a
+        // session's bearer outright.
+        .merge(enrolment_router(grants.clone()))
         // The grant is resolved on the invoke route only (ping is the
         // unauthenticated handshake), before the body is read.
         .merge(
@@ -515,14 +519,20 @@ async fn serve(
     }
 }
 
-/// The class B routes (see [`enrol`]), each under [`CONTROL_BODY_LIMIT`].
-fn enrolment_router() -> Router<ControlState> {
+/// The class B routes (see [`enrol`]), each under [`CONTROL_BODY_LIMIT`]
+/// and behind [`enrol::reject_session_bearer`]: a spawned session's
+/// credential buys nothing here.
+fn enrolment_router(grants: ControlGrants) -> Router<ControlState> {
     Router::new()
         .route("/api/connect", post(enrol::connect))
         .route("/api/connect/{request_id}", get(enrol::poll_connect))
         .route("/api/reconnect/challenge", post(enrol::reconnect_challenge))
         .route("/api/reconnect", post(enrol::reconnect))
         .route("/api/disconnect", post(enrol::disconnect))
+        .route_layer(middleware::from_fn_with_state(
+            grants,
+            enrol::reject_session_bearer,
+        ))
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT))
 }
 
@@ -783,6 +793,12 @@ async fn invoke(
             .into_response();
     }
 
+    // A class B grant confined to a project that has since been deleted
+    // lost its row to the cascade; drop its bearers so memory and store
+    // agree, instead of letting the scope table refuse it piecemeal.
+    if let Some(response) = enrol::refuse_orphaned_app_grant(&state, &grant).await {
+        return response;
+    }
     enrol::note_app_bearer_use(&state, &grant);
     match crate::web_server::dispatch(
         &command,
@@ -1014,6 +1030,119 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json_body(response).await["peerPid"], 4242);
         assert_eq!(HANDLED.load(Ordering::SeqCst), 1);
+    }
+
+    /// The enrolment routes refuse a session's bearer before the handler
+    /// runs: nothing is parked, no prompt is shown. A caller with no bearer,
+    /// an unknown one, or an approved app's bearer reaches the handler.
+    #[tokio::test]
+    async fn enrolment_routes_refuse_a_session_bearer_before_the_handler_runs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tower::ServiceExt;
+
+        static HANDLED: AtomicUsize = AtomicUsize::new(0);
+        async fn stand_in(State(grants): State<ControlGrants>) -> Json<Value> {
+            HANDLED.fetch_add(1, Ordering::SeqCst);
+            // What `connect` would do: park a request.
+            let pending = grants
+                .enrolment()
+                .request(
+                    enrol::ConnectRequest {
+                        client: "Claude Code".to_string(),
+                        scope: Scope::AllProjects,
+                        project_name: None,
+                        access: grants::Access::ReadWrite,
+                        peer_pid: None,
+                        peer_parent: None,
+                    },
+                    crate::store::now_timestamp(),
+                )
+                .unwrap();
+            Json(serde_json::json!({ "requestId": pending.id }))
+        }
+        let grants = ControlGrants::default();
+        let router = Router::new()
+            .route("/api/connect", post(stand_in))
+            .route("/api/reconnect/challenge", post(stand_in))
+            .route_layer(middleware::from_fn_with_state(
+                grants.clone(),
+                enrol::reject_session_bearer,
+            ))
+            .with_state(grants.clone());
+        let request = |path: &str, bearer: Option<&str>| {
+            let mut builder = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("Content-Type", "application/json");
+            if let Some(bearer) = bearer {
+                builder = builder.header("Authorization", format!("Bearer {bearer}"));
+            }
+            builder
+                .body(axum::body::Body::from(r#"{"client":"Claude Code"}"#))
+                .unwrap()
+        };
+
+        let session = grants.mint(ControlGrant {
+            actor: grants::Actor::Session {
+                session_id: "s-1".to_string(),
+                epoch: 1,
+            },
+            scope: Scope::Project("p".to_string()),
+            branch_id: None,
+            access: grants::Access::ReadWrite,
+        });
+        for path in ["/api/connect", "/api/reconnect/challenge"] {
+            let response = router
+                .clone()
+                .oneshot(request(path, Some(&session)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "scope_denied");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("spawned sessions cannot request connected-app access"),
+                "{body}"
+            );
+            assert!(
+                body["error"].as_str().unwrap().contains("session s-1"),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            HANDLED.load(Ordering::SeqCst),
+            0,
+            "refused before the handler"
+        );
+        assert!(
+            grants
+                .enrolment()
+                .pending(crate::store::now_timestamp())
+                .is_empty(),
+            "no request was parked, so no prompt could be shown"
+        );
+
+        // No bearer, an unknown bearer, and an approved app's bearer all
+        // reach the handler.
+        let app = grants.mint_app_bearer(
+            "g-1",
+            "approved",
+            Scope::AllProjects,
+            grants::Access::ReadWrite,
+            i64::MAX,
+        );
+        for bearer in [None, Some("0".repeat(64)), Some(app)] {
+            let response = router
+                .clone()
+                .oneshot(request("/api/connect", bearer.as_deref()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{bearer:?}");
+        }
+        assert_eq!(HANDLED.load(Ordering::SeqCst), 3);
     }
 
     #[test]

@@ -235,8 +235,26 @@ pub fn discover_instance(
 
 /// Whether `path` is an instance's `discovery.json` (no session credential)
 /// rather than a per-session file.
-fn is_instance_discovery_file(path: &Path) -> bool {
+pub fn is_instance_discovery_file(path: &Path) -> bool {
     path.file_name().and_then(|n| n.to_str()) == Some(DISCOVERY_FILE_NAME)
+}
+
+/// The per-session credential file this invocation would use, if its
+/// control file resolves to one: an explicit `--lock-path` or
+/// `$STAGEDCTL_LOCK` naming anything but an instance `discovery.json`.
+/// `stagedctl connect` and `disconnect` refuse to run under one — a spawned
+/// session's credential is confined to its project and cannot request
+/// connected-app access — without a round trip to the app. The data-dir
+/// fallback only ever yields instance files, so it never answers `Some`.
+pub fn session_credential_in_use(
+    flag: Option<&Path>,
+    env_value: Option<std::ffi::OsString>,
+    data_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    resolve_lock_candidates(flag, env_value, data_dir)
+        .ok()?
+        .into_iter()
+        .find(|path| !is_instance_discovery_file(path))
 }
 
 /// Every `control/<pid>/discovery.json` under `data_dir` whose pid is a live
@@ -667,12 +685,17 @@ impl Client {
 
     /// Authenticate with the freshest usable grant on this machine, if any.
     /// A grant the app no longer knows (`authorization_required`: a reset
-    /// database, say) is skipped for the next; one it revoked or let expire
-    /// is reported, since the user should hear that. With no usable grant
-    /// the client keeps whatever bearer the control file gave it and the
-    /// app's own `authorization_required` message explains what to do.
+    /// database, say) is skipped silently; one it revoked or let expire is
+    /// noted on stderr — the user should hear that — and skipped for the
+    /// next, since a client revoked in Settings must not block one approved
+    /// later under another name (grant files are only removed by
+    /// `disconnect`). If nothing attaches, the first such refusal is the
+    /// error (exit 4); with only unknown grants, or none, the client keeps
+    /// whatever bearer the control file gave it and the app's own
+    /// `authorization_required` message explains what to do.
     pub fn attach_grant_credential(&mut self, data_dir: &Path) -> Result<(), CtlError> {
         let now = crate::grants::now_ms();
+        let mut refused: Option<CtlError> = None;
         for (path, grant) in crate::grants::read_grant_files(data_dir) {
             if grant.is_expired_at(now) {
                 continue;
@@ -696,10 +719,22 @@ impl Client {
                 Err(CtlError::Authorization { code, .. }) if code == "authorization_required" => {
                     continue;
                 }
+                Err(e @ CtlError::Authorization { .. }) => {
+                    eprintln!(
+                        "stagedctl: grant {} ({}) is no longer accepted by the app ({e}); \
+                         trying the next grant — `stagedctl disconnect --client {:?}` removes \
+                         it",
+                        grant.grant_id, grant.client, grant.client
+                    );
+                    refused.get_or_insert(e);
+                }
                 Err(e) => return Err(e),
             }
         }
-        Ok(())
+        match refused {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Prove possession of `grant`'s secret and take this run's bearer. On
@@ -1423,6 +1458,10 @@ mod tests {
         }
     }
 
+    /// A `known` secret with this value stands for a grant the fake app has
+    /// revoked: its challenge answers `authorization_revoked`.
+    const REVOKED_SECRET: &str = "<revoked>";
+
     /// A fake app that knows the grants in `known` (id → secret) and issues
     /// one fixed nonce per challenge, checking the proof on reconnect
     /// exactly as `control_server::enrol` does. Records every
@@ -1446,6 +1485,11 @@ mod tests {
                 (200, ping_body(pid, 1, PROTOCOL_VERSION))
             } else if head.starts_with("POST /api/reconnect/challenge") {
                 match secret {
+                    Some(secret) if secret == REVOKED_SECRET => (
+                        401,
+                        r#"{"error":"the grant was revoked in Staged","code":"authorization_revoked"}"#
+                            .to_string(),
+                    ),
                     Some(_) => (
                         200,
                         serde_json::json!({ "nonce": format!("nonce-for-{grant_id}"), "expiresAt": 0 })
@@ -1611,6 +1655,75 @@ mod tests {
         let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("thirty days"), "{err}");
+    }
+
+    #[test]
+    fn a_revoked_grant_file_is_noted_and_the_next_grant_attaches() {
+        // The user revoked "old" in Settings and later approved "new"; the
+        // stale file stays until `disconnect`, and must not block "new".
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![
+                ("old".to_string(), REVOKED_SECRET.to_string()),
+                ("new".to_string(), "s-new".to_string()),
+            ],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::clone(&seen),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("new", "s-new", now + 1000))
+            .unwrap();
+        // Fresher, so tried first.
+        crate::grants::write_grant_file(dir.path(), &grant_file("old", "x", now + 5000)).unwrap();
+
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.bearer(), Some("live-new"));
+        // ping, old's challenge (refused), new's challenge, new's reconnect.
+        assert_eq!(seen.lock().unwrap().len(), 4);
+
+        // With only refused grants, the first refusal is the error.
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("old".to_string(), REVOKED_SECRET.to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("old", "x", now + 5000)).unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("forgotten", "y", now + 1000))
+            .unwrap();
+        let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert!(
+            err.to_string().starts_with("authorization_revoked:"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_session_credential_is_recognised_by_its_file_name_before_any_io() {
+        let session = PathBuf::from("/data/control/4242/sessions/abc-3.json");
+        let instance = PathBuf::from("/data/control/4242/discovery.json");
+        assert_eq!(
+            session_credential_in_use(Some(&session), None, None).as_deref(),
+            Some(session.as_path())
+        );
+        assert_eq!(
+            session_credential_in_use(None, Some(session.clone().into()), None).as_deref(),
+            Some(session.as_path()),
+            "$STAGEDCTL_LOCK is how a spawned session gets its credential"
+        );
+        assert_eq!(session_credential_in_use(Some(&instance), None, None), None);
+        assert_eq!(
+            session_credential_in_use(None, None, Some(Path::new("/nonexistent"))),
+            None,
+            "the data-dir fallback yields only instance files (or nothing)"
+        );
     }
 
     #[test]

@@ -19,6 +19,12 @@ without asking again. It lasts thirty days from its last use; the user can
 revoke it any time under Settings ▸ Connected apps, and
 `stagedctl disconnect` forgets and revokes it from this side.
 
+Inside a spawned session, `stagedctl connect` is refused (exit 4,
+`scope_denied`): the session's credential is the only one it gets, and it
+cannot ask the user for a wider one. If a task genuinely needs access
+beyond this session's project, say so in your output and let the user run
+`stagedctl connect` themselves.
+
 ## Discover, don't memorize
 
 The CLI's own help is the single authoritative reference, and the only one

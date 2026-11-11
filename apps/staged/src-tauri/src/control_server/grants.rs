@@ -13,15 +13,19 @@
 //! into the agent as `STAGEDCTL_LOCK`, and holds a [`SessionLease`] for the
 //! run's life. The lease's `Drop` revokes the grant by token — never by
 //! session id, since a resume or queued follow-up can register a successor
-//! under the same id before this run's thread exits — and removes the file
-//! only if it still holds this run's token.
+//! under the same id before this run's thread exits — and unlinks its file,
+//! which carries the registration epoch in its name so two runs of one
+//! session id never share a path.
 //!
 //! The other minter is consent (class B, see `enrol`): an outside client the
 //! user approved by name gets a live bearer carrying [`Actor::App`], bounded
 //! per grant by [`MAX_LIVE_BEARERS_PER_GRANT`] and lasting until the app
-//! exits or the grant is revoked, which drops every bearer of that grant.
+//! exits, the grant is revoked (which drops every bearer of that grant), or
+//! the durable row's expiry passes — each bearer carries that expiry, so a
+//! long-running app refuses it as `authorization_expired` the moment the
+//! row would.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -202,10 +206,10 @@ impl AuthorizationFailure {
     }
 }
 
-/// How many revoked token hashes are remembered so a late call from a
-/// finished session's lingering subprocess reads as "revoked" rather than
-/// "unknown". Bounded: it is a nicety for error text, not a security
-/// property (both outcomes refuse).
+/// How many retired token hashes are remembered, with why they were
+/// retired, so a late call from a finished session's lingering subprocess
+/// reads as "revoked" (or "expired") rather than "unknown". Bounded: it is
+/// a nicety for error text, not a security property (every outcome refuses).
 const REVOKED_MEMORY: usize = 1024;
 
 /// Most live bearers one class B grant may hold at once: each `stagedctl`
@@ -217,18 +221,28 @@ pub(crate) const MAX_LIVE_BEARERS_PER_GRANT: usize = 8;
 struct GrantsInner {
     /// Live grants by token hash.
     live: HashMap<String, ControlGrant>,
-    /// Recently revoked token hashes, oldest first.
-    revoked: VecDeque<String>,
-    revoked_set: HashSet<String>,
+    /// Class B bearers' expiry (the durable row's `expires_at` at mint),
+    /// by token hash. Session grants have none: the lease is their life.
+    expiries: HashMap<String, i64>,
+    /// Recently retired token hashes, oldest first, and why each went.
+    retired: VecDeque<String>,
+    retired_reason: HashMap<String, AuthorizationFailure>,
     /// Class B: grant id → its live token hashes, oldest first.
     app_bearers: HashMap<String, VecDeque<String>>,
 }
 
 impl GrantsInner {
     fn revoke_hash(&mut self, hash: &str) -> bool {
+        self.retire_hash(hash, AuthorizationFailure::Revoked)
+    }
+
+    /// Drop the live grant behind `hash`, remembering `reason` for later
+    /// callers. `false` if nothing was live.
+    fn retire_hash(&mut self, hash: &str, reason: AuthorizationFailure) -> bool {
         let Some(grant) = self.live.remove(hash) else {
             return false;
         };
+        self.expiries.remove(hash);
         if let Actor::App { grant_id, .. } = &grant.actor {
             if let Some(hashes) = self.app_bearers.get_mut(grant_id) {
                 hashes.retain(|h| h != hash);
@@ -237,11 +251,15 @@ impl GrantsInner {
                 }
             }
         }
-        if self.revoked_set.insert(hash.to_string()) {
-            self.revoked.push_back(hash.to_string());
-            if self.revoked.len() > REVOKED_MEMORY {
-                if let Some(oldest) = self.revoked.pop_front() {
-                    self.revoked_set.remove(&oldest);
+        if self
+            .retired_reason
+            .insert(hash.to_string(), reason)
+            .is_none()
+        {
+            self.retired.push_back(hash.to_string());
+            if self.retired.len() > REVOKED_MEMORY {
+                if let Some(oldest) = self.retired.pop_front() {
+                    self.retired_reason.remove(&oldest);
                 }
             }
         }
@@ -273,13 +291,32 @@ impl ControlGrants {
 
     /// The grant `token` stands for, or why it does not.
     pub(crate) fn authorize(&self, token: &str) -> Result<ControlGrant, AuthorizationFailure> {
+        self.authorize_at(token, crate::store::now_timestamp())
+    }
+
+    /// [`authorize`](Self::authorize) at a given instant. A class B bearer
+    /// whose row expiry has passed is retired here and refused `Expired`,
+    /// however long the app has been running.
+    pub(crate) fn authorize_at(
+        &self,
+        token: &str,
+        now: i64,
+    ) -> Result<ControlGrant, AuthorizationFailure> {
         let hash = token_hash(token);
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         if let Some(grant) = inner.live.get(&hash) {
+            if inner
+                .expiries
+                .get(&hash)
+                .is_some_and(|expires| *expires <= now)
+            {
+                inner.retire_hash(&hash, AuthorizationFailure::Expired);
+                return Err(AuthorizationFailure::Expired);
+            }
             return Ok(grant.clone());
         }
-        if inner.revoked_set.contains(&hash) {
-            return Err(AuthorizationFailure::Revoked);
+        if let Some(reason) = inner.retired_reason.get(&hash) {
+            return Err(*reason);
         }
         Err(AuthorizationFailure::Unknown)
     }
@@ -292,15 +329,16 @@ impl ControlGrants {
         self.inner.lock().unwrap().revoke_hash(&hash)
     }
 
-    /// Mint a live bearer for an approved class B grant. When the grant
-    /// already holds [`MAX_LIVE_BEARERS_PER_GRANT`], its oldest bearer is
-    /// revoked first.
+    /// Mint a live bearer for an approved class B grant, good until
+    /// `expires_at` (the durable row's expiry). When the grant already holds
+    /// [`MAX_LIVE_BEARERS_PER_GRANT`], its oldest bearer is revoked first.
     pub(crate) fn mint_app_bearer(
         &self,
         grant_id: &str,
         client: &str,
         scope: Scope,
         access: Access,
+        expires_at: i64,
     ) -> String {
         let token = crate::web_server::generate_token();
         let hash = token_hash(&token);
@@ -323,6 +361,7 @@ impl ControlGrants {
             inner.revoke_hash(&stale);
         }
         inner.live.insert(hash.clone(), grant);
+        inner.expiries.insert(hash.clone(), expires_at);
         inner
             .app_bearers
             .entry(grant_id.to_string())
@@ -394,8 +433,11 @@ pub(crate) fn session_grant_applies(
 }
 
 /// A minted session grant plus the per-session file that delivers it.
-/// Dropping the lease revokes the grant and retires the file; hold it for
-/// the run's whole life, on the runner thread, so a panic revokes too.
+/// Dropping the lease revokes the grant and unlinks the file; hold it for
+/// the run's whole life, on the runner thread, so a panic revokes too. The
+/// file name carries the registration epoch, so a successor run of the
+/// same session id writes its own file and this unlink can never take the
+/// successor's credential with it.
 pub struct SessionLease {
     token: String,
     file: PathBuf,
@@ -426,7 +468,14 @@ impl std::fmt::Debug for SessionLease {
 impl Drop for SessionLease {
     fn drop(&mut self) {
         self.grants.revoke(&self.token);
-        remove_session_file_if_ours(&self.file, &self.token);
+        if let Err(e) = std::fs::remove_file(&self.file) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "[control_server] failed to remove session credential {:?}: {e}",
+                    self.file
+                );
+            }
+        }
     }
 }
 
@@ -443,7 +492,7 @@ pub(crate) fn mint_session_lease_at(
     generation: u64,
     request: SessionGrantRequest,
 ) -> Result<SessionLease, String> {
-    let file = session_file_path(sessions_dir, &request.session_id);
+    let file = session_file_path(sessions_dir, &request.session_id, request.epoch);
     let grant = ControlGrant {
         actor: Actor::Session {
             session_id: request.session_id,
@@ -469,28 +518,13 @@ pub(crate) fn mint_session_lease_at(
     })
 }
 
-/// `~/.staged/control/<pid>/sessions/<session_id>.json`. Session ids are
-/// UUIDs the app generates, so the name needs no escaping.
-fn session_file_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
-    sessions_dir.join(format!("{session_id}.json"))
-}
-
-/// Remove `file` if it still carries `token`. A successor run of the same
-/// session id overwrites the file atomically with its own token at its
-/// mint, and that file is the successor's to retire.
-fn remove_session_file_if_ours(file: &Path, token: &str) {
-    let holds_ours = std::fs::read(file)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .is_some_and(|value| value["token"].as_str() == Some(token));
-    if !holds_ours {
-        return;
-    }
-    if let Err(e) = std::fs::remove_file(file) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("[control_server] failed to remove session credential {file:?}: {e}");
-        }
-    }
+/// `~/.staged/control/<pid>/sessions/<session_id>-<epoch>.json`. Session
+/// ids are UUIDs the app generates and the epoch is a counter, so the name
+/// needs no escaping; the epoch keeps two runs of one session id — a
+/// predecessor dropping while its successor mints — from sharing a path.
+/// The directory is swept whole with the instance, not by name.
+fn session_file_path(sessions_dir: &Path, session_id: &str, epoch: u64) -> PathBuf {
+    sessions_dir.join(format!("{session_id}-{epoch}.json"))
 }
 
 #[cfg(test)]
@@ -611,8 +645,8 @@ mod tests {
             "the oldest revoked hash is forgotten once the memory is full"
         );
         let inner = grants.inner.lock().unwrap();
-        assert_eq!(inner.revoked.len(), REVOKED_MEMORY);
-        assert_eq!(inner.revoked_set.len(), REVOKED_MEMORY);
+        assert_eq!(inner.retired.len(), REVOKED_MEMORY);
+        assert_eq!(inner.retired_reason.len(), REVOKED_MEMORY);
     }
 
     #[test]
@@ -687,17 +721,52 @@ mod tests {
     // Class B bearers
     // -------------------------------------------------------------------
 
+    /// An expiry no test clock reaches.
+    const FAR: i64 = i64::MAX;
+
+    #[test]
+    fn an_app_bearer_past_its_row_expiry_is_refused_as_expired() {
+        // The row's thirty days can run out while the app keeps running;
+        // the bearer minted from it must not outlive the row.
+        let grants = ControlGrants::default();
+        let token =
+            grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadWrite, 10_000);
+        assert!(grants.authorize_at(&token, 9_999).is_ok());
+        assert!(grants.app_grant_is_live("g1"));
+        assert_eq!(
+            grants.authorize_at(&token, 10_000).unwrap_err(),
+            AuthorizationFailure::Expired,
+            "expiry is inclusive at the instant, like the row's"
+        );
+        assert_eq!(
+            grants.authorize_at(&token, 10_001).unwrap_err(),
+            AuthorizationFailure::Expired,
+            "still expired, not revoked or unknown, on the next call"
+        );
+        assert!(
+            !grants.app_grant_is_live("g1"),
+            "retired from the grant's bearers"
+        );
+        assert_eq!(grants.live_count(), 0);
+        // A session grant has no expiry of its own.
+        let session = grants.mint(ControlGrant::test_all_projects());
+        assert!(grants.authorize_at(&session, i64::MAX).is_ok());
+    }
+
     #[test]
     fn app_bearers_carry_the_grant_and_revoke_together() {
         let grants = ControlGrants::default();
-        let first = grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadOnly);
+        let first =
+            grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadOnly, FAR);
         let second = grants.mint_app_bearer(
             "g1",
             "agent",
             Scope::Project("p".to_string()),
             Access::ReadWrite,
+            FAR,
         );
-        let other = grants.mint_app_bearer("g2", "other", Scope::AllProjects, Access::ReadWrite);
+        let other =
+            grants.mint_app_bearer("g2", "other", Scope::AllProjects, Access::ReadWrite, FAR);
         assert_eq!(
             grants.authorize(&first).unwrap(),
             ControlGrant {
@@ -730,10 +799,12 @@ mod tests {
     #[test]
     fn app_bearers_per_grant_are_bounded_oldest_out() {
         let grants = ControlGrants::default();
-        let first = grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadWrite);
+        let first =
+            grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadWrite, FAR);
         let mut newest = String::new();
         for _ in 0..MAX_LIVE_BEARERS_PER_GRANT {
-            newest = grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadWrite);
+            newest =
+                grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadWrite, FAR);
         }
         assert_eq!(
             grants.authorize(&first).unwrap_err(),
@@ -786,7 +857,7 @@ mod tests {
             mint_session_lease_at(&grants, &sessions, &transport, 4242, 3, request("s1", 7))
                 .unwrap();
 
-        assert_eq!(lease.file(), sessions.join("s1.json"));
+        assert_eq!(lease.file(), sessions.join("s1-7.json"));
         let contents: serde_json::Value =
             serde_json::from_slice(&std::fs::read(lease.file()).unwrap()).unwrap();
         assert_eq!(contents["socket"], transport.describe());
@@ -878,15 +949,19 @@ mod tests {
         let first =
             mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 1))
                 .unwrap();
-        // The successor registers under the same session id and overwrites
-        // the file with its own token.
+        // The successor registers under the same session id with the next
+        // epoch and gets its own file, so the predecessor's unconditional
+        // unlink cannot race its rename (read-then-unlink was not atomic).
         let second =
             mint_session_lease_at(&grants, &sessions, &transport, 4242, 1, request("s1", 2))
                 .unwrap();
-        assert_eq!(first.file(), second.file());
+        assert_ne!(first.file(), second.file());
+        assert_eq!(first.file(), sessions.join("s1-1.json"));
+        assert_eq!(second.file(), sessions.join("s1-2.json"));
 
         drop(first);
 
+        assert!(!sessions.join("s1-1.json").exists());
         assert!(second.file().exists(), "the successor's file must survive");
         let contents: serde_json::Value =
             serde_json::from_slice(&std::fs::read(second.file()).unwrap()).unwrap();

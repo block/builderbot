@@ -14,7 +14,8 @@ use serde_json::{json, Value};
 
 use crate::cli::{Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, TimelineVerb};
 use crate::client::{
-    default_data_dir, discover_and_connect, discover_instance, Client, CtlError, STAGEDCTL_LOCK_ENV,
+    default_data_dir, discover_and_connect, discover_instance, session_credential_in_use, Client,
+    CtlError, STAGEDCTL_LOCK_ENV,
 };
 use crate::grants::{self, GrantFile};
 
@@ -31,7 +32,21 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
 
     // The credential verbs come before the credential lookup: `connect`
     // is how a grant is obtained, `disconnect` must work with a grant the
-    // app no longer accepts.
+    // app no longer accepts. Neither is available to a spawned session,
+    // whose credential is its own and confined; the app refuses the same
+    // way, but the answer is known here without a round trip.
+    match &cli.command {
+        Noun::Connect { .. } | Noun::Disconnect { .. } => {
+            if let Some(path) = session_credential_in_use(
+                cli.lock_path.as_deref(),
+                std::env::var_os(STAGEDCTL_LOCK_ENV),
+                data_dir.as_deref(),
+            ) {
+                return Err(session_enrolment_refusal(&cli.command, &path));
+            }
+        }
+        _ => {}
+    }
     match &cli.command {
         Noun::Connect {
             client,
@@ -174,6 +189,27 @@ fn validate(command: &Noun) -> Result<(), CtlError> {
 
 /// How often to re-issue the long poll while the user has not answered.
 const CONNECT_POLL_PAUSE: Duration = Duration::from_millis(250);
+
+/// Exit 4 for `connect`/`disconnect` under a per-session credential. Opens
+/// with the sentence the app's own refusal uses (pinned on both sides), so
+/// an agent reads one explanation whichever side answers.
+fn session_enrolment_refusal(command: &Noun, path: &std::path::Path) -> CtlError {
+    let verb = match command {
+        Noun::Disconnect { .. } => "disconnect",
+        _ => "connect",
+    };
+    CtlError::Authorization {
+        code: "scope_denied".to_string(),
+        message: format!(
+            "spawned sessions cannot request connected-app access: `stagedctl {verb}` is for \
+             clients the user runs outside a Staged session, and this invocation runs inside \
+             one ({} is the session's own credential, confined to its project). Use that \
+             credential as is; if the task needs wider access, ask the user to run `stagedctl \
+             connect` from their own terminal",
+            path.display()
+        ),
+    }
+}
 
 fn connect(
     app: &Client,
@@ -1491,6 +1527,41 @@ mod tests {
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn connect_and_disconnect_refuse_to_run_under_a_session_credential() {
+        // The file need not exist, let alone answer: the refusal is by the
+        // control file's name, before discovery.
+        let session = std::path::PathBuf::from("/nonexistent/control/1/sessions/s-1-7.json");
+        for args in [
+            vec!["stagedctl", "connect", "--client", "Claude Code"],
+            vec![
+                "stagedctl",
+                "connect",
+                "--client",
+                "x",
+                "--project",
+                "p",
+                "--read-only",
+            ],
+            vec!["stagedctl", "disconnect"],
+            vec!["stagedctl", "disconnect", "--client", "x"],
+        ] {
+            let mut cli = <Cli as clap::Parser>::try_parse_from(&args).unwrap();
+            cli.lock_path = Some(session.clone());
+            let err = run(cli).unwrap_err();
+            assert_eq!(err.exit_code(), 4, "{args:?}: {err}");
+            let text = err.to_string();
+            assert!(
+                text.starts_with(
+                    "scope_denied: spawned sessions cannot request connected-app access"
+                ),
+                "{text}"
+            );
+            assert!(text.contains(&format!("`stagedctl {}`", args[1])), "{text}");
+            assert!(text.contains("s-1-7.json"), "names the credential: {text}");
+        }
     }
 
     #[test]

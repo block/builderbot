@@ -93,7 +93,14 @@ its last use and can be revoked at any time in the app under
 Settings ▸ Connected apps, or with `stagedctl disconnect`.
 
 Exit 4 with `authorization_denied` when the user declines. A request
-left unanswered for five minutes expires.")]
+left unanswered for five minutes expires in the app; the default
+--timeout gives up a minute earlier so an approval never lands after
+this command has stopped listening for it.
+
+Not available from inside a Staged-spawned session: a session's
+credential is confined to its own project and cannot request
+connected-app access (exit 4, `scope_denied`). If a task needs wider
+access, ask the user to run this command from their own terminal.")]
     Connect {
         /// The name shown to the user in the consent dialog
         #[arg(long, value_name = "NAME")]
@@ -109,7 +116,7 @@ left unanswered for five minutes expires.")]
         read_only: bool,
 
         /// Seconds to wait for the user's answer
-        #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+        #[arg(long, value_name = "SECONDS", default_value_t = 240)]
         timeout: u64,
     },
 
@@ -119,7 +126,11 @@ Forget the connected-app grants stored on this machine and, when a Staged
 app is running, revoke them there too so their live credentials stop
 working at once. With --client only the grants approved under that name
 are removed. Grants a Staged app cannot be reached for are still removed
-locally; revoke them in Settings ▸ Connected apps if needed.")]
+locally; revoke them in Settings ▸ Connected apps if needed.
+
+Not available from inside a Staged-spawned session (exit 4,
+`scope_denied`): a session's credential is its own, not a connected-app
+grant.")]
     Disconnect {
         /// Only the grants approved under this client name
         #[arg(long, value_name = "NAME")]
@@ -484,7 +495,11 @@ mod tests {
             } => {
                 assert_eq!(project, None);
                 assert!(!read_only);
-                assert_eq!(timeout, 300, "five minutes, the request's own lifetime");
+                assert_eq!(
+                    timeout, 240,
+                    "a minute inside the request's five-minute lifetime in the app, so the \
+                     CLI gives up before an approval could land uncollected"
+                );
             }
             other => panic!("parsed {other:?}"),
         }

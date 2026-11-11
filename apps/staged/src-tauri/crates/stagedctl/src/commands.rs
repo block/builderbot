@@ -13,7 +13,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cli::{Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, TimelineVerb};
-use crate::client::{default_data_dir, discover_and_connect, Client, CtlError, STAGEDCTL_LOCK_ENV};
+use crate::client::{
+    default_data_dir, discover_and_connect, discover_instance, Client, CtlError, STAGEDCTL_LOCK_ENV,
+};
+use crate::grants::{self, GrantFile};
 
 /// One command's result: the value `--json` prints, and the human rendering.
 #[derive(Debug)]
@@ -24,10 +27,55 @@ pub struct CmdOutput {
 
 pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
     validate(&cli.command)?;
+    let data_dir = default_data_dir();
+
+    // The credential verbs come before the credential lookup: `connect`
+    // is how a grant is obtained, `disconnect` must work with a grant the
+    // app no longer accepts.
+    match &cli.command {
+        Noun::Connect {
+            client,
+            project,
+            read_only,
+            timeout,
+        } => {
+            let data_dir = data_dir.as_deref().ok_or_else(|| {
+                CtlError::Environment("cannot determine the home directory".into())
+            })?;
+            let (app, _) = discover_instance(
+                cli.lock_path.as_deref(),
+                std::env::var_os(STAGEDCTL_LOCK_ENV),
+                Some(data_dir),
+            )?;
+            return connect(
+                &app,
+                data_dir,
+                client,
+                project.as_deref(),
+                *read_only,
+                Duration::from_secs(*timeout),
+            );
+        }
+        Noun::Disconnect { client } => {
+            let data_dir = data_dir.as_deref().ok_or_else(|| {
+                CtlError::Environment("cannot determine the home directory".into())
+            })?;
+            let app = discover_instance(
+                cli.lock_path.as_deref(),
+                std::env::var_os(STAGEDCTL_LOCK_ENV),
+                Some(data_dir),
+            )
+            .ok()
+            .map(|(app, _)| app);
+            return disconnect(app.as_ref(), data_dir, client.as_deref());
+        }
+        _ => {}
+    }
+
     let client = discover_and_connect(
         cli.lock_path.as_deref(),
         std::env::var_os(STAGEDCTL_LOCK_ENV),
-        default_data_dir().as_deref(),
+        data_dir.as_deref(),
     )?;
 
     match cli.command {
@@ -67,6 +115,7 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
             branch,
             file,
         }) => image_add(&client, &project, &repo, branch.as_deref(), &file),
+        Noun::Connect { .. } | Noun::Disconnect { .. } => unreachable!("handled above"),
     }
 }
 
@@ -109,8 +158,139 @@ fn validate(command: &Noun) -> Result<(), CtlError> {
         {
             invalid("--repo requires --project (repo addresses are project-scoped)")
         }
+        Noun::Connect { client, .. } if client.trim().is_empty() => {
+            invalid("--client must not be empty")
+        }
+        Noun::Connect { client, .. } if client.chars().count() > 64 => {
+            invalid("--client must be at most 64 characters")
+        }
         _ => Ok(()),
     }
+}
+
+// =============================================================================
+// connect / disconnect
+// =============================================================================
+
+/// How often to re-issue the long poll while the user has not answered.
+const CONNECT_POLL_PAUSE: Duration = Duration::from_millis(250);
+
+fn connect(
+    app: &Client,
+    data_dir: &std::path::Path,
+    client_name: &str,
+    project: Option<&str>,
+    read_only: bool,
+    timeout: Duration,
+) -> Result<CmdOutput, CtlError> {
+    let (request_id, _) = app.request_authorization(client_name.trim(), project, read_only)?;
+    eprintln!("Waiting for approval in Staged… (request {request_id})");
+    let deadline = Instant::now() + timeout;
+    let approval = loop {
+        match app.poll_authorization(&request_id)? {
+            Some(approval) => break approval,
+            None if Instant::now() >= deadline => {
+                return Err(CtlError::command(
+                    "connect_timeout",
+                    format!(
+                        "no answer from the Staged user within {} seconds; the request stays \
+                         in the app until it expires",
+                        timeout.as_secs()
+                    ),
+                ));
+            }
+            None => std::thread::sleep(CONNECT_POLL_PAUSE),
+        }
+    };
+    let path = grants::write_grant_file(data_dir, &approval.grant)?;
+    Ok(render_connected(&approval.grant, &path))
+}
+
+fn render_connected(grant: &GrantFile, path: &std::path::Path) -> CmdOutput {
+    let json = json!({
+        "grantId": grant.grant_id,
+        "client": grant.client,
+        "scope": { "projectId": grant.scope.project_id },
+        "access": grant.access,
+        "expiresAt": grant.expires_at,
+        "grantFile": path.display().to_string(),
+    });
+    let human = format!(
+        "connected as {} ({}, {} access); grant {} stored at {}\nexpires {} unless used \
+         again; revoke with `stagedctl disconnect` or in Settings ▸ Connected apps",
+        grant.client,
+        grant.scope_label(),
+        grant.access,
+        grant.grant_id,
+        path.display(),
+        format_timestamp(grant.expires_at / 1000),
+    );
+    CmdOutput { json, human }
+}
+
+fn disconnect(
+    app: Option<&Client>,
+    data_dir: &std::path::Path,
+    client_filter: Option<&str>,
+) -> Result<CmdOutput, CtlError> {
+    let grants: Vec<(std::path::PathBuf, GrantFile)> = grants::read_grant_files(data_dir)
+        .into_iter()
+        .filter(|(_, g)| client_filter.is_none() || client_filter == Some(g.client.as_str()))
+        .collect();
+    let mut removed = Vec::new();
+    let mut unreachable = Vec::new();
+    for (path, grant) in &grants {
+        let revoked_in_app = match app {
+            Some(app) => match app.revoke_grant(grant) {
+                Ok(revoked) => Some(revoked),
+                Err(e) => {
+                    eprintln!(
+                        "stagedctl: could not revoke grant {} in the app: {e}",
+                        grant.grant_id
+                    );
+                    unreachable.push(grant.grant_id.clone());
+                    None
+                }
+            },
+            None => {
+                unreachable.push(grant.grant_id.clone());
+                None
+            }
+        };
+        grants::remove_grant_file(path)?;
+        removed.push(json!({
+            "grantId": grant.grant_id,
+            "client": grant.client,
+            "revokedInApp": revoked_in_app,
+        }));
+    }
+    let human = if grants.is_empty() {
+        match client_filter {
+            Some(c) => format!("no grants stored for client {c}"),
+            None => "no grants stored on this machine".to_string(),
+        }
+    } else {
+        let mut lines = vec![format!(
+            "removed {} grant{}",
+            grants.len(),
+            if grants.len() == 1 { "" } else { "s" }
+        )];
+        for (_, grant) in &grants {
+            lines.push(format!("  {} ({})", grant.grant_id, grant.client));
+        }
+        if !unreachable.is_empty() {
+            lines.push(
+                "some grants could not be revoked in the app (not running or unreachable); \
+                 revoke them under Settings ▸ Connected apps if the app still lists them"
+                    .to_string(),
+            );
+        }
+        lines.join("\n")
+    };
+    Ok(CmdOutput {
+        json: json!({ "removed": removed, "notRevokedInApp": unreachable }),
+        human,
+    })
 }
 
 // =============================================================================
@@ -1287,6 +1467,109 @@ fn image_add(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------
+    // connect / disconnect
+    // -------------------------------------------------------------------
+
+    fn stored_grant(id: &str, client: &str) -> GrantFile {
+        GrantFile {
+            grant_id: id.to_string(),
+            reconnect_secret: "s".to_string(),
+            client: client.to_string(),
+            scope: grants::GrantScope { project_id: None },
+            access: "write".to_string(),
+            expires_at: 1_700_000_000_000,
+        }
+    }
+
+    fn private_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn connect_validates_the_client_name_before_discovery() {
+        let connect = |client: &str| Noun::Connect {
+            client: client.to_string(),
+            project: None,
+            read_only: false,
+            timeout: 1,
+        };
+        assert!(validate(&connect("my-agent")).is_ok());
+        let err = validate(&connect("   ")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid_arguments: --client must not be empty"
+        );
+        let err = validate(&connect(&"x".repeat(65))).unwrap_err();
+        assert!(err.to_string().contains("at most 64"), "{err}");
+        assert!(validate(&Noun::Disconnect { client: None }).is_ok());
+    }
+
+    #[test]
+    fn disconnect_without_an_app_still_forgets_the_grants_and_honours_the_filter() {
+        let dir = private_tempdir();
+        grants::write_grant_file(dir.path(), &stored_grant("g-a", "alpha")).unwrap();
+        grants::write_grant_file(dir.path(), &stored_grant("g-b", "beta")).unwrap();
+
+        let out = disconnect(None, dir.path(), Some("alpha")).unwrap();
+        assert_eq!(out.json["removed"].as_array().unwrap().len(), 1);
+        assert_eq!(out.json["removed"][0]["grantId"], "g-a");
+        assert_eq!(out.json["removed"][0]["revokedInApp"], Value::Null);
+        assert_eq!(out.json["notRevokedInApp"], json!(["g-a"]));
+        assert!(
+            out.human.starts_with("removed 1 grant\n  g-a (alpha)"),
+            "{}",
+            out.human
+        );
+        assert!(
+            out.human.contains("Settings ▸ Connected apps"),
+            "{}",
+            out.human
+        );
+        let left: Vec<String> = grants::read_grant_files(dir.path())
+            .into_iter()
+            .map(|(_, g)| g.grant_id)
+            .collect();
+        assert_eq!(left, ["g-b"]);
+
+        let out = disconnect(None, dir.path(), None).unwrap();
+        assert_eq!(out.json["removed"].as_array().unwrap().len(), 1);
+        assert!(grants::read_grant_files(dir.path()).is_empty());
+
+        let out = disconnect(None, dir.path(), None).unwrap();
+        assert_eq!(out.human, "no grants stored on this machine");
+        let out = disconnect(None, dir.path(), Some("alpha")).unwrap();
+        assert_eq!(out.human, "no grants stored for client alpha");
+    }
+
+    #[test]
+    fn a_fresh_connection_renders_the_grant_and_where_it_lives() {
+        let mut grant = stored_grant("g-1", "my-agent");
+        grant.scope.project_id = Some("p-1".to_string());
+        grant.access = "read".to_string();
+        let out = render_connected(&grant, std::path::Path::new("/tmp/x/g-1.json"));
+        assert_eq!(out.json["grantId"], "g-1");
+        assert_eq!(out.json["scope"]["projectId"], "p-1");
+        assert_eq!(out.json["grantFile"], "/tmp/x/g-1.json");
+        assert!(
+            out.human
+                .starts_with("connected as my-agent (project p-1, read access); grant g-1 stored at /tmp/x/g-1.json"),
+            "{}",
+            out.human
+        );
+        assert!(
+            out.human.contains("expires 2023-11-14T22:13:20Z"),
+            "{}",
+            out.human
+        );
+    }
 
     // -------------------------------------------------------------------
     // Repo address parsing

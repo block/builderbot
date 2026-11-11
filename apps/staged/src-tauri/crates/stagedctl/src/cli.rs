@@ -14,9 +14,11 @@ file — and stagedctl uses it to find the app and authenticate with zero
 configuration. The credential is confined to the session's own project
 and is revoked when the session ends. Outside a session it tries each
 running Staged instance (~/.staged/control/<pid>/discovery.json), newest
-first, until one answers; without a credential the app refuses commands
-(exit 4). Control files are read only when they are owner-private (0600
-inside a 0700 directory, no symlinks).
+first, until one answers, and authenticates with a connected-app grant
+if `stagedctl connect` has been approved on this machine; without any
+credential the app refuses commands (exit 4). Control files are read
+only when they are owner-private (0600 inside a 0700 directory, no
+symlinks).
 
 Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
@@ -32,9 +34,10 @@ Exit codes:
   1  command failed (stderr carries `code: message`)
   2  transport fault talking to the app
   3  no running Staged app, or the app was updated (restart Staged)
-  4  not authorized: no credential, credential revoked, or the command
-     addresses something outside this session's project (report it;
-     do not retry)";
+  4  not authorized: no credential (run `stagedctl connect` outside a
+     session), the request was denied, the credential was revoked or
+     expired, or the command addresses something outside the
+     credential's scope (report it; do not retry)";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -74,6 +77,54 @@ pub enum Noun {
     /// Attach images to a repo's timeline
     #[command(alias = "images", subcommand)]
     Image(ImageVerb),
+
+    /// Ask the Staged user to approve this client (outside a spawned session)
+    #[command(long_about = "\
+Ask the Staged user to approve this client. Use this when stagedctl runs
+outside a Staged-spawned session (no $STAGEDCTL_LOCK) — from a terminal,
+a script, or an agent the user started themselves.
+
+The request appears in the Staged window as a consent dialog naming
+--client, the projects it would reach, and whether it may write; the
+command waits (up to --timeout seconds) for the answer. Approval stores
+a grant on this machine (~/.staged/control/grants/, owner-private) that
+later invocations use without asking again; it lasts thirty days from
+its last use and can be revoked at any time in the app under
+Settings ▸ Connected apps, or with `stagedctl disconnect`.
+
+Exit 4 with `authorization_denied` when the user declines. A request
+left unanswered for five minutes expires.")]
+    Connect {
+        /// The name shown to the user in the consent dialog
+        #[arg(long, value_name = "NAME")]
+        client: String,
+
+        /// Confine the grant to one project (name or id); default: every
+        /// project
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
+
+        /// Ask for read access only (no starting, cancelling or attaching)
+        #[arg(long)]
+        read_only: bool,
+
+        /// Seconds to wait for the user's answer
+        #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+        timeout: u64,
+    },
+
+    /// Forget this machine's connected-app grants and revoke them in Staged
+    #[command(long_about = "\
+Forget the connected-app grants stored on this machine and, when a Staged
+app is running, revoke them there too so their live credentials stop
+working at once. With --client only the grants approved under that name
+are removed. Grants a Staged app cannot be reached for are still removed
+locally; revoke them in Settings ▸ Connected apps if needed.")]
+    Disconnect {
+        /// Only the grants approved under this client name
+        #[arg(long, value_name = "NAME")]
+        client: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -365,11 +416,21 @@ mod tests {
         }
 
         // Hidden: every noun has its plural alias, and none are visible.
+        // The verb-shaped top-level commands (connect, disconnect) take no
+        // subcommands and have no plural.
         for noun in Cli::command()
             .get_subcommands()
             .filter(|c| c.get_name() != "help")
         {
             let aliases: Vec<&str> = noun.get_all_aliases().collect();
+            if !noun.has_subcommands() {
+                assert!(
+                    aliases.is_empty(),
+                    "{} is a verb, not a noun; no alias",
+                    noun.get_name()
+                );
+                continue;
+            }
             assert_eq!(
                 aliases,
                 vec![format!("{}s", noun.get_name())],
@@ -383,6 +444,58 @@ mod tests {
                 noun.get_name()
             );
         }
+    }
+
+    #[test]
+    fn connect_and_disconnect_parse_their_flags() {
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "connect",
+            "--client",
+            "my agent",
+            "--project",
+            "Widgets",
+            "--read-only",
+            "--timeout",
+            "30",
+        ])
+        .unwrap();
+        match cli.command {
+            Noun::Connect {
+                client,
+                project,
+                read_only,
+                timeout,
+            } => {
+                assert_eq!(client, "my agent");
+                assert_eq!(project.as_deref(), Some("Widgets"));
+                assert!(read_only);
+                assert_eq!(timeout, 30);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["stagedctl", "connect", "--client", "x"]).unwrap();
+        match cli.command {
+            Noun::Connect {
+                project,
+                read_only,
+                timeout,
+                ..
+            } => {
+                assert_eq!(project, None);
+                assert!(!read_only);
+                assert_eq!(timeout, 300, "five minutes, the request's own lifetime");
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["stagedctl", "connect"]).is_err(),
+            "--client is required"
+        );
+        let cli = Cli::try_parse_from(["stagedctl", "disconnect"]).unwrap();
+        assert!(matches!(cli.command, Noun::Disconnect { client: None }));
+        let cli = Cli::try_parse_from(["stagedctl", "disconnect", "--client", "x"]).unwrap();
+        assert!(matches!(cli.command, Noun::Disconnect { client: Some(c) } if c == "x"));
     }
 
     #[test]

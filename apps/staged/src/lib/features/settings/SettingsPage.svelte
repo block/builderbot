@@ -2,11 +2,13 @@
   import { onMount } from 'svelte';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Keyboard from '@lucide/svelte/icons/keyboard';
+  import Plug from '@lucide/svelte/icons/plug';
   import Settings2 from '@lucide/svelte/icons/settings-2';
   import Stethoscope from '@lucide/svelte/icons/stethoscope';
   import { navigation, openSettings } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
+  import ConnectedAppsPanel from './ConnectedAppsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
   import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
@@ -84,6 +86,21 @@
             </div>
           </div>
         </button>
+        {#if isTauri}
+          <button
+            class="nav-item"
+            class:active={navigation.settingsSection === 'connected-apps'}
+            onclick={() => openSettings('connected-apps')}
+          >
+            <div class="nav-main">
+              <Plug size={14} />
+              <div class="nav-text">
+                <span class="nav-name">Connected apps</span>
+                <span class="nav-meta">Tools approved to use stagedctl</span>
+              </div>
+            </div>
+          </button>
+        {/if}
       </div>
     </aside>
 
@@ -96,6 +113,8 @@
             <GeneralSettingsPanel />
           {:else if navigation.settingsSection === 'keyboard'}
             <KeyboardSettingsPanel />
+          {:else if navigation.settingsSection === 'connected-apps'}
+            <ConnectedAppsPanel />
           {:else}
             <DoctorSettingsPanel />
           {/if}

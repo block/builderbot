@@ -1254,6 +1254,54 @@ export interface LaunchRecovery {
   projectSessions: InterruptedSession[];
 }
 
+// =============================================================================
+// Connected apps (stagedctl grants)
+// =============================================================================
+
+/**
+ * A `stagedctl connect` request awaiting the user's answer. Mirrors
+ * `ControlAuthorizationRequest` in `control_server/enrol.rs`; carried by the
+ * `control-authorization-requested` event and `list_pending_control_authorizations`.
+ */
+export interface ControlAuthorizationRequest {
+  requestId: string;
+  /** The name the CLI passed as `--client`. */
+  client: string;
+  /** `null` = every project. */
+  projectId: string | null;
+  projectName: string | null;
+  access: 'read' | 'write';
+  /** The requesting process and its parent's command name, shown as information only. */
+  peerPid: number | null;
+  peerParent: string | null;
+  /** ms since the epoch. */
+  requestedAt: number;
+  /** ms since the epoch; the request lapses unanswered after this. */
+  expiresAt: number;
+}
+
+/**
+ * An approved client as the Settings "Connected apps" panel lists it.
+ * Mirrors `ControlGrantSummary` in `control_server/consent.rs`.
+ */
+export interface ControlGrantSummary {
+  id: string;
+  client: string;
+  /** `null` = every project. */
+  projectId: string | null;
+  /** The scoped project's current name, when it still exists. */
+  projectName: string | null;
+  access: 'read' | 'write';
+  /** ms since the epoch. */
+  createdAt: number;
+  /** ms since the epoch; renewed on every successful reconnect. */
+  expiresAt: number;
+  /** ms since the epoch, or null when never used since approval. */
+  lastUsedAt: number | null;
+  /** Whether the client holds a live credential in this run of the app. */
+  live: boolean;
+}
+
 /** Returned by get_store_status when the database needs a reset or is too new. */
 export interface StoreIncompatibility {
   /** App version that last used this database (e.g. "0.1.0"). */

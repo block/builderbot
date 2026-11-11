@@ -5,6 +5,10 @@
 //!
 //! - `GET  /api/ping`              — handshake: pid, generation, protocolVersion
 //! - `POST /api/invoke/{command}`  — dispatch, restricted to [`ALLOWED_COMMANDS`]
+//! - `POST /api/connect`, `GET /api/connect/{id}` — class B enrolment: ask
+//!   the user, long-poll for the answer (see [`enrol`])
+//! - `POST /api/reconnect/challenge`, `POST /api/reconnect`, `POST /api/disconnect`
+//!   — an approved client's proof-of-secret reconnect and self-revoke
 //!
 //! **Transport and who can connect.** The socket lives in
 //! `~/.staged/control/<pid>/`, a `0700` directory the app creates and refuses
@@ -36,8 +40,11 @@
 //! start mints a read-write grant scoped to the session's own project,
 //! delivered through an owner-only per-session file (see [`grants`]), and
 //! revokes it when the run ends. A same-user caller with no grant — a user
-//! shell, say — is refused `authorization_required`; the consent-based
-//! class B grants come later and reuse the same registry.
+//! shell, say — is refused `authorization_required` until it enrols: class
+//! B, `stagedctl connect`, asks the user by name in a consent dialog and,
+//! once approved, holds a durable thirty-day grant it reconnects to with a
+//! proof of its secret ([`enrol`], [`consent`]). Both classes share the
+//! registry and the scope table.
 //!
 //! **What a caller can do.** The fixed verb table: [`ALLOWED_COMMANDS`] maps
 //! the `stagedctl` surface to specific dispatch commands — every one
@@ -64,18 +71,23 @@
 //! prepends to every local agent session's PATH so a bare `stagedctl` just
 //! works. The shim lives in the instance directory and shares its lifecycle.
 
+pub mod commands;
+mod consent;
+mod enrol;
 mod files;
 mod grants;
 
+pub use consent::{ControlGrantSummary, AUTHORIZATION_REQUESTED_EVENT, GRANTS_CHANGED_EVENT};
+pub use enrol::ControlAuthorizationRequest;
 pub(crate) use files::ControlTransport;
 pub use grants::ControlGrants;
 pub(crate) use grants::{
-    session_grant_applies, Access, AuthorizationFailure, ControlGrant, SessionGrantRequest,
+    session_grant_applies, Access, Actor, AuthorizationFailure, ControlGrant, SessionGrantRequest,
     SessionLease,
 };
-// Named only by tests today; the class B grants mint them.
+// Named outside this module only by web_server's tests.
 #[allow(unused_imports)]
-pub(crate) use grants::{Actor, Scope};
+pub(crate) use grants::Scope;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -458,6 +470,10 @@ async fn serve(
     };
     let router = Router::new()
         .route("/api/ping", get(ping))
+        // Enrolment and reconnect need no grant — they are how one is
+        // obtained — but sit behind the transport gate and header rules
+        // like everything else, with the same body cap.
+        .merge(enrolment_router())
         // The grant is resolved on the invoke route only (ping is the
         // unauthenticated handshake), before the body is read.
         .merge(
@@ -497,6 +513,17 @@ async fn serve(
                 .map_err(|e| format!("control server error: {e}"))
         }
     }
+}
+
+/// The class B routes (see [`enrol`]), each under [`CONTROL_BODY_LIMIT`].
+fn enrolment_router() -> Router<ControlState> {
+    Router::new()
+        .route("/api/connect", post(enrol::connect))
+        .route("/api/connect/{request_id}", get(enrol::poll_connect))
+        .route("/api/reconnect/challenge", post(enrol::reconnect_challenge))
+        .route("/api/reconnect", post(enrol::reconnect))
+        .route("/api/disconnect", post(enrol::disconnect))
+        .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT))
 }
 
 /// The invoke route with [`CONTROL_BODY_LIMIT`] applied to it. Generic over
@@ -568,10 +595,12 @@ fn peer_violation(peer: &UdsPeer) -> Option<&'static str> {
 }
 
 /// Middleware refusing connections from other users on the Unix socket.
+/// An admitted peer is attached to the request for the consent prompt's
+/// "asked by process N" line.
 #[cfg(unix)]
 async fn reject_foreign_peer(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<UdsPeer>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     if let Some(reason) = peer_violation(&peer) {
@@ -581,6 +610,7 @@ async fn reject_foreign_peer(
         )
             .into_response();
     }
+    request.extensions_mut().insert(peer);
     next.run(request).await
 }
 
@@ -753,6 +783,7 @@ async fn invoke(
             .into_response();
     }
 
+    enrol::note_app_bearer_use(&state, &grant);
     match crate::web_server::dispatch(
         &command,
         args,
@@ -918,6 +949,71 @@ mod tests {
             peer_violation(&unknown).is_some(),
             "unreadable credentials must fail closed"
         );
+    }
+
+    /// `serve` stacks [`reject_foreign_peer`] outermost around every route,
+    /// the enrolment ones included: a `stagedctl connect` from another user
+    /// is refused before the handler (and its consent prompt) runs, and an
+    /// admitted peer is attached to the request so the prompt can name the
+    /// asking process.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn enrolment_routes_refuse_a_foreign_uid_before_the_handler_runs() {
+        use axum::extract::ConnectInfo;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tower::ServiceExt;
+
+        static HANDLED: AtomicUsize = AtomicUsize::new(0);
+        async fn stand_in(axum::Extension(peer): axum::Extension<UdsPeer>) -> Json<Value> {
+            HANDLED.fetch_add(1, Ordering::SeqCst);
+            Json(serde_json::json!({ "requestId": "r", "peerPid": peer.pid }))
+        }
+        let router = Router::new()
+            .route("/api/connect", post(stand_in))
+            .layer(middleware::from_fn(reject_foreign_peer));
+        let connect = |peer: UdsPeer| {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/connect")
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(r#"{"client":"x","readOnly":false}"#))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            request
+        };
+        let ours = files::current_uid();
+
+        let response = router
+            .clone()
+            .oneshot(connect(UdsPeer {
+                uid: Some(ours.wrapping_add(1)),
+                gid: Some(0),
+                pid: Some(4242),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            json_body(response).await["error"],
+            "the connecting process belongs to another user"
+        );
+        assert_eq!(
+            HANDLED.load(Ordering::SeqCst),
+            0,
+            "refused before the handler"
+        );
+
+        let response = router
+            .oneshot(connect(UdsPeer {
+                uid: Some(ours),
+                gid: Some(0),
+                pid: Some(4242),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["peerPid"], 4242);
+        assert_eq!(HANDLED.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -14,9 +14,12 @@
 //! run's life. The lease's `Drop` revokes the grant by token — never by
 //! session id, since a resume or queued follow-up can register a successor
 //! under the same id before this run's thread exits — and removes the file
-//! only if it still holds this run's token. [`Actor::Client`] and
-//! [`Scope::AllProjects`] exist so the consent-based class B grants can
-//! reuse the registry; nothing mints them yet.
+//! only if it still holds this run's token.
+//!
+//! The other minter is consent (class B, see `enrol`): an outside client the
+//! user approved by name gets a live bearer carrying [`Actor::App`], bounded
+//! per grant by [`MAX_LIVE_BEARERS_PER_GRANT`] and lasting until the app
+//! exits or the grant is revoked, which drops every bearer of that grant.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -24,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
+use super::enrol::Enrolment;
 use super::files::{self, ControlTransport};
 
 /// Who a grant was issued to. Recorded so mutations can name their actor;
@@ -35,10 +39,9 @@ pub(crate) enum Actor {
     /// registration the grant belongs to, so two runs of the same session
     /// id are told apart.
     Session { session_id: String, epoch: u64 },
-    /// An outside client the user approved by name (class B; not yet
-    /// minted). `grant_id` is the durable grant's row id, `client` the name
-    /// the user approved.
-    #[allow(dead_code)]
+    /// An outside client the user approved by name (class B). `grant_id`
+    /// is the durable `control_grants` row id, `client` the name the user
+    /// approved.
     App { grant_id: String, client: String },
 }
 
@@ -61,10 +64,26 @@ pub(crate) enum Scope {
     /// refused ahead of the dispatch arm, and listing commands return only
     /// this project's rows.
     Project(String),
-    /// Every project (reserved for approved class B grants; not yet
-    /// minted).
-    #[allow(dead_code)]
+    /// Every project (an approved class B grant without `--project`).
     AllProjects,
+}
+
+impl Scope {
+    /// The confined project's id, or `None` for every project.
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Self::Project(project_id) => Some(project_id),
+            Self::AllProjects => None,
+        }
+    }
+
+    /// From a `control_grants.scope_project_id` column.
+    pub fn from_project_id(project_id: Option<String>) -> Self {
+        match project_id {
+            Some(project_id) => Self::Project(project_id),
+            None => Self::AllProjects,
+        }
+    }
 }
 
 /// Whether a grant may run the commands that change the app.
@@ -72,6 +91,24 @@ pub(crate) enum Scope {
 pub(crate) enum Access {
     ReadOnly,
     ReadWrite,
+}
+
+impl Access {
+    /// The `control_grants.access` column and wire spelling.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read",
+            Self::ReadWrite => "write",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::ReadOnly),
+            "write" => Some(Self::ReadWrite),
+            _ => None,
+        }
+    }
 }
 
 /// What a bearer token authorizes. Carried on the request into
@@ -122,8 +159,12 @@ pub(crate) enum AuthorizationFailure {
     /// start's, or made up).
     Unknown,
     /// A bearer this instance minted and has since revoked — the session it
-    /// belonged to has ended.
+    /// belonged to has ended, or the user revoked the connected app.
     Revoked,
+    /// A durable (class B) grant whose thirty days ran out unused.
+    Expired,
+    /// The user answered the consent prompt with Deny.
+    Denied,
 }
 
 impl AuthorizationFailure {
@@ -131,22 +172,32 @@ impl AuthorizationFailure {
         match self {
             Self::Missing | Self::Unknown => "authorization_required",
             Self::Revoked => "authorization_revoked",
+            Self::Expired => "authorization_expired",
+            Self::Denied => "authorization_denied",
         }
     }
 
     pub fn message(self) -> &'static str {
         match self {
             Self::Missing => {
-                "no credential: stagedctl can only drive Staged from inside a session the app \
-                 spawned (the session's $STAGEDCTL_LOCK file carries its credential)"
+                "no credential: inside a Staged-spawned session the session's $STAGEDCTL_LOCK \
+                 file carries one; from anywhere else run `stagedctl connect --client <name>` \
+                 and approve it in the Staged window"
             }
             Self::Unknown => {
                 "the credential is not one this Staged instance issued (it may belong to \
-                 another instance, or to an earlier start of this one)"
+                 another instance, or to an earlier start of this one); from outside a \
+                 session, `stagedctl connect` enrols a new one"
             }
             Self::Revoked => {
-                "the credential has been revoked: the session it was issued to has ended"
+                "the credential has been revoked: the session it was issued to has ended, or \
+                 the connected app was revoked in Settings"
             }
+            Self::Expired => {
+                "the connected app's approval expired (thirty days without use); run \
+                 `stagedctl connect` to ask again"
+            }
+            Self::Denied => "the user denied the connection request in the Staged window",
         }
     }
 }
@@ -157,6 +208,11 @@ impl AuthorizationFailure {
 /// property (both outcomes refuse).
 const REVOKED_MEMORY: usize = 1024;
 
+/// Most live bearers one class B grant may hold at once: each `stagedctl`
+/// invocation from an approved client reconnects for a fresh one, so the
+/// oldest is revoked when the next would exceed this.
+pub(crate) const MAX_LIVE_BEARERS_PER_GRANT: usize = 8;
+
 #[derive(Default)]
 struct GrantsInner {
     /// Live grants by token hash.
@@ -164,15 +220,44 @@ struct GrantsInner {
     /// Recently revoked token hashes, oldest first.
     revoked: VecDeque<String>,
     revoked_set: HashSet<String>,
+    /// Class B: grant id → its live token hashes, oldest first.
+    app_bearers: HashMap<String, VecDeque<String>>,
+}
+
+impl GrantsInner {
+    fn revoke_hash(&mut self, hash: &str) -> bool {
+        let Some(grant) = self.live.remove(hash) else {
+            return false;
+        };
+        if let Actor::App { grant_id, .. } = &grant.actor {
+            if let Some(hashes) = self.app_bearers.get_mut(grant_id) {
+                hashes.retain(|h| h != hash);
+                if hashes.is_empty() {
+                    self.app_bearers.remove(grant_id);
+                }
+            }
+        }
+        if self.revoked_set.insert(hash.to_string()) {
+            self.revoked.push_back(hash.to_string());
+            if self.revoked.len() > REVOKED_MEMORY {
+                if let Some(oldest) = self.revoked.pop_front() {
+                    self.revoked_set.remove(&oldest);
+                }
+            }
+        }
+        true
+    }
 }
 
 /// The live control grants, shared between the control server (which
-/// resolves bearers against it) and session starts (which mint into it).
-/// Managed as Tauri state ahead of `control_server::start`; cloning shares
-/// the registry.
+/// resolves bearers against it), session starts (which mint into it) and
+/// the consent flow (which mints and revokes class B bearers). Managed as
+/// Tauri state ahead of `control_server::start`; cloning shares the
+/// registry. Carries the class B [`Enrolment`] state too.
 #[derive(Clone, Default)]
 pub struct ControlGrants {
     inner: Arc<Mutex<GrantsInner>>,
+    pub(super) enrolment: Enrolment,
 }
 
 impl ControlGrants {
@@ -204,17 +289,72 @@ impl ControlGrants {
     /// an explicit revoke is harmless.
     pub(crate) fn revoke(&self, token: &str) -> bool {
         let hash = token_hash(token);
+        self.inner.lock().unwrap().revoke_hash(&hash)
+    }
+
+    /// Mint a live bearer for an approved class B grant. When the grant
+    /// already holds [`MAX_LIVE_BEARERS_PER_GRANT`], its oldest bearer is
+    /// revoked first.
+    pub(crate) fn mint_app_bearer(
+        &self,
+        grant_id: &str,
+        client: &str,
+        scope: Scope,
+        access: Access,
+    ) -> String {
+        let token = crate::web_server::generate_token();
+        let hash = token_hash(&token);
+        let grant = ControlGrant {
+            actor: Actor::App {
+                grant_id: grant_id.to_string(),
+                client: client.to_string(),
+            },
+            scope,
+            branch_id: None,
+            access,
+        };
         let mut inner = self.inner.lock().unwrap();
-        let was_live = inner.live.remove(&hash).is_some();
-        if was_live && inner.revoked_set.insert(hash.clone()) {
-            inner.revoked.push_back(hash);
-            if inner.revoked.len() > REVOKED_MEMORY {
-                if let Some(oldest) = inner.revoked.pop_front() {
-                    inner.revoked_set.remove(&oldest);
-                }
-            }
+        let evict: Vec<String> = {
+            let hashes = inner.app_bearers.entry(grant_id.to_string()).or_default();
+            let excess = (hashes.len() + 1).saturating_sub(MAX_LIVE_BEARERS_PER_GRANT);
+            hashes.drain(..excess).collect()
+        };
+        for stale in evict {
+            inner.revoke_hash(&stale);
         }
-        was_live
+        inner.live.insert(hash.clone(), grant);
+        inner
+            .app_bearers
+            .entry(grant_id.to_string())
+            .or_default()
+            .push_back(hash);
+        token
+    }
+
+    /// Revoke every live bearer of class B grant `grant_id`. Returns how
+    /// many were live. A later call with one of them reads `Revoked`.
+    pub(crate) fn revoke_app_grant(&self, grant_id: &str) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let hashes: Vec<String> = inner
+            .app_bearers
+            .remove(grant_id)
+            .map(Vec::from)
+            .unwrap_or_default();
+        let count = hashes.len();
+        for hash in hashes {
+            inner.revoke_hash(&hash);
+        }
+        count
+    }
+
+    /// Whether class B grant `grant_id` holds a live bearer right now.
+    pub(crate) fn app_grant_is_live(&self, grant_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .app_bearers
+            .get(grant_id)
+            .is_some_and(|hashes| !hashes.is_empty())
     }
 
     /// Number of live grants.
@@ -507,6 +647,108 @@ mod tests {
             AuthorizationFailure::Revoked.code(),
             "authorization_revoked"
         );
+        assert_eq!(
+            AuthorizationFailure::Expired.code(),
+            "authorization_expired"
+        );
+        assert_eq!(AuthorizationFailure::Denied.code(), "authorization_denied");
+        // Every code is one the CLI maps to exit 4 (pinned there too).
+        let cli = include_str!("../../crates/stagedctl/src/client.rs");
+        for failure in [
+            AuthorizationFailure::Missing,
+            AuthorizationFailure::Revoked,
+            AuthorizationFailure::Expired,
+            AuthorizationFailure::Denied,
+        ] {
+            assert!(
+                cli.contains(&format!("\"{}\",", failure.code())),
+                "stagedctl's AUTHORIZATION_CODES must list {}",
+                failure.code()
+            );
+        }
+    }
+
+    #[test]
+    fn scope_and_access_round_trip_their_column_spellings() {
+        assert_eq!(Scope::from_project_id(None), Scope::AllProjects);
+        assert_eq!(
+            Scope::from_project_id(Some("p".to_string())),
+            Scope::Project("p".to_string())
+        );
+        assert_eq!(Scope::Project("p".to_string()).project_id(), Some("p"));
+        assert_eq!(Scope::AllProjects.project_id(), None);
+        for access in [Access::ReadOnly, Access::ReadWrite] {
+            assert_eq!(Access::from_wire(access.wire()), Some(access));
+        }
+        assert_eq!(Access::from_wire("admin"), None);
+    }
+
+    // -------------------------------------------------------------------
+    // Class B bearers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn app_bearers_carry_the_grant_and_revoke_together() {
+        let grants = ControlGrants::default();
+        let first = grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadOnly);
+        let second = grants.mint_app_bearer(
+            "g1",
+            "agent",
+            Scope::Project("p".to_string()),
+            Access::ReadWrite,
+        );
+        let other = grants.mint_app_bearer("g2", "other", Scope::AllProjects, Access::ReadWrite);
+        assert_eq!(
+            grants.authorize(&first).unwrap(),
+            ControlGrant {
+                actor: Actor::App {
+                    grant_id: "g1".to_string(),
+                    client: "agent".to_string()
+                },
+                scope: Scope::AllProjects,
+                branch_id: None,
+                access: Access::ReadOnly,
+            }
+        );
+        assert!(grants.app_grant_is_live("g1"));
+        assert_eq!(grants.revoke_app_grant("g1"), 2);
+        assert!(!grants.app_grant_is_live("g1"));
+        assert_eq!(
+            grants.authorize(&first).unwrap_err(),
+            AuthorizationFailure::Revoked
+        );
+        assert_eq!(
+            grants.authorize(&second).unwrap_err(),
+            AuthorizationFailure::Revoked
+        );
+        assert!(grants.authorize(&other).is_ok(), "other grants untouched");
+        assert_eq!(grants.revoke_app_grant("g1"), 0, "idempotent");
+        assert_eq!(grants.revoke_app_grant("never"), 0);
+        assert_eq!(grants.live_count(), 1);
+    }
+
+    #[test]
+    fn app_bearers_per_grant_are_bounded_oldest_out() {
+        let grants = ControlGrants::default();
+        let first = grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadWrite);
+        let mut newest = String::new();
+        for _ in 0..MAX_LIVE_BEARERS_PER_GRANT {
+            newest = grants.mint_app_bearer("g1", "agent", Scope::AllProjects, Access::ReadWrite);
+        }
+        assert_eq!(
+            grants.authorize(&first).unwrap_err(),
+            AuthorizationFailure::Revoked,
+            "the oldest bearer is revoked once the grant exceeds its cap"
+        );
+        assert!(grants.authorize(&newest).is_ok());
+        assert_eq!(grants.live_count(), MAX_LIVE_BEARERS_PER_GRANT);
+        // Revoking one by token keeps the bookkeeping straight.
+        assert!(grants.revoke(&newest));
+        assert_eq!(
+            grants.revoke_app_grant("g1"),
+            MAX_LIVE_BEARERS_PER_GRANT - 1
+        );
+        assert_eq!(grants.live_count(), 0);
     }
 
     // -------------------------------------------------------------------

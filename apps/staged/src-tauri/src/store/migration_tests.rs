@@ -161,7 +161,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -182,6 +182,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "sessions", "pre_head_sha"));
     assert!(column_exists(&conn, "sessions", "blox_command_id"));
     assert!(column_exists(&conn, "sessions", "started_by"));
+    assert!(table_exists(&conn, "control_grants"));
     assert!(column_exists(&conn, "notes", "parent_project_note_id"));
     assert!(!column_exists(&conn, "reviews", "is_auto"));
     assert!(column_exists(&conn, "repo_actions", "pinned"));
@@ -295,7 +296,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -392,7 +393,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -484,7 +485,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -567,7 +568,7 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(!column_exists(&conn, "reviews", "is_auto"));
 
     // Reviews the removed auto-review feature created in the background are
@@ -648,7 +649,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set
@@ -733,7 +734,7 @@ fn test_note_migrations_backfill_subtype_and_completion_for_session_less_notes()
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "notes", "subtype"));
 
     let subtype = |id: &str| -> Option<String> {
@@ -839,7 +840,7 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "repo_actions", "pinned"));
     assert!(column_exists(&conn, "repo_actions", "icon"));
 
@@ -917,7 +918,7 @@ fn test_auto_commit_removal_migration_drops_flag_and_keeps_actions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
 
     // Only the flag goes: an action that had auto-commit enabled keeps running
@@ -981,7 +982,7 @@ fn test_session_branch_id_backfill_links_artifact_backed_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
 
     let branch_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -1039,7 +1040,7 @@ fn test_session_chat_read_at_migration_marks_existing_chats_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "sessions", "chat_read_at"));
 
     let read_at = |id: &str| -> Option<i64> {
@@ -1098,7 +1099,7 @@ fn test_pr_title_migration_adds_an_empty_title_to_existing_branches() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     assert!(column_exists(&conn, "branches", "pr_title"));
 
     // No backfill: a linked PR's title arrives with the next status poll.
@@ -1148,7 +1149,7 @@ fn test_note_read_at_migration_marks_landed_notes_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
 
     for (table, landed_at) in [("notes", 1000), ("project_notes", 2000)] {
         assert!(column_exists(&conn, table, "read_at"));
@@ -1213,7 +1214,7 @@ fn test_child_note_repair_detaches_only_cross_project_parents() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
 
     let parent_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -1266,7 +1267,7 @@ fn test_session_pre_head_and_blox_command_migration_leaves_existing_rows_null() 
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     let (pre_head, command): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT pre_head_sha, blox_command_id FROM sessions WHERE id = 'old'",
@@ -1307,7 +1308,7 @@ fn test_session_started_by_migration_leaves_existing_rows_null() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     let started_by: Option<String> = conn
         .query_row(
             "SELECT started_by FROM sessions WHERE id = 'old'",
@@ -1365,7 +1366,7 @@ fn test_artifact_delete_cleanup_migration_spares_disconnected_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
     for (table, prefix) in [
         ("commits", "c"),
         ("notes", "n"),
@@ -1394,6 +1395,75 @@ fn test_artifact_delete_cleanup_migration_spares_disconnected_sessions() {
     // its last artifact goes, like a running one; a finished one is cleaned up.
     assert_eq!(left, vec!["disconnected", "running"]);
     drop(stmt);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_control_grants_migration_creates_the_table_and_cascades_on_project() {
+    let path = temp_db_path("control-grants");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 42;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- Only the table 0043 references.
+        CREATE TABLE projects (id TEXT PRIMARY KEY);
+        INSERT INTO projects (id) VALUES ('p1');
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 43);
+    assert!(table_exists(&conn, "control_grants"));
+    for column in [
+        "id",
+        "client",
+        "scope_project_id",
+        "access",
+        "reconnect_secret_hash",
+        "created_at",
+        "expires_at",
+        "last_used_at",
+        "revoked_at",
+    ] {
+        assert!(
+            column_exists(&conn, "control_grants", column),
+            "missing column {column}"
+        );
+    }
+    conn.execute(
+        "INSERT INTO control_grants (id, client, scope_project_id, access,          reconnect_secret_hash, created_at, expires_at)          VALUES ('g1', 'agent', 'p1', 'write', 'h1', 1, 2)",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO control_grants (id, client, scope_project_id, access,              reconnect_secret_hash, created_at, expires_at)              VALUES ('g2', 'agent', NULL, 'admin', 'h2', 1, 2)",
+            [],
+        )
+        .is_err(),
+        "access is CHECKed to read/write"
+    );
+    conn.execute("DELETE FROM projects WHERE id = 'p1'", [])
+        .unwrap();
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM control_grants", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0, "a project-scoped grant goes with its project");
 
     cleanup_db(&path);
 }

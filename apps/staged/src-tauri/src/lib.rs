@@ -2448,6 +2448,11 @@ pub fn run() {
             doctor::login::doctor_login_status,
             doctor::login::send_doctor_login_code,
             doctor::run_doctor_update,
+            // stagedctl connected apps (consent + Settings)
+            control_server::commands::list_pending_control_authorizations,
+            control_server::commands::answer_control_authorization,
+            control_server::commands::list_control_grants,
+            control_server::commands::revoke_control_grant,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

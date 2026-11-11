@@ -7,9 +7,11 @@ file — and stagedctl uses it to find the app and authenticate with zero
 configuration. The credential is confined to the session's own project
 and is revoked when the session ends. Outside a session it tries each
 running Staged instance (~/.staged/control/<pid>/discovery.json), newest
-first, until one answers; without a credential the app refuses commands
-(exit 4). Control files are read only when they are owner-private (0600
-inside a 0700 directory, no symlinks).
+first, until one answers, and authenticates with a connected-app grant
+if `stagedctl connect` has been approved on this machine; without any
+credential the app refuses commands (exit 4). Control files are read
+only when they are owner-private (0600 inside a 0700 directory, no
+symlinks).
 
 Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
@@ -25,18 +27,21 @@ Exit codes:
   1  command failed (stderr carries `code: message`)
   2  transport fault talking to the app
   3  no running Staged app, or the app was updated (restart Staged)
-  4  not authorized: no credential, credential revoked, or the command
-     addresses something outside this session's project (report it;
-     do not retry)
+  4  not authorized: no credential (run `stagedctl connect` outside a
+     session), the request was denied, the credential was revoked or
+     expired, or the command addresses something outside the
+     credential's scope (report it; do not retry)
 
 Usage: stagedctl [OPTIONS] <COMMAND>
 
 Commands:
-  project   Inspect projects and the repos attached to them
-  timeline  Read project and repo timelines (commits, notes, reviews, images)
-  session   Start, observe, wait for, and cancel agent sessions
-  image     Attach images to a repo's timeline
-  help      Print this message or the help of the given subcommand(s)
+  project     Inspect projects and the repos attached to them
+  timeline    Read project and repo timelines (commits, notes, reviews, images)
+  session     Start, observe, wait for, and cancel agent sessions
+  image       Attach images to a repo's timeline
+  connect     Ask the Staged user to approve this client (outside a spawned session)
+  disconnect  Forget this machine's connected-app grants and revoke them in Staged
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
       --lock-path <PATH>
@@ -390,6 +395,70 @@ Options:
 
       --file <PATH>
           Path to the image file
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl connect --help ===
+Ask the Staged user to approve this client. Use this when stagedctl runs
+outside a Staged-spawned session (no $STAGEDCTL_LOCK) — from a terminal,
+a script, or an agent the user started themselves.
+
+The request appears in the Staged window as a consent dialog naming
+--client, the projects it would reach, and whether it may write; the
+command waits (up to --timeout seconds) for the answer. Approval stores
+a grant on this machine (~/.staged/control/grants/, owner-private) that
+later invocations use without asking again; it lasts thirty days from
+its last use and can be revoked at any time in the app under
+Settings ▸ Connected apps, or with `stagedctl disconnect`.
+
+Exit 4 with `authorization_denied` when the user declines. A request
+left unanswered for five minutes expires.
+
+Usage: stagedctl connect [OPTIONS] --client <NAME>
+
+Options:
+      --client <NAME>
+          The name shown to the user in the consent dialog
+
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+      --project <PROJECT>
+          Confine the grant to one project (name or id); default: every project
+
+      --read-only
+          Ask for read access only (no starting, cancelling or attaching)
+
+      --timeout <SECONDS>
+          Seconds to wait for the user's answer
+          
+          [default: 300]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl disconnect --help ===
+Forget the connected-app grants stored on this machine and, when a Staged
+app is running, revoke them there too so their live credentials stop
+working at once. With --client only the grants approved under that name
+are removed. Grants a Staged app cannot be reached for are still removed
+locally; revoke them in Settings ▸ Connected apps if needed.
+
+Usage: stagedctl disconnect [OPTIONS]
+
+Options:
+      --client <NAME>
+          Only the grants approved under this client name
+
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
 
   -h, --help
           Print help (see a summary with '-h')

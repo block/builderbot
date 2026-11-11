@@ -12,6 +12,14 @@
 //! command payload. Without an explicit path it tries every live-pid
 //! instance directory, newest first, until one passes that handshake —
 //! file freshness alone can lie (pid reuse).
+//!
+//! The credential comes second. A per-session file (`$STAGEDCTL_LOCK`)
+//! carries the session's own token; an instance's `discovery.json` carries
+//! none (or, on the TCP fallback, only the transport token), so a CLI that
+//! found the app that way authenticates with a connected-app grant from
+//! `~/.staged/control/grants/` instead — reconnecting with a proof of the
+//! grant's secret (see [`crate::grants`]) — and, with no grant either, lets
+//! the app say so (`authorization_required`, exit 4).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,9 +40,15 @@ pub const STAGEDCTL_LOCK_ENV: &str = "STAGEDCTL_LOCK";
 /// transports. Must equal `control_server::HOST_LITERAL` (pinned by test).
 pub const HOST_LITERAL: &str = "stagedctl";
 
-/// Largest control file the reader will take. Discovery and per-session
-/// files are a handful of short fields; anything bigger is not ours.
+/// Largest control file the reader will take. Discovery, per-session and
+/// grant files are a handful of short fields; anything bigger is not ours.
 const MAX_CONTROL_FILE_BYTES: u64 = 4096;
+
+/// The instance discovery file's name. Must equal
+/// `control_server::files::DISCOVERY_FILE_NAME` (pinned by test): a control
+/// file with this name carries no session credential, so the grant lookup
+/// applies.
+const DISCOVERY_FILE_NAME: &str = "discovery.json";
 
 /// The `code` values the app sends with a 401/403 that mean "the credential,
 /// not the transport, was refused". Exit 4 for each: an agent should report
@@ -189,17 +203,40 @@ pub fn discover_and_connect(
     env_value: Option<std::ffi::OsString>,
     data_dir: Option<&Path>,
 ) -> Result<Client, CtlError> {
+    let (mut client, path) = discover_instance(flag, env_value, data_dir)?;
+    if is_instance_discovery_file(&path) {
+        if let Some(data_dir) = data_dir {
+            client.attach_grant_credential(data_dir)?;
+        }
+    }
+    Ok(client)
+}
+
+/// [`discover_and_connect`] without the credential step: the handshaken
+/// client plus the control file it came from. `stagedctl connect` uses this
+/// — enrolment is how a credential is obtained.
+pub fn discover_instance(
+    flag: Option<&Path>,
+    env_value: Option<std::ffi::OsString>,
+    data_dir: Option<&Path>,
+) -> Result<(Client, PathBuf), CtlError> {
     let candidates = resolve_lock_candidates(flag, env_value, data_dir)?;
     let mut first_err: Option<CtlError> = None;
     for path in &candidates {
         match Client::connect(path) {
-            Ok(client) => return Ok(client),
+            Ok(client) => return Ok((client, path.clone())),
             Err(e) => {
                 first_err.get_or_insert(e);
             }
         }
     }
     Err(first_err.expect("resolve_lock_candidates never returns an empty list"))
+}
+
+/// Whether `path` is an instance's `discovery.json` (no session credential)
+/// rather than a per-session file.
+fn is_instance_discovery_file(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()) == Some(DISCOVERY_FILE_NAME)
 }
 
 /// Every `control/<pid>/discovery.json` under `data_dir` whose pid is a live
@@ -226,7 +263,7 @@ fn live_discovery_files(data_dir: &Path) -> Vec<PathBuf> {
         if !is_process_alive(pid) {
             continue;
         }
-        let path = entry.path().join("discovery.json");
+        let path = entry.path().join(DISCOVERY_FILE_NAME);
         let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
             continue;
         };
@@ -298,6 +335,14 @@ pub fn read_discovery(path: &Path) -> Result<Discovery, CtlError> {
 enum ReadError {
     Missing(String),
     Unsafe(String),
+}
+
+/// [`read_private_file`] with the refusal flattened to its message, for
+/// callers (the grant lookup) that skip rather than distinguish.
+pub(crate) fn read_private_file_lossy(path: &Path) -> Result<String, String> {
+    read_private_file(path).map_err(|e| match e {
+        ReadError::Missing(m) | ReadError::Unsafe(m) => m,
+    })
 }
 
 /// Read a control file only if it is what the app writes: a regular file
@@ -449,6 +494,13 @@ struct PingResponse {
 pub struct Client {
     http: reqwest::blocking::Client,
     base: String,
+    /// The `Authorization: Bearer` value, if any: the control file's token
+    /// (a session credential, or the TCP fallback's transport token), later
+    /// replaced by a connected-app bearer when one is obtained.
+    bearer: Option<String>,
+    /// What the handshake confirmed, for the grant the client later writes.
+    pub pid: u32,
+    pub generation: u64,
 }
 
 impl Client {
@@ -503,20 +555,15 @@ impl Client {
     /// `HTTP_PROXY` in the agent's environment must never route a control
     /// call (and the bearer it carries) through a third party — and no
     /// redirects, so the app's answer can't send a request elsewhere. The
-    /// literal `Host` the server pins and the bearer, when the file carries
-    /// one, ride on every request as default headers.
+    /// literal `Host` the server pins rides on every request as a default
+    /// header; the bearer, when the file carries one, is added per request
+    /// so a connected-app credential can replace it.
     fn for_discovery(discovery: &Discovery) -> Result<Client, CtlError> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::HOST,
             reqwest::header::HeaderValue::from_static(HOST_LITERAL),
         );
-        if let Some(token) = &discovery.token {
-            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|e| CtlError::Transport(format!("cannot build bearer: {e}")))?;
-            value.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
         let builder = reqwest::blocking::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -543,13 +590,29 @@ impl Client {
         let http = builder
             .build()
             .map_err(|e| CtlError::Transport(format!("cannot build HTTP client: {e}")))?;
-        Ok(Client { http, base })
+        Ok(Client {
+            http,
+            base,
+            bearer: discovery.token.clone(),
+            pid: discovery.pid,
+            generation: discovery.generation,
+        })
+    }
+
+    /// Add the bearer, when there is one, to a request.
+    fn authorized(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        match &self.bearer {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
     }
 
     fn ping(&self) -> Result<PingResponse, String> {
         let response = self
-            .http
-            .get(format!("{}/api/ping", self.base))
+            .authorized(self.http.get(format!("{}/api/ping", self.base)))
             .timeout(Duration::from_secs(5))
             .send()
             .map_err(|e| e.to_string())?;
@@ -568,32 +631,256 @@ impl Client {
     /// fault.
     pub fn invoke(&self, command: &str, args: Value) -> Result<Value, CtlError> {
         let response = self
-            .http
-            .post(format!("{}/api/invoke/{command}", self.base))
+            .authorized(
+                self.http
+                    .post(format!("{}/api/invoke/{command}", self.base)),
+            )
             .json(&args)
             .send()
             .map_err(|e| CtlError::Transport(format!("{command}: {e}")))?;
-
-        let status = response.status();
+        let status = response.status().as_u16();
         let body: Value = response.json().unwrap_or(Value::Null);
-        match status.as_u16() {
-            200 => Ok(body),
-            400 | 404 => Err(CtlError::command("app_error", error_message(&body))),
-            401 | 403 => match authorization_code(&body) {
-                Some(code) => Err(CtlError::Authorization {
-                    code: code.to_string(),
-                    message: error_message(&body),
-                }),
-                None => Err(CtlError::Transport(format!(
-                    "control server rejected the request: {}",
-                    error_message(&body)
-                ))),
+        classify(command, status, body)
+    }
+
+    /// `POST` one of the credential routes (`/api/connect`,
+    /// `/api/reconnect/...`, `/api/disconnect`) and classify the answer like
+    /// [`invoke`](Self::invoke); a `429` on `connect` is a command error
+    /// (the app has too many prompts waiting).
+    fn post_credential_route(&self, route: &str, body: &Value) -> Result<Value, CtlError> {
+        let response = self
+            .authorized(self.http.post(format!("{}{route}", self.base)))
+            .json(body)
+            .send()
+            .map_err(|e| CtlError::Transport(format!("{route}: {e}")))?;
+        let status = response.status().as_u16();
+        let body: Value = response.json().unwrap_or(Value::Null);
+        if status == 429 {
+            return Err(CtlError::command("too_many_requests", error_message(&body)));
+        }
+        classify(route, status, body)
+    }
+
+    // ---------------------------------------------------------------------
+    // Connected-app grants (class B)
+    // ---------------------------------------------------------------------
+
+    /// Authenticate with the freshest usable grant on this machine, if any.
+    /// A grant the app no longer knows (`authorization_required`: a reset
+    /// database, say) is skipped for the next; one it revoked or let expire
+    /// is reported, since the user should hear that. With no usable grant
+    /// the client keeps whatever bearer the control file gave it and the
+    /// app's own `authorization_required` message explains what to do.
+    pub fn attach_grant_credential(&mut self, data_dir: &Path) -> Result<(), CtlError> {
+        let now = crate::grants::now_ms();
+        for (path, grant) in crate::grants::read_grant_files(data_dir) {
+            if grant.is_expired_at(now) {
+                continue;
+            }
+            match self.reconnect(&grant) {
+                Ok(renewed) => {
+                    if renewed.expires_at != grant.expires_at {
+                        let updated = crate::grants::GrantFile {
+                            expires_at: renewed.expires_at,
+                            ..grant
+                        };
+                        if let Err(e) = crate::grants::write_grant_file(data_dir, &updated) {
+                            eprintln!(
+                                "stagedctl: could not record the renewed expiry in {}: {e}",
+                                path.display()
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(CtlError::Authorization { code, .. }) if code == "authorization_required" => {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Prove possession of `grant`'s secret and take this run's bearer. On
+    /// success the bearer is installed and the renewed expiry returned.
+    pub fn reconnect(&mut self, grant: &crate::grants::GrantFile) -> Result<Reconnected, CtlError> {
+        let challenge = self.post_credential_route(
+            "/api/reconnect/challenge",
+            &serde_json::json!({ "grantId": grant.grant_id }),
+        )?;
+        let nonce = challenge
+            .get("nonce")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CtlError::Transport("malformed reconnect challenge".to_string()))?;
+        let proof = crate::grants::reconnect_proof(grant, nonce);
+        let answer = self.post_credential_route(
+            "/api/reconnect",
+            &serde_json::json!({
+                "grantId": grant.grant_id,
+                "nonce": nonce,
+                "proof": proof,
+            }),
+        )?;
+        let token = answer
+            .get("token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CtlError::Transport("malformed reconnect answer".to_string()))?;
+        let expires_at = answer
+            .get("expiresAt")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| CtlError::Transport("malformed reconnect answer".to_string()))?;
+        grant
+            .accept_renewal(expires_at, crate::grants::now_ms())
+            .map_err(CtlError::Transport)?;
+        self.bearer = Some(token.to_string());
+        Ok(Reconnected { expires_at })
+    }
+
+    /// Ask the user to approve this client: `POST /api/connect`. Returns the
+    /// request id to poll and when the request expires.
+    pub fn request_authorization(
+        &self,
+        client: &str,
+        project: Option<&str>,
+        read_only: bool,
+    ) -> Result<(String, i64), CtlError> {
+        let answer = self.post_credential_route(
+            "/api/connect",
+            &serde_json::json!({
+                "client": client,
+                "project": project,
+                "readOnly": read_only,
+            }),
+        )?;
+        let request_id = answer
+            .get("requestId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CtlError::Transport("malformed connect answer".to_string()))?;
+        let expires_at = answer.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
+        Ok((request_id.to_string(), expires_at))
+    }
+
+    /// One long-poll of `GET /api/connect/{id}`: the approval, or `None`
+    /// while the user has not answered. A denial or an expired request is
+    /// an authorization error (exit 4).
+    pub fn poll_authorization(&self, request_id: &str) -> Result<Option<Approval>, CtlError> {
+        let response = self
+            .authorized(
+                self.http
+                    .get(format!("{}/api/connect/{request_id}", self.base)),
+            )
+            .send()
+            .map_err(|e| CtlError::Transport(format!("connect poll: {e}")))?;
+        let status = response.status().as_u16();
+        let body: Value = response.json().unwrap_or(Value::Null);
+        if status == 202 {
+            return Ok(None);
+        }
+        let body = classify("connect", status, body)?;
+        let field = |name: &str| {
+            body.get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| CtlError::Transport(format!("approval is missing {name}")))
+        };
+        Ok(Some(Approval {
+            grant: crate::grants::GrantFile {
+                grant_id: field("grantId")?,
+                reconnect_secret: field("reconnectSecret")?,
+                client: field("client").unwrap_or_default(),
+                scope: crate::grants::GrantScope {
+                    project_id: body
+                        .get("scope")
+                        .and_then(|s| s.get("projectId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                },
+                access: field("access").unwrap_or_else(|_| "write".to_string()),
+                expires_at: body.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
             },
-            code => Err(CtlError::Transport(format!(
-                "unexpected HTTP {code} from control server: {}",
+            token: field("token")?,
+        }))
+    }
+
+    /// Revoke `grant` in the app with a proof of its secret
+    /// (`stagedctl disconnect`). Returns whether the app still had it live.
+    pub fn revoke_grant(&self, grant: &crate::grants::GrantFile) -> Result<bool, CtlError> {
+        let challenge = self.post_credential_route(
+            "/api/reconnect/challenge",
+            &serde_json::json!({ "grantId": grant.grant_id }),
+        );
+        let challenge = match challenge {
+            Ok(challenge) => challenge,
+            // Already revoked or expired app-side: nothing left to revoke.
+            Err(CtlError::Authorization { code, .. })
+                if code == "authorization_revoked" || code == "authorization_expired" =>
+            {
+                return Ok(false)
+            }
+            Err(e) => return Err(e),
+        };
+        let nonce = challenge
+            .get("nonce")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CtlError::Transport("malformed reconnect challenge".to_string()))?;
+        let answer = self.post_credential_route(
+            "/api/disconnect",
+            &serde_json::json!({
+                "grantId": grant.grant_id,
+                "nonce": nonce,
+                "proof": crate::grants::reconnect_proof(grant, nonce),
+            }),
+        )?;
+        Ok(answer
+            .get("revoked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bearer(&self) -> Option<&str> {
+        self.bearer.as_deref()
+    }
+}
+
+/// What a successful reconnect returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reconnected {
+    pub expires_at: i64,
+}
+
+/// What an approved `connect` returned: the grant to store and this run's
+/// bearer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Approval {
+    pub grant: crate::grants::GrantFile,
+    pub token: String,
+}
+
+/// Map a control-server answer onto the exit-code contract. Command-level
+/// failures come back as HTTP 400/404 with `{"error": message}` and map to
+/// exit code 1 with the app's message verbatim; a 401/403 carrying one of
+/// [`AUTHORIZATION_CODES`] is exit code 4; anything else is a transport
+/// fault.
+fn classify(what: &str, status: u16, body: Value) -> Result<Value, CtlError> {
+    match status {
+        200 => Ok(body),
+        400 | 404 => Err(CtlError::command("app_error", error_message(&body))),
+        401 | 403 => match authorization_code(&body) {
+            Some(code) => Err(CtlError::Authorization {
+                code: code.to_string(),
+                message: error_message(&body),
+            }),
+            None => Err(CtlError::Transport(format!(
+                "control server rejected the request: {}",
                 error_message(&body)
             ))),
-        }
+        },
+        code => Err(CtlError::Transport(format!(
+            "unexpected HTTP {code} from control server ({what}): {}",
+            error_message(&body)
+        ))),
     }
 }
 
@@ -645,6 +932,21 @@ mod tests {
             )),
             "control_server::HOST_LITERAL diverged from the CLI's constant"
         );
+        let files = include_str!("../../../src/control_server/files.rs");
+        assert!(
+            files.contains(&format!(
+                "pub(super) const DISCOVERY_FILE_NAME: &str = \"{DISCOVERY_FILE_NAME}\";"
+            )),
+            "control_server::files::DISCOVERY_FILE_NAME diverged from the CLI's constant"
+        );
+        let store = include_str!("../../../src/store/control_grants.rs");
+        assert!(
+            store.contains(&format!(
+                "pub const CONTROL_GRANT_LIFETIME_MS: i64 = {};",
+                "30 * 24 * 60 * 60 * 1000"
+            )) && crate::grants::GRANT_LIFETIME_MS == 30 * 24 * 60 * 60 * 1000,
+            "the grant lifetime diverged between the app and the CLI"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -682,17 +984,12 @@ mod tests {
 
     #[test]
     fn authorization_codes_match_the_control_server() {
-        // The server spells each code once; the CLI's list must cover the
-        // ones it sends today (the remaining codes are reserved for the
-        // consent-based grants).
+        // The server spells each code once; the CLI's list must cover
+        // every one it sends.
         let server = include_str!("../../../src/control_server.rs");
         let grants = include_str!("../../../src/control_server/grants.rs");
-        for code in [
-            "authorization_required",
-            "authorization_revoked",
-            "scope_denied",
-        ] {
-            assert!(AUTHORIZATION_CODES.contains(&code));
+        for code in AUTHORIZATION_CODES {
+            assert!(AUTHORIZATION_CODES.contains(code));
             assert!(
                 server.contains(&format!("\"{code}\"")) || grants.contains(&format!("\"{code}\"")),
                 "the app no longer sends {code}; update AUTHORIZATION_CODES"
@@ -998,14 +1295,14 @@ mod tests {
     type FakeResponse = (u16, String, Vec<(String, String)>);
 
     /// Serve one HTTP/1.1 request per connection from `incoming`, answering
-    /// via the handler (which sees the whole request head: request line and
-    /// headers), then close. Enough to exercise the reqwest client over
-    /// either transport.
+    /// via the handler (which sees the whole request head — request line
+    /// and headers — and the body), then close. Enough to exercise the
+    /// reqwest client over either transport.
     fn run_fake<S, I, F>(incoming: I, mut handler: F)
     where
         S: Read + Write,
         I: Iterator<Item = std::io::Result<S>>,
-        F: FnMut(&str) -> FakeResponse,
+        F: FnMut(&str, &str) -> FakeResponse,
     {
         for stream in incoming {
             let Ok(mut stream) = stream else { break };
@@ -1041,7 +1338,8 @@ mod tests {
                     Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 }
             }
-            let (status, body, extra) = handler(&head);
+            let request_body = String::from_utf8_lossy(&buf[header_end..]).to_string();
+            let (status, body, extra) = handler(&head, &request_body);
             let extra: String = extra
                 .iter()
                 .map(|(name, value)| format!("{name}: {value}\r\n"))
@@ -1066,13 +1364,32 @@ mod tests {
         })
     }
 
-    fn fake_server_with_headers<F>(handler: F) -> (u16, std::thread::JoinHandle<()>)
+    fn fake_server_with_headers<F>(mut handler: F) -> (u16, std::thread::JoinHandle<()>)
     where
         F: FnMut(&str) -> FakeResponse + Send + 'static,
     {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || run_fake(listener.incoming(), handler));
+        let handle = std::thread::spawn(move || {
+            run_fake(listener.incoming(), move |head, _body| handler(head))
+        });
+        (port, handle)
+    }
+
+    /// Loopback-TCP fake whose handler also sees the request body (the
+    /// credential routes carry their arguments there).
+    fn fake_server_with_body<F>(mut handler: F) -> (u16, std::thread::JoinHandle<()>)
+    where
+        F: FnMut(&str, &str) -> (u16, String) + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            run_fake(listener.incoming(), move |head, body| {
+                let (status, body) = handler(head, body);
+                (status, body, Vec::new())
+            })
+        });
         (port, handle)
     }
 
@@ -1084,11 +1401,392 @@ mod tests {
     {
         let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
         std::thread::spawn(move || {
-            run_fake(listener.incoming(), move |head| {
+            run_fake(listener.incoming(), move |head, _body| {
                 let (status, body) = handler(head);
                 (status, body, Vec::new())
             })
         })
+    }
+
+    // -----------------------------------------------------------------
+    // Connected-app grants
+    // -----------------------------------------------------------------
+
+    fn grant_file(id: &str, secret: &str, expires_at: i64) -> crate::grants::GrantFile {
+        crate::grants::GrantFile {
+            grant_id: id.to_string(),
+            reconnect_secret: secret.to_string(),
+            client: "my-agent".to_string(),
+            scope: crate::grants::GrantScope { project_id: None },
+            access: "write".to_string(),
+            expires_at,
+        }
+    }
+
+    /// A fake app that knows the grants in `known` (id → secret) and issues
+    /// one fixed nonce per challenge, checking the proof on reconnect
+    /// exactly as `control_server::enrol` does. Records every
+    /// `Authorization` header it sees.
+    fn grant_aware_server(
+        pid: u32,
+        known: Vec<(String, String)>,
+        renew_to: i64,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (u16, std::thread::JoinHandle<()>) {
+        fake_server_with_body(move |head, body| {
+            seen.lock().unwrap().push(
+                header_value(head, "authorization")
+                    .unwrap_or("")
+                    .to_string(),
+            );
+            let args: serde_json::Value = serde_json::from_str(body).unwrap_or(Value::Null);
+            let grant_id = args.get("grantId").and_then(Value::as_str).unwrap_or("");
+            let secret = known.iter().find(|(id, _)| id == grant_id).map(|(_, s)| s);
+            if head.starts_with("GET /api/ping") {
+                (200, ping_body(pid, 1, PROTOCOL_VERSION))
+            } else if head.starts_with("POST /api/reconnect/challenge") {
+                match secret {
+                    Some(_) => (
+                        200,
+                        serde_json::json!({ "nonce": format!("nonce-for-{grant_id}"), "expiresAt": 0 })
+                            .to_string(),
+                    ),
+                    None => (
+                        401,
+                        r#"{"error":"unknown grant","code":"authorization_required"}"#.to_string(),
+                    ),
+                }
+            } else if head.starts_with("POST /api/reconnect") {
+                let Some(secret) = secret else {
+                    return (
+                        401,
+                        r#"{"error":"unknown grant","code":"authorization_required"}"#.to_string(),
+                    );
+                };
+                let expected = crate::grants::reconnect_proof(
+                    &grant_file(grant_id, secret, 0),
+                    &format!("nonce-for-{grant_id}"),
+                );
+                let proof = args.get("proof").and_then(Value::as_str).unwrap_or("");
+                let nonce = args.get("nonce").and_then(Value::as_str).unwrap_or("");
+                if proof == expected && nonce == format!("nonce-for-{grant_id}") {
+                    (
+                        200,
+                        serde_json::json!({
+                            "grantId": grant_id,
+                            "token": format!("live-{grant_id}"),
+                            "expiresAt": renew_to,
+                            "client": "my-agent",
+                            "scope": { "projectId": null },
+                            "access": "write",
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    (
+                        401,
+                        r#"{"error":"bad proof","code":"authorization_required"}"#.to_string(),
+                    )
+                }
+            } else if head.starts_with("POST /api/disconnect") {
+                (200, r#"{"revoked":true}"#.to_string())
+            } else {
+                (200, "null".to_string())
+            }
+        })
+    }
+
+    #[test]
+    fn an_instance_discovery_file_attaches_the_freshest_grant_by_proof() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let renew_to = now + crate::grants::GRANT_LIFETIME_MS - 1000;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![
+                ("older".to_string(), "s-older".to_string()),
+                ("newer".to_string(), "s-newer".to_string()),
+            ],
+            renew_to,
+            std::sync::Arc::clone(&seen),
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("older", "s-older", now + 1000))
+            .unwrap();
+        crate::grants::write_grant_file(dir.path(), &grant_file("newer", "s-newer", now + 2000))
+            .unwrap();
+        // An expired grant is never tried, however fresh it looks.
+        crate::grants::write_grant_file(dir.path(), &grant_file("stale", "s-stale", now - 1))
+            .unwrap();
+
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.bearer(), Some("live-newer"));
+        client
+            .invoke("list_projects", serde_json::json!({}))
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        // ping (instance token), challenge, reconnect, invoke (grant bearer).
+        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert_eq!(seen[3], "Bearer live-newer");
+
+        // The renewed expiry was recorded; the others are untouched.
+        let files: Vec<(String, i64)> = crate::grants::read_grant_files(dir.path())
+            .into_iter()
+            .map(|(_, g)| (g.grant_id, g.expires_at))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("newer".to_string(), renew_to),
+                ("older".to_string(), now + 1000),
+                ("stale".to_string(), now - 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_grant_the_app_does_not_know_is_skipped_for_the_next() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("known".to_string(), "s-known".to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            seen,
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("known", "s-known", now + 1000))
+            .unwrap();
+        crate::grants::write_grant_file(
+            dir.path(),
+            &grant_file("forgotten", "s-forgotten", now + 5000),
+        )
+        .unwrap();
+
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.bearer(), Some("live-known"));
+    }
+
+    #[test]
+    fn a_revoked_or_expired_grant_is_reported_and_a_bad_renewal_refused() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let (port, _handle) = fake_server(move |head| {
+            if head.starts_with("GET /api/ping") {
+                (200, ping_body(pid, 1, PROTOCOL_VERSION))
+            } else {
+                (
+                    401,
+                    r#"{"error":"the grant was revoked in Staged","code":"authorization_revoked"}"#
+                        .to_string(),
+                )
+            }
+        });
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("g", "s", now + 1000)).unwrap();
+        let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "authorization_revoked: the grant was revoked in Staged"
+        );
+
+        // A renewal further out than thirty days is not something the app
+        // would send; refuse it rather than record it.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("g".to_string(), "s".to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS + 24 * 60 * 60 * 1000,
+            seen,
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        crate::grants::write_grant_file(dir.path(), &grant_file("g", "s", now + 1000)).unwrap();
+        let err = discover_and_connect(None, None, Some(dir.path())).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("thirty days"), "{err}");
+    }
+
+    #[test]
+    fn a_per_session_file_never_consults_the_grants() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let token = "5e".repeat(32);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("g".to_string(), "s".to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            std::sync::Arc::clone(&seen),
+        );
+        let dir = private_tempdir();
+        crate::grants::write_grant_file(dir.path(), &grant_file("g", "s", now + 1000)).unwrap();
+        let session_file = instance_dir(dir.path(), pid)
+            .join("sessions")
+            .join("abc.json");
+        make_private_dir(session_file.parent().unwrap());
+        write_private(
+            &session_file,
+            &discovery_json(serde_json::json!({ "port": port, "token": token }), pid, 1),
+        );
+
+        let client = discover_and_connect(Some(&session_file), None, Some(dir.path())).unwrap();
+        assert_eq!(client.bearer(), Some(token.as_str()));
+        assert_eq!(seen.lock().unwrap().len(), 1, "ping only; no challenge");
+    }
+
+    #[test]
+    fn connect_requests_then_polls_and_a_denial_is_exit_4() {
+        let pid = std::process::id();
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (port, _handle) = {
+            let polls = std::sync::Arc::clone(&polls);
+            fake_server_with_body(move |head, body| {
+                if head.starts_with("GET /api/ping") {
+                    (200, ping_body(pid, 1, PROTOCOL_VERSION))
+                } else if head.starts_with("POST /api/connect") {
+                    let args: Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(args["client"], "my-agent");
+                    assert_eq!(args["project"], "Widgets");
+                    assert_eq!(args["readOnly"], true);
+                    (200, r#"{"requestId":"req-1","expiresAt":99}"#.to_string())
+                } else if head.starts_with("GET /api/connect/req-1") {
+                    let n = polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n == 0 {
+                        (202, r#"{"status":"pending","expiresAt":99}"#.to_string())
+                    } else {
+                        (
+                            200,
+                            serde_json::json!({
+                                "status": "approved",
+                                "grantId": "g-1",
+                                "token": "live-1",
+                                "reconnectSecret": "secret-1",
+                                "expiresAt": 12345,
+                                "client": "my-agent",
+                                "scope": { "projectId": "p-1" },
+                                "access": "read",
+                            })
+                            .to_string(),
+                        )
+                    }
+                } else if head.starts_with("GET /api/connect/req-denied") {
+                    (
+                        403,
+                        r#"{"error":"the Staged user denied the request","code":"authorization_denied"}"#
+                            .to_string(),
+                    )
+                } else if head.starts_with("GET /api/connect/req-expired") {
+                    (
+                        401,
+                        r#"{"error":"the request expired","code":"authorization_required"}"#
+                            .to_string(),
+                    )
+                } else {
+                    (404, r#"{"error":"unknown request"}"#.to_string())
+                }
+            })
+        };
+        let dir = private_tempdir();
+        let lock = write_tcp_discovery(dir.path(), pid, port, 1);
+        let (client, path) = discover_instance(None, None, Some(dir.path())).unwrap();
+        assert_eq!(path, lock);
+
+        let (request_id, expires_at) = client
+            .request_authorization("my-agent", Some("Widgets"), true)
+            .unwrap();
+        assert_eq!((request_id.as_str(), expires_at), ("req-1", 99));
+        assert_eq!(client.poll_authorization("req-1").unwrap(), None, "pending");
+        let approval = client.poll_authorization("req-1").unwrap().unwrap();
+        assert_eq!(approval.token, "live-1");
+        assert_eq!(
+            approval.grant,
+            crate::grants::GrantFile {
+                grant_id: "g-1".to_string(),
+                reconnect_secret: "secret-1".to_string(),
+                client: "my-agent".to_string(),
+                scope: crate::grants::GrantScope {
+                    project_id: Some("p-1".to_string())
+                },
+                access: "read".to_string(),
+                expires_at: 12345,
+            }
+        );
+
+        let err = client.poll_authorization("req-denied").unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "authorization_denied: the Staged user denied the request"
+        );
+        let err = client.poll_authorization("req-expired").unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        let err = client.poll_authorization("req-unknown").unwrap_err();
+        assert_eq!(err.exit_code(), 1, "{err}");
+    }
+
+    #[test]
+    fn a_full_prompt_queue_is_a_command_error() {
+        let pid = std::process::id();
+        let (port, _handle) = fake_server(move |head| {
+            if head.starts_with("GET /api/ping") {
+                (200, ping_body(pid, 1, PROTOCOL_VERSION))
+            } else {
+                (429, r#"{"error":"too many requests waiting"}"#.to_string())
+            }
+        });
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        let (client, _) = discover_instance(None, None, Some(dir.path())).unwrap();
+        let err = client
+            .request_authorization("my-agent", None, false)
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 1, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "too_many_requests: too many requests waiting"
+        );
+    }
+
+    #[test]
+    fn revoke_grant_proves_the_secret_and_accepts_an_already_dead_grant() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("g".to_string(), "s".to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            seen,
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        let (client, _) = discover_instance(None, None, Some(dir.path())).unwrap();
+        assert!(client.revoke_grant(&grant_file("g", "s", now)).unwrap());
+
+        let (port, _handle) = fake_server(move |head| {
+            if head.starts_with("GET /api/ping") {
+                (200, ping_body(pid, 1, PROTOCOL_VERSION))
+            } else {
+                (
+                    401,
+                    r#"{"error":"the grant expired","code":"authorization_expired"}"#.to_string(),
+                )
+            }
+        });
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        let (client, _) = discover_instance(None, None, Some(dir.path())).unwrap();
+        assert!(
+            !client.revoke_grant(&grant_file("g", "s", now)).unwrap(),
+            "nothing left to revoke"
+        );
     }
 
     fn ping_body(pid: u32, generation: u64, protocol_version: u32) -> String {

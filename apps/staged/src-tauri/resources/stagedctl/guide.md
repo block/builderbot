@@ -10,6 +10,15 @@ by Staged receive everything needed to use it with zero configuration:
   authenticates as this session. The credential is confined to the
   session's own project and is revoked when the session ends.
 
+Outside a Staged-spawned session (a terminal, a script, an agent the user
+started themselves) there is no `$STAGEDCTL_LOCK`. Run
+`stagedctl connect --client <name>` once: the Staged user sees a consent
+dialog and, on approval, a grant is stored on this machine
+(`~/.staged/control/grants/`, owner-private) that later invocations use
+without asking again. It lasts thirty days from its last use; the user can
+revoke it any time under Settings ▸ Connected apps, and
+`stagedctl disconnect` forgets and revokes it from this side.
+
 ## Discover, don't memorize
 
 The CLI's own help is the single authoritative reference, and the only one
@@ -47,6 +56,9 @@ The CLI needs the spawning app instance to be alive and reachable over
 its control socket. Exit code 3 means "not running under a Staged app" (or a protocol
 mismatch after the app updated); that is not retryable from inside this
 session — report it instead of retrying. Exit code 4 means the app refused
-this session's credential or the command addressed another project; that
-is a deliberate boundary, not a transient fault — report it, do not retry
-or work around it.
+the credential (none, revoked, expired, or the user denied a `connect`
+request) or the command addressed something outside its scope; that is a
+deliberate boundary, not a transient fault — report it, do not retry or
+work around it. The one exception is `authorization_required` outside a
+spawned session, which simply means `stagedctl connect` has not been
+approved yet.

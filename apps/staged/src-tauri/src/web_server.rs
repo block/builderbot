@@ -1057,6 +1057,22 @@ pub(crate) async fn dispatch(
         }
 
         // =====================================================================
+        // stagedctl connected apps (desktop only)
+        // =====================================================================
+        // Consent is the user's to give in the app window, and the grant
+        // list is theirs to prune there; a browser client (or a stagedctl
+        // caller, which never reaches these — they are outside
+        // `ALLOWED_COMMANDS`) must not approve a request or revoke a grant.
+        // One arm per line: the parity test reads an arm's patterns off the
+        // line that holds its `=>`.
+        "list_pending_control_authorizations" => {
+            Err(format!("{command} is not available in web mode"))
+        }
+        "answer_control_authorization" => Err(format!("{command} is not available in web mode")),
+        "list_control_grants" => Err(format!("{command} is not available in web mode")),
+        "revoke_control_grant" => Err(format!("{command} is not available in web mode")),
+
+        // =====================================================================
         // Projects
         // =====================================================================
         "list_projects" => {

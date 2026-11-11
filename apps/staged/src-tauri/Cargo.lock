@@ -5185,10 +5185,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dirs",
+ "hex",
  "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "time",
 ]

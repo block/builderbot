@@ -93,7 +93,7 @@ pub(crate) const SHOW_WINDOW_MENU_ID: &str = "show_window";
 /// windows are `win-N` peers — see `window_commands` — with nothing privileged
 /// about `main` beyond being the one whose geometry is restored, which makes it
 /// the nicest default to reveal.
-const MAIN_WINDOW_LABEL: &str = "main";
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
 /// Total budget for stopping sessions and actions. Sessions and actions are
 /// signalled first and waited on against this one deadline, because the

@@ -17,53 +17,55 @@ import {
 } from './cache';
 import { readSnapshot, writeSnapshot, clearSnapshot, SNAPSHOT_KEYS } from './shared/webSnapshot';
 import type {
+  AcpConfigSelection,
+  ActiveSessionInfo,
+  AttachmentThumbnail,
+  Branch,
+  BranchNote,
+  BranchPipelineResponse,
+  BranchRef,
+  BranchSessionLaunchContext,
+  BranchSessionResponse,
+  BranchSessionType,
+  BranchTimeline,
+  ChildSessionInfo,
+  Comment,
+  ControlAuthorizationRequest,
+  ControlGrantSummary,
+  DiffFilesResponse,
+  File,
+  FileDiff,
+  GitHubRepo,
+  Image,
+  ImageDimensions,
+  Issue,
+  LaunchRecovery,
+  LinkedBranchPr,
+  PollWorkspaceResult,
+  PrDetectionResult,
   Project,
   ProjectRepo,
   ProjectTransferDirection,
   ProjectTransferPreflight,
   ProjectTransferProgress,
   ProjectTransferResult,
+  PrStatus,
+  PullRequest,
+  QueuedSessionMessage,
   RecentRepo,
-  GitHubRepo,
-  Branch,
-  BranchTimeline,
-  BranchRef,
-  BranchPipelineResponse,
-  BranchSessionLaunchContext,
-  BranchSessionType,
-  BranchSessionResponse,
-  StoreIncompatibility,
-  ActiveSessionInfo,
-  ChildSessionInfo,
-  LaunchRecovery,
+  Review,
   Session,
+  SessionBackgroundHoldSnapshot,
+  SessionLiveDelivery,
   SessionMessage,
+  SessionMessageDelivery,
   SessionPoll,
   SessionPollRequest,
-  ToolCallBody,
-  SessionBackgroundHoldSnapshot,
   SessionReconcileEvent,
-  SessionLiveDelivery,
-  SessionMessageDelivery,
-  QueuedSessionMessage,
-  DiffFilesResponse,
-  FileDiff,
-  File,
-  Review,
-  Comment,
-  BranchNote,
-  WorkspaceInfo,
-  PullRequest,
-  Issue,
-  PrStatus,
-  PrDetectionResult,
-  LinkedBranchPr,
-  PollWorkspaceResult,
-  Image,
-  ImageDimensions,
-  AttachmentThumbnail,
+  StoreIncompatibility,
   SuggestedRepo,
-  AcpConfigSelection,
+  ToolCallBody,
+  WorkspaceInfo,
 } from './types';
 
 export type DiffScope = 'branch' | 'commit' | 'worktree';
@@ -123,6 +125,41 @@ export function getInterruptedSessions(): Promise<LaunchRecovery | null> {
  */
 export function resumeInterruptedSessions(sessionIds: string[]): Promise<void> {
   return invokeCommand('resume_interrupted_sessions', { sessionIds });
+}
+
+// =============================================================================
+// Connected apps (stagedctl grants)
+// =============================================================================
+
+/**
+ * The `stagedctl connect` requests awaiting an answer, oldest first. Taken
+ * once the `control-authorization-requested` listener is live so a request
+ * that arrived before the window loaded is still offered. Desktop only.
+ */
+export function listPendingControlAuthorizations(): Promise<ControlAuthorizationRequest[]> {
+  return invokeCommand('list_pending_control_authorizations');
+}
+
+/**
+ * Answer a `stagedctl connect` request. Approving stores a thirty-day grant
+ * and hands the waiting CLI its credential; denying tells it
+ * `authorization_denied`. Dismissing the dialog denies.
+ */
+export function answerControlAuthorization(requestId: string, approve: boolean): Promise<void> {
+  return invokeCommand('answer_control_authorization', { requestId, approve });
+}
+
+/** Every approved client that has not been revoked, newest first. Desktop only. */
+export function listControlGrants(): Promise<ControlGrantSummary[]> {
+  return invokeCommand('list_control_grants');
+}
+
+/**
+ * Revoke a connected app: its live credentials stop working at once and its
+ * next reconnect is refused. The backend emits `control-grants-changed`.
+ */
+export function revokeControlGrant(grantId: string): Promise<void> {
+  return invokeCommand('revoke_control_grant', { grantId });
 }
 
 // =============================================================================

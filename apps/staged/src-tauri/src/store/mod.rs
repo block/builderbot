@@ -17,6 +17,7 @@ mod actions;
 mod branch_move;
 mod branches;
 mod commits;
+mod control_grants;
 pub mod images;
 mod messages;
 mod migrations;
@@ -46,6 +47,7 @@ mod tests;
 
 // Re-export all model types for backwards compatibility.
 pub use branch_move::{BranchMove, RepoPlacement, WorkdirMove};
+pub use control_grants::{renewed_expiry, ControlGrantRecord, CONTROL_GRANT_LIFETIME_MS};
 pub use messages::TranscriptWindow;
 pub use models::*;
 pub use note_transfer::ChildNoteMove;

@@ -185,6 +185,10 @@ struct SessionRow {
     created_at: i64,
     #[serde(default)]
     updated_at: i64,
+    /// `session:<id>` / `app:<grant-id>` when a stagedctl caller started
+    /// the session; absent for starts made in the app.
+    #[serde(default)]
+    started_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -974,6 +978,9 @@ fn render_session(session: &SessionRow) -> String {
     }
     if let Some(title) = session.acp_title.as_deref().filter(|t| !t.is_empty()) {
         lines.push(format!("title: {title}"));
+    }
+    if let Some(actor) = session.started_by.as_deref().filter(|a| !a.is_empty()) {
+        lines.push(format!("started by: {actor}"));
     }
     lines.push(format!("prompt: {}", truncate(&session.prompt, 160)));
     if !session.working_dir.is_empty() {

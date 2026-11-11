@@ -4535,12 +4535,14 @@ pub async fn start_project_session(
         provider,
         image_ids,
         acp_config_selection,
+        None,
     )
     .await
 }
 
 /// Body of [`start_project_session`], shared with the web-mode `dispatch()`
-/// arm.
+/// arm. `started_by` is the control-server actor behind the start, recorded
+/// on the row (`Session::started_by`); the desktop command passes `None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_project_session_for_store(
     store: Arc<Store>,
@@ -4553,6 +4555,7 @@ pub async fn start_project_session_for_store(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<String>,
 ) -> Result<ProjectSessionResponse, String> {
     let project = store
         .get_project(&project_id)
@@ -4597,6 +4600,9 @@ pub async fn start_project_session_for_store(
     );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
+    }
+    if let Some(ref actor) = started_by {
+        session = session.with_started_by(actor);
     }
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
@@ -4996,6 +5002,7 @@ fn insert_running_branch_session(
     image_ids: &[String],
     launch_context: Option<&BranchSessionLaunchContext>,
     acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<&str>,
 ) -> Result<CreatedBranchSession, String> {
     let stored_prompt = embed_launch_context(prompt, launch_context)?;
     let start_agent_id = new_pending_branch_start_agent_id();
@@ -5007,6 +5014,9 @@ fn insert_running_branch_session(
     session.agent_id = Some(start_agent_id.clone());
     if let Some(p) = provider {
         session = session.with_provider(p);
+    }
+    if let Some(actor) = started_by {
+        session = session.with_started_by(actor);
     }
     // Taken before the row exists: the second phase that owns this row runs
     // for as long as the context build takes, and the hold is what tells the
@@ -5059,6 +5069,7 @@ fn insert_queued_branch_session(
     image_ids: &[String],
     launch_context: Option<&BranchSessionLaunchContext>,
     acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<&str>,
 ) -> Result<BranchSessionResponse, String> {
     let queued_prompt = embed_launch_context(prompt, launch_context)?;
     let mut session = with_optional_acp_config_selection(
@@ -5067,6 +5078,9 @@ fn insert_queued_branch_session(
     );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
+    }
+    if let Some(actor) = started_by {
+        session = session.with_started_by(actor);
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
@@ -5500,6 +5514,7 @@ pub async fn start_or_queue_branch_session_for_store(
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
     acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<String>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
 
@@ -5534,6 +5549,7 @@ pub async fn start_or_queue_branch_session_for_store(
                 &image_ids,
                 launch_context.as_ref(),
                 acp_config_selection,
+                started_by.as_deref(),
             );
         }
         let target = resolve_branch_session_target(&store, &branch_id)?;
@@ -5547,6 +5563,7 @@ pub async fn start_or_queue_branch_session_for_store(
             &image_ids,
             launch_context.as_ref(),
             acp_config_selection,
+            started_by.as_deref(),
         )?;
         (target, created)
     };
@@ -5611,6 +5628,7 @@ pub fn queue_branch_session_for_store(
         &image_ids,
         launch_context.as_ref(),
         acp_config_selection,
+        None,
     )
 }
 
@@ -5644,6 +5662,7 @@ pub async fn start_branch_session(
         image_ids,
         launch_context,
         acp_config_selection,
+        None,
     )
     .await
 }
@@ -5674,6 +5693,7 @@ pub async fn start_or_queue_branch_session(
         image_ids,
         launch_context,
         acp_config_selection,
+        None,
     )
     .await
 }
@@ -9030,6 +9050,64 @@ mod tests {
         );
     }
 
+    /// The actor a control caller hands the shared start bodies lands on the
+    /// row for both insert shapes; the desktop's `None` leaves it unset.
+    #[test]
+    fn branch_session_inserts_record_started_by_when_given() {
+        let (store, branch) = setup_branch_store();
+        let queued = insert_queued_branch_session(
+            &store,
+            None,
+            &branch.id,
+            "queued by an agent",
+            &BranchSessionType::Note,
+            Some("claude".to_string()),
+            &[],
+            None,
+            None,
+            Some("session:s1"),
+        )
+        .unwrap();
+        let row = store.get_session(&queued.session_id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Queued);
+        assert_eq!(row.started_by.as_deref(), Some("session:s1"));
+
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+        let created = insert_running_branch_session(
+            &store,
+            &test_registry(),
+            &target,
+            "started by an app",
+            &BranchSessionType::Commit,
+            Some("claude"),
+            &[],
+            None,
+            None,
+            Some("app:g1"),
+        )
+        .unwrap();
+        let row = store.get_session(&created.session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Running);
+        assert_eq!(row.started_by.as_deref(), Some("app:g1"));
+
+        let created = insert_running_branch_session(
+            &store,
+            &test_registry(),
+            &target,
+            "started in the UI",
+            &BranchSessionType::Note,
+            Some("claude"),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let row = store.get_session(&created.session.id).unwrap().unwrap();
+        assert_eq!(row.started_by, None, "a UI start records no actor");
+    }
+
     /// A mock app so [`cancel_session_impl`]'s status event has somewhere to
     /// go. Nothing listens, so the emit is a no-op — the point is to drive the
     /// real shared body rather than a test-only reimplementation of it.
@@ -11219,6 +11297,7 @@ mod tests {
             &[],
             Some(&launch_context),
             None,
+            None,
         )
         .unwrap();
 
@@ -11262,6 +11341,7 @@ mod tests {
             &BranchSessionType::Note,
             None,
             &[],
+            None,
             None,
             None,
         )
@@ -11689,6 +11769,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -11744,6 +11825,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(branch_session_start_still_owned(
@@ -11793,6 +11875,7 @@ mod tests {
             &BranchSessionType::Note,
             None,
             &[],
+            None,
             None,
             None,
         )
@@ -11861,6 +11944,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
         store
@@ -11896,6 +11980,7 @@ mod tests {
             &BranchSessionType::Note,
             None,
             &[],
+            None,
             None,
             None,
         )

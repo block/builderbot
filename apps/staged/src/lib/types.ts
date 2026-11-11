@@ -739,6 +739,13 @@ export interface Session {
    * their branch through the artifact instead.
    */
   branchId?: string | null;
+  /**
+   * The control-server actor that started this session through stagedctl,
+   * when one did: `session:<session-id>` for a session Staged spawned,
+   * `app:<grant-id>` for an outside client the user approved. Absent for
+   * sessions started from the app's own UI.
+   */
+  startedBy?: string | null;
 }
 
 export type QueuedSessionMessageStatus = 'queued' | 'sending' | 'sent';

@@ -235,6 +235,7 @@
   } from './paneReopen';
   import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from './scrollAnchor';
   import { createIntroGate } from './transcriptIntro';
+  import StartedByLabel from './StartedByLabel.svelte';
 
   interface Props {
     active: boolean;
@@ -2956,6 +2957,9 @@
       <!-- Pipeline is present but no messages yet — pipeline steps are the entire view -->
     {:else}
       <div class="messages">
+        <!-- Sessions stagedctl started on behalf of another session or a
+             connected app say so above the transcript; UI starts show nothing. -->
+        <StartedByLabel startedBy={session?.startedBy} />
         {#if hasOlderMessages}
           <!-- Fixed-height slot, so the spinner appearing does not move the
                transcript below it. -->

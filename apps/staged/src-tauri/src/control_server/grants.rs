@@ -36,9 +36,22 @@ pub(crate) enum Actor {
     /// id are told apart.
     Session { session_id: String, epoch: u64 },
     /// An outside client the user approved by name (class B; not yet
-    /// minted).
+    /// minted). `grant_id` is the durable grant's row id, `client` the name
+    /// the user approved.
     #[allow(dead_code)]
-    Client { name: String },
+    App { grant_id: String, client: String },
+}
+
+impl Actor {
+    /// The value recorded in `sessions.started_by` for a session this actor
+    /// starts: `session:<session-id>` or `app:<grant-id>`. Stable identifiers
+    /// only — never the client's display name, which the grant row keeps.
+    pub fn started_by(&self) -> String {
+        match self {
+            Self::Session { session_id, .. } => format!("session:{session_id}"),
+            Self::App { grant_id, .. } => format!("app:{grant_id}"),
+        }
+    }
 }
 
 /// Which projects a grant reaches.
@@ -88,8 +101,9 @@ impl ControlGrant {
     #[cfg(test)]
     pub(crate) fn test_all_projects() -> Self {
         Self {
-            actor: Actor::Client {
-                name: "test".to_string(),
+            actor: Actor::App {
+                grant_id: "test-grant".to_string(),
+                client: "test".to_string(),
             },
             scope: Scope::AllProjects,
             branch_id: None,
@@ -459,6 +473,24 @@ mod tests {
         let inner = grants.inner.lock().unwrap();
         assert_eq!(inner.revoked.len(), REVOKED_MEMORY);
         assert_eq!(inner.revoked_set.len(), REVOKED_MEMORY);
+    }
+
+    #[test]
+    fn actors_record_stable_started_by_identifiers() {
+        let session = Actor::Session {
+            session_id: "s1".to_string(),
+            epoch: 9,
+        };
+        assert_eq!(session.started_by(), "session:s1");
+        let app = Actor::App {
+            grant_id: "g1".to_string(),
+            client: "My Agent".to_string(),
+        };
+        assert_eq!(
+            app.started_by(),
+            "app:g1",
+            "the grant id, not the display name"
+        );
     }
 
     #[test]

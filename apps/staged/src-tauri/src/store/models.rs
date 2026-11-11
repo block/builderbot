@@ -635,6 +635,12 @@ pub struct Session {
     /// its place. Cleared when a new turn starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blox_command_id: Option<String>,
+    /// The control-server actor that started this session through
+    /// `stagedctl`, when one did: `session:<session-id>` for a session
+    /// Staged spawned, `app:<grant-id>` for an outside client the user
+    /// approved. `None` for starts made from the app's own UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
 }
 
 /// Persistent follow-up message waiting to be sent to an existing session.
@@ -730,6 +736,7 @@ impl Session {
             parent_session_id: None,
             pre_head_sha: None,
             blox_command_id: None,
+            started_by: None,
         }
     }
 
@@ -758,6 +765,7 @@ impl Session {
             parent_session_id: None,
             pre_head_sha: None,
             blox_command_id: None,
+            started_by: None,
         }
     }
 
@@ -782,6 +790,13 @@ impl Session {
 
     pub fn with_agent(mut self, agent_id: &str) -> Self {
         self.agent_id = Some(agent_id.to_string());
+        self
+    }
+
+    /// Record the control-server actor that started this session (see
+    /// [`Session::started_by`]). UI starts never call this.
+    pub fn with_started_by(mut self, started_by: &str) -> Self {
+        self.started_by = Some(started_by.to_string());
         self
     }
 

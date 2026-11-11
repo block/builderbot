@@ -1043,6 +1043,24 @@ fn test_session_round_trips_parent_session_id() {
     assert!(fetched_parent.parent_session_id.is_none());
 }
 
+#[test]
+fn test_session_started_by_round_trips_and_defaults_to_none() {
+    let store = Store::in_memory().unwrap();
+
+    let by_session = Session::new_queued("queued by an agent").with_started_by("session:s1");
+    store.create_session(&by_session).unwrap();
+    let by_app =
+        Session::new_running("started by an app", Path::new("/tmp")).with_started_by("app:grant-1");
+    store.create_session(&by_app).unwrap();
+    let by_user = Session::new_running("started in the UI", Path::new("/tmp"));
+    store.create_session(&by_user).unwrap();
+
+    let fetch = |id: &str| store.get_session(id).unwrap().unwrap().started_by;
+    assert_eq!(fetch(&by_session.id).as_deref(), Some("session:s1"));
+    assert_eq!(fetch(&by_app.id).as_deref(), Some("app:grant-1"));
+    assert_eq!(fetch(&by_user.id), None, "UI starts record no actor");
+}
+
 /// Fixture for the child-session badge query: a project with one repo, one
 /// branch on it, and a parent project session.
 fn child_session_fixture(store: &Store) -> (Project, Branch, ProjectRepo, Session) {

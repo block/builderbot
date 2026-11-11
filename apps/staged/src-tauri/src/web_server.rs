@@ -900,6 +900,18 @@ pub(crate) enum DispatchCaller {
     Web,
 }
 
+impl DispatchCaller {
+    /// What a session this caller starts records in `sessions.started_by`:
+    /// the control grant's actor (`session:<id>` / `app:<grant-id>`), or
+    /// `None` for a web caller, which — like the desktop UI — is the user.
+    pub(crate) fn started_by(&self) -> Option<String> {
+        match self {
+            Self::Control(grant) => Some(grant.actor.started_by()),
+            Self::Web => None,
+        }
+    }
+}
+
 /// Why a web (remote-browser) caller may not run `command`, or `None` if it
 /// may. From a remote browser, `create_image` would mean "read any file on
 /// the app's machine into a viewable timeline" and `open_in_app` would mean
@@ -3714,6 +3726,7 @@ pub(crate) async fn dispatch(
                 image_ids,
                 launch_context,
                 acp_config_selection,
+                caller.started_by(),
             )
             .await?;
 
@@ -3731,6 +3744,7 @@ pub(crate) async fn dispatch(
             let session_registry = Arc::clone(session_registry);
             let action_executor = Arc::clone(action_executor);
             let action_registry = Arc::clone(action_registry);
+            let started_by = caller.started_by();
             // The desktop command's body. It writes the `running` row and
             // then runs the rest of the start (note stub, runner, failure
             // recording); detached, so a client that goes mid-start can't
@@ -3748,6 +3762,7 @@ pub(crate) async fn dispatch(
                     provider,
                     image_ids,
                     acp_config_selection,
+                    started_by,
                 )
                 .await?;
                 Ok(serde_json::to_value(result).unwrap())
@@ -4299,6 +4314,53 @@ mod tests {
     // -------------------------------------------------------------------
     // Caller identity: same-host-only commands are closed to web callers
     // -------------------------------------------------------------------
+
+    /// A control caller's grant names who is starting a session, and both
+    /// start arms hand that name to the shared bodies so the row records it;
+    /// a web caller is the user and records nothing.
+    #[test]
+    fn control_callers_record_their_actor_as_started_by_on_both_start_arms() {
+        use crate::control_server::{Access, Actor, ControlGrant, Scope};
+        let session_caller = DispatchCaller::Control(ControlGrant {
+            actor: Actor::Session {
+                session_id: "s1".to_string(),
+                epoch: 1,
+            },
+            scope: Scope::Project("p1".to_string()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        });
+        assert_eq!(session_caller.started_by().as_deref(), Some("session:s1"));
+        let app_caller = DispatchCaller::Control(ControlGrant {
+            actor: Actor::App {
+                grant_id: "g1".to_string(),
+                client: "agent".to_string(),
+            },
+            scope: Scope::AllProjects,
+            branch_id: None,
+            access: Access::ReadWrite,
+        });
+        assert_eq!(app_caller.started_by().as_deref(), Some("app:g1"));
+        assert_eq!(DispatchCaller::Web.started_by(), None);
+
+        // Pin the arms: each must pass the caller's actor into the shared
+        // start body rather than the desktop command's `None`.
+        let source = include_str!("web_server.rs");
+        let (_, branch_arm) = dispatch_arms(source)
+            .into_iter()
+            .find(|(patterns, _)| patterns.iter().any(|p| p == "start_branch_session"))
+            .expect("dispatch should have a `start_branch_session` arm");
+        assert!(
+            branch_arm.contains("caller.started_by()"),
+            "start_branch_session must pass caller.started_by(): {branch_arm}"
+        );
+        let project_arm = dispatch_arm_body(source, "start_project_session");
+        assert!(
+            project_arm.contains("let started_by = caller.started_by();")
+                && project_arm.contains("started_by,\n"),
+            "start_project_session must pass caller.started_by(): {project_arm}"
+        );
+    }
 
     #[test]
     fn web_callers_cannot_reach_same_host_only_commands() {

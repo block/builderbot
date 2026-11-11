@@ -5,7 +5,16 @@
 //!
 //! - `POST /api/invoke/{command}` — dispatches to the same logic as Tauri commands
 //! - `GET  /api/events`           — WebSocket that broadcasts Tauri events as JSON
-//! - `GET  /*`                    — static files from `../dist` (the built Svelte frontend)
+//! - `GET  /*`                    — static files from the built Svelte frontend
+//!   (`STAGED_WEB_DIST`, else `dist/` located relative to the executable)
+//!
+//! There is no authentication: anyone who can reach the port can run every
+//! command the desktop window can, including repo and branch actions. TLS
+//! protects the bytes in transit, not who sends them. The server only starts
+//! when `STAGED_WEB_SERVER=1` is set, and there is no CORS layer, so a page
+//! on another origin cannot drive it from a browser that can reach the host:
+//! both `just run-web` (dist served from this origin) and `just dev-web`
+//! (Vite proxies `/api` to it) are same-origin.
 //!
 //! # Handler futures must not own queue state
 //!
@@ -42,7 +51,6 @@ use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
@@ -148,6 +156,9 @@ fn broadcast_web_event<S: serde::Serialize>(
 
 const CERT_PATH_ENV: &str = "STAGED_WEB_CERT_PATH";
 const KEY_PATH_ENV: &str = "STAGED_WEB_KEY_PATH";
+/// Directory holding the built frontend. Set by `just run-web`, whose release
+/// binary sits in an app bundle from which `dist/` cannot be found.
+const DIST_DIR_ENV: &str = "STAGED_WEB_DIST";
 
 fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
     let cert_path = std::env::var(CERT_PATH_ENV)
@@ -222,29 +233,39 @@ impl Listener for TlsListener {
     }
 }
 
+/// Where the built frontend lives. `STAGED_WEB_DIST` wins when set (used
+/// as given, even if it does not exist yet, so a bad value shows up as 404s
+/// from the path that was asked for rather than silently falling back);
+/// otherwise the first existing candidate relative to the executable or the
+/// cwd.
+fn resolve_dist_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os(DIST_DIR_ENV).filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .map(|p| {
+            let candidates = vec![
+                p.join("../dist"),          // exe next to a dist/ directory
+                p.join("../../../../dist"), // dev (target/debug -> src-tauri -> apps/staged -> dist)
+                PathBuf::from("../dist"),   // relative to cwd
+            ];
+            candidates
+                .into_iter()
+                .find(|c| c.exists())
+                .unwrap_or_else(|| PathBuf::from("../dist"))
+        })
+        .unwrap_or_else(|| PathBuf::from("../dist"))
+}
+
 /// Start the Axum web server in a background tokio task.
 ///
 /// This should be called from the Tauri `setup` hook after all managed state
 /// has been registered.
 pub fn start(state: WebAppState) {
     tauri::async_runtime::spawn(async move {
-        let dist_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            // In dev, the exe is in src-tauri/target/debug; dist is at ../../dist relative to src-tauri
-            .map(|p| {
-                // Try multiple candidate paths for the built frontend
-                let candidates = vec![
-                    p.join("../dist"),          // production bundle
-                    p.join("../../../../dist"), // dev (target/debug -> src-tauri -> apps/staged -> dist)
-                    PathBuf::from("../dist"),   // relative to cwd
-                ];
-                candidates
-                    .into_iter()
-                    .find(|c| c.exists())
-                    .unwrap_or_else(|| PathBuf::from("../dist"))
-            })
-            .unwrap_or_else(|| PathBuf::from("../dist"));
+        let dist_dir = resolve_dist_dir();
 
         let app = app_router(state, &dist_dir);
 
@@ -296,7 +317,6 @@ pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Rout
         .merge(media_routes)
         .fallback_service(ServeDir::new(dist_dir).append_index_html_on_directories(true))
         .layer(compression_layer())
-        .layer(CorsLayer::permissive())
 }
 
 /// Response compression for every route. tower-http's default predicate

@@ -2414,9 +2414,12 @@ pub fn run() {
                 project_transfer::prune_backups(transfer_store.as_deref());
             });
 
-            // Start the Axum web server only when opted-in via environment variable.
-            // This avoids exposing an HTTP server on all interfaces for users who
-            // don't need browser-based access.
+            // Start the Axum web server only when opted in via environment variable.
+            // Once enabled it binds 0.0.0.0:5175 with TLS and no authentication:
+            // anyone who can reach the port can run every command the desktop
+            // window can, including repo and branch actions. The only boundary
+            // is network reachability, so keep it off unless browser access from
+            // a trusted network is wanted.
             let web_server_enabled = std::env::var("STAGED_WEB_SERVER")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);

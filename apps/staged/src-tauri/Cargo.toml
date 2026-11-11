@@ -65,7 +65,7 @@ tauri-plugin-store = "2.5.0"
 # MCP server for project sessions
 rmcp = { version = "3.5", features = ["server", "transport-streamable-http-server"] }
 axum = { version = "0.8", features = ["ws", "http2"] }
-tower-http = { version = "0.7", features = ["fs", "cors", "compression-br", "compression-gzip"] }
+tower-http = { version = "0.7", features = ["fs", "compression-br", "compression-gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 time = "0.3"

@@ -775,7 +775,10 @@
   }
 
   /* An unsent reply in the note's chat: a pencil in the unread dot's colour,
-     on the icon's bottom-right corner so the two can show together. */
+     on the icon's bottom-right corner so the two can show together. Unlike
+     the dot, a 7px pencil doesn't explain itself, so the badge takes the
+     pointer for its tooltip (a click on it still reaches the row), over a
+     hit area a little larger than it is drawn. */
   .draft-badge {
     position: absolute;
     right: -4px;
@@ -788,7 +791,12 @@
     border-radius: 50%;
     background-color: var(--ui-accent);
     color: var(--primary-foreground);
-    pointer-events: none;
+  }
+
+  .draft-badge::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
   }
 
   .timeline-icon.commit-icon {

@@ -27,3 +27,20 @@ export async function focusAtEnd(el: HTMLElement | null): Promise<void> {
   await tick();
   focusAtEndSync(el);
 }
+
+/**
+ * Focus a contenteditable element and place the cursor at the start of its
+ * content. Synchronous, like `focusAtEndSync`.
+ */
+export function focusAtStartSync(el: HTMLElement | null): void {
+  if (!el) return;
+  el.focus();
+  const sel = window.getSelection();
+  if (sel) {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}

@@ -12,6 +12,7 @@ import {
   removeDraftQuote,
   serializeComposerDraft,
   type ComposerDraft,
+  type NewDraftQuote,
 } from './composerDraft';
 
 const dataFlow = {
@@ -103,14 +104,14 @@ describe('isComposerDraftEmpty', () => {
 });
 
 describe('serializeComposerDraft', () => {
-  it('writes each quote as a blockquote under its heading path, in draft order', () => {
+  it('writes each quote as a blockquote under its marker line, in draft order', () => {
     expect(serializeComposerDraft(review())).toBe(
       [
         'A few comments:',
-        'Re: Architecture › Data flow\n> The cache is invalidated on every write.',
+        '<!-- note-quote: Architecture › Data flow -->\n> The cache is invalidated on every write.',
         'Could we batch those?',
         'And one more.',
-        'Re: Rollout\n> Ship behind a flag.',
+        '<!-- note-quote: Rollout -->\n> Ship behind a flag.',
         'Which flag system?',
         'Thanks!',
       ].join('\n\n')
@@ -124,11 +125,71 @@ describe('serializeComposerDraft', () => {
       'q1'
     );
 
-    expect(serializeComposerDraft(draft)).toBe('> First line\n>\n> Second paragraph');
+    expect(serializeComposerDraft(draft)).toBe(
+      '<!-- note-quote -->\n> First line\n>\n> Second paragraph'
+    );
   });
 
   it('is the trimmed text for a draft without quotes', () => {
     expect(serializeComposerDraft({ quotes: [], text: '  hello  ' })).toBe('hello');
+  });
+
+  it('sends a draft without quotes exactly as typed, open fence and all', () => {
+    expect(serializeComposerDraft({ quotes: [], text: 'Look:\n```js\nfoo()' })).toBe(
+      'Look:\n```js\nfoo()'
+    );
+  });
+
+  it('escapes a path separator, a comment end or an escaping backslash in a heading', () => {
+    const draft = appendDraftQuote(
+      emptyComposerDraft(),
+      { quote: 'x', headings: ['Before › after', 'a --> b', 'C:\\temp\\›'], reply: '' },
+      'q1'
+    );
+
+    expect(serializeComposerDraft(draft)).toBe(
+      '<!-- note-quote: Before \\› after › a --\\> b › C:\\temp\\\\\\› -->\n> x'
+    );
+  });
+
+  it('puts a heading that spans lines on one', () => {
+    const draft = appendDraftQuote(
+      emptyComposerDraft(),
+      { quote: 'x', headings: [' Two\nlines ', '  '], reply: '' },
+      'q1'
+    );
+
+    expect(serializeComposerDraft(draft)).toBe('<!-- note-quote: Two lines -->\n> x');
+  });
+
+  it('closes a code fence left open before a quote or in a reply', () => {
+    let draft = appendDraftQuote(
+      { quotes: [], text: 'Try:\n````ts\nrun()' },
+      { quote: 'One', headings: [], reply: '~~~\nstill open' },
+      'q1'
+    );
+    draft = { ...draft, text: 'Last:\n```' };
+
+    expect(serializeComposerDraft(draft)).toBe(
+      [
+        'Try:\n````ts\nrun()\n````',
+        '<!-- note-quote -->\n> One',
+        '~~~\nstill open\n~~~',
+        // The main input ends the message, so it goes as typed.
+        'Last:\n```',
+      ].join('\n\n')
+    );
+  });
+
+  it('leaves closed fences and inline triple backticks alone', () => {
+    const before = 'Run ```npm i``` then:\n```sh\nnpm test\n```';
+    const draft = appendDraftQuote(
+      { quotes: [], text: before },
+      { quote: 'q', headings: [], reply: '' },
+      'q1'
+    );
+
+    expect(serializeComposerDraft(draft)).toBe(`${before}\n\n<!-- note-quote -->\n> q`);
   });
 });
 
@@ -180,8 +241,21 @@ describe('persisted content', () => {
 });
 
 describe('parseQuotedMessage', () => {
+  function roundTrip(draft: ComposerDraft) {
+    return parseQuotedMessage(serializeComposerDraft(draft));
+  }
+
+  function quoteDraft(quote: Partial<NewDraftQuote>, before = '', text = ''): ComposerDraft {
+    const draft = appendDraftQuote(
+      { quotes: [], text: before },
+      { quote: 'Quoted.', headings: [], reply: '', ...quote },
+      'q1'
+    );
+    return { ...draft, text };
+  }
+
   it('reads back what serializeComposerDraft wrote', () => {
-    const parts = parseQuotedMessage(serializeComposerDraft(review()));
+    const parts = roundTrip(review());
 
     expect(parts).toEqual([
       { type: 'text', text: 'A few comments:' },
@@ -194,9 +268,15 @@ describe('parseQuotedMessage', () => {
   });
 
   it('keeps multi-line quotes together, blank quote lines included', () => {
-    expect(parseQuotedMessage('> one\n>\n> two\n\nreply')).toEqual([
+    expect(roundTrip(quoteDraft({ quote: 'one\n\ntwo', reply: 'reply' }))).toEqual([
       { type: 'quote', quote: 'one\n\ntwo', headings: [] },
       { type: 'text', text: 'reply' },
+    ]);
+  });
+
+  it('keeps quoted lines that start with > or spaces as they were', () => {
+    expect(roundTrip(quoteDraft({ quote: '> nested\n    indented' }))).toEqual([
+      { type: 'quote', quote: '> nested\n    indented', headings: [] },
     ]);
   });
 
@@ -207,20 +287,98 @@ describe('parseQuotedMessage', () => {
     expect(hasQuotedParts(parts)).toBe(false);
   });
 
-  it('does not read REPL prompts, unspaced markers or fenced code as quotes', () => {
-    const message = ['>>> print(1)', '>not a quote', '```', '> inside a fence', '```'].join('\n');
+  it('leaves quotes typed or pasted by hand as text', () => {
+    for (const message of [
+      '> one\n>\n> two\n\nreply',
+      'Re: Q3 plan\n> We should ship in March.\n\nAgreed.',
+      'Re: something\n\n> quoted',
+      '>>> print(1)\n>not a quote',
+      'Re: A\n>\n>',
+    ]) {
+      expect(parseQuotedMessage(message)).toEqual([{ type: 'text', text: message }]);
+    }
+  });
+
+  it('reads a reply or gap that starts with > as text', () => {
+    const draft = appendDraftQuote(
+      { quotes: [], text: '> my own aside' },
+      { quote: 'Quoted.', headings: ['A'], reply: '> not from the note\nmy answer' },
+      'q1'
+    );
+
+    expect(roundTrip(draft)).toEqual([
+      { type: 'text', text: '> my own aside' },
+      { type: 'quote', quote: 'Quoted.', headings: ['A'] },
+      { type: 'text', text: '> not from the note\nmy answer' },
+    ]);
+  });
+
+  it('reads back headings holding the separator, a comment end or backslashes', () => {
+    const headings = ['Before › after', 'a --> b', 'C:\\temp\\›', 'trailing \\'];
+
+    expect(roundTrip(quoteDraft({ headings }))).toEqual([
+      { type: 'quote', quote: 'Quoted.', headings },
+    ]);
+  });
+
+  it('needs the marker, its > lines and a blank line or the edge around them', () => {
+    for (const message of [
+      // No > line under the marker.
+      '<!-- note-quote: A -->\n\n> quoted',
+      // Text straight above the marker.
+      'intro\n<!-- note-quote -->\n> quoted',
+      // Text straight below the quote.
+      '<!-- note-quote -->\n> quoted\nlazy line',
+      // Nothing but bare > lines.
+      '<!-- note-quote -->\n>\n>',
+      // Not the marker.
+      '<!-- note-quote:A -->\n> quoted',
+      '<!--note-quote-->\n> quoted',
+    ]) {
+      expect(parseQuotedMessage(message)).toEqual([{ type: 'text', text: message }]);
+    }
+  });
+
+  it('does not read a marker inside fenced code as a quote', () => {
+    const message = ['````md', '```', '', '<!-- note-quote -->', '> inside a fence', '````'].join(
+      '\n'
+    );
+
+    expect(parseQuotedMessage(message)).toEqual([{ type: 'text', text: message }]);
+  });
+
+  it('does not take a fence line with an info string as its close', () => {
+    const message = ['```', '```js', '', '<!-- note-quote -->', '> still code', '```'].join('\n');
 
     expect(hasQuotedParts(parseQuotedMessage(message))).toBe(false);
   });
 
-  it('reads a Re: line only directly above a quote as its path', () => {
-    expect(parseQuotedMessage('Re: something\n\n> quoted')).toEqual([
-      { type: 'text', text: 'Re: something' },
-      { type: 'quote', quote: 'quoted', headings: [] },
+  it('closes a fence only with its own character', () => {
+    const message = ['~~~', '```', '', '<!-- note-quote -->', '> still code', '~~~'].join('\n');
+
+    expect(hasQuotedParts(parseQuotedMessage(message))).toBe(false);
+  });
+
+  it('does not open a fence on a line of inline code', () => {
+    expect(roundTrip(quoteDraft({}, 'Run ```npm i``` first'))).toEqual([
+      { type: 'text', text: 'Run ```npm i``` first' },
+      { type: 'quote', quote: 'Quoted.', headings: [] },
     ]);
   });
 
-  it('leaves bare quote markers as text', () => {
-    expect(parseQuotedMessage('Re: A\n>\n>')).toEqual([{ type: 'text', text: 'Re: A\n>\n>' }]);
+  it('reads every quote after a fence the user left open', () => {
+    let draft = appendDraftQuote(
+      { quotes: [], text: 'Try:\n```ts\nrun()' },
+      { quote: 'One', headings: ['A'], reply: '```\nopen in the reply' },
+      'q1'
+    );
+    draft = appendDraftQuote(draft, { quote: 'Two', headings: ['B'], reply: '' }, 'q2');
+
+    expect(roundTrip(draft)).toEqual([
+      { type: 'text', text: 'Try:\n```ts\nrun()\n```' },
+      { type: 'quote', quote: 'One', headings: ['A'] },
+      { type: 'text', text: '```\nopen in the reply\n```' },
+      { type: 'quote', quote: 'Two', headings: ['B'] },
+    ]);
   });
 });

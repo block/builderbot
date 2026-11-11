@@ -295,4 +295,26 @@ describe('draft write scheduler', () => {
       consoleError.mockRestore();
     }
   });
+
+  it('rejects a failed run task to its caller, and keeps later writes flowing', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const scheduler = createDraftWriteScheduler();
+      const failure = new Error('store unavailable');
+
+      // A run is awaited by a caller that tells the user the change was lost.
+      await expect(
+        scheduler.run(async () => {
+          throw failure;
+        })
+      ).rejects.toBe(failure);
+      expect(consoleError).toHaveBeenCalledWith('[draftCache] Failed to persist draft:', failure);
+
+      await scheduler.saveNow('draft:a', 'after the failure');
+      await expect(scheduler.flush()).resolves.toBeUndefined();
+      expect(store.get('draft:a')).toMatchObject({ value: 'after the failure' });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

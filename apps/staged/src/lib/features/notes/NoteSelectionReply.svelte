@@ -5,13 +5,19 @@
   selection. It opens a popover with the quote (and the heading path it sits
   under) and a reply box: Enter (or "Add to reply") hands the quote and reply
   to `onAdd`, which puts them in the note chat's draft as a quote block;
-  Escape or a click away cancels. Each selection makes one block, so a review
-  of the whole note builds up one selection at a time.
+  Escape or a click away cancels. The popover closes once `onAdd` reports the
+  block added, and stays open with the reply if it couldn't be. Each
+  selection makes one block, so a review of the whole note builds up one
+  selection at a time.
 
   Rendered inside the note's scroll container (`scrollEl`, which must be
   positioned), so the button scrolls with the text it belongs to. While the
   popover is open the selection is frozen — focus moving into the reply box
   drops the page selection — and painted with a CSS highlight in its place.
+  The quote is captured when the button appears, so the note re-rendering
+  under an open popover (an agent editing it) leaves the popover, and the
+  reply being typed, where they are; only the highlight goes with the old
+  text.
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
@@ -33,7 +39,8 @@
     enabled: boolean;
     /** Headings left out of the path (the note's title). */
     ignoreHeading?: (heading: Element) => boolean;
-    onAdd: (quote: NewDraftQuote) => void;
+    /** Adds the block; resolves whether it was added. */
+    onAdd: (quote: NewDraftQuote) => Promise<boolean> | boolean;
   }
 
   let { scrollEl, contentEl, enabled, ignoreHeading, onAdd }: Props = $props();
@@ -48,6 +55,8 @@
   let anchor = $state<{ top: number; left: number } | null>(null);
   let open = $state(false);
   let reply = $state('');
+  /** `onAdd` is still saving the block. */
+  let adding = $state(false);
   let replyEl = $state<HTMLTextAreaElement | null>(null);
   let buttonEl = $state<HTMLElement | null>(null);
   let pointerDown = false;
@@ -58,8 +67,13 @@
     anchor = null;
   }
 
-  /** Where the button goes: just below the end of the selection, in scroll coordinates. */
+  /**
+   * Where the button goes: just below the end of the selection, in scroll
+   * coordinates. None for a collapsed range — the selected text was replaced,
+   * and the range fell back to where it had been.
+   */
   function anchorFor(range: Range, container: HTMLElement): { top: number; left: number } | null {
+    if (range.collapsed) return null;
     const rects = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
     const last = rects[rects.length - 1] ?? range.getBoundingClientRect();
     if (last.width === 0 && last.height === 0) return null;
@@ -138,12 +152,17 @@
   });
 
   // Text reflowing under the selection (the dialog resized, the chat pane
-  // opened beside it) moves the selection's end; the button follows.
+  // opened beside it) moves the selection's end; the button follows. The
+  // note re-rendering replaces the selected text and leaves no end to
+  // follow: an open popover then stays where it is rather than unmounting
+  // with the reply in it.
   $effect(() => {
     const el = contentEl;
     if (!el || !enabled) return;
     const observer = new ResizeObserver(() => {
-      if (selection && scrollEl) anchor = anchorFor(selection.range, scrollEl);
+      if (!selection || !scrollEl) return;
+      const next = anchorFor(selection.range, scrollEl);
+      if (next || !open) anchor = next;
     });
     observer.observe(el);
     return () => observer.disconnect();
@@ -170,26 +189,41 @@
     setTimeout(readSelection, 0);
   }
 
-  function confirm() {
+  async function confirm() {
     const current = selection;
-    if (!current) return;
+    if (!current || adding) return;
     const quote: NewDraftQuote = {
       quote: current.quote,
       headings: current.headings,
       reply: reply.trim(),
     };
+    adding = true;
+    let added = false;
+    try {
+      added = await onAdd(quote);
+    } catch (error) {
+      console.error('[NoteSelectionReply] Failed to add the quote:', error);
+    } finally {
+      adding = false;
+    }
+    // Not added (`onAdd` has said why): keep the reply for another try.
+    if (!added) {
+      if (open) replyEl?.focus();
+      return;
+    }
+    // Cancelled and another selection made while it saved: leave that one be.
+    if (selection !== current) return;
     open = false;
     reply = '';
     clearSelectionState();
     document.getSelection()?.removeAllRanges();
-    onAdd(quote);
   }
 
   function handleReplyKeydown(event: KeyboardEvent) {
     if (isImeKeydown(event)) return;
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      confirm();
+      void confirm();
     }
   }
 </script>
@@ -239,7 +273,9 @@
           >
             Cancel
           </Button>
-          <Button variant="accent" size="sm" onclick={confirm}>Add to reply</Button>
+          <Button variant="accent" size="sm" disabled={adding} onclick={confirm}>
+            Add to reply
+          </Button>
         </div>
       </Popover.Content>
     </Popover.Root>
@@ -264,7 +300,7 @@
     color: var(--text-secondary);
     font-size: var(--size-xs);
     font-weight: 500;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--shadow-raised);
     cursor: pointer;
     transition:
       color 0.1s,

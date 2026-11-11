@@ -148,20 +148,76 @@ function joinFreeText(first: string, second: string): string {
 export function normalizeQuoteText(text: string): string {
   return text
     .replace(/\r\n?/g, '\n')
-    .replace(/[ \t ]+$/gm, '')
+    .replace(/[ \t ]+$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-/** The line naming where a quote comes from, ahead of its blockquote. */
-const QUOTE_SOURCE_PREFIX = 'Re: ';
+// ---------------------------------------------------------------------------
+// The sent message
+// ---------------------------------------------------------------------------
+
+/**
+ * The line above each quote's blockquote, naming the note section it comes
+ * from when it has one:
+ *
+ * ```text
+ * <!-- note-quote: Architecture › Data flow -->
+ * > The cache is invalidated on every write.
+ * ```
+ *
+ * An HTML comment: the agent reads the path in it, a markdown renderer hides
+ * it, and nobody types it by hand, so the transcript shows quote cards for
+ * the blocks this composer wrote and nothing else. A `>` line or a `Re: …`
+ * line someone typed or pasted stays the text it was.
+ */
+const QUOTE_MARKER = /^<!-- note-quote(?:: (.+?))? -->$/;
+
+function quoteMarker(headings: string[]): string {
+  if (headings.length === 0) return '<!-- note-quote -->';
+  return `<!-- note-quote: ${headings.map(escapeHeading).join(HEADING_PATH_SEPARATOR)} -->`;
+}
+
+/** Characters a heading escapes in the marker: `›` would split the path, `>` could end the comment. */
+const ESCAPED_IN_HEADING = /[›>]/g;
+
+/**
+ * Backslash-escape a heading for the marker, so a `›` or `-->` inside it
+ * reads back as part of the heading. A backslash is doubled only where it
+ * would otherwise read as an escape, so `C:\temp` stays as it is.
+ */
+function escapeHeading(heading: string): string {
+  return heading.replace(/\\(?=[\\›>])/g, '\\\\').replace(ESCAPED_IN_HEADING, '\\$&');
+}
+
+/** A marker's heading path, split on unescaped `›`. */
+function parseHeadingPath(path: string): string[] {
+  const headings: string[] = [];
+  let current = '';
+  for (let i = 0; i < path.length; i++) {
+    const char = path[i];
+    const next = path[i + 1];
+    if (char === '\\' && next !== undefined && '\\›>'.includes(next)) {
+      current += next;
+      i++;
+    } else if (char === '›') {
+      headings.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  headings.push(current);
+  return headings.map((heading) => heading.trim()).filter(Boolean);
+}
+
+/** A heading as it goes in the marker: on one line, no edge whitespace. */
+function normalizeHeading(heading: string): string {
+  return heading.replace(/\s+/g, ' ').trim();
+}
 
 function quoteMarkdown(quote: Pick<DraftQuote, 'quote' | 'headings'>): string {
-  const lines: string[] = [];
-  const headings = quote.headings.map((heading) => heading.trim()).filter(Boolean);
-  if (headings.length > 0) {
-    lines.push(`${QUOTE_SOURCE_PREFIX}${headings.join(HEADING_PATH_SEPARATOR)}`);
-  }
+  const lines = [quoteMarker(quote.headings.map(normalizeHeading).filter(Boolean))];
   for (const line of normalizeQuoteText(quote.quote).split('\n')) {
     lines.push(line ? `> ${line}` : '>');
   }
@@ -169,30 +225,83 @@ function quoteMarkdown(quote: Pick<DraftQuote, 'quote' | 'headings'>): string {
 }
 
 /**
- * The message the agent receives: each quote as a markdown blockquote,
- * preceded by a `Re: Heading › Subheading` line naming where in the note it
- * comes from and followed by the reply, with the free text in its original
- * order around them. Blocks are separated by a blank line.
+ * The message the agent receives: each quote as a markdown blockquote under
+ * its marker line (see `QUOTE_MARKER`), followed by the reply, with the free
+ * text in its original order around them. Blocks are separated by a blank
+ * line.
  *
  * ```text
  * A few comments:
  *
- * Re: Architecture › Data flow
+ * <!-- note-quote: Architecture › Data flow -->
  * > The cache is invalidated on every write.
  *
  * Could we batch those?
  * ```
+ *
+ * A code fence left open in the free text before a quote, or in a reply, is
+ * closed there: each is an input of its own, so the fence can't have been
+ * meant to run on over the quote (and the agent would read the quote as code
+ * if it did). A draft without quotes is sent exactly as typed, trimmed.
  */
 export function serializeComposerDraft(draft: ComposerDraft): string {
   const parts: string[] = [];
   for (const quote of draft.quotes) {
-    parts.push(quote.before.trim());
+    parts.push(closeOpenFence(quote.before.trim()));
     if (normalizeQuoteText(quote.quote)) parts.push(quoteMarkdown(quote));
-    parts.push(quote.reply.trim());
+    parts.push(closeOpenFence(quote.reply.trim()));
   }
   parts.push(draft.text.trim());
   return parts.filter(Boolean).join('\n\n');
 }
+
+// ---------------------------------------------------------------------------
+// Fenced code
+// ---------------------------------------------------------------------------
+
+type CodeFence = { char: '`' | '~'; length: number };
+
+/**
+ * The fence a line opens, as CommonMark reads it: three or more backticks or
+ * tildes, indented at most three spaces. A backtick fence's info string has
+ * no backticks, so a line of inline code (```` ```x``` ````) opens nothing.
+ */
+function fenceOpenedBy(line: string): CodeFence | null {
+  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return null;
+  const char = match[1][0] as CodeFence['char'];
+  if (char === '`' && match[2].includes('`')) return null;
+  return { char, length: match[1].length };
+}
+
+/**
+ * Whether a line closes `fence`: a run of its character at least as long as
+ * the one that opened it, with nothing after but spaces. An info string
+ * (```` ```js ````) makes the line content, not a close.
+ */
+function closesFence(line: string, fence: CodeFence): boolean {
+  const match = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return !!match && match[1][0] === fence.char && match[1].length >= fence.length;
+}
+
+/** The fence still open at the end of `text`, if any. */
+function fenceOpenAtEnd(text: string): CodeFence | null {
+  let fence: CodeFence | null = null;
+  for (const line of text.split('\n')) {
+    if (fence === null) fence = fenceOpenedBy(line);
+    else if (closesFence(line, fence)) fence = null;
+  }
+  return fence;
+}
+
+function closeOpenFence(text: string): string {
+  const fence = fenceOpenAtEnd(text);
+  return fence ? `${text}\n${fence.char.repeat(fence.length)}` : text;
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
 
 /**
  * What `draftCache` persists for a draft. A draft without quotes is its plain
@@ -259,19 +368,19 @@ function parseStoredQuote(value: unknown): DraftQuote | null {
 export type QuotedMessagePart =
   { type: 'text'; text: string } | { type: 'quote'; quote: string; headings: string[] };
 
-/**
- * A quote line: `> ` and its text, or a bare `>` for a blank line inside one.
- * `>>` (nested quotes, a REPL prompt) and `>text` are left as text, so pasted
- * shell or Python sessions don't turn into quote blocks.
- */
+/** A line of a quote block: `> ` and its text, or a bare `>` for a blank line in it. */
 const QUOTE_LINE = /^>(?: (.*))?$/;
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+
+function isBlankLine(line: string): boolean {
+  return line.trim().length === 0;
+}
 
 /**
- * Split a user message into text and blockquotes for the transcript, reading
- * a `Re: …` line directly above a blockquote as its heading path — the shape
- * `serializeComposerDraft` writes. A quote typed by hand reads back the same,
- * without the path. Nothing inside a fenced code block is a quote.
+ * Split a user message into text and the quote blocks `serializeComposerDraft`
+ * wrote, for the transcript. A block is its marker line (`QUOTE_MARKER`) and
+ * the `>` lines straight after it, with a blank line or the message's edge on
+ * either side; nothing inside a fenced code block counts. Everything else,
+ * `>` lines included, is text and renders as typed.
  *
  * Returns a single text part when the message holds no quote, so the caller
  * can keep its plain rendering.
@@ -280,7 +389,7 @@ export function parseQuotedMessage(text: string): QuotedMessagePart[] {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const parts: QuotedMessagePart[] = [];
   let buffer: string[] = [];
-  let fence: string | null = null;
+  let fence: CodeFence | null = null;
 
   const flushText = () => {
     const joined = buffer.join('\n').replace(/^\n+|\n+$/g, '');
@@ -292,52 +401,42 @@ export function parseQuotedMessage(text: string): QuotedMessagePart[] {
     const line = lines[i];
     if (fence !== null) {
       buffer.push(line);
-      if (line.trim().startsWith(fence)) fence = null;
+      if (closesFence(line, fence)) fence = null;
       continue;
     }
-    const fenceMatch = FENCE_OPEN.exec(line);
-    if (fenceMatch) {
-      fence = fenceMatch[1];
+    fence = fenceOpenedBy(line);
+    const block = fence === null ? readQuoteBlock(lines, i) : null;
+    if (!block) {
       buffer.push(line);
       continue;
-    }
-    if (!QUOTE_LINE.test(line)) {
-      buffer.push(line);
-      continue;
-    }
-
-    const quoteLines: string[] = [];
-    let j = i;
-    for (; j < lines.length; j++) {
-      const match = QUOTE_LINE.exec(lines[j]);
-      if (!match) break;
-      quoteLines.push(match[1] ?? '');
-    }
-    i = j - 1;
-
-    const quote = quoteLines.join('\n').trim();
-    if (!quote) {
-      // Only bare `>` lines: nothing to show as a quote.
-      buffer.push(...lines.slice(i - quoteLines.length + 1, i + 1));
-      continue;
-    }
-
-    let headings: string[] = [];
-    const previous = buffer[buffer.length - 1];
-    if (previous?.startsWith(QUOTE_SOURCE_PREFIX)) {
-      headings = previous
-        .slice(QUOTE_SOURCE_PREFIX.length)
-        .split(HEADING_PATH_SEPARATOR)
-        .map((heading) => heading.trim())
-        .filter(Boolean);
-      buffer.pop();
     }
     flushText();
-    parts.push({ type: 'quote', quote, headings });
+    parts.push({ type: 'quote', quote: block.quote, headings: block.headings });
+    i = block.end - 1;
   }
   flushText();
 
   return parts;
+}
+
+/** The quote block whose marker is `lines[start]`, and the index of the line after it. */
+function readQuoteBlock(
+  lines: string[],
+  start: number
+): { quote: string; headings: string[]; end: number } | null {
+  const marker = QUOTE_MARKER.exec(lines[start]);
+  if (!marker || (start > 0 && !isBlankLine(lines[start - 1]))) return null;
+  const quoteLines: string[] = [];
+  let end = start + 1;
+  for (; end < lines.length; end++) {
+    const match = QUOTE_LINE.exec(lines[end]);
+    if (!match) break;
+    quoteLines.push(match[1] ?? '');
+  }
+  if (end < lines.length && !isBlankLine(lines[end])) return null;
+  const quote = quoteLines.join('\n');
+  if (!quote.trim()) return null;
+  return { quote, headings: marker[1] ? parseHeadingPath(marker[1]) : [], end };
 }
 
 /** Whether a parsed message holds any quote (otherwise render it as plain text). */

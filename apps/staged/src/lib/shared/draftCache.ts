@@ -142,14 +142,16 @@ export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
   let pendingValue: string | DraftContent = '';
   let writeQueue: Promise<void> = Promise.resolve();
 
+  function logFailure(err: unknown) {
+    console.error('[draftCache] Failed to persist draft:', err);
+  }
+
   function enqueue(write: () => Promise<void>): Promise<void> {
     // The queue's promises never reject: several call sites fire-and-forget
     // (`void` on onDestroy flushes and clearNow), so a rejected write would
     // surface as an unhandled rejection at teardown and be invisible
     // mid-session. Log it here instead and keep the chain alive.
-    writeQueue = writeQueue.then(write).catch((err) => {
-      console.error('[draftCache] Failed to persist draft:', err);
-    });
+    writeQueue = writeQueue.then(write).catch(logFailure);
     return writeQueue;
   }
 
@@ -205,10 +207,16 @@ export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
      * it (a pending debounced one is flushed first) and before any after. A
      * read-modify-write of a draft goes here, so no write can land between
      * its read and its write, and a `flush()` that starts later waits for it.
+     *
+     * Unlike the writes above, the returned promise rejects when `task`
+     * does, so a caller can tell the user their change wasn't saved; the
+     * queue logs the failure and carries on either way.
      */
     run(task: () => Promise<void>): Promise<void> {
       void flushPending();
-      return enqueue(task);
+      const result = writeQueue.then(task);
+      writeQueue = result.catch(logFailure);
+      return result;
     },
     flush: flushPending,
   };

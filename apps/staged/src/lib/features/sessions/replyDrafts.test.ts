@@ -24,6 +24,7 @@ vi.mock('../../shared/persistentStore', () => ({
   ),
 }));
 
+import { setStoreValue } from '../../shared/persistentStore';
 import { saveDraft, DRAFT_TTL_MS } from '../../shared/draftCache';
 import { serializeComposerDraft } from './composerDraft';
 import {
@@ -76,6 +77,23 @@ describe('addQuoteToReplyDraft', () => {
       expect(draft.quotes[0]).toMatchObject({ before: 'typed just now', reply: 'Why?' });
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('rejects when the stored draft cannot be amended, so the caller can say so', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const failure = new Error('store unavailable');
+      vi.mocked(setStoreValue).mockRejectedValueOnce(failure);
+
+      await expect(addQuoteToReplyDraft('s5', quote)).rejects.toBe(failure);
+      expect(store.has(replyDraftKey('s5'))).toBe(false);
+
+      // The writer is still usable afterwards.
+      await addQuoteToReplyDraft('s5', quote);
+      expect((await loadReplyDraft('s5')).quotes).toHaveLength(1);
+    } finally {
+      consoleError.mockRestore();
     }
   });
 

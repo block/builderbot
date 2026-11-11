@@ -16,10 +16,21 @@
     hashtagItems?: HashtagItem[];
     onkeydown?: (e: KeyboardEvent) => void;
     oninput?: (e: Event) => void;
+    /** An IME or dictation composition is open in the reply. */
+    composing?: boolean;
+    oncompositionend?: () => void;
     onRemove: () => void;
   }
 
-  let { quote = $bindable(), hashtagItems = [], onkeydown, oninput, onRemove }: Props = $props();
+  let {
+    quote = $bindable(),
+    hashtagItems = [],
+    onkeydown,
+    oninput,
+    composing = $bindable(false),
+    oncompositionend,
+    onRemove,
+  }: Props = $props();
 </script>
 
 <div class="composer-quote" data-quote-id={quote.id}>
@@ -42,6 +53,8 @@
     placeholder="Reply to this quote…"
     rows={1}
     items={hashtagItems}
+    bind:composing
+    {oncompositionend}
     {onkeydown}
     {oninput}
   />

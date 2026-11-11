@@ -1,0 +1,164 @@
+import { flushSync, mount, unmount } from 'svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import ComposerDraftQuotes from './ComposerDraftQuotes.svelte';
+import type { DraftQuote } from './composerDraft';
+import { reactiveProps } from './testStubs/reactiveProps.svelte';
+
+// The quote list's keyboard and composition behaviour: Backspace in an empty
+// gap removes the quote below it, and a composition open in any gap or reply
+// is reported through one `composing` flag so the composer's Send gate sees
+// it — the main input isn't the only place a word can be half-typed.
+
+function quote(id: string, before = ''): DraftQuote {
+  return { id, before, quote: `Quoted ${id}`, headings: [], reply: '' };
+}
+
+let component: ReturnType<typeof mount> | null = null;
+let target: HTMLElement;
+
+function render(quotes: DraftQuote[]) {
+  const onRemoveQuote = vi.fn();
+  const oncompositionend = vi.fn();
+  const props = reactiveProps({
+    quotes,
+    composing: false,
+    onRemoveQuote,
+    oncompositionend,
+  });
+  target = document.createElement('div');
+  document.body.appendChild(target);
+  component = mount(ComposerDraftQuotes, { target, props });
+  flushSync();
+  return { props, onRemoveQuote, oncompositionend };
+}
+
+function gapOf(id: string): HTMLElement {
+  const gap = target.querySelector<HTMLElement>(`[data-quote-entry="${id}"] .composer-gap-input`);
+  if (!gap) throw new Error(`no gap for ${id}`);
+  return gap;
+}
+
+function replyOf(id: string): HTMLElement {
+  const reply = target.querySelector<HTMLElement>(
+    `[data-quote-entry="${id}"] .composer-quote-reply`
+  );
+  if (!reply) throw new Error(`no reply for ${id}`);
+  return reply;
+}
+
+function backspace(el: HTMLElement, init: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Backspace',
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  el.dispatchEvent(event);
+  flushSync();
+  return event;
+}
+
+beforeEach(() => {
+  // jsdom lays nothing out and has no scrollIntoView; the list only needs it to exist.
+  if (!('scrollIntoView' in Element.prototype)) {
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: () => {},
+    });
+  }
+});
+
+afterEach(() => {
+  if (component) unmount(component);
+  component = null;
+  target.remove();
+});
+
+describe('ComposerDraftQuotes Backspace', () => {
+  it('removes the quote below an empty gap, once per press', () => {
+    const { onRemoveQuote } = render([quote('a'), quote('b')]);
+
+    const event = backspace(gapOf('b'));
+
+    expect(onRemoveQuote).toHaveBeenCalledWith('b');
+    expect(event.defaultPrevented).toBe(true);
+
+    backspace(gapOf('a'), { repeat: true });
+    expect(onRemoveQuote).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes text as usual while the gap holds any', () => {
+    const { onRemoveQuote } = render([quote('a', 'some text')]);
+
+    const event = backspace(gapOf('a'));
+
+    expect(onRemoveQuote).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('leaves a modified Backspace and one inside a composition to the editor', () => {
+    const { onRemoveQuote } = render([quote('a')]);
+
+    backspace(gapOf('a'), { metaKey: true });
+    backspace(gapOf('a'), { altKey: true });
+    gapOf('a').dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    flushSync();
+    backspace(gapOf('a'));
+
+    expect(onRemoveQuote).not.toHaveBeenCalled();
+  });
+});
+
+describe('ComposerDraftQuotes composition', () => {
+  it('reports a composition open in a reply or a gap, and its end', () => {
+    const { props, oncompositionend } = render([quote('a'), quote('b')]);
+
+    replyOf('a').dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    flushSync();
+    expect(props.composing).toBe(true);
+
+    replyOf('a').dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    flushSync();
+    expect(props.composing).toBe(false);
+    expect(oncompositionend).toHaveBeenCalledTimes(1);
+
+    gapOf('b').dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    flushSync();
+    expect(props.composing).toBe(true);
+  });
+
+  it('drops the flag when the composing quote is removed from the draft', () => {
+    const { props } = render([quote('a'), quote('b')]);
+
+    replyOf('b').dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    flushSync();
+    expect(props.composing).toBe(true);
+
+    props.quotes = [quote('a')];
+    flushSync();
+
+    expect(props.composing).toBe(false);
+  });
+});
+
+describe('ComposerDraftQuotes focus helpers', () => {
+  it('tells which quote holds focus and can focus a gap at either end', () => {
+    render([quote('a', 'before a'), quote('b')]);
+    const list = component as unknown as {
+      holdsFocus(id: string): boolean;
+      focusGap(id: string, caret: 'start' | 'end'): boolean;
+    };
+
+    replyOf('a').focus();
+    expect(list.holdsFocus('a')).toBe(true);
+    expect(list.holdsFocus('b')).toBe(false);
+
+    expect(list.focusGap('a', 'end')).toBe(true);
+    expect(document.activeElement).toBe(gapOf('a'));
+    const selection = window.getSelection();
+    expect(selection?.anchorNode && gapOf('a').contains(selection.anchorNode)).toBe(true);
+    expect(selection?.toString()).toBe('');
+
+    expect(list.focusGap('missing', 'start')).toBe(false);
+  });
+});

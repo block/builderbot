@@ -76,6 +76,9 @@ export function registerReplyComposer(sessionId: string, target: ReplyComposerTa
  * showing it, or else into the stored draft, which a composer opened later
  * loads. The stored amend runs in `replyDraftWriter`'s queue, so a composer
  * that opens meanwhile — whose load flushes that queue first — reads it.
+ *
+ * Resolves once the quote is in the draft, and rejects when the stored draft
+ * couldn't be written, so the caller can tell the user.
  */
 export function addQuoteToReplyDraft(sessionId: string, quote: NewDraftQuote): Promise<void> {
   const composer = composers.get(sessionId);
@@ -86,7 +89,7 @@ export function addQuoteToReplyDraft(sessionId: string, quote: NewDraftQuote): P
   return amendStoredReplyDraft(sessionId, [quote]);
 }
 
-/** Append quotes to the stored draft, with no composer involved. */
+/** Append quotes to the stored draft, with no composer involved. Rejects if the write fails. */
 export function amendStoredReplyDraft(sessionId: string, quotes: NewDraftQuote[]): Promise<void> {
   const key = replyDraftKey(sessionId);
   return replyDraftWriter.run(async () => {

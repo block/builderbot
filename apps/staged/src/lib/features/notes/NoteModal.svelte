@@ -559,24 +559,29 @@
    * A reply to a selected passage goes into the chat's draft as a quote
    * block. Split view opens the chat beside the note so the block is seen
    * landing; elsewhere the chat would cover the note mid-review, so a toast
-   * confirms it instead.
+   * confirms it instead — once the draft is saved, so it never claims a
+   * quote that didn't land. Returns whether it did: on failure the popover
+   * stays open with the reply, for another try.
    */
-  function handleQuoteReply(quote: NewDraftQuote) {
+  async function handleQuoteReply(quote: NewDraftQuote): Promise<boolean> {
     const sid = sessionId;
-    if (!sid) return;
-    // Queued before the chat opens: a pane that opens next loads it.
-    addQuoteToReplyDraft(sid, quote).catch((error) => {
+    if (!sid) return false;
+    try {
+      await addQuoteToReplyDraft(sid, quote);
+    } catch (error) {
       console.error('Failed to add quote to reply draft', error);
       toast.error('Could not add the quote to your reply draft');
-    });
-    if (chatOpen) return;
+      return false;
+    }
+    if (chatOpen) return true;
     if (viewport.canSplit) {
       setChatOpen(true);
-      return;
+      return true;
     }
     toast('Added to your reply draft', {
       action: { label: 'View chat', onClick: () => setChatOpen(true) },
     });
+    return true;
   }
 
   function handleChatToggle() {

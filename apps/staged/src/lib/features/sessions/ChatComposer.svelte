@@ -30,7 +30,8 @@
   A draft can hold quote blocks — passages of a note the user selected and
   replied to (see composerDraft.ts). They are listed above the text input,
   each with its reply and the free text before it editable in place; the
-  text input is the free text after the last one.
+  text input is the free text after the last one. Removing a quote moves
+  focus that was in it to the input its text joined.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -47,7 +48,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, type Snippet } from 'svelte';
+  import { onDestroy, tick, type Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -75,6 +76,7 @@
   import HashtagInput from './HashtagInput.svelte';
   import ComposerDraftQuotes from './ComposerDraftQuotes.svelte';
   import type { DraftQuote } from './composerDraft';
+  import { focusAtEndSync, focusAtStartSync } from '../../shared/focusAtEnd';
   import { createCompositionSendGate, createTouchPressFocusGuard } from './composerSendPress';
   import type { HashtagItem } from '../../types';
 
@@ -167,6 +169,29 @@
   }: Props = $props();
 
   let fileInputEl = $state<HTMLInputElement>();
+  let draftQuotesView = $state<ReturnType<typeof ComposerDraftQuotes>>();
+
+  /**
+   * Take a quote out of the draft (the parent merges the text around it).
+   * Focus in the removed block — its X, its reply, or the gap before it —
+   * would fall to the page, so it moves to the input the gap's text joined:
+   * the next quote's gap, or the main input after the last quote. The caret
+   * goes where that text now ends, or to the start when there was none.
+   */
+  async function removeQuote(id: string) {
+    const index = quotes.findIndex((quote) => quote.id === id);
+    if (index === -1) return;
+    const hadText = quotes[index].before.trim().length > 0;
+    const nextId = quotes[index + 1]?.id ?? null;
+    const hadFocus = draftQuotesView?.holdsFocus(id) ?? false;
+    onRemoveQuote?.(id);
+    if (!hadFocus) return;
+    await tick();
+    const caret = hadText ? 'end' : 'start';
+    if (nextId !== null && draftQuotesView?.focusGap(nextId, caret)) return;
+    if (caret === 'start') focusAtStartSync(textareaEl);
+    else focusAtEndSync(textareaEl);
+  }
 
   let submitBlock = $derived(
     composerSubmitBlock({
@@ -191,25 +216,34 @@
   // presses keep the default, and so does the split button's menu trigger,
   // which moves focus into its menu as usual.
   //
-  // While the box holds an IME or dictation composition the press moves focus
-  // after all, which commits the composition, and the send waits for its
-  // `compositionend` (createCompositionSendGate) so the committed text is in
-  // the draft it sends rather than landing in the box after it was cleared.
+  // While the box — or a quote's reply, or a gap between quotes — holds an
+  // IME or dictation composition the press moves focus after all, which
+  // commits the composition, and the send waits for its `compositionend`
+  // (createCompositionSendGate) so the committed text is in the draft it
+  // sends rather than landing in an input after it was cleared.
   // On Android, Gboard keeps the word being typed open as a composition, so
   // a Send there usually lets the keyboard drop: by design, rather than
   // committing the composition by hand; the message is still sent once.
   let composing = $state(false);
+  /** A composition open in a gap or a quote's reply instead (see ComposerDraftQuotes). */
+  let quotesComposing = $state(false);
+  let anyComposing = $derived(composing || (quotes.length > 0 && quotesComposing));
+  // The quote list unmounting mid-composition (the draft sent or replaced)
+  // reports no end; a list mounted later must not inherit the flag.
+  $effect(() => {
+    if (quotes.length === 0) quotesComposing = false;
+  });
   const sendPress = createTouchPressFocusGuard();
   const sendGate = createCompositionSendGate();
   let deferredSendTimer: ReturnType<typeof setTimeout> | undefined;
 
   function handleSendMouseDown(e: MouseEvent) {
-    if (sendPress.mouseDown(composing)) e.preventDefault();
+    if (sendPress.mouseDown(anyComposing)) e.preventDefault();
   }
 
   function handleSendClick() {
     sendPress.reset();
-    if (!sendGate.press(composing)) return;
+    if (!sendGate.press(anyComposing)) return;
     // Sending now: a send still deferred from an earlier press must not
     // follow it.
     clearTimeout(deferredSendTimer);
@@ -229,7 +263,7 @@
   // waiting on it too, so a later composition's end doesn't send. A real end
   // has already consulted the gate, synchronously, by the time this runs.
   $effect(() => {
-    if (!composing) sendGate.cancel();
+    if (!anyComposing) sendGate.cancel();
   });
 
   onDestroy(() => clearTimeout(deferredSendTimer));
@@ -274,11 +308,14 @@
   <ComposerError message={sendError} />
   {#if quotes.length > 0}
     <ComposerDraftQuotes
+      bind:this={draftQuotesView}
       bind:quotes
+      bind:composing={quotesComposing}
+      oncompositionend={handleCompositionEnd}
       {hashtagItems}
       {onkeydown}
       {oninput}
-      onRemoveQuote={(id) => onRemoveQuote?.(id)}
+      onRemoveQuote={(id) => void removeQuote(id)}
     />
   {/if}
   <HashtagInput

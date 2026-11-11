@@ -154,6 +154,7 @@
     findHashtagItemForReference,
     renderHashtagTokens as renderHashtagTokensShared,
   } from './hashtagItems';
+  import { toast } from 'svelte-sonner';
   import * as Alert from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
   import { subscribeDragDrop } from '../branches/dragDrop';
@@ -1121,8 +1122,13 @@
       const pending = pendingDraftQuotes;
       if (pending?.sessionId !== id) return;
       pendingDraftQuotes = null;
-      void amendStoredReplyDraft(id, pending.quotes).catch((err) => {
+      amendStoredReplyDraft(id, pending.quotes).catch((err) => {
         console.error('[SessionChatPane] Failed to save quoted reply:', err);
+        toast.error(
+          pending.quotes.length === 1
+            ? 'Could not add the quote to your reply draft'
+            : 'Could not add the quotes to your reply draft'
+        );
       });
     };
   });

@@ -37,7 +37,7 @@
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import PinnedRepoCards from './PinnedRepoCards.svelte';
   import ProjectRowContent from './ProjectRowContent.svelte';
-  import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
+  import ProjectTagMenuItems from './ProjectTagMenuItems.svelte';
   import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
   import { transferringTitle } from './projectTransfer';
   import SidebarFilterMenu from './SidebarFilterMenu.svelte';
@@ -639,7 +639,7 @@
                     <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
                       <Mail size={14} /> Mark as Unread
                     </ContextMenu.Item>
-                    <ProjectStatusSubmenu {project} />
+                    <ProjectTagMenuItems {project} />
                     <ContextMenu.Separator />
                     <ProjectTransferMenuItem {project} />
                     <ContextMenu.Item

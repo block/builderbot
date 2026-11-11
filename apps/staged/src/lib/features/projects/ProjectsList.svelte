@@ -31,7 +31,8 @@
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
-  import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
+  import ProjectTagMenuItems from './ProjectTagMenuItems.svelte';
+  import ProjectCardTagChips from './ProjectCardTagChips.svelte';
   import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
   import { transferringTitle } from './projectTransfer';
   import { projectActions } from './projectActions.svelte';
@@ -655,6 +656,7 @@
                       />
                       <span>{projectDisplayName(project)}</span>
                     </div>
+                    <ProjectCardTagChips projectId={project.id} />
                     {#if matchReason}
                       <div class="card-match">
                         <ProjectMatchReason reason={matchReason} terms={searchTerms} />
@@ -736,7 +738,7 @@
                   <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
                     <Mail size={14} /> Mark as Unread
                   </ContextMenu.Item>
-                  <ProjectStatusSubmenu {project} />
+                  <ProjectTagMenuItems {project} />
                   <ContextMenu.Separator />
                   <ProjectTransferMenuItem {project} />
                   <ContextMenu.Item

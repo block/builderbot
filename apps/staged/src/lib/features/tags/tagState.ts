@@ -294,6 +294,14 @@ export function chipTags(
   return chips;
 }
 
+/** The first `limit` chips, and how many more there are (a grid card's "+N"). */
+export function limitChips(
+  chips: readonly Tag[],
+  limit: number
+): { shown: Tag[]; overflow: number } {
+  return { shown: chips.slice(0, limit), overflow: Math.max(0, chips.length - limit) };
+}
+
 /** How many of `projectIds` carry each tag. Tags nobody uses are absent. */
 export function usageCounts(
   projectTagIds: ReadonlyMap<string, ReadonlySet<string>>,

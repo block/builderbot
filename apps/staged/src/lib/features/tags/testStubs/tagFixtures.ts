@@ -63,3 +63,31 @@ export function scopeIds(state: TagState, groupId: string | null): string[] {
     .sort((a, b) => a.position - b.position)
     .map((t) => t.id);
 }
+
+/** The state after `set_project_group_tag`, as the backend applies it. */
+export function withGroupTag(
+  state: TagState,
+  projectId: string,
+  groupId: string,
+  tagId: string | null
+): TagState {
+  const inGroup = new Set(state.tags.filter((t) => t.groupId === groupId).map((t) => t.id));
+  return {
+    ...state,
+    assignments: [
+      ...state.assignments.filter((a) => a.projectId !== projectId || !inGroup.has(a.tagId)),
+      ...(tagId ? [{ projectId, tagId }] : []),
+    ],
+  };
+}
+
+/** The state after `set_project_tag_assigned` for an ungrouped tag. */
+export function withTagAssigned(
+  state: TagState,
+  projectId: string,
+  tagId: string,
+  assigned: boolean
+): TagState {
+  const rest = state.assignments.filter((a) => a.projectId !== projectId || a.tagId !== tagId);
+  return { ...state, assignments: assigned ? [...rest, { projectId, tagId }] : rest };
+}

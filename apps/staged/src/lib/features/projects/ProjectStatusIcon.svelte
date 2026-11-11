@@ -4,8 +4,8 @@
   project is local or remote. See projectStatusDisplay.ts for the precedence
   rules.
 
-  Shared by the sidebar rows, the project grid cards and the detail-page
-  status picker so a project reads the same everywhere. Renders the bare SVG
+  Shared by the sidebar rows and the project grid cards (the header's icon
+  group pill resolves the same way) so a project reads the same everywhere. Renders the bare SVG
   (or a same-sized placeholder) so parents keep control of layout.
 -->
 <script lang="ts">

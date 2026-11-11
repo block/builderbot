@@ -51,7 +51,7 @@ vi.mock(
 );
 vi.mock('../notes/NoteModal.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock('./SuggestedRepos.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
-vi.mock('./ProjectStatusPicker.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
+vi.mock('./ProjectTagPills.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock('$lib/components/ui/dialog', () =>
   import('../sessions/testStubs/dialogMock').then((m) => m.dialogModuleMock())
 );

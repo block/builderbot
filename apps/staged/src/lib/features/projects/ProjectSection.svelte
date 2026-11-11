@@ -52,7 +52,7 @@
   import { nextActiveSessionIds } from './activeSessionIds';
   import { projectNoteRow } from './projectNoteRow';
   import { projectDisplayName } from '../../shared/utils';
-  import ProjectStatusPicker from './ProjectStatusPicker.svelte';
+  import ProjectTagPills from './ProjectTagPills.svelte';
   import { Button } from '$lib/components/ui/button';
   import {
     navigation,
@@ -89,6 +89,8 @@
     onProjectTitleElement?: (element: HTMLHeadingElement | null) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;
+    /** Bumped to open the tag picker (the T shortcut, from ProjectHome). */
+    tagPickerRequest?: number;
   }
 
   let {
@@ -106,6 +108,7 @@
     onProjectTitleElement,
     onRepoSelected,
     onRetryWorktree,
+    tagPickerRequest = 0,
   }: Props = $props();
 
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
@@ -923,9 +926,11 @@
 
 <div class="project-section">
   <section class="project-overview-card">
-    <div class="project-title-row">
-      <h2 class="project-title" use:reportProjectTitleElement>{projectDisplayName(project)}</h2>
-      <ProjectStatusPicker {project} {branches} disabled={deleting} />
+    <div class="project-heading">
+      <div class="project-title-row">
+        <h2 class="project-title" use:reportProjectTitleElement>{projectDisplayName(project)}</h2>
+      </div>
+      <ProjectTagPills {project} {branches} disabled={deleting} pickerRequest={tagPickerRequest} />
     </div>
 
     {#if projectNotes.length > 0}
@@ -1115,8 +1120,15 @@
     background-color: var(--bg-primary);
   }
 
-  /* The title takes the free space, so the status picker sits at the right
-     edge; a long title wraps within its column instead of pushing it down. */
+  /* The title, with the tag pills on their own row under it so a long title
+     isn't squeezed by them. */
+  .project-heading {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
   .project-title-row {
     display: flex;
     align-items: center;

@@ -5,8 +5,9 @@
  * is marked separately (RemoteProjectIcon), not by its status icon.
  *
  * Tags are app-wide catalog data, a project's tags per-project data (both in
- * tagsStore). Kept component-free so the sidebar row, grid card and
- * detail-page picker all resolve the same way and the rules stay testable.
+ * tagsStore). Kept component-free so the sidebar row, grid card and the
+ * header's icon group pill all resolve the same way and the rules stay
+ * testable.
  */
 
 import type { Branch, Tag } from '../../types';
@@ -52,7 +53,7 @@ export function resolveProjectStatus(
   return resolveComputedProjectStatus(branches, hydrated);
 }
 
-/** Human-readable text for a computed status, as the picker's Default row shows it. */
+/** Human-readable text for a computed status, as the icon group's Default row shows it. */
 export function computedStatusLabel(status: ComputedProjectStatus): string {
   switch (status.kind) {
     case 'placeholder':

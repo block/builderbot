@@ -9,6 +9,7 @@ import {
   indexAssignments,
   indexTagCatalog,
   intentSlot,
+  limitChips,
   MAX_TAG_NAME_CHARS,
   numberedName,
   pruneConfirmedIntents,
@@ -289,6 +290,30 @@ describe('chipTags', () => {
 
   it('is empty without tags', () => {
     expect(chipTags(undefined, catalog)).toEqual([]);
+  });
+
+  it('gives a grid card the tags outside the icon group, in order', () => {
+    const all = new Set(['infra', 'q4', 'p0', 'idea']);
+    expect(chipTags(all, catalog, { excludeGroupIds: ['status'] }).map((t) => t.id)).toEqual([
+      'p0',
+      'infra',
+      'q4',
+    ]);
+  });
+});
+
+describe('limitChips', () => {
+  const chips = chipTags(new Set(['done', 'p1', 'infra', 'q4']), catalog);
+
+  it('keeps the first chips in order and counts the rest', () => {
+    const { shown, overflow } = limitChips(chips, 3);
+    expect(shown.map((t) => t.id)).toEqual(['done', 'p1', 'infra']);
+    expect(overflow).toBe(1);
+  });
+
+  it('shows every chip when they fit', () => {
+    expect(limitChips(chips, 4)).toEqual({ shown: chips, overflow: 0 });
+    expect(limitChips([], 3)).toEqual({ shown: [], overflow: 0 });
   });
 });
 

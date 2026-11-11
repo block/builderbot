@@ -20,6 +20,7 @@
   import ProjectsSidebar from './lib/features/projects/ProjectsSidebar.svelte';
   import ProjectDeleteDialog from './lib/features/projects/ProjectDeleteDialog.svelte';
   import ProjectTransferDialog from './lib/features/projects/ProjectTransferDialog.svelte';
+  import NewTagDialog from './lib/features/tags/NewTagDialog.svelte';
   import ResumeOnLaunchDialog from './lib/features/sessions/ResumeOnLaunchDialog.svelte';
   import ControlAuthorizationDialog from './lib/features/settings/ControlAuthorizationDialog.svelte';
   import { resumeOnLaunch } from './lib/features/sessions/resumeOnLaunch.svelte';
@@ -269,6 +270,15 @@
     return event.defaultPrevented;
   }
 
+  /** The T shortcut: ask the project page to open its tag picker. */
+  function requestOpenTagPicker(): boolean {
+    if (navigation.currentRoute.kind !== 'project') return false;
+
+    const event = new CustomEvent('staged:open-tag-picker', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }
+
   async function startUpdaterLoop(): Promise<{ owner: boolean; stop: () => void } | null> {
     const windowLabel = getWindowLabel();
 
@@ -507,6 +517,16 @@
         keys: ['Backspace', 'Delete'],
         modifiers: { meta: true },
         handler: requestDeleteCurrentProject,
+      },
+      // The registry's first unmodified letter: the handler declines,
+      // leaving the key alone, unless the project page is showing with no
+      // dialog or menu open (see ProjectHome). Text fields never trigger it.
+      {
+        id: 'project-tags',
+        description: 'Tag project',
+        category: 'app',
+        keys: ['t'],
+        handler: requestOpenTagPicker,
       },
       {
         id: 'search-find',
@@ -829,6 +849,8 @@
   <ProjectDeleteDialog />
   <!-- Shared transfer confirmation, likewise. -->
   <ProjectTransferDialog />
+  <!-- "New tag…" from a project's context menu (the menu unmounts as it closes). -->
+  <NewTagDialog />
 
   <!-- Launch-time "Resume interrupted sessions?" — opened by resumeOnLaunch.load()
        from onMount on the desktop main window; stays closed everywhere else. -->

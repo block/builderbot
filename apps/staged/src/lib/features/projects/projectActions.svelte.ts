@@ -1,6 +1,6 @@
 /**
  * Shared project context-menu actions: mark unread, transfer and remove
- * project. (Tag writes, including the Set Status submenu's, live in
+ * project. (Tag writes, including the context menu's tag submenus, live in
  * features/tags/tagActions.)
  *
  * ProjectHome (top-bar button + ⌘⌫ shortcut), ProjectsList (card context

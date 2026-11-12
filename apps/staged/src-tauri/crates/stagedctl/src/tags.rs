@@ -1,9 +1,12 @@
 //! The `tag` noun and the tag side of `project`: wire shapes for the app's
-//! `TagState`, `<tag>` / `<group>` address resolution, and the renderers.
+//! `TagState`, `<tag>` / `<group>` address resolution, the renderers, and
+//! the `project tag` / `project untag` write plans.
 //!
 //! Like [`crate::commands`], this is a flag→JSON mapper over allowlisted
 //! dispatch commands. Everything here reads `get_tag_state` once and works
-//! on that snapshot; the app does the real validation.
+//! on that snapshot; the app does the real validation. The writes are
+//! planned in full against that snapshot before the first call goes out,
+//! so an argument the catalog can't answer writes nothing.
 
 use std::collections::HashMap;
 
@@ -544,7 +547,18 @@ pub fn project_tags(client: &Client, needle: &str) -> Result<CmdOutput, CtlError
     let project = find_project(&projects, needle)?.clone();
     let (state, raw) = fetch_state(client)?;
     let human = render_project_tags(&state, &project);
+    let json = project_tags_json(&state, &raw, &projects_raw, &project);
+    Ok(CmdOutput { json, human })
+}
 
+/// The `project tags` `--json` shape: `{ project, groups: [{ group, tag }],
+/// tags: [Tag] }`, built from the app's raw rows.
+fn project_tags_json(
+    state: &TagStateWire,
+    raw: &Value,
+    projects_raw: &Value,
+    project: &Project,
+) -> Value {
     let carried = state.tag_ids_for(&project.id);
     let groups: Vec<Value> = state
         .groups
@@ -555,8 +569,8 @@ pub fn project_tags(client: &Client, needle: &str) -> Result<CmdOutput, CtlError
                 .filter_map(|id| state.tag(id))
                 .find(|t| t.group_id.as_deref() == Some(group.id.as_str()));
             json!({
-                "group": raw_row(&raw, "groups", &group.id),
-                "tag": choice.map(|t| raw_row(&raw, "tags", &t.id)).unwrap_or(Value::Null),
+                "group": raw_row(raw, "groups", &group.id),
+                "tag": choice.map(|t| raw_row(raw, "tags", &t.id)).unwrap_or(Value::Null),
             })
         })
         .collect();
@@ -564,7 +578,7 @@ pub fn project_tags(client: &Client, needle: &str) -> Result<CmdOutput, CtlError
         .tags_in(None)
         .into_iter()
         .filter(|t| carried.contains(&t.id.as_str()))
-        .map(|t| raw_row(&raw, "tags", &t.id))
+        .map(|t| raw_row(raw, "tags", &t.id))
         .collect();
     let project_raw = projects_raw
         .as_array()
@@ -574,10 +588,300 @@ pub fn project_tags(client: &Client, needle: &str) -> Result<CmdOutput, CtlError
         })
         .cloned()
         .unwrap_or(Value::Null);
-    Ok(CmdOutput {
-        json: json!({ "project": project_raw, "groups": groups, "tags": tags }),
-        human,
-    })
+    json!({ "project": project_raw, "groups": groups, "tags": tags })
+}
+
+// =============================================================================
+// project tag / project untag
+// =============================================================================
+
+/// One write of a `project tag` / `project untag` plan. Each maps onto one
+/// allowlisted dispatch command; the project is supplied when it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// `set_project_group_tag`: make `tag_id` the project's choice in its
+    /// group, replacing a sibling.
+    Choose { group_id: String, tag_id: String },
+    /// `set_project_group_tag` with no tag: clear the choice in a group.
+    ClearGroup { group_id: String },
+    /// `set_project_tag_assigned`: add or remove exactly `tag_id`.
+    Assign { tag_id: String, assigned: bool },
+    /// `create_tag` with `assignProjectId`: a new ungrouped tag, assigned
+    /// in the same transaction.
+    Create { name: String },
+}
+
+impl Step {
+    fn command(&self) -> &'static str {
+        match self {
+            Self::Choose { .. } | Self::ClearGroup { .. } => "set_project_group_tag",
+            Self::Assign { .. } => "set_project_tag_assigned",
+            Self::Create { .. } => "create_tag",
+        }
+    }
+
+    fn args(&self, project_id: &str) -> Value {
+        match self {
+            Self::Choose { group_id, tag_id } => {
+                json!({ "projectId": project_id, "groupId": group_id, "tagId": tag_id })
+            }
+            Self::ClearGroup { group_id } => {
+                json!({ "projectId": project_id, "groupId": group_id, "tagId": Value::Null })
+            }
+            Self::Assign { tag_id, assigned } => {
+                json!({ "projectId": project_id, "tagId": tag_id, "assigned": assigned })
+            }
+            Self::Create { name } => json!({ "name": name, "assignProjectId": project_id }),
+        }
+    }
+}
+
+/// Plan `project tag`: resolve every `<tag>` against the catalog, in
+/// argument order, into the writes that apply them. A grouped tag becomes
+/// a [`Step::Choose`], an ungrouped one a [`Step::Assign`]. A tag named
+/// twice is applied once. Two different tags of one group are refused
+/// (`invalid_arguments`), since a project holds one tag per group and the
+/// second would silently undo the first.
+///
+/// A `<tag>` nothing answers to is `not_found`, unless `create` is set: then
+/// a bare name becomes a [`Step::Create`] of an ungrouped tag. A
+/// `<group>/<name>` whose group exists is refused instead, because
+/// `--create` never creates a grouped tag. `ambiguous` is an error either
+/// way.
+pub fn plan_tagging(
+    state: &TagStateWire,
+    needles: &[String],
+    create: bool,
+) -> Result<Vec<Step>, CtlError> {
+    let mut steps: Vec<Step> = Vec::new();
+    // group id → (the tag chosen there, the argument that chose it)
+    let mut chosen: HashMap<&str, (&TagWire, &str)> = HashMap::new();
+    let mut creating: Vec<String> = Vec::new();
+    for needle in needles {
+        match find_tag(state, needle) {
+            Ok(tag) => match tag.group_id.as_deref() {
+                Some(group_id) => {
+                    if let Some((earlier, earlier_needle)) = chosen.get(group_id) {
+                        if earlier.id == tag.id {
+                            continue;
+                        }
+                        let group_name = state
+                            .group(group_id)
+                            .map(|g| g.name.as_str())
+                            .unwrap_or(group_id);
+                        return Err(CtlError::command(
+                            "invalid_arguments",
+                            format!(
+                                "{earlier_needle:?} and {needle:?} are both in {group_name}, and \
+                                 a project holds one tag per group; name one of them"
+                            ),
+                        ));
+                    }
+                    chosen.insert(group_id, (tag, needle.as_str()));
+                    steps.push(Step::Choose {
+                        group_id: group_id.to_string(),
+                        tag_id: tag.id.clone(),
+                    });
+                }
+                None => {
+                    let step = Step::Assign {
+                        tag_id: tag.id.clone(),
+                        assigned: true,
+                    };
+                    if !steps.contains(&step) {
+                        steps.push(step);
+                    }
+                }
+            },
+            Err(CtlError::Command {
+                code: "not_found", ..
+            }) if create => {
+                if let TagRef::Qualified { group, .. } = TagRef::parse(needle) {
+                    if let Ok(group) = find_group(state, &group) {
+                        return Err(CtlError::command(
+                            "invalid_arguments",
+                            format!(
+                                "--create makes ungrouped tags only, and {needle:?} names the \
+                                 group {}; create the tag in that group first (`stagedctl tag \
+                                 create --group`), or name one of its existing tags",
+                                group.name
+                            ),
+                        ));
+                    }
+                }
+                let name = needle.trim();
+                if name.is_empty() {
+                    return Err(CtlError::command(
+                        "invalid_arguments",
+                        "a tag name must not be empty",
+                    ));
+                }
+                if creating.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                    continue;
+                }
+                creating.push(name.to_string());
+                steps.push(Step::Create {
+                    name: name.to_string(),
+                });
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(steps)
+}
+
+/// Plan `project untag`: with `group`, one [`Step::ClearGroup`]; otherwise
+/// one [`Step::Assign`] removal per distinct `<tag>`, resolved against the
+/// catalog so a typo fails before anything is written. The pairing of the
+/// two forms is checked by `validate()` before discovery.
+pub fn plan_untagging(
+    state: &TagStateWire,
+    needles: &[String],
+    group: Option<&str>,
+) -> Result<Vec<Step>, CtlError> {
+    if let Some(group) = group {
+        let group = find_group(state, group)?;
+        return Ok(vec![Step::ClearGroup {
+            group_id: group.id.clone(),
+        }]);
+    }
+    let mut steps: Vec<Step> = Vec::new();
+    for needle in needles {
+        let tag = find_tag(state, needle)?;
+        let step = Step::Assign {
+            tag_id: tag.id.clone(),
+            assigned: false,
+        };
+        if !steps.contains(&step) {
+            steps.push(step);
+        }
+    }
+    Ok(steps)
+}
+
+/// One line per step, against the catalog as it was before the writes, so
+/// a step that changed nothing says so. `created` holds the app's rows for
+/// the [`Step::Create`] steps, in order.
+pub(crate) fn render_steps(
+    state: &TagStateWire,
+    project: &Project,
+    steps: &[Step],
+    created: &[Value],
+    heading: &str,
+) -> String {
+    let carried = state.tag_ids_for(&project.id);
+    let mut lines = vec![format!("{heading} {}  id:{}", project.name, project.id)];
+    let mut created = created.iter();
+    for step in steps {
+        let line = match step {
+            Step::Choose { group_id, tag_id } => {
+                let group = state
+                    .group(group_id)
+                    .map(|g| g.name.as_str())
+                    .unwrap_or(group_id);
+                let name = state.tag(tag_id).map(|t| t.name.as_str()).unwrap_or(tag_id);
+                let note = if carried.contains(&tag_id.as_str()) {
+                    "  (unchanged)"
+                } else {
+                    ""
+                };
+                format!("  {group}: {name}{note}")
+            }
+            Step::ClearGroup { group_id } => {
+                let group = state
+                    .group(group_id)
+                    .map(|g| g.name.as_str())
+                    .unwrap_or(group_id);
+                let had = carried
+                    .iter()
+                    .filter_map(|id| state.tag(id))
+                    .any(|t| t.group_id.as_deref() == Some(group_id.as_str()));
+                let note = if had { "" } else { "  (unchanged)" };
+                format!("  {group}: (none){note}")
+            }
+            Step::Assign { tag_id, assigned } => {
+                let label = state
+                    .tag(tag_id)
+                    .map(|t| state.label(t))
+                    .unwrap_or_else(|| tag_id.clone());
+                let had = carried.contains(&tag_id.as_str());
+                let (sign, note) = match (assigned, had) {
+                    (true, true) => ("+", "  (already)"),
+                    (true, false) => ("+", ""),
+                    (false, true) => ("-", ""),
+                    (false, false) => ("-", "  (not carried)"),
+                };
+                format!("  {sign} {label}{note}")
+            }
+            Step::Create { name } => {
+                let id = created
+                    .next()
+                    .and_then(|row| row.get("id"))
+                    .and_then(Value::as_str)
+                    .map(|id| format!("  id:{id}"))
+                    .unwrap_or_default();
+                format!("  + {name}  (created){id}")
+            }
+        };
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+/// Run a plan in order and print the project's tags as they stand after
+/// it. `--json` is the `project tags` shape under `ok: true`, plus the
+/// `created` rows.
+fn apply_steps(
+    client: &Client,
+    before: &TagStateWire,
+    projects_raw: &Value,
+    project: &Project,
+    steps: &[Step],
+    heading: &str,
+) -> Result<CmdOutput, CtlError> {
+    let mut created: Vec<Value> = Vec::new();
+    for step in steps {
+        let result = client.invoke(step.command(), step.args(&project.id))?;
+        if matches!(step, Step::Create { .. }) {
+            created.push(result);
+        }
+    }
+    let human = render_steps(before, project, steps, &created, heading);
+    let (after, raw) = fetch_state(client)?;
+    let mut json = project_tags_json(&after, &raw, projects_raw, project);
+    if let Some(object) = json.as_object_mut() {
+        object.insert("ok".to_string(), json!(true));
+        object.insert("created".to_string(), Value::Array(created));
+    }
+    Ok(CmdOutput { json, human })
+}
+
+pub fn project_tag(
+    client: &Client,
+    needle: &str,
+    tags: &[String],
+    create: bool,
+) -> Result<CmdOutput, CtlError> {
+    let projects_raw = client.invoke("list_projects", json!({}))?;
+    let projects: Vec<Project> = parse(&projects_raw, "project list")?;
+    let project = find_project(&projects, needle)?.clone();
+    let (state, _) = fetch_state(client)?;
+    let steps = plan_tagging(&state, tags, create)?;
+    apply_steps(client, &state, &projects_raw, &project, &steps, "tagged")
+}
+
+pub fn project_untag(
+    client: &Client,
+    needle: &str,
+    tags: &[String],
+    group: Option<&str>,
+) -> Result<CmdOutput, CtlError> {
+    let projects_raw = client.invoke("list_projects", json!({}))?;
+    let projects: Vec<Project> = parse(&projects_raw, "project list")?;
+    let project = find_project(&projects, needle)?.clone();
+    let (state, _) = fetch_state(client)?;
+    let steps = plan_untagging(&state, tags, group)?;
+    apply_steps(client, &state, &projects_raw, &project, &steps, "untagged")
 }
 
 /// The project ids carrying every one of `needles` (AND). Resolves each
@@ -913,6 +1217,215 @@ mod tests {
             .err()
             .expect("a typo must fail before filtering");
         assert!(err.to_string().starts_with("not_found: "), "{err}");
+    }
+
+    fn choose(group: &str, tag: &str) -> Step {
+        Step::Choose {
+            group_id: group.into(),
+            tag_id: tag.into(),
+        }
+    }
+
+    fn assign(tag: &str, assigned: bool) -> Step {
+        Step::Assign {
+            tag_id: tag.into(),
+            assigned,
+        }
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn plan_assignments_routes_grouped_and_ungrouped_tags() {
+        let state = catalog();
+        // Argument order is kept; every address form resolves; a grouped
+        // tag is a group choice and an ungrouped one an assignment.
+        let steps = plan_tagging(
+            &state,
+            &strings(&["q4-launch", "Status/Done", "t-high-p", "infra"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                assign("t-q4", true),
+                choose("g-status", "t-done"),
+                choose("g-prio", "t-high-p"),
+                assign("t-infra", true),
+            ]
+        );
+        // The same tag twice, by two addresses, is one step.
+        let steps = plan_tagging(
+            &state,
+            &strings(&["Done", "status/done", "q4-launch", "t-q4"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![choose("g-status", "t-done"), assign("t-q4", true)]
+        );
+        // The wire shapes the app's arms read.
+        assert_eq!(
+            choose("g-status", "t-done").command(),
+            "set_project_group_tag"
+        );
+        assert_eq!(
+            choose("g-status", "t-done").args("p1"),
+            json!({ "projectId": "p1", "groupId": "g-status", "tagId": "t-done" })
+        );
+        assert_eq!(assign("t-q4", true).command(), "set_project_tag_assigned");
+        assert_eq!(
+            assign("t-q4", false).args("p1"),
+            json!({ "projectId": "p1", "tagId": "t-q4", "assigned": false })
+        );
+    }
+
+    #[test]
+    fn plan_assignments_rejects_two_tags_of_one_group() {
+        let state = catalog();
+        let err = plan_tagging(
+            &state,
+            &strings(&["q4-launch", "Done", "In progress"]),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        let text = err.to_string();
+        assert!(text.starts_with("invalid_arguments: "), "{text}");
+        assert!(
+            text.contains("\"Done\" and \"In progress\" are both in Status"),
+            "{text}"
+        );
+        // The same group's tag under two names is still two tags.
+        let err = plan_tagging(&state, &strings(&["t-done", "status/HIGH"]), false).unwrap_err();
+        assert!(err.to_string().contains("both in Status"), "{err}");
+        // Different groups are fine, and so is an ambiguous name's error.
+        assert!(plan_tagging(&state, &strings(&["Status/High", "Priority/High"]), false).is_ok());
+        let err = plan_tagging(&state, &strings(&["High"]), true).unwrap_err();
+        assert!(err.to_string().starts_with("ambiguous: "), "{err}");
+    }
+
+    #[test]
+    fn plan_assignments_creates_missing_names_only_with_create() {
+        let state = catalog();
+        // Without --create an unknown name fails and plans nothing.
+        let err = plan_tagging(&state, &strings(&["infra", "q4"]), false).unwrap_err();
+        assert!(err.to_string().starts_with("not_found: "), "{err}");
+        // With it, the unknown bare name is created, ungrouped, in order;
+        // the known ones resolve as before.
+        let steps = plan_tagging(&state, &strings(&["infra", "q4", "Done", "Q4"]), true).unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                assign("t-infra", true),
+                Step::Create { name: "q4".into() },
+                choose("g-status", "t-done"),
+            ],
+            "a second spelling of a name being created is not a second tag"
+        );
+        assert_eq!(steps[1].command(), "create_tag");
+        assert_eq!(
+            steps[1].args("p1"),
+            json!({ "name": "q4", "assignProjectId": "p1" }),
+            "no groupId: --create makes ungrouped tags with an automatic colour"
+        );
+        // A name a tag already has, in any case, is that tag, not a new one.
+        let steps = plan_tagging(&state, &strings(&["INFRA"]), true).unwrap();
+        assert_eq!(steps, vec![assign("t-infra", true)]);
+        // group/name into an existing group is refused: --create never
+        // makes a grouped tag.
+        let err = plan_tagging(&state, &strings(&["Status/Blocked"]), true).unwrap_err();
+        let text = err.to_string();
+        assert!(text.starts_with("invalid_arguments: "), "{text}");
+        assert!(text.contains("names the group Status"), "{text}");
+        // A slash with no such group is a whole name, like `a/b` is.
+        let steps = plan_tagging(&state, &strings(&["team/x"]), true).unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::Create {
+                name: "team/x".into()
+            }]
+        );
+        let err = plan_tagging(&state, &strings(&["  "]), true).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn untag_group_clears_the_choice() {
+        let state = catalog();
+        let steps = plan_untagging(&state, &[], Some("status")).unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::ClearGroup {
+                group_id: "g-status".into()
+            }]
+        );
+        assert_eq!(steps[0].command(), "set_project_group_tag");
+        assert_eq!(
+            steps[0].args("p1"),
+            json!({ "projectId": "p1", "groupId": "g-status", "tagId": null })
+        );
+        let err = plan_untagging(&state, &[], Some("Owner")).unwrap_err();
+        assert!(err.to_string().starts_with("not_found: "), "{err}");
+
+        // Named tags, grouped or not, are removed one by one, once each.
+        let steps = plan_untagging(
+            &state,
+            &strings(&["q4-launch", "Status/Done", "t-q4"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(steps, vec![assign("t-q4", false), assign("t-done", false)]);
+        let err = plan_untagging(&state, &strings(&["q4-launch", "nope"]), None).unwrap_err();
+        assert!(err.to_string().starts_with("not_found: "), "{err}");
+    }
+
+    #[test]
+    fn step_lines_say_what_changed_against_the_state_before() {
+        let state = catalog();
+        let p1 = project("p1", "Widgets");
+        // p1 has Status/In progress and q4-launch.
+        let steps = vec![
+            choose("g-status", "t-done"),
+            choose("g-prio", "t-high-p"),
+            assign("t-q4", true),
+            assign("t-infra", true),
+            Step::Create { name: "q4".into() },
+        ];
+        let created = vec![json!({ "id": "t-new", "name": "q4", "color": "cyan" })];
+        assert_eq!(
+            render_steps(&state, &p1, &steps, &created, "tagged"),
+            "tagged Widgets  id:p1\n\
+             \x20 Status: Done\n\
+             \x20 Priority: High\n\
+             \x20 + q4-launch  (already)\n\
+             \x20 + infra\n\
+             \x20 + q4  (created)  id:t-new"
+        );
+        let steps = vec![
+            choose("g-status", "t-prog"),
+            Step::ClearGroup {
+                group_id: "g-prio".into(),
+            },
+            Step::ClearGroup {
+                group_id: "g-status".into(),
+            },
+            assign("t-q4", false),
+            assign("t-done", false),
+        ];
+        assert_eq!(
+            render_steps(&state, &p1, &steps, &[], "untagged"),
+            "untagged Widgets  id:p1\n\
+             \x20 Status: In progress  (unchanged)\n\
+             \x20 Priority: (none)  (unchanged)\n\
+             \x20 Status: (none)\n\
+             \x20 - q4-launch\n\
+             \x20 - Status/Done  (not carried)"
+        );
     }
 
     #[test]

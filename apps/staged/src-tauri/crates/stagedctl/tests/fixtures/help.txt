@@ -71,10 +71,12 @@ Inspect projects and the repos attached to them
 Usage: stagedctl project [OPTIONS] <COMMAND>
 
 Commands:
-  list  List every project in the app
-  get   Show one project's repos and branches
-  tags  Show one project's tags: its choice in each group, then its free tags
-  help  Print this message or the help of the given subcommand(s)
+  list   List every project in the app
+  get    Show one project's repos and branches
+  tags   Show one project's tags: its choice in each group, then its free tags
+  tag    Tag a project: pick its tag in a group, or add free tags
+  untag  Untag a project: remove the named tags, or clear its choice in a group
+  help   Print this message or the help of the given subcommand(s)
 
 Options:
       --lock-path <PATH>
@@ -151,6 +153,78 @@ Arguments:
           Project name or id (see `stagedctl project list`)
 
 Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl project tag --help ===
+Tag a project. Each <tag> is applied in the order given: a grouped tag
+becomes the project's choice in that group, replacing whatever it had
+there (a project holds one tag per group); an ungrouped tag is added to
+the project's free tags. Tags the project already carries are left as
+they are. Naming two tags from the same group in one call is refused
+before anything is written.
+
+A <tag> that no tag in the catalog answers to exits 1 (`not_found`) and
+writes nothing. With --create, each such bare name is instead created as
+a new ungrouped tag with an automatic colour and added to the project in
+the same step, which is what the tag picker's "Create tag" row does.
+--create never creates a tag inside a group: use `stagedctl tag create
+--group` for that, or name an existing tag.
+
+Everything this verb does shows in the project header, where it can be
+undone with the group pill's None or the chip's ×.
+
+Usage: stagedctl project tag [OPTIONS] <PROJECT> <TAG>...
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+  <TAG>...
+          Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`); at most one tag per group
+
+Options:
+      --create
+          Create each bare name that no tag has, as an ungrouped tag
+
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl project untag --help ===
+Remove tags from a project. Each named <tag> is taken off the project,
+whether it is a grouped tag or a free one; a tag the project does not
+carry is left alone. With --group instead, the project's choice in that
+group is cleared, whatever it is (the group pill's None), and no <tag>
+arguments are accepted.
+
+Everything this verb does shows in the project header, where it can be
+undone by picking the tag again.
+
+Usage: stagedctl project untag [OPTIONS] <PROJECT> [TAG]...
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+  [TAG]...
+          Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`)
+
+Options:
+      --group <GROUP>
+          Clear the project's choice in this group (name or id) instead of naming tags
+
       --lock-path <PATH>
           Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
 

@@ -101,6 +101,16 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
         Noun::Project(ProjectVerb::List { tag }) => project_list(&client, &tag),
         Noun::Project(ProjectVerb::Get { project }) => project_get(&client, &project),
         Noun::Project(ProjectVerb::Tags { project }) => tags::project_tags(&client, &project),
+        Noun::Project(ProjectVerb::Tag {
+            project,
+            tags,
+            create,
+        }) => tags::project_tag(&client, &project, &tags, create),
+        Noun::Project(ProjectVerb::Untag {
+            project,
+            tags,
+            group,
+        }) => tags::project_untag(&client, &project, &tags, group.as_deref()),
         Noun::Tag(TagVerb::List { group }) => tags::tag_list(&client, group.as_deref()),
         Noun::Tag(TagVerb::Show { tag }) => tags::tag_show(&client, &tag),
         Noun::Tag(TagVerb::Group(TagGroupVerb::List)) => tags::tag_group_list(&client),
@@ -181,6 +191,14 @@ fn validate(command: &Noun) -> Result<(), CtlError> {
         {
             invalid("--repo requires --project (repo addresses are project-scoped)")
         }
+        Noun::Project(ProjectVerb::Untag { tags, group, .. }) => match (tags.is_empty(), group) {
+            (false, Some(_)) => invalid(
+                "--group clears the project's whole choice in that group and takes no <tag> \
+                 arguments; name the tags to remove, or pass --group alone",
+            ),
+            (true, None) => invalid("name at least one <tag> to remove, or pass --group"),
+            _ => Ok(()),
+        },
         Noun::Connect { client, .. } if client.trim().is_empty() => {
             invalid("--client must not be empty")
         }
@@ -2106,6 +2124,22 @@ mod tests {
                 &["stagedctl", "session", "list", "--repo", "o/r"],
                 "--repo requires --project",
             ),
+            (
+                &[
+                    "stagedctl",
+                    "project",
+                    "untag",
+                    "p",
+                    "q4",
+                    "--group",
+                    "Status",
+                ],
+                "--group clears",
+            ),
+            (
+                &["stagedctl", "project", "untag", "p"],
+                "name at least one <tag>",
+            ),
         ];
         for (args, expected) in cases {
             let err = validate(&parse_cli(args)).unwrap_err();
@@ -2155,6 +2189,10 @@ mod tests {
                 "--repo",
                 "o/r",
             ],
+            &["stagedctl", "project", "tag", "p", "q4", "Status/Done"],
+            &["stagedctl", "project", "tag", "p", "q4", "--create"],
+            &["stagedctl", "project", "untag", "p", "q4", "Status/Done"],
+            &["stagedctl", "project", "untag", "p", "--group", "Status"],
         ];
         for args in good {
             assert!(validate(&parse_cli(args)).is_ok(), "{args:?}");

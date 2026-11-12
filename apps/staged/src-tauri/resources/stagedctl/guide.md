@@ -69,6 +69,14 @@ Verbs that start sessions spawn real agents, which cost real money. They
 appear immediately in the UI, where the user can watch and cancel them —
 start sessions only when the task genuinely calls for it.
 
+Tag assignments (`stagedctl project tag`, `stagedctl project untag`) fit the
+invariant: they show at once as the pills and chips in the project header,
+where the user can undo them with a group pill's None or a chip's ×. A tag
+name the catalog does not have exits 1 rather than growing the catalog;
+pass `--create` only when a new ungrouped tag is genuinely what the task
+calls for, since the tag then exists for every project until the user
+deletes it in Settings ▸ Tags.
+
 ## When stagedctl is unavailable
 
 The CLI needs the spawning app instance to be alive and reachable over

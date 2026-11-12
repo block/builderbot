@@ -201,6 +201,62 @@ project's icon in the sidebar and grid.")]
         /// Project name or id (see `stagedctl project list`)
         project: String,
     },
+
+    /// Tag a project: pick its tag in a group, or add free tags
+    #[command(long_about = "\
+Tag a project. Each <tag> is applied in the order given: a grouped tag
+becomes the project's choice in that group, replacing whatever it had
+there (a project holds one tag per group); an ungrouped tag is added to
+the project's free tags. Tags the project already carries are left as
+they are. Naming two tags from the same group in one call is refused
+before anything is written.
+
+A <tag> that no tag in the catalog answers to exits 1 (`not_found`) and
+writes nothing. With --create, each such bare name is instead created as
+a new ungrouped tag with an automatic colour and added to the project in
+the same step, which is what the tag picker's \"Create tag\" row does.
+--create never creates a tag inside a group: use `stagedctl tag create
+--group` for that, or name an existing tag.
+
+Everything this verb does shows in the project header, where it can be
+undone with the group pill's None or the chip's ×.")]
+    Tag {
+        /// Project name or id (see `stagedctl project list`)
+        project: String,
+
+        /// Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag
+        /// list`); at most one tag per group
+        #[arg(required = true, value_name = "TAG")]
+        tags: Vec<String>,
+
+        /// Create each bare name that no tag has, as an ungrouped tag
+        #[arg(long)]
+        create: bool,
+    },
+
+    /// Untag a project: remove the named tags, or clear its choice in a group
+    #[command(long_about = "\
+Remove tags from a project. Each named <tag> is taken off the project,
+whether it is a grouped tag or a free one; a tag the project does not
+carry is left alone. With --group instead, the project's choice in that
+group is cleared, whatever it is (the group pill's None), and no <tag>
+arguments are accepted.
+
+Everything this verb does shows in the project header, where it can be
+undone by picking the tag again.")]
+    Untag {
+        /// Project name or id (see `stagedctl project list`)
+        project: String,
+
+        /// Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`)
+        #[arg(value_name = "TAG")]
+        tags: Vec<String>,
+
+        /// Clear the project's choice in this group (name or id) instead of
+        /// naming tags
+        #[arg(long, value_name = "GROUP")]
+        group: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -616,6 +672,63 @@ mod tests {
         assert!(
             matches!(cli.command, Noun::Project(ProjectVerb::Tags { project }) if project == "Widgets")
         );
+
+        // `project tag` needs at least one tag; --create is a plain flag.
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "project",
+            "tag",
+            "Widgets",
+            "Status/Done",
+            "q4",
+            "--create",
+        ])
+        .unwrap();
+        match cli.command {
+            Noun::Project(ProjectVerb::Tag {
+                project,
+                tags,
+                create,
+            }) => {
+                assert_eq!(project, "Widgets");
+                assert_eq!(tags, vec!["Status/Done", "q4"]);
+                assert!(create);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "tag", "Widgets"]).is_err(),
+            "at least one <tag> is required"
+        );
+
+        // `project untag` takes tags, or --group; the pairing is validate()'s.
+        let cli = Cli::try_parse_from(["stagedctl", "project", "untag", "Widgets", "q4"]).unwrap();
+        match cli.command {
+            Noun::Project(ProjectVerb::Untag {
+                project,
+                tags,
+                group,
+            }) => {
+                assert_eq!(project, "Widgets");
+                assert_eq!(tags, vec!["q4"]);
+                assert_eq!(group, None);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "project",
+            "untag",
+            "Widgets",
+            "--group",
+            "Status",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Project(ProjectVerb::Untag { tags, group: Some(g), .. })
+                if tags.is_empty() && g == "Status"
+        ));
 
         // `project list` keeps working bare, and --tag repeats.
         let cli = Cli::try_parse_from(["stagedctl", "project", "list"]).unwrap();

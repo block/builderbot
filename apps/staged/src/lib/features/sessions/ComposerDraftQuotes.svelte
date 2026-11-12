@@ -131,6 +131,11 @@
     return entryFor(id)?.querySelector<HTMLElement>('.composer-quote-reply') ?? null;
   }
 
+  /** A quote's block — breadcrumb, excerpt, reply — as rendered, for the field to scroll to. */
+  export function blockFor(id: string): HTMLElement | null {
+    return entryFor(id)?.querySelector<HTMLElement>('.composer-quote') ?? null;
+  }
+
   /** Whether focus is in a quote's block or the gap before it. */
   export function holdsFocus(id: string): boolean {
     const active = document.activeElement;

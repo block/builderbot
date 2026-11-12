@@ -9,8 +9,9 @@
   count it shows as `data-quote-count`, and offers a remove button per quote
   (`data-testid="remove-quote-<id>"`) that calls `onRemoveQuote` as the
   composer's X would, a Send button (`data-testid="composer-send"`) that
-  calls `onSend`, and a `focusQuoteReply` that places no caret but records
-  the ids asked for on the input (`data-focused-quotes`).
+  calls `onSend`, a `focusQuoteReply` that places no caret but records the
+  ids asked for on the input (`data-focused-quotes`), and a `revealQuote`
+  that scrolls nothing but records likewise (`data-revealed-quotes`).
 -->
 <script lang="ts">
   let {
@@ -41,6 +42,12 @@
     focusedQuotes = [...focusedQuotes, id];
     return false;
   }
+  /** The composer's scroll to a block, likewise recorded. */
+  let revealedQuotes = $state<string[]>([]);
+  export function revealQuote(id: string): boolean {
+    revealedQuotes = [...revealedQuotes, id];
+    return false;
+  }
 </script>
 
 <div
@@ -54,6 +61,7 @@
   data-send-split={sendControl?.split}
   data-quote-count={quotes.length}
   data-focused-quotes={focusedQuotes.join(' ')}
+  data-revealed-quotes={revealedQuotes.join(' ')}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
 {#each quotes as quote (quote.id)}

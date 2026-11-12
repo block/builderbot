@@ -1522,13 +1522,17 @@
   /* Holds the docked Reply button on a phone; nothing otherwise. Stands on
      the slot's bottom edge and covers at least the slot, so none of the bar
      shows past it; the chrome fills what the row leaves. Always the end of
-     the pane, it clears the home indicator. */
+     the pane, it clears the home indicator. The box is there whether or not
+     the row is, laid over the bar at the slot's size, so it takes no
+     presses itself: empty, a press on it is for the bar's buttons under it;
+     docked, the row (`.selection-reply-dock`) takes its own. */
   .selection-dock {
     position: absolute;
     left: 0;
     right: 0;
     bottom: 0;
     min-height: 100%;
+    pointer-events: none;
   }
 
   .selection-dock:not(:empty) {

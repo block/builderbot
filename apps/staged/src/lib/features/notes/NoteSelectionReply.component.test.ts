@@ -557,3 +557,65 @@ describe('NoteSelectionReply docked on a phone', () => {
     }
   });
 });
+
+// The note components as text (Vite's raw import), for their stylesheets.
+const componentSources = import.meta.glob('./*.svelte', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
+
+/**
+ * A component's `<style>` block, put in the document as plain CSS. Svelte's
+ * scoping class is not applied, so the rules match any element with the
+ * class; jsdom lays nothing out but does resolve declared properties from
+ * the stylesheets that match an element.
+ */
+function injectStyles(file: string): HTMLStyleElement {
+  const source = componentSources[file];
+  const css = source && /<style>([\s\S]*?)<\/style>/.exec(source)?.[1];
+  if (!css) throw new Error(`no <style> in ${file}`);
+  const style = document.createElement('style');
+  style.textContent = css;
+  document.head.appendChild(style);
+  return style;
+}
+
+describe('the dock over the note’s bottom bar', () => {
+  // NoteModal renders the dock (`.selection-dock`) whether or not a row is
+  // in it, laid over the bottom bar at least the bar's size, so the bar
+  // keeps its height when the row comes and the note's scroll box stays
+  // put. Empty, the box must take no presses meant for the bar's buttons
+  // under it — "Open chat", "Start note", "Unsent reply draft" — on any
+  // platform; the row portalled into it takes its own.
+  it('lets presses through an empty dock to the bar, and takes them on the docked row', () => {
+    const styles = ['./NoteModal.svelte', './NoteSelectionReply.svelte'].map(injectStyles);
+    const hosts = phoneHosts();
+    const slot = document.createElement('div');
+    slot.className = 'note-bottom';
+    const dock = document.createElement('div');
+    dock.className = 'selection-dock';
+    slot.appendChild(dock);
+    document.body.appendChild(slot);
+    try {
+      // Empty: at the slot's size, and no target.
+      expect(getComputedStyle(dock).minHeight).toBe('100%');
+      expect(getComputedStyle(dock).pointerEvents).toBe('none');
+
+      render({ ...hosts, dockHost: dock });
+      selectPassage();
+      settle(TOUCH_SETTLE_MS);
+
+      const row = dock.querySelector<HTMLElement>('.selection-reply-dock');
+      expect(row).not.toBeNull();
+      expect(row!.contains(dockButton())).toBe(true);
+      // Docked: the row is pressable on its own; the box around it still isn't.
+      expect(getComputedStyle(row!).pointerEvents).toBe('auto');
+      expect(getComputedStyle(dock).pointerEvents).toBe('none');
+    } finally {
+      hosts.cleanup();
+      slot.remove();
+      for (const style of styles) style.remove();
+    }
+  });
+});

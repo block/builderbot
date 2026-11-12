@@ -87,7 +87,7 @@
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { visibleViewport, watchVisualViewport } from '../../shared/visualViewport.svelte';
   import { adjacentEditor, caretLineEdges, isPlainVerticalArrow } from './composerCaretNav';
-  import { revealInField } from './composerFieldReveal';
+  import { revealElementInField, revealInField } from './composerFieldReveal';
   import { createCompositionSendGate, createTouchPressFocusGuard } from './composerSendPress';
   import type { HashtagItem } from '../../types';
 
@@ -322,6 +322,18 @@
     const focused = draftQuotesView?.focusReply(id) ?? false;
     if (focused) revealFocused();
     return focused;
+  }
+
+  /**
+   * Scroll the field so a quote block shows, without touching focus — for a
+   * block Undo put back on a touch screen, where focusing its reply would
+   * raise the keyboard; false if the block isn't shown.
+   */
+  export function revealQuote(id: string): boolean {
+    const block = draftQuotesView?.blockFor(id) ?? null;
+    if (!block || !fieldEl) return false;
+    revealElementInField(fieldEl, block);
+    return true;
   }
 
   let submitBlock = $derived(

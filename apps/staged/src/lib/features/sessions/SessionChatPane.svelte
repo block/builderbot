@@ -559,12 +559,19 @@
     });
   }
 
+  /** Scroll the composer's field to a quote block, once it is rendered, leaving focus where it is. */
+  function revealDraftQuote(quoteId: string) {
+    tick().then(() => {
+      if (!closed && active) composerView?.revealQuote(quoteId);
+    });
+  }
+
   /**
    * Take a quote block out of the draft. One with a reply typed under it is
    * offered back in a toast (there is no other undo for a block): Undo puts
    * it back where it was, reply and lead-in text included, and — with a
-   * pointer, not a touch screen — the caret in its reply. An unanswered
-   * block just goes.
+   * pointer, not a touch screen — the caret in its reply; on a touch screen
+   * the field is scrolled to show it instead. An unanswered block just goes.
    */
   function removeQuote(id: string) {
     const taken = takeDraftQuote(currentDraft(), id);
@@ -598,8 +605,12 @@
             receiveDraftEdit(sid, (draft) => restoreDraftQuote(draft, removed));
             // The caret goes back into the reply for a keyboard user; with
             // a touch screen that would raise the on-screen keyboard over
-            // the restored draft, which the user hasn't asked to type in.
+            // the restored draft, which the user hasn't asked to type in,
+            // so there the field is only scrolled to the block, which in a
+            // capped field that has scrolled on may otherwise come back
+            // out of view.
             if (!viewport.hasCoarsePointer) focusDraftQuoteReply(removed.quote.id);
+            else revealDraftQuote(removed.quote.id);
             return;
           }
           // This pane has moved on: another pane showing the draft takes it,

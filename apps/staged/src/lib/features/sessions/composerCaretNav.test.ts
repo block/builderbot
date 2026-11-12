@@ -160,6 +160,42 @@ describe('caretLineEdges', () => {
     expect(caretLineEdges(el)).toEqual({ first: false, last: true });
   });
 
+  it('takes the caret’s own rect where the browser gives it one, and measures the neighbours only without it', () => {
+    // Chromium gives a collapsed range in a text node a rect, on the line
+    // the caret is drawn on: after End on the first of two wrapped lines
+    // that is the end of the upper line, though the next character starts
+    // the lower. Read from the neighbours alone, that caret would count as
+    // on the last line and ArrowDown would skip the second line.
+    const el = wrapped('abcdefghijklmnopqrst', 10);
+    const text = el.firstChild as Text;
+    const neighbours = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects')!
+      .value as (this: Range) => DOMRect[];
+    Object.defineProperty(Range.prototype, 'getClientRects', {
+      configurable: true,
+      writable: true,
+      value(this: Range) {
+        if (!this.collapsed) return neighbours.call(this);
+        if (this.startContainer !== text) return [];
+        // At the wrap, the caret drawn on the upper line; elsewhere a rect
+        // with no height, as good as none.
+        return this.startOffset === 10 ? [lineRect(0)] : [rect(0, 0, 0)];
+      },
+    });
+
+    placeCaret(text, 10);
+    expect(caretLineEdges(el)).toEqual({ first: true, last: false });
+    expect(caretLineRectIn(el)).toEqual({ top: LINE_TOP, bottom: LINE_TOP + LINE_HEIGHT });
+
+    // Without a usable rect of its own the caret is measured from its
+    // neighbours as before: the character after, on the lower line.
+    placeCaret(text, 15);
+    expect(caretLineEdges(el)).toEqual({ first: false, last: true });
+    expect(caretLineRectIn(el)).toEqual({
+      top: LINE_TOP + LINE_HEIGHT,
+      bottom: LINE_TOP + 2 * LINE_HEIGHT,
+    });
+  });
+
   it('knows a caret at either end of the content without measuring that side', () => {
     const el = wrapped('abcdefghijklmnopqrst', 10);
     const text = el.firstChild as Text;

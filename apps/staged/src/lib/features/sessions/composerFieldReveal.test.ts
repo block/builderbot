@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest';
-import { revealInField } from './composerFieldReveal';
+import { revealElementInField, revealInField } from './composerFieldReveal';
 
 // jsdom lays nothing out, so the field and its input are given boxes: the
 // field's view is the 100px from 201 to 301 (a 1px border above), and its
 // scroll offset is kept on the element. What is covered is the least scroll
 // that brings an input into view, an input already in view left alone, and a
-// tall input followed by its caret's line rather than its top.
+// tall input followed by its caret's line rather than its top. A block
+// nobody is typing in (one Undo put back) is shown whole, or by its top
+// when it is taller than the view.
 
 const originalGetClientRects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects');
 const made: HTMLElement[] = [];
@@ -105,5 +107,35 @@ describe('revealInField', () => {
     window.getSelection()?.removeAllRanges();
     revealInField(el, target);
     expect(el.scrollTop).toBe(49);
+  });
+});
+
+describe('revealElementInField', () => {
+  it('scrolls the field by the least that shows a block below its view', () => {
+    const el = field();
+    const block = input(el, 320, 380);
+
+    revealElementInField(el, block);
+
+    expect(el.scrollTop).toBe(79);
+  });
+
+  it('shows the top of a block taller than the view, having no caret to follow', () => {
+    const el = field(40);
+    const block = input(el, 320, 600);
+
+    revealElementInField(el, block);
+
+    // The block's top is now at the view's top, 201.
+    expect(el.scrollTop).toBe(159);
+  });
+
+  it('leaves the field alone for a block already in view', () => {
+    const el = field(40);
+    const block = input(el, 210, 290);
+
+    revealElementInField(el, block);
+
+    expect(el.scrollTop).toBe(40);
   });
 });

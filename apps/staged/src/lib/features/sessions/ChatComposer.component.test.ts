@@ -210,6 +210,25 @@ describe('ChatComposer field', () => {
       else delete (Range.prototype as Partial<Range>).getClientRects;
     }
   });
+
+  it('scrolls the field to a quote block on request without moving focus', () => {
+    render([quote('a'), quote('b')]);
+    const fieldEl = layOutField();
+    const block = target.querySelector<HTMLElement>('[data-quote-entry="b"] .composer-quote');
+    if (!block) throw new Error('no block');
+    block.getBoundingClientRect = () => rect(320, 380);
+    const ancestors = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const focused = document.activeElement;
+
+    expect(component!.revealQuote('b')).toBe(true);
+    expect(fieldEl.scrollTop).toBe(79);
+    expect(document.activeElement).toBe(focused);
+    expect(ancestors).not.toHaveBeenCalled();
+    // A block that isn't shown is reported, not scrolled to.
+    expect(component!.revealQuote('missing')).toBe(false);
+    expect(fieldEl.scrollTop).toBe(79);
+    ancestors.mockRestore();
+  });
 });
 
 describe('ChatComposer placeholder', () => {

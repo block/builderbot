@@ -836,13 +836,19 @@
        button (and its on-screen keyboard): a toast there — the Undo offered
        for a removed quote, for one — sat over Send for its lifetime, and a
        tap meant for it after it had gone sent the message. On a phone they
-       drop in from the top, over the dialog header. -->
+       drop in from the top, over the dialog header — the full width of the
+       screen (svelte-sonner's narrow layout), Close button included — so
+       there they stay half as long and stack behind one another rather
+       than expanded, to cover as little of the header for as short a time
+       as the Undo needs. A press on a toast is kept from counting as a
+       press outside a dialog wherever the toast is (dialog-content.svelte
+       looks for the toaster up the target's ancestors, not at a position). -->
   <Toaster
     position={viewport.sheetMenus ? 'top-center' : 'bottom-right'}
     visibleToasts={4}
-    duration={8000}
+    duration={viewport.sheetMenus ? 4000 : 8000}
     closeButton
-    expand
+    expand={!viewport.sheetMenus}
     offset={safeAreaOffset('24px')}
     mobileOffset={safeAreaOffset('16px')}
   />

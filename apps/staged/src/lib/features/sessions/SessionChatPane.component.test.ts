@@ -262,6 +262,12 @@ describe('SessionChatPane quoted replies', () => {
     return (input?.dataset.focusedQuotes ?? '').split(' ').filter(Boolean);
   }
 
+  /** The quote blocks the pane asked the composer to scroll to without focusing. */
+  function revealedQuotes(): string[] {
+    const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
+    return (input?.dataset.revealedQuotes ?? '').split(' ').filter(Boolean);
+  }
+
   function lastSaved(key: string) {
     const calls = writer.scheduleSave.mock.calls.filter(([savedKey]) => savedKey === key);
     return calls[calls.length - 1]?.[1];
@@ -327,15 +333,18 @@ describe('SessionChatPane quoted replies', () => {
     unmount(pane);
   });
 
-  it('puts the caret in the restored reply for a pointer, but not on a touch screen', async () => {
+  it('puts the caret in the restored reply for a pointer, and only scrolls to the block on a touch screen', async () => {
     const first = await removeMiddleQuote('session-caret');
     lastUndo().action.onClick();
     await settle();
     expect(quoteCount()).toBe(3);
+    // The focus brings the block into the field's view itself.
     expect(focusedQuotes()).toEqual([first.second.id]);
+    expect(revealedQuotes()).toEqual([]);
     unmount(first.pane);
 
-    // A touch screen's keyboard would rise over the restored draft.
+    // A touch screen's keyboard would rise over the restored draft, so the
+    // field is scrolled to the block and nothing is focused.
     viewportMock.hasCoarsePointer = true;
     try {
       const second = await removeMiddleQuote('session-caret-touch');
@@ -343,6 +352,7 @@ describe('SessionChatPane quoted replies', () => {
       await settle();
       expect(quoteCount()).toBe(3);
       expect(focusedQuotes()).toEqual([]);
+      expect(revealedQuotes()).toEqual([second.second.id]);
       unmount(second.pane);
     } finally {
       viewportMock.hasCoarsePointer = false;

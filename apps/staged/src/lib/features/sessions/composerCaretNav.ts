@@ -34,18 +34,20 @@ const ZERO_WIDTH_SPACE = '​';
  *
  * An empty input has one line, so its caret is on both edges, and a caret
  * with no content before it is on the first line, one with none after it on
- * the last, whatever the layout. Otherwise the caret's line is measured from
- * the content next to it — a collapsed range has no rect of its own in
- * WebKit or Firefox — and compared with the input's content box. At a soft
- * wrap the character before the caret ends one line and the one after starts
- * the next, and the DOM doesn't say which the caret is drawn on. The
- * character after is read for both edges: a browser places the caret at a
- * wrap with downstream affinity after a click, Home, or an arrow from the
- * line above, i.e. at the start of the lower line, so that is the line the
- * caret is drawn on in every case but one — End (or ArrowRight to the end
- * of the line) leaves it drawn at the end of the upper line, and ArrowUp
- * there costs the extra press the browser takes to move it. At the end of
- * the content, where nothing follows, the character before is read.
+ * the last, whatever the layout. Otherwise the caret's line is measured and
+ * compared with the input's content box. The caret's own rect comes first:
+ * Chromium gives a collapsed range in a text node a rect on the line the
+ * caret is drawn on, affinity included, so at a soft wrap it tells the end
+ * of the upper line (after End or ArrowRight) from the start of the lower
+ * (after a click, Home or an arrow from above). WebKit and Firefox give a
+ * collapsed range no rect, and there the line is measured from the content
+ * next to the caret. At a soft wrap the character before the caret ends one
+ * line and the one after starts the next, and the DOM doesn't say which the
+ * caret is drawn on; the character after is read for both edges, as the
+ * downstream placement is the usual one, so the one case read wrong there
+ * — End leaving the caret drawn on the upper line — costs the extra press
+ * the browser takes to move it. At the end of the content, where nothing
+ * follows, the character before is read.
  */
 export function caretLineEdges(editor: HTMLElement): CaretLineEdges | null {
   const range = collapsedCaretIn(editor);
@@ -68,7 +70,8 @@ export function caretLineEdges(editor: HTMLElement): CaretLineEdges | null {
 /**
  * The line the caret in `editor` is drawn on, in viewport coordinates, or
  * `null` without a collapsed caret in it or a way to measure one. At a soft
- * wrap this is the line the caret's next character would start.
+ * wrap this is the line the caret's next character would start, unless the
+ * browser gives the caret a rect of its own.
  */
 export function caretLineRectIn(editor: HTMLElement): LineRect | null {
   const range = collapsedCaretIn(editor);
@@ -110,9 +113,11 @@ function rangeHasContent(range: Range): boolean {
 }
 
 /**
- * The line of the caret, measured from the content on `side` of it and
- * falling back to the other side at the content's edge, then to a marker put
- * in its place (only where the caret is between nodes, so nothing is split).
+ * The line of the caret: the collapsed range's own rect where the browser
+ * gives it one (Chromium, in a text node), else measured from the content on
+ * `side` of it, falling back to the other side at the content's edge, then
+ * to a marker put in its place (only where the caret is between nodes, so
+ * nothing is split).
  */
 function caretLineRect(
   editor: HTMLElement,
@@ -121,8 +126,23 @@ function caretLineRect(
 ): LineRect | null {
   const other = side === 'before' ? 'after' : 'before';
   return (
-    neighbourRect(editor, caret, side) ?? neighbourRect(editor, caret, other) ?? markerRect(caret)
+    ownRect(caret) ??
+    neighbourRect(editor, caret, side) ??
+    neighbourRect(editor, caret, other) ??
+    markerRect(caret)
   );
+}
+
+/**
+ * The rect a browser gives the collapsed caret range itself, on the line
+ * the caret is drawn on. Chromium reports one for a caret in a text node;
+ * WebKit and Firefox report none, and a caret between nodes has none
+ * anywhere, so the callers measure the neighbouring content instead.
+ */
+function ownRect(caret: Range): LineRect | null {
+  if (typeof caret.getClientRects !== 'function') return null;
+  const rect = [...caret.getClientRects()].find((candidate) => candidate.height > 0);
+  return rect ? { top: rect.top, bottom: rect.bottom } : null;
 }
 
 /**

@@ -703,7 +703,10 @@
   /* The docked button: a bar of the bottom bar's chrome, full width, with a
      finger-sized row in it. It rises in with the selection and falls away
      (`is-leaving`, DOCK_LEAVE_MS) as the selection goes. */
+  /* The dock it is portalled into lets presses through to the bar it covers
+     (NoteModal's `.selection-dock`); the row takes its own. */
   .selection-reply-dock {
+    pointer-events: auto;
     padding: 8px 16px;
     padding-left: calc(16px + var(--dialog-safe-left, 0px));
     padding-right: calc(16px + var(--dialog-safe-right, 0px));

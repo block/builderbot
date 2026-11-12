@@ -802,6 +802,8 @@
     forcePushNoVerify = noVerify;
     forcePushDeferred = deferred;
     showForcePushDialog = true;
+  }
+
   function sessionStatusLabel(status: string): string {
     if (status === 'paused') return 'paused because of an API limit';
     if (status === 'error') return 'failed';

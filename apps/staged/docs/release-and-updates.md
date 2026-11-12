@@ -227,3 +227,16 @@ Set `DRY_RUN=1` to validate artifacts and print the `gh` commands without touchi
 real releases. The release-script tests (`scripts/release-checks.test.ts` and
 `scripts/release-scripts.test.ts`) exercise these checks against dry-run fixtures
 and run as part of `pnpm test`.
+
+## The stagedctl sidecar
+
+The `stagedctl` control CLI ships inside the bundle at
+`Staged.app/Contents/MacOS/stagedctl` as a Tauri sidecar
+(`bundle.externalBin` in `tauri.conf.json`), so the codesign/notarize step
+signs it along with the app. `scripts/prepare-stagedctl-sidecar.sh` builds
+and stages it under `src-tauri/binaries/` before every tauri build — it runs
+automatically from the before-dev/before-build hooks and the `just
+dev`/`lint`/`test` recipes, so no release-workflow step is needed. App
+updates replace the sidecar together with the app; `install.sh` symlinks
+`/usr/local/bin/stagedctl` into the installed bundle so a user-visible CLI
+tracks those updates.

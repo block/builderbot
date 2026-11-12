@@ -93,7 +93,7 @@ pub(crate) const SHOW_WINDOW_MENU_ID: &str = "show_window";
 /// windows are `win-N` peers — see `window_commands` — with nothing privileged
 /// about `main` beyond being the one whose geometry is restored, which makes it
 /// the nicest default to reveal.
-const MAIN_WINDOW_LABEL: &str = "main";
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
 /// Total budget for stopping sessions and actions. Sessions and actions are
 /// signalled first and waited on against this one deadline, because the
@@ -608,6 +608,10 @@ pub fn shutdown_cleanup(app: &AppHandle) {
     };
 
     quit_state.run_cleanup_once(|| {
+        // Retire the stagedctl discovery file and PATH shim dir first so CLI
+        // callers stop finding an instance that is going away.
+        crate::control_server::remove_instance_files();
+
         // Signal both kinds of work before waiting on either, so they shut down
         // in parallel inside one shared budget instead of one after the other.
         let OwnedSessionSignals {

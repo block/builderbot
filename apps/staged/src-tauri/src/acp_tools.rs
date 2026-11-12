@@ -51,7 +51,10 @@ fn apply_tools_env_with_dirs(vars: &mut Vec<(String, String)>, dirs: &[PathBuf])
     apply_goose_search_paths(vars, dirs);
 }
 
-fn prepend_dirs_to_path(vars: &mut Vec<(String, String)>, dirs: &[PathBuf]) {
+/// Prepend `dirs` to the snapshot's PATH (deduplicating dirs already on it),
+/// creating PATH when absent. Also used by `control_server` to put the
+/// per-instance `stagedctl` shim dir on agent PATHs.
+pub(crate) fn prepend_dirs_to_path(vars: &mut Vec<(String, String)>, dirs: &[PathBuf]) {
     match vars.iter_mut().find(|(key, _)| key == "PATH") {
         Some((_, value)) => {
             let mut paths = dirs.to_vec();

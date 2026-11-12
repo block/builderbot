@@ -35,14 +35,14 @@ pub use driver::{
     sole_config_value_family_match_in, strip_code_fences, strip_config_value_hint,
     AcpAuthenticationSelection, AcpDriver, AcpEventMetadata, AcpInitializeMetadata,
     AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
-    AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentDriver, AgentRunOutcome,
-    AsyncTaskStopHandle, AttachOutcome, AttachedSession, BackgroundHoldConfig,
-    BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BasicMessageWriter,
-    CancelOutcome, DetachHandle, LatestPrompt, MessageWriter, OutOfTurnPermissionPolicy,
-    PromptImage, ReattachTurn, RecordedTurn, RemoteProcess, RemoteProcessStatus, ReplayBoundary,
-    SessionConnection, SessionLifetime, SessionSettleReason, SessionSettled, SteerError,
-    SteerOutcome, Store, TransportLoss, TransportLossPhase, TurnControlHandle, TurnResult,
-    BACKGROUND_CONTINUATION_ORIGIN,
+    AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentDriver, AgentProcessEvent,
+    AgentProcessObserver, AgentRunOutcome, AsyncTaskStopHandle, AttachOutcome, AttachedSession,
+    BackgroundHoldConfig, BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask,
+    BasicMessageWriter, CancelOutcome, DetachHandle, LatestPrompt, MessageWriter,
+    OutOfTurnPermissionPolicy, PromptImage, ReattachTurn, RecordedTurn, RemoteProcess,
+    RemoteProcessStatus, ReplayBoundary, SessionConnection, SessionLifetime, SessionSettleReason,
+    SessionSettled, SteerError, SteerOutcome, Store, TransportLoss, TransportLossPhase,
+    TurnControlHandle, TurnResult, BACKGROUND_CONTINUATION_ORIGIN,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

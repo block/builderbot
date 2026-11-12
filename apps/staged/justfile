@@ -14,8 +14,16 @@ install:
 # Development
 # ============================================================================
 
+# Build the stagedctl CLI and stage it where `bundle.externalBin` expects it
+# (src-tauri/binaries/stagedctl-<triple>). Required before ANY cargo build of
+# the app crate — tauri-build fails when the sidecar file is missing — so
+# dev/lint/test depend on this, and the tauri before-dev/before-build hooks
+# run the same script.
+stage-sidecar:
+    bash scripts/prepare-stagedctl-sidecar.sh
+
 # Run the app in development mode (optionally point to another repo)
-dev repo="":
+dev repo="": stage-sidecar
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -165,12 +173,12 @@ fmt-check-frontend:
     pnpm exec prettier --check "src/**/*.{ts,svelte,css,html}"
 
 # Lint Rust code with clippy
-lint:
-    cd src-tauri && cargo clippy -- -D warnings
+lint: stage-sidecar
+    cd src-tauri && cargo clippy --workspace -- -D warnings
 
 # Run Rust unit tests
-test:
-    cd src-tauri && cargo test --lib --bins --tests
+test: stage-sidecar
+    cd src-tauri && cargo test --workspace --lib --bins --tests
 
 # Run frontend unit tests
 test-frontend:

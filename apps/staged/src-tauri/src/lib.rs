@@ -14,6 +14,7 @@ pub mod blox;
 mod branch_teardown;
 pub mod branches;
 pub(crate) mod commit_reassociation;
+pub mod control_server;
 pub mod diff_cache;
 pub mod diff_commands;
 pub mod doctor;
@@ -2050,6 +2051,23 @@ pub fn run() {
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
 
+            // The stagedctl credentials: the control server resolves bearers
+            // against this registry and every local session start mints into
+            // it, so it is managed ahead of `start` and of the recovery
+            // below (pinned by a control_server test).
+            app.manage(control_server::ControlGrants::default());
+
+            // Control server for stagedctl — always on. Listens on a Unix
+            // socket in the owner-private ~/.staged/control/<pid>/ directory
+            // and exposes only the fixed allowlist in
+            // `control_server::ALLOWED_COMMANDS`, to callers holding a
+            // credential from the registry above. After the state above is
+            // managed (its handlers dispatch against it) and before the
+            // recovery below: the socket, discovery file and shim are ready
+            // when `start` returns, and a session the recovery or the
+            // startup kick starts keeps the env it launched with for life.
+            control_server::start(app.handle().clone());
+
             // Startup queue recovery, once every piece of state a drain reads
             // is managed: the kicks below run drains on their own tasks, and
             // those resolve the store and registry from the handle.
@@ -2271,6 +2289,7 @@ pub fn run() {
             delete_action_context,
             // Timeline
             timeline::get_branch_timeline,
+            timeline::get_project_timeline,
             timeline::refresh_branch_git_state,
             timeline::list_parent_branch_commits,
             timeline::reset_branch_to_remote,
@@ -2429,6 +2448,11 @@ pub fn run() {
             doctor::login::doctor_login_status,
             doctor::login::send_doctor_login_code,
             doctor::run_doctor_update,
+            // stagedctl connected apps (consent + Settings)
+            control_server::commands::list_pending_control_authorizations,
+            control_server::commands::answer_control_authorization,
+            control_server::commands::list_control_grants,
+            control_server::commands::revoke_control_grant,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

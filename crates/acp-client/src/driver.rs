@@ -67,7 +67,7 @@ pub(crate) use blox_process::BloxProcess;
 pub(crate) use blox_process::RemoteProcessProbe;
 pub use blox_process::{RemoteProcess, RemoteProcessStatus};
 pub use catch_up::LatestPrompt;
-use connection_io::{normalized_stdout, spawn_stderr_reader, staged_client};
+use connection_io::{normalized_stdout, observe_agent_process, spawn_stderr_reader, staged_client};
 pub use recorded_turn::{recording_shows_held_work, RecordedTurn};
 
 use transport_loss::{
@@ -902,6 +902,25 @@ pub struct BackgroundHoldTask {
 /// thread: keep it cheap and non-blocking (emit an event, don't do I/O).
 pub type BackgroundHoldObserver = Arc<dyn Fn(BackgroundHoldStatus) + Send + Sync>;
 
+/// What an [`AgentProcessObserver`] is told about a local agent process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentProcessEvent {
+    /// `spawn` returned this pid: the agent itself — or the login shell that
+    /// will `exec` it, which keeps the pid — so a client can recognise the
+    /// process tree a session's commands run in.
+    Spawned(u32),
+    /// The process was observed gone (its stderr reached EOF). The kernel may
+    /// reuse the pid from here on, so a client keying on it should forget it.
+    Exited(u32),
+}
+
+/// Callback told of every local agent process a driver spawns: once the
+/// moment `spawn` returns, and once when the process is seen to have exited.
+/// Never called for remote sessions, whose process lives on the workstation.
+///
+/// Called from the connection task: keep it cheap and non-blocking.
+pub type AgentProcessObserver = Arc<dyn Fn(AgentProcessEvent) + Send + Sync>;
+
 /// Session-connection lifetime states.
 ///
 /// `TurnLive` and `BackgroundHolding` are the two live states; the rest are
@@ -1185,6 +1204,9 @@ pub struct AcpDriver {
     /// hold, so the client can present the wait. Only ever called with a
     /// `background_hold` configured.
     background_hold_observer: Option<BackgroundHoldObserver>,
+    /// Told the pid of each local agent process this driver spawns. See
+    /// [`AcpDriver::with_agent_process_observer`].
+    agent_process_observer: Option<AgentProcessObserver>,
     /// Treat the agent as not advertising steering even when it does, so
     /// every [`TurnControlHandle::steer`] is refused locally and callers take
     /// the interrupt-and-reprompt path. See
@@ -1221,6 +1243,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
                 blox_process: None,
@@ -1243,6 +1266,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
                 blox_process: None,
@@ -1266,6 +1290,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -1325,6 +1350,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: agent_id
                 .and_then(blox_unattended_session_mode)
@@ -1415,6 +1441,15 @@ impl AcpDriver {
         observer: Option<BackgroundHoldObserver>,
     ) -> Self {
         self.background_hold_observer = observer;
+        self
+    }
+
+    /// Observe the pid of every local agent process this driver spawns, so
+    /// the client can tell which running session a process descends from
+    /// (Staged keys its control-socket consent gate on it). Not called for
+    /// remote sessions.
+    pub fn with_agent_process_observer(mut self, observer: Option<AgentProcessObserver>) -> Self {
+        self.agent_process_observer = observer;
         self
     }
 
@@ -2829,6 +2864,9 @@ impl AcpDriver {
         } else {
             let mut child = cmd.spawn().map_err(spawn_error)?;
             let child_exited = CancellationToken::new();
+            if let (Some(observer), Some(pid)) = (&self.agent_process_observer, child.id()) {
+                observe_agent_process(observer, pid, &child_exited);
+            }
             if let Some(stderr) = child.stderr.take() {
                 spawn_stderr_reader(
                     stderr,
@@ -10793,6 +10831,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -10810,6 +10849,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -10838,6 +10878,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,
@@ -10855,6 +10896,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
             blox_process: None,

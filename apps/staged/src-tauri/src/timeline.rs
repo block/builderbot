@@ -333,6 +333,96 @@ pub fn build_branch_timeline_public(
     build_branch_timeline(store, branch_id)
 }
 
+/// One branch of a [`ProjectTimeline`] fan-out, labeled with its repo address
+/// (`githubRepo`/`subpath`) so callers can present per-repo timelines without
+/// re-joining against `list_project_repos`.
+///
+/// `timeline` is `None` when that branch's timeline failed to build; the
+/// error string is carried instead, so one broken worktree doesn't hide the
+/// rest of the project.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectBranchTimeline {
+    pub branch: crate::store::Branch,
+    pub github_repo: Option<String>,
+    pub subpath: Option<String>,
+    pub timeline: Option<BranchTimeline>,
+    pub error: Option<String>,
+}
+
+/// A whole-project view: the project's notes plus every branch's timeline.
+///
+/// There is deliberately no project-level *merged* timeline — a branch is per
+/// (project, repo) and its timeline is the unit the UI renders — so this is
+/// the server-side equivalent of the frontend's one-card-per-branch fan-out,
+/// added for `stagedctl timeline show <project>`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTimeline {
+    pub project_notes: Vec<crate::store::ProjectNote>,
+    pub branches: Vec<ProjectBranchTimeline>,
+}
+
+pub(crate) fn build_project_timeline(
+    store: &Arc<Store>,
+    project_id: &str,
+) -> Result<ProjectTimeline, String> {
+    store
+        .get_project(project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    let project_notes = store
+        .list_project_notes_with_status(project_id)
+        .map_err(|e| e.to_string())?;
+
+    let branches = store
+        .list_branches_for_project(project_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut branch_timelines = Vec::with_capacity(branches.len());
+    for branch in branches {
+        let (github_repo, subpath) = branch
+            .project_repo_id
+            .as_deref()
+            .and_then(|repo_id| store.get_project_repo(repo_id).ok().flatten())
+            .map(|repo| (Some(repo.github_repo), repo.subpath))
+            .unwrap_or((None, None));
+
+        let (timeline, error) = match build_branch_timeline(store, &branch.id) {
+            Ok(timeline) => (Some(timeline), None),
+            Err(e) => (None, Some(e)),
+        };
+
+        branch_timelines.push(ProjectBranchTimeline {
+            branch,
+            github_repo,
+            subpath,
+            timeline,
+            error,
+        });
+    }
+
+    Ok(ProjectTimeline {
+        project_notes,
+        branches: branch_timelines,
+    })
+}
+
+/// Fan out [`get_branch_timeline`] over every branch of a project, plus the
+/// project's notes, in one call.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_project_timeline(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+) -> Result<ProjectTimeline, String> {
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || build_project_timeline(&store, &project_id))
+        .await
+        .map_err(|e| format!("Project timeline task failed: {e}"))?
+}
+
 fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store

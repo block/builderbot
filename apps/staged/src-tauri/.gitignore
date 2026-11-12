@@ -3,3 +3,8 @@
 /target/
 /gen/schemas
 /tauri.release.conf.json
+
+# Staged sidecars (bundle.externalBin) — produced by
+# scripts/prepare-stagedctl-sidecar.sh
+/binaries/*
+!/binaries/README.md

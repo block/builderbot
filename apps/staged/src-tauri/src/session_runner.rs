@@ -274,6 +274,14 @@ struct RegistryInner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RegistrationEpoch(u64);
 
+impl RegistrationEpoch {
+    /// The bare counter, for records that name a registration (a control
+    /// grant's actor) without holding the registry's type.
+    pub(crate) fn value(self) -> u64 {
+        self.0
+    }
+}
+
 struct RunningSession {
     epoch: RegistrationEpoch,
     token: CancellationToken,
@@ -1716,6 +1724,17 @@ pub fn start_session(
     let store_for_status = Arc::clone(&store);
 
     std::thread::spawn(move || {
+        // The session's stagedctl credential (control_server's class A
+        // grant): read-write within this session's own project, delivered
+        // through an owner-only per-session file whose path rides in
+        // STAGEDCTL_LOCK. Held by this thread for the run's life so its Drop
+        // — the revoke, and the file's removal — runs after the terminal
+        // write below, and on a panic too. The revoke is by token, never by
+        // session id: a resume or queued follow-up can register a successor
+        // under this id before this thread exits, and its grant must stay.
+        let control_lease = control_grant_request(&config, registration)
+            .and_then(|request| crate::control_server::mint_session_lease(&app_handle, request));
+
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1751,11 +1770,31 @@ pub fn start_session(
                 (None, Some(provider_id)) => crate::agent::env_vars::read_agent_env(provider_id),
                 _ => Vec::new(),
             };
+            // A session holding a control credential also gets STAGEDCTL_LOCK
+            // pointing at its per-session credential file plus STAGEDCTL_BIN
+            // pointing at the bundled sidecar, so the agent can run stagedctl
+            // with zero configuration. Sessions with no lease — remote
+            // (Blox) ones, which can't reach the socket or the file, and the
+            // others `control_grant_request` excludes — get neither.
+            let mut session_env = config.extra_env.clone();
+            session_env.extend(crate::control_server::stagedctl_env(
+                control_lease.as_ref(),
+            ));
             let driver = driver
                 .with_extra_env(crate::agent::env_vars::merge_agent_env(
                     agent_env,
-                    config.extra_env.clone(),
+                    session_env,
                 ))
+                // Each agent process the driver spawns is registered as this
+                // session's until it exits (or the lease ends), so the
+                // control server can tell a `stagedctl` run from inside this
+                // session's process tree apart from the user's own, whatever
+                // credential it presents (see `control_server::ancestry`).
+                .with_agent_process_observer(
+                    control_lease
+                        .as_ref()
+                        .map(|lease| lease.agent_process_observer()),
+                )
                 .with_background_hold(config.background_hold.clone())
                 // Publish the hold so the UI can show "waiting on background
                 // task (N)" — the session stays `running` throughout, so this
@@ -1810,6 +1849,14 @@ pub fn start_session(
                     Ok(snapshot) => {
                         let mut vars = snapshot.vars().into_owned();
                         crate::acp_tools::apply_managed_tools_env(&mut vars);
+                        // Put this instance's stagedctl shim dir on the
+                        // agent's PATH so the bare `stagedctl` name resolves
+                        // (STAGEDCTL_BIN above is the exact-path fallback,
+                        // e.g. when this snapshot capture fails). Only for a
+                        // session that holds a credential to use it with.
+                        if control_lease.is_some() {
+                            crate::control_server::apply_stagedctl_path(&mut vars);
+                        }
                         driver.with_env_snapshot(vars)
                     }
                     Err(e) => {
@@ -2230,6 +2277,31 @@ pub fn start_session(
     });
 
     Ok(SessionStartOutcome::Started)
+}
+
+/// The control credential a session start asks for, or `None` when it gets
+/// none: remote sessions (no path to the socket), sessions with no project
+/// (no scope to confine a grant to) and project (MCP) sessions, whose MCP
+/// tools stay their only control surface. The gate itself lives with the
+/// grants (`control_server::session_grant_applies`); this just reads the
+/// config.
+fn control_grant_request(
+    config: &SessionConfig,
+    registration: RegistrationEpoch,
+) -> Option<crate::control_server::SessionGrantRequest> {
+    if !crate::control_server::session_grant_applies(
+        config.workspace_name.as_deref(),
+        config.project_id.as_deref(),
+        config.mcp_project_id.as_deref(),
+    ) {
+        return None;
+    }
+    Some(crate::control_server::SessionGrantRequest {
+        session_id: config.session_id.clone(),
+        epoch: registration.value(),
+        project_id: config.project_id.clone()?,
+        branch_id: config.branch_id.clone(),
+    })
 }
 
 /// How a run's last connection settled, beyond its result: what the

@@ -21,6 +21,7 @@
   import ProjectDeleteDialog from './lib/features/projects/ProjectDeleteDialog.svelte';
   import ProjectTransferDialog from './lib/features/projects/ProjectTransferDialog.svelte';
   import ResumeOnLaunchDialog from './lib/features/sessions/ResumeOnLaunchDialog.svelte';
+  import ControlAuthorizationDialog from './lib/features/settings/ControlAuthorizationDialog.svelte';
   import { resumeOnLaunch } from './lib/features/sessions/resumeOnLaunch.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
@@ -72,6 +73,7 @@
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
+  import { listenForControlAuthorizations } from './lib/listeners/controlAuthorizationListener';
   import { listenForMenuEvents } from './lib/listeners/menuListener';
   import { listenForReferenceCopy } from './lib/features/sessions/referenceClipboard';
   import { darkMode } from './lib/stores/isDark.svelte';
@@ -88,6 +90,7 @@
   let unlistenCacheInvalidation: UnlistenFn | undefined;
   let unlistenPageLifecycle: (() => void) | undefined;
   let unlistenAcpToolsReconciled: UnlistenFn | undefined;
+  let unlistenControlAuthorizations: UnlistenFn | undefined;
   let unlistenStoreReset: UnlistenFn | undefined;
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
@@ -368,6 +371,11 @@
     // Refresh provider discovery (and any loaded doctor report) once the
     // backend finishes installing/upgrading the managed ACP bridges.
     unlistenAcpToolsReconciled = listenForAcpToolsReconciled();
+    // `stagedctl connect` consent prompts: desktop main window only, like the
+    // launch-resume offer; the dialog answers them one at a time.
+    if (isTauri && getWindowLabel() === 'main') {
+      unlistenControlAuthorizations = listenForControlAuthorizations();
+    }
     // Keep the shared project-list cache fresh for the app's lifetime — the
     // store dedupes, so starting before any view consumes it is safe.
     projectsDataStore.startListeners();
@@ -613,6 +621,7 @@
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
+    unlistenControlAuthorizations?.();
     unlistenStoreReset?.();
     unlistenUpdaterOwnerAvailable?.();
     projectsDataStore.stopListeners();
@@ -813,6 +822,9 @@
   <!-- Launch-time "Resume interrupted sessions?" — opened by resumeOnLaunch.load()
        from onMount on the desktop main window; stays closed everywhere else. -->
   <ResumeOnLaunchDialog />
+  <!-- "Allow <client> to control Staged?" for stagedctl connect requests; driven
+       by controlAuthorization.pending, fed by the listener above. -->
+  <ControlAuthorizationDialog />
 
   <ReferenceModalHost />
   <Toaster

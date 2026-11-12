@@ -739,6 +739,13 @@ export interface Session {
    * their branch through the artifact instead.
    */
   branchId?: string | null;
+  /**
+   * The control-server actor that started this session through stagedctl,
+   * when one did: `session:<session-id>` for a session Staged spawned,
+   * `app:<grant-id>` for an outside client the user approved. Absent for
+   * sessions started from the app's own UI.
+   */
+  startedBy?: string | null;
 }
 
 export type QueuedSessionMessageStatus = 'queued' | 'sending' | 'sent';
@@ -1041,6 +1048,17 @@ export interface SessionReconcileEvent {
 }
 
 /**
+ * Payload emitted by the `image-created` Tauri event for timeline-visible
+ * (non-pending) images, so clients that didn't create the image (e.g. when
+ * stagedctl did) can refresh the affected branch timeline.
+ */
+export interface ImageCreatedPayload {
+  imageId: string;
+  branchId: string | null;
+  projectId: string;
+}
+
+/**
  * One entry of the `get_active_sessions` busy-state snapshot: a running,
  * queued or disconnected session projected to its branch/project context.
  * Carries the same discriminators as `SessionStatusPayload` so the snapshot
@@ -1234,6 +1252,59 @@ export interface InterruptedSession {
 export interface LaunchRecovery {
   repoSessions: InterruptedSession[];
   projectSessions: InterruptedSession[];
+}
+
+// =============================================================================
+// Connected apps (stagedctl grants)
+// =============================================================================
+
+/**
+ * A `stagedctl connect` request awaiting the user's answer. Mirrors
+ * `ControlAuthorizationRequest` in `control_server/enrol.rs`; carried by the
+ * `control-authorization-requested` event and `list_pending_control_authorizations`.
+ */
+export interface ControlAuthorizationRequest {
+  requestId: string;
+  /** The name the CLI passed as `--client`. */
+  client: string;
+  /** `null` = every project. */
+  projectId: string | null;
+  projectName: string | null;
+  access: 'read' | 'write';
+  /** The requesting process and its parent's command name, shown as information only. */
+  peerPid: number | null;
+  peerParent: string | null;
+  /**
+   * The asking process's parent has already exited (or could not be read):
+   * it may have been backgrounded from an agent session. A notice, never a decision.
+   */
+  orphaned: boolean;
+  /** ms since the epoch. */
+  requestedAt: number;
+  /** ms since the epoch; the request lapses unanswered after this. */
+  expiresAt: number;
+}
+
+/**
+ * An approved client as the Settings "Connected apps" panel lists it.
+ * Mirrors `ControlGrantSummary` in `control_server/consent.rs`.
+ */
+export interface ControlGrantSummary {
+  id: string;
+  client: string;
+  /** `null` = every project. */
+  projectId: string | null;
+  /** The scoped project's current name, when it still exists. */
+  projectName: string | null;
+  access: 'read' | 'write';
+  /** ms since the epoch. */
+  createdAt: number;
+  /** ms since the epoch; renewed on every successful reconnect. */
+  expiresAt: number;
+  /** ms since the epoch, or null when never used since approval. */
+  lastUsedAt: number | null;
+  /** Whether the client holds a live credential in this run of the app. */
+  live: boolean;
 }
 
 /** Returned by get_store_status when the database needs a reset or is too new. */

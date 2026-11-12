@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "VITE_PORT=${VITE_PORT:-5174} pnpm run dev",
-    "beforeBuildCommand": "pnpm run build"
+    "beforeDevCommand": "bash scripts/prepare-stagedctl-sidecar.sh && VITE_PORT=${VITE_PORT:-5174} pnpm run dev",
+    "beforeBuildCommand": "bash scripts/prepare-stagedctl-sidecar.sh && pnpm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -43,8 +43,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "binaries/stagedctl"
+    ],
     "resources": [
-      "resources/pikchr/grammar.md"
+      "resources/pikchr/grammar.md",
+      "resources/stagedctl/guide.md"
     ],
     "macOS": {
       "infoPlist": "Info.plist"

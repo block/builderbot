@@ -14,7 +14,7 @@ use super::{now_timestamp, Store, StoreChange, StoreError};
 const SESSION_COLUMNS: &str = "id, prompt, status, working_dir, provider, agent_id,
     error_message, completion_reason, created_at, updated_at, owner_pid, pipeline,
     acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id,
-    pre_head_sha, blox_command_id";
+    pre_head_sha, blox_command_id, started_by";
 
 /// An in-flight session spawned by another session: the branch it works on
 /// and the title the branch timeline would give it. `status` is `"queued"` or
@@ -48,8 +48,8 @@ impl Store {
         let acp_config_selection_json =
             serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id, pre_head_sha, blox_command_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id, pre_head_sha, blox_command_id, started_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 session.id,
                 session.prompt,
@@ -70,6 +70,7 @@ impl Store {
                 session.parent_session_id,
                 session.pre_head_sha,
                 session.blox_command_id,
+                session.started_by,
             ],
         )?;
         Ok(())
@@ -1053,6 +1054,7 @@ impl Store {
             parent_session_id: row.get(16)?,
             pre_head_sha: row.get(17)?,
             blox_command_id: row.get(18)?,
+            started_by: row.get(19)?,
         })
     }
 }

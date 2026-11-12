@@ -234,6 +234,65 @@ pub(crate) fn resolve_pikchr_grammar_reference(
     grammar_path.to_string_lossy().into_owned()
 }
 
+const STAGEDCTL_GUIDE_RESOURCE: &str = "resources/stagedctl/guide.md";
+
+/// Path of the bundled stagedctl guide, resolving like the pikchr grammar:
+/// the bundle's resource dir first, the source tree in dev.
+fn bundled_stagedctl_guide_path(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
+    if let Ok(path) = app_handle
+        .path()
+        .resolve(STAGEDCTL_GUIDE_RESOURCE, BaseDirectory::Resource)
+    {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(STAGEDCTL_GUIDE_RESOURCE);
+    if source_path.is_file() {
+        return Some(source_path);
+    }
+
+    None
+}
+
+/// stagedctl guidance for a session prompt, or `None` when the session can't
+/// reach this instance's control server: remote (Blox) sessions have no
+/// loopback path, and a session is never told about a CLI it cannot run
+/// (control server down or sidecar missing).
+pub(crate) fn stagedctl_session_guidance(
+    app_handle: &tauri::AppHandle,
+    workspace_name: Option<&str>,
+) -> Option<String> {
+    if workspace_name.is_some() || !crate::control_server::stagedctl_session_ready() {
+        return None;
+    }
+    let guide_reference =
+        bundled_stagedctl_guide_path(app_handle).map(|path| path.display().to_string());
+    Some(stagedctl_guidance_text(guide_reference.as_deref()))
+}
+
+/// The prompt paragraph teaching `--help`-first discovery of stagedctl.
+/// Modeled on berd's berd-help skill, it deliberately does not restate
+/// commands or flags — the CLI's own help is the authoritative reference —
+/// so this text cannot go stale against the binary. It does state the
+/// product invariant (every verb is UI-visible and read-only or reversible)
+/// as a self-check heuristic.
+fn stagedctl_guidance_text(guide_reference: Option<&str>) -> String {
+    let mut guidance = "This session was spawned by the Staged desktop app, whose control CLI \
+`stagedctl` is on your PATH (exact binary path in $STAGEDCTL_BIN). Use it when you need to \
+inspect or drive the app itself; never edit files under ~/.staged directly. Discover the \
+command surface instead of guessing: `stagedctl --help` lists the nouns, `stagedctl <noun> \
+<verb> --help` is the authoritative reference for flags, addressing, and exit codes, and \
+`--json` switches any command to machine-readable output. Every stagedctl verb is visible in \
+the app's UI and is read-only or reversible; a verb you cannot find is deliberately absent."
+        .to_string();
+    if let Some(reference) = guide_reference {
+        guidance.push_str(&format!(" For the full guide, read: {reference}"));
+    }
+    guidance
+}
+
 /// Whether the local Pikchr `generate_pikchr` tool applies to a session.
 ///
 /// The pikchr MCP server binds to loopback, so it's only reachable from
@@ -4465,7 +4524,39 @@ pub async fn start_project_session(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<ProjectSessionResponse, String> {
     let store = get_store(&store)?;
+    start_project_session_for_store(
+        store,
+        Arc::clone(&registry),
+        Arc::clone(&action_executor),
+        Arc::clone(&action_registry),
+        app_handle,
+        project_id,
+        prompt,
+        provider,
+        image_ids,
+        acp_config_selection,
+        None,
+    )
+    .await
+}
 
+/// Body of [`start_project_session`], shared with the web-mode `dispatch()`
+/// arm. `started_by` is the control-server actor behind the start, recorded
+/// on the row (`Session::started_by`); the desktop command passes `None`.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_project_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    project_id: String,
+    prompt: String,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<String>,
+) -> Result<ProjectSessionResponse, String> {
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
@@ -4509,6 +4600,9 @@ pub async fn start_project_session(
     );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
+    }
+    if let Some(ref actor) = started_by {
+        session = session.with_started_by(actor);
     }
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
@@ -4838,6 +4932,7 @@ async fn prepare_branch_session_start(
             matches!(session_type, BranchSessionType::Note),
             branch.workspace_name.as_deref(),
         ),
+        stagedctl_session_guidance(app_handle, branch.workspace_name.as_deref()).as_deref(),
     );
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -4907,6 +5002,7 @@ fn insert_running_branch_session(
     image_ids: &[String],
     launch_context: Option<&BranchSessionLaunchContext>,
     acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<&str>,
 ) -> Result<CreatedBranchSession, String> {
     let stored_prompt = embed_launch_context(prompt, launch_context)?;
     let start_agent_id = new_pending_branch_start_agent_id();
@@ -4918,6 +5014,9 @@ fn insert_running_branch_session(
     session.agent_id = Some(start_agent_id.clone());
     if let Some(p) = provider {
         session = session.with_provider(p);
+    }
+    if let Some(actor) = started_by {
+        session = session.with_started_by(actor);
     }
     // Taken before the row exists: the second phase that owns this row runs
     // for as long as the context build takes, and the hold is what tells the
@@ -4957,9 +5056,12 @@ fn insert_running_branch_session(
     })
 }
 
+/// `app_handle` is optional so store-level tests can run without a Tauri
+/// app; `None` skips the queued `session-status-changed` announcement.
 #[allow(clippy::too_many_arguments)]
 fn insert_queued_branch_session(
     store: &Arc<Store>,
+    app_handle: Option<&tauri::AppHandle>,
     branch_id: &str,
     prompt: &str,
     session_type: &BranchSessionType,
@@ -4967,6 +5069,7 @@ fn insert_queued_branch_session(
     image_ids: &[String],
     launch_context: Option<&BranchSessionLaunchContext>,
     acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<&str>,
 ) -> Result<BranchSessionResponse, String> {
     let queued_prompt = embed_launch_context(prompt, launch_context)?;
     let mut session = with_optional_acp_config_selection(
@@ -4975,6 +5078,9 @@ fn insert_queued_branch_session(
     );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
+    }
+    if let Some(actor) = started_by {
+        session = session.with_started_by(actor);
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
@@ -5000,6 +5106,31 @@ fn insert_queued_branch_session(
             review.id
         }
     };
+
+    // Announce the queued session so clients that did not issue this call
+    // (the desktop UI when stagedctl queues work) refresh the branch
+    // timeline and show the queued artifact stub.
+    if let Some(app_handle) = app_handle {
+        let project_id = store
+            .get_branch(branch_id)
+            .ok()
+            .flatten()
+            .map(|branch| branch.project_id);
+        crate::web_server::emit_to_all(
+            app_handle,
+            "session-status-changed",
+            session_runner::SessionStatusEvent {
+                session_id: session.id.clone(),
+                status: "queued".to_string(),
+                error_message: None,
+                completion_reason: None,
+                branch_id: Some(branch_id.to_string()),
+                project_id,
+                session_type: Some(session_type.as_str().to_string()),
+                dependency_skipped: false,
+            },
+        );
+    }
 
     Ok(BranchSessionResponse {
         session_id: session.id,
@@ -5383,6 +5514,7 @@ pub async fn start_or_queue_branch_session_for_store(
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
     acp_config_selection: Option<store::AcpConfigSelection>,
+    started_by: Option<String>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
 
@@ -5409,6 +5541,7 @@ pub async fn start_or_queue_branch_session_for_store(
         {
             return insert_queued_branch_session(
                 &store,
+                Some(&app_handle),
                 &branch_id,
                 &prompt,
                 &session_type,
@@ -5416,6 +5549,7 @@ pub async fn start_or_queue_branch_session_for_store(
                 &image_ids,
                 launch_context.as_ref(),
                 acp_config_selection,
+                started_by.as_deref(),
             );
         }
         let target = resolve_branch_session_target(&store, &branch_id)?;
@@ -5429,6 +5563,7 @@ pub async fn start_or_queue_branch_session_for_store(
             &image_ids,
             launch_context.as_ref(),
             acp_config_selection,
+            started_by.as_deref(),
         )?;
         (target, created)
     };
@@ -5463,9 +5598,12 @@ pub async fn start_or_queue_branch_session_for_store(
     Ok(response)
 }
 
+/// `app_handle` is optional so store-level tests can run without a Tauri
+/// app; `None` skips the queued `session-status-changed` announcement.
 #[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session_for_store(
     store: Arc<Store>,
+    app_handle: Option<&tauri::AppHandle>,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
@@ -5482,6 +5620,7 @@ pub fn queue_branch_session_for_store(
     // Queued is where a start on a branch being transferred goes anyway.
     insert_queued_branch_session(
         &store,
+        app_handle,
         &branch_id,
         &prompt,
         &session_type,
@@ -5489,6 +5628,7 @@ pub fn queue_branch_session_for_store(
         &image_ids,
         launch_context.as_ref(),
         acp_config_selection,
+        None,
     )
 }
 
@@ -5522,6 +5662,7 @@ pub async fn start_branch_session(
         image_ids,
         launch_context,
         acp_config_selection,
+        None,
     )
     .await
 }
@@ -5552,6 +5693,7 @@ pub async fn start_or_queue_branch_session(
         image_ids,
         launch_context,
         acp_config_selection,
+        None,
     )
     .await
 }
@@ -5571,6 +5713,7 @@ pub async fn start_or_queue_branch_session(
 #[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
@@ -5582,6 +5725,7 @@ pub fn queue_branch_session(
     let store = get_store(&store)?;
     queue_branch_session_for_store(
         store,
+        Some(&app_handle),
         branch_id,
         prompt,
         session_type,
@@ -6294,6 +6438,7 @@ async fn start_queued_session_for_branch(
             matches!(session_type, BranchSessionType::Note),
             branch.workspace_name.as_deref(),
         ),
+        stagedctl_session_guidance(&app_handle, branch.workspace_name.as_deref()).as_deref(),
     );
 
     // The SHAs the artifact anchors to and the remote working directory are
@@ -7940,6 +8085,7 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
     base_branch: Option<&str>,
     pikchr_grammar_reference: &str,
     pikchr_tools_available: bool,
+    stagedctl_guidance: Option<&str>,
 ) -> String {
     let mut action_instructions = match session_type {
         BranchSessionType::Note => [
@@ -8100,6 +8246,14 @@ Rules:\n\
         action_instructions.push_str(note_media_guidance());
     }
 
+    // stagedctl applies to every session type (a review session may still
+    // read timelines or check session status); `None` means the session
+    // can't reach the control server, so the CLI is never advertised.
+    if let Some(guidance) = stagedctl_guidance {
+        action_instructions.push_str("\n\n");
+        action_instructions.push_str(guidance);
+    }
+
     let action_tag = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_information}\n</action>"
     );
@@ -8193,8 +8347,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// Calls [`build_full_prompt_with_pikchr_reference`] with the default pikchr
-    /// grammar reference and no pikchr tools. Production callers thread both
-    /// through explicitly; only these tests want the defaults.
+    /// grammar reference, no pikchr tools, and no stagedctl guidance.
+    /// Production callers thread all three through explicitly; only these
+    /// tests want the defaults.
     fn build_full_prompt(
         user_prompt: &str,
         project_information: &str,
@@ -8212,6 +8367,7 @@ mod tests {
             base_branch,
             PIKCHR_GRAMMAR_URL,
             false,
+            None,
         )
     }
 
@@ -8892,6 +9048,64 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The actor a control caller hands the shared start bodies lands on the
+    /// row for both insert shapes; the desktop's `None` leaves it unset.
+    #[test]
+    fn branch_session_inserts_record_started_by_when_given() {
+        let (store, branch) = setup_branch_store();
+        let queued = insert_queued_branch_session(
+            &store,
+            None,
+            &branch.id,
+            "queued by an agent",
+            &BranchSessionType::Note,
+            Some("claude".to_string()),
+            &[],
+            None,
+            None,
+            Some("session:s1"),
+        )
+        .unwrap();
+        let row = store.get_session(&queued.session_id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Queued);
+        assert_eq!(row.started_by.as_deref(), Some("session:s1"));
+
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+        let created = insert_running_branch_session(
+            &store,
+            &test_registry(),
+            &target,
+            "started by an app",
+            &BranchSessionType::Commit,
+            Some("claude"),
+            &[],
+            None,
+            None,
+            Some("app:g1"),
+        )
+        .unwrap();
+        let row = store.get_session(&created.session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Running);
+        assert_eq!(row.started_by.as_deref(), Some("app:g1"));
+
+        let created = insert_running_branch_session(
+            &store,
+            &test_registry(),
+            &target,
+            "started in the UI",
+            &BranchSessionType::Note,
+            Some("claude"),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let row = store.get_session(&created.session.id).unwrap().unwrap();
+        assert_eq!(row.started_by, None, "a UI start records no actor");
     }
 
     /// A mock app so [`cancel_session_impl`]'s status event has somewhere to
@@ -11016,6 +11230,7 @@ mod tests {
 
         let response = queue_branch_session_for_store(
             Arc::clone(&store),
+            None,
             branch.id.clone(),
             "capture a note".to_string(),
             BranchSessionType::Note,
@@ -11082,6 +11297,7 @@ mod tests {
             &[],
             Some(&launch_context),
             None,
+            None,
         )
         .unwrap();
 
@@ -11125,6 +11341,7 @@ mod tests {
             &BranchSessionType::Note,
             None,
             &[],
+            None,
             None,
             None,
         )
@@ -11552,6 +11769,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -11607,6 +11825,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(branch_session_start_still_owned(
@@ -11656,6 +11875,7 @@ mod tests {
             &BranchSessionType::Note,
             None,
             &[],
+            None,
             None,
             None,
         )
@@ -11724,6 +11944,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
         store
@@ -11759,6 +11980,7 @@ mod tests {
             &BranchSessionType::Note,
             None,
             &[],
+            None,
             None,
             None,
         )
@@ -13310,10 +13532,90 @@ mod tests {
             None,
             "/tmp/staged/pikchr/grammar.md",
             true,
+            None,
         );
 
         assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
         assert!(prompt.contains("generate_pikchr"));
+    }
+
+    #[test]
+    fn branch_session_prompts_include_supplied_stagedctl_guidance() {
+        // The guidance applies to every session type, inside the <action> tag.
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Commit,
+            BranchSessionType::Review,
+        ] {
+            let guidance = stagedctl_guidance_text(Some("/tmp/staged/stagedctl/guide.md"));
+            let prompt = build_full_prompt_with_pikchr_reference(
+                "user prompt",
+                "project info",
+                "branch context",
+                &session_type,
+                None,
+                None,
+                PIKCHR_GRAMMAR_URL,
+                false,
+                Some(&guidance),
+            );
+
+            let action_end = prompt.find("</action>").expect("action tag present");
+            let guidance_start = prompt
+                .find("stagedctl --help")
+                .unwrap_or_else(|| panic!("{session_type:?} prompt should teach --help discovery"));
+            assert!(
+                guidance_start < action_end,
+                "{session_type:?} guidance must sit inside the <action> tag"
+            );
+            assert!(prompt.contains("For the full guide, read: /tmp/staged/stagedctl/guide.md"));
+        }
+    }
+
+    #[test]
+    fn stagedctl_guidance_is_omitted_when_unavailable() {
+        // `None` (remote workspace, control server down, or sidecar missing)
+        // must leave no trace of the CLI in the prompt.
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Commit,
+            None,
+            None,
+        );
+
+        assert!(!prompt.contains("stagedctl"));
+    }
+
+    #[test]
+    fn stagedctl_guidance_teaches_discovery_not_commands() {
+        let guidance = stagedctl_guidance_text(Some("/tmp/guide.md"));
+
+        // --help-first discovery, machine output, and the safety invariant.
+        assert!(guidance.contains("stagedctl --help"));
+        assert!(guidance.contains("--json"));
+        assert!(guidance.contains("$STAGEDCTL_BIN"));
+        assert!(guidance.contains("read-only or reversible"));
+        assert!(guidance.contains("For the full guide, read: /tmp/guide.md"));
+
+        // Modeled on berd-help: never restate the verb table — it would go
+        // stale against the CLI. Spot-check that no v1 noun/verb pair leaks in.
+        for verbs in [
+            "project list",
+            "timeline show",
+            "session start",
+            "image add",
+        ] {
+            assert!(
+                !guidance.contains(verbs),
+                "guidance must not restate the `{verbs}` command"
+            );
+        }
+
+        // Without a resolvable guide file the pointer is dropped entirely.
+        let without_reference = stagedctl_guidance_text(None);
+        assert!(!without_reference.contains("full guide"));
     }
 
     #[test]

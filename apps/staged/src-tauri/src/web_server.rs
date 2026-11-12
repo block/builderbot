@@ -758,7 +758,7 @@ async fn invoke_command(
     State(state): State<WebAppState>,
     Json(args): Json<Value>,
 ) -> Response {
-    match dispatch(&command, args, &state).await {
+    match dispatch(&command, args, &state.app_handle, DispatchCaller::Web).await {
         Ok(value) => Json(value).into_response(),
         Err(msg) => (
             StatusCode::BAD_REQUEST,
@@ -879,29 +879,146 @@ pub(crate) fn preferences_store(
         .map_err(|e| format!("Failed to load preferences store: {e}"))
 }
 
+pub(crate) mod control_scope;
+pub(crate) use control_scope::SCOPE_DENIED_PREFIX;
+
+/// Who is calling [`dispatch`]. A handful of commands encode same-host-only
+/// semantics — they take local file paths or launch local apps — which are
+/// valid from the control server but a hole from a remote browser. Making
+/// the caller a parameter closes those arms by construction (see
+/// [`web_caller_rejection`]) instead of relying on `start()` staying stubbed,
+/// and carries a control caller's grant so its scope can be enforced ahead
+/// of the arm table (see [`control_scope`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum DispatchCaller {
+    /// The `stagedctl` control server (`control_server.rs`): a same-user
+    /// process on the app's machine, holding this grant.
+    Control(crate::control_server::ControlGrant),
+    /// The browser-facing web server: the caller may be a remote browser.
+    /// (Its `start()` is currently stubbed, but rejection of same-host-only
+    /// commands must not depend on that.)
+    Web,
+}
+
+impl DispatchCaller {
+    /// What a session this caller starts records in `sessions.started_by`:
+    /// the control grant's actor (`session:<id>` / `app:<grant-id>`), or
+    /// `None` for a web caller, which — like the desktop UI — is the user.
+    pub(crate) fn started_by(&self) -> Option<String> {
+        match self {
+            Self::Control(grant) => Some(grant.actor.started_by()),
+            Self::Web => None,
+        }
+    }
+}
+
+/// Why a web (remote-browser) caller may not run `command`, or `None` if it
+/// may. From a remote browser, `create_image` would mean "read any file on
+/// the app's machine into a viewable timeline" and `open_in_app` would mean
+/// "open an arbitrary path in an arbitrary local app" — so both are rejected
+/// before any dispatch arm runs, and restoring the web listener cannot
+/// silently inherit them.
+fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static str> {
+    if !matches!(caller, DispatchCaller::Web) {
+        return None;
+    }
+    // `cmd`, not `command`: `web_dispatch_covers_tauri_commands` locates
+    // dispatch's arm table by searching for a match over `command`, so that
+    // spelling must stay unique to dispatch().
+    match cmd {
+        "create_image" => Some(
+            "create_image is not available in web mode: it reads a file path \
+             on the app's machine (use create_image_from_data)",
+        ),
+        "open_in_app" => Some(
+            "open_in_app is not available in web mode: it launches an app on \
+             the app's machine",
+        ),
+        _ => None,
+    }
+}
+
+/// The `create_image` args the control surface accepts, enforcing that the
+/// created image is UI-visible: `pending: true` (hidden until a session
+/// attaches it) and a missing `branchId` (project-scoped images are
+/// write-only — nothing lists or renders them) are both rejected, so no
+/// caller — the well-behaved CLI or a raw POST to the control port — can
+/// create an artifact the UI never shows. Returns
+/// `(branchId, projectId, filePath)`.
+fn control_create_image_args(args: &Value) -> Result<(String, String, String), String> {
+    if opt_arg::<bool>(args, "pending")?.unwrap_or(false) {
+        return Err(
+            "create_image with pending=true is not available through the control surface: \
+             a pending image is invisible until a session attaches it"
+                .to_string(),
+        );
+    }
+    let Some(branch_id) = opt_arg::<String>(args, "branchId")? else {
+        return Err(
+            "create_image requires a branchId through the control surface: \
+             a project-scoped image is invisible in the UI"
+                .to_string(),
+        );
+    };
+    let file_path: String = arg(args, "filePath")?;
+    // Nothing downstream (`create_image_impl`, `read_local_attachment`)
+    // canonicalizes or checks this, so a relative path would resolve against
+    // the app's own working directory — not the caller's. The CLI always
+    // sends an absolute path; a raw POST must too.
+    if !std::path::Path::new(&file_path).is_absolute() {
+        return Err(format!(
+            "create_image requires an absolute filePath through the control surface \
+             (got {file_path:?}): a relative path would resolve against the app's \
+             working directory, not the caller's"
+        ));
+    }
+    Ok((branch_id, arg(args, "projectId")?, file_path))
+}
+
 /// The big dispatcher. Maps command names to handler logic.
 ///
 /// Each arm extracts arguments from the JSON body and calls the same
 /// underlying logic as the corresponding Tauri command. Return values
-/// are serialized to `serde_json::Value`.
-async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Value, String> {
+/// are serialized to `serde_json::Value`. Shared by the (stubbed) web
+/// server and the `stagedctl` control server (`control_server.rs`);
+/// `caller` says which, so same-host-only arms can be closed to web
+/// callers by construction.
+pub(crate) async fn dispatch(
+    command: &str,
+    args: Value,
+    app_handle: &tauri::AppHandle,
+    caller: DispatchCaller,
+) -> Result<Value, String> {
     use tauri::Manager;
 
+    if let Some(reason) = web_caller_rejection(command, &caller) {
+        return Err(reason.to_string());
+    }
+
     // Convenience aliases — pull shared state from the Tauri AppHandle
-    let app_handle = &state.app_handle;
     let store_mutex: &Mutex<Option<Arc<Store>>> = &app_handle.state::<Mutex<Option<Arc<Store>>>>();
     let session_registry: &Arc<SessionRegistry> = &app_handle.state::<Arc<SessionRegistry>>();
     let action_executor: &Arc<ActionExecutor> = &app_handle.state::<Arc<ActionExecutor>>();
     let action_registry: &Arc<ActionRegistry> = &app_handle.state::<Arc<ActionRegistry>>();
     let pr_scheduler: &Arc<PrPollScheduler> = &app_handle.state::<Arc<PrPollScheduler>>();
 
+    // A control caller's grant confines it to one project (and maybe to
+    // reads); refused here, before any arm, so no arm has to remember to.
+    if let DispatchCaller::Control(grant) = &caller {
+        control_scope::check(command, &args, grant, store_mutex)?;
+    }
+
     match command {
         // =====================================================================
         // Store status
         // =====================================================================
         "get_store_status" => {
-            // We don't have DbState in web context — return null (store ready)
-            Ok(Value::Null)
+            // Same-host clients (stagedctl) need the real status so a
+            // needs-reset prompt surfaces as data instead of opaque
+            // "Database not initialized" errors on every other command.
+            let db_state = app_handle.state::<crate::DbState>();
+            let status = db_state.needs_reset.lock().unwrap().clone();
+            Ok(serde_json::to_value(status).unwrap())
         }
         "confirm_reset_store" => {
             // Not applicable in web context
@@ -940,11 +1057,31 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
 
         // =====================================================================
+        // stagedctl connected apps (desktop only)
+        // =====================================================================
+        // Consent is the user's to give in the app window, and the grant
+        // list is theirs to prune there; a browser client (or a stagedctl
+        // caller, which never reaches these — they are outside
+        // `ALLOWED_COMMANDS`) must not approve a request or revoke a grant.
+        // One arm per line: the parity test reads an arm's patterns off the
+        // line that holds its `=>`.
+        "list_pending_control_authorizations" => {
+            Err(format!("{command} is not available in web mode"))
+        }
+        "answer_control_authorization" => Err(format!("{command} is not available in web mode")),
+        "list_control_grants" => Err(format!("{command} is not available in web mode")),
+        "revoke_control_grant" => Err(format!("{command} is not available in web mode")),
+
+        // =====================================================================
         // Projects
         // =====================================================================
         "list_projects" => {
             let store = get_store(store_mutex)?;
-            let projects = store.list_projects().map_err(|e| e.to_string())?;
+            let mut projects = store.list_projects().map_err(|e| e.to_string())?;
+            // A project-scoped control credential sees only its own project.
+            if let Some(project_id) = control_scope::project_filter(&caller) {
+                projects.retain(|project| project.id == project_id);
+            }
             Ok(serde_json::to_value(projects).unwrap())
         }
         "create_project" => {
@@ -1478,7 +1615,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             })
             .await
             .map_err(|e| format!("Default branch detection failed: {e}"))?;
-            emit_to_all(&state.app_handle, "repo-cloned", &github_repo);
+            emit_to_all(app_handle, "repo-cloned", &github_repo);
             Ok(serde_json::to_value(default_branch).unwrap())
         }
         "get_repo_clone_path" => {
@@ -2632,6 +2769,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .map_err(|e| format!("Timeline task failed: {e}"))??;
             Ok(serde_json::to_value(timeline).unwrap())
         }
+        "get_project_timeline" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let timeline = tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::build_project_timeline(&store, &project_id)
+            })
+            .await
+            .map_err(|e| format!("Project timeline task failed: {e}"))??;
+            Ok(serde_json::to_value(timeline).unwrap())
+        }
         "refresh_branch_git_state" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
@@ -2908,7 +3055,30 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // =====================================================================
         // Images
         // =====================================================================
-        "create_image" => Err("create_image is not available in web mode".to_string()),
+        "create_image" => {
+            // Web callers never reach this arm (`web_caller_rejection` — a
+            // filesystem path is only valid same-host); what remains is the
+            // control surface, whose args are pinned so it can never create
+            // a UI-invisible image.
+            let (branch_id, project_id, file_path) = control_create_image_args(&args)?;
+            let store = get_store(store_mutex)?;
+            let app_handle = app_handle.clone();
+            // Reading and validating the file (a 50 MB PDF, say) is not
+            // runtime-worker work; the event goes out from the same closure
+            // so it follows the write it announces.
+            blocking_json(move || {
+                let image = crate::image_commands::create_image_impl(
+                    store,
+                    Some(branch_id),
+                    project_id,
+                    file_path,
+                    Some(false),
+                )?;
+                crate::image_commands::emit_image_created(&app_handle, &image);
+                Ok::<_, String>(image)
+            })
+            .await
+        }
         "create_image_from_data" => {
             let store = get_store(store_mutex)?;
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
@@ -2924,6 +3094,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             })
             .await
             .map_err(|e| format!("Image task failed: {e}"))??;
+            crate::image_commands::emit_image_created(app_handle, &image);
             Ok(serde_json::to_value(image).unwrap())
         }
         "get_image_path" => {
@@ -3255,8 +3426,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
         "get_active_sessions" => {
             let store = get_store(store_mutex)?;
-            let sessions =
+            let mut sessions =
                 crate::session_commands::get_active_sessions_impl(&store, session_registry)?;
+            // A project-scoped control credential sees only its own
+            // project's sessions.
+            if let Some(project_id) = control_scope::project_filter(&caller) {
+                sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
+            }
             Ok(serde_json::to_value(sessions).unwrap())
         }
         "list_child_sessions" => {
@@ -3566,6 +3742,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 image_ids,
                 launch_context,
                 acp_config_selection,
+                caller.started_by(),
             )
             .await?;
 
@@ -3579,94 +3756,34 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let acp_config_selection: Option<store::AcpConfigSelection> =
                 opt_arg(&args, "acpConfigSelection")?;
-
-            let project = store
-                .get_project(&project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
-            let project_context = {
-                let store = Arc::clone(&store);
-                let project = project.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    session_commands::build_project_session_context(&store, &project)
-                })
-                .await
-                .map_err(|e| e.to_string())?
-            };
-
-            let is_remote = project.location == store::ProjectLocation::Remote;
-            let pikchr_grammar_reference =
-                session_commands::resolve_pikchr_grammar_reference(app_handle, None);
-            let action_instructions =
-                session_commands::build_project_session_action_instructions_with_pikchr_reference(
-                    is_remote,
-                    &pikchr_grammar_reference,
-                );
-
-            let full_prompt = format!(
-                "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
-            );
-
-            let working_dir = crate::git::project_worktree_root_for(&project.id)
-                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-
-            let mut session = store::Session::new_running(&full_prompt, &working_dir);
-            if let Some(selection) = acp_config_selection.clone() {
-                session = session.with_acp_config_selection(selection);
-            }
-            if let Some(ref p) = provider {
-                session = session.with_provider(p);
-            }
-            // Live from before the `running` write until the runner has
-            // registered (see `SessionRegistry::hold`).
-            let _liveness = session_registry.hold(&session.id);
-            store.create_session(&session).map_err(|e| e.to_string())?;
-
-            let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
-            store
-                .create_project_note(&note)
-                .map_err(|e| e.to_string())?;
-            let note_id = note.id.clone();
-
-            session_runner::start_session(
-                SessionConfig {
-                    session_id: session.id.clone(),
-                    prompt: full_prompt,
-                    working_dir,
-                    agent_session_id: None,
-                    pre_head_sha: None,
+            let app_handle = app_handle.clone();
+            let session_registry = Arc::clone(session_registry);
+            let action_executor = Arc::clone(action_executor);
+            let action_registry = Arc::clone(action_registry);
+            let started_by = caller.started_by();
+            // The desktop command's body. It writes the `running` row and
+            // then runs the rest of the start (note stub, runner, failure
+            // recording); detached, so a client that goes mid-start can't
+            // drop it between the write and its release — whatever that
+            // body's await points become.
+            detached(async move {
+                let result = session_commands::start_project_session_for_store(
+                    store,
+                    session_registry,
+                    action_executor,
+                    action_registry,
+                    app_handle,
+                    project_id,
+                    prompt,
                     provider,
-                    workspace_name: None,
-                    extra_env: vec![],
-                    mcp_project_id: Some(project_id.clone()),
-                    action_executor: Some(Arc::clone(action_executor)),
-                    action_registry: Some(Arc::clone(action_registry)),
-                    remote_working_dir: None,
-                    image_ids: image_ids.unwrap_or_default(),
-                    queued_message_id: None,
+                    image_ids,
                     acp_config_selection,
-                    branch_id: None,
-                    project_id: Some(project_id),
-                    // Project sessions are always local and write project notes.
-                    expose_pikchr_tools: true,
-                    // This project session's note is the parent for any
-                    // `child_note` repo sessions it spawns.
-                    parent_project_note_id: Some(note_id.clone()),
-                    background_hold: session_commands::default_background_hold(),
-                },
-                store,
-                app_handle.clone(),
-                Arc::clone(session_registry),
-            )?;
-
-            Ok(
-                serde_json::to_value(session_commands::ProjectSessionResponse {
-                    session_id: session.id,
-                    note_id,
-                })
-                .unwrap(),
-            )
+                    started_by,
+                )
+                .await?;
+                Ok(serde_json::to_value(result).unwrap())
+            })
+            .await
         }
         "queue_branch_session" => {
             let store = get_store(store_mutex)?;
@@ -3681,9 +3798,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 opt_arg(&args, "acpConfigSelection")?;
 
             // A review without a provider discovers the installed agents.
+            let app_handle = app_handle.clone();
             blocking_json(move || {
                 session_commands::queue_branch_session_for_store(
                     store,
+                    Some(&app_handle),
                     branch_id,
                     prompt,
                     session_type,
@@ -4130,10 +4249,18 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
         "get_available_openers" => {
-            // In web mode, openers are not relevant
-            Ok(serde_json::to_value(Vec::<()>::new()).unwrap())
+            let openers = crate::util_commands::get_available_openers().await?;
+            Ok(serde_json::to_value(openers).unwrap())
         }
-        "open_in_app" => Err("open_in_app is not available in web mode".to_string()),
+        "open_in_app" => {
+            // Web callers never reach this arm (`web_caller_rejection`);
+            // for the control surface the app to open in runs on the same
+            // machine as the caller.
+            let path: String = arg(&args, "path")?;
+            let app_id: String = arg(&args, "appId")?;
+            crate::util_commands::open_in_app(path, app_id).await?;
+            Ok(Value::Null)
+        }
 
         // =====================================================================
         // Doctor
@@ -4193,9 +4320,159 @@ mod blocking_guard_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{event_gap_payload, normalize_ws_client_id, web_client_id};
+    use super::{
+        control_create_image_args, event_gap_payload, normalize_ws_client_id, web_caller_rejection,
+        web_client_id, DispatchCaller,
+    };
     use serde_json::{json, Value};
     use std::collections::{BTreeMap, BTreeSet};
+
+    // -------------------------------------------------------------------
+    // Caller identity: same-host-only commands are closed to web callers
+    // -------------------------------------------------------------------
+
+    /// A control caller's grant names who is starting a session, and both
+    /// start arms hand that name to the shared bodies so the row records it;
+    /// a web caller is the user and records nothing.
+    #[test]
+    fn control_callers_record_their_actor_as_started_by_on_both_start_arms() {
+        use crate::control_server::{Access, Actor, ControlGrant, Scope};
+        let session_caller = DispatchCaller::Control(ControlGrant {
+            actor: Actor::Session {
+                session_id: "s1".to_string(),
+                epoch: 1,
+            },
+            scope: Scope::Project("p1".to_string()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        });
+        assert_eq!(session_caller.started_by().as_deref(), Some("session:s1"));
+        let app_caller = DispatchCaller::Control(ControlGrant {
+            actor: Actor::App {
+                grant_id: "g1".to_string(),
+                client: "agent".to_string(),
+            },
+            scope: Scope::AllProjects,
+            branch_id: None,
+            access: Access::ReadWrite,
+        });
+        assert_eq!(app_caller.started_by().as_deref(), Some("app:g1"));
+        assert_eq!(DispatchCaller::Web.started_by(), None);
+
+        // Pin the arms: each must pass the caller's actor into the shared
+        // start body rather than the desktop command's `None`.
+        let source = include_str!("web_server.rs");
+        let (_, branch_arm) = dispatch_arms(source)
+            .into_iter()
+            .find(|(patterns, _)| patterns.iter().any(|p| p == "start_branch_session"))
+            .expect("dispatch should have a `start_branch_session` arm");
+        assert!(
+            branch_arm.contains("caller.started_by()"),
+            "start_branch_session must pass caller.started_by(): {branch_arm}"
+        );
+        let project_arm = dispatch_arm_body(source, "start_project_session");
+        assert!(
+            project_arm.contains("let started_by = caller.started_by();")
+                && project_arm.contains("started_by,\n"),
+            "start_project_session must pass caller.started_by(): {project_arm}"
+        );
+    }
+
+    #[test]
+    fn web_callers_cannot_reach_same_host_only_commands() {
+        let control =
+            DispatchCaller::Control(crate::control_server::ControlGrant::test_all_projects());
+        for command in ["create_image", "open_in_app"] {
+            assert!(
+                web_caller_rejection(command, &DispatchCaller::Web).is_some(),
+                "{command} takes local paths / launches local apps and must be \
+                 rejected for web callers"
+            );
+            assert!(
+                web_caller_rejection(command, &control).is_none(),
+                "{command} must stay reachable from the same-host control server"
+            );
+        }
+        // Everything else is unaffected by caller identity.
+        assert_eq!(
+            web_caller_rejection("list_projects", &DispatchCaller::Web),
+            None
+        );
+
+        // The check is only structural if dispatch() actually consults it
+        // before running any arm: pin the call site. The needle is assembled
+        // at runtime so this assertion's own source can't satisfy it.
+        let call_site = format!("web_caller_rejection({}, &caller)", "command");
+        assert!(
+            include_str!("web_server.rs").contains(&call_site),
+            "dispatch() must gate on web_caller_rejection before its match"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // create_image through the control surface can't make invisible artifacts
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn control_create_image_rejects_pending_images() {
+        // A pending image is hidden until a session attaches it — invisible
+        // through the control surface, so rejected regardless of the CLI
+        // behaving (a raw POST to the control port hits this too).
+        let err = control_create_image_args(&json!({
+            "branchId": "b1", "projectId": "p1",
+            "filePath": "/tmp/x.png", "pending": true,
+        }))
+        .unwrap_err();
+        assert!(err.contains("pending"), "got: {err}");
+    }
+
+    #[test]
+    fn control_create_image_rejects_missing_branch_id() {
+        // Project-scoped images are write-only — nothing lists or renders
+        // them — so a branch is required.
+        for args in [
+            json!({ "projectId": "p1", "filePath": "/tmp/x.png" }),
+            json!({ "branchId": null, "projectId": "p1", "filePath": "/tmp/x.png" }),
+        ] {
+            let err = control_create_image_args(&args).unwrap_err();
+            assert!(err.contains("branchId"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn control_create_image_rejects_relative_file_paths() {
+        // The path is opened by the app process, so a relative one would
+        // resolve against the app's cwd rather than the caller's; the CLI
+        // sends absolute paths and a raw POST gets the same rule.
+        for file_path in ["rel/x.png", "./x.png", "x.png", "../x.png", ""] {
+            let err = control_create_image_args(&json!({
+                "branchId": "b1", "projectId": "p1", "filePath": file_path,
+            }))
+            .unwrap_err();
+            assert!(
+                err.contains("absolute"),
+                "{file_path:?} should be rejected as non-absolute, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_create_image_accepts_branch_scoped_non_pending_args() {
+        // pending omitted and pending:false are equivalent — the dispatch
+        // arm pins the impl call to pending=Some(false) either way.
+        for args in [
+            json!({ "branchId": "b1", "projectId": "p1", "filePath": "/tmp/x.png" }),
+            json!({
+                "branchId": "b1", "projectId": "p1",
+                "filePath": "/tmp/x.png", "pending": false,
+            }),
+        ] {
+            let (branch_id, project_id, file_path) = control_create_image_args(&args).unwrap();
+            assert_eq!(branch_id, "b1");
+            assert_eq!(project_id, "p1");
+            assert_eq!(file_path, "/tmp/x.png");
+        }
+    }
 
     #[test]
     fn ws_client_id_drops_blank_and_reserved_ids() {
@@ -4430,6 +4707,7 @@ mod tests {
             "start_queued_session_now_for_branch(",
             "resume_session_for_store(",
             "resume_or_queue_session_for_store(",
+            "start_project_session_for_store(",
         ];
         /// Arms whose bodies run through `detached`.
         const DETACHED: &[&str] = &[
@@ -4438,6 +4716,7 @@ mod tests {
             "pull_or_queue_branch",
             "resume_session",
             "start_queued_session_now",
+            "start_project_session",
             "push_branch",
             "rebase_branch",
             "squash_commits",
@@ -4447,11 +4726,8 @@ mod tests {
         /// same synchronous stretch: a drop before the write has written
         /// nothing (the polls redo it next tick), and nothing is left
         /// half-written.
-        const WRITES_AFTER_LAST_AWAIT: &[&str] = &[
-            "poll_workspace_status",
-            "poll_all_workspace_statuses",
-            "start_project_session",
-        ];
+        const WRITES_AFTER_LAST_AWAIT: &[&str] =
+            &["poll_workspace_status", "poll_all_workspace_statuses"];
 
         let source = include_str!("web_server.rs");
         for (commands, arm) in dispatch_arms(source) {

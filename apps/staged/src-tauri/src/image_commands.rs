@@ -10,6 +10,34 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// Payload of the `image-created` event, emitted for timeline-visible
+/// (non-pending) images so clients can refresh the affected branch timeline
+/// even when the image was created by another client (e.g. stagedctl).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCreatedEvent {
+    pub image_id: String,
+    pub branch_id: Option<String>,
+    pub project_id: String,
+}
+
+pub(crate) fn emit_image_created(app_handle: &tauri::AppHandle, image: &crate::store::Image) {
+    // Pending images belong to a session composer, not the timeline — there
+    // is nothing for other clients to refresh yet.
+    if image.session_id.is_some() {
+        return;
+    }
+    crate::web_server::emit_to_all(
+        app_handle,
+        "image-created",
+        ImageCreatedEvent {
+            image_id: image.id.clone(),
+            branch_id: image.branch_id.clone(),
+            project_id: image.project_id.clone(),
+        },
+    );
+}
+
 /// Create an image record and copy the file to the project images directory.
 ///
 /// When `pending` is true the image is hidden from the branch timeline until
@@ -19,6 +47,7 @@ use std::sync::{Arc, Mutex};
 #[tauri::command(rename_all = "camelCase")]
 pub async fn create_image(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     branch_id: Option<String>,
     project_id: String,
     file_path: String,
@@ -26,14 +55,19 @@ pub async fn create_image(
 ) -> Result<crate::store::Image, String> {
     let store = crate::get_store(&store)?;
     // Reading and validating a 50 MB PDF is not main-thread work.
-    tauri::async_runtime::spawn_blocking(move || {
+    let image = tauri::async_runtime::spawn_blocking(move || {
         create_image_impl(store, branch_id, project_id, file_path, pending)
     })
     .await
-    .map_err(|e| format!("Failed to store image: {e}"))?
+    .map_err(|e| format!("Failed to store image: {e}"))??;
+    emit_image_created(&app_handle, &image);
+    Ok(image)
 }
 
-fn create_image_impl(
+/// Body of [`create_image`], shared with the `dispatch()` arm: a same-host
+/// caller (stagedctl) is exactly the case where a file path is valid.
+/// Callers emit [`emit_image_created`] themselves.
+pub(crate) fn create_image_impl(
     store: Arc<Store>,
     branch_id: Option<String>,
     project_id: String,
@@ -202,8 +236,10 @@ pub fn get_image_data(
 /// the stored format follows the file signature. See [`create_image`] for the
 /// meaning of the `pending` flag.
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_image_from_data(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     branch_id: Option<String>,
     project_id: String,
     filename: String,
@@ -213,13 +249,15 @@ pub async fn create_image_from_data(
 ) -> Result<crate::store::Image, String> {
     let store = crate::get_store(&store)?;
     // See `create_image`: decoding a large payload must not block the main thread.
-    tauri::async_runtime::spawn_blocking(move || {
+    let image = tauri::async_runtime::spawn_blocking(move || {
         create_image_from_data_impl(
             store, branch_id, project_id, filename, mime_type, data, pending,
         )
     })
     .await
-    .map_err(|e| format!("Failed to store image: {e}"))?
+    .map_err(|e| format!("Failed to store image: {e}"))??;
+    emit_image_created(&app_handle, &image);
+    Ok(image)
 }
 
 pub(crate) fn create_image_from_data_impl(

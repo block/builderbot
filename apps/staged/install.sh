@@ -30,6 +30,17 @@ install_cli() {
     install_with_optional_sudo "$source_cli" "$destination_cli"
 }
 
+# The control CLI is symlinked out of the installed bundle (not copied) so
+# app updates keep the CLI on /usr/local/bin in step with the app.
+link_cli() {
+    local source_cli="$1"
+    local destination_cli="$2"
+
+    mkdir_with_optional_sudo "$(dirname "$destination_cli")"
+    ln -sfn "$source_cli" "$destination_cli" 2>/dev/null \
+        || sudo ln -sfn "$source_cli" "$destination_cli"
+}
+
 mkdir_with_optional_sudo() {
     local dir="$1"
     mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir"
@@ -135,9 +146,15 @@ APP_SOURCE="$SOURCE_DIR/apps/staged/src-tauri/target/release/bundle/macos/Staged
 CLI_SOURCE="$SOURCE_DIR/scripts/staged"
 APP_DEST="$INSTALL_DIR/Staged.app"
 CLI_DEST="$CLI_DIR/staged"
+STAGEDCTL_DEST="$CLI_DIR/stagedctl"
 
 if [ ! -d "$APP_SOURCE" ]; then
     echo "Error: Staged.app was not produced at $APP_SOURCE" >&2
+    exit 1
+fi
+
+if [ ! -f "$APP_SOURCE/Contents/MacOS/stagedctl" ]; then
+    echo "Error: stagedctl sidecar was not bundled at $APP_SOURCE/Contents/MacOS/stagedctl" >&2
     exit 1
 fi
 
@@ -147,5 +164,9 @@ copy_app "$APP_SOURCE" "$APP_DEST"
 log "installing CLI to $CLI_DEST"
 install_cli "$CLI_SOURCE" "$CLI_DEST"
 
+log "linking control CLI to $STAGEDCTL_DEST"
+link_cli "$APP_DEST/Contents/MacOS/stagedctl" "$STAGEDCTL_DEST"
+
 log "installation complete"
 printf 'Run `%s` to launch Staged from your current directory.\n' "$(basename "$CLI_DEST")"
+printf 'Run `%s --help` to control the running app from the command line.\n' "$(basename "$STAGEDCTL_DEST")"

@@ -12,6 +12,19 @@
 //! take no identifier (`list_projects`, `get_active_sessions`) are filtered
 //! inside their arms instead, through [`project_filter`].
 //!
+//! The tag catalog (groups and tags) is shared by every project, so it has
+//! its own rules. Any grant may read it (`get_tag_state`; the arm confines
+//! the `assignments` to the scope project through [`project_filter`], so a
+//! session learns no other project's tags), and any writing grant may set
+//! its own project's assignments (`set_project_group_tag`,
+//! `set_project_tag_assigned`, by `projectId`). Editing the catalog itself
+//! (`update_tag`, `move_tag` and the group commands) takes an unconfined
+//! writing grant, since a rename from one project's session would show on
+//! every project. `create_tag` is the one exception: a project-scoped grant
+//! may create a tag if the call assigns it to the grant's own project in the
+//! same request (`assignProjectId`), which is what the tag picker's "Create
+//! tag" row does. The two deletes are not allowlisted at all.
+//!
 //! This is a table iterated with `find`, not a `match`, on purpose: the
 //! dispatch parity tests locate `dispatch`'s arm table by its `match` over
 //! `command` and each arm by its `"<name>" =>` spelling, so neither may
@@ -44,6 +57,14 @@ pub(crate) enum ScopeKey {
     SessionArg,
     /// `create_image`'s `branchId` + `projectId`, which must agree.
     CreateImage,
+    /// A read of the shared tag catalog: no identifier, any grant. The arm
+    /// confines the per-project assignments by [`project_filter`].
+    Catalog,
+    /// `create_tag`: unconfined grants may create anything; a project-scoped
+    /// grant must assign the new tag to its own project (`assignProjectId`).
+    CreateTag,
+    /// An edit to the shared tag catalog: only an unconfined grant.
+    Unconfined,
 }
 
 /// One row per allowlisted control command: how to resolve its project,
@@ -81,6 +102,37 @@ pub(crate) const CONTROL_SCOPE: &[(&str, ScopeKey, Access)] = &[
     ),
     ("cancel_session", ScopeKey::SessionArg, Access::ReadWrite),
     ("create_image", ScopeKey::CreateImage, Access::ReadWrite),
+    ("get_tag_state", ScopeKey::Catalog, Access::ReadOnly),
+    (
+        "set_project_group_tag",
+        ScopeKey::ProjectArg,
+        Access::ReadWrite,
+    ),
+    (
+        "set_project_tag_assigned",
+        ScopeKey::ProjectArg,
+        Access::ReadWrite,
+    ),
+    ("create_tag", ScopeKey::CreateTag, Access::ReadWrite),
+    ("update_tag", ScopeKey::Unconfined, Access::ReadWrite),
+    ("move_tag", ScopeKey::Unconfined, Access::ReadWrite),
+    ("create_tag_group", ScopeKey::Unconfined, Access::ReadWrite),
+    ("rename_tag_group", ScopeKey::Unconfined, Access::ReadWrite),
+    (
+        "set_icon_tag_group",
+        ScopeKey::Unconfined,
+        Access::ReadWrite,
+    ),
+    (
+        "set_tag_group_sidebar",
+        ScopeKey::Unconfined,
+        Access::ReadWrite,
+    ),
+    (
+        "reorder_tag_groups",
+        ScopeKey::Unconfined,
+        Access::ReadWrite,
+    ),
 ];
 
 /// The project a control caller's results must be confined to, or `None`
@@ -161,6 +213,28 @@ pub(crate) fn check_with_store(
             }
             require_in_scope(scope, &project_id, "project")
         }
+        ScopeKey::Catalog => Ok(()),
+        ScopeKey::CreateTag => {
+            let Some(allowed) = scope else {
+                return Ok(());
+            };
+            let assign_project_id: Option<String> = opt_arg(args, "assignProjectId")?;
+            match assign_project_id {
+                Some(project_id) => require_in_scope(scope, &project_id, "project"),
+                None => Err(denied(format!(
+                    "{cmd} edits the shared tag catalog; this credential is confined to project \
+                     {allowed} and may only create a tag it assigns to that project \
+                     (assignProjectId)"
+                ))),
+            }
+        }
+        ScopeKey::Unconfined => match scope {
+            Some(allowed) => Err(denied(format!(
+                "{cmd} edits the shared tag catalog, which needs a credential for every \
+                 project; this one is confined to project {allowed}"
+            ))),
+            None => Ok(()),
+        },
     }
 }
 
@@ -540,6 +614,152 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Tags
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn catalog_reads_pass_for_any_grant() {
+        let f = fixture();
+        for g in [
+            scoped(&f.project_a),
+            grant(Scope::Project(f.project_a.clone()), Access::ReadOnly),
+            ControlGrant::test_all_projects(),
+            grant(Scope::AllProjects, Access::ReadOnly),
+        ] {
+            check_with_store("get_tag_state", &json!({}), &g, &f.store).unwrap();
+        }
+    }
+
+    #[test]
+    fn tag_assignments_follow_the_project_argument() {
+        let f = fixture();
+        let g = scoped(&f.project_a);
+        check_with_store(
+            "set_project_group_tag",
+            &json!({ "projectId": f.project_a, "groupId": "g", "tagId": null }),
+            &g,
+            &f.store,
+        )
+        .unwrap();
+        check_with_store(
+            "set_project_tag_assigned",
+            &json!({ "projectId": f.project_a, "tagId": "t", "assigned": true }),
+            &g,
+            &f.store,
+        )
+        .unwrap();
+        for cmd in ["set_project_group_tag", "set_project_tag_assigned"] {
+            assert_denied(
+                check_with_store(
+                    cmd,
+                    &json!({ "projectId": f.project_b, "groupId": "g", "tagId": "t", "assigned": true }),
+                    &g,
+                    &f.store,
+                ),
+                "another project",
+            );
+        }
+    }
+
+    #[test]
+    fn create_tag_by_a_scoped_grant_must_assign_its_own_project() {
+        let f = fixture();
+        let g = scoped(&f.project_a);
+        // The picker's create: a tag made and assigned to the own project.
+        check_with_store(
+            "create_tag",
+            &json!({ "name": "q4", "assignProjectId": f.project_a }),
+            &g,
+            &f.store,
+        )
+        .unwrap();
+        // An unassigned tag is a catalog edit, which a scoped grant can't make.
+        assert_denied(
+            check_with_store("create_tag", &json!({ "name": "q4" }), &g, &f.store),
+            "assignProjectId",
+        );
+        assert_denied(
+            check_with_store(
+                "create_tag",
+                &json!({ "name": "q4", "assignProjectId": null }),
+                &g,
+                &f.store,
+            ),
+            "assignProjectId",
+        );
+        // Nor assign one to another project.
+        assert_denied(
+            check_with_store(
+                "create_tag",
+                &json!({ "name": "q4", "assignProjectId": f.project_b }),
+                &g,
+                &f.store,
+            ),
+            "another project",
+        );
+        // An unconfined grant may create a tag anywhere, assigned or not.
+        let all = ControlGrant::test_all_projects();
+        check_with_store("create_tag", &json!({ "name": "q4" }), &all, &f.store).unwrap();
+        check_with_store(
+            "create_tag",
+            &json!({ "name": "q4", "groupId": "g", "assignProjectId": f.project_b }),
+            &all,
+            &f.store,
+        )
+        .unwrap();
+    }
+
+    /// Every catalog edit except `create_tag`, with arguments that would
+    /// pass the arm.
+    fn catalog_writes() -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            (
+                "update_tag",
+                json!({ "tagId": "t", "name": "Done", "color": "green", "icon": null }),
+            ),
+            (
+                "move_tag",
+                json!({ "tagId": "t", "groupId": "g", "index": 0 }),
+            ),
+            ("create_tag_group", json!({ "name": "Status", "tags": [] })),
+            (
+                "rename_tag_group",
+                json!({ "groupId": "g", "name": "State" }),
+            ),
+            ("set_icon_tag_group", json!({ "groupId": "g" })),
+            (
+                "set_tag_group_sidebar",
+                json!({ "groupId": "g", "shown": true }),
+            ),
+            ("reorder_tag_groups", json!({ "groupIds": ["g"] })),
+        ]
+    }
+
+    #[test]
+    fn catalog_writes_need_an_unconfined_grant() {
+        let f = fixture();
+        let session = scoped(&f.project_a);
+        let all = ControlGrant::test_all_projects();
+        for (cmd, args) in catalog_writes() {
+            assert_denied(
+                check_with_store(cmd, &args, &session, &f.store),
+                "confined to project",
+            );
+            check_with_store(cmd, &args, &all, &f.store).unwrap();
+        }
+        let unconfined: Vec<&str> = CONTROL_SCOPE
+            .iter()
+            .filter(|(_, key, _)| *key == ScopeKey::Unconfined)
+            .map(|(name, ..)| *name)
+            .collect();
+        let expected: Vec<&str> = catalog_writes().iter().map(|(cmd, _)| *cmd).collect();
+        assert_eq!(
+            unconfined, expected,
+            "the unconfined set is exactly the catalog edits"
+        );
+    }
+
+    // -------------------------------------------------------------------
     // Access and scope breadth
     // -------------------------------------------------------------------
 
@@ -547,7 +767,7 @@ mod tests {
     fn read_only_grants_are_refused_the_writing_commands_only() {
         let f = fixture();
         let g = grant(Scope::Project(f.project_a.clone()), Access::ReadOnly);
-        let writes = [
+        let mut writes = vec![
             ("start_branch_session", json!({ "branchId": f.branch_a })),
             ("start_project_session", json!({ "projectId": f.project_a })),
             ("cancel_session", json!({ "sessionId": f.session_a })),
@@ -555,9 +775,31 @@ mod tests {
                 "create_image",
                 json!({ "branchId": f.branch_a, "projectId": f.project_a, "filePath": "/tmp/x" }),
             ),
+            (
+                "set_project_group_tag",
+                json!({ "projectId": f.project_a, "groupId": "g", "tagId": "t" }),
+            ),
+            (
+                "set_project_tag_assigned",
+                json!({ "projectId": f.project_a, "tagId": "t", "assigned": true }),
+            ),
+            (
+                "create_tag",
+                json!({ "name": "q4", "assignProjectId": f.project_a }),
+            ),
         ];
+        writes.extend(catalog_writes());
         for (cmd, args) in &writes {
             assert_denied(check_with_store(cmd, args, &g, &f.store), "read-only");
+        }
+        // The same holds for an unconfined read-only grant: the catalog
+        // edits it could otherwise make are writes.
+        let all_read = grant(Scope::AllProjects, Access::ReadOnly);
+        for (cmd, args) in &writes {
+            assert_denied(
+                check_with_store(cmd, args, &all_read, &f.store),
+                "read-only",
+            );
         }
         let writing: Vec<&str> = CONTROL_SCOPE
             .iter()
@@ -565,7 +807,7 @@ mod tests {
             .map(|(name, ..)| *name)
             .collect();
         let expected: Vec<&str> = writes.iter().map(|(cmd, _)| *cmd).collect();
-        assert_eq!(writing, expected, "the write set is exactly these four");
+        assert_eq!(writing, expected, "the write set is exactly these commands");
         // Reads on the own project still pass.
         check_with_store(
             "get_session",
@@ -575,6 +817,8 @@ mod tests {
         )
         .unwrap();
         check_with_store("list_projects", &json!({}), &g, &f.store).unwrap();
+        check_with_store("get_tag_state", &json!({}), &g, &f.store).unwrap();
+        check_with_store("get_tag_state", &json!({}), &all_read, &f.store).unwrap();
     }
 
     #[test]

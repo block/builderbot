@@ -527,17 +527,39 @@ export function leaveBoard(groupId: string): void {
   releaseBoardLayer(groupId);
 }
 
-/** Navigate to a specific project's detail view. */
+/**
+ * Navigate to a specific project's detail view.
+ *
+ * The project takes the place of whatever the workspace was showing: from the
+ * grid it is pushed, and from a project or the repos list it replaces that
+ * route, so Back goes home either way. Settings and the diff view sit over
+ * the workspace rather than in it, so from either one the project replaces
+ * the workspace route underneath and the routes over it go: with Settings
+ * open over project A (`[home, A, settings]`), opening B leaves `[home, B]`
+ * as a sidebar switch from A would, not `[home, A, B]`, and opening A itself
+ * leaves `[home, A]`. The ⌘K palette is how a project gets opened from there.
+ *
+ * A diff route dropped this way announces itself (`staged:diff-route-replaced`)
+ * like a popped one does. Callers leaving the diff view from outside it await
+ * diffLeaveCheck first.
+ */
 export function selectProject(projectId: string): void {
-  const current = currentRoute();
-  if (current.kind === 'projects') {
-    setDetailStack([rootRoute(), { kind: 'project', projectId }]);
-  } else if (current.kind === 'project' || current.kind === 'repos' || current.kind === 'board') {
-    replaceCurrentRoute({ kind: 'project', projectId });
-  } else if (current.kind === 'settings') {
-    setDetailStack([...navigation.detailStack.slice(0, -1), { kind: 'project', projectId }]);
+  const stack = navigation.detailStack;
+  let end = stack.length;
+  while (end > 1 && (stack[end - 1].kind === 'settings' || stack[end - 1].kind === 'diff')) end--;
+  const dropped = stack.slice(end);
+  const base = stack[end - 1] ?? rootRoute();
+  const route: DetailRoute = { kind: 'project', projectId };
+  if (base.kind === 'project' || base.kind === 'repos' || base.kind === 'board') {
+    setDetailStack([...stack.slice(0, end - 1), route]);
   } else {
-    setDetailStack([rootRoute(), { kind: 'project', projectId }]);
+    setDetailStack([rootRoute(), route]);
+  }
+  for (const droppedRoute of dropped) {
+    if (droppedRoute.kind !== 'diff') continue;
+    window.dispatchEvent(
+      new CustomEvent('staged:diff-route-replaced', { detail: { route: droppedRoute } })
+    );
   }
   persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
@@ -565,7 +587,9 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
   }
 }
 
-/** Returns true when a modal or diff overlay is open. */
+/** Returns true when a modal or diff overlay is open. The ⌘K palette's rule
+ *  (otherModalOpen in paletteState.svelte.ts) is the dialog half of this
+ *  only: it opens over the diff view. */
 function isModalOpen(): boolean {
   return currentRoute().kind === 'diff' || !!document.querySelector('[role="dialog"]');
 }
@@ -658,4 +682,38 @@ export function popDetailRoute(): void {
 export function closeDiffRouteIfCurrent(expectedRoute: DiffDetailRoute): void {
   if (currentRoute() !== expectedRoute) return;
   popDetailRoute();
+}
+
+// ── Leaving the diff view from outside it ──
+//
+// Comments typed into the diff view save as they are written, and the view's
+// own ways out (Escape, ⌘←, its close button) wait for the last save and stay
+// on the diff when it fails, so the text is still there to retry. A
+// navigation the diff view didn't start (the ⌘K palette opening a project)
+// has to make the same check, or a failed save would go with the view.
+
+/** Resolves true once what is typed into the diff view is saved, false when
+ *  a save failed and the view should stay. */
+export type DiffLeaveCheck = () => Promise<boolean>;
+
+let registeredDiffLeaveCheck: DiffLeaveCheck | null = null;
+
+/**
+ * Called by the diff view while it is mounted, with the check its own close
+ * runs. Returns the function that withdraws it.
+ */
+export function registerDiffLeaveCheck(check: DiffLeaveCheck): () => void {
+  registeredDiffLeaveCheck = check;
+  return () => {
+    if (registeredDiffLeaveCheck === check) registeredDiffLeaveCheck = null;
+  };
+}
+
+/**
+ * The check to await before navigating away from the diff view, or null when
+ * the route on screen isn't the diff (nothing to wait for, so the caller can
+ * navigate in the same tick). Navigate only if it resolves true.
+ */
+export function diffLeaveCheck(): DiffLeaveCheck | null {
+  return currentRoute().kind === 'diff' ? registeredDiffLeaveCheck : null;
 }

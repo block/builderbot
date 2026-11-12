@@ -16,6 +16,7 @@
     replaceCurrentReferenceEntry,
     resolveHashtagReference,
     restorePreviousReferenceAfterDiffRoute,
+    endReferenceTrailAfterDiffRoute,
     setCurrentNoteView,
     type HashtagClickInfo,
     type ReferenceChatEntry,
@@ -36,9 +37,16 @@
     const handleDiffRoutePopped = () => {
       restorePreviousReferenceAfterDiffRoute();
     };
+    // The diff route was replaced by a project rather than popped (opened
+    // from the ⌘K palette): there is no going back to what led to it.
+    const handleDiffRouteReplaced = () => {
+      endReferenceTrailAfterDiffRoute();
+    };
     window.addEventListener('staged:diff-route-popped', handleDiffRoutePopped);
+    window.addEventListener('staged:diff-route-replaced', handleDiffRouteReplaced);
     return () => {
       window.removeEventListener('staged:diff-route-popped', handleDiffRoutePopped);
+      window.removeEventListener('staged:diff-route-replaced', handleDiffRouteReplaced);
     };
   });
 

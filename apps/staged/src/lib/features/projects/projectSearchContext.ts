@@ -9,11 +9,17 @@ import { tagsStore } from '../../stores/tags.svelte';
 import { buildSearchSnapshot, type SearchContext, type SearchSnapshot } from './projectSearch';
 import { projectSearchIndex } from './projectSearchIndex.svelte';
 
+/** A repo's badge short name ("staged"), one of the labels a search matches
+ *  it on. The ⌘K palette shows it on a row found that way. */
+export function repoBadgeShortName(githubRepo: string, subpath: string | null): string | undefined {
+  return repoBadgeStore.lookup(githubRepo, subpath)?.shortName;
+}
+
 function projectSearchContext(): SearchContext {
   return {
     branchesByProject: projectsDataStore.branchesByProject,
     reposByProject: projectsDataStore.reposByProject,
-    repoShortName: (githubRepo, subpath) => repoBadgeStore.lookup(githubRepo, subpath)?.shortName,
+    repoShortName: repoBadgeShortName,
     index: projectSearchIndex.index,
     // Every tag, the icon group's included, in catalog order. The backend's
     // search index doesn't hold tags: they're already here, kept fresh.

@@ -25,7 +25,12 @@
 import type { Branch, Project, ProjectRepo } from '../../types';
 import { highlightSegments, queryTerms, type HighlightSegment } from '../../shared/textSearch';
 import { projectDisplayName } from '../../shared/utils';
-import { searchProjects, type MatchReason, type SearchSnapshot } from '../projects/projectSearch';
+import {
+  searchProjects,
+  visibleProjects,
+  type MatchReason,
+  type SearchSnapshot,
+} from '../projects/projectSearch';
 
 /** The most rows the palette renders; `PaletteResults.total` says how many
  *  matched. A query narrows faster than a longer list scrolls. */
@@ -139,8 +144,13 @@ export interface PaletteRow {
   project: Project;
   /** The project's name, split into matched and unmatched runs. */
   name: HighlightSegment[];
-  /** The repo path the row shows, likewise; null for a project without one. */
+  /** The repo path the row shows, likewise; null for a project without one.
+   *  The first of the project's repos the query highlights, by whichever of
+   *  its labels the query found (see PaletteRepo), else the primary's path. */
   repo: HighlightSegment[] | null;
+  /** That repo's badge short name, highlighted, when it is the label the
+   *  query found and the path doesn't hold it. Shown beside the path. */
+  repoAlias: HighlightSegment[] | null;
   /** How many more repos the project has than the one shown. */
   moreRepos: number;
   /** Why the query found the project when neither its name nor its repos
@@ -168,6 +178,9 @@ export interface PaletteSearchInput {
   reposByProject?: ReadonlyMap<string, readonly ProjectRepo[]>;
   /** Hydrated branches by project id, for recency. */
   branchesByProject?: ReadonlyMap<string, readonly Branch[]>;
+  /** A repo's badge short name ("staged"), as the snapshot was built with:
+   *  the app search matches it, so the row has to be able to show it. */
+  repoShortName?: RepoShortName;
   /** The project on screen: listed last when there is no query, since
    *  opening it goes nowhere. */
   currentProjectId?: string | null;
@@ -180,18 +193,54 @@ function repoPath(githubRepo: string, subpath: string | null): string {
   return subpath ? `${githubRepo}/${subpath}` : githubRepo;
 }
 
-/** The project's repo paths, primary first. Before its repos hydrate, the
+export type RepoShortName = (githubRepo: string, subpath: string | null) => string | undefined;
+
+/**
+ * One of a project's repos, by the labels the app search matches it on
+ * (repoLabels in projectSearch.ts): its path, the base repo's path when a
+ * fork PR's head repo stands in for it, and its badge short name. The row
+ * shows `path` unless the query found the repo by one of the others.
+ */
+export interface PaletteRepo {
+  /** `owner/name` or `owner/name/subpath`, the head repo's when there is one. */
+  path: string;
+  /** The base repo's path, when `path` is a head repo's. */
+  basePath: string | null;
+  shortName: string | null;
+}
+
+/** The project's repos, primary first. Before its repos hydrate, the
  *  project's own repo stands in, as on the grid card. */
+export function projectRepos(
+  project: Project,
+  repos: readonly ProjectRepo[] | undefined,
+  repoShortName?: RepoShortName
+): PaletteRepo[] {
+  if (repos && repos.length > 0) {
+    return [...repos]
+      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary))
+      .map((repo) => ({
+        path: repoPath(repo.headRepo ?? repo.githubRepo, repo.subpath),
+        basePath: repo.headRepo ? repoPath(repo.githubRepo, repo.subpath) : null,
+        shortName: repoShortName?.(repo.githubRepo, repo.subpath) ?? null,
+      }));
+  }
+  if (!project.githubRepo) return [];
+  return [
+    {
+      path: repoPath(project.githubRepo, project.subpath),
+      basePath: null,
+      shortName: repoShortName?.(project.githubRepo, project.subpath) ?? null,
+    },
+  ];
+}
+
+/** The paths the row shows for the project's repos, primary first. */
 export function projectRepoPaths(
   project: Project,
   repos: readonly ProjectRepo[] | undefined
 ): string[] {
-  if (repos && repos.length > 0) {
-    return [...repos]
-      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary))
-      .map((repo) => repoPath(repo.headRepo ?? repo.githubRepo, repo.subpath));
-  }
-  return project.githubRepo ? [repoPath(project.githubRepo, project.subpath)] : [];
+  return projectRepos(project, repos).map((repo) => repo.path);
 }
 
 /**
@@ -300,7 +349,7 @@ function hasMatch(segments: readonly HighlightSegment[]): boolean {
 
 function buildRow(
   project: Project,
-  repoPaths: readonly string[],
+  repos: readonly PaletteRepo[],
   terms: readonly string[],
   fuzzy: boolean,
   reason: MatchReason | null
@@ -308,17 +357,32 @@ function buildRow(
   const highlight = fuzzy ? fuzzyHighlightSegments : highlightSegments;
   const name = highlight(projectDisplayName(project), terms);
   // The repo the row shows is the first the query highlights, else the
-  // primary, so a match on a secondary repo is visible in the row.
+  // primary, so a match on a secondary repo is visible in the row. A repo is
+  // matched on any of its labels, and the row shows the one that matched: a
+  // project found only by its base repo's path or a badge short name would
+  // otherwise be listed with nothing to say why.
   let repo: HighlightSegment[] | null = null;
-  for (const path of repoPaths) {
-    const segments = highlight(path, terms);
-    if (!repo) repo = segments;
-    if (hasMatch(segments)) {
-      repo = segments;
+  let repoAlias: HighlightSegment[] | null = null;
+  for (const candidate of repos) {
+    const path = highlight(candidate.path, terms);
+    if (!repo) repo = path;
+    if (hasMatch(path)) {
+      repo = path;
+      break;
+    }
+    const base = candidate.basePath ? highlight(candidate.basePath, terms) : null;
+    if (base && hasMatch(base)) {
+      repo = base;
+      break;
+    }
+    const alias = candidate.shortName ? highlight(candidate.shortName, terms) : null;
+    if (alias && hasMatch(alias)) {
+      repo = path;
+      repoAlias = alias;
       break;
     }
   }
-  return { project, name, repo, moreRepos: Math.max(0, repoPaths.length - 1), reason };
+  return { project, name, repo, repoAlias, moreRepos: Math.max(0, repos.length - 1), reason };
 }
 
 /**
@@ -333,18 +397,20 @@ export function paletteResults({
   snapshot = null,
   reposByProject,
   branchesByProject,
+  repoShortName,
   currentProjectId = null,
   limit = PALETTE_ROW_LIMIT,
 }: PaletteSearchInput): PaletteResults {
   const terms = queryTerms(query);
   const recent = byRecentActivity(projects, branchesByProject);
-  const pathsOf = (project: Project) => projectRepoPaths(project, reposByProject?.get(project.id));
+  const reposOf = (project: Project) =>
+    projectRepos(project, reposByProject?.get(project.id), repoShortName);
 
   if (terms.length === 0) {
     const current = recent.find((p) => p.id === currentProjectId);
     const ordered = current ? [...recent.filter((p) => p !== current), current] : recent;
     return {
-      rows: ordered.slice(0, limit).map((p) => buildRow(p, pathsOf(p), terms, false, null)),
+      rows: ordered.slice(0, limit).map((p) => buildRow(p, reposOf(p), terms, false, null)),
       total: ordered.length,
       terms,
     };
@@ -352,12 +418,16 @@ export function paletteResults({
 
   const exact = searchProjects(recent, query, snapshot);
   const found = new Set(exact.projects.map((p) => p.id));
-  const fuzzy: Array<{ project: Project; paths: string[]; score: number }> = [];
+  const fuzzy: Array<{ project: Project; repos: PaletteRepo[]; score: number }> = [];
   for (const project of recent) {
     if (found.has(project.id)) continue;
-    const paths = pathsOf(project);
-    const score = fuzzyScore(projectDisplayName(project), paths, terms);
-    if (score >= 0) fuzzy.push({ project, paths, score });
+    const repos = reposOf(project);
+    const score = fuzzyScore(
+      projectDisplayName(project),
+      repos.map((repo) => repo.path),
+      terms
+    );
+    if (score >= 0) fuzzy.push({ project, repos, score });
   }
   // Array#sort is stable: equal scores keep the recency order.
   fuzzy.sort((a, b) => b.score - a.score);
@@ -366,14 +436,59 @@ export function paletteResults({
   for (const project of exact.projects) {
     if (rows.length >= limit) break;
     rows.push(
-      buildRow(project, pathsOf(project), terms, false, exact.reasons.get(project.id) ?? null)
+      buildRow(project, reposOf(project), terms, false, exact.reasons.get(project.id) ?? null)
     );
   }
-  for (const { project, paths } of fuzzy) {
+  for (const { project, repos } of fuzzy) {
     if (rows.length >= limit) break;
-    rows.push(buildRow(project, paths, terms, true, null));
+    rows.push(buildRow(project, repos, terms, true, null));
   }
   return { rows, total: exact.projects.length + fuzzy.length, terms };
+}
+
+// ── What the window is hiding ──
+
+/** The surface listing projects in this window, as it stands. */
+export interface WindowProjectList {
+  /** Every project the surface could list. */
+  projects: Project[];
+  /** What the chip filters leave of them (projectFiltersStore.filteredProjects). */
+  chipFiltered: Project[];
+  /**
+   * The one project the surface keeps although the chips exclude it. Which
+   * one depends on the surface on screen: beside a project or the repos list
+   * it is the sidebar, which keeps the selected project's row; on home it is
+   * the grid, which keeps the card a visit just came back from until the
+   * filters next change (gridStickyProjectId).
+   */
+  stickyId: string | null;
+  /** The search field's query, shared by the sidebar and the grid. */
+  query: string;
+  /** Prepared search data, needed only while `query` isn't blank. */
+  snapshot?: SearchSnapshot | null;
+}
+
+const NO_IDS: ReadonlySet<string> = new Set();
+
+/**
+ * The ids of the projects the window's own list isn't showing, for the
+ * palette's "Filtered out" badge: by the rule both surfaces share
+ * (visibleProjects), the chips narrow the list, the sticky project is kept
+ * regardless, and the query then narrows what is left, the sticky project
+ * included. So the badge and the list agree: a row the sidebar or the grid
+ * still shows is never badged, and one they hide always is.
+ */
+export function hiddenProjectIds({
+  projects,
+  chipFiltered,
+  stickyId,
+  query,
+  snapshot = null,
+}: WindowProjectList): ReadonlySet<string> {
+  const shown = visibleProjects(projects, chipFiltered, stickyId, query, snapshot).projects;
+  if (shown.length === projects.length) return NO_IDS;
+  const shownIds = new Set(shown.map((project) => project.id));
+  return new Set(projects.filter((p) => !shownIds.has(p.id)).map((project) => project.id));
 }
 
 // ── Selection ──

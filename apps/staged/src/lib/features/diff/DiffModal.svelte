@@ -83,7 +83,7 @@
   } from './flingScroll';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { Portal } from 'bits-ui';
-  import { openDiffRoute } from '../layout/navigation.svelte';
+  import { openDiffRoute, registerDiffLeaveCheck } from '../layout/navigation.svelte';
   import {
     disabledReferenceNav,
     pushReferenceEntry,
@@ -402,6 +402,11 @@
     if (!(await flushActiveCommentEditors())) return;
     onClose();
   }
+
+  // The same check for a navigation that leaves the diff from outside it (the
+  // ⌘K palette opening a project): it waits on this and stays here when a
+  // comment didn't save.
+  onMount(() => registerDiffLeaveCheck(flushActiveCommentEditors));
 
   async function prepareCommitSessionStart(): Promise<boolean> {
     return await flushActiveCommentEditors();

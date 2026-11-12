@@ -7,11 +7,14 @@ import {
   byRecentActivity,
   fuzzyHighlightSegments,
   fuzzyMatch,
+  hiddenProjectIds,
   moveSelection,
   paletteResults,
   projectActivityAt,
   projectRepoPaths,
+  projectRepos,
   type PaletteSearchInput,
+  type RepoShortName,
 } from './paletteSearch';
 
 // ── Fixtures ──
@@ -80,18 +83,27 @@ interface World {
   projects: Project[];
   branches?: Record<string, Branch[]>;
   repos?: Record<string, ProjectRepo[]>;
+  /** Badge short names by repo path (`owner/name` or `owner/name/subpath`). */
+  shortNames?: Record<string, string>;
 }
 
 /** paletteResults over a world, with the search snapshot the palette builds. */
 function search(world: World, query: string, extra: Partial<PaletteSearchInput> = {}) {
   const branchesByProject = new Map(Object.entries(world.branches ?? {}));
   const reposByProject = new Map(Object.entries(world.repos ?? {}));
+  const repoShortName: RepoShortName = (githubRepo, subpath) =>
+    world.shortNames?.[subpath ? `${githubRepo}/${subpath}` : githubRepo];
   return paletteResults({
     projects: world.projects,
     query,
-    snapshot: buildSearchSnapshot(world.projects, { branchesByProject, reposByProject }),
+    snapshot: buildSearchSnapshot(world.projects, {
+      branchesByProject,
+      reposByProject,
+      repoShortName,
+    }),
     branchesByProject,
     reposByProject,
+    repoShortName,
     ...extra,
   });
 }
@@ -226,6 +238,34 @@ describe('projectRepoPaths', () => {
   });
 });
 
+describe('projectRepos', () => {
+  const shortName: RepoShortName = (githubRepo, subpath) =>
+    githubRepo === 'org/base' && subpath === null ? 'core' : undefined;
+
+  it('keeps the base path and the short name a fork head stands in front of', () => {
+    expect(
+      projectRepos(
+        project(),
+        [
+          repo({ id: 'r1', githubRepo: 'org/mono', subpath: 'apps/web' }),
+          repo({ id: 'r2', githubRepo: 'org/base', headRepo: 'me/fork', isPrimary: false }),
+        ],
+        shortName
+      )
+    ).toEqual([
+      { path: 'org/mono/apps/web', basePath: null, shortName: null },
+      // The short name belongs to the base repo, which is what is badged.
+      { path: 'me/fork', basePath: 'org/base', shortName: 'core' },
+    ]);
+  });
+
+  it("labels the project's own repo until its repos hydrate", () => {
+    expect(projectRepos(project({ githubRepo: 'org/base' }), undefined, shortName)).toEqual([
+      { path: 'org/base', basePath: null, shortName: 'core' },
+    ]);
+  });
+});
+
 // ── paletteResults ──
 
 describe('paletteResults with no query', () => {
@@ -331,6 +371,64 @@ describe('paletteResults with a query', () => {
     expect(row.moreRepos).toBe(1);
   });
 
+  // What the app search matches a repo on beyond the path the row shows: a
+  // project found only that way must still say why.
+  describe('found by a repo label the row does not show by default', () => {
+    const forked = project({ id: 'forked', name: 'Retry backoff' });
+    const badged = project({ id: 'badged', name: 'Ledger export' });
+    const labels: World = {
+      projects: [forked, badged],
+      repos: {
+        forked: [
+          repo({ projectId: 'forked', githubRepo: 'block/payments', headRepo: 'matt/pay-fork' }),
+        ],
+        badged: [
+          repo({ projectId: 'badged', githubRepo: 'block/ledger', subpath: 'tools/export' }),
+          repo({ id: 'r2', projectId: 'badged', githubRepo: 'block/infra', isPrimary: false }),
+        ],
+      },
+      shortNames: { 'block/ledger/tools/export': 'books', 'block/infra': 'platform' },
+    };
+
+    it("shows the head repo of a fork PR when the query doesn't say otherwise", () => {
+      const [row] = search(labels, 'retry').rows;
+      expect(marked(row.repo)).toBe('matt/pay-fork');
+      expect(row.repoAlias).toBeNull();
+    });
+
+    it('shows the base repo path when that is what the query matched', () => {
+      const results = search(labels, 'payments');
+      expect(names(results)).toEqual(['Retry backoff']);
+      expect(marked(results.rows[0].repo)).toBe('block/[payments]');
+      expect(results.rows[0].repoAlias).toBeNull();
+    });
+
+    it('still prefers the head repo path when the query matches both', () => {
+      const [row] = search(labels, 'pay').rows;
+      expect(marked(row.repo)).toBe('matt/[pay]-fork');
+    });
+
+    it('shows the badge short name beside the path when that is what matched', () => {
+      const results = search(labels, 'books');
+      expect(names(results)).toEqual(['Ledger export']);
+      expect(marked(results.rows[0].repoAlias)).toBe('[books]');
+      expect(marked(results.rows[0].repo)).toBe('block/ledger/tools/export');
+    });
+
+    it("shows a secondary repo's short name with that repo's path", () => {
+      const [row] = search(labels, 'platform').rows;
+      expect(marked(row.repoAlias)).toBe('[platform]');
+      expect(marked(row.repo)).toBe('block/infra');
+      expect(row.moreRepos).toBe(1);
+    });
+
+    it('leaves the short name out when the path already shows the match', () => {
+      const [row] = search(labels, 'ledger').rows;
+      expect(marked(row.repo)).toBe('block/[ledger]/tools/export');
+      expect(row.repoAlias).toBeNull();
+    });
+  });
+
   it('matches a branch name and says so in the reason', () => {
     const results = search(world, 'guide');
     expect(names(results)).toEqual(['Docs refresh']);
@@ -402,6 +500,62 @@ describe('paletteResults with a query', () => {
     const results = search({ projects: many }, 'docs', { limit: 4 });
     expect(results.rows).toHaveLength(4);
     expect(results.total).toBe(6);
+  });
+});
+
+// ── hiddenProjectIds ──
+
+describe('hiddenProjectIds', () => {
+  const alpha = project({ id: 'alpha', name: 'Alpha service' });
+  const beta = project({ id: 'beta', name: 'Beta tools' });
+  const gamma = project({ id: 'gamma', name: 'Gamma web' });
+  const projects = [alpha, beta, gamma];
+  const hidden = (list: Partial<Parameters<typeof hiddenProjectIds>[0]>) =>
+    [
+      ...hiddenProjectIds({ projects, chipFiltered: projects, stickyId: null, query: '', ...list }),
+    ].sort();
+
+  it('hides nothing while the list shows everything', () => {
+    expect(hidden({})).toEqual([]);
+  });
+
+  it('hides what the chip filters exclude', () => {
+    expect(hidden({ chipFiltered: [alpha] })).toEqual(['beta', 'gamma']);
+  });
+
+  it('does not hide the sticky project the list keeps despite the chips', () => {
+    // The sidebar's selected row, or the card the grid came back to.
+    expect(hidden({ chipFiltered: [alpha], stickyId: 'gamma' })).toEqual(['beta']);
+    expect(hidden({ chipFiltered: [], stickyId: 'beta' })).toEqual(['alpha', 'gamma']);
+  });
+
+  it('hides what the search field rules out, the sticky project included', () => {
+    expect(hidden({ query: 'beta' })).toEqual(['alpha', 'gamma']);
+    // A typed query is a deliberate narrowing: neither list exempts its
+    // sticky project from it.
+    expect(hidden({ chipFiltered: [alpha], stickyId: 'gamma', query: 'alpha' })).toEqual([
+      'beta',
+      'gamma',
+    ]);
+    expect(hidden({ chipFiltered: [alpha], stickyId: 'gamma', query: 'web' })).toEqual([
+      'alpha',
+      'beta',
+    ]);
+  });
+
+  it('matches the query on what the snapshot holds, like the lists do', () => {
+    const branchesByProject = new Map([
+      ['gamma', [branch({ projectId: 'gamma', branchName: 'matt/dark-mode' })]],
+    ]);
+    const snapshot = buildSearchSnapshot(projects, {
+      branchesByProject,
+      reposByProject: new Map(),
+    });
+    expect(hidden({ query: 'dark-mode', snapshot })).toEqual(['alpha', 'beta']);
+  });
+
+  it('ignores a sticky project that is not in the list at all', () => {
+    expect(hidden({ chipFiltered: [alpha], stickyId: 'gone' })).toEqual(['beta', 'gamma']);
   });
 });
 

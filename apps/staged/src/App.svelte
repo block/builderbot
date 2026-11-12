@@ -31,7 +31,7 @@
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
   import CommandPalette from './lib/features/commandPalette/CommandPalette.svelte';
-  import { toggleCommandPalette } from './lib/features/commandPalette/paletteState.svelte';
+  import { commandPaletteShortcut } from './lib/features/commandPalette/paletteState.svelte';
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
   import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
   import { tabDirection } from './lib/shared/tabDirection';
@@ -262,14 +262,6 @@
     if (!navigation.canGoBack) return false;
     popDetailRoute();
     return true;
-  }
-
-  // ⌘K: the project palette. Its own rule keeps it shut while another modal
-  // is open (see otherModalOpen); here, the store-reset and error screens
-  // have no workspace to search or open a project in.
-  function toggleProjectPalette() {
-    if (storeIncompat || storeError) return;
-    toggleCommandPalette();
   }
 
   function isTextInputActive(): boolean {
@@ -548,15 +540,11 @@
         keys: ['t'],
         handler: requestOpenTagPicker,
       },
-      {
-        id: 'search-projects',
-        description: 'Search projects',
-        category: 'search',
-        keys: ['k'],
-        modifiers: { meta: true },
-        allowInInputs: true,
-        handler: toggleProjectPalette,
-      },
+      // ⌘K: the project palette. The definition (key, input and key-repeat
+      // rules, and why the key is swallowed even when a press does nothing)
+      // is the palette's. Here: the store-reset and error screens have no
+      // workspace to search or open a project in.
+      commandPaletteShortcut(() => !storeIncompat && !storeError),
       {
         id: 'search-find',
         description: 'Find in open note/session',

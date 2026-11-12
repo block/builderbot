@@ -3,7 +3,8 @@
   status icon (ProjectStatusIcon, as in the sidebar and the grid), its name
   with the query's matches highlighted, and a second line with its repo path
   and, when the query found it through a branch, PR, note or review, that
-  reason (ProjectMatchReason, as the sidebar shows it).
+  reason (ProjectMatchReason, as the sidebar shows it). A project found by a
+  repo's badge short name shows that name before the path.
 
   A listbox option: it takes no focus (the palette's input keeps it and points
   at the highlighted row through aria-activedescendant), so the row is a plain
@@ -29,7 +30,8 @@
     selected: boolean;
     /** The project the window is showing. */
     current?: boolean;
-    /** The window's filters or sidebar search hide this project. */
+    /** The window's own list (the sidebar or the grid) isn't showing this
+     *  project: its chip filters or its search field hide it. */
     filteredOut?: boolean;
     /** A remove is in flight: listed, but not openable. */
     removing?: boolean;
@@ -92,6 +94,9 @@
     {#if row.repo || row.reason}
       <span class="row-meta">
         {#if row.repo}
+          {#if row.repoAlias}
+            <span class="row-alias">{@render highlighted(row.repoAlias)}</span>
+          {/if}
           <span class="row-repo">{@render highlighted(row.repo)}</span>
           {#if row.moreRepos > 0}
             <span class="row-more">+{row.moreRepos}</span>
@@ -118,7 +123,7 @@
           <Badge
             variant="outline"
             class="palette-badge"
-            title="Hidden by this window's filters or sidebar search"
+            title="Hidden by this window's filters or search"
           >
             Filtered out
           </Badge>
@@ -203,6 +208,16 @@
     flex-shrink: 1;
   }
 
+  /* The badge short name the query found the repo by, set off from the path
+     the way the app's repo badges are: a small outlined label. */
+  .row-alias {
+    flex-shrink: 0;
+    padding: 0 5px;
+    border: 1px solid var(--border-muted);
+    border-radius: 4px;
+    color: var(--text-secondary);
+  }
+
   .row-more,
   .row-separator {
     flex-shrink: 0;
@@ -216,6 +231,7 @@
   }
 
   .row-name mark,
+  .row-alias mark,
   .row-repo mark {
     background-color: var(--search-match-bg);
     border-radius: 2px;

@@ -3,16 +3,20 @@
   that finds any project and opens its detail view.
 
   Mounted once in App.svelte beside the other shared dialogs and driven by
-  commandPalette.open (the shortcut itself is registered with the rest of
-  the app's shortcuts in App.svelte).
+  commandPalette.open (the shortcut is defined in paletteState.svelte.ts and
+  registered with the rest of the app's shortcuts in App.svelte).
 
   What it searches is every project the app knows about —
   projectsDataStore.projects, the unfiltered list — and never the window's
-  filtered views: the chip filters and the sidebar's search narrow the grid
-  and the sidebar, not this. A project those hide is listed with a "Filtered
+  filtered views: the chip filters and the search field narrow the grid and
+  the sidebar, not this. A project those hide is listed with a "Filtered
   out" badge, and opening it goes through navigation's selectProject, which
   shows the detail view whatever the filters say and leaves them untouched
   (the sidebar keeps the selected project's row visible on its own).
+
+  It opens over Settings and the diff view too. A project opened from there
+  replaces the workspace route underneath (selectProject), and the diff view
+  first saves what was typed into it (diffLeaveCheck).
 
   Matching and ranking live in paletteSearch.ts. The dialog is the design
   system's (focus trap, Escape, backdrop dismiss, focus restore, the
@@ -20,23 +24,31 @@
   and points at the highlighted option with aria-activedescendant.
 -->
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { untrack } from 'svelte';
+  import { toast } from 'svelte-sonner';
   import Search from '@lucide/svelte/icons/search';
   import * as Dialog from '$lib/components/ui/dialog';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { activeDescendantId, listboxOptionId } from '../../shared/listboxIds';
   import { revealWithin } from '../../shared/revealWithin';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { navigation, selectProject } from '../layout/navigation.svelte';
+  import { diffLeaveCheck, navigation, selectProject } from '../layout/navigation.svelte';
   import { activeLayerHost } from '../layout/workspaceLayer';
   import { projectFiltersStore } from '../projects/projectFilters.svelte';
-  import { searchProjects } from '../projects/projectSearch';
-  import { projectSearchSnapshots } from '../projects/projectSearchContext';
+  import { projectSearchSnapshots, repoBadgeShortName } from '../projects/projectSearchContext';
   import { projectSearchIndex } from '../projects/projectSearchIndex.svelte';
-  import { projectsListViewState } from '../projects/projectsListViewState.svelte';
+  import {
+    gridStickyProjectId,
+    projectsListViewState,
+  } from '../projects/projectsListViewState.svelte';
   import CommandPaletteRow from './CommandPaletteRow.svelte';
   import { closeCommandPalette, commandPalette } from './paletteState.svelte';
-  import { moveSelection, paletteResults, type PaletteResults } from './paletteSearch';
+  import {
+    hiddenProjectIds,
+    moveSelection,
+    paletteResults,
+    type PaletteResults,
+  } from './paletteSearch';
 
   const uid = $props.id();
   const listboxId = `command-palette-${uid}-results`;
@@ -46,22 +58,33 @@
 
   let inputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
+  // The highlight is a project, not a position: `selectedId` names it, and
+  // `selectedIndex` is the row it was last seen at, used only once that
+  // project has left the list. Null means the top row (a fresh open, an
+  // edited query) until the list it applies to has rendered.
+  let selectedId = $state<string | null>(null);
   let selectedIndex = $state(0);
   // Set when a result was opened, so closing sends focus to the view that
   // came up rather than back to a control in the one it replaced.
   let navigated = false;
+  // Which open this is, and whether it is waiting on the diff view to save
+  // before opening a result.
+  let openSession = 0;
+  let leaving = false;
+  // The highlight was last moved by the pointer (see the reveal effect).
+  let movedByPointer = false;
 
   let query = $derived(commandPalette.query);
   let searching = $derived(query.trim().length > 0);
-  let sidebarQuery = $derived(projectsListViewState.searchQuery);
+  let listQuery = $derived(projectsListViewState.searchQuery);
 
   // Prepared search data for every project (branches, PRs, repo labels,
   // note and review titles). Built only while something reads it: the
-  // palette is open and a query — its own, or the sidebar's for the
-  // "Filtered out" badge — is active.
+  // palette is open and a query — its own, or the window's search field's
+  // for the "Filtered out" badge — is active.
   const searchSnapshot = projectSearchSnapshots();
   let snapshot = $derived(
-    commandPalette.open && (searching || sidebarQuery.trim().length > 0) ? searchSnapshot() : null
+    commandPalette.open && (searching || listQuery.trim().length > 0) ? searchSnapshot() : null
   );
 
   let results = $derived(
@@ -72,30 +95,70 @@
           snapshot,
           reposByProject: projectsDataStore.reposByProject,
           branchesByProject: projectsDataStore.branchesByProject,
+          repoShortName: repoBadgeShortName,
           currentProjectId: navigation.selectedProjectId,
         })
       : NO_RESULTS
   );
   let rows = $derived(results.rows);
 
-  // The projects this window's chip filters or sidebar search hide. Only
-  // for the badge: the palette lists and opens them all the same.
+  // The projects this window's own list is hiding, for the badge only: the
+  // palette lists and opens them all the same. "Own list" is the surface the
+  // workspace shows (under Settings or the diff view too): the grid on home,
+  // the sidebar beside a project or the repos list. Each keeps one project
+  // its chips exclude, and the badge goes by the same one: the grid's sticky
+  // return card, the sidebar's selected project. A project being removed is
+  // off both lists, and its row says "Removing…" instead.
+  let listStickyId = $derived(
+    navigation.homeActive
+      ? gridStickyProjectId(projectFiltersStore.activeFilters)
+      : navigation.projectLayer?.kind === 'project'
+        ? navigation.projectLayer.projectId
+        : null
+  );
   let filteredOutIds = $derived.by(() => {
     if (!commandPalette.open) return NO_IDS;
-    if (!projectFiltersStore.hasActiveFilters && !sidebarQuery.trim()) return NO_IDS;
-    const shown = new Set(
-      searchProjects(projectFiltersStore.filteredProjects, sidebarQuery, snapshot).projects.map(
-        (project) => project.id
-      )
-    );
-    return new Set(
-      projectsDataStore.projects.filter((p) => !shown.has(p.id)).map((project) => project.id)
-    );
+    if (!projectFiltersStore.hasActiveFilters && !listQuery.trim()) return NO_IDS;
+    return hiddenProjectIds({
+      projects: projectsDataStore.projects,
+      chipFiltered: projectFiltersStore.filteredProjects,
+      stickyId: listStickyId,
+      query: listQuery,
+      snapshot,
+    });
   });
 
-  // The highlighted row. A list that shrank under it (data changing while
-  // open) clamps rather than pointing past the end.
-  let activeIndex = $derived(rows.length === 0 ? -1 : Math.min(selectedIndex, rows.length - 1));
+  // Each open starts from the top, with what a query will search on its way:
+  // every project's branches and repos (the idle drip may not have reached
+  // them all) and the note/review title index.
+  $effect.pre(() => {
+    if (!commandPalette.open) return;
+    untrack(() => {
+      openSession += 1;
+      selectedId = null;
+      selectedIndex = 0;
+      navigated = false;
+      leaving = false;
+      movedByPointer = false;
+      projectSearchIndex.ensureLoaded();
+      void projectsDataStore.ensureProjectsHydrated();
+    });
+  });
+
+  // The highlighted row: wherever the highlighted project is now. The list
+  // changes while the palette is open (opening it fetches every project's
+  // branches, and each one landing can reorder the recents; projects are
+  // created, renamed and removed), and Enter must open the project that was
+  // highlighted, not whichever one has taken its row. Only when that project
+  // is no longer listed does the highlight fall back to its old position,
+  // clamped to the list.
+  let selectedAt = $derived(
+    selectedId === null ? -1 : rows.findIndex((row) => row.project.id === selectedId)
+  );
+  let activeIndex = $derived(
+    rows.length === 0 ? -1 : selectedAt >= 0 ? selectedAt : Math.min(selectedIndex, rows.length - 1)
+  );
+  let activeId = $derived(activeIndex < 0 ? null : rows[activeIndex].project.id);
   let activeDescendant = $derived(
     activeDescendantId(listboxId, {
       open: rows.length > 0,
@@ -104,41 +167,108 @@
     })
   );
 
-  // Each open starts from the top, with what a query will search on its way:
-  // every project's branches and repos (the idle drip may not have reached
-  // them all) and the note/review title index.
+  // Follow the highlighted project: remember the row it sits at, and once
+  // the highlight has fallen to a position (the top row, or a clamp), pin it
+  // to the project found there, so the next change to the list doesn't move
+  // it again.
   $effect.pre(() => {
-    if (!commandPalette.open) return;
+    const id = activeId;
+    const index = activeIndex;
+    if (id === null) return;
     untrack(() => {
-      selectedIndex = 0;
-      navigated = false;
-      projectSearchIndex.ensureLoaded();
-      void projectsDataStore.ensureProjectsHydrated();
+      selectedId = id;
+      selectedIndex = index;
     });
   });
 
+  // Keep the highlighted row in view when it moves: the arrow keys moved the
+  // highlight, or the list reordered and took the row with it. Not when the
+  // pointer moved the highlight, which would scroll the list out from under
+  // it.
+  $effect(() => {
+    const index = activeIndex;
+    if (index < 0) return;
+    if (movedByPointer) {
+      movedByPointer = false;
+      return;
+    }
+    untrack(() => {
+      const row = document.getElementById(listboxOptionId(listboxId, index));
+      if (row && listEl) revealWithin(row, listEl, { block: 'nearest' });
+    });
+  });
+
+  // One line for screen readers, in a live region that stays mounted (below):
+  // how many projects are listed, or why none are.
+  let status = $derived.by(() => {
+    if (rows.length > 0) {
+      if (results.total > rows.length) return `Top ${rows.length} of ${results.total} projects`;
+      return `${results.total} ${results.total === 1 ? 'project' : 'projects'}`;
+    }
+    if (searching) return `No projects match “${query.trim()}”`;
+    return projectsDataStore.loaded ? 'No projects yet' : 'Loading projects…';
+  });
+
   function handleInput() {
+    selectedId = null;
     selectedIndex = 0;
     if (listEl) listEl.scrollTop = 0;
     // A stale title index reloads on the keystroke, as in the search fields.
     projectSearchIndex.ensureLoaded();
   }
 
-  /** Highlight a row; from the keyboard, also scroll it into view. */
-  function highlight(index: number, reveal: boolean) {
-    if (index < 0 || index === activeIndex) return;
+  /** Highlight the project at a row, from the keyboard or the pointer. */
+  function highlight(index: number, fromPointer: boolean) {
+    const id = rows[index]?.project.id;
+    if (!id || index === activeIndex) return;
+    movedByPointer = fromPointer;
+    selectedId = id;
     selectedIndex = index;
-    if (!reveal) return;
-    void tick().then(() => {
-      const row = document.getElementById(listboxOptionId(listboxId, index));
-      if (row && listEl) revealWithin(row, listEl, { block: 'nearest' });
-    });
   }
 
-  function openRow(index: number) {
+  /** Whether the project can be opened: listed, and not being removed (such
+   *  a project is listed, but there is nothing left to open). */
+  function openable(projectId: string): boolean {
+    return (
+      projectsDataStore.projects.some((project) => project.id === projectId) &&
+      !projectsDataStore.isProjectDeleting(projectId)
+    );
+  }
+
+  async function openRow(index: number) {
     const project = rows[index]?.project;
-    // A project being removed is listed, but there is nothing left to open.
-    if (!project || projectsDataStore.isProjectDeleting(project.id)) return;
+    if (!project || leaving || !openable(project.id)) return;
+
+    // Over the diff view, opening a project leaves it. Comments typed there
+    // save as they are written; like the diff view's own close, wait for the
+    // last save and stay when it failed, so the text is still there to retry.
+    const diffSaved = diffLeaveCheck();
+    if (diffSaved) {
+      const session = openSession;
+      leaving = true;
+      let saved = false;
+      try {
+        saved = await diffSaved();
+      } catch (e) {
+        console.error('[CommandPalette] Could not save the diff comment before leaving:', e);
+      } finally {
+        // Unless the palette was reopened meanwhile: `leaving` is that
+        // open's now.
+        if (session === openSession) leaving = false;
+      }
+      // Dismissed while the save ran: the user called it off.
+      if (!commandPalette.open || session !== openSession) return;
+      if (!saved) {
+        // Closing returns focus to the comment that needs another try.
+        closeCommandPalette();
+        toast.error('Comment not saved', {
+          description: 'Still on the diff, so nothing typed there is lost. Try again.',
+        });
+        return;
+      }
+      if (!openable(project.id)) return;
+    }
+
     // Already the view on screen: closing is the whole of it, and focus goes
     // back where it was.
     const onScreen =
@@ -149,8 +279,15 @@
     if (!onScreen) selectProject(project.id);
   }
 
+  // On the dialog, not the input: the keys are the palette's wherever focus
+  // sits inside it.
   function handleKeydown(e: KeyboardEvent) {
     if (isImeKeydown(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+    // Focus that ended up on the dialog itself (it is focusable, for the
+    // focus trap) goes back to the field, where this key's text belongs.
+    if (document.activeElement !== inputEl && e.key !== 'Tab' && e.key !== 'Escape') {
+      inputEl?.focus();
+    }
     const delta = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
     if (delta === 0 && e.key !== 'Enter') return;
     // These keys are the palette's. Stopped as well as prevented: views
@@ -158,8 +295,24 @@
     // Enter, the diff view steps through hunks on the arrows).
     e.preventDefault();
     e.stopPropagation();
-    if (delta !== 0) highlight(moveSelection(activeIndex, delta, rows.length), true);
-    else openRow(activeIndex);
+    if (delta !== 0) highlight(moveSelection(activeIndex, delta, rows.length), false);
+    else void openRow(activeIndex);
+  }
+
+  // A press anywhere in the panel but the field itself must not take focus
+  // from it: on a row the click still opens it, and on the footer, the icon
+  // or the empty state, typing and the arrow keys carry on. Without this the
+  // press focuses the dialog and the field goes dead until clicked again.
+  function handleMousedown(e: MouseEvent) {
+    if (e.target === inputEl) return;
+    e.preventDefault();
+    if (document.activeElement !== inputEl) inputEl?.focus();
+  }
+
+  // The dialog closes on any Escape keydown. One that cancels an IME
+  // composition is the IME's: closing would throw away the query with it.
+  function handleEscapeKeydown(e: KeyboardEvent) {
+    if (isImeKeydown(e)) e.preventDefault();
   }
 
   function handleOpenAutoFocus(e: Event) {
@@ -180,19 +333,30 @@
 </script>
 
 <Dialog.Root open={commandPalette.open} onOpenChange={(open) => !open && closeCommandPalette()}>
+  <!-- The shadow is a utility, not a rule in the style block below: Tailwind
+       draws the primitive's `ring-1` edge as a box-shadow layer and composes
+       its shadow utilities with it, where a `box-shadow` declaration replaces
+       the lot and the panel loses the 1px edge every other dialog has. -->
   <Dialog.Content
     data-command-palette=""
-    class="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-[620px]"
+    class="flex flex-col gap-0 overflow-hidden p-0 shadow-(--shadow-elevated) sm:max-w-[620px]"
     showCloseButton={false}
     fullScreenOnMobile={false}
     onOpenAutoFocus={handleOpenAutoFocus}
     onCloseAutoFocus={handleCloseAutoFocus}
+    onEscapeKeydown={handleEscapeKeydown}
+    onkeydown={handleKeydown}
+    onmousedown={handleMousedown}
   >
     <Dialog.Title class="sr-only">Search projects</Dialog.Title>
     <Dialog.Description class="sr-only">
       Type to find a project by name, repo, branch or pull request. Use the arrow keys to choose a
       result and Enter to open it.
     </Dialog.Description>
+    <!-- The one live region, mounted for as long as the dialog is: only its
+         text changes. A region inserted already holding its text (the count
+         in the footer, the empty state) is often not announced at all. -->
+    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">{status}</div>
 
     <div class="palette-search">
       <Search size={16} />
@@ -212,13 +376,10 @@
         autocapitalize="off"
         spellcheck="false"
         oninput={handleInput}
-        onkeydown={handleKeydown}
       />
     </div>
 
     {#if rows.length > 0}
-      <!-- A press on a row must not take focus from the input: the click
-           still opens the row, and typing carries on if it doesn't. -->
       <div
         class="palette-list"
         role="listbox"
@@ -226,7 +387,6 @@
         aria-label="Projects"
         tabindex="-1"
         bind:this={listEl}
-        onmousedown={(e) => e.preventDefault()}
       >
         {#each rows as row, i (row.project.id)}
           <CommandPaletteRow
@@ -237,13 +397,13 @@
             current={row.project.id === navigation.selectedProjectId}
             filteredOut={filteredOutIds.has(row.project.id)}
             removing={projectsDataStore.isProjectDeleting(row.project.id)}
-            onhighlight={() => highlight(i, false)}
-            onopen={() => openRow(i)}
+            onhighlight={() => highlight(i, true)}
+            onopen={() => void openRow(i)}
           />
         {/each}
       </div>
     {:else}
-      <div class="palette-empty" role="status">
+      <div class="palette-empty">
         {#if searching}
           <p class="empty-title">No projects match “{query.trim()}”</p>
           <p class="empty-hint">
@@ -264,7 +424,7 @@
         <span class="hint"><kbd>esc</kbd> close</span>
       </span>
       {#if rows.length > 0}
-        <span class="count" aria-live="polite">
+        <span class="count">
           {#if results.total > rows.length}
             Top {rows.length} of {results.total}
           {:else}
@@ -285,7 +445,6 @@
     top: 12vh;
     bottom: auto;
     margin-block: 0;
-    box-shadow: var(--shadow-elevated);
   }
 
   /* The primitive's fade and zoom, on the panel and on its backdrop, are the

@@ -24,6 +24,12 @@ export interface Shortcut {
   keys: string[];
   modifiers?: ShortcutModifiers;
   allowInInputs?: boolean;
+  /**
+   * Run once per press: while the key is held, its auto-repeat keydowns are
+   * swallowed without calling the handler. For a toggle, which would
+   * otherwise flip for as long as the key stays down.
+   */
+  ignoreRepeat?: boolean;
 }
 
 export interface FormattedKey {
@@ -180,6 +186,11 @@ function handleKeydown(event: KeyboardEvent): void {
     const matchesKey = shortcut.keys.some((key) => keyMatches(event.key, key));
     if (!matchesKey) continue;
     if (!modifiersMatch(event, shortcut.modifiers)) continue;
+
+    if (event.repeat && shortcut.ignoreRepeat) {
+      event.preventDefault();
+      return;
+    }
 
     const handled = shortcut.handler();
     if (handled === false) return;

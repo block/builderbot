@@ -347,6 +347,7 @@ impl ProjectToolsHandler {
             SessionStatus::Queued => "queued",
             SessionStatus::Running => "running",
             SessionStatus::Disconnected => "disconnected",
+            SessionStatus::Paused => "paused",
             SessionStatus::Completed => "completed",
             SessionStatus::Cancelled => "cancelled",
             SessionStatus::Error => "failed",
@@ -884,6 +885,8 @@ impl ProjectToolsHandler {
                                 .as_str()
                                 .to_string(),
                         ),
+                        rate_limit_resets_at: None,
+                        rate_limit_kind: None,
                         branch_id: Some(branch_id.clone()),
                         project_id: Some(self.project_id.clone()),
                         session_type: None,
@@ -932,6 +935,20 @@ impl ProjectToolsHandler {
                                 CompletionReason::ProjectSessionInterrupted,
                             );
                         }
+                    }
+                    // A session parked on a rate limit has no runner and no
+                    // token: the store write is the whole cancel. It drops
+                    // `completion_reason = rate_limited`, so the rate-limit
+                    // scheduler never resumes the child, and settles the
+                    // work queued behind it, as a Stop in the UI does.
+                    Ok(Some(session)) if session.status == SessionStatus::Paused => {
+                        crate::session_commands::cancel_session_without_runner(
+                            &self.store,
+                            &self.app_handle,
+                            &handle.session_id,
+                            CompletionReason::ProjectSessionInterrupted,
+                            crate::session_queue::KickSource::Mcp,
+                        );
                     }
                     _ => {}
                 }
@@ -1750,6 +1767,35 @@ mod tests {
             instructions.contains("leave this empty"),
             "instructions must say a standard review needs none: {instructions}"
         );
+    }
+
+    /// A child parked on a rate limit has no runner, so neither the queued
+    /// transition nor the registry can cancel it; the tool used to fall
+    /// through, report `paused`, and leave the scheduler to restart the child.
+    /// The store write itself is covered by
+    /// `session_commands::tests::cancelling_a_paused_session_without_a_runner_keeps_the_callers_reason_and_stops_auto_resume`;
+    /// that the tool reaches it is pinned by source text, because the handler
+    /// holds a concrete app handle and cannot be driven under the mock runtime.
+    #[test]
+    fn cancel_repo_session_cancels_a_paused_session_through_the_store() {
+        let source = include_str!("project_mcp.rs");
+        let start = "async fn cancel_repo_session(";
+        let body = &source[source.find(start).expect(start)..];
+        let end = "async fn continue_repo_session(";
+        let body = &body[..body.find(end).expect(end)];
+        let paused = "if session.status == SessionStatus::Paused => {";
+        let arm = &body[body.find(paused).expect(paused)..];
+        let arm = &arm[..arm.find("_ => {}").expect("fall-through arm")];
+        for needle in [
+            "crate::session_commands::cancel_session_without_runner(",
+            "CompletionReason::ProjectSessionInterrupted,",
+            "crate::session_queue::KickSource::Mcp,",
+        ] {
+            assert!(
+                arm.contains(needle),
+                "the `paused` arm of `cancel_repo_session` must contain `{needle}`"
+            );
+        }
     }
 
     #[test]

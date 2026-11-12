@@ -309,6 +309,8 @@ impl Reconciler {
             status: status.as_str().to_string(),
             error_message,
             completion_reason: reason.map(|r| r.as_str().to_string()),
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id: target.branch_id.clone(),
             project_id: target.project_id.clone(),
             // Every emit carries it: the frontend labels running work with

@@ -655,10 +655,7 @@
           );
         }
       } else {
-        prStateStore.setPrError(
-          branch.id,
-          `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
-        );
+        prStateStore.setPrError(branch.id, `PR creation session ${sessionStatusLabel(status)}.`);
       }
     } catch (e) {
       prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
@@ -788,10 +785,7 @@
           }, 1_500);
         }
       } else {
-        pushStateStore.setPushError(
-          branch.id,
-          `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
-        );
+        pushStateStore.setPushError(branch.id, `Push session ${sessionStatusLabel(status)}.`);
       }
     } finally {
       pushCompletionInFlight = false;
@@ -808,6 +802,12 @@
     forcePushNoVerify = noVerify;
     forcePushDeferred = deferred;
     showForcePushDialog = true;
+  }
+
+  function sessionStatusLabel(status: string): string {
+    if (status === 'paused') return 'paused because of an API limit';
+    if (status === 'error') return 'failed';
+    return 'was cancelled';
   }
 
   function handleForcePushConfirm() {

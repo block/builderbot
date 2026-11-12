@@ -28,6 +28,7 @@ export type ProjectNoteRowSource = Pick<
   | 'createdAt'
   | 'updatedAt'
   | 'completedAt'
+  | 'rateLimitResetsAt'
 >;
 
 export type ProjectNoteRowLive = {
@@ -61,7 +62,7 @@ export function projectNoteRow(
     case 'failed':
       row = {
         type: 'failed-note',
-        title: failedArtifactSubtitle(note.completionReason, 'note'),
+        title: failedArtifactSubtitle(note.completionReason, 'note', note.rateLimitResetsAt),
         secondaryMeta: undefined,
       };
       break;

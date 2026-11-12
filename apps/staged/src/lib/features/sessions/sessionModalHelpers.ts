@@ -7,6 +7,7 @@ import {
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_WORKSTATION_GONE,
 } from '../../shared/disconnectedSession';
+import { formatRateLimitResetTime } from '../timeline/sessionFailureCopy';
 
 /** A text snippet attached to a new-session prompt (modal-local, never persisted). */
 export interface TextSnippet {
@@ -79,7 +80,8 @@ export interface ToolDisplay {
  * says what Staged found instead of, or as well as, the generic reason.
  */
 export function sessionEndMessage(
-  current: Pick<Session, 'completionReason'> & Partial<Pick<Session, 'errorMessage'>>
+  current: Pick<Session, 'completionReason'> &
+    Partial<Pick<Session, 'errorMessage' | 'providerMetadata' | 'rateLimitResetsAt'>>
 ): string {
   switch (current.errorMessage) {
     case RECONCILE_TURN_UNDETERMINED:
@@ -89,18 +91,23 @@ export function sessionEndMessage(
     case RECONCILE_PROMPT_NOT_RECEIVED:
       return 'Staged lost its connection before your last message reached the workstation, so the agent never saw it.';
     case RECONCILE_MAY_STILL_RUN:
-      return `${endReasonMessage(current.completionReason)} The workstation didn’t confirm the stop, so the turn may still be running there.`;
+      return `${endReasonMessage(current)} The workstation didn’t confirm the stop, so the turn may still be running there.`;
     default:
-      return endReasonMessage(current.completionReason);
+      return endReasonMessage(current);
   }
 }
 
-function endReasonMessage(completionReason: Session['completionReason']): string {
-  switch (completionReason) {
+function endReasonMessage(
+  current: Pick<Session, 'completionReason'> &
+    Partial<Pick<Session, 'providerMetadata' | 'rateLimitResetsAt'>>
+): string {
+  switch (current.completionReason) {
     case 'crashed':
       return 'This session ended unexpectedly.';
     case 'remote_agent_lost':
       return 'This session’s agent stopped running on its workspace.';
+    case 'rate_limited':
+      return rateLimitEndMessage(current);
     case 'app_quit':
       return 'This session was interrupted when Staged closed.';
     case 'project_session_interrupted':
@@ -114,6 +121,31 @@ function endReasonMessage(completionReason: Session['completionReason']): string
     default:
       return 'This session can be resumed.';
   }
+}
+
+/**
+ * Why a rate-limited session paused and what happens next: the scheduler's
+ * bookkeeping in `providerMetadata.staged.rateLimitAutoRecovery` when it has
+ * any, else the provider's reset time.
+ */
+function rateLimitEndMessage(
+  current: Partial<Pick<Session, 'providerMetadata' | 'rateLimitResetsAt'>>
+): string {
+  const recovery = rateLimitAutoRecovery(current.providerMetadata);
+  if (recovery?.gaveUpAt) {
+    return `This session paused because the provider reported an API limit. Auto-retry gave up after ${recovery.attempt ?? 'several'} attempts.`;
+  }
+  if (recovery?.unsafeToAutoResume) {
+    return 'This session paused because the provider reported an API limit. Resume manually when ready.';
+  }
+  if (recovery?.nextRetryAt && recovery.attempt && recovery.maxAttempts) {
+    return `This session paused because the provider reported an API limit. It will retry around ${formatTimestamp(recovery.nextRetryAt)} (attempt ${recovery.attempt}/${recovery.maxAttempts}).`;
+  }
+  const resetTime = formatRateLimitResetTime(current.rateLimitResetsAt);
+  if (resetTime) {
+    return `This session paused because the provider reported an API limit. It resets around ${resetTime}.`;
+  }
+  return 'This session paused because the provider reported an API limit.';
 }
 
 /**
@@ -153,6 +185,31 @@ export function newestUserMessageId(
     if (messages[i].role === 'user') return messages[i].id;
   }
   return null;
+}
+
+interface RateLimitAutoRecovery {
+  attempt?: number;
+  maxAttempts?: number;
+  nextRetryAt?: number | null;
+  gaveUpAt?: number | null;
+  unsafeToAutoResume?: boolean;
+}
+
+function rateLimitAutoRecovery(
+  providerMetadata: Record<string, unknown> | null | undefined
+): RateLimitAutoRecovery | null {
+  const staged = providerMetadata?.staged;
+  if (!isRecord(staged)) return null;
+  const recovery = staged.rateLimitAutoRecovery;
+  if (!isRecord(recovery)) return null;
+  return recovery as RateLimitAutoRecovery;
+}
+
+function formatTimestamp(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }
 
 /** Tags wrapping injected context blocks in prompts/messages (rendered as collapsed cards). */

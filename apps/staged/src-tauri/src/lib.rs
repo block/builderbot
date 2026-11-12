@@ -42,6 +42,8 @@ pub mod project_mcp;
 pub mod project_search;
 pub mod project_transfer;
 pub mod prs;
+pub(crate) mod rate_limit_metrics;
+pub mod rate_limit_scheduler;
 pub mod review_commands;
 pub mod session_commands;
 pub mod session_completion;
@@ -185,6 +187,8 @@ pub struct CommitTimelineItem {
     /// apart from a plain commit session, since the subject is a display label
     /// an agent-pushed ACP title can replace mid-pipeline.
     pub pipeline_kind: Option<store::PipelineKind>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     /// Whether this commit was authored by the current git user.
     pub is_own_commit: bool,
 }
@@ -202,6 +206,8 @@ pub struct NoteTimelineItem {
     /// The session's `error_message`, for the copy a failed row shows (a
     /// deleted workstation reads differently from a crash).
     pub session_error_message: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
@@ -232,6 +238,8 @@ pub struct ReviewTimelineItem {
     /// The session's `error_message`, for the copy a failed row shows (a
     /// deleted workstation reads differently from a crash).
     pub session_error_message: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     pub title: Option<String>,
     /// Active non-`information` comments (what the detail view lists as comments).
     pub comment_count: usize,
@@ -255,6 +263,8 @@ pub struct ImageTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     pub created_at: i64,
 }
 
@@ -303,10 +313,14 @@ pub(crate) fn get_store(
 
 /// The registry is a parameter rather than a state read: at setup this runs
 /// before the registry is managed.
+#[allow(clippy::too_many_arguments)]
 fn start_store_services(
     store: Arc<Store>,
     pr_scheduler: Arc<pr_poll_scheduler::PrPollScheduler>,
-    registry: Arc<session_runner::SessionRegistry>,
+    rate_limit_scheduler: Arc<rate_limit_scheduler::RateLimitScheduler>,
+    session_registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<actions::ActionExecutor>,
+    action_registry: Arc<actions::ActionRegistry>,
     app_handle: tauri::AppHandle,
 ) {
     background_sync::spawn(Arc::clone(&store), app_handle.clone());
@@ -314,15 +328,29 @@ fn start_store_services(
     // launch pass runs after startup recovery, below.
     session_runner::reconcile::install(
         Arc::clone(&store),
-        Arc::clone(&registry),
+        Arc::clone(&session_registry),
         app_handle.clone(),
     );
-    session_queue::sweep::spawn(Arc::clone(&store), registry, app_handle.clone());
+    session_queue::sweep::spawn(
+        Arc::clone(&store),
+        Arc::clone(&session_registry),
+        app_handle.clone(),
+    );
     // The startup dead-owner recovery only helps the instance that restarts:
     // an instance that dies later leaves its sessions `running` in every other
     // window until some instance sweeps them.
     session_runner::spawn_dead_session_sweep(Arc::clone(&store), app_handle.clone());
-    pr_poll_scheduler::spawn(pr_scheduler, store, app_handle);
+    pr_poll_scheduler::spawn(pr_scheduler, Arc::clone(&store), app_handle.clone());
+    // Guarded internally against double-spawn; today each process reaches this
+    // helper once (setup with a compatible store, or the confirmed-reset path).
+    rate_limit_scheduler::spawn(
+        rate_limit_scheduler,
+        store,
+        session_registry,
+        action_executor,
+        action_registry,
+        app_handle,
+    );
 }
 
 // =============================================================================
@@ -420,6 +448,7 @@ fn reset_store(
     Ok(Some(store))
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn confirm_reset_store(
     app_handle: tauri::AppHandle,
@@ -427,13 +456,19 @@ fn confirm_reset_store(
     store_slot: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     store_change_tx: tauri::State<'_, tokio::sync::broadcast::Sender<store::StoreChange>>,
     pr_scheduler: tauri::State<'_, Arc<pr_poll_scheduler::PrPollScheduler>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    rate_limit_scheduler: tauri::State<'_, Arc<rate_limit_scheduler::RateLimitScheduler>>,
+    session_registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    action_executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
+    action_registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
 ) -> Result<(), String> {
     if let Some(store) = reset_store(&db_state, &store_slot, &store_change_tx)? {
         start_store_services(
             store,
             Arc::clone(pr_scheduler.inner()),
-            Arc::clone(registry.inner()),
+            Arc::clone(rate_limit_scheduler.inner()),
+            Arc::clone(session_registry.inner()),
+            Arc::clone(action_executor.inner()),
+            Arc::clone(action_registry.inner()),
             app_handle.clone(),
         );
         // Every window owns its prompt state. Tell peers to dismiss it after
@@ -1079,6 +1114,8 @@ async fn get_repo_default_branch_timeline(
                     completion_reason: None,
                     session_error_message: None,
                     pipeline_kind: None,
+                    rate_limit_resets_at: None,
+                    rate_limit_kind: None,
                     is_own_commit: false,
                 })
             })
@@ -1994,6 +2031,9 @@ pub fn run() {
             // during the needs-reset prompt); the tick loop is spawned once the
             // store is ready, either below or after a confirmed reset.
             let pr_scheduler = Arc::new(pr_poll_scheduler::PrPollScheduler::new());
+            let rate_limit_scheduler = Arc::new(rate_limit_scheduler::RateLimitScheduler::new());
+            let action_executor = Arc::new(actions::ActionExecutor::new());
+            let action_registry = Arc::new(actions::ActionRegistry::new());
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
@@ -2027,7 +2067,10 @@ pub fn run() {
                     start_store_services(
                         Arc::clone(&store_arc),
                         Arc::clone(&pr_scheduler),
+                        Arc::clone(&rate_limit_scheduler),
                         Arc::clone(&session_registry),
+                        Arc::clone(&action_executor),
+                        Arc::clone(&action_registry),
                         app.handle().clone(),
                     );
                     // `fsmonitor-v1` only flips `.git/config` flags on stale
@@ -2087,8 +2130,9 @@ pub fn run() {
             app.manage(pr_scheduler);
             app.manage(window_commands::NewWindowState::new());
             app.manage(window_commands::UpdaterWindowState::default());
-            app.manage(Arc::new(actions::ActionExecutor::new()));
-            app.manage(Arc::new(actions::ActionRegistry::new()));
+            app.manage(rate_limit_scheduler);
+            app.manage(action_executor);
+            app.manage(action_registry);
             app.manage(app_lifecycle::QuitState::default());
             app.manage(launch_resume::LaunchResumeState::default());
             app.manage(DbState {

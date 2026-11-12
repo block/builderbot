@@ -16,6 +16,7 @@
   import CheckCircle from '@lucide/svelte/icons/check-circle';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import Ban from '@lucide/svelte/icons/ban';
+  import Clock from '@lucide/svelte/icons/clock';
   import Eye from '@lucide/svelte/icons/eye';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import type { Session, SessionStatus, SessionStatusPayload } from '../../types';
@@ -63,7 +64,14 @@
 
   onMount(() => {
     unlistenStatus = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
-      const { sessionId, status, errorMessage, completionReason } = payload;
+      const {
+        sessionId,
+        status,
+        errorMessage,
+        completionReason,
+        rateLimitResetsAt,
+        rateLimitKind,
+      } = payload;
       sessions = sessions.map((s) => {
         if (s.id === sessionId) {
           return {
@@ -71,6 +79,8 @@
             status: status as SessionStatus,
             errorMessage: errorMessage ?? s.errorMessage,
             completionReason: completionReason ?? s.completionReason,
+            rateLimitResetsAt: rateLimitResetsAt ?? s.rateLimitResetsAt,
+            rateLimitKind: rateLimitKind ?? s.rateLimitKind,
             updatedAt: Date.now(),
           };
         }
@@ -148,6 +158,8 @@
     switch (status) {
       case 'completed':
         return CheckCircle;
+      case 'paused':
+        return Clock;
       case 'error':
         return AlertCircle;
       case 'cancelled':
@@ -402,6 +414,9 @@
   }
   .session-indicator.status-completed {
     color: var(--status-added);
+  }
+  .session-indicator.status-paused {
+    color: var(--ui-warning);
   }
   .session-indicator.status-error {
     color: var(--ui-danger);

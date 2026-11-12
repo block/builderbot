@@ -99,6 +99,7 @@
     deleteDisabledReason?: string;
     onRetryClick?: () => void;
     onResumeClick?: () => void;
+    resumeLabel?: string;
     onPullClick?: () => void;
     pullDisabledReason?: string;
     onPushClick?: () => void;
@@ -153,6 +154,7 @@
     deleteDisabledReason,
     onRetryClick,
     onResumeClick,
+    resumeLabel = 'Resume',
     onPullClick,
     pullDisabledReason,
     onPushClick,
@@ -505,11 +507,11 @@
             variant="outline"
             size="xs"
             onclick={handleResumeClick}
-            title="Resume session"
-            aria-label="Resume session"
+            title={resumeLabel}
+            aria-label={resumeLabel}
             class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
           >
-            Resume
+            {resumeLabel}
           </Button>
         {/if}
         {#if onPullClick || pullDisabledReason}

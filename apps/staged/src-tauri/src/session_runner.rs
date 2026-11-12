@@ -38,6 +38,7 @@
 
 pub(crate) mod attachments;
 mod disconnect;
+mod late_stop;
 pub(crate) mod reconcile;
 
 pub(crate) use disconnect::may_still_run_on_workstation;
@@ -139,6 +140,8 @@ pub struct SessionStatusEvent {
     pub status: String,
     pub error_message: Option<String>,
     pub completion_reason: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     /// The branch the session runs on. Invariant the frontend load-bears on:
     /// *every* repo-session event carries this — queue-drain, immediate launch,
     /// resume, and terminal emits alike — and a project-session event never
@@ -229,6 +232,14 @@ impl From<acp_client::BackgroundHoldStatus> for SessionBackgroundHoldSnapshot {
                 .collect(),
         }
     }
+}
+
+/// The reset time and limit kind a paused session recovers from, as classified
+/// out of the provider's error payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RateLimitRecovery {
+    resets_at: Option<String>,
+    kind: Option<String>,
 }
 
 // =============================================================================
@@ -545,8 +556,9 @@ impl SessionRegistry {
     /// entry and takes `cancel_session_impl`'s own path for the row.
     ///
     /// For an owner whose final write leaves the row non-terminal: a Stop
-    /// trusts the entry's owner to record it, and a `disconnected` write
-    /// records none, so the owner has to hand it on.
+    /// trusts the entry's owner to record it, and a `disconnected` or
+    /// rate-limited `paused` write records none, so the owner has to hand it
+    /// on (to reconcile) or act on it (see [`late_stop::deregister_paused_run`]).
     fn deregister_reporting_cancellation_of(
         &self,
         session_id: &str,
@@ -1385,6 +1397,7 @@ fn finish_cancelled_before_run<R: tauri::Runtime>(
         SessionStatus::Cancelled.as_str(),
         None,
         Some(&completion_reason),
+        None,
         branch_id,
         project_id,
     );
@@ -1457,6 +1470,7 @@ pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
             SessionStatus::Error.as_str(),
             Some(error.to_string()),
             Some(&CompletionReason::Crashed),
+            None,
             branch_id,
             project_id,
         );
@@ -2425,6 +2439,7 @@ fn finish_disconnected_run(
             SessionStatus::Disconnected.as_str(),
             None,
             None,
+            None,
             config.branch_id.clone(),
             config.project_id.clone(),
         );
@@ -2478,10 +2493,13 @@ fn finish_session_run(
     // need to agree on what "cancelled before the run settled" means.
     let cancel_requested = cancel_token.is_cancelled();
     let cancelled_for_quit = cancellation_completion_reason == CompletionReason::AppQuit;
-    let (new_status, error_msg, completion_reason) = match result {
-        Ok(AgentRunOutcome::Cancelled) if cancel_requested => {
-            ("cancelled", None, cancellation_completion_reason.clone())
-        }
+    let (new_status, error_msg, completion_reason, rate_limit_recovery) = match result {
+        Ok(AgentRunOutcome::Cancelled) if cancel_requested => (
+            "cancelled",
+            None,
+            cancellation_completion_reason.clone(),
+            None,
+        ),
         // Ended without a Stop: the agent cancelled the turn itself, or a
         // detach landed before the prompt was sent and recorded why.
         Ok(AgentRunOutcome::Cancelled) => (
@@ -2490,6 +2508,7 @@ fn finish_session_run(
             registry
                 .detach_reason_of(&session_id_for_status, registration)
                 .unwrap_or(CompletionReason::Interrupted),
+            None,
         ),
         // A cancel that landed on a turn which had already completed and
         // held for its background work stopped only the *wait*. Fall
@@ -2499,20 +2518,64 @@ fn finish_session_run(
             if cancel_requested
                 && !completed_turn_survives_late_cancel(settlement.settle_reason) =>
         {
-            ("cancelled", None, cancellation_completion_reason.clone())
+            (
+                "cancelled",
+                None,
+                cancellation_completion_reason.clone(),
+                None,
+            )
         }
         Ok(AgentRunOutcome::Completed) => (
             "completed",
             None,
             completed_turn_completion_reason(settlement.settle_reason),
+            None,
         ),
         Err(ref e) if cancel_requested => {
             log::info!("Session {session_id_for_status} cancelled (error during teardown: {e})");
-            ("cancelled", None, cancellation_completion_reason)
+            ("cancelled", None, cancellation_completion_reason, None)
         }
         Err(ref e) => {
             log::error!("Session {session_id_for_status} failed: {e}");
-            ("error", Some(e.clone()), failed_run_completion_reason(e))
+            let session_snapshot = store_for_status
+                .get_session(&session_id_for_status)
+                .ok()
+                .flatten();
+            let provider_metadata = session_snapshot
+                .as_ref()
+                .and_then(|session| session.provider_metadata.as_ref());
+            let provider = session_snapshot
+                .as_ref()
+                .and_then(|session| session.provider.as_deref())
+                .or(config.provider.as_deref());
+            // A rate limit pauses the session; anything else fails it, as a
+            // lost remote agent when that is what the error says.
+            let completion_reason = match completion_reason_for_driver_error(e, provider_metadata) {
+                CompletionReason::Crashed => failed_run_completion_reason(e),
+                reason => reason,
+            };
+            let rate_limit_recovery =
+                (completion_reason == CompletionReason::RateLimited).then(|| {
+                    rate_limit_recovery_details(e, provider_metadata, crate::store::now_timestamp())
+                });
+            if let Some(recovery) = rate_limit_recovery.as_ref() {
+                crate::rate_limit_metrics::record_rate_limit_hit(
+                    &session_id_for_status,
+                    provider,
+                    recovery.kind.as_deref(),
+                    recovery.resets_at.is_some(),
+                );
+            }
+            (
+                if completion_reason == CompletionReason::RateLimited {
+                    "paused"
+                } else {
+                    "error"
+                },
+                Some(e.clone()),
+                completion_reason,
+                rate_limit_recovery,
+            )
         }
     };
 
@@ -2599,31 +2662,59 @@ fn finish_session_run(
     // Only a Stop *newer* than the match above counts — one it already
     // saw may have been folded into `completed` deliberately, see
     // `completed_turn_survives_late_cancel`.
-    let (new_status, error_msg, completion_reason) = if !cancel_requested
-        && cancel_token.is_cancelled()
-    {
+    //
+    // It replaces the whole decision, the rate-limit recovery included: the
+    // write below pauses the row exactly when the recovery is still set, so
+    // a Stop that kept it would be announced as `cancelled` and stored as
+    // `paused`, for the scheduler to restart.
+    let late_stop_reason = (!cancel_requested && cancel_token.is_cancelled()).then(|| {
         log::info!("Session {session_id_for_status} cancelled during its post-completion hooks");
-        let reason = registry
+        registry
             .cancellation_completion_reason(&session_id_for_status)
-            .unwrap_or(CompletionReason::Interrupted);
-        ("cancelled", None, reason)
-    } else {
-        (new_status, error_msg, completion_reason)
-    };
+            .unwrap_or(CompletionReason::Interrupted)
+    });
+    let (new_status, error_msg, completion_reason, rate_limit_recovery) =
+        late_stop::terminal_decision_after_late_stop(
+            (
+                new_status,
+                error_msg,
+                completion_reason,
+                rate_limit_recovery,
+            ),
+            late_stop_reason,
+        );
 
     // Decided: from here the entry is a finished turn's, and a Resume that
     // wins the row between the write below and the deregister must not
     // inherit a Stop that was aimed at this turn (see `mark_finished`).
     registry.mark_finished(&session_id_for_status, registration);
     let status_enum = SessionStatus::parse(new_status).unwrap();
-    let transitioned = store_for_status
-        .transition_from_running(
+    let transitioned = if let Some(recovery) = rate_limit_recovery.as_ref() {
+        // Status flip and retry bookkeeping land in one write, so a
+        // scheduler tick can never see a paused row without bookkeeping
+        // and double-count the attempt.
+        crate::rate_limit_scheduler::pause_for_rate_limit(
+            &store_for_status,
             &session_id_for_status,
-            status_enum,
             error_msg.as_deref(),
-            Some(&completion_reason),
+            recovery.resets_at.as_deref(),
+            recovery.kind.as_deref(),
+            crate::store::now_timestamp(),
         )
-        .unwrap_or(false);
+        .unwrap_or_else(|e| {
+            log::warn!("Failed to pause rate-limited session {session_id_for_status}: {e}");
+            false
+        })
+    } else {
+        store_for_status
+            .transition_from_running(
+                &session_id_for_status,
+                status_enum.clone(),
+                error_msg.as_deref(),
+                Some(&completion_reason),
+            )
+            .unwrap_or(false)
+    };
 
     // Deregister only now that the terminal state is written: a `running`
     // row this process owns with no registry entry is what the
@@ -2631,7 +2722,25 @@ fn finish_session_run(
     // time in `running`. Epoch-guarded, because a Resume that wins the row
     // between the write above and this line has registered a successor
     // under the same id (see `RegistrationEpoch`).
-    registry.deregister(&session_id_for_status, registration);
+    //
+    // A row this run just paused for rate-limit recovery is not terminal,
+    // so a Stop its entry accepted after the late-Stop check above cannot
+    // be dropped the way one on a finished turn is: the deregister reads it
+    // out and ends the row as `cancelled`, announcing that and moving the
+    // branch queue along in place of the `paused` event and drain below.
+    if transitioned && rate_limit_recovery.is_some() {
+        if late_stop::deregister_paused_run(
+            &store_for_status,
+            &registry,
+            &app_handle,
+            &session_id_for_status,
+            registration,
+        ) {
+            return;
+        }
+    } else {
+        registry.deregister(&session_id_for_status, registration);
+    }
 
     // Parse and persist pr/push outcomes and emit the pr-created /
     // push-completed domain events. Gated on winning the transition so
@@ -2656,11 +2765,21 @@ fn finish_session_run(
         new_status,
         error_msg,
         Some(&completion_reason),
+        rate_limit_recovery.as_ref(),
         config.branch_id.clone(),
         config.project_id.clone(),
     );
 
     if transitioned {
+        // A pause falls through to the branch queue drain below. A paused
+        // session is not running, so work the user queued behind it has
+        // to be released or the branch deadlocks: the queue waits for a
+        // terminal hook that never fires, while auto-resume waits for
+        // the queue to empty. Only the branch queue drains —
+        // `completed_successfully` is false for a pause, so this
+        // session's own queued follow-up messages keep waiting for the
+        // resume that can actually deliver them.
+
         let branch_id = config.branch_id.clone();
         // Read the token again rather than reusing what the terminal-state
         // match saw: the entry stayed registered through the hooks and up
@@ -2669,7 +2788,9 @@ fn finish_session_run(
         // write was recorded by the late-Stop check and is already
         // `cancelled` in the row; one that landed between the write and
         // the deregister changed no row — the turn was over — but still
-        // says the user does not want the queued follow-up to run.
+        // says the user does not want the queued follow-up to run. (The
+        // exception is a row that write paused for a rate limit, which
+        // such a Stop does end: that case returned at the deregister.)
         //
         // Naming the shared body rather than a command is the point: the
         // Tauri command and the web dispatcher's `cancel_session` arm both
@@ -2977,6 +3098,7 @@ pub fn start_pipeline_session(
                     status_str,
                     None,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -3130,6 +3252,7 @@ pub fn start_pipeline_session(
                     status_str,
                     error,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -3166,6 +3289,7 @@ pub fn start_pipeline_session(
                     "cancelled",
                     None,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -3251,6 +3375,7 @@ fn finish_failed_pipeline_handoff_start<R: tauri::Runtime>(
             SessionStatus::Error.as_str(),
             Some(error.to_string()),
             Some(&CompletionReason::Crashed),
+            None,
             config.branch_id.clone(),
             config.project_id.clone(),
         );
@@ -4074,6 +4199,264 @@ fn format_step_output_for_prompt(label: &str, command: &str, output: &str, faile
     format!("### {label}{status}\nCommand: {command}\n```\n{output}\n```")
 }
 
+fn completion_reason_for_driver_error(
+    error: &str,
+    provider_metadata: Option<&serde_json::Value>,
+) -> CompletionReason {
+    if is_rate_limit_error(error, provider_metadata) {
+        CompletionReason::RateLimited
+    } else {
+        CompletionReason::Crashed
+    }
+}
+
+fn rate_limit_recovery_details(
+    error: &str,
+    provider_metadata: Option<&serde_json::Value>,
+    now_millis: i64,
+) -> RateLimitRecovery {
+    let mut details = RateLimitRecovery::default();
+
+    if let Some(metadata) = provider_metadata {
+        if let Some(rate_limit) = metadata
+            .pointer("/acp/usageUpdate/_meta")
+            .and_then(|meta| meta.get("_claude/rateLimit"))
+        {
+            details.resets_at = timestamp_field(rate_limit, &["resetsAt", "resetAt"], now_millis);
+            details.kind = string_field(rate_limit, &["rateLimitType", "type", "status"]);
+        }
+
+        if details.resets_at.is_none() {
+            details.resets_at = metadata.pointer("/acp/promptError/data").and_then(|data| {
+                timestamp_field(data, &["resetsAt", "resetAt", "retryAt"], now_millis)
+            });
+        }
+
+        if details.kind.is_none() {
+            details.kind = metadata
+                .pointer("/acp/promptError/data")
+                .and_then(|data| string_field(data, &["errorKind", "kind", "type"]));
+        }
+    }
+
+    if details.kind.is_none() {
+        let normalized = error.to_ascii_lowercase();
+        details.kind = if normalized.contains("overloaded") {
+            Some("overloaded".to_string())
+        } else if normalized.contains("usage limit") || normalized.contains("quota") {
+            Some("usage_limit".to_string())
+        } else {
+            Some("rate_limit".to_string())
+        };
+    }
+
+    details
+}
+
+fn string_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(|field| field.as_str()))
+        .map(str::to_string)
+}
+
+/// Extract a reset timestamp, normalized to an RFC3339 UTC string.
+///
+/// claude-agent-acp forwards the SDK's `rate_limit_info` verbatim, and the
+/// SDK's `resetsAt` is a numeric epoch timestamp (`SDKRateLimitInfo` declares
+/// `resetsAt?: number`), so numeric fields — and strings that are bare
+/// integers — are converted here to the RFC3339 form the stored column, the
+/// scheduler's parser, and the frontend's `new Date(...)` copy all expect.
+fn timestamp_field(value: &serde_json::Value, names: &[&str], now_millis: i64) -> Option<String> {
+    names.iter().find_map(|name| {
+        let field = value.get(*name)?;
+        if let Some(text) = field.as_str() {
+            let text = text.trim();
+            if let Ok(epoch) = text.parse::<i64>() {
+                return epoch_to_rfc3339_utc(epoch, now_millis);
+            }
+            return (!text.is_empty()).then(|| text.to_string());
+        }
+        let epoch = field
+            .as_i64()
+            .or_else(|| field.as_f64().map(|epoch| epoch.trunc() as i64))?;
+        epoch_to_rfc3339_utc(epoch, now_millis)
+    })
+}
+
+/// Format a positive epoch timestamp as RFC3339 UTC with millisecond
+/// precision. Epoch seconds and millis are split by magnitude: seconds don't
+/// pass 10^11 until year 5138, while millis crossed it in 1973.
+///
+/// The magnitude split misreads epochs in other scales — microseconds land as
+/// millis centuries out — so anything further ahead than any real provider
+/// reset window is dropped rather than stored: recovery then uses plain
+/// backoff and the UI shows no reset time, instead of both parking on a
+/// timestamp in year 55,000.
+fn epoch_to_rfc3339_utc(epoch: i64, now_millis: i64) -> Option<String> {
+    if epoch <= 0 {
+        return None;
+    }
+    let millis = if epoch >= 100_000_000_000 {
+        epoch
+    } else {
+        epoch.checked_mul(1_000)?
+    };
+    if millis.saturating_sub(now_millis) > crate::rate_limit_scheduler::MAX_PLAUSIBLE_RESET_LEAD_MS
+    {
+        return None;
+    }
+    let datetime =
+        time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000).ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        datetime.year(),
+        u8::from(datetime.month()),
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute(),
+        datetime.second(),
+        datetime.millisecond()
+    ))
+}
+
+fn is_rate_limit_error(error: &str, provider_metadata: Option<&serde_json::Value>) -> bool {
+    let normalized = error.to_ascii_lowercase();
+
+    if provider_metadata
+        .map(metadata_has_non_retryable_limit)
+        .unwrap_or(false)
+        || has_non_retryable_limit_marker(&normalized)
+    {
+        return false;
+    }
+
+    // A structured error kind from the bridge is authoritative. Driver error
+    // text can carry agent or tool stderr and model output, so a session that
+    // is itself working on rate-limit code, or a reply quoting "overloaded",
+    // must not turn a crash the bridge already classified as something else
+    // (`invalid_request`, `max_output_tokens`, `server_error`, ...) into a
+    // paused session that replays the retry prompt. The text fallback is only
+    // for errors that arrive with no kind at all.
+    if let Some(kind) = provider_metadata.and_then(prompt_error_kind) {
+        return kind == "rate_limit" || kind == "overloaded";
+    }
+
+    if provider_metadata
+        .map(usage_update_reports_limit)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    has_rate_limit_marker(&normalized)
+}
+
+/// The bridge's `errorKind` for the failed prompt, lowercased, when it sent one.
+fn prompt_error_kind(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .pointer("/acp/promptError/data/errorKind")
+        .and_then(|kind| kind.as_str())
+        .map(|kind| kind.trim().to_ascii_lowercase())
+        .filter(|kind| !kind.is_empty())
+}
+
+fn metadata_has_non_retryable_limit(metadata: &serde_json::Value) -> bool {
+    prompt_error_kind(metadata)
+        .map(|kind| {
+            kind == "billing_error" || kind == "credits_exhausted" || kind == "account_on_hold"
+        })
+        .unwrap_or(false)
+}
+
+fn usage_update_reports_limit(metadata: &serde_json::Value) -> bool {
+    let Some(rate_limit) = metadata
+        .pointer("/acp/usageUpdate/_meta")
+        .and_then(|meta| meta.get("_claude/rateLimit"))
+    else {
+        return false;
+    };
+
+    rate_limit
+        .get("status")
+        .and_then(|status| status.as_str())
+        .map(|status| {
+            let status = status.to_ascii_lowercase();
+            status == "rejected" || status == "limited" || status == "rate_limited"
+        })
+        .unwrap_or(false)
+}
+
+fn has_non_retryable_limit_marker(normalized: &str) -> bool {
+    // Auth and hard billing/credit failures need user action, not retry/resume.
+    let non_retryable_markers = [
+        "please run /login",
+        "run /login",
+        "not authenticated",
+        "auth login",
+        "billing_error",
+        "billing error",
+        "account_on_hold",
+        "account on hold",
+        "credits exhausted",
+        "credit exhausted",
+        "insufficient_quota",
+        "insufficient quota",
+    ];
+    non_retryable_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+fn has_rate_limit_marker(normalized: &str) -> bool {
+    // Phrase markers are specific enough to substring-match, which keeps
+    // suffix forms matching ("rate limited", "rate limits", "rateLimitType").
+    let substring_markers = [
+        "rate limit",
+        "ratelimit",
+        "rate_limit",
+        "too many requests",
+        "resource_exhausted",
+        "resource exhausted",
+        "usage limit",
+        "usage_limit",
+        "usagelimit",
+        "overloaded",
+        "resetsat",
+        "resets at",
+    ];
+    // Driver error text can include arbitrary process stderr, where "429"
+    // appears inside longer numbers (exit codes, byte counts) and "quota"
+    // inside unrelated words ("quotation"); these only count as whole tokens.
+    let token_markers = ["429", "quota"];
+    substring_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+        || token_markers
+            .iter()
+            .any(|marker| contains_token(normalized, marker))
+}
+
+/// Substring match that only counts occurrences not embedded in a longer
+/// alphanumeric run: "http 429" and "error(429)" match "429", "14290" and
+/// "4429" do not. Non-ASCII bytes count as boundaries, which is safe because
+/// a multi-byte character can never continue an ASCII token.
+fn contains_token(text: &str, token: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut search_from = 0;
+    while let Some(offset) = text[search_from..].find(token) {
+        let start = search_from + offset;
+        let end = start + token.len();
+        let boundary_before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let boundary_after = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if boundary_before && boundary_after {
+            return true;
+        }
+        search_from = start + 1;
+    }
+    false
+}
+
 fn spawn_pipe_reader<R>(mut pipe: R) -> tokio::task::JoinHandle<io::Result<Vec<u8>>>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -4301,6 +4684,7 @@ fn recover_dead_session<R: tauri::Runtime>(
         status.as_str(),
         None,
         reason.as_ref(),
+        None,
         recovered_branch_id.clone(),
         recovered_project_id,
     );
@@ -6093,12 +6477,14 @@ fn find_closing_fence(text: &str) -> Option<usize> {
 /// runs (see [`finish_cancelled_before_run`]) and the stranded-session sweep
 /// can be driven by a mock app in tests. Every production caller passes the
 /// concrete handle.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_status<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     session_id: &str,
     status: &str,
     error: Option<String>,
     completion_reason: Option<&CompletionReason>,
+    rate_limit_recovery: Option<&RateLimitRecovery>,
     branch_id: Option<String>,
     project_id: Option<String>,
 ) {
@@ -6107,6 +6493,8 @@ pub(crate) fn emit_status<R: tauri::Runtime>(
         status: status.to_string(),
         error_message: error,
         completion_reason: completion_reason.map(|r| r.as_str().to_string()),
+        rate_limit_resets_at: rate_limit_recovery.and_then(|details| details.resets_at.clone()),
+        rate_limit_kind: rate_limit_recovery.and_then(|details| details.kind.clone()),
         branch_id,
         project_id,
         session_type: None,
@@ -6173,6 +6561,8 @@ pub fn emit_session_running(
         status: "running".to_string(),
         error_message: None,
         completion_reason: None,
+        rate_limit_resets_at: None,
+        rate_limit_kind: None,
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),
@@ -7204,6 +7594,364 @@ mod tests {
         assert!(prompt_output.contains("```\ndone\n```"));
         assert!(!prompt_output.contains("10%"));
         assert!(!prompt_output.contains("20%"));
+    }
+
+    #[test]
+    fn driver_error_completion_reason_detects_rate_limits() {
+        assert_eq!(
+            completion_reason_for_driver_error(
+                r#"Prompt failed: Error { code: InternalError, message: "rate limit exceeded", data: Some(Object {"errorKind": String("rate_limit")}) }"#,
+                None,
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: RequestError(429, \"Rate limit exceeded. Try again later.\")",
+                None,
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: UsageLimitReached { resets_at: Some(2026-06-24T15:45:00Z) }",
+                None,
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("RESOURCE_EXHAUSTED: quota exceeded", None),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("upstream overloaded; retry later", None),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed",
+                Some(&serde_json::json!({
+                    "acp": {
+                        "promptError": {
+                            "code": -32603,
+                            "message": "provider failed",
+                            "data": {
+                                "errorKind": "rate_limit"
+                            }
+                        }
+                    }
+                })),
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed",
+                Some(&serde_json::json!({
+                    "acp": {
+                        "usageUpdate": {
+                            "used": 123,
+                            "size": 200000,
+                            "_meta": {
+                                "_claude/rateLimit": {
+                                    "status": "rejected",
+                                    "rateLimitType": "subscription",
+                                    "resetsAt": "2026-06-24T15:45:00Z"
+                                }
+                            }
+                        }
+                    }
+                })),
+            ),
+            CompletionReason::RateLimited
+        );
+    }
+
+    /// A structured `errorKind` that is not a limit is authoritative: driver
+    /// error text can carry stderr or model output that mentions rate limits,
+    /// and that must not turn a classified crash into a paused session.
+    #[test]
+    fn structured_non_limit_error_kinds_skip_the_text_fallback() {
+        fn metadata(kind: &str) -> serde_json::Value {
+            serde_json::json!({
+                "acp": {
+                    "promptError": {
+                        "code": -32603,
+                        "message": "provider failed",
+                        "data": { "errorKind": kind }
+                    }
+                }
+            })
+        }
+        // Text that would classify as a limit on its own.
+        let limit_like_text = "Prompt failed: tool stderr: rate limit exceeded, HTTP 429, \
+                               overloaded; resets at 2026-06-24T15:45:00Z";
+        assert_eq!(
+            completion_reason_for_driver_error(limit_like_text, None),
+            CompletionReason::RateLimited
+        );
+
+        for kind in [
+            "invalid_request",
+            "max_output_tokens",
+            "server_error",
+            "transport_lost",
+            "incomplete_tool_call",
+            "Unknown",
+        ] {
+            assert_eq!(
+                completion_reason_for_driver_error(limit_like_text, Some(&metadata(kind))),
+                CompletionReason::Crashed,
+                "errorKind {kind:?} must short-circuit to crashed"
+            );
+        }
+        // The structured limit kinds still pause, case-insensitively.
+        for kind in ["rate_limit", "overloaded", "Rate_Limit"] {
+            assert_eq!(
+                completion_reason_for_driver_error("Prompt failed", Some(&metadata(kind))),
+                CompletionReason::RateLimited,
+                "errorKind {kind:?} must pause"
+            );
+        }
+        // Metadata without a kind leaves the text fallback in charge.
+        assert_eq!(
+            completion_reason_for_driver_error(
+                limit_like_text,
+                Some(&serde_json::json!({
+                    "acp": { "promptError": { "code": -32603, "message": "provider failed" } }
+                })),
+            ),
+            CompletionReason::RateLimited
+        );
+    }
+
+    /// `account_on_hold` needs user action like billing failures do; retrying
+    /// cannot clear it.
+    #[test]
+    fn account_on_hold_is_not_retryable() {
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: rate limit",
+                Some(&serde_json::json!({
+                    "acp": { "promptError": { "data": { "errorKind": "account_on_hold" } } }
+                })),
+            ),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("Account on hold; usage limit reached", None),
+            CompletionReason::Crashed
+        );
+    }
+
+    /// 2026-06-24T15:00:00Z, 45 minutes before the reset the fixtures report.
+    const RESET_TEST_NOW_MILLIS: i64 = 1_782_313_200_000;
+
+    #[test]
+    fn rate_limit_recovery_details_extracts_reset_metadata() {
+        let details = rate_limit_recovery_details(
+            "Prompt failed",
+            Some(&serde_json::json!({
+                "acp": {
+                    "usageUpdate": {
+                        "_meta": {
+                            "_claude/rateLimit": {
+                                "status": "rejected",
+                                "rateLimitType": "subscription",
+                                "resetsAt": "2026-06-24T15:45:00Z"
+                            }
+                        }
+                    }
+                }
+            })),
+            RESET_TEST_NOW_MILLIS,
+        );
+
+        assert_eq!(details.resets_at.as_deref(), Some("2026-06-24T15:45:00Z"));
+        assert_eq!(details.kind.as_deref(), Some("subscription"));
+    }
+
+    #[test]
+    fn rate_limit_recovery_details_normalizes_numeric_reset_timestamps() {
+        // claude-agent-acp forwards the SDK's rate_limit_info verbatim, where
+        // resetsAt is a numeric epoch, not an RFC3339 string.
+        let details = rate_limit_recovery_details(
+            "Prompt failed",
+            Some(&serde_json::json!({
+                "acp": {
+                    "usageUpdate": {
+                        "_meta": {
+                            "_claude/rateLimit": {
+                                "status": "rejected",
+                                "rateLimitType": "five_hour",
+                                "resetsAt": 1_782_315_900
+                            }
+                        }
+                    }
+                }
+            })),
+            RESET_TEST_NOW_MILLIS,
+        );
+        assert_eq!(
+            details.resets_at.as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+        assert_eq!(details.kind.as_deref(), Some("five_hour"));
+
+        // Epoch millis and numeric strings normalize to the same instant.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": 1_782_315_900_000_i64 }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            )
+            .as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "retryAt": "1782315900" }),
+                &["retryAt"],
+                RESET_TEST_NOW_MILLIS,
+            )
+            .as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+
+        // RFC3339 strings pass through untouched; garbage stays absent.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": "2026-06-24T15:45:00Z" }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            )
+            .as_deref(),
+            Some("2026-06-24T15:45:00Z")
+        );
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": -5 }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn implausibly_distant_reset_timestamps_are_dropped() {
+        let max_lead = crate::rate_limit_scheduler::MAX_PLAUSIBLE_RESET_LEAD_MS;
+
+        // An epoch in microseconds passes the seconds-vs-millis magnitude
+        // split as millis and lands tens of millennia out; storing it would
+        // show absurd reset copy and park recovery on a bogus retry time.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": 1_782_315_900_000_000_i64 }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            ),
+            None
+        );
+
+        // The cap is about lead time, not scale: any epoch beyond the
+        // plausibility window is rejected, one within it is kept.
+        let beyond_window_secs = (RESET_TEST_NOW_MILLIS + max_lead) / 1_000 + 60;
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": beyond_window_secs }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            ),
+            None
+        );
+        let within_window_secs = (RESET_TEST_NOW_MILLIS + max_lead) / 1_000 - 60;
+        assert!(timestamp_field(
+            &serde_json::json!({ "resetsAt": within_window_secs }),
+            &["resetsAt"],
+            RESET_TEST_NOW_MILLIS,
+        )
+        .is_some());
+
+        // Past resets still normalize: they are real data the scheduler
+        // already handles by falling back to backoff.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": 1_782_313_100 }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            )
+            .as_deref(),
+            Some("2026-06-24T14:58:20.000Z")
+        );
+    }
+
+    #[test]
+    fn bare_number_and_quotation_markers_do_not_classify_as_rate_limits() {
+        // "429" embedded in a longer number (exit codes, byte counts in
+        // stderr) is not a rate-limit signal; a whole 429 token is.
+        assert_eq!(
+            completion_reason_for_driver_error("agent process exited with code 14290", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("wrote 4429 bytes to stderr", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("HTTP 429 returned by provider", None),
+            CompletionReason::RateLimited
+        );
+
+        // "quota" as part of another word is not a quota error.
+        assert_eq!(
+            completion_reason_for_driver_error("unbalanced quotation mark in config", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("You exceeded your current quota", None),
+            CompletionReason::RateLimited
+        );
+    }
+
+    #[test]
+    fn driver_error_completion_reason_leaves_actionable_failures_as_crashes() {
+        assert_eq!(
+            completion_reason_for_driver_error("Please run /login before continuing", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                r#"Prompt failed: Error { data: Some(Object {"errorKind": String("billing_error")}) }"#,
+                None,
+            ),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("Credits exhausted for this account", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("agent process exited unexpectedly", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: rate limit",
+                Some(&serde_json::json!({
+                    "acp": {
+                        "promptError": {
+                            "code": -32603,
+                            "message": "billing failed",
+                            "data": {
+                                "errorKind": "billing_error"
+                            }
+                        }
+                    }
+                })),
+            ),
+            CompletionReason::Crashed
+        );
     }
 
     /// A session at its AI handoff: the row is `running` and the handoff step

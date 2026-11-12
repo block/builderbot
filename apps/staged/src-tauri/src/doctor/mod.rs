@@ -8,6 +8,7 @@ pub use doctor::{
     FixCancelHandle, FixCancellation, FixStdin, FixStdinWriter, FixType, RunChecksOptions,
 };
 
+mod deprecated_bridge;
 pub mod login;
 mod managed_bridges;
 mod runtime_checks;
@@ -19,6 +20,9 @@ pub(crate) mod test_support;
 #[path = "tests/commands.rs"]
 mod tests;
 
+use deprecated_bridge::{
+    deprecated_claude_acp_check, run_deprecated_claude_acp_fix, DEPRECATED_CLAUDE_ACP_CHECK_ID,
+};
 pub use login::{
     cancel_doctor_login, doctor_login_status, send_doctor_login_code, start_doctor_login,
     DoctorLoginOutput, DoctorLoginStatus, LoginStart,
@@ -300,6 +304,9 @@ async fn run_doctor_report(
     if let Some(check) = node_runtime {
         report.checks.push(check);
     }
+    if let Some(check) = deprecated_claude_acp_check(&report, &env_vars).await {
+        report.checks.push(check);
+    }
     report.checks.extend(queue_check);
     report
 }
@@ -344,6 +351,13 @@ pub async fn run_doctor_fix(
         }
     }
     let env_vars = doctor_env_vars().await;
+    // The deprecated-bridge fix carries its own command rather than a static
+    // check definition, so the npm-backed gate below can't see it — ensure the
+    // managed runtime here, since the fix shells out to npm.
+    if check_id == DEPRECATED_CLAUDE_ACP_CHECK_ID {
+        ensure_managed_node_runtime_for_fix().await?;
+        return run_deprecated_claude_acp_fix(fix_type, env_vars).await;
+    }
     let npm_backed = doctor::agents::lookup_fix_command(&check_id, &fix_type)
         .as_deref()
         .is_some_and(crate::managed_acp_tools::is_npm_backed_command);

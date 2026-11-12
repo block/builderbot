@@ -323,4 +323,72 @@ describe('newestUserMessageId', () => {
     expect(newestUserMessageId([])).toBeNull();
     expect(newestUserMessageId([{ id: 3, role: 'assistant' }])).toBeNull();
   });
+  it('explains API limit failures', () => {
+    expect(sessionEndMessage({ completionReason: 'rate_limited' })).toBe(
+      'This session paused because the provider reported an API limit.'
+    );
+  });
+
+  it('explains API limit reset time when available', () => {
+    expect(
+      sessionEndMessage({
+        completionReason: 'rate_limited',
+        rateLimitResetsAt: '2026-06-24T15:45:00Z',
+      })
+    ).toContain('It resets around');
+  });
+
+  it('explains scheduled API limit auto-retry state', () => {
+    expect(
+      sessionEndMessage({
+        completionReason: 'rate_limited',
+        providerMetadata: {
+          staged: {
+            rateLimitAutoRecovery: {
+              attempt: 3,
+              maxAttempts: 8,
+              nextRetryAt: Date.UTC(2026, 5, 24, 15, 45),
+            },
+          },
+        },
+      })
+    ).toContain('It will retry around');
+  });
+
+  it('explains API limit auto-retry give-up state', () => {
+    expect(
+      sessionEndMessage({
+        completionReason: 'rate_limited',
+        providerMetadata: {
+          staged: {
+            rateLimitAutoRecovery: {
+              attempt: 9,
+              maxAttempts: 8,
+              gaveUpAt: Date.UTC(2026, 5, 24, 15, 45),
+            },
+          },
+        },
+      })
+    ).toBe(
+      'This session paused because the provider reported an API limit. Auto-retry gave up after 9 attempts.'
+    );
+  });
+
+  it('explains API limit manual-only recovery state', () => {
+    expect(
+      sessionEndMessage({
+        completionReason: 'rate_limited',
+        providerMetadata: {
+          staged: {
+            rateLimitAutoRecovery: {
+              unsafeToAutoResume: true,
+              reason: 'pending_tool_call',
+            },
+          },
+        },
+      })
+    ).toBe(
+      'This session paused because the provider reported an API limit. Resume manually when ready.'
+    );
+  });
 });

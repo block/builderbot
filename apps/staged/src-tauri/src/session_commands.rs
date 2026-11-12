@@ -1565,9 +1565,98 @@ pub(crate) async fn resume_or_queue_session_for_store(
         branch_id,
         acp_config_selection,
         None,
+        ResumeClaim::Transition,
     )
     .await
     .map(|()| ResumeSessionOutcome::Started)
+}
+
+/// A rate-limited session already claimed for one auto-resume attempt.
+///
+/// The scheduler builds this under the branch launch lock, so by the time the
+/// resume runs the session row is already `running`. It carries everything the
+/// resume still needs from before the claim: the message the user queued during
+/// the backoff (preferred over the synthetic retry prompt because it carries
+/// their actual intent and saves a turn), and the rate-limit fields the claim
+/// cleared, so a failed start can park the session exactly as it was found.
+pub(crate) struct RateLimitResumeTicket {
+    pub session_id: String,
+    pub queued_message: Option<store::QueuedSessionMessage>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
+}
+
+pub(crate) async fn auto_resume_rate_limited_session(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    ticket: RateLimitResumeTicket,
+) -> Result<(), String> {
+    // The post-success drain cascade delivers any remaining queued messages.
+    let (prompt, image_ids, branch_id, queued_message_id) = match &ticket.queued_message {
+        Some(message) => (
+            message.content.clone(),
+            Some(message.image_ids.clone()),
+            message.branch_id.clone(),
+            Some(message.id.clone()),
+        ),
+        None => (
+            crate::rate_limit_scheduler::AUTO_RETRY_RESUME_PROMPT.to_string(),
+            None,
+            None,
+            None,
+        ),
+    };
+
+    let result = resume_session_for_store(
+        Arc::clone(&store),
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        ticket.session_id.clone(),
+        prompt,
+        image_ids,
+        branch_id,
+        None,
+        queued_message_id,
+        ResumeClaim::AlreadyClaimed,
+    )
+    .await;
+
+    if let Err(ref e) = result {
+        // The claim already moved the row to `running`, so releasing it is this
+        // path's job: park the session again with the limit metadata it had
+        // before the attempt, then hand the queued message back so the next
+        // attempt (or the user) can send it.
+        let _ = store.transition_running_to_rate_limited(
+            &ticket.session_id,
+            Some(e),
+            ticket.rate_limit_resets_at.as_deref(),
+            ticket.rate_limit_kind.as_deref(),
+        );
+        if let Some(message) = &ticket.queued_message {
+            let _ = store.release_queued_session_message(&message.id, Some(e));
+        }
+    }
+
+    result
+}
+
+/// How the caller of [`resume_session_for_store`] takes ownership of the
+/// session row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeClaim {
+    /// Claim the row here, refusing the resume if it is already running. This
+    /// is the safe default for every user-initiated resume.
+    Transition,
+    /// The caller already claimed the row and owns parking it again if the
+    /// start fails. Rate-limit auto-resume claims under the branch launch lock
+    /// so no branch launch can slip a second agent into the worktree between
+    /// its busy check and its claim.
+    AlreadyClaimed,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1583,6 +1672,7 @@ pub(crate) async fn resume_session_for_store(
     branch_id: Option<String>,
     acp_config_selection: Option<store::AcpConfigSelection>,
     queued_message_id: Option<String>,
+    claim: ResumeClaim,
 ) -> Result<(), String> {
     let session = store
         .get_session(&session_id)
@@ -1602,14 +1692,25 @@ pub(crate) async fn resume_session_for_store(
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
     let _liveness = registry.hold(&session_id);
-    let transitioned = store
-        .transition_to_running_clearing_agent_id(
-            &session_id,
-            plan.pending_start_agent_id.as_deref(),
-        )
-        .map_err(|e| e.to_string())?;
-    if !transitioned {
-        return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
+    match claim {
+        ResumeClaim::Transition => {
+            let transitioned = store
+                .transition_to_running_clearing_agent_id(
+                    &session_id,
+                    plan.pending_start_agent_id.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+            if !transitioned {
+                return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
+            }
+        }
+        // The caller's claim predates `prepare_resume`, and the hold that
+        // keeps the row live is invisible to a Stop: one that landed during
+        // the preparation wrote `cancelled` and kicked the branch's queue.
+        // Launching regardless would start the stopped session on a branch
+        // that now reads free. Nothing between this read and the runner
+        // registering in `launch_resume` can suspend.
+        ResumeClaim::AlreadyClaimed => ensure_claimed_resume_still_running(&store, &session_id)?,
     }
 
     launch_resume(
@@ -1625,6 +1726,30 @@ pub(crate) async fn resume_session_for_store(
         queued_message_id,
     )
     .map(|_| ())
+}
+
+/// The refusal `resume_session_for_store` returns for a
+/// [`ResumeClaim::AlreadyClaimed`] resume whose row stopped being `running`
+/// while the resume was prepared: a Stop (or a delete) took the session after
+/// the claim. The rate-limit scheduler reads it back as a lost claim rather
+/// than a failed start.
+pub(crate) const RESUME_CLAIM_LOST_ERROR: &str =
+    "Session was stopped before its resume could start";
+
+/// Whether a row claimed before `prepare_resume` is still the claimant's to
+/// launch: it must still be `running`.
+///
+/// The claim wrote `running`, and the only thing covering the row since is a
+/// liveness hold, which `SessionRegistry::cancel` does not see. A Stop in that
+/// stretch therefore takes [`cancel_session_impl`]'s store fallback and writes
+/// `cancelled`; a row that is gone was deleted. Either way the session is no
+/// longer this resume's, and the caller's own re-park (guarded on `running`)
+/// writes nothing.
+fn ensure_claimed_resume_still_running(store: &Store, session_id: &str) -> Result<(), String> {
+    match store.get_session(session_id).map_err(|e| e.to_string())? {
+        Some(row) if row.status == store::SessionStatus::Running => Ok(()),
+        _ => Err(RESUME_CLAIM_LOST_ERROR.to_string()),
+    }
 }
 
 /// Everything a resume reads before the row is claimed: the session's
@@ -1972,6 +2097,8 @@ fn launch_resume(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id: event_branch_id,
             project_id: event_project_id.or(mcp_project_id.clone()),
             session_type,
@@ -2461,7 +2588,8 @@ pub(crate) async fn route_continue_session(
             }
             store::SessionStatus::Completed
             | store::SessionStatus::Cancelled
-            | store::SessionStatus::Error => {
+            | store::SessionStatus::Error
+            | store::SessionStatus::Paused => {
                 if stopped == StoppedSessionPolicy::Refuse {
                     return Ok(ContinueRoute::Delivered(ContinueOutcome::not_running(
                         format!("the session is {}", session.status.as_str()),
@@ -2901,6 +3029,7 @@ pub(crate) async fn send_queued_session_message_for_store(
         message.branch_id.clone(),
         None,
         Some(message.id.clone()),
+        ResumeClaim::Transition,
     )
     .await;
 
@@ -2939,6 +3068,7 @@ pub(crate) async fn drain_queued_message_for_session(
         message.branch_id.clone(),
         None,
         Some(message.id.clone()),
+        ResumeClaim::Transition,
     )
     .await;
 
@@ -3052,9 +3182,16 @@ pub(crate) fn build_note_followup_message_impl(
 /// The registry is the fast path: a session whose cancellation token is
 /// registered gets it fired, and the session runner records the terminal state
 /// itself. The `!was_running` fallback covers the rest — a session that is
-/// `running` or `queued` in the store but has no live token to fire, either
-/// because it never started one or because it was deregistered before its
-/// terminal write. Without it the row would sit at `running` forever.
+/// `running`, `queued`, or `paused` in the store but has no live token to
+/// fire, either because it never started one or because it was deregistered
+/// before its terminal write. Without it the row would sit at `running`
+/// forever.
+///
+/// A rate-limited `paused` session is never in the registry, so this fallback
+/// is the only Stop it can take. Writing `cancelled` here clears
+/// `completion_reason = rate_limited`, which is what makes the rate-limit
+/// scheduler's claim lose: without it a Stop was a silent no-op and the only
+/// ways out of the auto-retries were deleting the artifact or resuming first.
 ///
 /// Both the `cancel_session` Tauri command and the web dispatcher's arm of the
 /// same name call this. They must not diverge: `session_runner` relies on this
@@ -3098,51 +3235,82 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                 store::SessionStatus::Running
                     | store::SessionStatus::Queued
                     | store::SessionStatus::Disconnected
+                    | store::SessionStatus::Paused
             ) {
-                let _ = store.update_session_status(
-                    session_id,
-                    store::SessionStatus::Cancelled,
-                    None,
-                    Some(&store::CompletionReason::Interrupted),
-                );
-                let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
-                let project_id = store.get_project_id_for_session(session_id).ok().flatten();
-                crate::web_server::emit_to_all(
+                cancel_session_without_runner(
+                    &store,
                     app_handle,
-                    "session-status-changed",
-                    session_runner::SessionStatusEvent {
-                        session_id: session_id.to_string(),
-                        status: "cancelled".to_string(),
-                        error_message: None,
-                        completion_reason: Some("interrupted".to_string()),
-                        branch_id: branch_id.clone(),
-                        project_id,
-                        session_type: None,
-                        dependency_skipped: false,
-                    },
+                    session_id,
+                    store::CompletionReason::Interrupted,
+                    crate::session_queue::KickSource::CancelFallback,
                 );
-                // A running session's cancel drains the branch, which settles
-                // anything gated on it; this write does not, so settle its
-                // dependents here.
-                if let Err(e) = crate::pipeline_dependency::skip_dependents_of_cancelled(
-                    &store, app_handle, session_id,
-                ) {
-                    log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
-                }
-                // The row was the branch's busy marker (or a queued barrier);
-                // the terminal-state drain that would normally follow belongs
-                // to a runner this row never had.
-                if let Some(branch_id) = branch_id {
-                    crate::session_queue::kick(
-                        app_handle,
-                        &branch_id,
-                        crate::session_queue::KickSource::CancelFallback,
-                    );
-                }
             }
         }
     }
     Ok(())
+}
+
+/// End a session row no runner owns as `cancelled`, and do what that
+/// runner's terminal write would have: announce it, settle the work gated on
+/// it, and move the branch's queue along.
+///
+/// The store-write half of a Stop, shared by every entry point that can meet
+/// a row with no live token: [`cancel_session_impl`]'s fallback, the project
+/// MCP `cancel_repo_session` tool's `paused` arm, and the session runner for
+/// a Stop that reached a run just as it paused its row for a rate limit
+/// (`session_runner::late_stop`). The caller decides the row is one this
+/// applies to — the write is not guarded on the status.
+///
+/// For a rate-limited `paused` session this is the whole cancel. Writing
+/// `cancelled` replaces `completion_reason = rate_limited` with
+/// `completion_reason` and clears the reset columns, so the rate-limit
+/// scheduler neither lists the row nor wins its claim
+/// (`transition_to_running_with_provider_metadata` only matches
+/// paused/rate-limited rows).
+pub(crate) fn cancel_session_without_runner<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &tauri::AppHandle<R>,
+    session_id: &str,
+    completion_reason: store::CompletionReason,
+    kick_source: crate::session_queue::KickSource,
+) {
+    let _ = store.update_session_status(
+        session_id,
+        store::SessionStatus::Cancelled,
+        None,
+        Some(&completion_reason),
+    );
+    let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
+    let project_id = store.get_project_id_for_session(session_id).ok().flatten();
+    crate::web_server::emit_to_all(
+        app_handle,
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
+            session_id: session_id.to_string(),
+            status: "cancelled".to_string(),
+            error_message: None,
+            completion_reason: Some(completion_reason.as_str().to_string()),
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
+            branch_id: branch_id.clone(),
+            project_id,
+            session_type: None,
+            dependency_skipped: false,
+        },
+    );
+    // A running session's cancel drains the branch, which settles anything
+    // gated on it; this write does not, so settle its dependents here.
+    if let Err(e) =
+        crate::pipeline_dependency::skip_dependents_of_cancelled(store, app_handle, session_id)
+    {
+        log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
+    }
+    // The row was the branch's busy marker (or a queued barrier); the
+    // terminal-state drain that would normally follow belongs to a runner
+    // this row never had.
+    if let Some(branch_id) = branch_id {
+        crate::session_queue::kick(app_handle, &branch_id, kick_source);
+    }
 }
 
 /// Cancel the queued session an artifact's delete left behind.
@@ -3186,6 +3354,8 @@ pub(crate) fn cancel_queued_session_of_deleted_artifact<R: tauri::Runtime>(
             status: "cancelled".to_string(),
             error_message: None,
             completion_reason: Some("interrupted".to_string()),
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id,
             project_id,
             session_type: None,
@@ -3880,6 +4050,7 @@ pub(crate) fn fail_claimed_queued_start<R: tauri::Runtime>(
                 store::SessionStatus::Error.as_str(),
                 Some(error.clone()),
                 Some(&store::CompletionReason::Crashed),
+                None,
                 Some(branch_id.to_string()),
                 Some(project_id.to_string()),
             );
@@ -3942,6 +4113,7 @@ fn fail_queued_start_before_claim<R: tauri::Runtime>(
                 store::SessionStatus::Error.as_str(),
                 Some(error),
                 Some(&store::CompletionReason::Crashed),
+                None,
                 Some(branch.id.clone()),
                 Some(branch.project_id.clone()),
             );
@@ -4621,6 +4793,8 @@ pub async fn start_project_session_for_store(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id: None,
             project_id: Some(project_id.clone()),
             session_type: None,
@@ -5124,6 +5298,8 @@ fn insert_queued_branch_session(
                 status: "queued".to_string(),
                 error_message: None,
                 completion_reason: None,
+                rate_limit_resets_at: None,
+                rate_limit_kind: None,
                 branch_id: Some(branch_id.to_string()),
                 project_id,
                 session_type: Some(session_type.as_str().to_string()),
@@ -6269,7 +6445,8 @@ fn forced_start_precheck(
         store::SessionStatus::Disconnected
         | store::SessionStatus::Completed
         | store::SessionStatus::Error
-        | store::SessionStatus::Cancelled => {
+        | store::SessionStatus::Cancelled
+        | store::SessionStatus::Paused => {
             return Err(format!("Session {session_id} is no longer queued"));
         }
     }
@@ -6583,6 +6760,8 @@ async fn start_queued_session_for_branch(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),
@@ -8852,6 +9031,42 @@ mod tests {
         }
     }
 
+    /// An already-claimed resume (rate-limit auto-resume) took its row to
+    /// `running` before `prepare_resume`, and a Stop during the preparation
+    /// writes `cancelled` past the liveness hold. So the row is read back
+    /// after the preparation, under the hold, and nothing may suspend between
+    /// that read and the launch. Pinned by source text, like the checks above,
+    /// because the resume needs a concrete app runtime to drive.
+    #[test]
+    fn claimed_resume_rechecks_its_row_between_preparation_and_launch() {
+        let source = include_str!("session_commands.rs");
+        let start = "pub(crate) async fn resume_session_for_store(";
+        let body = &source[source.find(start).expect(start)..];
+        let body = &body[..body.find("\n}\n").expect("fn end")];
+
+        let prepared = body.find("prepare_resume(&store").expect("preparation");
+        let held = body.find("registry.hold(&session_id)").expect("hold");
+        let arm = body
+            .find("ResumeClaim::AlreadyClaimed =>")
+            .expect("already-claimed arm");
+        let check = "ensure_claimed_resume_still_running(&store, &session_id)?";
+        let checked = body.find(check).expect(check);
+        let launched = checked
+            + body[checked..]
+                .find("\n    launch_resume(")
+                .expect("launch_resume call");
+
+        assert!(prepared < held, "the hold is taken after the preparation");
+        assert!(
+            held < arm && arm < checked,
+            "the already-claimed arm rechecks the row under the hold"
+        );
+        assert!(
+            !body[checked..launched].contains(".await"),
+            "`{start}` awaits between its recheck and `launch_resume(`"
+        );
+    }
+
     fn schedule(kind: BranchSessionScheduleKind) -> BranchSessionSchedule {
         BranchSessionSchedule {
             kind,
@@ -9192,6 +9407,214 @@ mod tests {
         assert_eq!(
             store.get_session(&session.id).unwrap().unwrap().status,
             store::SessionStatus::Cancelled
+        );
+    }
+
+    /// A rate-limited `paused` session is never in the registry, so this
+    /// fallback is the only Stop it can take. It used to touch only
+    /// `running`/`queued`, so Stop on a paused session was a silent no-op and
+    /// the auto-retries kept coming. Cancelling clears
+    /// `completion_reason = rate_limited`, which makes the scheduler's claim
+    /// lose, and settles work gated on the session as a running cancel would.
+    #[test]
+    fn cancelling_a_paused_rate_limited_session_records_the_stop_and_releases_its_dependents() {
+        let (store, branch) = setup_branch_store();
+        let paused =
+            store::Session::new_running("rebase", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&paused).unwrap();
+        store
+            .create_commit(
+                &store::Commit::new_with_sha(&branch.id, "abc123").with_session(&paused.id),
+            )
+            .unwrap();
+        assert!(store
+            .transition_running_to_rate_limited(&paused.id, Some("rate limit"), None, None)
+            .unwrap());
+        let mut push = store::Session::new_queued("push").with_branch(&branch.id);
+        push.pipeline = Some(
+            store::PipelineExecution::from_steps(&[])
+                .with_kind(store::PipelineKind::Push)
+                .with_depends_on_session_id(Some(paused.id.clone())),
+        );
+        store.create_session(&push).unwrap();
+
+        cancel_through_shared_body(&session_runner::SessionRegistry::new(), &store, &paused.id);
+
+        let row = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+        // The scheduler's claim only matches paused/rate-limited rows.
+        assert!(!store
+            .transition_to_running_with_provider_metadata(&paused.id, None)
+            .unwrap());
+        assert_eq!(
+            store.get_session(&push.id).unwrap().unwrap().status,
+            store::SessionStatus::Cancelled
+        );
+    }
+
+    /// The project MCP `cancel_repo_session` tool cancels a paused child
+    /// through the same store write as the Stop above, under its own
+    /// completion reason. It used to have no arm for `paused`, so a parent
+    /// that aborted a rate-limited child was told `paused` and the scheduler
+    /// restarted the child at its next retry. The helper is driven directly
+    /// because the tool holds a concrete (non-mock) app handle.
+    #[test]
+    fn cancelling_a_paused_session_without_a_runner_keeps_the_callers_reason_and_stops_auto_resume()
+    {
+        use tauri::Listener;
+
+        let (store, branch) = setup_branch_store();
+        let paused =
+            store::Session::new_running("rebase", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&paused).unwrap();
+        store
+            .create_commit(
+                &store::Commit::new_with_sha(&branch.id, "abc123").with_session(&paused.id),
+            )
+            .unwrap();
+        assert!(store
+            .transition_running_to_rate_limited(
+                &paused.id,
+                Some("rate limit"),
+                Some("2026-11-12T09:00:00Z"),
+                Some("five_hour"),
+            )
+            .unwrap());
+        let mut push = store::Session::new_queued("push").with_branch(&branch.id);
+        push.pipeline = Some(
+            store::PipelineExecution::from_steps(&[])
+                .with_kind(store::PipelineKind::Push)
+                .with_depends_on_session_id(Some(paused.id.clone())),
+        );
+        store.create_session(&push).unwrap();
+        assert_eq!(
+            store.get_rate_limited_paused_sessions().unwrap().len(),
+            1,
+            "the scheduler lists the paused row before the cancel"
+        );
+
+        let app = mock_app();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let seen = Arc::clone(&events);
+        app.handle()
+            .listen_any("session-status-changed", move |event| {
+                seen.lock()
+                    .unwrap()
+                    .push(serde_json::from_str(event.payload()).unwrap());
+            });
+
+        cancel_session_without_runner(
+            &store,
+            app.handle(),
+            &paused.id,
+            store::CompletionReason::ProjectSessionInterrupted,
+            crate::session_queue::KickSource::Mcp,
+        );
+
+        let row = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::ProjectSessionInterrupted)
+        );
+        assert_eq!(row.rate_limit_resets_at, None);
+        assert_eq!(row.rate_limit_kind, None);
+        // The scheduler neither lists the row nor wins its claim, which only
+        // matches paused/rate-limited rows.
+        assert!(store.get_rate_limited_paused_sessions().unwrap().is_empty());
+        assert!(!store
+            .transition_to_running_with_provider_metadata(&paused.id, None)
+            .unwrap());
+        assert_eq!(
+            store.get_session(&push.id).unwrap().unwrap().status,
+            store::SessionStatus::Cancelled
+        );
+        // The event names the caller's reason, not a hard-coded
+        // `interrupted`, and carries no reset for the UI to keep showing.
+        let events = events.lock().unwrap().clone();
+        let event = events
+            .iter()
+            .find(|event| event["sessionId"] == paused.id.as_str())
+            .unwrap_or_else(|| panic!("no status event for the paused session: {events:?}"));
+        assert_eq!(event["status"], "cancelled");
+        assert_eq!(event["completionReason"], "project_session_interrupted");
+        assert!(event["rateLimitResetsAt"].is_null());
+        assert!(event["rateLimitKind"].is_null());
+    }
+
+    /// The recheck an already-claimed resume makes before it launches. The
+    /// rate-limit scheduler claims the paused row to `running` and holds it
+    /// live, but a hold is invisible to a Stop: one that lands while the
+    /// resume is prepared writes `cancelled` through the store fallback. The
+    /// launch used to go ahead regardless, starting the stopped session on a
+    /// branch the Stop had just freed. The recheck refuses it, and the
+    /// scheduler's re-park, guarded on `running`, leaves the row cancelled.
+    #[test]
+    fn a_claimed_resume_stopped_during_preparation_is_refused_before_launch() {
+        let (store, branch) = setup_branch_store();
+        let paused =
+            store::Session::new_running("rebase", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&paused).unwrap();
+        store
+            .create_commit(
+                &store::Commit::new_with_sha(&branch.id, "abc123").with_session(&paused.id),
+            )
+            .unwrap();
+        assert!(store
+            .transition_running_to_rate_limited(
+                &paused.id,
+                Some("rate limit"),
+                Some("2026-11-12T09:00:00Z"),
+                Some("five_hour"),
+            )
+            .unwrap());
+
+        // The scheduler's claim, with the hold it takes first.
+        let registry = Arc::new(session_runner::SessionRegistry::new());
+        let _liveness = registry.hold(&paused.id);
+        assert!(store
+            .transition_to_running_with_provider_metadata(&paused.id, None)
+            .unwrap());
+        assert_eq!(
+            ensure_claimed_resume_still_running(&store, &paused.id),
+            Ok(()),
+            "an untouched claim launches"
+        );
+
+        cancel_through_shared_body(&registry, &store, &paused.id);
+
+        assert_eq!(
+            ensure_claimed_resume_still_running(&store, &paused.id),
+            Err(RESUME_CLAIM_LOST_ERROR.to_string())
+        );
+        // The failed resume's re-park writes nothing: the row stays stopped,
+        // with nothing for the scheduler to list or claim again.
+        assert!(!store
+            .transition_running_to_rate_limited(
+                &paused.id,
+                Some(RESUME_CLAIM_LOST_ERROR),
+                Some("2026-11-12T09:00:00Z"),
+                Some("five_hour"),
+            )
+            .unwrap());
+        let row = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+        assert_eq!(row.rate_limit_resets_at, None);
+        assert_eq!(row.rate_limit_kind, None);
+        assert!(store.get_rate_limited_paused_sessions().unwrap().is_empty());
+
+        // A row deleted during the preparation is no longer the claim's either.
+        assert_eq!(
+            ensure_claimed_resume_still_running(&store, "no-such-session"),
+            Err(RESUME_CLAIM_LOST_ERROR.to_string())
         );
     }
 

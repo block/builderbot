@@ -844,7 +844,12 @@
 
     const unlistenStatus = onSessionStatusChanged((payload) => {
       const { sessionId: eventSessionId, status, branchId: eventBranchId } = payload;
-      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+      if (
+        status === 'completed' ||
+        status === 'paused' ||
+        status === 'error' ||
+        status === 'cancelled'
+      ) {
         // Push/force-push session tracking lives in pushStateStore and is
         // cleared centrally by sessionStatusListener.handlePushCompletion.
 

@@ -15,15 +15,15 @@ same server rather than as separate helpers.
 
 ## Where things live
 
-| What                         | Where                                                                       |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| Server script (source)       | `src-tauri/resources/remote/staged-mcp.cjs`                                 |
-| Install, injection, runner   | `src-tauri/src/remote_staged_mcp.rs`                                        |
-| `write_note` outbox reader   | `src-tauri/src/remote_staged_mcp/note_outbox.rs`                            |
-| Test helpers                 | `src-tauri/src/remote_staged_mcp/test_support.rs`                           |
-| Installed script             | `~/.staged/bin/staged-mcp.cjs` on the workstation                           |
-| Installed checksum           | `~/.staged/bin/staged-mcp.sha256` (SHA-256 of the script)                   |
-| Per-session scratch area     | `~/.staged/sessions/<session-id>/`                                          |
+| What                       | Where                                                     |
+| -------------------------- | --------------------------------------------------------- |
+| Server script (source)     | `src-tauri/resources/remote/staged-mcp.cjs`               |
+| Install, injection, runner | `src-tauri/src/remote_staged_mcp.rs`                      |
+| `write_note` outbox reader | `src-tauri/src/remote_staged_mcp/note_outbox.rs`          |
+| Test helpers               | `src-tauri/src/remote_staged_mcp/test_support.rs`         |
+| Installed script           | `~/.staged/bin/staged-mcp.cjs` on the workstation         |
+| Installed checksum         | `~/.staged/bin/staged-mcp.sha256` (SHA-256 of the script) |
+| Per-session scratch area   | `~/.staged/sessions/<session-id>/`                        |
 
 The script is embedded in the build (`remote_staged_mcp::SCRIPT_SOURCE`,
 `include_str!`), so a running Staged always installs the version it was built
@@ -92,7 +92,7 @@ Newline-delimited JSON-RPC 2.0 on stdin/stdout, the MCP stdio transport:
   implements it (`2025-06-18`, `2025-03-26`, `2024-11-05`), otherwise with
   the newest one it speaks. It never echoes a version it does not implement.
   The result carries `capabilities: { tools: {} }`, `serverInfo: { name:
-  "staged", version: "2" }`, and `instructions` built from each tool's
+"staged", version: "3" }`, and `instructions` built from each tool's
   `instructions` sentence, in `TOOLS` order.
 - `ping` answers `{}`.
 - `tools/list` lists `TOOLS` in order. `tools/call` runs the named tool and
@@ -136,9 +136,15 @@ alive` and the server goes on serving: losing the process would lose
 scratch area shared by every tool of that session:
 
 - A tool creates it the first time it writes (`ensureSessionDir`, mode 700).
-  The server never creates it on its own, so a session whose calls were all
-  rejected leaves nothing behind.
+  The server never creates it on its own. For a note session the laptop
+  creates it at run start, in the command that settles the outbox, so the
+  agent can write `draft.md` into it; the end-of-run clear removes it again,
+  so a session whose calls were all rejected leaves nothing behind.
 - Each tool owns its own file names in it. Keep them distinct per tool.
+- A file can be the agent's to write rather than the tool's. `draft.md` is:
+  the agent writes and edits it with its own file tools, and `write_note`
+  only reads it (a regular file, UTF-8, non-empty, at most 1 MiB) and
+  answers a tool error naming the absolute path otherwise.
 - Write atomically (`writeAtomic`: temp file, `fsync`, rename, mode 600).
   When the laptop must read several files as one unit, bracket them with a
   marker the way `write_note` does with `done`.
@@ -152,8 +158,19 @@ scratch area shared by every tool of that session:
   files and then `rmdir`s the directory, which fails harmlessly while
   another tool's files are still there.
 
-`write_note`'s outbox (`note.md`, `meta.json`, `done`) is the first tenant.
-Its layout, collector and clear policy are described in
+`write_note` is the first tenant, with four files:
+
+```text
+draft.md   the note body, written and edited by the agent; write_note publishes it
+note.md    the published body: a copy of draft.md taken by the call
+meta.json  title, suggested next steps, turn id, timestamp, script version
+done       marker, removed first and written last
+```
+
+`note.md`, `meta.json` and `done` are the outbox the laptop collects.
+`draft.md` is never collected: the laptop seeds it at run start for an
+amendment and removes it whenever it clears the outbox. The layout,
+collector, seed rule and clear policy are described in
 [`note-delivery.md`](./note-delivery.md).
 
 ## Adding a tool
@@ -166,10 +183,12 @@ On the workstation, in `staged-mcp.cjs`:
    spawns a process or awaits I/O can return a promise and the server
    replies when it settles. `context` carries `sessionId`, `turnId` and
    `sessionDir`. The optional `instructions` sentence is appended to the
-   `initialize` instructions, and the optional `failureText(error)` is the
+   `initialize` instructions; it may be a function of `context`, which is
+   how `write_note` names the session's `draft.md` by absolute path. The
+   optional `failureText(error)` is the
    result text when `call` throws or its promise rejects. Keep `failureText`
    simple: if it throws, the agent gets the default `<name> failed:
-   <message>` text instead. A `call` that holds a long-lived handle need not
+<message>` text instead. A `call` that holds a long-lived handle need not
    `unref()` it, since the server exits on stdin close once the call has
    settled, but it should settle its promise even when what it started
    hangs, or the call is abandoned after the shutdown grace.
@@ -180,7 +199,8 @@ On the workstation, in `staged-mcp.cjs`:
 Nothing has to change for the upload. The new script has a new checksum, so
 every workstation gets it on its next session. Bump `SERVER_VERSION` only
 when a reader on the laptop needs to tell the old shape of a tool's output
-from the new one.
+from the new one, or when a tool's contract changes (version 3: `write_note`
+takes no `body` and publishes `draft.md`).
 
 On the laptop:
 
@@ -208,14 +228,17 @@ On the laptop:
 
 1. Confirm the workstation has `node`: `sq blox ws exec <ws> -- node --version`.
 2. Start a remote note session. The log shows `Staged MCP on Blox attached
-   (turn <id>)`. On the workstation, `~/.staged/bin/staged-mcp.cjs` and
+(turn <id>)`. On the workstation, `~/.staged/bin/staged-mcp.cjs` and
    `staged-mcp.sha256` exist, and `staged-note-mcp.cjs` /
    `staged-note-mcp.sha256` do not. A second session logs no `Installed the
-   Staged MCP on Blox` line and uploads nothing, because the probe's
+Staged MCP on Blox` line and uploads nothing, because the probe's
    checksum matches.
 3. Drive the server by hand on the workstation:
    `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node
-   ~/.staged/bin/staged-mcp.cjs test-session t1`.
+~/.staged/bin/staged-mcp.cjs test-session t1`. The `write_note` schema
+   lists `title` and `suggested_next_steps` and no `body`. An `initialize`
+   request answers with `serverInfo.version` `"3"` and instructions that
+   name `/home/<user>/.staged/sessions/test-session/draft.md`.
 
 ## Automated coverage
 
@@ -226,7 +249,8 @@ On the laptop:
   local `sh` both on the first install and after an older build reinstalled
   its copy), the stdio injection, the install scripts against a local `sh`,
   protocol-version negotiation, the generic MCP methods over the tool
-  registry, asynchronous tools (a promise settled by a later `release` call
+  registry (including the `initialize` instructions naming `draft.md` by
+  absolute path), asynchronous tools (a promise settled by a later `release` call
   is answered after the requests dispatched before it, rejections with and
   without `failureText`, a `failureText` that throws, a resolve to nothing,
   stray failures outside a call, and an interval handle that does not keep

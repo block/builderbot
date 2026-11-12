@@ -131,7 +131,7 @@ fn bundled_pikchr_grammar_bytes(app_handle: &tauri::AppHandle) -> Option<Vec<u8>
 /// Full text of the bundled Pikchr grammar, for prompts that inline the
 /// grammar rather than referencing it by path (the local `generate_pikchr`
 /// sub-session). Remote note sessions keep referencing an uploaded grammar
-/// file instead — see [`resolve_pikchr_grammar_reference`]. `None` when the
+/// file instead — see [`resolve_remote_note_support`]. `None` when the
 /// bundled resource is missing or unreadable; callers fall back to pointing
 /// at [`PIKCHR_GRAMMAR_URL`].
 pub(crate) fn bundled_pikchr_grammar_text(app_handle: &tauri::AppHandle) -> Option<String> {
@@ -168,26 +168,55 @@ fn local_pikchr_grammar_reference_for_session(
     session_type: &BranchSessionType,
 ) -> String {
     if matches!(session_type, BranchSessionType::Note) {
-        resolve_pikchr_grammar_reference(app_handle, None)
+        local_pikchr_grammar_reference(app_handle)
     } else {
         PIKCHR_GRAMMAR_URL.to_string()
     }
 }
 
+/// What a remote note prompt reads off the workstation: where the Pikchr
+/// grammar was uploaded, and the workstation's home directory — needed to
+/// spell out the note draft path (see `note_draft`) and resolved in the
+/// grammar upload's own `ws exec`, so it costs no round trip.
+pub(crate) struct RemoteNoteSupport {
+    pub pikchr_grammar_reference: String,
+    /// `None` when the workstation did not report one; the prompt then names
+    /// the draft with `$HOME`.
+    pub home: Option<String>,
+}
+
+/// Upload the grammar through `write`, which returns the output of the
+/// transfer's last command — the one that ends with
+/// [`crate::note_draft::REMOTE_HOME_EPILOGUE`].
 fn upload_pikchr_grammar_to_remote_with_writer<F>(
     workspace_name: &str,
     bytes: &[u8],
     remote_path: String,
     write: F,
-) -> String
+) -> RemoteNoteSupport
 where
-    F: FnOnce(&str, &[u8], &str) -> Result<(), String>,
+    F: FnOnce(&str, &[u8], &str) -> Result<String, String>,
 {
     match write(workspace_name, bytes, &remote_path) {
-        Ok(()) => remote_path,
+        Ok(output) => {
+            let home = crate::note_draft::parse_remote_home(&output);
+            if home.is_none() {
+                log::warn!(
+                    "Remote workspace {workspace_name} reported no home directory \
+                     ({output:?}); the note draft path will be spelled with $HOME"
+                );
+            }
+            RemoteNoteSupport {
+                pikchr_grammar_reference: remote_path,
+                home,
+            }
+        }
         Err(e) => {
             log::warn!("Failed to copy Pikchr grammar to remote workspace {workspace_name}: {e}");
-            PIKCHR_GRAMMAR_URL.to_string()
+            RemoteNoteSupport {
+                pikchr_grammar_reference: PIKCHR_GRAMMAR_URL.to_string(),
+                home: None,
+            }
         }
     }
 }
@@ -196,40 +225,79 @@ fn upload_pikchr_grammar_to_remote(
     workspace_name: &str,
     bytes: &[u8],
     remote_path: String,
-) -> String {
+) -> RemoteNoteSupport {
     upload_pikchr_grammar_to_remote_with_writer(
         workspace_name,
         bytes,
         remote_path,
-        write_bytes_to_remote,
+        |workspace_name, bytes, remote_path| {
+            write_bytes_to_remote_then_with(
+                &|args| {
+                    blox::ws_exec(workspace_name, blox::ExecMode::Transient, args)
+                        .map_err(|e| e.to_string())
+                },
+                bytes,
+                remote_path,
+                Some(crate::note_draft::REMOTE_HOME_EPILOGUE),
+            )
+        },
     )
 }
 
-pub(crate) fn resolve_pikchr_grammar_reference(
+/// The workstation's home directory in a round trip of its own: only for a
+/// remote note prompt that has no grammar to upload, and so no command to
+/// fold the question into.
+fn resolve_remote_home(workspace_name: &str) -> Option<String> {
+    let home = blox::ws_exec(
+        workspace_name,
+        blox::ExecMode::Transient,
+        &["sh", "-c", crate::note_draft::REMOTE_HOME_EPILOGUE],
+    )
+    .map_err(|e| e.to_string())
+    .and_then(|output| {
+        crate::note_draft::parse_remote_home(&output)
+            .ok_or_else(|| format!("no home directory in {output:?}"))
+    });
+    match home {
+        Ok(home) => Some(home),
+        Err(e) => {
+            log::warn!(
+                "Failed to resolve the home directory of remote workspace {workspace_name}: \
+                 {e}; the note draft path will be spelled with $HOME"
+            );
+            None
+        }
+    }
+}
+
+/// Stage what a remote note prompt needs on `workspace_name`: the grammar
+/// upload, with the home directory read in the same command.
+fn resolve_remote_note_support(
     app_handle: &tauri::AppHandle,
-    workspace_name: Option<&str>,
-) -> String {
+    workspace_name: &str,
+) -> RemoteNoteSupport {
+    match bundled_pikchr_grammar_bytes(app_handle) {
+        Some(bytes) => upload_pikchr_grammar_to_remote(
+            workspace_name,
+            &bytes,
+            generated_pikchr_grammar_remote_path(),
+        ),
+        None => RemoteNoteSupport {
+            pikchr_grammar_reference: PIKCHR_GRAMMAR_URL.to_string(),
+            home: resolve_remote_home(workspace_name),
+        },
+    }
+}
+
+/// The Pikchr grammar reference for a session on this machine: the bundled
+/// file's path. Touches no workstation, so async callers may use it; a
+/// remote note prompt goes through [`resolve_remote_note_support`] on the
+/// blocking pool instead.
+pub(crate) fn local_pikchr_grammar_reference(app_handle: &tauri::AppHandle) -> String {
     let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
         log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
         return PIKCHR_GRAMMAR_URL.to_string();
     };
-
-    if let Some(workspace_name) = workspace_name {
-        return match std::fs::read(&grammar_path) {
-            Ok(bytes) => upload_pikchr_grammar_to_remote(
-                workspace_name,
-                &bytes,
-                generated_pikchr_grammar_remote_path(),
-            ),
-            Err(e) => {
-                log::warn!(
-                    "Failed to read bundled Pikchr grammar at {}: {e}",
-                    grammar_path.display()
-                );
-                PIKCHR_GRAMMAR_URL.to_string()
-            }
-        };
-    }
 
     grammar_path.to_string_lossy().into_owned()
 }
@@ -426,25 +494,37 @@ fn background_hold_from_overrides(
     Some(config)
 }
 
-/// How a note session hands its note back: the `write_note` MCP tool. Shared by
-/// every note-producing prompt (branch note, project session, note follow-up)
-/// so the contract is stated once. The tool is served over HTTP locally and by
-/// the Staged MCP on Blox (stdio); the agent sees the same tool either way.
+/// How a note session hands its note back: the note is the session's draft
+/// file (`draft_path`, see `note_draft`) and the `write_note` MCP tool
+/// publishes it. Shared by every note-producing prompt (branch note, project
+/// session, note follow-up) so the contract is stated once, and the file is
+/// named once. The tool is served over HTTP locally and by the Staged MCP on
+/// Blox (stdio); the agent sees the same tool either way.
+///
+/// One wording covers a fresh note and an amendment: the draft is absent for
+/// a fresh note and seeded with the stored body before an amending run
+/// starts, so "if the file already exists" is the amendment case.
 ///
 /// The `---` separator contract this replaces is still parsed by the
 /// post-completion hooks as a logged fallback, but prompts no longer mention
 /// it: an agent that writes the note into its reply produces nothing the user
 /// sees unless that fallback fires.
-pub(crate) fn note_delivery_guidance() -> &'static str {
-    "To deliver the note, call the `write_note` tool from the `staged` MCP server. In Claude Code \
+pub(crate) fn note_delivery_guidance(draft_path: &str) -> String {
+    format!(
+        "Your note draft file is `{draft_path}`. This file is your note. Write it, edit it, and \
+when it is ready call `write_note`. Put the full note body in it as markdown, without the title \
+and without wrapping it in code fences, using your file tools. If the file already exists, it \
+holds the note as last saved: Read it and edit only what changes instead of rewriting it.\n\
+\n\
+To publish the note, call the `write_note` tool from the `staged` MCP server. In Claude Code \
 its full name is `mcp__staged__write_note` and it may be deferred: if it is not in your loaded \
 tools, load it with `ToolSearch select:mcp__staged__write_note` first, then call it with its \
 schema — never call it with empty or guessed input. The call is the deliverable: Staged saves \
-exactly what you pass to it and nothing else. Your assistant text is not saved and is not shown \
-with the note, so do not write the note into your reply. Pass the complete note on every call \
-(calling again replaces the saved note; the last call of the turn wins):\n\
+the draft file's contents at the moment of the call and nothing else. Your assistant text is not \
+saved and is not shown with the note, so do not write the note into your reply, and do not pass \
+the note body to the call. To change a published note, edit the file and call `write_note` \
+again (the last call of the turn wins). The call takes:\n\
 - `title`: a plain-text title (no markdown, no leading `#`).\n\
-- `body`: the full note in markdown, without the title. Do not wrap it in code fences.\n\
 - `suggested_next_steps`: an object with two nullable string fields, `suggestedNextCommitStep` \
 and `suggestedNextNoteStep`, suggesting what the user might want to do next.\n\
 \n\
@@ -453,16 +533,17 @@ Guidelines for suggested next steps:\n\
 can assume the user has already read the title for context. Do NOT repeat information from the \
 title.\n\
 - If the note is a plan, suggest a commit to implement it: \
-{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}\n\
+{{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}}\n\
 - If the note is a plan with multiple options, pick the best option: \
-{\"suggestedNextCommitStep\": \"Implement option 2: use Redis cache\", \"suggestedNextNoteStep\": null}\n\
+{{\"suggestedNextCommitStep\": \"Implement option 2: use Redis cache\", \"suggestedNextNoteStep\": null}}\n\
 - If the note is bug research, suggest both a fix and a deeper plan: \
-{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Plan a fix for this bug\"}\n\
+{{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Plan a fix for this bug\"}}\n\
 - If the note is pure research or informational with no clear next action: \
-{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}\n\
+{{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
 \n\
 Once the tool reports the note is saved, end your turn without repeating the note. If the turn \
-ends without a `write_note` call, no note is saved."
+ends without a `write_note` call, no note is saved, whatever the draft file holds."
+    )
 }
 
 fn note_media_guidance() -> &'static str {
@@ -501,6 +582,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
     has_parsed_note: bool,
     pikchr_grammar_reference: &str,
     pikchr_tools_available: bool,
+    note_draft_path: &str,
 ) -> String {
     let visible_request = if has_parsed_note {
         "Please update the note to reflect the latest chat."
@@ -515,7 +597,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, pikchr_tools_available);
     let media_guidance = note_media_guidance();
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
-    let delivery_guidance = note_delivery_guidance();
+    let delivery_guidance = note_delivery_guidance(note_draft_path);
 
     format!(
         "<action>\n\
@@ -3287,26 +3369,43 @@ pub(crate) fn build_note_followup_message_impl(
         None
     };
 
-    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(
-        app_handle,
-        linked_branch
-            .as_ref()
-            .and_then(|branch| branch.workspace_name.as_deref()),
-    );
+    let workspace_name = linked_branch
+        .as_ref()
+        .and_then(|branch| branch.workspace_name.as_deref());
+
+    // The draft the follow-up names is the one the run it starts will seed
+    // (or clear) and its `write_note` will read: on the workstation for a
+    // remote branch — its home comes back with the grammar upload — and in
+    // the local temp directory otherwise.
+    let (pikchr_grammar_reference, note_draft_path) = match workspace_name {
+        Some(workspace_name) => {
+            let support = resolve_remote_note_support(app_handle, workspace_name);
+            let draft_path = crate::note_draft::prompt_draft_path(
+                session_id,
+                crate::note_draft::DraftLocation::Remote {
+                    home: support.home.as_deref(),
+                },
+            );
+            (support.pikchr_grammar_reference, draft_path)
+        }
+        None => (
+            local_pikchr_grammar_reference(app_handle),
+            crate::note_draft::prompt_draft_path(
+                session_id,
+                crate::note_draft::DraftLocation::Local,
+            ),
+        ),
+    };
 
     // Note follow-ups expose the pikchr tool on local sessions only. A
     // project-note follow-up has no linked branch and always runs locally.
-    let pikchr_tools_available = local_note_pikchr_tools_available(
-        true,
-        linked_branch
-            .as_ref()
-            .and_then(|branch| branch.workspace_name.as_deref()),
-    );
+    let pikchr_tools_available = local_note_pikchr_tools_available(true, workspace_name);
 
     Ok(build_note_followup_message_with_pikchr_reference(
         has_parsed_note,
         &pikchr_grammar_reference,
         pikchr_tools_available,
+        &note_draft_path,
     ))
 }
 
@@ -4743,6 +4842,7 @@ being referenced.";
 pub(crate) fn build_project_session_action_instructions_with_pikchr_reference(
     is_remote: bool,
     pikchr_grammar_reference: &str,
+    note_draft_path: &str,
 ) -> String {
     let preamble = if is_remote {
         "This top-level project session runs locally and acts as a coordinator. \
@@ -4787,7 +4887,7 @@ repository edits directly here; use `start_repo_session` for implementation work
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, true);
     let media_guidance = note_media_guidance();
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
-    let delivery_guidance = note_delivery_guidance();
+    let delivery_guidance = note_delivery_guidance(note_draft_path);
 
     format!(
         "The user is requesting work at the project level. Investigate and \
@@ -4889,17 +4989,6 @@ pub async fn start_project_session_for_store(
         .map_err(|e| e.to_string())?
     };
 
-    let is_remote = project.location == store::ProjectLocation::Remote;
-    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, None);
-    let action_instructions = build_project_session_action_instructions_with_pikchr_reference(
-        is_remote,
-        &pikchr_grammar_reference,
-    );
-
-    let full_prompt = format!(
-        "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
-    );
-
     // Resolve working directory — use the project-scoped worktree root (created
     // at project creation time), NOT the repo clone path (~/.staged/repos/…).
     // Project sessions must never have a repos-dir working directory because the
@@ -4908,9 +4997,10 @@ pub async fn start_project_session_for_store(
     let working_dir = crate::git::project_worktree_root_for(&project.id)
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
-    // Create the session
+    // Create the session. Its id comes first: the prompt names the note draft
+    // file, which is per session (see `note_draft`).
     let mut session = with_optional_acp_config_selection(
-        store::Session::new_running(&full_prompt, &working_dir),
+        store::Session::new_running("", &working_dir),
         acp_config_selection.clone(),
     );
     if let Some(ref p) = provider {
@@ -4919,6 +5009,22 @@ pub async fn start_project_session_for_store(
     if let Some(ref actor) = started_by {
         session = session.with_started_by(actor);
     }
+
+    let is_remote = project.location == store::ProjectLocation::Remote;
+    let pikchr_grammar_reference = local_pikchr_grammar_reference(&app_handle);
+    // A project session always runs locally, whatever the project's location.
+    let note_draft_path =
+        crate::note_draft::prompt_draft_path(&session.id, crate::note_draft::DraftLocation::Local);
+    let action_instructions = build_project_session_action_instructions_with_pikchr_reference(
+        is_remote,
+        &pikchr_grammar_reference,
+        &note_draft_path,
+    );
+
+    let full_prompt = format!(
+        "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
+    );
+    session.prompt = full_prompt.clone();
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
     let _liveness = registry.hold(&session.id);
@@ -5166,6 +5272,7 @@ async fn prepare_branch_session_start(
     store: &Arc<Store>,
     app_handle: &tauri::AppHandle,
     target: &BranchSessionTarget,
+    session_id: &str,
     prompt: &str,
     session_type: BranchSessionType,
     provider: Option<String>,
@@ -5178,7 +5285,7 @@ async fn prepare_branch_session_start(
 
     // Remote branches use ws_exec for git operations; local branches use the
     // worktree directly.
-    let (branch_context, pikchr_grammar_reference) = if is_remote {
+    let (branch_context, pikchr_grammar_reference, note_draft_path) = if is_remote {
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
         let pikchr_grammar_staging = remote_pikchr_grammar_staging(app_handle, &session_type);
         let base_branch = branch.base_branch.clone();
@@ -5197,9 +5304,16 @@ async fn prepare_branch_session_start(
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
+        let note_draft_path = crate::note_draft::prompt_draft_path(
+            session_id,
+            crate::note_draft::DraftLocation::Remote {
+                home: remote_context.remote_home.as_deref(),
+            },
+        );
         (
             remote_context.branch_context,
             remote_context.pikchr_grammar_reference,
+            note_draft_path,
         )
     } else {
         let worktree_path = working_dir.clone();
@@ -5220,7 +5334,11 @@ async fn prepare_branch_session_start(
         .map_err(|e| format!("Failed to build branch context: {e}"))?;
         let pikchr_grammar_reference =
             local_pikchr_grammar_reference_for_session(app_handle, &session_type);
-        (ctx, pikchr_grammar_reference)
+        let note_draft_path = crate::note_draft::prompt_draft_path(
+            session_id,
+            crate::note_draft::DraftLocation::Local,
+        );
+        (ctx, pikchr_grammar_reference, note_draft_path)
     };
 
     let pre_head_sha = if matches!(session_type, BranchSessionType::Commit) {
@@ -5250,6 +5368,7 @@ async fn prepare_branch_session_start(
             branch.workspace_name.as_deref(),
         ),
         stagedctl_session_guidance(app_handle, branch.workspace_name.as_deref()).as_deref(),
+        &note_draft_path,
     );
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -5712,6 +5831,7 @@ async fn complete_running_branch_session_start(
             &store,
             &app_handle,
             &target,
+            &session_id,
             &prompt,
             session_type,
             provider,
@@ -6712,7 +6832,7 @@ async fn start_queued_session_for_branch(
     };
 
     // Resolve working directory and branch context.
-    let (working_dir, branch_context, pikchr_grammar_reference) = if is_remote {
+    let (working_dir, branch_context, pikchr_grammar_reference, note_draft_path) = if is_remote {
         let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -6734,10 +6854,17 @@ async fn start_queued_session_for_branch(
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
+        let note_draft_path = crate::note_draft::prompt_draft_path(
+            &session_id,
+            crate::note_draft::DraftLocation::Remote {
+                home: remote_context.remote_home.as_deref(),
+            },
+        );
         (
             fallback_dir,
             remote_context.branch_context,
             remote_context.pikchr_grammar_reference,
+            note_draft_path,
         )
     } else {
         let workdir = store
@@ -6770,7 +6897,16 @@ async fn start_queued_session_for_branch(
         .map_err(|e| format!("Failed to build branch context: {e}"))?;
         let pikchr_grammar_reference =
             local_pikchr_grammar_reference_for_session(&app_handle, &session_type);
-        (worktree_path, ctx, pikchr_grammar_reference)
+        let note_draft_path = crate::note_draft::prompt_draft_path(
+            &session_id,
+            crate::note_draft::DraftLocation::Local,
+        );
+        (
+            worktree_path,
+            ctx,
+            pikchr_grammar_reference,
+            note_draft_path,
+        )
     };
 
     // Build the full prompt with context.
@@ -6788,6 +6924,7 @@ async fn start_queued_session_for_branch(
             branch.workspace_name.as_deref(),
         ),
         stagedctl_session_guidance(&app_handle, branch.workspace_name.as_deref()).as_deref(),
+        &note_draft_path,
     );
 
     // The SHAs the artifact anchors to and the remote working directory are
@@ -7281,6 +7418,10 @@ pub(crate) fn build_branch_context(
 struct RemoteBranchContext {
     branch_context: String,
     pikchr_grammar_reference: String,
+    /// The workstation's home directory, resolved for a note session only
+    /// (its prompt names the draft file under it); `None` otherwise or when
+    /// the workstation did not report one.
+    remote_home: Option<String>,
 }
 
 fn build_remote_branch_context(
@@ -7339,6 +7480,7 @@ fn build_remote_branch_context(
     // written to remote temp files in parallel to reduce ws_exec round trips.
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
     let mut pikchr_grammar_reference = PIKCHR_GRAMMAR_URL.to_string();
+    let mut remote_home: Option<String> = None;
 
     std::thread::scope(|s| {
         let note_handle = s.spawn(|| note_timeline_entries(store, branch_id, Some(workspace_name)));
@@ -7356,14 +7498,21 @@ fn build_remote_branch_context(
             s.spawn(|| image_timeline_entries(store, branch_id, Some(workspace_name), project_id));
         let project_note_handle =
             s.spawn(|| project_note_timeline_entries(store, project_id, Some(workspace_name)));
-        let pikchr_grammar_handle = match &pikchr_grammar_staging {
+        // A note session's support files: the grammar upload, whose command
+        // also reports the home directory the draft path is spelled with.
+        // Without a grammar to upload the home is asked for on its own.
+        let note_support_handle = match &pikchr_grammar_staging {
             RemotePikchrGrammarStaging::Upload { bytes, remote_path } => {
                 let remote_path = remote_path.clone();
                 Some(s.spawn(move || {
                     upload_pikchr_grammar_to_remote(workspace_name, bytes.as_slice(), remote_path)
                 }))
             }
-            RemotePikchrGrammarStaging::NotNeeded | RemotePikchrGrammarStaging::FallbackUrl => None,
+            RemotePikchrGrammarStaging::FallbackUrl => Some(s.spawn(move || RemoteNoteSupport {
+                pikchr_grammar_reference: PIKCHR_GRAMMAR_URL.to_string(),
+                home: resolve_remote_home(workspace_name),
+            })),
+            RemotePikchrGrammarStaging::NotNeeded => None,
         };
 
         match note_handle.join() {
@@ -7382,9 +7531,12 @@ fn build_remote_branch_context(
             Ok(entries) => timeline.extend(entries),
             Err(_) => log::error!("project_note_timeline_entries thread panicked"),
         }
-        if let Some(handle) = pikchr_grammar_handle {
+        if let Some(handle) = note_support_handle {
             match handle.join() {
-                Ok(reference) => pikchr_grammar_reference = reference,
+                Ok(support) => {
+                    pikchr_grammar_reference = support.pikchr_grammar_reference;
+                    remote_home = support.home;
+                }
                 Err(_) => log::error!("Pikchr grammar upload thread panicked"),
             }
         }
@@ -7394,6 +7546,7 @@ fn build_remote_branch_context(
     RemoteBranchContext {
         branch_context: parts.join("\n\n"),
         pikchr_grammar_reference,
+        remote_home,
     }
 }
 
@@ -7875,6 +8028,19 @@ pub(crate) fn write_bytes_to_remote_with(
     bytes: &[u8],
     remote_path: &str,
 ) -> Result<(), String> {
+    write_bytes_to_remote_then_with(exec, bytes, remote_path, None).map(|_| ())
+}
+
+/// [`write_bytes_to_remote_with`] with an optional shell `epilogue` appended
+/// (`&&`) to the last chunk's command, after the rename; returns that
+/// command's output. A caller that needs one more fact from the workstation
+/// asks for it here instead of in a round trip of its own.
+pub(crate) fn write_bytes_to_remote_then_with(
+    exec: &dyn Fn(&[&str]) -> Result<String, String>,
+    bytes: &[u8],
+    remote_path: &str,
+    epilogue: Option<&str>,
+) -> Result<String, String> {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
 
@@ -7893,28 +8059,35 @@ pub(crate) fn write_bytes_to_remote_with(
     };
     let part = format!("{remote_path}.{}.part", uuid::Uuid::new_v4().simple());
     let last = chunks.len() - 1;
+    let mut last_output = String::new();
     for (i, chunk) in chunks.into_iter().enumerate() {
         let redirect = if i == 0 { ">" } else { ">>" };
         let publish = if i == last {
-            format!(" && mv -f '{part}' '{remote_path}'")
+            let epilogue = epilogue
+                .map(|epilogue| format!(" && {epilogue}"))
+                .unwrap_or_default();
+            format!(" && mv -f '{part}' '{remote_path}'{epilogue}")
         } else {
             String::new()
         };
-        if let Err(e) = exec(&[
+        match exec(&[
             "sh",
             "-c",
             &format!("echo '{chunk}' | base64 -d {redirect} '{part}'{publish}"),
         ]) {
-            let _ = exec(&["rm", "-f", &part]);
-            return Err(if last == 0 {
-                format!("Failed to write to remote workspace: {e}")
-            } else {
-                format!("Failed to write chunk {i} to remote workspace: {e}")
-            });
+            Ok(output) => last_output = output,
+            Err(e) => {
+                let _ = exec(&["rm", "-f", &part]);
+                return Err(if last == 0 {
+                    format!("Failed to write to remote workspace: {e}")
+                } else {
+                    format!("Failed to write chunk {i} to remote workspace: {e}")
+                });
+            }
         }
     }
 
-    Ok(())
+    Ok(last_output)
 }
 
 /// Write note content to a temp file inside a remote workspace via `ws_exec`.
@@ -8437,6 +8610,9 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
     pikchr_grammar_reference: &str,
     pikchr_tools_available: bool,
     stagedctl_guidance: Option<&str>,
+    // The session's note draft file (see `note_draft`); only a note
+    // session's prompt names it.
+    note_draft_path: &str,
 ) -> String {
     let mut action_instructions = match session_type {
         BranchSessionType::Note => [
@@ -8445,7 +8621,7 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.",
             NOTE_STANDALONE_OUTPUT_GUIDANCE.trim(),
-            note_delivery_guidance(),
+            note_delivery_guidance(note_draft_path).as_str(),
         ]
         .join("\n\n"),
         BranchSessionType::Commit => {
@@ -8662,6 +8838,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    /// The note draft file the prompt tests name.
+    const TEST_NOTE_DRAFT_PATH: &str = "/tmp/staged-note-draft-test-session.md";
+
     /// Calls [`build_full_prompt_with_pikchr_reference`] with the default pikchr
     /// grammar reference, no pikchr tools, and no stagedctl guidance.
     /// Production callers thread all three through explicitly; only these
@@ -8684,6 +8863,7 @@ mod tests {
             PIKCHR_GRAMMAR_URL,
             false,
             None,
+            TEST_NOTE_DRAFT_PATH,
         )
     }
 
@@ -14083,7 +14263,7 @@ mod tests {
     #[test]
     fn successful_remote_pikchr_grammar_upload_returns_generated_path() {
         let expected_path = generated_pikchr_grammar_remote_path();
-        let returned_path = upload_pikchr_grammar_to_remote_with_writer(
+        let support = upload_pikchr_grammar_to_remote_with_writer(
             "test-workspace",
             b"grammar bytes",
             expected_path.clone(),
@@ -14091,11 +14271,71 @@ mod tests {
                 assert_eq!(workspace_name, "test-workspace");
                 assert_eq!(bytes, b"grammar bytes");
                 assert_eq!(remote_path, expected_path);
-                Ok(())
+                Ok("/home/bloxer".to_string())
             },
         );
 
-        assert_eq!(returned_path, expected_path);
+        assert_eq!(support.pikchr_grammar_reference, expected_path);
+        // The upload's last command reports the home the draft path needs.
+        assert_eq!(support.home.as_deref(), Some("/home/bloxer"));
+    }
+
+    #[test]
+    fn remote_pikchr_grammar_upload_without_a_home_still_returns_the_path() {
+        let expected_path = generated_pikchr_grammar_remote_path();
+        let support = upload_pikchr_grammar_to_remote_with_writer(
+            "test-workspace",
+            b"grammar bytes",
+            expected_path.clone(),
+            |_workspace_name, _bytes, _remote_path| Ok(String::new()),
+        );
+
+        assert_eq!(support.pikchr_grammar_reference, expected_path);
+        assert_eq!(support.home, None);
+    }
+
+    #[test]
+    fn remote_byte_writes_run_the_epilogue_in_the_last_command_and_return_its_output() {
+        use std::cell::RefCell;
+        let commands = RefCell::new(Vec::<String>::new());
+        let record = |args: &[&str]| {
+            assert_eq!(args[..2], ["sh", "-c"]);
+            commands.borrow_mut().push(args[2].to_string());
+            // Only the command that carries the epilogue prints anything.
+            Ok(if args[2].contains("printf") {
+                "/home/bloxer".to_string()
+            } else {
+                String::new()
+            })
+        };
+        let epilogue = crate::note_draft::REMOTE_HOME_EPILOGUE;
+
+        // Two chunks: the epilogue rides the second, after the rename.
+        let output = write_bytes_to_remote_then_with(
+            &record,
+            &vec![7u8; 400_000],
+            "/tmp/file.bin",
+            Some(epilogue),
+        )
+        .unwrap();
+        assert_eq!(output, "/home/bloxer");
+        {
+            let commands = commands.borrow();
+            assert_eq!(commands.len(), 2, "the epilogue adds no round trip");
+            assert!(!commands[0].contains(epilogue), "{}", commands[0]);
+            assert!(
+                commands[1].ends_with(&format!("'/tmp/file.bin' && {epilogue}")),
+                "{}",
+                commands[1]
+            );
+        }
+
+        // Without one, the commands are what they always were.
+        commands.borrow_mut().clear();
+        write_bytes_to_remote_with(&record, b"bytes", "/tmp/file.bin").unwrap();
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].ends_with("'/tmp/file.bin'"), "{}", commands[0]);
     }
 
     #[test]
@@ -14159,14 +14399,15 @@ mod tests {
     #[test]
     fn failed_remote_pikchr_grammar_upload_falls_back_to_public_url() {
         let generated_path = generated_pikchr_grammar_remote_path();
-        let returned_path = upload_pikchr_grammar_to_remote_with_writer(
+        let support = upload_pikchr_grammar_to_remote_with_writer(
             "test-workspace",
             b"grammar bytes",
             generated_path,
             |_workspace_name, _bytes, _remote_path| Err("remote unavailable".to_string()),
         );
 
-        assert_eq!(returned_path, PIKCHR_GRAMMAR_URL);
+        assert_eq!(support.pikchr_grammar_reference, PIKCHR_GRAMMAR_URL);
+        assert_eq!(support.home, None);
     }
 
     #[test]
@@ -14174,6 +14415,7 @@ mod tests {
         let prompt = build_project_session_action_instructions_with_pikchr_reference(
             false,
             PIKCHR_GRAMMAR_URL,
+            TEST_NOTE_DRAFT_PATH,
         );
 
         assert_project_session_reference_guidance(&prompt);
@@ -14189,6 +14431,7 @@ mod tests {
         let prompt = build_project_session_action_instructions_with_pikchr_reference(
             true,
             PIKCHR_GRAMMAR_URL,
+            TEST_NOTE_DRAFT_PATH,
         );
 
         assert_project_session_reference_guidance(&prompt);
@@ -14204,6 +14447,7 @@ mod tests {
         let prompt = build_project_session_action_instructions_with_pikchr_reference(
             false,
             "/tmp/staged/pikchr/grammar.md",
+            TEST_NOTE_DRAFT_PATH,
         );
 
         assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
@@ -14221,6 +14465,7 @@ mod tests {
             "/tmp/staged/pikchr/grammar.md",
             true,
             None,
+            TEST_NOTE_DRAFT_PATH,
         );
 
         assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
@@ -14246,6 +14491,7 @@ mod tests {
                 PIKCHR_GRAMMAR_URL,
                 false,
                 Some(&guidance),
+                TEST_NOTE_DRAFT_PATH,
             );
 
             let action_end = prompt.find("</action>").expect("action tag present");
@@ -14312,6 +14558,7 @@ mod tests {
             true,
             "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
             true,
+            TEST_NOTE_DRAFT_PATH,
         );
 
         assert!(prompt.contains("The user is asking you to update the linked note"));
@@ -14327,12 +14574,22 @@ mod tests {
     #[test]
     fn note_followup_prompt_uses_supplied_remote_pikchr_reference() {
         let remote_path = generated_pikchr_grammar_remote_path();
-        let prompt = build_note_followup_message_with_pikchr_reference(false, &remote_path, false);
+        let prompt = build_note_followup_message_with_pikchr_reference(
+            false,
+            &remote_path,
+            false,
+            "/home/bloxer/.staged/sessions/test-session/draft.md",
+        );
 
         assert!(prompt.contains("The user is asking you to write the linked note"));
         assert!(prompt.contains("Please write the note for this session."));
         assert_pikchr_note_guidance(&prompt, &remote_path);
         assert_note_standalone_output_guidance(&prompt);
+        // The remote draft is spelled out with the workstation's real home.
+        assert_note_delivery_guidance_for(
+            &prompt,
+            "/home/bloxer/.staged/sessions/test-session/draft.md",
+        );
         // Remote note sessions can't reach the pikchr server, so it isn't mentioned.
         assert!(!prompt.contains("generate_pikchr"));
     }
@@ -14411,9 +14668,34 @@ mod tests {
         assert_note_delivery_guidance(&prompt);
     }
 
-    /// Every note-producing prompt instructs the `write_note` call and says
-    /// assistant text is not saved; none of them mention the `---` contract.
+    /// Every note-producing prompt names the draft file once, says the file
+    /// is the note and that `write_note` publishes it, and says assistant
+    /// text is not saved; none of them mention a `body` argument or the
+    /// `---` contract.
     fn assert_note_delivery_guidance(prompt: &str) {
+        assert_note_delivery_guidance_for(prompt, TEST_NOTE_DRAFT_PATH);
+    }
+
+    fn assert_note_delivery_guidance_for(prompt: &str, draft_path: &str) {
+        assert_eq!(
+            prompt.matches(draft_path).count(),
+            1,
+            "the draft file is named exactly once: {prompt}"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "Your note draft file is `{draft_path}`. This file is your note. Write it, edit \
+it, and when it is ready call `write_note`."
+            )),
+            "{prompt}"
+        );
+        // The amendment wording: a seeded draft is read and edited, not rewritten.
+        assert!(
+            prompt.contains("Read it and edit only what changes"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("`body`"), "{prompt}");
+        assert!(prompt.contains("`title`"), "{prompt}");
         assert!(prompt.contains("call the `write_note` tool"), "{prompt}");
         // Named in full so the Claude bridge can load the deferred MCP tool
         // up front instead of spending a ToolSearch round trip on it.
@@ -14435,6 +14717,7 @@ mod tests {
             let prompt = build_project_session_action_instructions_with_pikchr_reference(
                 is_remote,
                 "https://example.invalid/grammar.md",
+                TEST_NOTE_DRAFT_PATH,
             );
             assert_note_delivery_guidance(&prompt);
         }
@@ -14447,6 +14730,7 @@ mod tests {
                 has_parsed_note,
                 "https://example.invalid/grammar.md",
                 true,
+                TEST_NOTE_DRAFT_PATH,
             );
             assert_note_delivery_guidance(&prompt);
             assert!(prompt.ends_with(if has_parsed_note {

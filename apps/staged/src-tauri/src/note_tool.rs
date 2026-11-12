@@ -4,9 +4,11 @@
 //! separator, parsed on the laptop once the turn settled. That contract is
 //! fragile (stray rules in prose, unterminated fences, "first block wins" for
 //! the next-steps JSON) and ties the deliverable to the transcript. Instead the
-//! agent now calls `write_note` with the title, body, and structured suggested
-//! next steps. The call is the deliverable; the assistant's own text is not
-//! saved.
+//! agent writes the note body into its per-session draft file (`note_draft`)
+//! and calls `write_note` with the title and structured suggested next steps;
+//! the call publishes the draft. The call is the deliverable; the assistant's
+//! own text is not saved, and a draft that changed without a call is not
+//! stored either.
 //!
 //! Locally the tool is served by an in-process HTTP MCP server
 //! ([`start_note_mcp_server`]) bound to loopback, exactly like the project and
@@ -17,10 +19,13 @@
 //!
 //! Remote (Blox) sessions cannot reach a laptop-side server, so they get the
 //! same tool from the Staged MCP on Blox, a stdio server installed on the
-//! workstation (`remote_staged_mcp`), whose note outbox the laptop collects
-//! into the same slot after the turn (`remote_staged_mcp::note_outbox`). The tool contract — name, schema, result text — is shared so
-//! prompts do not care which transport served the call.
+//! workstation (`remote_staged_mcp`), which reads `draft.md` from the
+//! session's scratch directory and whose note outbox the laptop collects into
+//! the same slot after the turn (`remote_staged_mcp::note_outbox`). The tool
+//! contract — name, schema, result text — is shared so prompts do not care
+//! which transport served the call.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -47,10 +52,11 @@ pub(crate) const WRITE_NOTE_TOOL_NAME: &str = "write_note";
 /// Tool description shared by the HTTP server (the `#[tool]` attribute) and
 /// the Staged MCP on Blox; tests compare both against this copy.
 #[cfg(test)]
-pub(crate) const WRITE_NOTE_DESCRIPTION: &str = "Save the note this session is producing. This call is the deliverable: \
-Staged stores exactly what you pass here and does not read your assistant text. Pass the full note each time \
-(title, markdown body, and suggested next steps); calling again replaces the previous note, and the last call \
-of the turn wins. After the result says the note is saved, end your turn without repeating the note.";
+pub(crate) const WRITE_NOTE_DESCRIPTION: &str = "Publish the note this session is producing. This call is the deliverable: \
+Staged stores the current contents of your note draft file (the path is in your instructions) as the note body, \
+under the title you pass here, and does not read your assistant text. Write the whole note body into the draft \
+file first; calling again republishes the file, and the last call of the turn wins. After the result says the \
+note is saved, end your turn without repeating the note.";
 
 /// Structured suggested next steps, the same shape as the former
 /// `suggested-next-steps` JSON block (camelCase keys). Both fields are
@@ -82,8 +88,9 @@ impl SuggestedNextSteps {
     }
 }
 
-/// Arguments of `write_note`. The schema is derived from this struct, so the
-/// Staged MCP on Blox's hand-written schema must stay in step with it (see the
+/// Arguments of `write_note`. There is no `body`: the body is the draft
+/// file. The schema is derived from this struct, so the Staged MCP on Blox's
+/// hand-written schema must stay in step with it (see the
 /// `write_note_schema_matches_the_rust_tool_schema` test in
 /// `remote_staged_mcp::note_outbox`).
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -91,9 +98,6 @@ pub struct WriteNoteParams {
     /// The note title, shown as its heading. Plain text, no markdown, no
     /// leading `#`.
     pub title: String,
-    /// The full note body in markdown, without the title. Write it as a
-    /// standalone artifact: the user's prompt is not shown with it.
-    pub body: String,
     /// What the user might want to do next. Keep both fields to a few words
     /// and use null when there is no clear next action.
     #[serde(default)]
@@ -122,13 +126,16 @@ pub struct NoteSubmission {
 }
 
 impl NoteSubmission {
-    /// Validate and normalize tool arguments into a submission.
+    /// Validate and normalize tool arguments plus the body read from the
+    /// draft (locally) or the outbox's `note.md` (remotely) into a
+    /// submission.
     ///
     /// The title and body must both be non-empty after trimming; a title that
     /// was written as a markdown H1 anyway has its `# ` stripped so the stored
     /// title stays plain text.
     pub(crate) fn from_params(
         params: WriteNoteParams,
+        body: &str,
         source: NoteSubmissionSource,
     ) -> Result<Self, String> {
         let title = params.title.trim();
@@ -139,9 +146,9 @@ impl NoteSubmission {
         if title.contains('\n') {
             return Err("`title` must be a single line".to_string());
         }
-        let body = params.body.trim();
+        let body = body.trim();
         if body.is_empty() {
-            return Err("`body` must not be empty".to_string());
+            return Err("the note body must not be empty".to_string());
         }
         Ok(Self {
             title: title.to_string(),
@@ -170,8 +177,8 @@ impl NoteSubmission {
 /// the agent sees the same instruction on both transports.
 pub(crate) fn saved_message(title: &str, body_len: usize) -> String {
     format!(
-        "Saved note \"{title}\" ({body_len} characters). The note is stored; end your turn now \
-without repeating it in your reply."
+        "Saved note \"{title}\" ({body_len} characters from the draft file). The note is stored; \
+end your turn now without repeating it in your reply."
     )
 }
 
@@ -203,54 +210,83 @@ pub(crate) fn current_submission(slot: &NoteSubmissionSlot) -> Option<NoteSubmis
 }
 
 /// Handler for the local `write_note` tool. One per session; every HTTP
-/// connection to the server shares the session's slot.
+/// connection to the server shares the session's slot and draft path.
 #[derive(Clone)]
 struct NoteToolsHandler {
     session_id: String,
     slot: NoteSubmissionSlot,
+    draft_path: PathBuf,
 }
 
 impl NoteToolsHandler {
-    fn new(session_id: String, slot: NoteSubmissionSlot) -> Self {
-        Self { session_id, slot }
+    fn new(session_id: String, slot: NoteSubmissionSlot, draft_path: PathBuf) -> Self {
+        Self {
+            session_id,
+            slot,
+            draft_path,
+        }
     }
 }
 
 #[tool_router]
 impl NoteToolsHandler {
     #[tool(
-        description = "Save the note this session is producing. This call is the deliverable: \
-Staged stores exactly what you pass here and does not read your assistant text. Pass the full note each time \
-(title, markdown body, and suggested next steps); calling again replaces the previous note, and the last call \
-of the turn wins. After the result says the note is saved, end your turn without repeating the note."
+        description = "Publish the note this session is producing. This call is the deliverable: \
+Staged stores the current contents of your note draft file (the path is in your instructions) as the note body, \
+under the title you pass here, and does not read your assistant text. Write the whole note body into the draft \
+file first; calling again republishes the file, and the last call of the turn wins. After the result says the \
+note is saved, end your turn without repeating the note."
     )]
     async fn write_note(
         &self,
         Parameters(params): Parameters<WriteNoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        Ok(handle_write_note(&self.session_id, &self.slot, params))
+        Ok(handle_write_note(
+            &self.session_id,
+            &self.slot,
+            &self.draft_path,
+            params,
+        ))
     }
 }
 
 /// The tool body, separated from the rmcp plumbing so tests can drive it.
+///
+/// Reads the draft first: a missing, empty, oversized, non-UTF-8 or
+/// non-regular draft is a tool error naming the path, and the slot is left
+/// untouched so the agent fixes the file and calls again within the turn.
 pub(crate) fn handle_write_note(
     session_id: &str,
     slot: &NoteSubmissionSlot,
+    draft_path: &Path,
     params: WriteNoteParams,
 ) -> CallToolResult {
-    match NoteSubmission::from_params(params, NoteSubmissionSource::Tool) {
+    let body = match crate::note_draft::read_draft(draft_path) {
+        Ok(body) => body,
+        Err(error) => {
+            log::warn!(
+                "Session {session_id}: write_note could not read the draft {}: {error:?}",
+                draft_path.display()
+            );
+            return CallToolResult::error(vec![ContentBlock::text(
+                error.describe(&draft_path.to_string_lossy()),
+            )]);
+        }
+    };
+    match NoteSubmission::from_params(params, &body, NoteSubmissionSource::Tool) {
         Ok(submission) => {
             let message = submission.saved_message();
             log::info!(
-                "Session {session_id}: write_note saved \"{}\" ({} chars)",
+                "Session {session_id}: write_note saved \"{}\" ({} chars from {})",
                 submission.title,
-                submission.body.len()
+                submission.body.len(),
+                draft_path.display()
             );
             store_submission(slot, submission);
             CallToolResult::success(vec![ContentBlock::text(message)])
         }
         Err(reason) => CallToolResult::error(vec![ContentBlock::text(format!(
-            "write_note rejected: {reason}. Call it again with a non-empty title and body."
+            "write_note rejected: {reason}. Call it again with a non-empty one-line title."
         ))]),
     }
 }
@@ -262,13 +298,15 @@ impl ServerHandler for NoteToolsHandler {
     }
 }
 
-/// Start the local MCP HTTP server exposing `write_note` for one session.
+/// Start the local MCP HTTP server exposing `write_note` for one session,
+/// publishing the draft at `draft_path`.
 ///
 /// Returns the bound port and a `JoinHandle`. The server runs until the handle
 /// (and its parent `LocalSet`) is dropped. Submissions land in `slot`.
 pub async fn start_note_mcp_server(
     session_id: String,
     slot: NoteSubmissionSlot,
+    draft_path: PathBuf,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -279,7 +317,13 @@ pub async fn start_note_mcp_server(
         .port();
 
     let service = StreamableHttpService::new(
-        move || Ok(NoteToolsHandler::new(session_id.clone(), Arc::clone(&slot))),
+        move || {
+            Ok(NoteToolsHandler::new(
+                session_id.clone(),
+                Arc::clone(&slot),
+                draft_path.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
@@ -318,18 +362,40 @@ mod tests {
         );
     }
 
-    fn params(title: &str, body: &str) -> WriteNoteParams {
+    fn params(title: &str) -> WriteNoteParams {
         WriteNoteParams {
             title: title.to_string(),
-            body: body.to_string(),
             suggested_next_steps: None,
+        }
+    }
+
+    /// A temp directory holding the session's draft at `draft.md`.
+    struct Draft {
+        dir: tempfile::TempDir,
+    }
+
+    impl Draft {
+        fn new() -> Self {
+            Self {
+                dir: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn path(&self) -> PathBuf {
+            self.dir.path().join("draft.md")
+        }
+
+        fn write(&self, body: &str) -> PathBuf {
+            std::fs::write(self.path(), body).unwrap();
+            self.path()
         }
     }
 
     #[test]
     fn submission_trims_and_strips_a_markdown_heading_from_the_title() {
         let submission = NoteSubmission::from_params(
-            params("  # Design  ", "\nBody text.\n"),
+            params("  # Design  "),
+            "\nBody text.\n",
             NoteSubmissionSource::Tool,
         )
         .unwrap();
@@ -342,22 +408,22 @@ mod tests {
     #[test]
     fn submission_rejects_empty_or_multiline_titles_and_empty_bodies() {
         assert!(
-            NoteSubmission::from_params(params("", "body"), NoteSubmissionSource::Tool)
+            NoteSubmission::from_params(params(""), "body", NoteSubmissionSource::Tool)
                 .unwrap_err()
                 .contains("title")
         );
         assert!(
-            NoteSubmission::from_params(params("# ", "body"), NoteSubmissionSource::Tool)
+            NoteSubmission::from_params(params("# "), "body", NoteSubmissionSource::Tool)
                 .unwrap_err()
                 .contains("title")
         );
         assert!(
-            NoteSubmission::from_params(params("a\nb", "body"), NoteSubmissionSource::Tool)
+            NoteSubmission::from_params(params("a\nb"), "body", NoteSubmissionSource::Tool)
                 .unwrap_err()
                 .contains("single line")
         );
         assert!(
-            NoteSubmission::from_params(params("Title", "  \n"), NoteSubmissionSource::Tool)
+            NoteSubmission::from_params(params("Title"), "  \n", NoteSubmissionSource::Tool)
                 .unwrap_err()
                 .contains("body")
         );
@@ -369,9 +435,9 @@ mod tests {
             r#"{"suggestedNextCommitStep": "  Fix it ", "suggestedNextNoteStep": "   "}"#,
         )
         .unwrap();
-        let mut p = params("T", "B");
+        let mut p = params("T");
         p.suggested_next_steps = Some(steps);
-        let submission = NoteSubmission::from_params(p, NoteSubmissionSource::Tool).unwrap();
+        let submission = NoteSubmission::from_params(p, "B", NoteSubmissionSource::Tool).unwrap();
         assert_eq!(
             submission.suggested_next_steps,
             Some(SuggestedNextSteps {
@@ -382,41 +448,78 @@ mod tests {
     }
 
     #[test]
-    fn handler_stores_the_last_call_and_tells_the_agent_to_end_the_turn() {
+    fn handler_publishes_the_draft_and_tells_the_agent_to_end_the_turn() {
+        let draft = Draft::new();
         let slot = new_submission_slot();
         assert!(!has_submission(&slot));
 
-        let first = handle_write_note("s1", &slot, params("First", "one"));
+        let path = draft.write("\n\nFirst body ![Shot](staged-media://abc.png)\n");
+        let first = handle_write_note("s1", &slot, &path, params("First"));
         assert_ne!(first.is_error, Some(true));
         let text = serde_json::to_string(&first.content).unwrap();
         assert!(text.contains("Saved note \\\"First\\\""), "{text}");
+        assert!(text.contains("from the draft file"), "{text}");
         assert!(text.contains("end your turn"), "{text}");
+        let current = current_submission(&slot).unwrap();
+        assert_eq!(current.body, "First body ![Shot](staged-media://abc.png)");
 
-        handle_write_note("s1", &slot, params("Second", "two"));
+        // The agent edits the draft and republishes: the file wins, trimmed.
+        draft.write("Second body");
+        handle_write_note("s1", &slot, &path, params("Second"));
         let current = current_submission(&slot).unwrap();
         assert_eq!(current.title, "Second");
-        assert_eq!(current.body, "two");
+        assert_eq!(current.body, "Second body");
     }
 
     #[test]
-    fn handler_reports_invalid_arguments_as_a_tool_error_without_storing() {
+    fn handler_rejects_a_bad_draft_naming_the_path_without_touching_the_slot() {
+        let draft = Draft::new();
         let slot = new_submission_slot();
-        let result = handle_write_note("s1", &slot, params("", "body"));
+        let path = draft.path();
+        let shown = path.to_string_lossy().into_owned();
+
+        let expect_rejected = |what: &str| {
+            let result = handle_write_note("s1", &slot, &path, params("Title"));
+            assert_eq!(result.is_error, Some(true), "{what}");
+            let text = serde_json::to_string(&result.content).unwrap();
+            assert!(text.contains(&shown), "{what}: {text}");
+            assert!(text.contains(what), "{what}: {text}");
+            assert!(!has_submission(&slot), "{what} must not fill the slot");
+        };
+
+        expect_rejected("does not exist");
+        draft.write("  \n\t\n");
+        expect_rejected("is empty");
+        std::fs::write(&path, [0xffu8, 0xfe, b'a']).unwrap();
+        expect_rejected("not valid UTF-8");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::note_draft::DRAFT_MAX_BYTES + 1)
+            .unwrap();
+        drop(file);
+        expect_rejected("byte limit");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        expect_rejected("not a regular file");
+
+        // A good draft but a bad title is still a rejection with no store.
+        std::fs::remove_dir(&path).unwrap();
+        draft.write("body");
+        let result = handle_write_note("s1", &slot, &path, params(""));
         assert_eq!(result.is_error, Some(true));
         assert!(!has_submission(&slot));
     }
 
     #[test]
-    fn input_schema_names_the_three_arguments_with_camel_case_step_keys() {
+    fn input_schema_names_title_and_steps_only_with_camel_case_step_keys() {
         let schema = write_note_input_schema();
         let text = schema.to_string();
         assert!(text.contains("\"title\""), "{text}");
-        assert!(text.contains("\"body\""), "{text}");
+        assert!(!text.contains("\"body\""), "{text}");
         assert!(text.contains("\"suggested_next_steps\""), "{text}");
         assert!(text.contains("suggestedNextCommitStep"), "{text}");
         assert!(text.contains("suggestedNextNoteStep"), "{text}");
         let required = schema["required"].as_array().expect("required list");
         let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(required, ["title", "body"]);
+        assert_eq!(required, ["title"]);
     }
 }

@@ -687,9 +687,9 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
     let valid = NoteSubmission::from_params(
         crate::note_tool::WriteNoteParams {
             title: "Plan".into(),
-            body: "Body\n```pikchr\nbox \"ok\"\n```".into(),
             suggested_next_steps: None,
         },
+        "Body\n```pikchr\nbox \"ok\"\n```",
         NoteSubmissionSource::Outbox,
     )
     .unwrap();
@@ -701,9 +701,9 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
     let broken = NoteSubmission::from_params(
         crate::note_tool::WriteNoteParams {
             title: "Plan".into(),
-            body: "Body\n```pikchr\nboxx \"bad\"\n```".into(),
             suggested_next_steps: None,
         },
+        "Body\n```pikchr\nboxx \"bad\"\n```",
         NoteSubmissionSource::Outbox,
     )
     .unwrap();
@@ -1250,9 +1250,9 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
     let valid = NoteSubmission::from_params(
         crate::note_tool::WriteNoteParams {
             title: "Plan".into(),
-            body: "Body".into(),
             suggested_next_steps: None,
         },
+        "Body",
         NoteSubmissionSource::Outbox,
     )
     .unwrap();

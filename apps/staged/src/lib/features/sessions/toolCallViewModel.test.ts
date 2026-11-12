@@ -661,7 +661,6 @@ describe('buildToolCallViewModel output handling', () => {
 describe('write_note tool rows', () => {
   const input = {
     title: 'README.md: Sandbox repository purpose',
-    body: 'The README names this repository “Sandbox.”\n\nIt is a throwaway repo for manual QA.',
     suggested_next_steps: {
       suggestedNextCommitStep: 'Expand the README',
       suggestedNextNoteStep: null,
@@ -672,7 +671,7 @@ describe('write_note tool rows', () => {
       type: 'content',
       content: {
         type: 'text',
-        text: 'Saved note "README.md: Sandbox repository purpose" (82 characters). The note is stored; end your turn now without repeating it in your reply.',
+        text: 'Saved note "README.md: Sandbox repository purpose" (82 characters from the draft file). The note is stored; end your turn now without repeating it in your reply.',
       },
     },
   ];
@@ -680,32 +679,34 @@ describe('write_note tool rows', () => {
   it.each([
     ['Claude', 'mcp__staged__write_note'],
     ['Goose', 'staged: write note'],
-  ])('renders the %s form as a note with its title and body instead of a command', (_, name) => {
-    const model = buildToolCallViewModel(
-      richTool({
-        verb: 'Ran',
-        detail: name,
-        call: message({ id: 1, role: 'tool_call', content: JSON.stringify({ name, input }) }),
-        rawInput: input,
-        content: saved,
-      })
-    );
+  ])(
+    'renders the %s form as a note with its title and next steps instead of a command',
+    (_, name) => {
+      const model = buildToolCallViewModel(
+        richTool({
+          verb: 'Ran',
+          detail: name,
+          call: message({ id: 1, role: 'tool_call', content: JSON.stringify({ name, input }) }),
+          rawInput: input,
+          content: saved,
+        })
+      );
 
-    expect(model.category).toBe('note');
-    expect(model.verb).toBe('Saved note');
-    expect(model.detail).toBe('README.md: Sandbox repository purpose');
-    expect(model.metadata.note).toEqual({
-      title: 'README.md: Sandbox repository purpose',
-      body: input.body,
-      suggestedNextCommitStep: 'Expand the README',
-      suggestedNextNoteStep: null,
-    });
-    expect(model.metadata.command).toBeNull();
-    expect(model.sections[0]).toEqual({ kind: 'note', note: model.metadata.note });
-    expect(model.sections.some((section) => section.kind === 'input')).toBe(false);
-    expect(model.output.primaryText).toContain('Saved note');
-    expect(model.hasDetails).toBe(true);
-  });
+      expect(model.category).toBe('note');
+      expect(model.verb).toBe('Saved note');
+      expect(model.detail).toBe('README.md: Sandbox repository purpose');
+      expect(model.metadata.note).toEqual({
+        title: 'README.md: Sandbox repository purpose',
+        suggestedNextCommitStep: 'Expand the README',
+        suggestedNextNoteStep: null,
+      });
+      expect(model.metadata.command).toBeNull();
+      expect(model.sections[0]).toEqual({ kind: 'note', note: model.metadata.note });
+      expect(model.sections.some((section) => section.kind === 'input')).toBe(false);
+      expect(model.output.primaryText).toContain('Saved note');
+      expect(model.hasDetails).toBe(true);
+    }
+  );
 
   it('reads the note from the tool_call content when the raw input is deferred', () => {
     const model = buildToolCallViewModel(

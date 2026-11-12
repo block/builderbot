@@ -23,7 +23,7 @@ function message(
 
 describe('buildAcpTranscriptGroups', () => {
   it('shows a write_note call as its own "Saved note" row named after the note', () => {
-    const noteInput = { title: 'Plan', body: 'Do the thing.' };
+    const noteInput = { title: 'Plan' };
     const visible = [
       message({
         id: 1,
@@ -123,7 +123,7 @@ describe('buildAcpTranscriptGroups', () => {
         role: 'tool_call',
         content: JSON.stringify({
           name: 'mcp__staged__write_note',
-          input: { title: 'Disconnect test note', body: 'Body' },
+          input: { title: 'Disconnect test note' },
         }),
         acpEventKind: 'tool_call',
         acpToolCallId: 'tc-1',
@@ -184,7 +184,7 @@ describe('buildAcpTranscriptGroups', () => {
         role: 'tool_call',
         content: JSON.stringify({
           name: 'mcp__staged__write_note',
-          input: { title: 'First attempt', body: 'Body' },
+          input: { title: 'First attempt' },
         }),
         acpEventKind: 'tool_call',
         acpToolCallId: 'tc-1',
@@ -196,7 +196,7 @@ describe('buildAcpTranscriptGroups', () => {
         role: 'tool_call',
         content: JSON.stringify({
           name: 'mcp__staged__write_note',
-          input: { title: 'Second attempt', body: 'Body' },
+          input: { title: 'Second attempt' },
         }),
         acpEventKind: 'tool_call',
         acpToolCallId: 'tc-2',

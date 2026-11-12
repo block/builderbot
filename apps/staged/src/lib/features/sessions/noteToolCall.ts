@@ -3,13 +3,13 @@ import { parseToolCall } from './sessionModalHelpers';
 
 /**
  * The `write_note` call a note session makes on Staged's `staged` MCP server
- * (see `docs/note-delivery.md`). The transcript row carries the tool's
- * arguments, so the chat pane can show the note the agent saved instead of
- * a shell-styled `$ mcp__staged__write_note` line.
+ * (see `docs/note-delivery.md`). The call publishes the session's draft file
+ * as the note body, so its arguments are the title and the suggested next
+ * steps only; the chat pane shows those instead of a shell-styled
+ * `$ mcp__staged__write_note` line. The body is the stored note's to show.
  */
 export interface WriteNoteCall {
   title: string;
-  body: string;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
 }
@@ -29,21 +29,22 @@ export function isWriteNoteToolName(name: string | null | undefined): boolean {
   return /^staged(?:__|:_|_|\.)write_note$/.test(normalized);
 }
 
-/** The note arguments from a `write_note` input object, if it has them. */
+/**
+ * The note arguments from a `write_note` input object, if it has them. A
+ * `body` on a row recorded before the draft file carried the note is ignored.
+ */
 export function writeNoteCallFromInput(input: unknown): WriteNoteCall | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const record = input as Record<string, unknown>;
   const title = typeof record.title === 'string' ? record.title.trim() : '';
-  const body = typeof record.body === 'string' ? record.body : '';
-  if (!title && !body) return null;
   const steps = record.suggested_next_steps ?? record.suggestedNextSteps;
   const stepRecord =
     steps && typeof steps === 'object' && !Array.isArray(steps)
       ? (steps as Record<string, unknown>)
       : null;
+  if (!title && !stepRecord) return null;
   return {
     title,
-    body,
     suggestedNextCommitStep: stepString(
       stepRecord?.suggestedNextCommitStep ?? stepRecord?.suggested_next_commit_step
     ),
@@ -71,7 +72,6 @@ export function writeNoteToolCall(content: string, rawInput: unknown): WriteNote
     writeNoteCallFromInput(rawInput) ??
     writeNoteCallFromInput(parsed?.args) ?? {
       title: '',
-      body: '',
       suggestedNextCommitStep: null,
       suggestedNextNoteStep: null,
     }

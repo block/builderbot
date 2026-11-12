@@ -27,6 +27,7 @@ pub mod managed_node;
 mod mcp_progress;
 pub mod migrations;
 pub mod note_commands;
+mod note_draft;
 mod note_media;
 pub mod note_tool;
 pub mod note_transfer;

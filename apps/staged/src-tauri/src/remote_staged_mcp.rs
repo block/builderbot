@@ -113,6 +113,10 @@ pub(crate) struct RemoteStagedMcp {
     pub node: String,
     /// Absolute path of the installed server script.
     pub script_path: String,
+    /// The workstation's home directory, as the probe printed it: what the
+    /// session scratch paths spelled out to the agent (`note_draft`) start
+    /// with.
+    pub home: String,
 }
 
 /// What the install probe reports about the workstation.
@@ -197,7 +201,11 @@ pub(crate) fn install(exec: RemoteExec) -> Result<RemoteStagedMcp, String> {
         log::debug!("The Staged MCP on Blox at {script_path} is current ({checksum})");
     }
 
-    Ok(RemoteStagedMcp { node, script_path })
+    Ok(RemoteStagedMcp {
+        node,
+        script_path,
+        home: probe.home,
+    })
 }
 
 /// The stdio MCP server entry for `session/new`: the workstation's `node`
@@ -291,6 +299,7 @@ mod tests {
             RemoteStagedMcp {
                 node: "/usr/bin/node".into(),
                 script_path: "/home/bloxer/.staged/bin/staged-mcp.cjs".into(),
+                home: "/home/bloxer".into(),
             }
         );
         let commands = log.borrow();
@@ -358,6 +367,7 @@ mod tests {
         let server = RemoteStagedMcp {
             node: "/usr/bin/node".into(),
             script_path: "/home/bloxer/.staged/bin/staged-mcp.cjs".into(),
+            home: "/home/bloxer".into(),
         };
         assert_eq!(SERVER_NAME, "staged");
         match stdio_mcp_server(&server, "sess-1", "turn-1") {
@@ -512,12 +522,21 @@ mod tests {
 
         let init = &responses[0]["result"];
         assert_eq!(init["serverInfo"]["name"], SERVER_NAME);
-        assert_eq!(init["serverInfo"]["version"], "2");
+        assert_eq!(init["serverInfo"]["version"], "3");
         assert_eq!(init["capabilities"], serde_json::json!({"tools": {}}));
+        // The instructions name the session's draft file by absolute path:
+        // the one spelling of it an agent that expands neither `~` nor
+        // `$HOME` can use.
         assert_eq!(
             init["instructions"],
-            "Call write_note to save the note this session is producing; your assistant text is \
-             not saved."
+            format!(
+                "Your note draft file is `{}`. This file is your note: write it, edit it, and \
+                 when it is ready call write_note (title and suggested next steps) to publish \
+                 it; your assistant text is not saved.",
+                home.path()
+                    .join(".staged/sessions/sess-1/draft.md")
+                    .display()
+            )
         );
 
         assert_eq!(responses[1]["id"], 2);

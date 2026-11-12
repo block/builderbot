@@ -32,7 +32,8 @@
  *
  * Adding a tool: write an object with `name`, `description`, `inputSchema`,
  * an optional `instructions` sentence (appended to the `initialize`
- * instructions), an optional `failureText(error)` (the result text when
+ * instructions; a string, or a function of `context` for text that names a
+ * path), an optional `failureText(error)` (the result text when
  * `call` throws or rejects), and `call(context, args)` returning
  * `{ text, isError }` or a promise of it. `context` carries `sessionId`,
  * `turnId` and `sessionDir`. Then add the object to `TOOLS`. See
@@ -58,7 +59,7 @@ const readline = require("readline");
 
 // Reported as `serverInfo.version` and stamped by tools into what they write
 // (`write_note`'s `meta.json` keeps it under its original `helperVersion` key).
-const SERVER_VERSION = 2;
+const SERVER_VERSION = 3;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -140,12 +141,17 @@ function removeIfPresent(filePath) {
 // 2. Tools
 // ---------------------------------------------------------------------------
 
-// write_note: the note outbox.
+// write_note: publish the draft into the note outbox.
 //
-// Every call replaces the session's note, atomically (temp file + rename),
-// in the session directory:
+// The note body is the session's draft file, `draft.md` in the session
+// directory, which the agent writes with its own file tools (Staged seeds it
+// with the stored body for an amendment and leaves it absent for a fresh
+// note). A call reads the draft and replaces the session's note, atomically
+// (temp file + rename), in the session directory:
 //
-//     note.md    the note body (markdown, without the title)
+//     draft.md   the agent's draft (the laptop seeds and clears it; this
+//                server only reads it)
+//     note.md    the published note body (markdown, without the title)
 //     meta.json  {"title", "suggestedNextSteps", "turn", "writtenAt", "helperVersion"}
 //     done       marker: the turn delivered a note
 //
@@ -157,27 +163,22 @@ function removeIfPresent(filePath) {
 // Must stay word-for-word in step with `WRITE_NOTE_DESCRIPTION` in
 // `apps/staged/src-tauri/src/note_tool.rs`.
 const WRITE_NOTE_DESCRIPTION =
-  "Save the note this session is producing. This call is the deliverable: " +
-  "Staged stores exactly what you pass here and does not read your assistant text. " +
-  "Pass the full note each time (title, markdown body, and suggested next steps); " +
-  "calling again replaces the previous note, and the last call of the turn wins. " +
-  "After the result says the note is saved, end your turn without repeating the note.";
+  "Publish the note this session is producing. This call is the deliverable: " +
+  "Staged stores the current contents of your note draft file (the path is in your instructions) " +
+  "as the note body, under the title you pass here, and does not read your assistant text. " +
+  "Write the whole note body into the draft file first; calling again republishes the file, " +
+  "and the last call of the turn wins. After the result says the note is saved, end your turn " +
+  "without repeating the note.";
 
 // Mirrors the schema rmcp derives from `WriteNoteParams`; the Rust test
 // `write_note_schema_matches_the_rust_tool_schema` checks property names and
-// required fields.
+// required fields. There is no `body`: the body is the draft file.
 const WRITE_NOTE_INPUT_SCHEMA = {
   type: "object",
   properties: {
     title: {
       type: "string",
       description: "The note title, shown as its heading. Plain text, no markdown, no leading `#`.",
-    },
-    body: {
-      type: "string",
-      description:
-        "The full note body in markdown, without the title. Write it as a standalone " +
-        "artifact: the user's prompt is not shown with it.",
     },
     suggested_next_steps: {
       description:
@@ -195,8 +196,90 @@ const WRITE_NOTE_INPUT_SCHEMA = {
       ],
     },
   },
-  required: ["title", "body"],
+  required: ["title"],
 };
+
+// The draft file name and the largest draft a call publishes; both match
+// `note_draft` on the laptop.
+const DRAFT_FILE_NAME = "draft.md";
+const DRAFT_MAX_BYTES = 1024 * 1024;
+
+/** The session's draft path, as the prompt spells it out to the agent. */
+function draftPath(context) {
+  return path.join(context.sessionDir, DRAFT_FILE_NAME);
+}
+
+/** `write_note rejected: <what>, then call write_note again.` naming the draft. */
+function draftRejection(what) {
+  return "write_note rejected: " + what + ", then call write_note again.";
+}
+
+/**
+ * Read and validate the draft: a regular file, at most DRAFT_MAX_BYTES,
+ * UTF-8, non-empty after trimming. Returns `{ body }` or `{ error }` with
+ * the same wording as `note_draft::DraftError::describe` on the laptop.
+ */
+function readDraft(context) {
+  const filePath = draftPath(context);
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return {
+        error: draftRejection(
+          "the draft file `" +
+            filePath +
+            "` does not exist. This file is your note: write the full note body (markdown, " +
+            "without the title) into it"
+        ),
+      };
+    }
+    return {
+      error: draftRejection("the draft file `" + filePath + "` could not be read: " + error.message),
+    };
+  }
+  if (!stat.isFile()) {
+    return {
+      error: draftRejection(
+        "`" + filePath + "` is not a regular file. The draft must be a plain file holding the note body"
+      ),
+    };
+  }
+  if (stat.size > DRAFT_MAX_BYTES) {
+    return {
+      error: draftRejection(
+        "the draft file `" +
+          filePath +
+          "` is " +
+          stat.size +
+          " bytes, over the " +
+          DRAFT_MAX_BYTES +
+          " byte limit. Shorten it"
+      ),
+    };
+  }
+  const bytes = fs.readFileSync(filePath);
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (_error) {
+    return {
+      error: draftRejection("the draft file `" + filePath + "` is not valid UTF-8. Rewrite it as UTF-8 text"),
+    };
+  }
+  const body = text.trim();
+  if (body.length === 0) {
+    return {
+      error: draftRejection(
+        "the draft file `" +
+          filePath +
+          "` is empty. Write the full note body (markdown, without the title) into it"
+      ),
+    };
+  }
+  return { body: body };
+}
 
 function cleanStep(value) {
   if (value === null || value === undefined) return null;
@@ -232,22 +315,19 @@ function savedMessage(title, bodyLength) {
     title +
     '" (' +
     bodyLength +
-    " characters). The note is stored; end your turn now without repeating it in your reply."
+    " characters from the draft file). The note is stored; end your turn now without repeating it in your reply."
   );
 }
 
-/** Validate the arguments and write the note outbox. Returns {text, isError}. */
+/** Validate the arguments, read the draft and write the note outbox. Returns {text, isError}. */
 function writeNote(context, args) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
     return { text: "write_note rejected: arguments must be an object.", isError: true };
   }
   let title = args.title;
-  let body = args.body;
-  if (typeof title !== "string" || typeof body !== "string") {
+  if (typeof title !== "string") {
     return {
-      text:
-        "write_note rejected: `title` and `body` must be strings. " +
-        "Call it again with a non-empty title and body.",
+      text: "write_note rejected: `title` must be a string. Call it again with a non-empty one-line title.",
       isError: true,
     };
   }
@@ -255,7 +335,7 @@ function writeNote(context, args) {
   if (title.startsWith("#")) title = title.slice(1).trim();
   if (title.length === 0) {
     return {
-      text: "write_note rejected: `title` must not be empty. Call it again with a non-empty title and body.",
+      text: "write_note rejected: `title` must not be empty. Call it again with a non-empty one-line title.",
       isError: true,
     };
   }
@@ -265,19 +345,21 @@ function writeNote(context, args) {
       isError: true,
     };
   }
-  body = body.trim();
-  if (body.length === 0) {
-    return {
-      text: "write_note rejected: `body` must not be empty. Call it again with a non-empty title and body.",
-      isError: true,
-    };
-  }
   let steps;
   try {
     steps = normalizeSteps(args.suggested_next_steps);
   } catch (error) {
     return { text: "write_note rejected: " + error.message + ".", isError: true };
   }
+  // The draft is read after the arguments are checked so a bad title never
+  // costs a file read, and before anything is written so a bad draft leaves
+  // the outbox exactly as it was.
+  const draft = readDraft(context);
+  if (draft.error) {
+    log("write_note could not read the draft for session " + context.sessionId);
+    return { text: draft.error, isError: true };
+  }
+  const body = draft.body;
 
   const directory = ensureSessionDir(context);
   const meta = {
@@ -305,8 +387,14 @@ const WRITE_NOTE_TOOL = {
   name: "write_note",
   description: WRITE_NOTE_DESCRIPTION,
   inputSchema: WRITE_NOTE_INPUT_SCHEMA,
-  instructions:
-    "Call write_note to save the note this session is producing; your assistant text is not saved.",
+  instructions: function (context) {
+    return (
+      "Your note draft file is `" +
+      draftPath(context) +
+      "`. This file is your note: write it, edit it, and when it is ready call write_note " +
+      "(title and suggested next steps) to publish it; your assistant text is not saved."
+    );
+  },
   failureText: function (error) {
     return "write_note failed to save the note: " + error.message;
   },
@@ -328,14 +416,14 @@ function findTool(name) {
 }
 
 /** The `initialize` result for a client asking for `requestedVersion`. */
-function initializeResult(requestedVersion) {
+function initializeResult(context, requestedVersion) {
   const result = {
     protocolVersion: negotiateProtocolVersion(requestedVersion),
     capabilities: { tools: {} },
     serverInfo: { name: SERVER_NAME, version: String(SERVER_VERSION) },
   };
   const instructions = TOOLS.map(function (tool) {
-    return tool.instructions;
+    return typeof tool.instructions === "function" ? tool.instructions(context) : tool.instructions;
   }).filter(Boolean);
   if (instructions.length > 0) result.instructions = instructions.join(" ");
   return result;
@@ -525,7 +613,7 @@ function handleLine(context, rawLine) {
   if (isNotification) return;
 
   if (method === "initialize") {
-    reply(id, initializeResult(params.protocolVersion));
+    reply(id, initializeResult(context, params.protocolVersion));
   } else if (method === "ping") {
     reply(id, {});
   } else if (method === "tools/list") {

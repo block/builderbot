@@ -34,7 +34,7 @@ async fn finished_notes_preserve_diagram_repair_and_completion_hooks() {
             LatestAssistantPikchrValidation::Invalid(error) => error,
             other => panic!("expected diagram repair, got {other:?}"),
         };
-        let correction = build_pikchr_correction_prompt(&error, true);
+        let correction = build_pikchr_correction_prompt(&error, true, None);
         store
             .add_session_message(&session.id, MessageRole::User, &correction)
             .unwrap();

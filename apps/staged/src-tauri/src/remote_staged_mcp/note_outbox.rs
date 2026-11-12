@@ -7,10 +7,17 @@
 //! the workstation home:
 //!
 //! ```text
-//! ~/.staged/sessions/<session-id>/note.md   body (markdown, without the title)
+//! ~/.staged/sessions/<session-id>/draft.md  the agent's draft: the note body it
+//!                                           writes and edits; `write_note` reads it
+//! ~/.staged/sessions/<session-id>/note.md   the published body (markdown, no title)
 //! ~/.staged/sessions/<session-id>/meta.json title, suggested next steps, turn id
 //! ~/.staged/sessions/<session-id>/done      marker: a complete note is present
 //! ```
+//!
+//! The draft is the laptop's to seed and clear (`note_draft`): the
+//! start-of-run recovery's clear seeds it with the stored body for an
+//! amendment, in the same round trip ([`clear_outbox_and_seed`]), and every
+//! clear removes it with the outbox.
 //!
 //! After the turn — or on the dead-owner sweep, when the laptop lost the
 //! session — the collector pulls the outbox over `ws exec` and turns it into
@@ -37,8 +44,9 @@ use crate::note_tool::{
 pub(crate) fn clear_outbox_script(session_id: &str) -> String {
     let dir = session_dir_expr(session_id);
     format!(
-        "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\"; \
-         rmdir \"$d\" 2>/dev/null; exit 0"
+        "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\" \"$d/{DRAFT}\"; \
+         rmdir \"$d\" 2>/dev/null; exit 0",
+        DRAFT = crate::note_draft::REMOTE_DRAFT_FILE_NAME
     )
 }
 
@@ -47,6 +55,90 @@ pub(crate) fn clear_outbox(exec: RemoteExec, session_id: &str) -> Result<(), Str
     exec(&["sh", "-c", &clear_outbox_script(session_id)])
         .map(|_| ())
         .map_err(|e| format!("failed to clear the remote note outbox: {e}"))
+}
+
+/// Largest base64 payload put on one command line, the same bound
+/// `session_commands::write_bytes_to_remote_with` uses to stay under ARG_MAX.
+const SEED_CHUNK_SIZE: usize = 500_000;
+
+/// The run-start form of [`clear_outbox_script`]: one round trip that
+/// empties the outbox and puts `draft.md` in its run-start state.
+///
+/// The outbox files and any stale draft go, and the session directory is
+/// left in place (created if need be, mode 700) so the agent's first write
+/// of `draft.md` needs no `mkdir` — not every agent's file tool creates
+/// parent directories. With `seed_b64` (an amendment's stored body, base64)
+/// the seed is decoded into a temp file and renamed into place, and a failed
+/// seed exits 1 so the caller hears about it. Without one (a fresh note) no
+/// file is created, the `mkdir` is best-effort and the script always exits
+/// 0, like the plain clear.
+pub(crate) fn clear_outbox_and_seed_script(session_id: &str, seed_b64: Option<&str>) -> String {
+    let dir = session_dir_expr(session_id);
+    let draft = crate::note_draft::REMOTE_DRAFT_FILE_NAME;
+    let Some(seed) = seed_b64 else {
+        return format!(
+            "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\" \"$d/{draft}\"; \
+             mkdir -p \"$d\" 2>/dev/null && chmod 700 \"$d\" 2>/dev/null; exit 0"
+        );
+    };
+    format!(
+        "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\" \"$d/{draft}\"; \
+         mkdir -p \"$d\" && chmod 700 \"$d\" && \
+         echo '{seed}' | base64 -d > \"$d/.{draft}.seed\" && \
+         mv -f \"$d/.{draft}.seed\" \"$d/{draft}\" || exit 1; exit 0"
+    )
+}
+
+/// Clear the outbox at run start and, for an amendment, seed the draft with
+/// `seed` (the stored note body). One round trip, as [`clear_outbox`] is,
+/// for a fresh note and for a seed that fits one command line; a larger
+/// seed is appended in [`SEED_CHUNK_SIZE`] base64 chunks after the clear.
+pub(crate) fn clear_outbox_and_seed(
+    exec: RemoteExec,
+    session_id: &str,
+    seed: Option<&[u8]>,
+) -> Result<(), String> {
+    use base64::Engine;
+    validate_session_id(session_id)?;
+    let Some(seed) = seed else {
+        return exec(&["sh", "-c", &clear_outbox_and_seed_script(session_id, None)])
+            .map(|_| ())
+            .map_err(|e| format!("failed to clear the remote note outbox: {e}"));
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(seed);
+    if encoded.len() <= SEED_CHUNK_SIZE {
+        return exec(&[
+            "sh",
+            "-c",
+            &clear_outbox_and_seed_script(session_id, Some(&encoded)),
+        ])
+        .map(|_| ())
+        .map_err(|e| format!("failed to clear the remote note outbox and seed the draft: {e}"));
+    }
+    clear_outbox(exec, session_id)?;
+    let dir = session_dir_expr(session_id);
+    let draft = crate::note_draft::REMOTE_DRAFT_FILE_NAME;
+    let chunks: Vec<&str> = encoded
+        .as_bytes()
+        .chunks(SEED_CHUNK_SIZE)
+        .map(|chunk| std::str::from_utf8(chunk).expect("base64 is ASCII"))
+        .collect();
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let redirect = if i == 0 { ">" } else { ">>" };
+        let publish = if i == last {
+            format!(" && mv -f \"$d/.{draft}.seed\" \"$d/{draft}\"")
+        } else {
+            String::new()
+        };
+        let script = format!(
+            "d={dir}; mkdir -p \"$d\" && chmod 700 \"$d\" && \
+             echo '{chunk}' | base64 -d {redirect} \"$d/.{draft}.seed\"{publish}"
+        );
+        exec(&["sh", "-c", &script])
+            .map_err(|e| format!("failed to seed the remote note draft (chunk {i}): {e}"))?;
+    }
+    Ok(())
 }
 
 /// Print the outbox as four lines: `done`/`pending`, then `meta.json` and
@@ -184,9 +276,9 @@ pub(crate) fn outbox_state(
     let submission = NoteSubmission::from_params(
         WriteNoteParams {
             title: meta.title,
-            body,
             suggested_next_steps: meta.suggested_next_steps,
         },
+        &body,
         NoteSubmissionSource::Outbox,
     )
     .map_err(|e| format!("outbox note is invalid: {e}"))?;
@@ -368,6 +460,12 @@ pub(crate) enum OutboxRecovery {
 /// clear the outbox so the new run's collector cannot mistake it for its own.
 /// With no complete note the outbox is just emptied of partial files.
 ///
+/// The clear also puts the draft in its run-start state: `seed` is asked —
+/// after any ingest, so it sees the note the ingest stored — for the stored
+/// body to seed `draft.md` with (an amendment), or `None` to leave no draft
+/// (a fresh note). A seed that fits one command line shares the clear's
+/// round trip ([`clear_outbox_and_seed`]).
+///
 /// Two failures leave the outbox alone for the next attempt and are errors
 /// here: a workstation that could not be reached, and a waiting note that
 /// `ingest` reports it could not store (it returns `false`) — clearing after
@@ -380,6 +478,7 @@ pub(crate) fn recover_uncollected_outbox(
     exec: RemoteExec,
     session_id: &str,
     ingest: &mut dyn FnMut(NoteSubmission) -> bool,
+    seed: &mut dyn FnMut() -> Option<Vec<u8>>,
 ) -> Result<OutboxRecovery, String> {
     let recovery = match collect_classified(exec, session_id, None) {
         Ok(OutboxState::Delivered(submission)) => {
@@ -408,7 +507,8 @@ pub(crate) fn recover_uncollected_outbox(
         }
         Err(CollectError::Transport(message)) => return Err(message),
     };
-    clear_outbox(exec, session_id)?;
+    let seed = seed();
+    clear_outbox_and_seed(exec, session_id, seed.as_deref())?;
     Ok(recovery)
 }
 
@@ -737,10 +837,15 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let exec = collecting_exec(&done_output("earlier-run"), &log);
         let mut ingested = Vec::new();
-        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |submission| {
-            ingested.push(submission);
-            true
-        })
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |submission| {
+                ingested.push(submission);
+                true
+            },
+            &mut || None,
+        )
         .unwrap();
         assert_eq!(recovery, OutboxRecovery::Ingested);
         assert_eq!(ingested.len(), 1);
@@ -749,14 +854,15 @@ mod tests {
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
         assert!(commands[0][2].contains("echo done; else echo pending"));
-        assert_eq!(commands[1][2], clear_outbox_script("sess-1"));
+        assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));
     }
 
     #[test]
     fn session_start_keeps_a_note_it_could_not_store() {
         let log = RefCell::new(Vec::new());
         let exec = collecting_exec(&done_output("earlier-run"), &log);
-        let error = recover_uncollected_outbox(&exec, "sess-1", &mut |_| false).unwrap_err();
+        let error =
+            recover_uncollected_outbox(&exec, "sess-1", &mut |_| false, &mut || None).unwrap_err();
         assert!(
             error.contains("Plan") && error.contains("could not be stored"),
             "{error}"
@@ -770,16 +876,21 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let exec = collecting_exec("pending\n\n\n", &log);
         let mut ingested = 0;
-        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| {
-            ingested += 1;
-            true
-        })
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |_| {
+                ingested += 1;
+                true
+            },
+            &mut || None,
+        )
         .unwrap();
         assert_eq!(recovery, OutboxRecovery::Empty);
         assert_eq!(ingested, 0);
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "{commands:?}");
-        assert_eq!(commands[1][2], clear_outbox_script("sess-1"));
+        assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));
     }
 
     #[test]
@@ -788,16 +899,21 @@ mod tests {
         // `done` beside a missing `note.md`: a v1 script's partial write.
         let exec = collecting_exec("done\n\n\n", &log);
         let mut ingested = 0;
-        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| {
-            ingested += 1;
-            true
-        })
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |_| {
+                ingested += 1;
+                true
+            },
+            &mut || None,
+        )
         .unwrap();
         assert_eq!(recovery, OutboxRecovery::Discarded);
         assert_eq!(ingested, 0);
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
-        assert_eq!(commands[1][2], clear_outbox_script("sess-1"));
+        assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));
     }
 
     #[test]
@@ -809,14 +925,83 @@ mod tests {
             Err("workstation suspended".to_string())
         };
         let mut ingested = 0;
-        let error = recover_uncollected_outbox(&exec, "sess-1", &mut |_| {
-            ingested += 1;
-            true
-        })
+        let error = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |_| {
+                ingested += 1;
+                true
+            },
+            &mut || None,
+        )
         .unwrap_err();
         assert!(error.contains("workstation suspended"), "{error}");
         assert_eq!(ingested, 0);
         assert_eq!(log.borrow().len(), 1, "no clear after a failed collection");
+    }
+
+    #[test]
+    fn session_start_seeds_the_draft_in_the_clear_round_trip() {
+        // A fresh note: the seed closure says None, and the clear removes a
+        // stale draft and leaves the directory for the agent's first write,
+        // creating no file. Two commands either way, so a fresh remote note
+        // costs no more round trips than before.
+        let log = RefCell::new(Vec::new());
+        let exec = collecting_exec("pending\n\n\n", &log);
+        recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || None).unwrap();
+        {
+            let commands = log.borrow();
+            assert_eq!(commands.len(), 2, "{commands:?}");
+            let clear = &commands[1][2];
+            assert_eq!(*clear, clear_outbox_and_seed_script("sess-1", None));
+            assert!(clear.contains("rm -f \"$d/note.md\""), "{clear}");
+            assert!(clear.contains("\"$d/draft.md\""), "{clear}");
+            assert!(clear.contains("mkdir -p \"$d\""), "{clear}");
+            assert!(!clear.contains("base64"), "no file is created: {clear}");
+        }
+
+        // An amendment: the stored body rides along in the clear command.
+        log.borrow_mut().clear();
+        let seed = b"Stored body ![Shot](staged-media://abc.png)";
+        let mut asked = 0;
+        recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || {
+            asked += 1;
+            Some(seed.to_vec())
+        })
+        .unwrap();
+        assert_eq!(asked, 1);
+        let commands = log.borrow();
+        assert_eq!(
+            commands.len(),
+            2,
+            "still collect, then clear+seed: {commands:?}"
+        );
+        let clear = &commands[1][2];
+        assert_eq!(
+            *clear,
+            clear_outbox_and_seed_script("sess-1", Some(&b64(seed)))
+        );
+        assert!(clear.contains("rm -f \"$d/note.md\""), "{clear}");
+        assert!(clear.contains(&b64(seed)), "{clear}");
+        assert!(
+            clear.contains("mv -f \"$d/.draft.md.seed\" \"$d/draft.md\""),
+            "{clear}"
+        );
+    }
+
+    #[test]
+    fn a_seed_too_large_for_one_command_line_is_appended_after_the_clear() {
+        let log = RefCell::new(Vec::new());
+        let exec = collecting_exec("pending\n\n\n", &log);
+        let seed = vec![b'x'; SEED_CHUNK_SIZE + 10];
+        clear_outbox_and_seed(&exec, "sess-1", Some(&seed)).unwrap();
+        let commands = log.borrow();
+        assert_eq!(commands.len(), 3, "clear, then two chunks: {commands:?}");
+        assert_eq!(commands[0][2], clear_outbox_script("sess-1"));
+        assert!(commands[1][2].contains("base64 -d > \"$d/.draft.md.seed\""));
+        assert!(!commands[1][2].contains("mv -f"));
+        assert!(commands[2][2].contains("base64 -d >> \"$d/.draft.md.seed\""));
+        assert!(commands[2][2].ends_with("mv -f \"$d/.draft.md.seed\" \"$d/draft.md\""));
     }
 
     /// `write_note` as a `tools/list` response lists it, wherever it sits
@@ -873,6 +1058,14 @@ mod tests {
         panic!("cannot find the suggested_next_steps object in {schema}");
     }
 
+    /// Write the session's draft the way the agent would, at
+    /// `~/.staged/sessions/sess-1/draft.md`.
+    fn write_draft(home: &std::path::Path, body: &str) {
+        let dir = home.join(".staged/sessions/sess-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("draft.md"), body).unwrap();
+    }
+
     #[test]
     fn write_note_on_the_staged_mcp_writes_the_outbox() {
         let Some(node) = node() else {
@@ -881,20 +1074,34 @@ mod tests {
         };
         let home = tempfile::tempdir().unwrap();
 
-        // A rejected call on its own must leave no trace in the outbox.
+        // A rejected call on its own must leave no trace in the outbox: a bad
+        // title, and a good title with no draft to publish.
         let rejected = run_script(
             home.path(),
             &node,
             &[
-                serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"","body":"x"}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_note","arguments":{"title":""}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"No draft yet"}}}),
             ],
         );
         assert_eq!(rejected[0]["result"]["isError"], true);
+        assert_eq!(rejected[1]["result"]["isError"], true);
+        let text = rejected[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let draft_path = home.path().join(".staged/sessions/sess-1/draft.md");
+        assert!(
+            text.contains(&format!("`{}`", draft_path.display()))
+                && text.contains("does not exist"),
+            "{text}"
+        );
         assert!(
             !home.path().join(".staged/sessions/sess-1").exists(),
             "a rejected call writes nothing"
         );
 
+        // The draft is the body: the agent writes it, then publishes it.
+        write_draft(home.path(), "  Body line\n---\nmore  ");
         let responses = run_script(
             home.path(),
             &node,
@@ -902,8 +1109,8 @@ mod tests {
                 serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}),
                 serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
                 serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-                serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"","body":"x"}}}),
-                serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"# Plan","body":"  Body line\n---\nmore  ","suggested_next_steps":{"suggestedNextCommitStep":" Fix it ","suggestedNextNoteStep":""}}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_note","arguments":{"title":""}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"# Plan","suggested_next_steps":{"suggestedNextCommitStep":" Fix it ","suggestedNextNoteStep":""}}}}),
                 serde_json::json!({"jsonrpc":"2.0","id":5,"method":"nope"}),
             ],
         );
@@ -912,6 +1119,11 @@ mod tests {
         assert_eq!(responses[0]["id"], 1);
         assert_eq!(responses[0]["result"]["serverInfo"]["name"], "staged");
         assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+        let instructions = responses[0]["result"]["instructions"].as_str().unwrap();
+        assert!(
+            instructions.contains(&format!("`{}`", draft_path.display())),
+            "initialize names the draft: {instructions}"
+        );
 
         let write_note = listed_write_note(&responses[1]);
         assert_eq!(
@@ -939,6 +1151,11 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(outbox.join("note.md")).unwrap(),
             "Body line\n---\nmore"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+            "  Body line\n---\nmore  ",
+            "the script only reads the draft"
         );
         let meta: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(outbox.join("meta.json")).unwrap())
@@ -982,6 +1199,10 @@ mod tests {
             collect(&exec, "sess-1", None).unwrap(),
             OutboxState::Pending
         );
+        assert!(
+            !outbox.exists(),
+            "the clear removes the draft too: {outbox:?}"
+        );
         assert_eq!(
             collect(&exec, "never-ran", None).unwrap(),
             OutboxState::Pending
@@ -1020,9 +1241,10 @@ mod tests {
         };
         let home = tempfile::tempdir().unwrap();
         let outbox = home.path().join(".staged/sessions/sess-1");
-        let call = |id: u32, title: &str, body: &str| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"write_note","arguments":{"title":title,"body":body}}});
+        let call = |id: u32, title: &str| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"write_note","arguments":{"title":title}}});
 
-        let first = run_script(home.path(), &node, &[call(1, "First", "first body")]);
+        write_draft(home.path(), "first body");
+        let first = run_script(home.path(), &node, &[call(1, "First")]);
         assert_eq!(first[0]["result"]["isError"], false);
         assert!(outbox.join("done").exists());
 
@@ -1033,7 +1255,8 @@ mod tests {
         std::fs::remove_file(outbox.join("meta.json")).unwrap();
         std::fs::create_dir(outbox.join("meta.json")).unwrap();
         std::fs::write(outbox.join("meta.json/keep"), "x").unwrap();
-        let second = run_script(home.path(), &node, &[call(2, "Second", "second body")]);
+        write_draft(home.path(), "second body");
+        let second = run_script(home.path(), &node, &[call(2, "Second")]);
         assert_eq!(
             second[0]["result"]["isError"], true,
             "the blocked rename is reported to the agent: {second:?}"
@@ -1057,7 +1280,8 @@ mod tests {
         // Unblock and rewrite again: the marker comes back last, with both
         // files from the same call.
         std::fs::remove_dir_all(outbox.join("meta.json")).unwrap();
-        let third = run_script(home.path(), &node, &[call(3, "Third", "third body")]);
+        write_draft(home.path(), "third body");
+        let third = run_script(home.path(), &node, &[call(3, "Third")]);
         assert_eq!(third[0]["result"]["isError"], false);
         match collect(&exec, "sess-1", Some("turn-1")).unwrap() {
             OutboxState::Delivered(submission) => {
@@ -1075,44 +1299,65 @@ mod tests {
             return;
         };
         let home = tempfile::tempdir().unwrap();
+        write_draft(home.path(), "found later");
         run_script(
             home.path(),
             &node,
             &[
-                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Lost","body":"found later"}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Lost"}}}),
             ],
         );
         let exec = local_exec(home.path());
         let mut ingested = Vec::new();
         assert_eq!(
-            recover_uncollected_outbox(&exec, "sess-1", &mut |s| {
-                ingested.push(s);
-                true
-            })
+            recover_uncollected_outbox(
+                &exec,
+                "sess-1",
+                &mut |s| {
+                    ingested.push(s);
+                    true
+                },
+                &mut || None
+            )
             .unwrap(),
             OutboxRecovery::Ingested
         );
         assert_eq!(ingested.len(), 1);
         assert_eq!(ingested[0].title, "Lost");
         assert_eq!(ingested[0].body, "found later");
+        // The run-start clear empties the directory and leaves it for the
+        // agent's first write of the draft; the end-of-run clear removes it.
         let outbox = home.path().join(".staged/sessions/sess-1");
+        assert!(outbox.is_dir(), "{outbox:?}");
+        assert_eq!(
+            std::fs::read_dir(&outbox).unwrap().count(),
+            0,
+            "outbox files and draft are gone"
+        );
+        clear_outbox(&exec, "sess-1").unwrap();
         assert!(
             !outbox.exists(),
             "the emptied outbox directory is removed too"
         );
         assert_eq!(
-            recover_uncollected_outbox(&exec, "sess-1", &mut |_| panic!("nothing to ingest"))
-                .unwrap(),
+            recover_uncollected_outbox(
+                &exec,
+                "sess-1",
+                &mut |_| panic!("nothing to ingest"),
+                &mut || None
+            )
+            .unwrap(),
             OutboxRecovery::Empty
         );
 
         // The collect script against a real shell: four lines, marker
         // bracketing the files, nothing left behind after a clear.
+        write_draft(home.path(), "second");
         run_script(
             home.path(),
             &node,
             &[
-                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Again","body":"second"}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Again"}}}),
             ],
         );
         let output = exec(&["sh", "-c", &collect_script("sess-1")]).unwrap();
@@ -1129,5 +1374,103 @@ mod tests {
             outbox.exists(),
             "a directory holding anything else is not removed"
         );
+        assert!(
+            !outbox.join("draft.md").exists(),
+            "the clear removes the draft"
+        );
+        std::fs::remove_file(outbox.join("extra")).unwrap();
+        std::fs::remove_dir(&outbox).unwrap();
+    }
+
+    #[test]
+    fn the_seed_in_clear_script_runs_against_a_local_shell() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping local seed test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+
+        // An amendment's start: a finished note from an earlier run is
+        // waiting, the session resumes, and the recovery's clear seeds the
+        // draft with the stored body in the same command.
+        write_draft(home.path(), "old draft");
+        run_script(
+            home.path(),
+            &node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Earlier"}}}),
+            ],
+        );
+        let seed = "Stored body\n\n![Shot](staged-media://abc.png)\n";
+        let mut ingested = Vec::new();
+        assert_eq!(
+            recover_uncollected_outbox(
+                &exec,
+                "sess-1",
+                &mut |s| {
+                    ingested.push(s);
+                    true
+                },
+                &mut || Some(seed.as_bytes().to_vec()),
+            )
+            .unwrap(),
+            OutboxRecovery::Ingested
+        );
+        assert_eq!(ingested[0].body, "old draft");
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+            seed
+        );
+        for gone in ["note.md", "meta.json", "done", ".draft.md.seed"] {
+            assert!(!outbox.join(gone).exists(), "{gone} should be gone");
+        }
+        let mode = std::os::unix::fs::PermissionsExt::mode(
+            &std::fs::metadata(&outbox).unwrap().permissions(),
+        );
+        assert_eq!(mode & 0o777, 0o700);
+
+        // The agent edits the seeded draft and publishes it.
+        write_draft(home.path(), "Stored body, amended");
+        let published = run_script(
+            home.path(),
+            &node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Amended"}}}),
+            ],
+        );
+        assert_eq!(published[0]["result"]["isError"], false);
+        assert!(matches!(
+            collect(&exec, "sess-1", Some("turn-1")).unwrap(),
+            OutboxState::Delivered(submission) if submission.body == "Stored body, amended"
+        ));
+
+        // A fresh note's start with the same directory: no seed, so the
+        // clear leaves no draft and no outbox file, only the directory
+        // (mode 700) the agent will write its draft into.
+        recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || None).unwrap();
+        assert!(outbox.is_dir(), "{outbox:?}");
+        assert_eq!(std::fs::read_dir(&outbox).unwrap().count(), 0);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&outbox).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+
+        // A fresh start on a workstation that has no session directory yet
+        // creates it, and the end-of-run clear takes it away again.
+        clear_outbox(&exec, "sess-1").unwrap();
+        assert!(!outbox.exists(), "{outbox:?}");
+        recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || None).unwrap();
+        assert!(outbox.is_dir(), "{outbox:?}");
+        clear_outbox(&exec, "sess-1").unwrap();
+        assert!(!outbox.exists(), "{outbox:?}");
+
+        // A large seed goes in chunks and arrives whole.
+        let large = vec![b'y'; SEED_CHUNK_SIZE + 1];
+        clear_outbox_and_seed(&exec, "sess-1", Some(&large)).unwrap();
+        assert_eq!(std::fs::read(outbox.join("draft.md")).unwrap(), large);
+        assert!(!outbox.join(".draft.md.seed").exists());
     }
 }

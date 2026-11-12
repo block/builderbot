@@ -44,7 +44,7 @@ export interface ToolCallMetadata {
   /** Whether {@link inputText} would render anything, without formatting it. */
   hasInputText: boolean;
   parsedCommands: ParsedToolCommand[];
-  /** The note a `write_note` call saved; `null` for every other tool. */
+  /** What a `write_note` call published (title, next steps); `null` for every other tool. */
   note: WriteNoteCall | null;
   command: string | null;
   workingDirectory: string | null;
@@ -369,8 +369,8 @@ export function buildToolCallSections(
     sections.push({ kind: 'locations', locations: metadata.locations });
   }
 
-  // A note's input *is* the note: the note section shows it, so the raw
-  // JSON would only repeat it.
+  // A note's input is its title and suggested next steps: the note section
+  // shows them, so the raw JSON would only repeat it.
   if (metadata.hasInputText && !metadata.note) {
     // `text` defers to the metadata's memoized getter so the caret-driven
     // `hasDetails` check (which only reads `kind`) never triggers formatting.

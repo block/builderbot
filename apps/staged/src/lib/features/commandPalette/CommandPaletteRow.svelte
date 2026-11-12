@@ -240,12 +240,18 @@
     min-width: 0;
   }
 
+  /* The same treatment as ProjectMatchReason, which draws the reason beside
+     these: no fill, the match in the primary text colour over a warm line.
+     That lifts a match out of the muted repo line and leaves the name as it
+     is. The offset keeps the line inside the line boxes, which clip. */
   .row-name mark,
   .row-alias mark,
   .row-repo mark {
-    background-color: var(--search-match-bg);
-    border-radius: 2px;
-    color: inherit;
+    background-color: transparent;
+    color: var(--text-primary);
+    text-decoration: underline 1.5px var(--search-match-accent);
+    text-underline-offset: 1.5px;
+    text-decoration-skip-ink: none;
   }
 
   .row-badges {

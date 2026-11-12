@@ -154,7 +154,6 @@
     findHashtagItemForReference,
     renderHashtagTokens as renderHashtagTokensShared,
   } from './hashtagItems';
-  import { toast } from 'svelte-sonner';
   import * as Alert from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
   import { subscribeDragDrop } from '../branches/dragDrop';
@@ -2072,7 +2071,6 @@
     replyImageIds = [];
     imagePreviews = new Map();
     attachError = null;
-    tick().then(() => autoResize());
 
     sending = true;
     beginComposerAction();
@@ -2149,7 +2147,6 @@
         replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
         void replyDraftWriter.saveNow(draftKey, composerDraftContent(currentDraft()));
         sendError = unstartedDraftMessage({ reason, keptNewerText: restored.keptNewerText });
-        tick().then(() => autoResize());
         return;
       }
 

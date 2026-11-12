@@ -57,7 +57,7 @@ const BLOCKING_MODULES: &[&str] = &["git", "blox", "blox_cli"];
 const ALLOWED: &[(&str, &str, &str)] = &[
     // A closure that `pull_or_queue_branch_with` runs under `spawn_blocking`.
     (
-        "prs.rs",
+        "prs/pull.rs",
         "pull_or_queue_branch_for_branch",
         "pull_branch_ff_only_impl(",
     ),

@@ -3352,23 +3352,15 @@
   }
 
   /* Search result highlighting */
-  .search-match {
-    background-color: rgba(250, 200, 50, 0.35);
-    border-radius: 2px;
+  .search-match,
+  .search-current {
+    text-decoration: underline 2px var(--search-match-accent, #f2c744);
+    text-underline-offset: 3px;
+    text-decoration-skip-ink: none;
   }
 
   .search-current {
-    background-color: rgba(255, 150, 50, 0.5);
-    border-radius: 2px;
-  }
-
-  @media (prefers-color-scheme: light) {
-    .search-match {
-      background-color: rgba(250, 200, 50, 0.5);
-    }
-
-    .search-current {
-      background-color: rgba(255, 150, 50, 0.6);
-    }
+    background-color: var(--search-current-match-bg, rgba(242, 199, 68, 0.3));
+    border-radius: 2px 2px 0 0;
   }
 </style>

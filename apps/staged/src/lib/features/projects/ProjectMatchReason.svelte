@@ -84,10 +84,14 @@
     text-overflow: ellipsis;
   }
 
+  /* No fill: the match reads in the primary text colour over a warm line.
+     The offset keeps the line inside the label's 14px line box, which clips. */
   .match-label mark {
-    background-color: var(--search-match-bg);
-    border-radius: 2px;
-    color: inherit;
+    background-color: transparent;
+    color: var(--text-primary);
+    text-decoration: underline 1.5px var(--search-match-accent);
+    text-underline-offset: 1.5px;
+    text-decoration-skip-ink: none;
   }
 
   .match-more {

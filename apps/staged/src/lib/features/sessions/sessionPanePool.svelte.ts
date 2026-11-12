@@ -21,6 +21,7 @@
 import { mount as svelteMount, unmount as svelteUnmount } from 'svelte';
 import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
 import type { HashtagItem, ProjectRepo, Session } from '../../types';
+import type { ComposerNewSessionDraft, ComposerNewSessionKind } from './composerSendControl';
 import type { LinkedNoteContext } from './noteFreshness';
 import type { DisplayRootInput } from './pathDisplayRoots';
 import SessionChatPane from './SessionChatPane.svelte';
@@ -59,6 +60,10 @@ export class PaneProps {
   onSearchStateChange = $state.raw<
     ((state: { matchCount: number; currentIndex: number }) => void) | undefined
   >(undefined);
+  onStartNewSession = $state.raw<
+    ((kind: ComposerNewSessionKind, draft: ComposerNewSessionDraft) => Promise<boolean>) | undefined
+  >(undefined);
+  newSessionDisabled = $state.raw(false);
 }
 
 export interface PaneLease {
@@ -195,6 +200,7 @@ export function createSessionPanePool(deps: SessionPanePoolDeps) {
         entry.props.onSearchStateChange = undefined;
         entry.props.onOpenSession = undefined;
         entry.props.onHashtagClick = undefined;
+        entry.props.onStartNewSession = undefined;
         entry.props.active = false;
         // Otherwise `host.parentNode` keeps the closed dialog's whole tree alive.
         entry.host.remove();

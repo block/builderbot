@@ -9,6 +9,15 @@
  * segment performs the remembered mode (queue or live send) and a dropdown
  * switches between the two. The mode is a global preference
  * (`preferences.composerSendMode`), remembered across sessions and repos.
+ *
+ * Where the host can start a new session from the draft instead of sending
+ * it (the note dialog: see `COMPOSER_NEW_SESSION_OPTIONS`), the button splits
+ * in every state, and the dropdown lists those actions below the modes, or on
+ * their own when there is no mode to switch.
+ *
+ * The control is derived once, by the pane (`SessionChatPane`), and handed
+ * to `ChatComposer` whole: the pane acts on `action` and the composer draws
+ * the rest, so the two cannot be looking at different controls.
  */
 
 /** How the composer submits a message while the session is running. */
@@ -31,8 +40,16 @@ export type ComposerSendAction =
   | 'send-now';
 
 export interface ComposerSendControl {
-  /** Whether the mode dropdown is rendered beside the primary segment. */
+  /** Whether a dropdown is rendered beside the primary segment. */
   split: boolean;
+  /** Whether that dropdown offers the Queue / Send mode switch. */
+  modeMenu: boolean;
+  /**
+   * Whether that dropdown lists the new-session actions
+   * (`COMPOSER_NEW_SESSION_OPTIONS`). Carried here, not re-derived by the
+   * composer, so the entries and the split that holds them cannot disagree.
+   */
+  newSessionMenu: boolean;
   action: ComposerSendAction;
   /** Primary segment label. */
   label: string;
@@ -49,16 +66,25 @@ export interface ComposerSendControlInput {
   canSendLive: boolean;
   /** The remembered mode (only consulted when both of the above hold). */
   mode: ComposerSendMode;
+  /**
+   * The host can start a new session from the draft (see
+   * `COMPOSER_NEW_SESSION_OPTIONS`), so the dropdown is rendered in every
+   * state to carry those actions.
+   */
+  canStartNewSession?: boolean;
 }
 
 export function composerSendControl({
   isLive,
   canSendLive,
   mode,
+  canStartNewSession = false,
 }: ComposerSendControlInput): ComposerSendControl {
   if (!isLive) {
     return {
-      split: false,
+      split: canStartNewSession,
+      modeMenu: false,
+      newSessionMenu: canStartNewSession,
       action: 'start',
       label: 'Send',
       title: 'Send message',
@@ -67,7 +93,9 @@ export function composerSendControl({
   }
   if (!canSendLive || mode === 'queue') {
     return {
-      split: canSendLive,
+      split: canSendLive || canStartNewSession,
+      modeMenu: canSendLive,
+      newSessionMenu: canStartNewSession,
       action: 'queue',
       label: 'Queue',
       title: 'Queue message for after this turn',
@@ -76,6 +104,8 @@ export function composerSendControl({
   }
   return {
     split: true,
+    modeMenu: true,
+    newSessionMenu: canStartNewSession,
     action: 'send-now',
     label: 'Send',
     title: 'Send to the running agent now',
@@ -191,3 +221,34 @@ export const COMPOSER_SEND_MODE_OPTIONS: readonly {
   { mode: 'queue', label: 'Queue', description: 'Deliver after the current turn finishes' },
   { mode: 'send', label: 'Send', description: 'Deliver to the running agent now' },
 ];
+
+/** A kind of session the dropdown can start from the draft instead of sending it. */
+export type ComposerNewSessionKind = 'note' | 'commit';
+
+/** The draft handed to the host when a new session is started from it. */
+export interface ComposerNewSessionDraft {
+  /** The typed message, trimmed like a sent one. */
+  text: string;
+  /** IDs of the images and PDFs attached to it. */
+  imageIds: string[];
+}
+
+/**
+ * Menu entries that start a new session from the draft, in display order
+ * (the order of the timeline's "New note" / "New commit" buttons, whose
+ * labels they share). Offered only where the host supplies a starter: the
+ * note dialog's chat composer, where the new session is about that note.
+ */
+export const COMPOSER_NEW_SESSION_OPTIONS: readonly {
+  kind: ComposerNewSessionKind;
+  label: string;
+  description: string;
+}[] = [
+  { kind: 'note', label: 'New note', description: 'Start a note session about this note' },
+  { kind: 'commit', label: 'New commit', description: 'Start a commit session about this note' },
+];
+
+/** Hover title and accessible name for the split button's menu trigger. */
+export function composerSendMenuTitle(canStartNewSession: boolean): string {
+  return canStartNewSession ? 'More send options' : 'Change how messages are delivered';
+}

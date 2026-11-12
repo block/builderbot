@@ -183,12 +183,14 @@ describe('release', () => {
     lease.props.onSearchStateChange = vi.fn();
     lease.props.onOpenSession = vi.fn();
     lease.props.onHashtagClick = vi.fn();
+    lease.props.onStartNewSession = vi.fn(async () => true);
     lease.release();
     expect(lease.props.active).toBe(false);
     expect(lease.props.onSessionChange).toBeUndefined();
     expect(lease.props.onSearchStateChange).toBeUndefined();
     expect(lease.props.onOpenSession).toBeUndefined();
     expect(lease.props.onHashtagClick).toBeUndefined();
+    expect(lease.props.onStartNewSession).toBeUndefined();
   });
 
   it('is idempotent', async () => {

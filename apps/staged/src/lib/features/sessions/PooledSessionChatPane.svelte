@@ -14,6 +14,7 @@
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
   import type { HashtagItem, ProjectRepo, Session } from '../../types';
   import { assertBitsConfigContext, bitsConfigContextEntries } from './bitsConfigContext';
+  import type { ComposerNewSessionDraft, ComposerNewSessionKind } from './composerSendControl';
   import { reuseHashtagItems } from './hashtagItemsIdentity';
   import type { LinkedNoteContext } from './noteFreshness';
   import type { DisplayRootInput } from './pathDisplayRoots';
@@ -37,6 +38,12 @@
     onHashtagClick?: (click: HashtagClickInfo) => void;
     onSessionChange?: (session: Session | null) => void;
     onSearchStateChange?: (state: { matchCount: number; currentIndex: number }) => void;
+    /** Start a new session from the composer's draft; see SessionChatPane. */
+    onStartNewSession?: (
+      kind: ComposerNewSessionKind,
+      draft: ComposerNewSessionDraft
+    ) => Promise<boolean>;
+    newSessionDisabled?: boolean;
     compact?: boolean;
     /** The adopted pane once it is attached and awake; null when it is released. */
     onPane?: (pane: SessionPaneExports | null) => void;
@@ -55,6 +62,8 @@
     onHashtagClick,
     onSessionChange,
     onSearchStateChange,
+    onStartNewSession,
+    newSessionDisabled = false,
     compact = false,
     onPane,
   }: Props = $props();
@@ -80,6 +89,8 @@
     props.onHashtagClick = onHashtagClick;
     props.onSessionChange = onSessionChange;
     props.onSearchStateChange = onSearchStateChange;
+    props.onStartNewSession = onStartNewSession;
+    props.newSessionDisabled = newSessionDisabled;
     // The pane resets its markdown cache whenever this identity changes, so a
     // list that reads the same (a hit adopted by the other dialog, which built
     // its own copy) keeps the array the pane already holds. The previous value

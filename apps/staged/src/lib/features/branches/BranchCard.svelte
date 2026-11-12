@@ -2365,6 +2365,9 @@
       openNote = null;
       void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
     }}
+    onStartSessionFromChat={async (mode, request) =>
+      (await sessionMgr.startOrQueueSession(mode, request.prompt, request.imageIds)) !== null}
+    startSessionFromChatDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
   />
 {/if}
 

@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   COMPOSER_DISCONNECTED_TITLE,
   COMPOSER_LOADING_TITLE,
+  COMPOSER_NEW_SESSION_OPTIONS,
   COMPOSER_SEND_MODE_OPTIONS,
   COMPOSER_UNAVAILABLE_TITLE,
   composerSendControl,
+  composerSendMenuTitle,
   composerSessionBlock,
   composerSubmitBlock,
   composerSubmitBlockTitle,
@@ -59,6 +61,88 @@ describe('composerSendControl', () => {
 
   it('offers exactly the two modes in the dropdown', () => {
     expect(COMPOSER_SEND_MODE_OPTIONS.map((o) => o.mode)).toEqual(['queue', 'send']);
+  });
+
+  it('offers the mode switch only when live delivery is supported', () => {
+    expect(composerSendControl({ isLive: false, canSendLive: true, mode: 'send' }).modeMenu).toBe(
+      false
+    );
+    expect(composerSendControl({ isLive: true, canSendLive: false, mode: 'send' }).modeMenu).toBe(
+      false
+    );
+    expect(composerSendControl({ isLive: true, canSendLive: true, mode: 'queue' }).modeMenu).toBe(
+      true
+    );
+    expect(composerSendControl({ isLive: true, canSendLive: true, mode: 'send' }).modeMenu).toBe(
+      true
+    );
+  });
+});
+
+describe('composerSendControl with new-session actions', () => {
+  it('splits the button in every state, leaving the primary segment as it was', () => {
+    const states = [
+      { isLive: false, canSendLive: false },
+      { isLive: false, canSendLive: true },
+      { isLive: true, canSendLive: false },
+      { isLive: true, canSendLive: true },
+    ];
+    for (const state of states) {
+      for (const mode of ['queue', 'send'] as const) {
+        const plain = composerSendControl({ ...state, mode });
+        const withActions = composerSendControl({ ...state, mode, canStartNewSession: true });
+        expect(plain.newSessionMenu).toBe(false);
+        expect(withActions).toEqual({ ...plain, split: true, newSessionMenu: true });
+      }
+    }
+  });
+
+  it('never lists the actions without the split that holds them', () => {
+    for (const isLive of [false, true]) {
+      for (const canSendLive of [false, true]) {
+        for (const mode of ['queue', 'send'] as const) {
+          for (const canStartNewSession of [false, true]) {
+            const control = composerSendControl({ isLive, canSendLive, mode, canStartNewSession });
+            expect(control.newSessionMenu).toBe(canStartNewSession);
+            expect(control.split).toBe(control.modeMenu || control.newSessionMenu);
+          }
+        }
+      }
+    }
+  });
+
+  it('carries only the new-session actions when there is no mode to switch', () => {
+    expect(
+      composerSendControl({
+        isLive: false,
+        canSendLive: false,
+        mode: 'queue',
+        canStartNewSession: true,
+      })
+    ).toMatchObject({ split: true, modeMenu: false, action: 'start', label: 'Send' });
+    expect(
+      composerSendControl({
+        isLive: true,
+        canSendLive: false,
+        mode: 'send',
+        canStartNewSession: true,
+      })
+    ).toMatchObject({ split: true, modeMenu: false, action: 'queue', label: 'Queue' });
+  });
+
+  it("lists a note and a commit session under the timeline's own labels, note first", () => {
+    expect(COMPOSER_NEW_SESSION_OPTIONS.map((o) => [o.kind, o.label])).toEqual([
+      ['note', 'New note'],
+      ['commit', 'New commit'],
+    ]);
+    for (const option of COMPOSER_NEW_SESSION_OPTIONS) {
+      expect(option.description).toMatch(/about this note$/);
+    }
+  });
+
+  it('names the menu trigger for what the menu holds', () => {
+    expect(composerSendMenuTitle(false)).toBe('Change how messages are delivered');
+    expect(composerSendMenuTitle(true)).toBe('More send options');
   });
 });
 

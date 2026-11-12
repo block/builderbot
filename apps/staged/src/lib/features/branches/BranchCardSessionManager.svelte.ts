@@ -12,6 +12,7 @@
 import type {
   AcpConfigSelection,
   Branch,
+  BranchSessionResponse,
   BranchTimeline as BranchTimelineData,
   BranchSessionType,
 } from '../../types';
@@ -104,16 +105,21 @@ export default class BranchCardSessionManager {
     return `draft:branch-session:${this.getBranch().id}:${mode}`;
   }
 
+  /**
+   * Start a session on this branch, or queue it behind the one in flight.
+   * Resolves the backend's response, or `null` when the start failed (the
+   * failure has been toasted and the pending timeline row removed).
+   */
   async startOrQueueSession(
     mode: BranchSessionType,
     prompt: string,
     imageIds: string[] = [],
     launchOptions: BranchSessionLaunchOptions = {}
-  ) {
+  ): Promise<BranchSessionResponse | null> {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
 
-    await startOrQueueBranchSessionWithPending({
+    return startOrQueueBranchSessionWithPending({
       branchId: branch.id,
       isRemote,
       mode,

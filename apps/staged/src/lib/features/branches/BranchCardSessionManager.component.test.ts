@@ -3,7 +3,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Branch } from '../../types';
 
-const { writer, loadDraftMock } = vi.hoisted(() => ({
+const { writer, loadDraftMock, startWithPending } = vi.hoisted(() => ({
+  startWithPending: vi.fn(async (_options: unknown): Promise<unknown> => null),
   writer: {
     scheduleSave: vi.fn(),
     saveNow: vi.fn(async () => {}),
@@ -21,7 +22,7 @@ vi.mock('./branchSessionLaunch.svelte', () => ({
   getPendingSessionItems: () => [],
   hasPendingQueuedSession: () => false,
   hasPendingSessionStart: () => false,
-  startOrQueueBranchSessionWithPending: vi.fn(async () => {}),
+  startOrQueueBranchSessionWithPending: startWithPending,
 }));
 
 import BranchCardSessionManager from './BranchCardSessionManager.svelte';
@@ -43,6 +44,34 @@ beforeEach(() => {
   writer.flush.mockClear();
   loadDraftMock.mockReset();
   loadDraftMock.mockImplementation(async () => null);
+  startWithPending.mockReset();
+  startWithPending.mockImplementation(async () => null);
+});
+
+describe('BranchCardSessionManager startOrQueueSession', () => {
+  it("starts on the card's branch and resolves the launch result", async () => {
+    const launched = { sessionId: 'session-9', sessionStatus: 'running' };
+    startWithPending.mockResolvedValue(launched);
+    const mgr = createManager();
+
+    await expect(
+      mgr.startOrQueueSession('note', 'Re: #note:abc\n\nfollow up', ['img-1'])
+    ).resolves.toBe(launched);
+    expect(startWithPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        branchId: 'branch-1',
+        isRemote: false,
+        mode: 'note',
+        prompt: 'Re: #note:abc\n\nfollow up',
+        imageIds: ['img-1'],
+      })
+    );
+  });
+
+  it('resolves null when the start failed, so callers can keep their draft', async () => {
+    startWithPending.mockResolvedValue(null);
+    await expect(createManager().startOrQueueSession('commit', 'prompt')).resolves.toBeNull();
+  });
 });
 
 describe('BranchCardSessionManager referring open', () => {

@@ -113,7 +113,49 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
         }) => tags::project_untag(&client, &project, &tags, group.as_deref()),
         Noun::Tag(TagVerb::List { group }) => tags::tag_list(&client, group.as_deref()),
         Noun::Tag(TagVerb::Show { tag }) => tags::tag_show(&client, &tag),
+        Noun::Tag(TagVerb::Create {
+            name,
+            group,
+            color,
+            icon,
+        }) => tags::tag_create(&client, &name, group.as_deref(), color, icon.as_deref()),
+        Noun::Tag(TagVerb::Edit {
+            tag,
+            name,
+            color,
+            icon,
+            no_icon,
+        }) => {
+            let icon = match (icon.as_deref(), no_icon) {
+                (_, true) => tags::IconChange::Remove,
+                (Some(icon), false) => tags::IconChange::Set(icon),
+                (None, false) => tags::IconChange::Keep,
+            };
+            tags::tag_edit(&client, &tag, name.as_deref(), color, icon)
+        }
+        Noun::Tag(TagVerb::Move {
+            tag,
+            group,
+            index,
+            yes,
+            ..
+        }) => tags::tag_move(&client, &tag, group.as_deref(), index, yes),
         Noun::Tag(TagVerb::Group(TagGroupVerb::List)) => tags::tag_group_list(&client),
+        Noun::Tag(TagVerb::Group(TagGroupVerb::Create { name, template })) => {
+            tags::tag_group_create(&client, &name, template)
+        }
+        Noun::Tag(TagVerb::Group(TagGroupVerb::Rename { group, name })) => {
+            tags::tag_group_rename(&client, &group, &name)
+        }
+        Noun::Tag(TagVerb::Group(TagGroupVerb::SetIcon { group, .. })) => {
+            tags::tag_group_set_icon(&client, group.as_deref())
+        }
+        Noun::Tag(TagVerb::Group(TagGroupVerb::SetSidebar { group, on, .. })) => {
+            tags::tag_group_set_sidebar(&client, &group, on)
+        }
+        Noun::Tag(TagVerb::Group(TagGroupVerb::Reorder { groups })) => {
+            tags::tag_group_reorder(&client, &groups)
+        }
         Noun::Timeline(TimelineVerb::Show {
             project,
             repo,
@@ -199,6 +241,32 @@ fn validate(command: &Noun) -> Result<(), CtlError> {
             (true, None) => invalid("name at least one <tag> to remove, or pass --group"),
             _ => Ok(()),
         },
+        Noun::Tag(TagVerb::Edit {
+            name,
+            color,
+            icon,
+            no_icon,
+            ..
+        }) if name.is_none() && color.is_none() && icon.is_none() && !no_icon => {
+            invalid("nothing to change: pass --name, --color, --icon or --no-icon")
+        }
+        Noun::Tag(TagVerb::Edit {
+            name: Some(name), ..
+        }) if name.trim().is_empty() => invalid("--name must not be empty"),
+        Noun::Tag(TagVerb::Move { group, ungroup, .. }) if group.is_none() && !ungroup => invalid(
+            "pass --group <group> to move the tag into a group (its own group, with --index, \
+             to reorder it there), or --ungroup to take it out of its group",
+        ),
+        Noun::Tag(TagVerb::Group(TagGroupVerb::Rename { name, .. })) if name.trim().is_empty() => {
+            invalid("the new name must not be empty")
+        }
+        Noun::Tag(TagVerb::Group(TagGroupVerb::SetIcon { group, none })) => match (group, none) {
+            (None, false) => invalid("name a <group> to drive the project icon, or pass --none"),
+            _ => Ok(()),
+        },
+        Noun::Tag(TagVerb::Group(TagGroupVerb::SetSidebar { on, off, .. })) if !on && !off => {
+            invalid("pass --on to pin the group's board to the sidebar, or --off to unpin it")
+        }
         Noun::Connect { client, .. } if client.trim().is_empty() => {
             invalid("--client must not be empty")
         }
@@ -2140,6 +2208,27 @@ mod tests {
                 &["stagedctl", "project", "untag", "p"],
                 "name at least one <tag>",
             ),
+            (
+                &["stagedctl", "tag", "edit", "Status/Done"],
+                "nothing to change",
+            ),
+            (
+                &["stagedctl", "tag", "edit", "Status/Done", "--name", " "],
+                "--name must not be empty",
+            ),
+            (
+                &["stagedctl", "tag", "move", "q4", "--index", "2"],
+                "pass --group <group>",
+            ),
+            (
+                &["stagedctl", "tag", "group", "rename", "Status", ""],
+                "must not be empty",
+            ),
+            (&["stagedctl", "tag", "group", "set-icon"], "name a <group>"),
+            (
+                &["stagedctl", "tag", "group", "set-sidebar", "Status"],
+                "pass --on",
+            ),
         ];
         for (args, expected) in cases {
             let err = validate(&parse_cli(args)).unwrap_err();
@@ -2156,6 +2245,30 @@ mod tests {
     fn validate_accepts_well_paired_flags() {
         let good: &[&[&str]] = &[
             &["stagedctl", "project", "list"],
+            &["stagedctl", "tag", "edit", "Status/Done", "--no-icon"],
+            &["stagedctl", "tag", "edit", "Status/Done", "--color", "red"],
+            &["stagedctl", "tag", "move", "q4", "--ungroup"],
+            &[
+                "stagedctl",
+                "tag",
+                "move",
+                "q4",
+                "--group",
+                "Status",
+                "--index",
+                "0",
+                "--yes",
+            ],
+            &["stagedctl", "tag", "group", "set-icon", "--none"],
+            &["stagedctl", "tag", "group", "set-icon", "Status"],
+            &[
+                "stagedctl",
+                "tag",
+                "group",
+                "set-sidebar",
+                "Status",
+                "--off",
+            ],
             &["stagedctl", "timeline", "show", "p"],
             &[
                 "stagedctl",

@@ -77,6 +77,17 @@ pass `--create` only when a new ungrouped tag is genuinely what the task
 calls for, since the tag then exists for every project until the user
 deletes it in Settings ▸ Tags.
 
+Catalog edits (`stagedctl tag create|edit|move`, `stagedctl tag group …`)
+show at once in Settings ▸ Tags, where the user can rename, move or delete
+what you changed, and they need a credential that reaches every project
+(a session's own credential is refused, exit 4). They change what every
+project's tags mean, so make them only when the task asks for a catalog
+change, not to tidy up. `tag move --yes` is the one edit that drops
+assignments (projects already holding a tag in the destination group lose
+the moving tag); the command refuses without `--yes` when that would
+happen, and the user can re-tag those projects. Deleting tags and groups
+is deliberately not available.
+
 ## When stagedctl is unavailable
 
 The CLI needs the spawning app instance to be alive and reachable over

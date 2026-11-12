@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::cli::{GroupTemplate, TagColor};
 use crate::client::{Client, CtlError};
 use crate::commands::{find_project, parse, CmdOutput, Project};
 
@@ -904,6 +905,480 @@ pub fn projects_with_all_tags<'a>(
     })
 }
 
+// =============================================================================
+// The tag catalog: tag create / edit / move, tag group create / rename /
+// set-icon / set-sidebar / reorder
+// =============================================================================
+
+/// One tag of a group template: `(name, icon, color)`.
+pub type TemplateTag = (&'static str, &'static str, &'static str);
+
+/// The Status template: the project statuses Staged shipped before tags.
+/// Copied from `src/lib/features/tags/tagTemplates.ts` (the frontend's
+/// `TAG_GROUP_TEMPLATES`), which this crate cannot import; a test pins the
+/// two against that file's source text.
+pub const STATUS_TEMPLATE: &[TemplateTag] = &[
+    ("Idea", "lightbulb", "amber"),
+    ("In progress", "circle-dot", "blue"),
+    ("Polishing", "paintbrush", "cyan"),
+    ("Needs review", "eye", "purple"),
+    ("Done", "circle-check", "green"),
+    ("On hold", "circle-pause", "gray"),
+    ("Blocked", "octagon-minus", "red"),
+];
+
+/// The Priority template, copied from the same file.
+pub const PRIORITY_TEMPLATE: &[TemplateTag] = &[
+    ("P0", "chevrons-up", "red"),
+    ("P1", "chevron-up", "amber"),
+    ("P2", "minus", "blue"),
+    ("P3", "chevron-down", "gray"),
+];
+
+/// The tags a template creates with its group.
+pub fn template_tags(template: GroupTemplate) -> &'static [TemplateTag] {
+    match template {
+        GroupTemplate::Status => STATUS_TEMPLATE,
+        GroupTemplate::Priority => PRIORITY_TEMPLATE,
+        GroupTemplate::Blank => &[],
+    }
+}
+
+/// The `tags` argument of `create_tag_group`: the app's `NewTag` rows.
+pub fn template_new_tags(template: GroupTemplate) -> Vec<Value> {
+    template_tags(template)
+        .iter()
+        .map(|(name, icon, color)| json!({ "name": name, "icon": icon, "color": color }))
+        .collect()
+}
+
+/// A `tag edit` request's icon, which may be left alone, set, or removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconChange<'a> {
+    Keep,
+    Set(&'a str),
+    Remove,
+}
+
+/// The `update_tag` arguments for `tag edit`: the app takes the whole
+/// value, so each flag not given is filled from the tag as it stands. This
+/// is the frontend's `editTag` rule.
+pub fn plan_edit(
+    tag: &TagWire,
+    name: Option<&str>,
+    color: Option<TagColor>,
+    icon: IconChange<'_>,
+) -> Value {
+    let icon = match icon {
+        IconChange::Keep => tag.icon.clone(),
+        IconChange::Set(icon) => Some(icon.to_string()),
+        IconChange::Remove => None,
+    };
+    json!({
+        "tagId": tag.id,
+        "name": name.unwrap_or(&tag.name),
+        "color": color.map(|c| c.as_str().to_string()).unwrap_or_else(|| tag.color.clone()),
+        "icon": icon,
+    })
+}
+
+/// A resolved `tag move`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovePlan {
+    pub tag_id: String,
+    /// The destination group, or `None` for the ungrouped list.
+    pub group_id: Option<String>,
+    /// The zero-based position in the destination.
+    pub index: usize,
+    /// Whether the tag changes scope (group or ungrouped) at all.
+    pub cross_scope: bool,
+    /// Projects carrying the tag that already have another tag in the
+    /// destination group. The app keeps theirs and drops this tag from
+    /// them. Zero unless the tag moves into a group from elsewhere.
+    pub conflicts: Vec<String>,
+}
+
+impl MovePlan {
+    pub fn args(&self) -> Value {
+        json!({ "tagId": self.tag_id, "groupId": self.group_id, "index": self.index })
+    }
+}
+
+/// Plan `tag move` against the catalog: resolve the destination, default
+/// `index` to the end of it (the tag itself not counted when it is already
+/// there), count the projects that would lose the tag, and refuse a name
+/// the destination already has (the app would refuse it too; this gives a
+/// clearer message and writes nothing). Mirrors the frontend's
+/// `resolveTagDrop`.
+pub fn plan_move(
+    state: &TagStateWire,
+    tag: &TagWire,
+    group: Option<&TagGroupWire>,
+    index: Option<usize>,
+) -> Result<MovePlan, CtlError> {
+    let group_id = group.map(|g| g.id.as_str());
+    let others: Vec<&TagWire> = state
+        .tags_in(group_id)
+        .into_iter()
+        .filter(|t| t.id != tag.id)
+        .collect();
+    let cross_scope = tag.group_id.as_deref() != group_id;
+    if let Some(other) = others
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(&tag.name))
+    {
+        let scope = match group {
+            Some(group) => format!("the group {}", group.name),
+            None => "the ungrouped tags".to_string(),
+        };
+        return Err(CtlError::command(
+            "invalid_arguments",
+            format!(
+                "{scope} already has a tag named {:?} (id:{}); rename one of them first \
+                 (`stagedctl tag edit --name`)",
+                other.name, other.id
+            ),
+        ));
+    }
+    let index = index.unwrap_or(others.len()).min(others.len());
+    let mut conflicts = Vec::new();
+    if cross_scope && group_id.is_some() {
+        let siblings: Vec<&str> = others.iter().map(|t| t.id.as_str()).collect();
+        let mut seen: Vec<&str> = Vec::new();
+        for assignment in &state.assignments {
+            if assignment.tag_id != tag.id || seen.contains(&assignment.project_id.as_str()) {
+                continue;
+            }
+            seen.push(&assignment.project_id);
+            let carried = state.tag_ids_for(&assignment.project_id);
+            if carried.iter().any(|id| siblings.contains(id)) {
+                conflicts.push(assignment.project_id.clone());
+            }
+        }
+    }
+    Ok(MovePlan {
+        tag_id: tag.id.clone(),
+        group_id: group_id.map(str::to_string),
+        index,
+        cross_scope,
+        conflicts,
+    })
+}
+
+/// Plan `tag group reorder`: resolve every `<group>` and require the list
+/// to name each group exactly once, as the app does, before anything is
+/// sent.
+pub fn plan_group_order(state: &TagStateWire, needles: &[String]) -> Result<Vec<String>, CtlError> {
+    let mut order: Vec<String> = Vec::new();
+    for needle in needles {
+        let group = find_group(state, needle)?;
+        if order.contains(&group.id) {
+            return Err(CtlError::command(
+                "invalid_arguments",
+                format!(
+                    "{} is listed twice ({needle:?}); name every group exactly once",
+                    group.name
+                ),
+            ));
+        }
+        order.push(group.id.clone());
+    }
+    let missing: Vec<&str> = state
+        .groups
+        .iter()
+        .filter(|g| !order.contains(&g.id))
+        .map(|g| g.name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(CtlError::command(
+            "invalid_arguments",
+            format!(
+                "the new order must name every group exactly once; missing: {}",
+                missing.join(", ")
+            ),
+        ));
+    }
+    Ok(order)
+}
+
+/// The `--json` of a catalog write: the app's return value (or the row the
+/// write touched, re-read) under `ok: true`.
+fn ok_json(fields: Vec<(&str, Value)>) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("ok".to_string(), json!(true));
+    for (key, value) in fields {
+        object.insert(key.to_string(), value);
+    }
+    Value::Object(object)
+}
+
+/// One tag's row as `tag list` prints it, with a leading word.
+fn tag_line(state: &TagStateWire, tag: &TagWire, heading: &str) -> String {
+    let usage = usage_counts(state);
+    format!("{heading}{}", tag_rows(state, &[tag], &usage).remove(0))
+}
+
+pub fn tag_create(
+    client: &Client,
+    name: &str,
+    group: Option<&str>,
+    color: Option<TagColor>,
+    icon: Option<&str>,
+) -> Result<CmdOutput, CtlError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CtlError::command(
+            "invalid_arguments",
+            "a tag name must not be empty",
+        ));
+    }
+    let (state, _) = fetch_state(client)?;
+    let group_id = match group {
+        Some(needle) => Some(find_group(&state, needle)?.id.clone()),
+        None => None,
+    };
+    let created = client.invoke(
+        "create_tag",
+        json!({
+            "name": name,
+            "color": color.map(|c| c.as_str()),
+            "icon": icon,
+            "groupId": group_id,
+        }),
+    )?;
+    let (after, _) = fetch_state(client)?;
+    let id = created.get("id").and_then(Value::as_str).unwrap_or("");
+    let human = match after.tag(id) {
+        Some(tag) => tag_line(&after, tag, "created"),
+        None => format!("created {name}  id:{id}"),
+    };
+    Ok(CmdOutput {
+        json: ok_json(vec![("tag", created)]),
+        human,
+    })
+}
+
+pub fn tag_edit(
+    client: &Client,
+    needle: &str,
+    name: Option<&str>,
+    color: Option<TagColor>,
+    icon: IconChange<'_>,
+) -> Result<CmdOutput, CtlError> {
+    let (state, _) = fetch_state(client)?;
+    let tag = find_tag(&state, needle)?;
+    let before = state.label(tag);
+    let args = plan_edit(tag, name.map(str::trim), color, icon);
+    client.invoke("update_tag", args)?;
+    let (after, raw) = fetch_state(client)?;
+    let human = match after.tag(&tag.id) {
+        Some(updated) if after.label(updated) != before => {
+            format!("{}  (was {before})", tag_line(&after, updated, "updated"))
+        }
+        Some(updated) => tag_line(&after, updated, "updated"),
+        None => format!("updated {before}  id:{}", tag.id),
+    };
+    Ok(CmdOutput {
+        json: ok_json(vec![("tag", raw_row(&raw, "tags", &tag.id))]),
+        human,
+    })
+}
+
+pub fn tag_move(
+    client: &Client,
+    needle: &str,
+    group: Option<&str>,
+    index: Option<usize>,
+    yes: bool,
+) -> Result<CmdOutput, CtlError> {
+    let (state, _) = fetch_state(client)?;
+    let tag = find_tag(&state, needle)?;
+    let destination = match group {
+        Some(needle) => Some(find_group(&state, needle)?),
+        None => None,
+    };
+    let plan = plan_move(&state, tag, destination, index)?;
+    if !plan.conflicts.is_empty() && !yes {
+        let group_name = destination.map(|g| g.name.as_str()).unwrap_or_default();
+        let projects_raw = client.invoke("list_projects", json!({}))?;
+        let projects: Vec<Project> = parse(&projects_raw, "project list")?;
+        let names: Vec<&str> = plan
+            .conflicts
+            .iter()
+            .filter_map(|id| projects.iter().find(|p| &p.id == id))
+            .map(|p| p.name.as_str())
+            .collect();
+        let listed = if names.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", names.join(", "))
+        };
+        return Err(CtlError::command(
+            "conflicts",
+            format!(
+                "moving {} into {group_name} would drop it from {}{listed} that already \
+                 {} a {group_name} tag, which they keep; pass --yes to go ahead",
+                state.label(tag),
+                plural(plan.conflicts.len(), "project"),
+                if plan.conflicts.len() == 1 {
+                    "has"
+                } else {
+                    "have"
+                },
+            ),
+        ));
+    }
+    client.invoke("move_tag", plan.args())?;
+    let (after, raw) = fetch_state(client)?;
+    let position = after
+        .tags_in(plan.group_id.as_deref())
+        .iter()
+        .position(|t| t.id == tag.id)
+        .unwrap_or(plan.index);
+    let mut human = match after.tag(&tag.id) {
+        Some(moved) => format!(
+            "moved {}  (was {})  position {position}",
+            after.label(moved),
+            state.label(tag)
+        ),
+        None => format!("moved {}  id:{}", state.label(tag), tag.id),
+    };
+    if !plan.conflicts.is_empty() {
+        human.push_str(&format!(
+            "\n  {} lost it: already in {}",
+            plural(plan.conflicts.len(), "project"),
+            destination.map(|g| g.name.as_str()).unwrap_or_default()
+        ));
+    }
+    Ok(CmdOutput {
+        json: ok_json(vec![
+            ("tag", raw_row(&raw, "tags", &tag.id)),
+            ("conflicts", json!(plan.conflicts)),
+        ]),
+        human,
+    })
+}
+
+pub fn tag_group_create(
+    client: &Client,
+    name: &str,
+    template: GroupTemplate,
+) -> Result<CmdOutput, CtlError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CtlError::command(
+            "invalid_arguments",
+            "a group name must not be empty",
+        ));
+    }
+    let created = client.invoke(
+        "create_tag_group",
+        json!({ "name": name, "tags": template_new_tags(template) }),
+    )?;
+    let (after, _) = fetch_state(client)?;
+    let id = created.get("id").and_then(Value::as_str).unwrap_or("");
+    let human = match after.group(id) {
+        Some(group) => format!("created {}", render_tag_list(&after, Some(group))),
+        None => format!("created {name}  id:{id}"),
+    };
+    Ok(CmdOutput {
+        json: ok_json(vec![("group", created)]),
+        human,
+    })
+}
+
+pub fn tag_group_rename(client: &Client, needle: &str, name: &str) -> Result<CmdOutput, CtlError> {
+    let (state, _) = fetch_state(client)?;
+    let group = find_group(&state, needle)?;
+    client.invoke(
+        "rename_tag_group",
+        json!({ "groupId": group.id, "name": name.trim() }),
+    )?;
+    let (after, raw) = fetch_state(client)?;
+    let now = after
+        .group(&group.id)
+        .map(|g| g.name.as_str())
+        .unwrap_or(name);
+    let human = if now == group.name {
+        format!("renamed {}  (unchanged)  id:{}", group.name, group.id)
+    } else {
+        format!("renamed {} → {now}  id:{}", group.name, group.id)
+    };
+    Ok(CmdOutput {
+        json: ok_json(vec![("group", raw_row(&raw, "groups", &group.id))]),
+        human,
+    })
+}
+
+pub fn tag_group_set_icon(client: &Client, needle: Option<&str>) -> Result<CmdOutput, CtlError> {
+    let (state, _) = fetch_state(client)?;
+    let group = match needle {
+        Some(needle) => Some(find_group(&state, needle)?),
+        None => None,
+    };
+    client.invoke(
+        "set_icon_tag_group",
+        json!({ "groupId": group.map(|g| g.id.as_str()) }),
+    )?;
+    let (_, raw) = fetch_state(client)?;
+    let human = match group {
+        Some(group) => format!("project icon: {}  id:{}", group.name, group.id),
+        None => "project icon: (none; projects show their pull-request status)".to_string(),
+    };
+    Ok(CmdOutput {
+        json: ok_json(vec![(
+            "group",
+            group
+                .map(|g| raw_row(&raw, "groups", &g.id))
+                .unwrap_or(Value::Null),
+        )]),
+        human,
+    })
+}
+
+pub fn tag_group_set_sidebar(
+    client: &Client,
+    needle: &str,
+    shown: bool,
+) -> Result<CmdOutput, CtlError> {
+    let (state, _) = fetch_state(client)?;
+    let group = find_group(&state, needle)?;
+    client.invoke(
+        "set_tag_group_sidebar",
+        json!({ "groupId": group.id, "shown": shown }),
+    )?;
+    let (_, raw) = fetch_state(client)?;
+    let human = format!(
+        "{} board in sidebar: {}{}  id:{}",
+        group.name,
+        if shown { "on" } else { "off" },
+        if group.show_in_sidebar == shown {
+            "  (unchanged)"
+        } else {
+            ""
+        },
+        group.id
+    );
+    Ok(CmdOutput {
+        json: ok_json(vec![("group", raw_row(&raw, "groups", &group.id))]),
+        human,
+    })
+}
+
+pub fn tag_group_reorder(client: &Client, needles: &[String]) -> Result<CmdOutput, CtlError> {
+    let (state, _) = fetch_state(client)?;
+    let order = plan_group_order(&state, needles)?;
+    client.invoke("reorder_tag_groups", json!({ "groupIds": order }))?;
+    let (after, raw) = fetch_state(client)?;
+    Ok(CmdOutput {
+        json: ok_json(vec![(
+            "groups",
+            raw.get("groups").cloned().unwrap_or_else(|| json!([])),
+        )]),
+        human: render_group_list(&after),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,6 +1900,177 @@ mod tests {
              \x20 Status: (none)\n\
              \x20 - q4-launch\n\
              \x20 - Status/Done  (not carried)"
+        );
+    }
+
+    #[test]
+    fn edit_merges_flags_over_the_current_value() {
+        let state = catalog();
+        let done = find_tag(&state, "Status/Done").unwrap();
+        // The app takes the whole value: an unset flag keeps the tag's own.
+        assert_eq!(
+            plan_edit(done, None, Some(TagColor::Red), IconChange::Keep),
+            json!({ "tagId": "t-done", "name": "Done", "color": "red", "icon": "check" })
+        );
+        assert_eq!(
+            plan_edit(done, Some("Shipped"), None, IconChange::Keep),
+            json!({ "tagId": "t-done", "name": "Shipped", "color": "green", "icon": "check" })
+        );
+        assert_eq!(
+            plan_edit(done, None, None, IconChange::Remove),
+            json!({ "tagId": "t-done", "name": "Done", "color": "green", "icon": null })
+        );
+        let q4 = find_tag(&state, "q4-launch").unwrap();
+        assert_eq!(
+            plan_edit(q4, None, None, IconChange::Set("rocket")),
+            json!({ "tagId": "t-q4", "name": "q4-launch", "color": "purple", "icon": "rocket" })
+        );
+        assert_eq!(
+            plan_edit(q4, None, None, IconChange::Keep)["icon"],
+            Value::Null,
+            "a tag without an icon keeps none"
+        );
+    }
+
+    #[test]
+    fn move_counts_conflicts_and_needs_yes() {
+        let state = catalog();
+        let q4 = find_tag(&state, "q4-launch").unwrap();
+        let status = find_group(&state, "Status").unwrap();
+        // q4-launch is on p1 (In progress) and p3 (Done): both already hold
+        // a Status tag, so both would lose q4-launch.
+        let plan = plan_move(&state, q4, Some(status), None).unwrap();
+        assert!(plan.cross_scope);
+        assert_eq!(plan.conflicts, vec!["p1".to_string(), "p3".to_string()]);
+        assert_eq!(
+            plan.args(),
+            json!({ "tagId": "t-q4", "groupId": "g-status", "index": 3 })
+        );
+        // infra is carried by nobody: no conflicts.
+        let infra = find_tag(&state, "infra").unwrap();
+        let plan = plan_move(&state, infra, Some(status), None).unwrap();
+        assert!(plan.conflicts.is_empty());
+        // Into Priority: p1 has no Priority tag, p3 neither; nothing lost.
+        let prio = find_group(&state, "Priority").unwrap();
+        let plan = plan_move(&state, q4, Some(prio), None).unwrap();
+        assert!(plan.conflicts.is_empty());
+        // Out of a group never drops anything, even from busy projects.
+        let prog = find_tag(&state, "Status/In progress").unwrap();
+        let plan = plan_move(&state, prog, None, None).unwrap();
+        assert!(plan.cross_scope && plan.conflicts.is_empty());
+        assert_eq!(plan.args()["groupId"], Value::Null);
+        // A name the destination already has is refused before any write.
+        let high_p = find_tag(&state, "Priority/High").unwrap();
+        let err = plan_move(&state, high_p, Some(status), None).unwrap_err();
+        let text = err.to_string();
+        assert!(text.starts_with("invalid_arguments: "), "{text}");
+        assert!(text.contains("already has a tag named \"High\""), "{text}");
+        // Case-insensitively, as the app's unique index is.
+        let mut lower = state.clone();
+        lower.tags.push(tag("t-done2", None, "done", "gray", None));
+        let done2 = find_tag(&lower, "t-done2").unwrap();
+        let status = find_group(&lower, "Status").unwrap();
+        assert!(plan_move(&lower, done2, Some(status), None).is_err());
+    }
+
+    #[test]
+    fn move_index_defaults_to_the_end_of_the_destination() {
+        let state = catalog();
+        let q4 = find_tag(&state, "q4-launch").unwrap();
+        let status = find_group(&state, "Status").unwrap();
+        // Status holds three tags: the end is index 3.
+        assert_eq!(plan_move(&state, q4, Some(status), None).unwrap().index, 3);
+        // An explicit index is kept, and clamped to the end.
+        assert_eq!(
+            plan_move(&state, q4, Some(status), Some(1)).unwrap().index,
+            1
+        );
+        assert_eq!(
+            plan_move(&state, q4, Some(status), Some(99)).unwrap().index,
+            3
+        );
+        // Within its own scope the tag itself is not counted: Status has two
+        // others, so Done's end is 2, and "where it is" is not a conflict.
+        let done = find_tag(&state, "Status/Done").unwrap();
+        let plan = plan_move(&state, done, Some(status), None).unwrap();
+        assert!(!plan.cross_scope);
+        assert_eq!(plan.index, 2);
+        assert!(plan.conflicts.is_empty());
+        let plan = plan_move(&state, done, Some(status), Some(0)).unwrap();
+        assert_eq!(
+            plan.args(),
+            json!({ "tagId": "t-done", "groupId": "g-status", "index": 0 })
+        );
+        // To the ungrouped list: three others there.
+        assert_eq!(plan_move(&state, done, None, None).unwrap().index, 3);
+        // Reordering the ungrouped list counts the others only.
+        assert_eq!(plan_move(&state, q4, None, None).unwrap().index, 2);
+    }
+
+    #[test]
+    fn reorder_requires_every_group_once() {
+        let state = catalog();
+        assert_eq!(
+            plan_group_order(&state, &strings(&["priority", "g-status"])).unwrap(),
+            vec!["g-prio".to_string(), "g-status".to_string()]
+        );
+        let err = plan_group_order(&state, &strings(&["Priority"])).unwrap_err();
+        let text = err.to_string();
+        assert!(text.starts_with("invalid_arguments: "), "{text}");
+        assert!(text.contains("missing: Status"), "{text}");
+        let err =
+            plan_group_order(&state, &strings(&["Priority", "Status", "g-prio"])).unwrap_err();
+        assert!(
+            err.to_string().contains("Priority is listed twice"),
+            "{err}"
+        );
+        let err = plan_group_order(&state, &strings(&["Priority", "Owner"])).unwrap_err();
+        assert!(err.to_string().starts_with("not_found: "), "{err}");
+    }
+
+    #[test]
+    fn group_templates_match_the_frontend() {
+        // The templates are copied from the frontend, which this crate
+        // cannot import; read that file's `TAG_GROUP_TEMPLATES` and compare.
+        let source = include_str!("../../../../src/lib/features/tags/tagTemplates.ts");
+        let start = source.find("export const TAG_GROUP_TEMPLATES").unwrap();
+        let source = &source[start..];
+        let section = |id: &str| -> Vec<(String, String, String)> {
+            let from = source.find(&format!("id: '{id}'")).unwrap();
+            let body = &source[from..];
+            let end = body[1..].find("id: '").map(|i| i + 1).unwrap_or(body.len());
+            body[..end]
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    let line = line.strip_prefix("{ name: '")?;
+                    let (name, rest) = line.split_once("', icon: '")?;
+                    let (icon, rest) = rest.split_once("', color: '")?;
+                    let (color, _) = rest.split_once('\'')?;
+                    Some((name.to_string(), icon.to_string(), color.to_string()))
+                })
+                .collect()
+        };
+        let as_owned = |template: &[TemplateTag]| -> Vec<(String, String, String)> {
+            template
+                .iter()
+                .map(|(n, i, c)| (n.to_string(), i.to_string(), c.to_string()))
+                .collect()
+        };
+        let status = section("status");
+        assert_eq!(status.len(), 7, "the parser found the Status rows");
+        assert_eq!(as_owned(STATUS_TEMPLATE), status);
+        let priority = section("priority");
+        assert_eq!(priority.len(), 4, "the parser found the Priority rows");
+        assert_eq!(as_owned(PRIORITY_TEMPLATE), priority);
+        assert!(section("blank").is_empty());
+        assert_eq!(template_tags(GroupTemplate::Status), STATUS_TEMPLATE);
+        assert_eq!(template_tags(GroupTemplate::Priority), PRIORITY_TEMPLATE);
+        assert!(template_tags(GroupTemplate::Blank).is_empty());
+        // The wire rows the app's `NewTag` reads.
+        assert_eq!(
+            template_new_tags(GroupTemplate::Priority)[0],
+            json!({ "name": "P0", "icon": "chevrons-up", "color": "red" })
         );
     }
 

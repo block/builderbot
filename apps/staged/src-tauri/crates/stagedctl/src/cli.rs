@@ -86,7 +86,8 @@ pub enum Noun {
     #[command(alias = "images", subcommand)]
     Image(ImageVerb),
 
-    /// Read the tag catalog: tag groups, tags, and which projects carry them
+    /// Read and edit the tag catalog: tag groups, tags, and which projects
+    /// carry them
     #[command(alias = "tags", subcommand)]
     Tag(TagVerb),
 
@@ -292,7 +293,118 @@ credential's own project.")]
         tag: String,
     },
 
-    /// Inspect tag groups
+    /// Create a tag, ungrouped or inside a group
+    #[command(long_about = "\
+Create a tag. Without --group it is an ungrouped tag (a free tag any
+project may carry alongside its others); with --group it joins that group,
+where a project holds one tag at a time. The new tag goes last in its
+group or in the ungrouped list.
+
+Without --color the app picks the least-used colour. --icon takes a
+kebab-case Lucide icon name (circle-check, flame, …); without it the tag
+draws as a dot. A name is trimmed, must be 1 to 64 characters, and must
+not match another tag in the same group (or another ungrouped tag),
+ignoring case.
+
+Needs a credential that reaches every project: a session's own
+credential is refused (exit 4, `scope_denied`), since the catalog is
+shared by every project. To create and assign an ungrouped tag from a
+session, use `stagedctl project tag <project> <name> --create`.
+
+Shows at once in Settings ▸ Tags, where the user can rename or delete it.")]
+    Create {
+        /// The tag's name
+        name: String,
+
+        /// Put the tag in this group (name or id); default: ungrouped
+        #[arg(long, value_name = "GROUP")]
+        group: Option<String>,
+
+        /// The tag's colour; default: the least-used colour
+        #[arg(long, value_name = "COLOR", value_enum)]
+        color: Option<TagColor>,
+
+        /// A kebab-case Lucide icon name; default: none (a dot)
+        #[arg(long, value_name = "ICON")]
+        icon: Option<String>,
+    },
+
+    /// Change a tag's name, colour or icon
+    #[command(long_about = "\
+Change a tag's name, colour or icon. Only the flags given change; the
+rest of the tag stays as it is. --no-icon removes the icon so the tag
+draws as a dot. At least one of the flags is required.
+
+The tag keeps its id and every project carrying it, so this is how a tag
+is renamed in place. The new name must not match another tag in the same
+group (or another ungrouped tag), ignoring case.
+
+Needs a credential that reaches every project (exit 4, `scope_denied`,
+under a session's own credential). Shows at once in Settings ▸ Tags.")]
+    Edit {
+        /// Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`)
+        tag: String,
+
+        /// The new name
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// The new colour
+        #[arg(long, value_name = "COLOR", value_enum)]
+        color: Option<TagColor>,
+
+        /// The new icon, a kebab-case Lucide icon name
+        #[arg(long, value_name = "ICON", conflicts_with = "no_icon")]
+        icon: Option<String>,
+
+        /// Remove the icon
+        #[arg(long)]
+        no_icon: bool,
+    },
+
+    /// Move a tag into a group, out to the ungrouped list, or to a new place
+    #[command(long_about = "\
+Move a tag: into a group with --group, out of its group into the
+ungrouped list with --ungroup, or to a new place in its own group with
+--group <its group> --index <n>. --index is the zero-based position in
+the destination; without it the tag goes last.
+
+Moving a tag into a group it was not in changes what it means: a project
+holds one tag per group, so every project that carries the moving tag
+AND already has a tag in the destination group keeps that one and loses
+the moving tag. The command counts those projects and refuses with
+`conflicts` (exit 1) unless --yes is given; with no such project it goes
+ahead. That is the same confirmation Settings ▸ Tags asks for. A move
+within a group, or out to the ungrouped list, never drops anything.
+
+The tag keeps its id. A tag whose name matches another in the destination,
+ignoring case, is refused before anything is written; rename one first.
+
+Needs a credential that reaches every project (exit 4, `scope_denied`,
+under a session's own credential). Shows at once in Settings ▸ Tags and
+in the header of every project carrying the tag.")]
+    Move {
+        /// Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`)
+        tag: String,
+
+        /// The destination group (name or id)
+        #[arg(long, value_name = "GROUP", conflicts_with = "ungroup")]
+        group: Option<String>,
+
+        /// Make the tag ungrouped
+        #[arg(long)]
+        ungroup: bool,
+
+        /// Zero-based position in the destination; default: last
+        #[arg(long, value_name = "N")]
+        index: Option<usize>,
+
+        /// Go ahead when projects would lose the tag (see above)
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Inspect and edit tag groups
     #[command(alias = "groups", subcommand)]
     Group(TagGroupVerb),
 }
@@ -308,6 +420,148 @@ Each line shows the group name, whether its tag draws the project icon
 sidebar, how many tags it holds, and the group id. Both the name and the
 id are accepted anywhere a <group> argument is expected.")]
     List,
+
+    /// Create a tag group, empty or from a template
+    #[command(long_about = "\
+Create a tag group. It goes last in the group order. A project holds one
+tag from each group, and the home page can show a board with one column
+per tag of the group.
+
+--template fills the group: `status` creates the seven project statuses
+Staged shipped before tags (Idea, In progress, Polishing, Needs review,
+Done, On hold, Blocked), `priority` creates P0 to P3, and `blank` (the
+default) creates no tags. These are the same templates as Settings ▸ Tags'
+New group menu. The name is free: a second Status group may be called
+\"Status 2\" or anything else not already a group name, ignoring case.
+
+When no group drives the project icon yet, the new group does, as in
+Settings, so projects get an icon as soon as they pick a tag from it.
+
+Needs a credential that reaches every project (exit 4, `scope_denied`,
+under a session's own credential). Shows at once in Settings ▸ Tags,
+where the user can rename or delete it.")]
+    Create {
+        /// The group's name
+        name: String,
+
+        /// The tags to create with the group
+        #[arg(long, value_name = "TEMPLATE", value_enum, default_value_t = GroupTemplate::Blank)]
+        template: GroupTemplate,
+    },
+
+    /// Rename a tag group
+    #[command(long_about = "\
+Rename a tag group. Its tags, their ids and every project's choice stay
+as they are; only the name shown on pills, menus and the board changes.
+The new name must not be another group's, ignoring case.
+
+Needs a credential that reaches every project (exit 4, `scope_denied`,
+under a session's own credential). Shows at once in Settings ▸ Tags.")]
+    Rename {
+        /// Group name or id (see `stagedctl tag group list`)
+        group: String,
+
+        /// The new name
+        name: String,
+    },
+
+    /// Choose which group's tag draws each project's icon
+    #[command(long_about = "\
+Choose the group whose tag draws each project's icon in the sidebar and
+grid. At most one group does; naming a group takes the role from the
+current one. With --none no group does, and every project shows its
+pull-request status instead. A project without a tag in the icon group
+shows its pull-request status too.
+
+Needs a credential that reaches every project (exit 4, `scope_denied`,
+under a session's own credential). Shows at once in Settings ▸ Tags and
+on every project's icon.")]
+    SetIcon {
+        /// Group name or id (see `stagedctl tag group list`)
+        #[arg(value_name = "GROUP", conflicts_with = "none")]
+        group: Option<String>,
+
+        /// No group drives the project icon
+        #[arg(long)]
+        none: bool,
+    },
+
+    /// Pin a group's board to the projects sidebar, or unpin it
+    #[command(long_about = "\
+Pin a group's board to the projects sidebar (--on) or unpin it (--off).
+A pinned group gets a row under the Projects heading that opens its board,
+one column per tag, in place of a project. Any number of groups may be
+pinned. Exactly one of --on and --off is required.
+
+Needs a credential that reaches every project (exit 4, `scope_denied`,
+under a session's own credential). Shows at once in the sidebar and in
+Settings ▸ Tags.")]
+    SetSidebar {
+        /// Group name or id (see `stagedctl tag group list`)
+        group: String,
+
+        /// Pin the board
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+
+        /// Unpin the board
+        #[arg(long)]
+        off: bool,
+    },
+
+    /// Put the tag groups in a new order
+    #[command(long_about = "\
+Put the tag groups in a new order: list every group (name or id) exactly
+once, first to last. The order is where the groups appear in Settings ▸
+Tags, the project header's pills, the menus and the filter list. A list
+that leaves a group out or names one twice is refused before anything is
+written.
+
+Needs a credential that reaches every project (exit 4, `scope_denied`,
+under a session's own credential). Shows at once in Settings ▸ Tags.")]
+    Reorder {
+        /// Every group, in the new order (names or ids)
+        #[arg(required = true, value_name = "GROUP")]
+        groups: Vec<String>,
+    },
+}
+
+/// A tag's colour. Mirrors the app's `TagColor` wire values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum TagColor {
+    Green,
+    Red,
+    Amber,
+    Blue,
+    Purple,
+    Cyan,
+    Gray,
+}
+
+impl TagColor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Red => "red",
+            Self::Amber => "amber",
+            Self::Blue => "blue",
+            Self::Purple => "purple",
+            Self::Cyan => "cyan",
+            Self::Gray => "gray",
+        }
+    }
+}
+
+/// What `tag group create --template` fills the new group with. The
+/// templates themselves live in `tags.rs`, copied from the frontend's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum GroupTemplate {
+    /// Idea, In progress, Polishing, Needs review, Done, On hold, Blocked
+    Status,
+    /// P0, P1, P2, P3
+    Priority,
+    /// No tags
+    Blank,
 }
 
 #[derive(Subcommand, Debug)]
@@ -746,6 +1000,206 @@ mod tests {
         match cli.command {
             Noun::Project(ProjectVerb::List { tag }) => assert_eq!(tag, vec!["status/done", "q4"]),
             other => panic!("parsed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tag_catalog_verbs_parse_their_arguments() {
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "tag",
+            "create",
+            "Blocked",
+            "--group",
+            "Status",
+            "--color",
+            "red",
+            "--icon",
+            "octagon-minus",
+        ])
+        .unwrap();
+        match cli.command {
+            Noun::Tag(TagVerb::Create {
+                name,
+                group,
+                color,
+                icon,
+            }) => {
+                assert_eq!(name, "Blocked");
+                assert_eq!(group.as_deref(), Some("Status"));
+                assert_eq!(color, Some(TagColor::Red));
+                assert_eq!(icon.as_deref(), Some("octagon-minus"));
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["stagedctl", "tag", "create", "x", "--color", "pink"]).is_err(),
+            "colours come from the app's palette"
+        );
+
+        // edit: --icon and --no-icon exclude each other at parse time; the
+        // "at least one flag" rule is validate()'s.
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "tag",
+            "edit",
+            "Status/Done",
+            "--name",
+            "Shipped",
+            "--no-icon",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Edit { tag, name: Some(name), color: None, icon: None, no_icon: true })
+                if tag == "Status/Done" && name == "Shipped"
+        ));
+        assert!(Cli::try_parse_from([
+            "stagedctl",
+            "tag",
+            "edit",
+            "x",
+            "--icon",
+            "flame",
+            "--no-icon"
+        ])
+        .is_err());
+
+        // move: --group and --ungroup exclude each other; --index and --yes
+        // are plain flags.
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "tag",
+            "move",
+            "q4",
+            "--group",
+            "Status",
+            "--index",
+            "2",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Move { tag, group: Some(g), ungroup: false, index: Some(2), yes: true })
+                if tag == "q4" && g == "Status"
+        ));
+        let cli = Cli::try_parse_from(["stagedctl", "tag", "move", "q4", "--ungroup"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Move {
+                group: None,
+                ungroup: true,
+                index: None,
+                yes: false,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from([
+            "stagedctl",
+            "tag",
+            "move",
+            "q4",
+            "--group",
+            "Status",
+            "--ungroup"
+        ])
+        .is_err());
+
+        // group create: the template defaults to blank.
+        let cli = Cli::try_parse_from(["stagedctl", "tag", "group", "create", "Owner"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Group(TagGroupVerb::Create { name, template: GroupTemplate::Blank }))
+                if name == "Owner"
+        ));
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "tag",
+            "groups",
+            "create",
+            "Status 2",
+            "--template",
+            "status",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Group(TagGroupVerb::Create {
+                template: GroupTemplate::Status,
+                ..
+            }))
+        ));
+        let cli = Cli::try_parse_from(["stagedctl", "tag", "group", "rename", "Status", "Stage"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Group(TagGroupVerb::Rename { group, name }))
+                if group == "Status" && name == "Stage"
+        ));
+        let cli = Cli::try_parse_from(["stagedctl", "tag", "group", "set-icon", "--none"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Group(TagGroupVerb::SetIcon {
+                group: None,
+                none: true
+            }))
+        ));
+        assert!(
+            Cli::try_parse_from(["stagedctl", "tag", "group", "set-icon", "Status", "--none"])
+                .is_err()
+        );
+        let cli =
+            Cli::try_parse_from(["stagedctl", "tag", "group", "set-sidebar", "Status", "--on"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Group(TagGroupVerb::SetSidebar { group, on: true, off: false }))
+                if group == "Status"
+        ));
+        assert!(Cli::try_parse_from([
+            "stagedctl",
+            "tag",
+            "group",
+            "set-sidebar",
+            "Status",
+            "--on",
+            "--off"
+        ])
+        .is_err());
+        let cli =
+            Cli::try_parse_from(["stagedctl", "tag", "group", "reorder", "Priority", "Status"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::Group(TagGroupVerb::Reorder { groups }))
+                if groups == vec!["Priority", "Status"]
+        ));
+        assert!(
+            Cli::try_parse_from(["stagedctl", "tag", "group", "reorder"]).is_err(),
+            "the new order needs at least one group"
+        );
+    }
+
+    #[test]
+    fn tag_color_values_match_the_wire() {
+        // clap's lowercase value names must equal the app's serde names.
+        for color in [
+            TagColor::Green,
+            TagColor::Red,
+            TagColor::Amber,
+            TagColor::Blue,
+            TagColor::Purple,
+            TagColor::Cyan,
+            TagColor::Gray,
+        ] {
+            let cli =
+                Cli::try_parse_from(["stagedctl", "tag", "create", "x", "--color", color.as_str()])
+                    .unwrap();
+            assert!(matches!(
+                cli.command,
+                Noun::Tag(TagVerb::Create { color: Some(c), .. }) if c == color
+            ));
         }
     }
 

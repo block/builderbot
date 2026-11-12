@@ -3520,7 +3520,8 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
 
 /// Kick the queue progression a session's terminal state unblocks: its own
 /// queued follow-up message when the turn earned one, and the next queued
-/// session on its branch.
+/// session on its branch — or, for a project session, the branches of its
+/// project with a deferred push armed, which wait for the project to go idle.
 ///
 /// Every caller gates this on winning `transition_from_running` — losing means
 /// another writer owns the terminal state, and the drain with it. Shared by the
@@ -3537,10 +3538,6 @@ pub(crate) fn drain_queued_after_terminal_state(
     drain_message: bool,
     kick_source: crate::session_queue::KickSource,
 ) {
-    if !drain_message && branch_id.is_none() {
-        return;
-    }
-
     tauri::async_runtime::spawn(async move {
         if drain_message {
             match crate::session_commands::drain_queued_message_for_session(
@@ -3561,8 +3558,24 @@ pub(crate) fn drain_queued_after_terminal_state(
             }
         }
 
-        if let Some(branch_id) = branch_id {
-            crate::session_queue::kick(&app_handle, &branch_id, kick_source);
+        match branch_id {
+            Some(branch_id) => crate::session_queue::kick(&app_handle, &branch_id, kick_source),
+            // A project-note session (any other branchless session resolves to
+            // no project and kicks nothing). Its end is invisible to the
+            // branch queues, so the deferred pushes waiting on it are kicked
+            // from here; the drain re-checks that the project is idle.
+            None => match store.get_project_id_for_session(&session_id) {
+                Ok(Some(project_id)) => crate::session_queue::kick_branches_with_deferred_push(
+                    &app_handle,
+                    &store,
+                    Some(&project_id),
+                    crate::session_queue::KickSource::ProjectSessionEnded,
+                ),
+                Ok(None) => {}
+                Err(e) => log::warn!(
+                    "Could not resolve the project of ended session {session_id} for its deferred pushes: {e}"
+                ),
+            },
         }
     });
 }

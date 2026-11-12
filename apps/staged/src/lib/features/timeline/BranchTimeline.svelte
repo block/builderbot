@@ -20,12 +20,18 @@
   import type {
     BranchGitState,
     BranchTimeline as BranchTimelineData,
+    DeferredPushName,
     HashtagItem,
     NoteSubtype,
     UpstreamRelation,
   } from '../../types';
   import { noteChatState, type NoteChatState, type NoteClickInfo } from '../sessions/noteFreshness';
   import type { PendingAdd } from '../branches/timelineImages';
+  import {
+    deferredPushLabel,
+    deferredPushWaitingMeta,
+    type DeferredPushWaitingOn,
+  } from '../branches/prButtonMenu';
   import TimelineRow from './TimelineRow.svelte';
   import TimelineContextMenu, {
     type TimelineContextMenuAction,
@@ -131,6 +137,12 @@
      * the transfer rather than the queue, and can't be started ahead of it.
      */
     transferring?: boolean;
+    /** Clear the deferred push ("Push after current work") armed on the branch. */
+    onCancelDeferredPush?: () => void;
+    /** The deferred push armed on the branch, shown as a footer row. */
+    deferredPush?: DeferredPushName | null;
+    /** What the deferred push is waiting on, for the footer row's text. */
+    deferredPushWaitingOn?: DeferredPushWaitingOn | null;
     /** Push is queued behind in-flight branch work. */
     pushQueuedOrigin?: boolean;
     /** Pull is queued behind in-flight branch work. */
@@ -217,6 +229,9 @@
     onCancelQueuedPush,
     onCancelQueuedPull,
     transferring = false,
+    onCancelDeferredPush,
+    deferredPush = null,
+    deferredPushWaitingOn = null,
     pushQueuedOrigin = false,
     pullQueuedOrigin = false,
     branchSessionBusy = false,
@@ -334,6 +349,8 @@
     resettingToOrigin?: boolean;
     pushing?: boolean;
     pushQueued?: boolean;
+    /** A deferred push is armed; the push button cancels it. */
+    pushDeferred?: boolean;
     forcePushQueued?: boolean;
     pullQueued?: boolean;
     onViewDiff?: () => void;
@@ -689,6 +706,28 @@
     };
   }
 
+  /**
+   * The deferred push ("Push after current work") armed on the branch, as a
+   * footer row below the git-state rows: it names the armed variant, says what
+   * it waits for, and its button clears it. The row is the undo affordance,
+   * which is why the plain deferred rows in the PR menu need no confirm.
+   */
+  function deferredPushFooterRow(): DisplayItem | null {
+    if (!deferredPush) return null;
+    return {
+      key: 'git-deferred-push',
+      type: 'git-push',
+      title: deferredPushLabel(deferredPush),
+      meta: deferredPushWaitingMeta(deferredPushWaitingOn),
+      timestamp: gitFooterTimestamp,
+      order: 2,
+      placement: 'git-footer',
+      onPush: onCancelDeferredPush,
+      pushQueued: true,
+      pushDeferred: true,
+    };
+  }
+
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
     const nowMs = minuteNow.now();
@@ -935,6 +974,8 @@
     // when the timeline came back without a git state to hang it on.
     const queuedPull = queuedPullFooterRow(timeline.gitState?.upstream.relation ?? null);
     if (queuedPull) all.push(queuedPull);
+    const deferredPushRow = deferredPushFooterRow();
+    if (deferredPushRow) all.push(deferredPushRow);
 
     // Provisioning row appears at the very start of the timeline
     if (provisioningLabel) {
@@ -1254,6 +1295,7 @@
             resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
             pushQueued={item.pushQueued}
+            pushDeferred={item.pushDeferred}
             forcePushQueued={item.forcePushQueued}
             pullQueued={item.pullQueued}
             onViewDiffClick={item.onViewDiff}
@@ -1345,6 +1387,7 @@
             resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
             pushQueued={item.pushQueued}
+            pushDeferred={item.pushDeferred}
             forcePushQueued={item.forcePushQueued}
             pullQueued={item.pullQueued}
             onViewDiffClick={item.onViewDiff}

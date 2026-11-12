@@ -475,8 +475,9 @@ const pushAdoptions = new Map<string, { ended: boolean }>();
  * the force push "Rebase and force push" queues: it runs later and on its
  * own, and meanwhile the PR button offers a second, plain push.
  *
- * The snapshot and the running event both lack the force flag, so this looks
- * the session up (one `getSession` per untracked push, normally zero). As in
+ * The snapshot and the running event both lack the push flags (force and
+ * no-verify), so this looks the session up (one `getSession` per untracked
+ * push, normally zero). As in
  * `reconcileSweptWorkflowSession`, a thrown lookup paints nothing. A session
  * that has since finished is left to its terminal events, as is one whose
  * terminal event arrived during the lookup. Once adopted, the chip behaves
@@ -505,7 +506,8 @@ async function adoptUntrackedPush({ sessionId, branchId }: UntrackedPush): Promi
     branchId,
     sessionId,
     started ? 'pushing' : 'queued',
-    session.pipeline.pushForce ?? false
+    session.pipeline.pushForce ?? false,
+    session.pipeline.pushNoVerify ?? false
   );
 }
 

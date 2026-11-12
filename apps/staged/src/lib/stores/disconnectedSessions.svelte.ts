@@ -111,6 +111,24 @@ class DisconnectedSessionsStore {
     return this.sessionsForProject(projectId).length > 0;
   }
 
+  /**
+   * The project's own disconnected sessions — those learnt without a branch,
+   * i.e. project-note sessions — in the order they were learnt. Its branches'
+   * disconnected sessions are left out (see
+   * `projectStateStore.getRunningProjectSessionIds`, which also explains why
+   * "has a project id but no branch id" is exactly "has a `project_notes`
+   * row": the `disconnected` events and snapshot entries here carry the same
+   * backend-resolved project id as the running ones).
+   */
+  projectSessionsForProject(projectId: string): string[] {
+    this.version;
+    const ids: string[] = [];
+    for (const [sessionId, entry] of this.sessions) {
+      if (entry.projectId === projectId && !entry.branchId) ids.push(sessionId);
+    }
+    return ids;
+  }
+
   /** A `session-reconcile-changed` event. */
   applyReconcileEvent(event: SessionReconcileEvent): void {
     if (event.phase === 'idle') {

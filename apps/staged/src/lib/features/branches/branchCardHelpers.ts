@@ -16,16 +16,28 @@ const PDF_EXTENSIONS = ['.pdf'];
  * action they only disable for an *immediate* run (Pull on a dirty worktree) would
  * otherwise stay disabled even though the click would just queue.
  */
-export function isGitActionInFlight(args: {
+export function isGitActionInFlight(args: GitActionsInFlightArgs): boolean {
+  return countGitActionsInFlight(args) > 0;
+}
+
+export interface GitActionsInFlightArgs {
   push?: { state: PushState } | null;
   pull?: { state: PullState } | null;
   /** An immediate pull the card is awaiting inline; it has no store entry. */
   immediatePull?: boolean;
-}): boolean {
-  if (args.immediatePull) return true;
+}
+
+/**
+ * How many git actions of our own are running or waiting on the branch queue:
+ * at most one push and one pull (an immediate pull and a store pull entry are
+ * the same action seen from two places).
+ */
+export function countGitActionsInFlight(args: GitActionsInFlightArgs): number {
   const push = args.push?.state;
   const pull = args.pull?.state;
-  return push === 'pushing' || push === 'queued' || pull === 'pulling' || pull === 'queued';
+  const pushing = push === 'pushing' || push === 'queued';
+  const pulling = args.immediatePull === true || pull === 'pulling' || pull === 'queued';
+  return (pushing ? 1 : 0) + (pulling ? 1 : 0);
 }
 
 export const MAX_CONSECUTIVE_POLL_FAILURES = 3;

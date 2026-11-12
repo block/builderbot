@@ -291,8 +291,59 @@ pub struct Branch {
     /// Whether the branch has completed its initial setup (worktree created
     /// and prerun actions have had the opportunity to run).
     pub setup_complete: bool,
+    /// A push armed to run once the branch and its project are idle
+    /// ("Push after current work"). `None` when nothing is armed.
+    pub deferred_push: Option<DeferredPush>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A push armed to run once the branch and its project have nothing running,
+/// disconnected or queued: "Push after current work" and its force and
+/// `--no-verify` variants.
+///
+/// Persisted on the branch row (`branches.deferred_push`) as one of four
+/// names, so the store does not depend on `prs::PushVariant`; `prs` maps
+/// between the two. Arming again overwrites the variant; cancelling clears it;
+/// a branch delete drops it with the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredPush {
+    /// Force push (`--force-with-lease`).
+    pub force: bool,
+    /// Skip git's `pre-push` hook (`--no-verify`).
+    pub no_verify: bool,
+    /// When it was armed (milliseconds since epoch).
+    pub requested_at: i64,
+}
+
+impl DeferredPush {
+    /// The name the `branches.deferred_push` column stores, and the frontend
+    /// reads: `push`, `force`, `push-no-verify` or `force-no-verify`.
+    pub fn as_column_name(&self) -> &'static str {
+        match (self.force, self.no_verify) {
+            (false, false) => "push",
+            (true, false) => "force",
+            (false, true) => "push-no-verify",
+            (true, true) => "force-no-verify",
+        }
+    }
+
+    /// The inverse of [`Self::as_column_name`]; `None` for an unknown name.
+    pub fn parse(name: &str, requested_at: i64) -> Option<Self> {
+        let (force, no_verify) = match name {
+            "push" => (false, false),
+            "force" => (true, false),
+            "push-no-verify" => (false, true),
+            "force-no-verify" => (true, true),
+            _ => return None,
+        };
+        Some(Self {
+            force,
+            no_verify,
+            requested_at,
+        })
+    }
 }
 
 impl Branch {
@@ -320,6 +371,7 @@ impl Branch {
             pr_head_sha: None,
             pr_title: None,
             setup_complete: false,
+            deferred_push: None,
             created_at: now,
             updated_at: now,
         }
@@ -354,6 +406,7 @@ impl Branch {
             pr_head_sha: None,
             pr_title: None,
             setup_complete: false,
+            deferred_push: None,
             created_at: now,
             updated_at: now,
         }
@@ -1740,6 +1793,14 @@ pub struct PipelineExecution {
     /// `false` for non-push pipelines.
     #[serde(default, skip_serializing_if = "is_false")]
     pub push_force: bool,
+    /// Whether the push variant skips git's `pre-push` hook (`--no-verify`).
+    ///
+    /// Recorded for the same reasons as `push_force`: a queued "Push without
+    /// verifying" must still skip the hook once it is drained, and must not
+    /// dedupe into a queued push that runs it. Always `false` for non-push
+    /// pipelines.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub push_no_verify: bool,
     /// Session this queued pipeline may only run after, and only if it
     /// succeeded.
     ///
@@ -1801,6 +1862,7 @@ impl PipelineExecution {
             kind: None,
             rebase_target: None,
             push_force: false,
+            push_no_verify: false,
             depends_on_session_id: None,
             steps: step_statuses,
             current_step: 0,
@@ -1813,6 +1875,22 @@ impl PipelineExecution {
         self
     }
 
+    /// When the pipeline's own execution last finished a step (ms): the latest
+    /// `completed_at` across its steps, `None` while no step has finished.
+    ///
+    /// This is the pipeline's completion time as the pipeline itself recorded
+    /// it, and the only clock the deferred push trusts for "did a push already
+    /// do my job": the session row's `updated_at` is also bumped by bulk
+    /// writers (`project_transfer`, `branch_move`) long after a session ends,
+    /// but nothing rewrites a finished pipeline's steps. For a pipeline that
+    /// handed off to the agent it is the handoff time, which is *earlier* than
+    /// the agent's finish; callers comparing it against other sessions' end
+    /// times therefore err toward "something finished after this push", the
+    /// safe direction.
+    pub fn finished_at(&self) -> Option<i64> {
+        self.steps.iter().filter_map(|step| step.completed_at).max()
+    }
+
     pub fn with_rebase_target(mut self, target: String) -> Self {
         self.rebase_target = Some(target);
         self
@@ -1820,6 +1898,11 @@ impl PipelineExecution {
 
     pub fn with_push_force(mut self, force: bool) -> Self {
         self.push_force = force;
+        self
+    }
+
+    pub fn with_push_no_verify(mut self, no_verify: bool) -> Self {
+        self.push_no_verify = no_verify;
         self
     }
 
@@ -1913,6 +1996,27 @@ mod pipeline_tests {
         assert!(!serde_json::to_string(&rebase)
             .unwrap()
             .contains("pushForce"));
+    }
+
+    #[test]
+    fn pipeline_push_no_verify_round_trips_and_is_optional_for_legacy_json() {
+        let legacy: PipelineExecution = serde_json::from_str(
+            r#"{"kind":"push","pushForce":true,"steps":[],"currentStep":0,"completedWithoutAi":false}"#,
+        )
+        .unwrap();
+        assert!(!legacy.push_no_verify);
+        assert!(!serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("pushNoVerify"));
+
+        let no_verify = PipelineExecution::from_steps(&[])
+            .with_kind(PipelineKind::Push)
+            .with_push_no_verify(true);
+        let json = serde_json::to_string(&no_verify).unwrap();
+        assert!(json.contains("\"pushNoVerify\":true"), "{json}");
+        let read_back = serde_json::from_str::<PipelineExecution>(&json).unwrap();
+        assert!(read_back.push_no_verify);
+        assert!(!read_back.push_force);
     }
 
     #[test]

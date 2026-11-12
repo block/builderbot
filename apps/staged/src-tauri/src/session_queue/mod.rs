@@ -47,5 +47,6 @@ pub(crate) use follow_ups::{
     flush_follow_ups_for_branch, flush_follow_ups_for_project, held_work_note, release_held_work,
 };
 pub(crate) use kick::{
-    flush_follow_ups, kick, kick_all_with_queued_work, BranchQueueKicker, KickSource,
+    flush_follow_ups, kick, kick_all_with_queued_work, kick_branches_with_deferred_push,
+    BranchQueueKicker, KickSource,
 };

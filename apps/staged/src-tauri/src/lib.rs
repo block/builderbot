@@ -125,6 +125,12 @@ pub struct BranchWithWorkdir {
     pub pr_head_sha: Option<String>,
     pub pr_title: Option<String>,
     pub setup_complete: bool,
+    /// The deferred push armed on the branch ("Push after current work"), as
+    /// `push`, `force`, `push-no-verify` or `force-no-verify`; `None` when
+    /// nothing is armed. See `store::DeferredPush`.
+    pub deferred_push: Option<&'static str>,
+    /// When the deferred push was armed (milliseconds since epoch).
+    pub deferred_push_requested_at: Option<i64>,
     pub worktree_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -2086,6 +2092,10 @@ pub fn run() {
                 // window when it asks (see `launch_resume`). After the
                 // dead-owner recovery, so crash-orphaned rows are in the set.
                 launch_resume::detect_at_launch(app.handle(), &store);
+                // Deferred pushes ("Push after current work") left armed by
+                // the last run. After the offer is known, so a branch the
+                // offer may put work back on waits for the answer.
+                launch_resume::kick_deferred_pushes_at_launch(app.handle(), &store);
             }
             if let Some(path) = preferences_store_path_buf() {
                 preference_events::forward_to_web(app.handle(), path, event_tx.clone());
@@ -2342,17 +2352,19 @@ pub fn run() {
             github_commands::list_issues,
             github_commands::post_comment_to_github,
             // PRs
-            prs::create_pr,
-            prs::get_pr_url,
-            prs::update_branch_pr,
-            prs::refresh_pr_status,
-            prs::refresh_all_pr_statuses,
-            prs::has_unpushed_commits,
-            prs::push_branch,
-            prs::pull_or_queue_branch,
-            prs::rebase_branch,
-            prs::squash_commits,
-            prs::clear_branch_pr_status,
+            prs::commands::create_pr,
+            prs::commands::get_pr_url,
+            prs::commands::update_branch_pr,
+            prs::commands::refresh_pr_status,
+            prs::commands::refresh_all_pr_statuses,
+            prs::commands::has_unpushed_commits,
+            prs::commands::push_branch,
+            prs::commands::defer_branch_push,
+            prs::commands::cancel_deferred_push,
+            prs::commands::pull_or_queue_branch,
+            prs::commands::rebase_branch,
+            prs::commands::squash_commits,
+            prs::commands::clear_branch_pr_status,
             pr_detection::recover_branch_pr,
             pr_detection::detect_branch_pr,
             pr_detection::link_branch_pr,

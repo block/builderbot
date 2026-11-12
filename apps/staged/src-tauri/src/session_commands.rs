@@ -6017,6 +6017,31 @@ pub(crate) async fn drain_branch_queue(
         }
     }
 
+    // Nothing queued could start. A deferred push ("Push after current work")
+    // armed on the branch fires here, once the branch and its project are
+    // idle: this tail is the one place every event that can unblock a branch
+    // reaches (see `session_queue::kick`), and the gates above — quitting,
+    // provisioning, transferring — apply to it for free. The start takes the
+    // launch lock itself, so no lock is held across it. A start that fails
+    // leaves the flag armed for the next kick.
+    if !started_any {
+        match crate::prs::fire_deferred_push_if_idle(
+            Arc::clone(&store),
+            Arc::clone(&registry),
+            app_handle.clone(),
+            branch_id.clone(),
+        )
+        .await
+        {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "[session_queue] deferred push on branch {branch_id} failed to start; it stays \
+                 armed for the next kick: {e}"
+            ),
+        }
+    }
+
     Ok(started_any)
 }
 
@@ -8763,12 +8788,12 @@ mod tests {
                 "launch_resume(",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/commit.rs"),
                 "async fn start_queued_commit_pipeline_for_branch(",
                 "session_runner::start_pipeline_session(",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/git_pipeline.rs"),
                 "async fn start_queued_git_pipeline_for_branch(",
                 "session_runner::start_pipeline_session(",
             ),
@@ -8806,12 +8831,12 @@ mod tests {
                 "registry.hold(&session_id)",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/commit.rs"),
                 "async fn start_queued_commit_pipeline_for_branch(",
                 "registry.hold(&session.id)",
             ),
             (
-                include_str!("prs.rs"),
+                include_str!("prs/git_pipeline.rs"),
                 "async fn start_queued_git_pipeline_for_branch(",
                 "registry.hold(&session.id)",
             ),
@@ -13264,6 +13289,19 @@ mod tests {
         );
         assert_eq!(
             infer_branch_resume_session_type("Force push the current branch to the remote"),
+            Some("push")
+        );
+        // The "without verifying" (`--no-verify`) variants.
+        assert_eq!(
+            infer_branch_resume_session_type(
+                "Push the current branch to the remote with a normal push, skipping the pre-push hook (`--no-verify`). If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push that keeps `--no-verify`. Do not force push."
+            ),
+            Some("push")
+        );
+        assert_eq!(
+            infer_branch_resume_session_type(
+                "Force push the current branch to the remote, skipping the pre-push hook (`--no-verify`)"
+            ),
             Some("push")
         );
     }

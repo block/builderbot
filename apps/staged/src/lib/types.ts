@@ -87,9 +87,19 @@ export interface Branch {
   prHeadSha: string | null;
   /** The PR's title on GitHub as of the last fetch; null until the first one. */
   prTitle: string | null;
+  /**
+   * The push armed to run once the branch and its project are idle ("Push
+   * after current work"), or null when none is.
+   */
+  deferredPush: DeferredPushName | null;
+  /** When the deferred push was armed (ms since epoch); null when none is. */
+  deferredPushRequestedAt: number | null;
   /** Number of finalized commits on this branch (populated by list_branches_for_project). */
   commitCount?: number;
 }
+
+/** The four deferred pushes, as the backend names them (`store::DeferredPush`). */
+export type DeferredPushName = 'push' | 'force' | 'push-no-verify' | 'force-no-verify';
 
 // PR status types
 export interface PrStatus {
@@ -787,6 +797,9 @@ export interface PipelineExecution {
   kind?: PipelineKind | null;
   /** Whether a `push` pipeline force-pushes. Absent for the other kinds. */
   pushForce?: boolean;
+  /** Whether a `push` pipeline skips the pre-push hook (`--no-verify`). Absent
+   *  for the other kinds. */
+  pushNoVerify?: boolean;
   steps: PipelineStepStatus[];
   currentStep: number;
   completedWithoutAi: boolean;
@@ -972,6 +985,14 @@ export interface BranchPipelineResponse {
   /** The queued session that runs after this one, and only if it succeeds:
    *  the force push of "Rebase and force push". Always queued. */
   followUpSessionId?: string;
+}
+
+/** What `defer_branch_push` did. */
+export interface DeferredPushResponse {
+  /** The push is armed and waits for the branch and project to go idle. */
+  armed: boolean;
+  /** Set when they were already idle: the push that started (or queued) instead. */
+  push?: BranchPipelineResponse;
 }
 
 // =============================================================================

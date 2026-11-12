@@ -310,7 +310,8 @@ describe('browser-native command wrappers', () => {
     const invokeCommand = vi
       .fn()
       .mockResolvedValueOnce({ sessionId: 'session-1', sessionStatus: 'running' })
-      .mockResolvedValueOnce({ sessionId: 'session-2', sessionStatus: 'queued' });
+      .mockResolvedValueOnce({ sessionId: 'session-2', sessionStatus: 'queued' })
+      .mockResolvedValueOnce({ sessionId: 'session-3', sessionStatus: 'running' });
     vi.doMock('./transport', () => ({
       invokeCommand,
       isTauri: true,
@@ -326,10 +327,15 @@ describe('browser-native command wrappers', () => {
       sessionId: 'session-2',
       sessionStatus: 'queued',
     });
+    await expect(pushBranch('branch-1', 'codex', false, true)).resolves.toEqual({
+      sessionId: 'session-3',
+      sessionStatus: 'running',
+    });
 
     expect(invokeCommand.mock.calls).toEqual([
-      ['push_branch', { branchId: 'branch-1', provider: 'codex', force: false }],
-      ['push_branch', { branchId: 'branch-1', provider: 'codex', force: true }],
+      ['push_branch', { branchId: 'branch-1', provider: 'codex', force: false, noVerify: null }],
+      ['push_branch', { branchId: 'branch-1', provider: 'codex', force: true, noVerify: null }],
+      ['push_branch', { branchId: 'branch-1', provider: 'codex', force: false, noVerify: true }],
     ]);
   });
 

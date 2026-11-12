@@ -6,7 +6,8 @@ use tauri::Manager;
 
 use super::follow_ups::{held_follow_ups_ready, held_work_note};
 use super::kick::{
-    flush_follow_ups, kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource,
+    flush_follow_ups, kick, kick_all_with_queued_work, kick_branches_with_deferred_push,
+    BranchQueueKicker, DrainFn, KickSource,
 };
 use super::retry::{
     queued_start_retry, QueuedStartAttempts, QueuedStartRetry, MAX_QUEUED_START_ATTEMPTS,
@@ -658,6 +659,59 @@ fn startup_kicks_every_branch_with_queued_rows_without_a_client() {
     let mut expected = vec![branch_a.id.clone(), branch_b.id.clone()];
     expected.sort();
     assert_eq!(kicked, expected);
+}
+
+/// A project-note session's end is invisible to the branch queues, so
+/// `drain_queued_after_terminal_state` kicks the branches of its project with
+/// a deferred push armed — those and no others. Without a project, the same
+/// pass is the startup kick over every armed branch.
+#[test]
+fn project_session_end_kicks_the_projects_armed_branches_only() {
+    let (store, armed) = store_with_branch();
+    let unarmed = store::Branch::new(&armed.project_id, "unarmed", "main");
+    store.create_branch(&unarmed).unwrap();
+    let other_project = store::Project::new("other/repo");
+    store.create_project(&other_project).unwrap();
+    let other_armed = store::Branch::new(&other_project.id, "elsewhere", "main");
+    store.create_branch(&other_armed).unwrap();
+    for branch in [&armed, &other_armed] {
+        store
+            .set_branch_deferred_push(
+                &branch.id,
+                Some(store::DeferredPush {
+                    force: false,
+                    no_verify: true,
+                    requested_at: 1,
+                }),
+            )
+            .unwrap();
+    }
+
+    let kicker = Arc::new(BranchQueueKicker::recording());
+    let app = app_with_kicker(&kicker);
+
+    kick_branches_with_deferred_push(
+        app.handle(),
+        &store,
+        Some(&armed.project_id),
+        KickSource::ProjectSessionEnded,
+    );
+    assert_eq!(
+        kicker.kicked(),
+        vec![(armed.id.clone(), KickSource::ProjectSessionEnded)]
+    );
+
+    kick_branches_with_deferred_push(app.handle(), &store, None, KickSource::Startup);
+    let mut startup: Vec<String> = kicker
+        .kicked()
+        .into_iter()
+        .filter(|(_, source)| *source == KickSource::Startup)
+        .map(|(branch, _)| branch)
+        .collect();
+    startup.sort();
+    let mut expected = vec![armed.id.clone(), other_armed.id.clone()];
+    expected.sort();
+    assert_eq!(startup, expected);
 }
 
 // ---------------------------------------------------------------------------

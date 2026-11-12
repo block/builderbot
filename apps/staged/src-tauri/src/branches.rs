@@ -119,6 +119,8 @@ pub(crate) fn to_branch_with_workdir(
         pr_head_sha: branch.pr_head_sha,
         pr_title: branch.pr_title,
         setup_complete: branch.setup_complete,
+        deferred_push: branch.deferred_push.map(|d| d.as_column_name()),
+        deferred_push_requested_at: branch.deferred_push.map(|d| d.requested_at),
         worktree_path: workdir_path,
         created_at: branch.created_at,
         updated_at: branch.updated_at,
@@ -4932,7 +4934,11 @@ mod upstream_tracking_tests {
             git::upstream_branch_name(Path::new(&path), "feature-x", "main"),
             "feature-x"
         );
-        let steps = crate::prs::build_push_pipeline_steps("feature-x", "feature-x", false);
+        let steps = crate::prs::build_push_pipeline_steps(
+            "feature-x",
+            "feature-x",
+            crate::prs::PushVariant::default(),
+        );
         let store::PipelineStep::Command { command, .. } = &steps[0] else {
             panic!("expected a push command step");
         };
@@ -4963,8 +4969,11 @@ mod upstream_tracking_tests {
 
         let stored = store.get_branch(&branch.id).unwrap().unwrap();
         let remote_branch = resolve_remote_branch_sync(&store, &stored);
-        let steps =
-            crate::prs::build_push_pipeline_steps(&stored.branch_name, &remote_branch, false);
+        let steps = crate::prs::build_push_pipeline_steps(
+            &stored.branch_name,
+            &remote_branch,
+            crate::prs::PushVariant::default(),
+        );
         let store::PipelineStep::Command { command, .. } = &steps[0] else {
             panic!("expected a push command step");
         };
@@ -5009,8 +5018,11 @@ mod upstream_tracking_tests {
 
         let stored = store.get_branch(&branch.id).unwrap().unwrap();
         let remote_branch = resolve_remote_branch_sync(&store, &stored);
-        let steps =
-            crate::prs::build_push_pipeline_steps(&stored.branch_name, &remote_branch, false);
+        let steps = crate::prs::build_push_pipeline_steps(
+            &stored.branch_name,
+            &remote_branch,
+            crate::prs::PushVariant::default(),
+        );
         let store::PipelineStep::Command { command, .. } = &steps[0] else {
             panic!("expected a push command step");
         };
@@ -5052,6 +5064,77 @@ mod upstream_tracking_tests {
             "+refs/heads/main:refs/remotes/origin/main"
         );
         assert!(git::cli_run(clone.path(), &["fetch", "origin"]).is_ok());
+    }
+
+    /// "Push without verifying" against a real `pre-push` hook that always
+    /// fails and counts its runs. The verifying push fails and runs the hook
+    /// twice, because the HTTPS fallback retries on any failure; the no-verify
+    /// push lands without running it at all.
+    #[test]
+    fn no_verify_push_skips_a_failing_pre_push_hook() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (origin, clone, _) = clone_of_origin(false);
+        let path = clone.path();
+        git(path, &["checkout", "-b", "feature-x", "origin/feature-x"]);
+        std::fs::write(path.join("file.txt"), "base\nfeature\nmore\n").unwrap();
+        git(path, &["commit", "-am", "more"]);
+        let head = git(path, &["rev-parse", "HEAD"]);
+        let origin_before = git(origin.path(), &["rev-parse", "refs/heads/feature-x"]);
+
+        // A repo-local hooksPath, so neither the test helpers' per-command
+        // `core.hooksPath=/dev/null` nor a global hooksPath hides the hook.
+        let hooks = TempDir::new("hooks");
+        let runs = hooks.path().join("runs");
+        let hook = hooks.path().join("pre-push");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\necho run >> '{}'\nexit 1\n", runs.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            path,
+            &["config", "core.hooksPath", hooks.path().to_str().unwrap()],
+        );
+        let hook_runs = || {
+            std::fs::read_to_string(&runs)
+                .map(|runs| runs.lines().count())
+                .unwrap_or(0)
+        };
+        let run_push = |variant: crate::prs::PushVariant| {
+            let steps = crate::prs::build_push_pipeline_steps("feature-x", "feature-x", variant);
+            let store::PipelineStep::Command { command, .. } = &steps[0] else {
+                panic!("expected a push command step");
+            };
+            let mut push = std::process::Command::new("sh");
+            push.arg("-c").arg(command).current_dir(path);
+            git::strip_git_env(&mut push);
+            push.output().unwrap()
+        };
+
+        let verifying = run_push(crate::prs::PushVariant::default());
+        assert!(!verifying.status.success());
+        assert_eq!(hook_runs(), 2);
+        assert_eq!(
+            git(origin.path(), &["rev-parse", "refs/heads/feature-x"]),
+            origin_before
+        );
+
+        let no_verify = run_push(crate::prs::PushVariant {
+            force: false,
+            no_verify: true,
+        });
+        assert!(
+            no_verify.status.success(),
+            "{}",
+            String::from_utf8_lossy(&no_verify.stderr)
+        );
+        assert_eq!(hook_runs(), 2);
+        assert_eq!(
+            git(origin.path(), &["rev-parse", "refs/heads/feature-x"]),
+            head
+        );
     }
 
     /// A local branch the user already had, with no worktree, is only given a

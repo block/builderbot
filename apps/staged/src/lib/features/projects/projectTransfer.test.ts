@@ -365,6 +365,8 @@ describe('placeholderPreflight', () => {
     prFetchedAt: null,
     prHeadSha: null,
     prTitle: null,
+    deferredPush: null,
+    deferredPushRequestedAt: null,
     ...overrides,
   });
   const projectRepo: ProjectRepo = {

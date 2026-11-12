@@ -379,6 +379,107 @@ fn state_holds_the_offer_until_it_is_answered() {
     assert!(state.take_handled().is_none());
 }
 
+fn arm_deferred_push(store: &Store, branch_id: &str) {
+    store
+        .set_branch_deferred_push(
+            branch_id,
+            Some(store::DeferredPush {
+                force: false,
+                no_verify: false,
+                requested_at: 1,
+            }),
+        )
+        .unwrap();
+}
+
+/// The startup pass over armed deferred pushes skips a branch the offer may
+/// put work back on — one with an interrupted session of its own, or in a
+/// project with an interrupted project session — and kicks the rest. The
+/// held branches are kicked when the offer is answered, whichever way.
+#[test]
+fn launch_holds_deferred_pushes_the_offer_names_and_kicks_the_rest() {
+    let (store, project, branch) = store_with_branch();
+    let sibling = store::Branch::new(&project.id, "sibling", "main");
+    store.create_branch(&sibling).unwrap();
+    let other_project = store::Project::new("other/repo");
+    store.create_project(&other_project).unwrap();
+    let elsewhere = store::Branch::new(&other_project.id, "elsewhere", "main");
+    store.create_branch(&elsewhere).unwrap();
+    for id in [&branch.id, &sibling.id, &elsewhere.id] {
+        arm_deferred_push(&store, id);
+    }
+    interrupted_commit(&store, &branch.id, 10, Some("acp-1"));
+
+    let kicker = Arc::new(crate::session_queue::BranchQueueKicker::recording());
+    let app = mock_app();
+    app.manage(Arc::clone(&kicker));
+    app.manage(LaunchResumeState::default());
+    super::detect_at_launch(app.handle(), &store);
+    super::kick_deferred_pushes_at_launch(app.handle(), &store);
+
+    // Only the interrupted commit's own branch waits; its sibling is free.
+    let mut kicked = kicker.kicked_branches();
+    kicked.sort();
+    let mut expected = vec![sibling.id.clone(), elsewhere.id.clone()];
+    expected.sort();
+    assert_eq!(kicked, expected);
+    let state = app.state::<LaunchResumeState>();
+    assert_eq!(state.deferred_push_holds(), vec![branch.id.clone()]);
+    assert_eq!(state.take_deferred_push_holds(), vec![branch.id.clone()]);
+    assert!(state.take_deferred_push_holds().is_empty());
+
+    // An interrupted project session holds every armed branch of its project.
+    let (store, project, branch) = store_with_branch();
+    let sibling = store::Branch::new(&project.id, "sibling", "main");
+    store.create_branch(&sibling).unwrap();
+    let other_project = store::Project::new("other/repo");
+    store.create_project(&other_project).unwrap();
+    let elsewhere = store::Branch::new(&other_project.id, "elsewhere", "main");
+    store.create_branch(&elsewhere).unwrap();
+    for id in [&branch.id, &sibling.id, &elsewhere.id] {
+        arm_deferred_push(&store, id);
+    }
+    interrupted_project_session(&store, &project.id, 10, Some("acp-2"));
+
+    let kicker = Arc::new(crate::session_queue::BranchQueueKicker::recording());
+    let app = mock_app();
+    app.manage(Arc::clone(&kicker));
+    app.manage(LaunchResumeState::default());
+    super::detect_at_launch(app.handle(), &store);
+    super::kick_deferred_pushes_at_launch(app.handle(), &store);
+
+    assert_eq!(kicker.kicked_branches(), vec![elsewhere.id.clone()]);
+    let mut held = app.state::<LaunchResumeState>().deferred_push_holds();
+    held.sort();
+    let mut expected = vec![branch.id.clone(), sibling.id.clone()];
+    expected.sort();
+    assert_eq!(held, expected);
+}
+
+/// With nothing interrupted there is no offer to wait on: every armed branch
+/// is kicked at startup and nothing is held.
+#[test]
+fn launch_kicks_every_deferred_push_when_nothing_was_interrupted() {
+    let (store, _project, branch) = store_with_branch();
+    arm_deferred_push(&store, &branch.id);
+
+    let kicker = Arc::new(crate::session_queue::BranchQueueKicker::recording());
+    let app = mock_app();
+    app.manage(Arc::clone(&kicker));
+    app.manage(LaunchResumeState::default());
+    super::detect_at_launch(app.handle(), &store);
+    super::kick_deferred_pushes_at_launch(app.handle(), &store);
+
+    assert_eq!(
+        kicker.kicked(),
+        vec![(branch.id.clone(), crate::session_queue::KickSource::Startup)]
+    );
+    assert!(app
+        .state::<LaunchResumeState>()
+        .deferred_push_holds()
+        .is_empty());
+}
+
 /// A launch with nothing interrupted offers nothing and has no marker.
 #[test]
 fn state_is_empty_when_nothing_was_interrupted() {

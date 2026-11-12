@@ -52,6 +52,21 @@ describe('disconnectedSessionsStore', () => {
     expect(store.isDisconnected('s2')).toBe(false);
   });
 
+  it('lists the project’s own disconnected sessions apart from its branches’', async () => {
+    const store = await freshStore();
+    store.markDisconnected('branch-1', 'p1', 'b1');
+    store.markDisconnected('project-1', 'p1', null);
+    store.markDisconnected('other-project', 'p2', null);
+    store.markDisconnected('project-2', 'p1', null);
+
+    expect(store.projectSessionsForProject('p1')).toEqual(['project-1', 'project-2']);
+    expect(store.sessionsForProject('p1')).toEqual(['branch-1', 'project-1', 'project-2']);
+
+    // A later event that names the branch moves it out of the project's own.
+    store.markDisconnected('project-2', 'p1', 'b2');
+    expect(store.projectSessionsForProject('p1')).toEqual(['project-1']);
+  });
+
   it('keeps a known project when a later event names none', async () => {
     const store = await freshStore();
     store.markDisconnected('s1', 'p1', 'b1');

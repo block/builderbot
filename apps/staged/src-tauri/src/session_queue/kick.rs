@@ -55,6 +55,9 @@ pub(crate) enum KickSource {
     /// it moved: the work held for the transfer starts where the project
     /// still is.
     TransferFailed,
+    /// A project-note session in the branch's project reached a terminal
+    /// state; a deferred push on the branch may have been waiting for it.
+    ProjectSessionEnded,
 }
 
 impl KickSource {
@@ -78,6 +81,7 @@ impl KickSource {
             Self::Reconciled => "reconciled",
             Self::ProjectTransferred => "project transferred",
             Self::TransferFailed => "transfer failed",
+            Self::ProjectSessionEnded => "project session ended",
         }
     }
 }
@@ -365,6 +369,37 @@ pub(crate) fn flush_follow_ups<R: tauri::Runtime>(
             "[session_queue] no kicker managed; leaving the follow-ups held on branch \
              {branch_id} queued"
         ),
+    }
+}
+
+/// Kick every branch with a deferred push ("Push after current work") armed,
+/// within `project_id` when given.
+///
+/// The drain's tail fires the push once the branch and its project are idle,
+/// so this is how a project-note session's end — which no branch kick sees —
+/// reaches the branches waiting on it.
+pub(crate) fn kick_branches_with_deferred_push<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    store: &Store,
+    project_id: Option<&str>,
+    source: KickSource,
+) {
+    let branch_ids = match store.branch_ids_with_deferred_push(project_id) {
+        Ok(ids) => ids,
+        Err(e) => {
+            log::warn!("[session_queue] failed to list branches with a deferred push: {e}");
+            return;
+        }
+    };
+    if !branch_ids.is_empty() {
+        log::info!(
+            "[session_queue] {} branch(es) have a deferred push at {}",
+            branch_ids.len(),
+            source.as_str()
+        );
+    }
+    for branch_id in branch_ids {
+        kick(app_handle, &branch_id, source);
     }
 }
 

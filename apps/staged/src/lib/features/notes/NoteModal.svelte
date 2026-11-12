@@ -46,6 +46,7 @@
   import { notesChangeAffectsNote } from './noteRefresh';
   import { noteRenderInputsReady } from './noteRenderReadiness';
   import { NoteReadTracker } from './noteReadTracker.svelte';
+  import { noteChatSessionStarter, type NoteChatSessionStart } from './noteChatNewSession';
   import { formatChatButtonLabel, type LinkedNoteContext } from '../sessions/noteFreshness';
   import PooledSessionChatPane from '../sessions/PooledSessionChatPane.svelte';
   import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
@@ -117,6 +118,18 @@
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
     /** Called when the user clicks a next-step button. */
     onStartSession?: (mode: 'commit' | 'note', prefill: string) => void;
+    /**
+     * Start a new note or commit session about this note from the chat
+     * composer's draft ("New note" / "New commit" in the Send button's
+     * dropdown). The modal closes itself (`onClose`) first; the prompt
+     * already refers to the note. Resolves whether the session started, so
+     * the composer can put the draft back if it did not. Hosts that have no
+     * branch to start on leave it unset, and it is never offered for project
+     * notes: the dropdown then lacks the actions.
+     */
+    onStartSessionFromChat?: NoteChatSessionStart;
+    /** The host cannot start a session right now: the actions show disabled. */
+    startSessionFromChatDisabled?: boolean;
     hashtagItems?: HashtagItem[];
     referenceNav?: ReferenceNavState;
     onHashtagClick?: (click: HashtagClickInfo) => void;
@@ -142,6 +155,8 @@
     onChatOpenChange,
     nextSteps,
     onStartSession,
+    onStartSessionFromChat,
+    startSessionFromChatDisabled = false,
     hashtagItems = [],
     referenceNav,
     onHashtagClick,
@@ -165,6 +180,14 @@
   let displayUpdatedAt = $derived(liveNote?.updatedAt ?? noteUpdatedAt);
   let displayNoteId = $derived(liveNote?.id ?? noteId);
   let hasNoteContent = $derived(!!displayContent.trim());
+  let startSessionFromChat = $derived(
+    noteChatSessionStarter({
+      noteId: displayNoteId,
+      noteKind,
+      start: onStartSessionFromChat,
+      dismiss: () => onClose(),
+    })
+  );
   let noteFreshnessKey = $derived(
     open && sessionId && typeof displayUpdatedAt === 'number'
       ? `${displayNoteId ?? 'note'}:${sessionId}:${displayUpdatedAt}`
@@ -893,6 +916,8 @@
             {onOpenSession}
             onSessionChange={handlePaneSessionChange}
             {onHashtagClick}
+            onStartNewSession={startSessionFromChat}
+            newSessionDisabled={startSessionFromChatDisabled}
           />
         </aside>
       {/if}

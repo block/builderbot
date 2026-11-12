@@ -108,7 +108,12 @@
   } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import ComposerError from './ComposerError.svelte';
-  import { composerSendControl, composerSessionBlock } from './composerSendControl';
+  import {
+    composerSendControl,
+    composerSessionBlock,
+    type ComposerNewSessionDraft,
+    type ComposerNewSessionKind,
+  } from './composerSendControl';
   import DisconnectedSessionAlert from './DisconnectedSessionAlert.svelte';
   import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
@@ -255,6 +260,20 @@
     onHashtagClick?: (click: HashtagClickInfo) => void;
     onSessionChange?: (session: Session | null) => void;
     onSearchStateChange?: (state: { matchCount: number; currentIndex: number }) => void;
+    /**
+     * Start a new session from the composer's draft instead of sending it
+     * (the note dialog's "New note" / "New commit"). Resolves whether the
+     * session started. The pane takes the draft out of the box before
+     * calling, as a send does, and puts it back on `false`; the host may
+     * close the dialog (parking this pane) as soon as it is called. When
+     * absent the composer does not offer the actions.
+     */
+    onStartNewSession?: (
+      kind: ComposerNewSessionKind,
+      draft: ComposerNewSessionDraft
+    ) => Promise<boolean>;
+    /** The host cannot start a session right now: the actions show disabled. */
+    newSessionDisabled?: boolean;
     compact?: boolean;
   }
 
@@ -276,6 +295,8 @@
     onHashtagClick,
     onSessionChange,
     onSearchStateChange,
+    onStartNewSession,
+    newSessionDisabled = false,
     compact = false,
   }: Props = $props();
 
@@ -1725,6 +1746,52 @@
     } finally {
       if (!sendingLocked) sending = false;
     }
+  }
+
+  /**
+   * Start a new session from the draft instead of sending it: the composer's
+   * "New note" / "New commit". The draft leaves the box and the store first,
+   * as in `handleSend`, because the host closes the dialog as it starts the
+   * session and this pane is parked with whatever the box still holds. A
+   * start that failed (the host reports it) puts the draft back. By then the
+   * pane is usually parked, where the autosave effect does not run and the
+   * next open reloads the box from the store, so the text is written there
+   * directly.
+   */
+  async function handleStartNewSession(kind: ComposerNewSessionKind) {
+    const start = onStartNewSession;
+    if (!start || newSessionDisabled) return;
+    // Same gates as `handleSend`: a row to act on, no send in flight, text.
+    if (composerBlock || sending) return;
+    const text = inputText.trim();
+    if (!text) return;
+    const id = sessionId;
+    const draftKey = replyDraftKey(id);
+    void replyDraftWriter.clearNow(draftKey);
+    inputText = '';
+    const imageIds = [...replyImageIds];
+    replyImageIds = [];
+    imagePreviews = new Map();
+    attachError = null;
+    tick().then(() => autoResize());
+
+    sending = true;
+    beginComposerAction();
+    let started = false;
+    try {
+      started = await start(kind, { text, imageIds });
+    } catch (e) {
+      sendError = `Failed to start: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      sending = false;
+    }
+    if (started) return;
+    void replyDraftWriter.saveNow(draftKey, text);
+    // The box is this session's only while the pane still shows it.
+    if (sessionId !== id) return;
+    inputText = text;
+    replyImageIds = imageIds;
+    tick().then(() => autoResize());
   }
 
   async function handleNoteFollowupClick() {
@@ -3458,6 +3525,8 @@
         sessionBlock={composerBlock}
         {sendError}
         onSend={handleSend}
+        onStartNewSession={onStartNewSession ? handleStartNewSession : undefined}
+        {newSessionDisabled}
       >
         {#snippet configPicker()}
           <AcpFixedConfigPicker

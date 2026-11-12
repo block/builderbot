@@ -15,6 +15,12 @@
   (`sessionBlock`: still loading, or the load settled without one) the
   control is disabled with a title saying which, but the draft can be typed.
 
+  Where the host can start a new session from the draft (`onStartNewSession`:
+  the note dialog), the button is split in every state and the dropdown also
+  lists "New note" and "New commit". They are enabled exactly when the
+  primary segment is, unless the host cannot start a session right now
+  (`newSessionDisabled`).
+
   Failures of the composer's own actions (`sendError`: a refused send, a
   queue change that failed) are shown on a `ComposerError` line inside the
   composer, next to the attachment error, rather than in the pane's
@@ -39,15 +45,20 @@
   import X from '@lucide/svelte/icons/x';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button, buttonVariants } from '$lib/components/ui/button';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { cn } from '$lib/components/utils';
   import {
+    COMPOSER_NEW_SESSION_OPTIONS,
     COMPOSER_SEND_MODE_OPTIONS,
     composerSendControl,
+    composerSendMenuTitle,
     composerSubmitBlock,
     composerSubmitBlockTitle,
+    type ComposerNewSessionKind,
     type ComposerSendMode,
     type ComposerSessionBlock,
   } from './composerSendControl';
@@ -104,6 +115,14 @@
      */
     sendError?: string | null;
     onSend?: () => void;
+    /**
+     * Start a new session of `kind` from the draft instead of sending it.
+     * When set, the dropdown lists the new-session actions (and the button
+     * is split in every state to carry them).
+     */
+    onStartNewSession?: (kind: ComposerNewSessionKind) => void;
+    /** The host cannot start a session right now: the actions show disabled. */
+    newSessionDisabled?: boolean;
     /** Agent config picker rendered at the start of the control row. */
     configPicker?: Snippet;
   }
@@ -129,17 +148,23 @@
     sessionBlock = null,
     sendError = null,
     onSend,
+    onStartNewSession,
+    newSessionDisabled = false,
     configPicker,
   }: Props = $props();
 
   let fileInputEl = $state<HTMLInputElement>();
 
-  let sendControl = $derived(composerSendControl({ isLive, canSendLive, mode: sendMode }));
+  let canStartNewSession = $derived(onStartNewSession !== undefined);
+  let sendControl = $derived(
+    composerSendControl({ isLive, canSendLive, mode: sendMode, canStartNewSession })
+  );
   let submitBlock = $derived(
     composerSubmitBlock({ sessionBlock, sending, hasText: value.trim().length > 0 })
   );
   let sendDisabled = $derived(submitBlock !== null);
   let sendTitle = $derived(composerSubmitBlockTitle(submitBlock) ?? sendControl.title);
+  let sendMenuTitle = $derived(composerSendMenuTitle(canStartNewSession));
 
   function handleSendModeChange(value: string) {
     if (value === 'queue' || value === 'send') onSendModeChange?.(value);
@@ -289,23 +314,48 @@
               buttonVariants({ variant: 'accent' }),
               'composer-send-menu-trigger touch-hit -ml-px h-auto min-h-9 w-8 rounded-l-none px-0 mobile:min-h-11'
             )}
-            title="Change how messages are delivered"
-            aria-label="Change how messages are delivered"
+            title={sendMenuTitle}
+            aria-label={sendMenuTitle}
             disabled={sending || sessionBlock !== null}
           >
             <ChevronDown size={14} />
           </DropdownMenu.Trigger>
           <DropdownMenu.Content align="end" side="top" sideOffset={4} class="min-w-[220px]">
-            <DropdownMenu.RadioGroup value={sendMode} onValueChange={handleSendModeChange}>
-              {#each COMPOSER_SEND_MODE_OPTIONS as option (option.mode)}
-                <DropdownMenu.RadioItem value={option.mode}>
+            {#if sendControl.modeMenu}
+              <DropdownMenu.RadioGroup value={sendMode} onValueChange={handleSendModeChange}>
+                {#each COMPOSER_SEND_MODE_OPTIONS as option (option.mode)}
+                  <DropdownMenu.RadioItem value={option.mode}>
+                    <span class="flex min-w-0 flex-col">
+                      <span>{option.label}</span>
+                      <span class="truncate text-xs text-muted-foreground"
+                        >{option.description}</span
+                      >
+                    </span>
+                  </DropdownMenu.RadioItem>
+                {/each}
+              </DropdownMenu.RadioGroup>
+            {/if}
+            {#if canStartNewSession}
+              {#if sendControl.modeMenu}
+                <DropdownMenu.Separator />
+              {/if}
+              {#each COMPOSER_NEW_SESSION_OPTIONS as option (option.kind)}
+                <DropdownMenu.Item
+                  disabled={sendDisabled || newSessionDisabled}
+                  onSelect={() => onStartNewSession?.(option.kind)}
+                >
+                  {#if option.kind === 'note'}
+                    <FileText size={14} class="text-[var(--note-color)]" />
+                  {:else}
+                    <GitCommitVertical size={14} class="text-[var(--commit-color)]" />
+                  {/if}
                   <span class="flex min-w-0 flex-col">
                     <span>{option.label}</span>
                     <span class="truncate text-xs text-muted-foreground">{option.description}</span>
                   </span>
-                </DropdownMenu.RadioItem>
+                </DropdownMenu.Item>
               {/each}
-            </DropdownMenu.RadioGroup>
+            {/if}
           </DropdownMenu.Content>
         </DropdownMenu.Root>
       </span>

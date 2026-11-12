@@ -4,7 +4,18 @@ import type { Branch, BranchTimeline, WorkspaceStatus } from '../../types';
 import type { DragDropSubscription } from './dragDrop';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 
-const { subscribeDragDrop, toast, cmd, emptyTimeline } = vi.hoisted(() => {
+/** The props the card hands its note dialog, which is stubbed out. */
+interface NoteModalProps {
+  noteId?: string | null;
+  onClose: () => void;
+  onStartSessionFromChat?: (
+    mode: 'note' | 'commit',
+    request: { prompt: string; imageIds: string[] }
+  ) => Promise<boolean>;
+  startSessionFromChatDisabled?: boolean;
+}
+
+const { subscribeDragDrop, toast, cmd, emptyTimeline, noteModal } = vi.hoisted(() => {
   const emptyTimeline: BranchTimeline = {
     commits: [],
     notes: [],
@@ -14,6 +25,7 @@ const { subscribeDragDrop, toast, cmd, emptyTimeline } = vi.hoisted(() => {
   };
   return {
     emptyTimeline,
+    noteModal: { props: null as NoteModalProps | null },
     subscribeDragDrop: vi.fn((_sub: DragDropSubscription) => () => {}),
     toast: { success: vi.fn(), error: vi.fn() },
     cmd: {
@@ -35,6 +47,15 @@ const { subscribeDragDrop, toast, cmd, emptyTimeline } = vi.hoisted(() => {
       ),
       getBranchTimeline: vi.fn(
         async (_branchId: string, _options?: { force?: boolean }) => emptyTimeline
+      ),
+      startOrQueueBranchSession: vi.fn(
+        async (
+          _branchId: string,
+          _prompt: string,
+          _sessionType: string,
+          _provider?: string,
+          _imageIds?: string[]
+        ) => ({ sessionId: 'session-new', sessionStatus: 'running' })
       ),
     },
   };
@@ -69,7 +90,12 @@ vi.mock(
   '../sessions/NewSessionModal.svelte',
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
-vi.mock('../notes/NoteModal.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
+// The note dialog renders nothing and records the props the card gave it.
+vi.mock('../notes/NoteModal.svelte', () => ({
+  default: (_anchor: unknown, props: NoteModalProps) => {
+    noteModal.props = props;
+  },
+}));
 vi.mock('../notes/WriteNoteModal.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock(
   '../../shared/ConfirmDeleteDialog.svelte',
@@ -192,6 +218,7 @@ async function settle(finished: () => void) {
 afterEach(() => {
   for (const card of mounted.splice(0)) unmount(card);
   document.body.innerHTML = '';
+  noteModal.props = null;
   subscribeDragDrop.mockClear();
   toast.success.mockClear();
   toast.error.mockClear();
@@ -511,5 +538,68 @@ describe('BranchCard "Add image" picks the timeline cannot show yet', () => {
     await settle(() => expect(cmd.createImage).toHaveResolvedTimes(1));
 
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe("BranchCard new session from a note's chat composer", () => {
+  const request = { prompt: 'Re: #note:note-1\n\nSplit it up', imageIds: ['image-9'] };
+
+  /** Opens the card's note dialog and returns the props it was given. */
+  async function openNote() {
+    mountCard(localBranch('/work/tree'));
+    await timelineShown();
+    document.querySelector<HTMLButtonElement>('[data-testid="open-note"]')!.click();
+    flushSync();
+    expect(noteModal.props?.noteId).toBe('note-1');
+    return noteModal.props!;
+  }
+
+  it("starts the chosen kind on the card's branch, as its own buttons do, with the prompt and attachments", async () => {
+    const modal = await openNote();
+    expect(modal.startSessionFromChatDisabled).toBe(false);
+
+    await expect(modal.onStartSessionFromChat!('commit', request)).resolves.toBe(true);
+
+    expect(cmd.startOrQueueBranchSession).toHaveBeenCalledTimes(1);
+    const [branchId, prompt, sessionType, , imageIds] = cmd.startOrQueueBranchSession.mock.calls[0];
+    expect({ branchId, prompt, sessionType, imageIds }).toEqual({
+      branchId: 'branch-1',
+      prompt: request.prompt,
+      sessionType: 'commit',
+      imageIds: ['image-9'],
+    });
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('reports a start that failed, so the composer keeps the draft', async () => {
+    const modal = await openNote();
+    cmd.startOrQueueBranchSession.mockRejectedValueOnce(new Error('worktree is gone'));
+
+    await expect(modal.onStartSessionFromChat!('note', request)).resolves.toBe(false);
+
+    expect(toast.error).toHaveBeenCalledWith(
+      'Unable to start session',
+      expect.objectContaining({ description: 'worktree is gone' })
+    );
+  });
+
+  it('disables the actions while a session start is already in flight', async () => {
+    const modal = await openNote();
+    let finish!: (response: { sessionId: string; sessionStatus: string }) => void;
+    cmd.startOrQueueBranchSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        })
+    );
+
+    const started = modal.onStartSessionFromChat!('note', request);
+    flushSync();
+    expect(modal.startSessionFromChatDisabled).toBe(true);
+
+    finish({ sessionId: 'session-new', sessionStatus: 'running' });
+    await expect(started).resolves.toBe(true);
+    flushSync();
+    expect(modal.startSessionFromChatDisabled).toBe(false);
   });
 });

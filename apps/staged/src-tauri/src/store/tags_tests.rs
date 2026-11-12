@@ -623,7 +623,7 @@ fn any_number_of_groups_can_pin_their_board_to_the_sidebar() {
     let (store, mut rx) = store_with_feed();
     let a = group(&store, "A", &["x"]);
     let b = group(&store, "B", &[]);
-    // Off by default, for new groups and (0045) for existing ones.
+    // Off by default, for new groups and (0046) for existing ones.
     assert!(!a.show_in_sidebar && !b.show_in_sidebar);
     assert!(sidebar_groups(&store).is_empty());
     drain(&mut rx);

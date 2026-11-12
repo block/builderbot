@@ -98,7 +98,7 @@ pub struct TagGroup {
     pub position: i64,
     /// Whether this group's tag drives the project icon. At most one group.
     pub is_icon_group: bool,
-    /// Whether the group's board is pinned to the projects sidebar (0045).
+    /// Whether the group's board is pinned to the projects sidebar (0046).
     pub show_in_sidebar: bool,
     pub created_at: i64,
     pub updated_at: i64,

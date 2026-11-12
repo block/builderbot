@@ -136,7 +136,6 @@ function project(id: string, name: string, updatedAt: number, githubRepo?: strin
     subpath: null,
     createdAt: 0,
     updatedAt,
-    statusOverride: null,
   };
 }
 

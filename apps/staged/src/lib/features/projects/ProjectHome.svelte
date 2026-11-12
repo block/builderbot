@@ -53,6 +53,7 @@
     canDeleteProjectWithoutConfirmation,
     computeSafeToDeleteSignature,
   } from './projectDeleteSafety';
+  import { addRepoBlocker } from './addRepoBlocker';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
 
   interface Props {
@@ -372,15 +373,16 @@
   let selectedProjectSafeToDelete = $derived(
     selectedProject ? safeToDeleteProjects.has(selectedProject.id) : false
   );
-  let selectedProjectCanAddRepo = $derived(selectedProject ? canAddRepo(selectedProject) : false);
-  let selectedProjectAddRepoHint = $derived(
-    selectedProject && selectedProject.location === 'remote' ? addRepoHint(selectedProject) : null
+  let selectedProjectAddRepoBlocker = $derived(
+    selectedProject
+      ? addRepoBlocker(selectedProject, branchesByProject.get(selectedProject.id) || [])
+      : null
   );
   let selectedProjectAddRepoDisabled = $derived(
     !selectedProject ||
       selectedProjectDeleting ||
       selectedProjectTransferring ||
-      !selectedProjectCanAddRepo
+      selectedProjectAddRepoBlocker !== null
   );
   let selectedProjectExcludeRepos = $derived(
     selectedProject
@@ -613,24 +615,6 @@
     }
   }
 
-  function canAddRepo(project: Project): boolean {
-    if (project.location !== 'remote') return true;
-    const branches = branchesByProject.get(project.id) || [];
-    return branches.some((b) => b.branchType === 'remote' && b.workspaceStatus === 'running');
-  }
-
-  function addRepoHint(project: Project): string {
-    if (project.location !== 'remote') return '';
-    const branches = branchesByProject.get(project.id) || [];
-    if (branches.length === 0) {
-      return 'Create the initial remote branch and workspace before adding another repo.';
-    }
-    if (branches.some((b) => b.branchType === 'remote' && b.workspaceStatus === 'starting')) {
-      return 'Workspace is provisioning. Wait until it is running, then add another repo.';
-    }
-    return 'Workspace must be running before adding another repo.';
-  }
-
   function getRemoteWorkspaceStatus(project: Project | null): WorkspaceStatus | null {
     if (!project || project.location !== 'remote') return null;
     return (
@@ -845,7 +829,7 @@
 
 {#snippet projectTopBarRightActions()}
   {#if selectedProject && !selectedProjectDeleting}
-    <span class="add-repo-action inline-flex" title={selectedProjectAddRepoHint ?? 'Add repo'}>
+    <span class="add-repo-action inline-flex" title={selectedProjectAddRepoBlocker ?? 'Add repo'}>
       <Button
         variant="ghost"
         size="sm"

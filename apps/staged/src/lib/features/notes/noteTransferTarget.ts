@@ -87,10 +87,10 @@ export function lookedUpRepo(lookup: NoteRepoLookup): NoteRepo | null {
 
 /**
  * Why a project created for this note can't be remote, or `null` when it can.
- * A remote project's workspace is provisioned from the repo it is created
- * with, and adding a repo afterwards needs that workspace running already, so
- * a new remote project starts from the note's repo — which has to be known
- * first, and which project notes don't have.
+ * A new remote project starts from the note's repo, which provisions its
+ * workspace, so that repo has to be known first. A note bound to no repo —
+ * every project note — makes a remote project with no repo, whose workspace
+ * waits for the first repo added to it.
  */
 export function newRemoteProjectBlocker(lookup: NoteRepoLookup): string | null {
   switch (lookup.status) {
@@ -99,7 +99,7 @@ export function newRemoteProjectBlocker(lookup: NoteRepoLookup): string | null {
     case 'failed':
       return "Remote is unavailable: couldn't look up this note's repo";
     case 'resolved':
-      return lookup.repo ? null : 'Remote needs a repo, and this note has none';
+      return null;
   }
 }
 

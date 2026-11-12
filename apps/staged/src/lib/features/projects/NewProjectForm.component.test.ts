@@ -28,14 +28,14 @@ const created = { id: 'created', name: 'Fresh' } as Project;
 
 let component: ReturnType<typeof mount> | null = null;
 
-/** Mount the form with a name typed and, for remote, the repo it requires picked. */
-function open() {
+/** Mount the form with a name typed and, unless `selectedRepo` is `null`, a repo picked. */
+function open(selectedRepo: string | null = 'acme/widgets') {
   const target = document.createElement('div');
   document.body.appendChild(target);
   const onCreated = vi.fn();
   component = mount(NewProjectForm, {
     target,
-    props: { onCreated, name: 'Fresh', selectedRepo: 'acme/widgets' },
+    props: { onCreated, name: 'Fresh', selectedRepo },
   });
   flushSync();
   return { target, onCreated };
@@ -108,6 +108,20 @@ describe('NewProjectForm location', () => {
     create(target);
     await vi.waitFor(() => expect(onCreated).toHaveBeenCalledWith(created));
     expect(createProject.mock.calls[0].slice(0, 3)).toEqual(['Fresh', 'remote', 'acme/widgets']);
+    expect(setNewProjectLocation).toHaveBeenCalledExactlyOnceWith('remote');
+  });
+
+  it('creates a remote project with no repo, leaving its workspace for the first repo added', async () => {
+    prefs.newProjectLocation = 'remote';
+    const { target, onCreated } = open(null);
+    const createButton = [...target.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Create')
+    )!;
+    expect(createButton.disabled).toBe(false);
+
+    create(target);
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledWith(created));
+    expect(createProject.mock.calls[0].slice(0, 3)).toEqual(['Fresh', 'remote', undefined]);
     expect(setNewProjectLocation).toHaveBeenCalledExactlyOnceWith('remote');
   });
 

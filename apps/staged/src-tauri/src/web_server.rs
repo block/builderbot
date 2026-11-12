@@ -1292,7 +1292,8 @@ pub(crate) async fn dispatch(
                 default_branch,
                 head_repo,
             )
-            .await?;
+            .await?
+            .repo;
             Ok(serde_json::to_value(repo).unwrap())
         }
         "update_project_repo_branch_name" => {

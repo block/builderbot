@@ -137,10 +137,8 @@ describe('newRemoteProjectBlocker', () => {
     expect(newRemoteProjectBlocker({ status: 'resolved', repo })).toBeNull();
   });
 
-  it('keeps a note with no repo, like every project note, to a local project', () => {
-    expect(newRemoteProjectBlocker({ status: 'resolved', repo: null })).toBe(
-      'Remote needs a repo, and this note has none'
-    );
+  it('lets a note with no repo, like every project note, start a remote project with none', () => {
+    expect(newRemoteProjectBlocker({ status: 'resolved', repo: null })).toBeNull();
   });
 
   it('waits for the lookup rather than claiming the note has no repo', () => {

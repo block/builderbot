@@ -147,6 +147,24 @@ pub(crate) fn resolve_branch_repo_slug(
     Ok(project_primary_repo(project)?.to_string())
 }
 
+/// The Blox workspace a remote project's branches share, or `None` while no
+/// remote branch names one — a remote project created without a repo has no
+/// workspace until its first repo is added and provisions one. A remote
+/// branch with a blank name is passed over rather than taken as "none", since
+/// `None` makes the next added repo provision a second workspace.
+pub(crate) fn existing_project_workspace_name(
+    store: &Store,
+    project_id: &str,
+) -> Result<Option<String>, String> {
+    Ok(store
+        .list_branches_for_project(project_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|b| b.branch_type == store::BranchType::Remote)
+        .filter_map(|b| b.workspace_name)
+        .find(|name| !name.trim().is_empty()))
+}
+
 /// Resolve the shared workspace name for a remote project.
 ///
 /// If any remote branch already exists for the project, reuse its workspace
@@ -156,14 +174,7 @@ pub(crate) fn resolve_project_workspace_name(
     project: &store::Project,
     fallback_workspace_name: Option<&str>,
 ) -> Result<String, String> {
-    let existing = store
-        .list_branches_for_project(&project.id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|b| b.branch_type == store::BranchType::Remote)
-        .and_then(|b| b.workspace_name)
-        .filter(|name| !name.trim().is_empty());
-    if let Some(name) = existing {
+    if let Some(name) = existing_project_workspace_name(store, &project.id)? {
         return Ok(name);
     }
 
@@ -3799,6 +3810,34 @@ mod tests {
                 "rev-parse",
                 "HEAD"
             ]
+        );
+    }
+
+    /// A remote branch with a blank workspace name doesn't hide the name a
+    /// later one carries: `None` would have the next added repo provision a
+    /// second workspace for the project.
+    #[test]
+    fn existing_project_workspace_name_passes_over_a_blank_name() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("squareup/g2");
+        store.create_project(&project).unwrap();
+        let mut blank = store::Branch::new_remote(&project.id, "blank", "main", " ");
+        blank.created_at -= 1_000;
+        store.create_branch(&blank).unwrap();
+        store
+            .create_branch(&store::Branch::new_remote(
+                &project.id,
+                "feature",
+                "main",
+                "ws-1",
+            ))
+            .unwrap();
+
+        assert_eq!(
+            existing_project_workspace_name(&store, &project.id)
+                .unwrap()
+                .as_deref(),
+            Some("ws-1")
         );
     }
 

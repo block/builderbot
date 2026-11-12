@@ -686,7 +686,7 @@ async fn add_project_repo(
     head_repo: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
-    let repo = project_commands::add_project_repo_impl(
+    let added = project_commands::add_project_repo_impl(
         Arc::clone(&store),
         project_id.clone(),
         github_repo,
@@ -700,9 +700,15 @@ async fn add_project_repo(
     )
     .await?;
 
-    project_commands::spawn_project_repo_setup(app_handle, store, project_id, repo.id.clone());
+    project_commands::spawn_project_repo_setup(
+        app_handle,
+        store,
+        project_id,
+        added.repo.id.clone(),
+        added.provisions_workspace,
+    );
 
-    Ok(repo)
+    Ok(added.repo)
 }
 
 #[tauri::command(rename_all = "camelCase")]

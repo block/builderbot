@@ -1844,11 +1844,11 @@ pub fn start_session(
         let local_note_tool_attached: Cell<bool> = Cell::new(false);
         let remote_note_draft: std::cell::OnceCell<String> = std::cell::OnceCell::new();
         let note_draft_path = || -> Option<String> {
-            local_note_draft
-                .as_ref()
-                .filter(|_| local_note_tool_attached.get())
-                .map(|path| path.to_string_lossy().into_owned())
-                .or_else(|| remote_note_draft.get().cloned())
+            attached_note_draft_path(
+                local_note_draft.as_deref(),
+                local_note_tool_attached.get(),
+                remote_note_draft.get().map(String::as_str),
+            )
         };
 
         let local = tokio::task::LocalSet::new();
@@ -2220,7 +2220,24 @@ pub fn start_session(
 
             let attachments = load_prompt_attachments(&store, &config.image_ids);
 
-            let mut prompt = attachments.prompt(&config.prompt);
+            // The prompt was built before the run knew whether a `write_note`
+            // tool would attach, and names the tool and the draft file. A
+            // note run without one says so up front, so the first turn can
+            // deliver through the `---` fallback and the single follow-up is
+            // not spent on it.
+            let write_note_tool_attached = note_draft_path().is_some();
+            if is_note_session && !write_note_tool_attached {
+                log::warn!(
+                    "Session {}: no write_note tool attached; telling the agent to deliver the \
+                     note in its reply",
+                    config.session_id
+                );
+            }
+            let mut prompt = first_turn_prompt(
+                attachments.prompt(&config.prompt),
+                is_note_session,
+                write_note_tool_attached,
+            );
             let mut agent_session_id = config.agent_session_id.clone();
             let mut repair_attempts = 0;
             let mut note_followup_attempts = 0;
@@ -2474,27 +2491,24 @@ pub fn start_session(
                     }
                 }
 
-                // Diagrams are checked wherever the note landed: the final
-                // assistant message (the `---` contract) and the body handed
-                // to `write_note` — locally through the tool, remotely through
-                // the outbox collected just above — which the transcript never
-                // carries.
+                // Diagrams are checked where the note landed. With a
+                // `write_note` tool attached and a published note in the slot
+                // — filled locally by the tool, remotely by the outbox
+                // collection just above — the slot is what gets stored and
+                // the final assistant message is not saved, so only the
+                // published body is checked. Otherwise the final message is
+                // checked first: it is a plain session's reply or the `---`
+                // fallback's note.
                 // Where the error was found travels with it: its line number
                 // counts the final message's lines or the published body's,
                 // and the correction prompt may only point at the draft file
                 // for the latter.
-                let pikchr_error = match validate_latest_session_pikchr(&store, &config.session_id)?
-                {
-                    LatestAssistantPikchrValidation::Invalid(error) => {
-                        Some((error, PikchrErrorOrigin::FinalMessage))
-                    }
-                    LatestAssistantPikchrValidation::SkippedFinalMessage
-                    | LatestAssistantPikchrValidation::NoPikchr
-                    | LatestAssistantPikchrValidation::Valid => {
-                        validate_submitted_note_pikchr(&note_slot)
-                            .map(|error| (error, PikchrErrorOrigin::SubmittedNote))
-                    }
-                };
+                let pikchr_error = turn_pikchr_error(
+                    &store,
+                    &config.session_id,
+                    &note_slot,
+                    note_draft_path().is_some(),
+                )?;
                 match pikchr_error {
                     None => {
                         // A note session whose turn ended without a
@@ -3521,6 +3535,49 @@ fn validate_latest_message_pikchr(messages: &[SessionMessage]) -> LatestAssistan
     }
 }
 
+/// The first invalid Pikchr block the settled turn has to repair, and where
+/// it was found.
+///
+/// With a `write_note` tool attached and a submission in the slot, the slot
+/// is the note and the final assistant message is never saved, so only the
+/// submitted body is validated: a broken block the agent quotes in its
+/// reply (explaining what it just fixed, say) must not spend a repair turn,
+/// nor end a run whose published note is valid in
+/// [`AgentRunError::PikchrRepairExhausted`]. The slot keeps the last
+/// submission across the turns of a run, so this also holds for a repair
+/// turn once the note has been republished or re-collected.
+///
+/// In every other state the final message is validated first: a run with no
+/// tool attached (a plain session, or a note run on the `---` fallback) and
+/// a turn that published nothing, whose reply may be the fallback's note.
+fn turn_pikchr_error(
+    store: &Store,
+    session_id: &str,
+    slot: &NoteSubmissionSlot,
+    write_note_tool_attached: bool,
+) -> Result<
+    Option<(
+        crate::pikchr_validation::PikchrValidationError,
+        PikchrErrorOrigin,
+    )>,
+    String,
+> {
+    let submitted_note_error = || {
+        validate_submitted_note_pikchr(slot).map(|error| (error, PikchrErrorOrigin::SubmittedNote))
+    };
+    if write_note_tool_attached && crate::note_tool::has_submission(slot) {
+        return Ok(submitted_note_error());
+    }
+    Ok(match validate_latest_session_pikchr(store, session_id)? {
+        LatestAssistantPikchrValidation::Invalid(error) => {
+            Some((error, PikchrErrorOrigin::FinalMessage))
+        }
+        LatestAssistantPikchrValidation::SkippedFinalMessage
+        | LatestAssistantPikchrValidation::NoPikchr
+        | LatestAssistantPikchrValidation::Valid => submitted_note_error(),
+    })
+}
+
 fn stored_agent_session_id(store: &Store, session_id: &str) -> Result<Option<String>, String> {
     store
         .get_session(session_id)
@@ -3552,7 +3609,8 @@ pub(crate) fn session_has_note_artifact(store: &Store, session_id: &str) -> bool
 enum PikchrErrorOrigin {
     /// The final assistant message: a plain session's reply, a note
     /// delivered through the `---` fallback, or a diagram the agent echoed
-    /// in its reply beside a `write_note` call.
+    /// in its reply without publishing a note. A reply beside a published
+    /// note is not checked at all ([`turn_pikchr_error`]).
     FinalMessage,
     /// The note body `write_note` published (the submission slot): the
     /// draft file's contents from its first non-blank line.
@@ -3565,6 +3623,52 @@ enum PikchrErrorOrigin {
 const NOTE_SEPARATOR_FALLBACK_FORMAT: &str = "a line containing only `---`, then the note: a \
 markdown H1 title (`# <Title>`) on the next line, followed by the full note body in markdown, not \
 wrapped in code fences";
+
+/// What every prompt of a note run without a `write_note` tool says before
+/// it asks for the note in the reply.
+const NOTE_TOOL_UNAVAILABLE: &str = "The `write_note` tool is not available in this session, so \
+Staged takes the note from your reply";
+
+/// The draft file of the `write_note` tool attached to a run, or `None`
+/// when the run has no tool. A local run has one once its note server has
+/// started (`local_tool_attached`); a remote run once the Staged MCP on Blox
+/// is installed, which is when its draft path becomes known.
+fn attached_note_draft_path(
+    local_draft: Option<&std::path::Path>,
+    local_tool_attached: bool,
+    remote_draft: Option<&str>,
+) -> Option<String> {
+    local_draft
+        .filter(|_| local_tool_attached)
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| remote_draft.map(str::to_owned))
+}
+
+/// The prompt a run opens with. It was built before the run knew whether a
+/// `write_note` tool would attach, so for a note session it names the tool
+/// and the draft file. A note run that has neither (the local note server
+/// did not start, or the Staged MCP on Blox could not be installed) gets a
+/// notice appended, in the wording of that run's follow-up
+/// ([`note_write_followup_prompt`]), so its first turn can deliver through
+/// the `---` fallback instead of spending the single follow-up to learn
+/// how. Every other run gets the prompt unchanged.
+fn first_turn_prompt(
+    prompt: String,
+    is_note_session: bool,
+    write_note_tool_attached: bool,
+) -> String {
+    if !is_note_session || write_note_tool_attached {
+        return prompt;
+    }
+    format!(
+        "{prompt}\n\n\
+<action>\n\
+Your instructions name a note draft file and the `write_note` tool. Neither can be used in this \
+run, so do not write the draft file. {NOTE_TOOL_UNAVAILABLE} instead. End your reply with \
+{NOTE_SEPARATOR_FALLBACK_FORMAT}.\n\
+</action>"
+    )
+}
 
 /// The prompt that asks for a Pikchr repair.
 ///
@@ -3641,8 +3745,7 @@ diagram and the note out of your reply."
         (true, PikchrErrorOrigin::FinalMessage, None) => (
             FINAL_REPLY_SUBJECT,
             format!(
-                "The `write_note` tool is not available in this session, so Staged takes the \
-note from your reply. Return a complete corrected final response: \
+                "{NOTE_TOOL_UNAVAILABLE}. Return a complete corrected final response: \
 {NOTE_SEPARATOR_FALLBACK_FORMAT}."
             ),
             REPLY_REPAIR_SCOPE,
@@ -3732,10 +3835,9 @@ the tool call is. Do not create commits or change other files.\n\
         ),
         None => format!(
             "<action>\n\
-Your turn ended without delivering a note, so no note was saved. The `write_note` tool is not \
-available in this session, so Staged takes the note from your reply instead. Reply with \
-{NOTE_SEPARATOR_FALLBACK_FORMAT}. If you already wrote the body into your note draft file, use \
-its contents as the body. Do not create commits or change other files.\n\
+Your turn ended without delivering a note, so no note was saved. {NOTE_TOOL_UNAVAILABLE} \
+instead. Reply with {NOTE_SEPARATOR_FALLBACK_FORMAT}. If you already wrote the body into your \
+note draft file, use its contents as the body. Do not create commits or change other files.\n\
 </action>"
         ),
     }

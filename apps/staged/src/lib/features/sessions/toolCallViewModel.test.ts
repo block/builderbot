@@ -671,7 +671,7 @@ describe('write_note tool rows', () => {
       type: 'content',
       content: {
         type: 'text',
-        text: 'Saved note "README.md: Sandbox repository purpose" (82 characters from the draft file). The note is stored; end your turn now without repeating it in your reply.',
+        text: 'Saved note "README.md: Sandbox repository purpose" (82 bytes from the draft file). The note is stored; end your turn now without repeating it in your reply.',
       },
     },
   ];

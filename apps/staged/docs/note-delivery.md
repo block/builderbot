@@ -76,9 +76,10 @@ then call write_note again.`` on both; the cause is the platform's own
   message.
 
 Each call republishes the file; the last call of the turn wins. The result
-text is `Saved note "<title>" (<n> characters from the draft file). The note
+text is `Saved note "<title>" (<n> bytes from the draft file). The note
 is stored; end your turn now without repeating it in your reply.` (`<n>` is
-the body's UTF-8 length on both transports.) The message
+the body's UTF-8 length on both transports, which is why the text says
+bytes and not characters.) The message
 writer treats a completed `write_note` call like the old separator: the
 session finishes after the response that follows it instead of holding for
 background work.
@@ -147,18 +148,36 @@ read different text and the line number counts that text's lines:
 | The final assistant message     | no                    | A corrected reply in the `---` format. It says the tool is not available and does not ask for a call.                                                                                                     |
 | A plain session's final message | n/a                   | A complete corrected final response.                                                                                                                                                                      |
 
-The final message is checked first, so an agent that echoed a diagram in its
-reply, or one that delivered through the `---` fallback, gets a prompt about
-the reply. Only an error in the published note may say "your draft file
-holds the note you saved" and point at a line in it: a fresh note whose
-agent never wrote a draft has no such file.
+Which text is checked depends on what the turn will store
+(`turn_pikchr_error`):
+
+- **A `write_note` tool is attached and the slot holds a published note.**
+  Only the published body is checked. The final assistant message is not
+  saved in this state, so a broken `pikchr` block quoted in it (an agent
+  explaining the block it just fixed is the likely case) is not an error:
+  it spends no repair turn and cannot end a run whose published note is
+  valid in `PikchrRepairExhausted`. The slot keeps the last published note
+  across the turns of a run, so this also covers a repair turn once the
+  note has been republished (locally) or re-collected from the outbox
+  (remotely). A repair turn that did not republish is still judged by the
+  note in the slot, and gets the prompt about the note again.
+- **Anything else.** The final message is checked first, then the slot.
+  This is a run with no tool attached (a plain session, or a note run on
+  the `---` fallback, whose reply is the note) and a turn that published
+  nothing, where the reply may be the fallback's note. An agent that echoed
+  a broken diagram without publishing gets the prompt about the reply (the
+  second row of the table).
+
+Only an error in the published note may say "your draft file holds the note
+you saved" and point at a line in it: a fresh note whose agent never wrote a
+draft has no such file.
 
 "`write_note` attached" is per run. It is false when the local server did
 not start, or when the Staged MCP on Blox could not be installed, and such a
 run can only deliver through the `---` fallback. The runner then has no
-draft path to hand the prompt builders, and both the correction prompt and
-the follow-up (below) describe the `---` format instead of asking for a
-call that cannot be made.
+draft path to hand the prompt builders, so the first-turn notice, the
+correction prompt and the follow-up (all below) describe the `---` format
+instead of asking for a call that cannot be made.
 
 The guidance names the
 tool both as `write_note` and by its Claude Code name `mcp__staged__write_note`,
@@ -202,7 +221,8 @@ instructions", and this is what makes that true on both transports, even
 for a session whose prompt predates the draft file. On each call it reads the draft and
 writes the title, body and next steps into a per-run `NoteSubmissionSlot`
 shared with the message writer, the post-turn Pikchr validation (which
-checks the published body, since the transcript does not carry the note),
+checks the published body, since the transcript does not carry the note,
+and skips the unsaved reply once a note is published),
 and the post-completion hooks.
 
 The draft's run lifecycle is three steps in the session runner:
@@ -366,7 +386,8 @@ fills. From there it feeds, with no further round trip:
 - the post-turn Pikchr validation (`validate_submitted_note_pikchr`), so a
   remote note with a broken diagram gets the same correction prompt a local
   one does; the repair turn's rewrite is collected again when that turn
-  settles, and the loop gives up after the usual number of attempts;
+  settles, and the loop gives up after the usual number of attempts. With a
+  collected note in the slot the reply is not checked, exactly as locally;
 - the "did this turn deliver a note" decision behind the `write_note`
   follow-up prompt, so a remote turn that did call the tool is never asked
   to call it again — the follow-up fires only when the outbox has no `done`
@@ -606,9 +627,24 @@ follow-up, because the call it would ask for cannot be made: "The
 note from your reply instead. Reply with a line containing only `---`, then
 the note: a markdown H1 title (`# <Title>`) on the next line, followed by
 the full note body". That is the format the fallback parser below accepts.
-The session's first prompt still describes `write_note`, since it is built
-before the run knows whether the tool will attach; the follow-up is where
-the run corrects it.
+
+Such a run should not need the follow-up at all. The session's first prompt
+is built in `session_commands` before the run knows whether the tool will
+attach, so it names the draft file and `write_note`. When neither attached,
+the runner appends a notice to that prompt before it is sent
+(`first_turn_prompt`): your instructions name a draft file and the
+tool, neither can be used in this run, do not write the draft file, and
+"The `write_note` tool is not available in this session, so Staged takes
+the note from your reply instead", followed by the same `---` format. The
+sentence and the format are the follow-up's own constants
+(`NOTE_TOOL_UNAVAILABLE`, `NOTE_SEPARATOR_FALLBACK_FORMAT`). The first turn
+can therefore deliver, and the single follow-up stays in reserve for a turn
+that still delivered nothing. On a workstation it also keeps the agent from
+leaving a `draft.md` that no later step of the run would clear. A run with
+the tool attached, and a session that writes no note, get the prompt as
+built. The notice is added to the prompt sent to the agent only; the stored
+first user message is unchanged, and the run logs a warning when it adds
+it.
 
 The `---` parser is kept only as a fallback. When the hooks receive no
 submission they scan the turn's assistant messages as before, and log at warn
@@ -1082,7 +1118,12 @@ with or without a seed, a failed seed leaves the recovery settled, the
 follow-up and Pikchr repair prompts name the
 draft, an error found in the reply makes no claim about the draft, a run
 without the tool is pointed at the `---` format and never asked to call
-`write_note`), `session_commands::tests` (the `$HOME` placeholder caution
+`write_note`, a published note is validated instead of the unsaved reply
+while a run with no tool or no published note still has its reply checked,
+a remote repair turn is judged by the re-collected note and not by a broken
+block quoted in its reply, and a note run without the tool gets the notice
+in its first prompt, locally and on a workstation, while a run with the tool
+gets none), `session_commands::tests` (the `$HOME` placeholder caution
 appears with an unresolved home and only then),
 `remote_staged_mcp::tests` (the Staged MCP on Blox itself: install,
 injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),

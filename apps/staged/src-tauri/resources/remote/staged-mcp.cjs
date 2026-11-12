@@ -59,7 +59,7 @@ const readline = require("readline");
 
 // Reported as `serverInfo.version` and stamped by tools into what they write
 // (`write_note`'s `meta.json` keeps it under its original `helperVersion` key).
-const SERVER_VERSION = 4;
+const SERVER_VERSION = 5;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -393,7 +393,7 @@ function savedMessage(title, bodyLength) {
     title +
     '" (' +
     bodyLength +
-    " characters from the draft file). The note is stored; end your turn now without repeating it in your reply."
+    " bytes from the draft file). The note is stored; end your turn now without repeating it in your reply."
   );
 }
 

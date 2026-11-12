@@ -214,7 +214,8 @@ from the new one, or when a tool's contract changes (version 3: `write_note`
 takes no `body` and publishes `draft.md`; version 4: the draft read drops a
 leading byte order mark, trims as Rust does, reports an unreadable draft as
 a rejected call, and the saved-note text counts UTF-8 bytes as the laptop
-does).
+does; version 5: the saved-note text calls that count bytes, not
+characters).
 
 On the laptop:
 

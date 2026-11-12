@@ -476,3 +476,216 @@ fn a_run_without_the_write_note_tool_is_pointed_at_the_separator_fallback() {
         Some("# Design\n\nBody.")
     );
 }
+
+/// A reply that quotes a diagram which does not parse, as an agent
+/// explaining the block it just fixed would.
+const REPLY_QUOTING_A_BROKEN_BLOCK: &str =
+    "Saved. The block was:\n```pikchr\nbox \"unterminated\n```";
+const VALID_NOTE_BODY: &str = "Intro\n\n```pikchr\nbox \"fixed\" fit\n```";
+const BROKEN_NOTE_BODY: &str = "Intro\n\n```pikchr\nbox \"unterminated\n```";
+
+fn tool_submission(body: &str) -> NoteSubmission {
+    NoteSubmission {
+        title: "Plan".to_string(),
+        body: body.to_string(),
+        suggested_next_steps: None,
+        source: NoteSubmissionSource::Tool,
+    }
+}
+
+/// With a `write_note` tool attached and a published note in the slot the
+/// reply is never saved, so a broken block in it is not an error. Without a
+/// tool, or with nothing published (the `---` fallback), the reply is still
+/// what gets checked.
+#[test]
+fn a_published_note_is_validated_instead_of_the_unsaved_reply() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let session_id = note_session(&store, false, "");
+    store
+        .add_session_message(&session_id, MessageRole::User, "Write a note")
+        .unwrap();
+    store
+        .add_session_message(
+            &session_id,
+            MessageRole::Assistant,
+            REPLY_QUOTING_A_BROKEN_BLOCK,
+        )
+        .unwrap();
+
+    // Tool attached, valid note published: nothing to repair.
+    let slot = new_submission_slot();
+    crate::note_tool::store_submission(&slot, tool_submission(VALID_NOTE_BODY));
+    assert_eq!(
+        turn_pikchr_error(&store, &session_id, &slot, true).unwrap(),
+        None
+    );
+
+    // Tool attached, nothing published: the reply may be the `---`
+    // fallback's note, so it is checked.
+    let empty = new_submission_slot();
+    let (error, origin) = turn_pikchr_error(&store, &session_id, &empty, true)
+        .unwrap()
+        .expect("the reply is validated when no note was published");
+    assert_eq!(origin, PikchrErrorOrigin::FinalMessage);
+    assert_eq!(error.line_number, 2);
+
+    // No tool attached: the reply is checked, with or without a slot.
+    for slot in [&empty, &slot] {
+        let (_, origin) = turn_pikchr_error(&store, &session_id, slot, false)
+            .unwrap()
+            .expect("the reply is validated when the run has no tool");
+        assert_eq!(origin, PikchrErrorOrigin::FinalMessage);
+    }
+
+    // The published note itself is still checked, and its line number is
+    // the body's, not the reply's.
+    crate::note_tool::store_submission(&slot, tool_submission(BROKEN_NOTE_BODY));
+    let (error, origin) = turn_pikchr_error(&store, &session_id, &slot, true)
+        .unwrap()
+        .expect("a broken published note is an error");
+    assert_eq!(origin, PikchrErrorOrigin::SubmittedNote);
+    assert_eq!(error.line_number, 3);
+}
+
+/// The repair loop of a remote run: the collected note is broken, the
+/// repair turn fixes the draft and republishes, and its reply quotes the
+/// block it fixed. Once the outbox is re-collected the turn has nothing
+/// left to repair, so the quoted block cannot spend another attempt or end
+/// the run in `PikchrRepairExhausted` with a valid note published.
+#[test]
+fn a_repair_turn_is_judged_by_the_recollected_note_not_by_its_reply() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let session_id = note_session(&store, false, "");
+    let slot = new_submission_slot();
+    let memory = note_outbox::new_collected_note_memory();
+    let log = RefCell::new(Vec::new());
+    let done = |written_at: u64, body: &str| {
+        let meta = format!(
+            r#"{{"title":"Plan","suggestedNextSteps":null,"turn":"t1","writtenAt":{written_at},"helperVersion":5}}"#
+        );
+        format!("done\n{}\n{}\n", b64(meta.as_bytes()), b64(body.as_bytes()))
+    };
+    let collect = |output: &str| {
+        let exec = recording_exec(output, &log);
+        note_outbox::collect_turn_into_slot(&exec, &session_id, "t1", &slot, &memory).unwrap()
+    };
+
+    // First turn: a clean reply, a broken note in the outbox.
+    store
+        .add_session_message(&session_id, MessageRole::User, "Write a note")
+        .unwrap();
+    store
+        .add_session_message(&session_id, MessageRole::Assistant, "Saved.")
+        .unwrap();
+    assert!(matches!(
+        collect(&done(1, BROKEN_NOTE_BODY)),
+        OutboxState::Delivered(_)
+    ));
+    let (error, origin) = turn_pikchr_error(&store, &session_id, &slot, true)
+        .unwrap()
+        .expect("the collected note is broken");
+    assert_eq!(origin, PikchrErrorOrigin::SubmittedNote);
+
+    // The repair turn: the reply quotes the broken block.
+    let correction = build_pikchr_correction_prompt(&error, origin, true, Some("/home/u/draft.md"));
+    store
+        .add_session_message(&session_id, MessageRole::User, &correction)
+        .unwrap();
+    store
+        .add_session_message(
+            &session_id,
+            MessageRole::Assistant,
+            REPLY_QUOTING_A_BROKEN_BLOCK,
+        )
+        .unwrap();
+
+    // A repair turn that did not republish leaves the broken note in the
+    // outbox: the error is still the note's, not the reply's.
+    assert!(matches!(
+        collect(&done(1, BROKEN_NOTE_BODY)),
+        OutboxState::Delivered(_)
+    ));
+    let (still, origin) = turn_pikchr_error(&store, &session_id, &slot, true)
+        .unwrap()
+        .expect("the note was not republished");
+    assert_eq!(origin, PikchrErrorOrigin::SubmittedNote);
+    assert_eq!(still.line_number, 3);
+
+    // Re-collected after the republish: the note parses, and the reply's
+    // quoted block is not an error.
+    assert!(matches!(
+        collect(&done(2, VALID_NOTE_BODY)),
+        OutboxState::Delivered(_)
+    ));
+    assert_eq!(
+        crate::note_tool::current_submission(&slot).unwrap().body,
+        VALID_NOTE_BODY
+    );
+    assert_eq!(
+        turn_pikchr_error(&store, &session_id, &slot, true).unwrap(),
+        None
+    );
+
+    // The same transcript in a run with no tool is a `---` fallback run:
+    // its reply is the note and is still checked.
+    let (_, origin) = turn_pikchr_error(&store, &session_id, &new_submission_slot(), false)
+        .unwrap()
+        .expect("a run with no tool validates its reply");
+    assert_eq!(origin, PikchrErrorOrigin::FinalMessage);
+}
+
+/// The first prompt is built before the run knows whether a `write_note`
+/// tool attached. A note run with none (the local note server did not
+/// start, or the Staged MCP on Blox could not be installed) is told so at
+/// once, in the follow-up's wording; a run with the tool, and a session
+/// that writes no note, get the prompt as built.
+#[test]
+fn a_note_run_without_the_tool_is_told_so_in_its_first_prompt() {
+    let built = "<action>\nWrite the note in your draft file, then call `write_note`.\n</action>";
+    let local_draft = crate::note_draft::local_draft_path("sess-1");
+    let remote_draft = "/home/u/.staged/sessions/sess-1/draft.md";
+
+    // Local: the draft path is fixed by the session id, but the note server
+    // did not start. Remote: the install failed, so no draft path is known.
+    let local_without_tool = attached_note_draft_path(Some(&local_draft), false, None);
+    let remote_without_tool = attached_note_draft_path(None, false, None);
+    assert_eq!(local_without_tool, None);
+    assert_eq!(remote_without_tool, None);
+
+    let followup = note_write_followup_prompt(None);
+    for draft in [local_without_tool, remote_without_tool] {
+        let prompt = first_turn_prompt(built.to_string(), true, draft.is_some());
+        let notice = prompt
+            .strip_prefix(built)
+            .expect("the built prompt is kept, with the notice after it");
+        assert!(notice.starts_with("\n\n<action>\n"), "{notice}");
+        assert!(notice.ends_with("\n</action>"), "{notice}");
+        // The follow-up's wording: the same sentence and the same format.
+        for shared in [NOTE_TOOL_UNAVAILABLE, NOTE_SEPARATOR_FALLBACK_FORMAT] {
+            assert!(notice.contains(shared), "{shared}: {notice}");
+            assert!(followup.contains(shared), "{shared}: {followup}");
+        }
+        assert!(notice.contains("do not write the draft file"), "{notice}");
+        for ask in ["call `write_note`", "call the `write_note`", "then call"] {
+            assert!(!notice.contains(ask), "{ask}: {notice}");
+        }
+    }
+
+    // With the tool attached, locally or on a workstation, nothing is added.
+    let local_with_tool = attached_note_draft_path(Some(&local_draft), true, None);
+    let remote_with_tool = attached_note_draft_path(None, false, Some(remote_draft));
+    assert_eq!(
+        local_with_tool.as_deref(),
+        Some(local_draft.to_string_lossy().as_ref())
+    );
+    assert_eq!(remote_with_tool.as_deref(), Some(remote_draft));
+    for draft in [local_with_tool, remote_with_tool] {
+        assert_eq!(
+            first_turn_prompt(built.to_string(), true, draft.is_some()),
+            built
+        );
+    }
+
+    // A session that writes no note never has the tool and gets no notice.
+    assert_eq!(first_turn_prompt(built.to_string(), false, false), built);
+}

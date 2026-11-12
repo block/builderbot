@@ -174,10 +174,11 @@ impl NoteSubmission {
 }
 
 /// The `write_note` result text. Shared with the Staged MCP on Blox's wording so
-/// the agent sees the same instruction on both transports.
+/// the agent sees the same instruction on both transports. `body_len` is the
+/// body's UTF-8 length, so the text says bytes.
 pub(crate) fn saved_message(title: &str, body_len: usize) -> String {
     format!(
-        "Saved note \"{title}\" ({body_len} characters from the draft file). The note is stored; \
+        "Saved note \"{title}\" ({body_len} bytes from the draft file). The note is stored; \
 end your turn now without repeating it in your reply."
     )
 }
@@ -490,6 +491,12 @@ mod tests {
         assert!(text.contains("Saved note \\\"First\\\""), "{text}");
         assert!(text.contains("from the draft file"), "{text}");
         assert!(text.contains("end your turn"), "{text}");
+        // The count is the body's UTF-8 length, and the text says so.
+        assert_eq!(
+            saved_message("Né", "é→".len()),
+            "Saved note \"Né\" (5 bytes from the draft file). The note is stored; end your \
+turn now without repeating it in your reply."
+        );
         let current = current_submission(&slot).unwrap();
         assert_eq!(current.body, "First body ![Shot](staged-media://abc.png)");
 

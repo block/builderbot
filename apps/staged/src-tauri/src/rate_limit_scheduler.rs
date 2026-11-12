@@ -166,6 +166,14 @@ async fn run_tick(
             continue;
         }
 
+        // The claim flips the row to `running` under our pid, and the runner
+        // only registers it once the spawned task reaches `start_session`
+        // (after `prepare_resume`, an SSH round trip on a remote branch). The
+        // stranded-session sweep ends any `running` row nothing in the
+        // registry owns, so the hold has to exist before the claim and last
+        // until the task hands over or re-parks the row. The `continue` arms
+        // below drop it with no row to cover.
+        let liveness = registry.hold(&session.id);
         let ticket = match claim_for_auto_resume(&store, &session.id) {
             Ok(AutoResumeClaim::Claimed(ticket)) => *ticket,
             Ok(AutoResumeClaim::Deferred {
@@ -217,6 +225,9 @@ async fn run_tick(
         let action_registry_for_task = Arc::clone(&action_registry);
         let app_for_task = app_handle.clone();
         tauri::async_runtime::spawn(async move {
+            // Keeps the row live through the resume start and, on failure,
+            // through `reschedule_after_start_failure`'s re-park.
+            let _liveness = liveness;
             let session_id = session.id.clone();
             log::info!(
                 "[rate_limit_recovery] auto-resuming session {} (attempt {}/{})",
@@ -563,8 +574,9 @@ enum AutoResumeClaim {
     /// The session row is `running` and this attempt owns it.
     Claimed(Box<crate::session_commands::RateLimitResumeTicket>),
     /// The branch has other work in flight, so resuming now would run two
-    /// agents in the same worktree. `drainable_branch_id` is set when that work
-    /// is queued-only.
+    /// agents in the same worktree, or its project is being transferred and
+    /// nothing may start on it. `drainable_branch_id` is set when the work in
+    /// flight is queued-only.
     Deferred {
         reason: String,
         drainable_branch_id: Option<String>,
@@ -608,6 +620,18 @@ fn claim_for_auto_resume(store: &Arc<Store>, session_id: &str) -> Result<AutoRes
     let _guard = launch_lock.as_ref().map(|lock| lock.lock().unwrap());
 
     if let Some(branch_id) = branch_id.as_deref() {
+        // Every other start path refuses a branch whose project is mid-transfer
+        // (`ensure_branch_not_transferring`), and a paused row does not hold a
+        // transfer back. Claiming here would flip the row to `running` only
+        // for the resume to fail on that same check, re-park it, and spend one
+        // of the capped retry attempts on a transfer that can run for minutes.
+        // A deferral leaves the retry state untouched for the next tick.
+        if crate::project_transfer::is_branch_transferring(branch_id) {
+            return Ok(AutoResumeClaim::Deferred {
+                reason: format!("branch {branch_id} is being transferred"),
+                drainable_branch_id: None,
+            });
+        }
         match crate::prs::branch_work_in_flight(store, branch_id)? {
             crate::prs::BranchWorkInFlight::Running => {
                 return Ok(AutoResumeClaim::Deferred {
@@ -649,9 +673,10 @@ fn claim_for_auto_resume(store: &Arc<Store>, session_id: &str) -> Result<AutoRes
     // Claim any message the user queued during the backoff before claiming the
     // row: `claim_oldest_queued_session_message` skips running sessions, so the
     // reverse order would always fall back to the synthetic retry prompt.
-    // (Messages can only be queued before the pause today — enqueueing requires
-    // a running session — but claiming here keeps the auto path correct if that
-    // guard is ever relaxed to accept paused sessions.)
+    // Such messages exist: follow-ups sent while the session was running, and
+    // follow-ups held for a project transfer
+    // (`add_queued_session_message_held_for_transfer`), which queue on a
+    // paused session too and are drained once the transfer is over.
     let queued_message = store
         .claim_oldest_queued_session_message(session_id)
         .map_err(|e| e.to_string())?;
@@ -1193,6 +1218,102 @@ mod tests {
         assert_eq!(
             store.get_session(&paused.id).unwrap().unwrap().status,
             SessionStatus::Paused
+        );
+    }
+
+    /// A project transfer refuses every other start on its branches
+    /// (`ensure_branch_not_transferring`), and a paused row does not block the
+    /// transfer. Claiming anyway would flip the row to `running`, fail the
+    /// resume on that check, and burn one of the capped attempts per tick for
+    /// as long as the transfer runs; deferring spends nothing.
+    #[test]
+    fn defers_while_the_branch_is_being_transferred() {
+        use crate::project_transfer::{begin, TransferDirection};
+        use crate::store::{CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (branch, paused) = branch_with_paused_session(&store);
+        // What a tick does before claiming: build the retry bookkeeping.
+        let paused_row = store.get_session(&paused.id).unwrap().unwrap();
+        let bookkeeping_before = ensure_auto_recovery_state(&store, &paused_row, 20_000)
+            .unwrap()
+            .expect("a rate-limited paused row has recovery state");
+        assert_eq!(bookkeeping_before.attempt, 1);
+        // The transfer registry is process-global, so the ids must not collide
+        // with any other test's transfer.
+        let transfer = begin(
+            &format!("rate-limit-transfer-project-{}", paused.id),
+            &format!("rate-limit-transfer-{}", paused.id),
+            TransferDirection::ToRemote,
+            vec![branch.id.clone()],
+        )
+        .unwrap();
+
+        match claim_for_auto_resume(&store, &paused.id).unwrap() {
+            AutoResumeClaim::Deferred {
+                reason,
+                drainable_branch_id,
+            } => {
+                assert!(
+                    reason.contains("transferred"),
+                    "unexpected reason: {reason}"
+                );
+                assert_eq!(drainable_branch_id, None);
+            }
+            _ => panic!("expected a deferral while the branch is being transferred"),
+        }
+        let row = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Paused);
+        assert_eq!(row.completion_reason, Some(CompletionReason::RateLimited));
+        // No attempt is spent: the retry bookkeeping is exactly as it was.
+        assert_eq!(
+            auto_recovery_from_metadata(row.provider_metadata.as_ref()),
+            Some(bookkeeping_before)
+        );
+
+        // Once the transfer is over, the next tick claims as usual.
+        drop(transfer);
+        assert!(matches!(
+            claim_for_auto_resume(&store, &paused.id).unwrap(),
+            AutoResumeClaim::Claimed(_)
+        ));
+    }
+
+    /// The claim flips the row to `running` under our pid, and the runner
+    /// registers it only when the spawned task reaches `start_session`, after
+    /// `prepare_resume` (an SSH round trip on a remote branch). The
+    /// stranded-session sweep ends any `running` row nothing in the registry
+    /// owns, so `run_tick` must take its liveness hold before the claim and
+    /// move it into the task. Pinned by source text, like
+    /// `session_commands::tests::queued_start_holds_liveness_before_its_claim`,
+    /// because `run_tick` needs a concrete app runtime to drive.
+    #[test]
+    fn run_tick_holds_liveness_before_its_claim() {
+        let source = include_str!("rate_limit_scheduler.rs");
+        let start = "async fn run_tick(";
+        let body = &source[source.find(start).expect(start)..];
+        let claim = body
+            .find("claim_for_auto_resume(&store")
+            .expect("claim_for_auto_resume call");
+        let before_claim = &body[..claim];
+        assert!(
+            before_claim.contains("let liveness = registry.hold(&session.id);"),
+            "`run_tick` must take `registry.hold(&session.id)` before `claim_for_auto_resume(&store`"
+        );
+        let after_claim = &body[claim..];
+        let spawn = after_claim
+            .find("tauri::async_runtime::spawn(async move {")
+            .expect("spawned resume task");
+        let task = &after_claim[spawn..];
+        let moved = task
+            .find("let _liveness = liveness;")
+            .expect("hold moved into task");
+        let resume = task
+            .find("auto_resume_rate_limited_session(")
+            .expect("resume call");
+        assert!(
+            moved < resume,
+            "the hold must be moved into the task before the resume starts"
         );
     }
 

@@ -544,7 +544,7 @@ impl Store {
             .transpose()
             .map_err(|e| StoreError(format!("Failed to serialize provider metadata: {e}")))?;
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, provider_metadata = ?1, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?2, owner_pid = ?3
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, provider_metadata = ?1, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?2, owner_pid = ?3, blox_command_id = NULL
              WHERE id = ?4 AND status = 'paused' AND completion_reason = 'rate_limited'",
             params![provider_metadata_json, now_timestamp(), std::process::id(), id],
         )?;

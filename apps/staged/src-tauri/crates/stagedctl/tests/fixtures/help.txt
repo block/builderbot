@@ -20,6 +20,9 @@ Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
   --repo      a repo address of the form <owner>/<repo>[:<subpath>], as
               printed by `stagedctl project get <project>`
+  <tag>       a tag id, <group>/<name>, or a bare tag name when only one
+              tag has it, as printed by `stagedctl tag list`
+  <group>     a tag group name or id, as printed by `stagedctl tag list`
 
 Ids print in hashtag reference form (#note:<id>, #project-note:<id>,
 #review:<id>, #commit:<sha>) so they can be pasted directly into session
@@ -44,6 +47,7 @@ Commands:
   timeline    Read project and repo timelines (commits, notes, reviews, images)
   session     Start, observe, wait for, and cancel agent sessions
   image       Attach images to a repo's timeline
+  tag         Read the tag catalog: tag groups, tags, and which projects carry them
   connect     Ask the Staged user to approve this client (outside a spawned session)
   disconnect  Forget this machine's connected-app grants and revoke them in Staged
   help        Print this message or the help of the given subcommand(s)
@@ -69,6 +73,7 @@ Usage: stagedctl project [OPTIONS] <COMMAND>
 Commands:
   list  List every project in the app
   get   Show one project's repos and branches
+  tags  Show one project's tags: its choice in each group, then its free tags
   help  Print this message or the help of the given subcommand(s)
 
 Options:
@@ -88,11 +93,18 @@ Each line shows the project name, its primary repo address, where its
 branches run (local or remote), and the project id. Both the name and the
 id are accepted anywhere a <project> argument is expected.
 
+With --tag, only the projects carrying that tag are listed. Repeating the
+flag narrows further: a project must carry every tag named (AND), even
+when the tags are in the same group.
+
 Usage: stagedctl project list [OPTIONS]
 
 Options:
       --lock-path <PATH>
           Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --tag <TAG>
+          Only projects carrying this tag (id, <group>/<name>, or a bare name); repeat to require several
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
@@ -109,6 +121,30 @@ the --repo flag of `timeline show`, `session start`, `session list`, and
 `image add` expects.
 
 Usage: stagedctl project get [OPTIONS] <PROJECT>
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl project tags --help ===
+Show one project's tags.
+
+One line per tag group, in the app's group order, with the tag the project
+has in that group or (none). A last line lists the project's ungrouped
+tags. The group marked as the project icon is the one whose tag draws the
+project's icon in the sidebar and grid.
+
+Usage: stagedctl project tags [OPTIONS] <PROJECT>
 
 Arguments:
   <PROJECT>
@@ -400,6 +436,117 @@ Options:
 
       --file <PATH>
           Path to the image file
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl tag --help ===
+Read the tag catalog: tag groups, tags, and which projects carry them
+
+Usage: stagedctl tag [OPTIONS] <COMMAND>
+
+Commands:
+  list   List every tag group and its tags, then the ungrouped tags
+  show   Show one tag and the projects carrying it
+  group  Inspect tag groups
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help
+
+=== stagedctl tag list --help ===
+List the tag catalog: every tag group in the app's order with its tags,
+then the ungrouped tags under a Tags heading.
+
+A group line shows the group name, whether its tag draws the project icon
+and whether its board is pinned to the sidebar, and the group id. A tag
+line shows the tag as <group>/<name> (or the bare name for an ungrouped
+tag), its colour, its icon if it has one, how many projects carry it, and
+the tag id. Any of those forms is accepted where a <tag> argument is
+expected; a bare name works when only one tag in the catalog has it.
+
+With --group, only that group's tags are listed.
+
+Usage: stagedctl tag list [OPTIONS]
+
+Options:
+      --group <GROUP>
+          Only this group's tags (group name or id)
+
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl tag show --help ===
+Show one tag: its group (if any), colour and icon, and every project that
+carries it.
+
+Under a project-scoped credential the project list holds at most the
+credential's own project.
+
+Usage: stagedctl tag show [OPTIONS] <TAG>
+
+Arguments:
+  <TAG>
+          Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl tag group --help ===
+Inspect tag groups
+
+Usage: stagedctl tag group [OPTIONS] <COMMAND>
+
+Commands:
+  list  List every tag group with its flags and tag count
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help
+
+=== stagedctl tag group list --help ===
+List every tag group in the app's order.
+
+Each line shows the group name, whether its tag draws the project icon
+(at most one group does), whether its board is pinned to the projects
+sidebar, how many tags it holds, and the group id. Both the name and the
+id are accepted anywhere a <group> argument is expected.
+
+Usage: stagedctl tag group list [OPTIONS]
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
 
   -h, --help
           Print help (see a summary with '-h')

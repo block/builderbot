@@ -12,12 +12,16 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::cli::{Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, TimelineVerb};
+use crate::cli::{
+    Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, TagGroupVerb, TagVerb,
+    TimelineVerb,
+};
 use crate::client::{
     default_data_dir, discover_and_connect, discover_instance, session_credential_in_use, Approval,
     Client, CtlError, STAGEDCTL_LOCK_ENV,
 };
 use crate::grants::{self, GrantFile};
+use crate::tags;
 
 /// One command's result: the value `--json` prints, and the human rendering.
 #[derive(Debug)]
@@ -94,8 +98,12 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
     )?;
 
     match cli.command {
-        Noun::Project(ProjectVerb::List) => project_list(&client),
+        Noun::Project(ProjectVerb::List { tag }) => project_list(&client, &tag),
         Noun::Project(ProjectVerb::Get { project }) => project_get(&client, &project),
+        Noun::Project(ProjectVerb::Tags { project }) => tags::project_tags(&client, &project),
+        Noun::Tag(TagVerb::List { group }) => tags::tag_list(&client, group.as_deref()),
+        Noun::Tag(TagVerb::Show { tag }) => tags::tag_show(&client, &tag),
+        Noun::Tag(TagVerb::Group(TagGroupVerb::List)) => tags::tag_group_list(&client),
         Noun::Timeline(TimelineVerb::Show {
             project,
             repo,
@@ -355,15 +363,15 @@ fn disconnect(
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Project {
-    id: String,
-    name: String,
+pub(crate) struct Project {
+    pub(crate) id: String,
+    pub(crate) name: String,
     #[serde(default)]
-    github_repo: Option<String>,
+    pub(crate) github_repo: Option<String>,
     #[serde(default)]
-    subpath: Option<String>,
+    pub(crate) subpath: Option<String>,
     #[serde(default)]
-    location: Option<String>,
+    pub(crate) location: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -558,7 +566,10 @@ struct ProjectBranchWire {
     error: Option<String>,
 }
 
-fn parse<T: serde::de::DeserializeOwned>(value: &Value, what: &str) -> Result<T, CtlError> {
+pub(crate) fn parse<T: serde::de::DeserializeOwned>(
+    value: &Value,
+    what: &str,
+) -> Result<T, CtlError> {
     serde_json::from_value(value.clone()).map_err(|e| {
         CtlError::Transport(format!(
             "unexpected {what} shape from the app (CLI/app drift?): {e}"
@@ -609,7 +620,10 @@ fn repo_address(github_repo: &str, subpath: Option<&str>) -> String {
 
 /// Match a `<project>` argument against the app's project list: exact id,
 /// then exact name, then unique case-insensitive name.
-fn find_project<'a>(projects: &'a [Project], needle: &str) -> Result<&'a Project, CtlError> {
+pub(crate) fn find_project<'a>(
+    projects: &'a [Project],
+    needle: &str,
+) -> Result<&'a Project, CtlError> {
     if let Some(project) = projects.iter().find(|p| p.id == needle) {
         return Ok(project);
     }
@@ -747,12 +761,29 @@ fn resolve_branch(
 // project
 // =============================================================================
 
-fn project_list(client: &Client) -> Result<CmdOutput, CtlError> {
-    let raw = client.invoke("list_projects", json!({}))?;
-    let projects: Vec<Project> = parse(&raw, "project list")?;
+fn project_list(client: &Client, tag_filters: &[String]) -> Result<CmdOutput, CtlError> {
+    let mut raw = client.invoke("list_projects", json!({}))?;
+    let mut projects: Vec<Project> = parse(&raw, "project list")?;
+
+    // --tag narrows client-side: one catalog read, then keep the projects
+    // carrying every named tag. Without the flag the catalog isn't read, so
+    // a plain `project list` still works against a Staged without tags.
+    if !tag_filters.is_empty() {
+        let state_raw = client.invoke("get_tag_state", json!({}))?;
+        let state: tags::TagStateWire = parse(&state_raw, "tag state")?;
+        let keep = tags::projects_with_all_tags(&state, tag_filters)?;
+        projects.retain(|p| keep(&p.id));
+        if let Some(rows) = raw.as_array_mut() {
+            rows.retain(|row| row.get("id").and_then(Value::as_str).is_some_and(&keep));
+        }
+    }
 
     let human = if projects.is_empty() {
-        "no projects".to_string()
+        if tag_filters.is_empty() {
+            "no projects".to_string()
+        } else {
+            "no projects carry every tag named".to_string()
+        }
     } else {
         projects
             .iter()

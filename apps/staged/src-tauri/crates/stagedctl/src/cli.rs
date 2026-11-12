@@ -27,6 +27,9 @@ Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
   --repo      a repo address of the form <owner>/<repo>[:<subpath>], as
               printed by `stagedctl project get <project>`
+  <tag>       a tag id, <group>/<name>, or a bare tag name when only one
+              tag has it, as printed by `stagedctl tag list`
+  <group>     a tag group name or id, as printed by `stagedctl tag list`
 
 Ids print in hashtag reference form (#note:<id>, #project-note:<id>,
 #review:<id>, #commit:<sha>) so they can be pasted directly into session
@@ -82,6 +85,10 @@ pub enum Noun {
     /// Attach images to a repo's timeline
     #[command(alias = "images", subcommand)]
     Image(ImageVerb),
+
+    /// Read the tag catalog: tag groups, tags, and which projects carry them
+    #[command(alias = "tags", subcommand)]
+    Tag(TagVerb),
 
     /// Ask the Staged user to approve this client (outside a spawned session)
     #[command(long_about = "\
@@ -157,8 +164,17 @@ List every project in the app.
 
 Each line shows the project name, its primary repo address, where its
 branches run (local or remote), and the project id. Both the name and the
-id are accepted anywhere a <project> argument is expected.")]
-    List,
+id are accepted anywhere a <project> argument is expected.
+
+With --tag, only the projects carrying that tag are listed. Repeating the
+flag narrows further: a project must carry every tag named (AND), even
+when the tags are in the same group.")]
+    List {
+        /// Only projects carrying this tag (id, <group>/<name>, or a bare
+        /// name); repeat to require several
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
+    },
 
     /// Show one project's repos and branches
     #[command(long_about = "\
@@ -172,6 +188,70 @@ the --repo flag of `timeline show`, `session start`, `session list`, and
         /// Project name or id (see `stagedctl project list`)
         project: String,
     },
+
+    /// Show one project's tags: its choice in each group, then its free tags
+    #[command(long_about = "\
+Show one project's tags.
+
+One line per tag group, in the app's group order, with the tag the project
+has in that group or (none). A last line lists the project's ungrouped
+tags. The group marked as the project icon is the one whose tag draws the
+project's icon in the sidebar and grid.")]
+    Tags {
+        /// Project name or id (see `stagedctl project list`)
+        project: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TagVerb {
+    /// List every tag group and its tags, then the ungrouped tags
+    #[command(long_about = "\
+List the tag catalog: every tag group in the app's order with its tags,
+then the ungrouped tags under a Tags heading.
+
+A group line shows the group name, whether its tag draws the project icon
+and whether its board is pinned to the sidebar, and the group id. A tag
+line shows the tag as <group>/<name> (or the bare name for an ungrouped
+tag), its colour, its icon if it has one, how many projects carry it, and
+the tag id. Any of those forms is accepted where a <tag> argument is
+expected; a bare name works when only one tag in the catalog has it.
+
+With --group, only that group's tags are listed.")]
+    List {
+        /// Only this group's tags (group name or id)
+        #[arg(long, value_name = "GROUP")]
+        group: Option<String>,
+    },
+
+    /// Show one tag and the projects carrying it
+    #[command(long_about = "\
+Show one tag: its group (if any), colour and icon, and every project that
+carries it.
+
+Under a project-scoped credential the project list holds at most the
+credential's own project.")]
+    Show {
+        /// Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`)
+        tag: String,
+    },
+
+    /// Inspect tag groups
+    #[command(alias = "groups", subcommand)]
+    Group(TagGroupVerb),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TagGroupVerb {
+    /// List every tag group with its flags and tag count
+    #[command(long_about = "\
+List every tag group in the app's order.
+
+Each line shows the group name, whether its tag draws the project icon
+(at most one group does), whether its board is pinned to the projects
+sidebar, how many tags it holds, and the group id. Both the name and the
+id are accepted anywhere a <group> argument is expected.")]
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -360,42 +440,29 @@ impl SessionType {
     }
 }
 
-/// Render `--help` for the root and every noun and verb, in a stable order,
-/// for the help-pinning test.
+/// Render `--help` for the root and every noun, verb and sub-noun verb, in
+/// a stable order, for the help-pinning test.
 pub fn render_all_help() -> String {
     use clap::CommandFactory;
 
-    let mut root = Cli::command();
-    root.build();
-
-    let mut out = String::new();
-    let mut render = |cmd: &mut clap::Command, path: &str| {
+    fn walk(cmd: &mut clap::Command, path: &str, out: &mut String) {
+        cmd.build();
         out.push_str(&format!("=== {path} --help ===\n"));
-        out.push_str(&cmd.render_long_help().to_string());
+        out.push_str(&cmd.clone().render_long_help().to_string());
         out.push('\n');
-    };
-
-    render(&mut root.clone(), "stagedctl");
-    let nouns: Vec<String> = root
-        .get_subcommands()
-        .filter(|c| c.get_name() != "help")
-        .map(|c| c.get_name().to_string())
-        .collect();
-    for noun in nouns {
-        let mut noun_cmd = root.find_subcommand(&noun).unwrap().clone();
-        noun_cmd.build();
-        render(&mut noun_cmd.clone(), &format!("stagedctl {noun}"));
-        let verbs: Vec<String> = noun_cmd
+        let children: Vec<String> = cmd
             .get_subcommands()
             .filter(|c| c.get_name() != "help")
             .map(|c| c.get_name().to_string())
             .collect();
-        for verb in verbs {
-            let mut verb_cmd = noun_cmd.find_subcommand(&verb).unwrap().clone();
-            verb_cmd.build();
-            render(&mut verb_cmd, &format!("stagedctl {noun} {verb}"));
+        for child in children {
+            let mut child_cmd = cmd.find_subcommand(&child).unwrap().clone();
+            walk(&mut child_cmd, &format!("{path} {child}"), out);
         }
     }
+
+    let mut out = String::new();
+    walk(&mut Cli::command(), "stagedctl", &mut out);
     out
 }
 
@@ -416,6 +483,7 @@ mod tests {
             ("timelines", "show"),
             ("sessions", "list"),
             ("images", "add"),
+            ("tags", "list"),
         ] {
             let args: Vec<&str> = match (plural, singular) {
                 ("images", _) => vec![
@@ -522,6 +590,63 @@ mod tests {
         assert!(matches!(cli.command, Noun::Disconnect { client: None }));
         let cli = Cli::try_parse_from(["stagedctl", "disconnect", "--client", "x"]).unwrap();
         assert!(matches!(cli.command, Noun::Disconnect { client: Some(c) } if c == "x"));
+    }
+
+    #[test]
+    fn tag_verbs_parse_their_arguments() {
+        let cli = Cli::try_parse_from(["stagedctl", "tag", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Tag(TagVerb::List { group: None })
+        ));
+        let cli = Cli::try_parse_from(["stagedctl", "tag", "list", "--group", "Status"]).unwrap();
+        assert!(
+            matches!(cli.command, Noun::Tag(TagVerb::List { group: Some(g) }) if g == "Status")
+        );
+        let cli = Cli::try_parse_from(["stagedctl", "tag", "show", "Status/Done"]).unwrap();
+        assert!(matches!(cli.command, Noun::Tag(TagVerb::Show { tag }) if tag == "Status/Done"));
+        for groups in ["group", "groups"] {
+            let cli = Cli::try_parse_from(["stagedctl", "tag", groups, "list"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Noun::Tag(TagVerb::Group(TagGroupVerb::List))
+            ));
+        }
+        let cli = Cli::try_parse_from(["stagedctl", "project", "tags", "Widgets"]).unwrap();
+        assert!(
+            matches!(cli.command, Noun::Project(ProjectVerb::Tags { project }) if project == "Widgets")
+        );
+
+        // `project list` keeps working bare, and --tag repeats.
+        let cli = Cli::try_parse_from(["stagedctl", "project", "list"]).unwrap();
+        assert!(matches!(cli.command, Noun::Project(ProjectVerb::List { tag }) if tag.is_empty()));
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "project",
+            "list",
+            "--tag",
+            "status/done",
+            "--tag",
+            "q4",
+        ])
+        .unwrap();
+        match cli.command {
+            Noun::Project(ProjectVerb::List { tag }) => assert_eq!(tag, vec!["status/done", "q4"]),
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_rendering_reaches_the_tag_group_verbs() {
+        let help = render_all_help();
+        assert!(
+            help.contains("=== stagedctl tag group --help ==="),
+            "{help}"
+        );
+        assert!(
+            help.contains("=== stagedctl tag group list --help ==="),
+            "{help}"
+        );
     }
 
     #[test]

@@ -943,7 +943,16 @@ pub struct Approval {
 fn classify(what: &str, status: u16, body: Value) -> Result<Value, CtlError> {
     match status {
         200 => Ok(body),
-        400 | 404 => Err(CtlError::command("app_error", error_message(&body))),
+        400 => Err(CtlError::command("app_error", error_message(&body))),
+        404 => {
+            // Not allowlisted. For a tag command the likely cause is a Staged
+            // from before tags reached the control server, not a typo.
+            let mut message = error_message(&body);
+            if crate::tags::is_tag_command(what) {
+                message.push_str(" (this Staged does not have tags yet; update it)");
+            }
+            Err(CtlError::command("app_error", message))
+        }
         401 | 403 => match authorization_code(&body) {
             Some(code) => Err(CtlError::Authorization {
                 code: code.to_string(),
@@ -1043,6 +1052,38 @@ mod tests {
             .exit_code(),
             4
         );
+    }
+
+    #[test]
+    fn a_404_on_a_tag_command_hints_at_updating_staged() {
+        // An app from before tags reached the control server answers a tag
+        // command the way it answers any unknown command. Only the tag
+        // commands get the hint; a 400 from a current app is passed through.
+        let refusal = || serde_json::json!({"error": "command not available through stagedctl: get_tag_state"});
+        let err = classify("get_tag_state", 404, refusal()).unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            "app_error: command not available through stagedctl: get_tag_state \
+             (this Staged does not have tags yet; update it)"
+        );
+        let err = classify(
+            "list_projects",
+            404,
+            serde_json::json!({"error": "command not available through stagedctl: list_projects"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "app_error: command not available through stagedctl: list_projects"
+        );
+        let err = classify(
+            "set_project_group_tag",
+            400,
+            serde_json::json!({"error": "Tag group not found: g1"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "app_error: Tag group not found: g1");
     }
 
     #[test]

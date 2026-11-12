@@ -903,7 +903,12 @@
         return;
       }
 
-      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+      if (
+        status === 'completed' ||
+        status === 'paused' ||
+        status === 'error' ||
+        status === 'cancelled'
+      ) {
         // A finished child drops its badge; a finished parent drops the row.
         activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
 
@@ -985,6 +990,7 @@
               }) && !resumingNoteIds.has(note.id)
                 ? () => handleResumeNote(note)
                 : undefined}
+              resumeLabel={note.completionReason === 'rate_limited' ? 'Resume now' : undefined}
               contextMenuKey={projectNoteContextMenuKey(note)}
             />
           {/each}

@@ -495,6 +495,7 @@ pub enum SessionStatus {
     /// parses unknown statuses as `Error`, ending the row rather than
     /// failing the load.
     Disconnected,
+    Paused,
     Completed,
     Error,
     Cancelled,
@@ -506,6 +507,7 @@ impl SessionStatus {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Disconnected => "disconnected",
+            Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Error => "error",
             Self::Cancelled => "cancelled",
@@ -517,6 +519,7 @@ impl SessionStatus {
             "queued" => Some(Self::Queued),
             "running" => Some(Self::Running),
             "disconnected" => Some(Self::Disconnected),
+            "paused" => Some(Self::Paused),
             "completed" => Some(Self::Completed),
             "error" | "failed" => Some(Self::Error),
             "cancelled" => Some(Self::Cancelled),
@@ -554,6 +557,8 @@ pub enum CompletionReason {
     /// output ended, or bloxlet reports it stopped — e.g. bloxlet restarted
     /// under it. The error message names the cause.
     RemoteAgentLost,
+    /// Agent stopped because the provider reported a rate or usage limit.
+    RateLimited,
     /// Staged closed while the session was still running.
     AppQuit,
     /// Legacy sessions or indeterminate cause.
@@ -570,6 +575,7 @@ impl CompletionReason {
             Self::ProjectSessionInterrupted => "project_session_interrupted",
             Self::Crashed => "crashed",
             Self::RemoteAgentLost => "remote_agent_lost",
+            Self::RateLimited => "rate_limited",
             Self::AppQuit => "app_quit",
             Self::Unknown => "unknown",
         }
@@ -584,6 +590,7 @@ impl CompletionReason {
             "project_session_interrupted" => Some(Self::ProjectSessionInterrupted),
             "crashed" => Some(Self::Crashed),
             "remote_agent_lost" => Some(Self::RemoteAgentLost),
+            "rate_limited" => Some(Self::RateLimited),
             "app_quit" => Some(Self::AppQuit),
             "unknown" => Some(Self::Unknown),
             _ => None,
@@ -604,6 +611,7 @@ impl CompletionReason {
             | Self::ProjectSessionInterrupted
             | Self::Crashed
             | Self::RemoteAgentLost
+            | Self::RateLimited
             | Self::AppQuit => true,
             Self::TurnComplete | Self::Unknown => false,
         }
@@ -628,6 +636,13 @@ pub struct Session {
     pub error_message: Option<String>,
     /// Why the session reached its terminal state. `None` while running/queued.
     pub completion_reason: Option<CompletionReason>,
+    /// Protocol/provider metadata captured during the run, such as structured
+    /// ACP prompt errors, prompt stop reasons, and usage update metadata.
+    pub provider_metadata: Option<serde_json::Value>,
+    /// Provider-reported reset time for a rate/usage limit, when available.
+    pub rate_limit_resets_at: Option<String>,
+    /// Provider-specific limit kind, when available.
+    pub rate_limit_kind: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     /// PID of the Staged process that owns this session while it is running.
@@ -773,6 +788,9 @@ impl Session {
             agent_id: None,
             error_message: None,
             completion_reason: None,
+            provider_metadata: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             created_at: now,
             updated_at: now,
             owner_pid: Some(std::process::id()),
@@ -802,6 +820,9 @@ impl Session {
             agent_id: None,
             error_message: None,
             completion_reason: None,
+            provider_metadata: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             created_at: now,
             updated_at: now,
             owner_pid: None,
@@ -1202,6 +1223,12 @@ pub struct ProjectNote {
     /// When the user last read the session's chat (`sessions.chat_read_at`).
     #[serde(skip_deserializing)]
     pub chat_read_at: Option<i64>,
+    /// Provider-reported reset time for a rate/usage limit, when available.
+    #[serde(skip_deserializing)]
+    pub rate_limit_resets_at: Option<String>,
+    /// Provider-specific limit kind, when available.
+    #[serde(skip_deserializing)]
+    pub rate_limit_kind: Option<String>,
 }
 
 impl ProjectNote {
@@ -1224,6 +1251,8 @@ impl ProjectNote {
             completion_reason: None,
             last_chat_message_at: None,
             chat_read_at: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
         }
     }
 

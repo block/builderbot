@@ -3800,7 +3800,9 @@
       />
     {:else if session && session.status !== 'running' && session.status !== 'queued'}
       {#if isResumableReason(session.completionReason)}
+        {@const isRateLimited = session.completionReason === 'rate_limited'}
         {@const isWarning =
+          isRateLimited ||
           session.completionReason === 'crashed' ||
           session.completionReason === 'remote_agent_lost' ||
           session.completionReason === 'app_quit' ||
@@ -3817,7 +3819,7 @@
               onclick={() => sendMessage('Continue where you left off.')}
               disabled={sending}
             >
-              Resume
+              {isRateLimited ? 'Resume now' : 'Resume'}
             </Button>
           </Alert.Action>
         </Alert.Root>

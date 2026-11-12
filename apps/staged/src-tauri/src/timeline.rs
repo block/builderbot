@@ -249,6 +249,8 @@ fn parse_commit_lines(
                 completion_reason: resolved.completion_reason,
                 session_error_message: resolved.error_message,
                 pipeline_kind: None,
+                rate_limit_resets_at: resolved.rate_limit_resets_at,
+                rate_limit_kind: resolved.rate_limit_kind,
                 is_own_commit: false, // set later by build_branch_timeline
             });
         }
@@ -287,6 +289,8 @@ fn map_local_commits(
                 completion_reason: resolved.completion_reason,
                 session_error_message: resolved.error_message,
                 pipeline_kind: None,
+                rate_limit_resets_at: resolved.rate_limit_resets_at,
+                rate_limit_kind: resolved.rate_limit_kind,
                 is_own_commit: false, // set later by build_branch_timeline
             }
         })
@@ -587,6 +591,8 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 completion_reason: resolved.completion_reason,
                 session_error_message: resolved.error_message,
                 pipeline_kind: session.and_then(|s| s.pipeline).and_then(|p| p.kind),
+                rate_limit_resets_at: resolved.rate_limit_resets_at,
+                rate_limit_kind: resolved.rate_limit_kind,
                 is_own_commit: true, // pending commits are always the current user's
             });
         }
@@ -623,6 +629,8 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
                 session_error_message: resolved.error_message,
+                rate_limit_resets_at: resolved.rate_limit_resets_at,
+                rate_limit_kind: resolved.rate_limit_kind,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
                 completed_at: n.completed_at,
@@ -663,6 +671,8 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_provider: resolved.provider,
                 completion_reason: resolved.completion_reason,
                 session_error_message: resolved.error_message,
+                rate_limit_resets_at: resolved.rate_limit_resets_at,
+                rate_limit_kind: resolved.rate_limit_kind,
                 title,
                 comment_count: counts.comments,
                 annotation_count: counts.annotations,
@@ -690,6 +700,8 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                rate_limit_resets_at: resolved.rate_limit_resets_at,
+                rate_limit_kind: resolved.rate_limit_kind,
                 created_at: img.created_at,
             }
         })
@@ -2534,6 +2546,8 @@ mod tests {
             completion_reason: None,
             session_error_message: None,
             pipeline_kind: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             is_own_commit: false,
         }
     }

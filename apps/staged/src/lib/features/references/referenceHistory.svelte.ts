@@ -151,6 +151,16 @@ export function restorePreviousReferenceAfterDiffRoute(): void {
   }
 }
 
+/**
+ * The diff route a reference opened was replaced by another view instead of
+ * popped. Back from a popped diff reopens the note or chat that led to it;
+ * here the user went somewhere else, so the trail ends rather than leave a
+ * diff entry that later references would offer to go Back to.
+ */
+export function endReferenceTrailAfterDiffRoute(): void {
+  if (currentReferenceEntry()?.kind === 'diff') clearReferenceHistory();
+}
+
 export function setCurrentNoteView(view: 'note' | 'chat'): void {
   const current = currentReferenceEntry();
   if (current?.kind !== 'note') return;

@@ -6192,6 +6192,19 @@ fn prompt_response_metadata(response: &PromptResponse) -> Option<AcpEventMetadat
     })
 }
 
+/// Structured prompt-failure payload. The JSON-RPC error's `data` carries
+/// provider details (e.g. `errorKind`) that recovery logic needs after the
+/// error has been flattened into display text.
+fn prompt_error_metadata(error: &agent_client_protocol::Error) -> AcpEventMetadata {
+    AcpEventMetadata {
+        event_kind: Some("prompt_error".to_string()),
+        message_id: None,
+        usage: None,
+        content: serialize_value(error),
+        origin: None,
+    }
+}
+
 fn send_session_cancel(
     connection: &ConnectionTo<Agent>,
     acp_session_id: &str,
@@ -7473,14 +7486,24 @@ async fn run_prompt_turn(
     let prompt_response = loop {
         tokio::select! {
             result = &mut prompt_task => {
-                break result.map_err(prompt_failed)?;
+                match result {
+                    Ok(response) => break response,
+                    Err(e) => {
+                        record_prompt_error(&handler.writer, &e).await;
+                        return Err(prompt_failed(e));
+                    }
+                }
             }
             // A proxy that lost its remote process keeps stdout open, so no
             // reply (and no transport-closed failure) would ever come. A
             // reply already on its way still wins.
             _ = transport.lost().cancelled() => {
                 match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut prompt_task).await {
-                    Ok(result) => break result.map_err(prompt_failed)?,
+                    Ok(Ok(response)) => break response,
+                    Ok(Err(e)) => {
+                        record_prompt_error(&handler.writer, &e).await;
+                        return Err(prompt_failed(e));
+                    }
                     Err(_) => {
                         transport.confirm(TransportLossPhase::Turn);
                         return Err(transport.lost_error("with the turn in flight"));
@@ -7492,7 +7515,7 @@ async fn run_prompt_turn(
                 if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
                     log::warn!("{e}");
                 }
-                match await_stopped_turn(&mut prompt_task, transport, our_session_id).await? {
+                match await_stopped_turn(&mut prompt_task, transport, &handler.writer, our_session_id).await? {
                     Some(response) => break response,
                     None => return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled)),
                 }
@@ -7569,6 +7592,7 @@ async fn run_prompt_turn(
                             if agent_client_protocol::is_incoming_transport_closed(&e) {
                                 transport.confirm(TransportLossPhase::Turn);
                             }
+                            record_prompt_error(&handler.writer, &e).await;
                             let message = format!("Prompt failed after interrupt: {e:?}");
                             let _ = reply.send(Err(message.clone()));
                             return Err(message);
@@ -7609,7 +7633,7 @@ async fn run_prompt_turn(
                                 "Session stopped before the message could be sent".to_string(),
                             ));
                             handler.cancel_pending_permissions();
-                            match await_stopped_turn(&mut prompt_task, transport, our_session_id).await? {
+                            match await_stopped_turn(&mut prompt_task, transport, &handler.writer, our_session_id).await? {
                                 Some(response) => break response,
                                 None => return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled)),
                             }
@@ -7620,7 +7644,6 @@ async fn run_prompt_turn(
             }
         }
     };
-
     if let Some(metadata) = prompt_response_metadata(&prompt_response) {
         handler.writer.record_acp_event_metadata(metadata).await;
     }
@@ -7691,6 +7714,7 @@ where
 async fn await_stopped_turn<F>(
     prompt_task: &mut std::pin::Pin<&mut F>,
     transport: &TransportMonitor,
+    writer: &Arc<dyn MessageWriter>,
     our_session_id: &str,
 ) -> Result<Option<PromptResponse>, String>
 where
@@ -7699,6 +7723,7 @@ where
     match await_cancel_ack(prompt_task, CANCEL_ACK_DEADLINE, transport).await {
         CancelAck::Answered(Ok(response)) => Ok(Some(response)),
         CancelAck::Answered(Err(e)) => {
+            record_prompt_error(writer, &e).await;
             if agent_client_protocol::is_incoming_transport_closed(&e)
                 || transport.first_signal().is_some()
             {
@@ -7725,6 +7750,18 @@ where
             Ok(None)
         }
     }
+}
+
+/// Persist a failed `session/prompt`'s structured payload before the error is
+/// flattened into display text: recovery (a rate-limit pause, say) reads the
+/// provider's details from it.
+async fn record_prompt_error(
+    writer: &Arc<dyn MessageWriter>,
+    error: &agent_client_protocol::Error,
+) {
+    writer
+        .record_acp_event_metadata(prompt_error_metadata(error))
+        .await;
 }
 
 /// The text a failed `session/prompt` surfaces to the user.

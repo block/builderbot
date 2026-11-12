@@ -366,6 +366,8 @@
      * still be working on the workstation, with nothing in Staged attached.
      */
     disconnected?: boolean;
+    rateLimitResetsAt?: string | null;
+    rateLimitKind?: string | null;
     /** Hashtag reference token for context menu (e.g. "#commit:abc123"). */
     hashtagRef?: string;
     showConnector?: boolean;
@@ -767,7 +769,8 @@
         secondaryMeta = failedArtifactSubtitle(
           commit.completionReason,
           'commit',
-          commit.sessionErrorMessage
+          commit.sessionErrorMessage,
+          commit.rateLimitResetsAt
         );
       } else if (isQueued) {
         phase = 'queued';
@@ -812,6 +815,8 @@
             : undefined,
         completionReason: commit.completionReason,
         disconnected: type === 'pending-commit' && isDisconnected,
+        rateLimitResetsAt: commit.rateLimitResetsAt,
+        rateLimitKind: commit.rateLimitKind,
         hashtagRef: type === 'commit' ? `#commit:${commit.sha}` : undefined,
       });
 
@@ -838,7 +843,8 @@
         secondaryMeta = failedArtifactSubtitle(
           note.completionReason,
           'note',
-          note.sessionErrorMessage
+          note.sessionErrorMessage,
+          note.rateLimitResetsAt
         );
       } else if (phase === 'queued') {
         type = 'queued-note';
@@ -875,6 +881,8 @@
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
         disconnected: type === 'generating-note' && isDisconnected,
+        rateLimitResetsAt: note.rateLimitResetsAt,
+        rateLimitKind: note.rateLimitKind,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
       });
     }
@@ -905,7 +913,8 @@
         meta = failedArtifactSubtitle(
           review.completionReason,
           'review',
-          review.sessionErrorMessage
+          review.sessionErrorMessage,
+          review.rateLimitResetsAt
         );
       } else if (isQueued) {
         phase = 'queued';
@@ -944,6 +953,8 @@
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: review.completionReason,
         disconnected: type === 'generating-review' && isDisconnected,
+        rateLimitResetsAt: review.rateLimitResetsAt,
+        rateLimitKind: review.rateLimitKind,
         hashtagRef: type === 'review' ? `#review:${review.id}` : undefined,
       });
     }
@@ -1326,6 +1337,7 @@
             onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
               ? () => onResumeClick!(item.sessionId!)
               : undefined}
+            resumeLabel={item.completionReason === 'rate_limited' ? 'Resume now' : undefined}
           />
         </div>
       {/each}
@@ -1409,6 +1421,7 @@
             onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
               ? () => onResumeClick!(item.sessionId!)
               : undefined}
+            resumeLabel={item.completionReason === 'rate_limited' ? 'Resume now' : undefined}
           />
         </div>
       {/each}

@@ -12,9 +12,9 @@ use super::{now_timestamp, Store, StoreChange, StoreError};
 /// Every query that maps rows through it selects this list, so a new column
 /// is added here once rather than in each query.
 const SESSION_COLUMNS: &str = "id, prompt, status, working_dir, provider, agent_id,
-    error_message, completion_reason, created_at, updated_at, owner_pid, pipeline,
-    acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id,
-    pre_head_sha, blox_command_id, started_by";
+    error_message, completion_reason, provider_metadata, rate_limit_resets_at, rate_limit_kind,
+    created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id,
+    completion_effects_at, parent_session_id, pre_head_sha, blox_command_id, started_by";
 
 /// An in-flight session spawned by another session: the branch it works on
 /// and the title the branch timeline would give it. `status` is `"queued"` or
@@ -39,6 +39,12 @@ pub struct ChildSessionInfo {
 impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let provider_metadata_json = session
+            .provider_metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StoreError(format!("Failed to serialize provider metadata: {e}")))?;
         let pipeline_json = session
             .pipeline
             .as_ref()
@@ -48,8 +54,8 @@ impl Store {
         let acp_config_selection_json =
             serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id, pre_head_sha, blox_command_id, started_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, provider_metadata, rate_limit_resets_at, rate_limit_kind, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id, pre_head_sha, blox_command_id, started_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 session.id,
                 session.prompt,
@@ -59,6 +65,9 @@ impl Store {
                 session.agent_id,
                 session.error_message,
                 session.completion_reason.as_ref().map(|r| r.as_str()),
+                provider_metadata_json,
+                session.rate_limit_resets_at,
+                session.rate_limit_kind,
                 session.created_at,
                 session.updated_at,
                 session.owner_pid,
@@ -116,7 +125,7 @@ impl Store {
             None
         };
         conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4,
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4,
                  owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
              WHERE id = ?5",
             params![status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
@@ -136,6 +145,15 @@ impl Store {
     /// `Cancelled` as well as `Error`: a run cancelled from outside (e.g. a
     /// Pikchr sub-session hitting its tool-call timeout) can carry an
     /// explanation of why it ended. Other statuses clear the message.
+    ///
+    /// Completing also drops the `staged.rateLimitAutoRecovery` fragment: a
+    /// successful completion ends the rate-limit episode, and bookkeeping that
+    /// survived the auto-resume claim would otherwise accumulate `attempt` and
+    /// keep `first_limited_at` across separate limit hits — an unattended
+    /// multi-window run would give up on the retry cap or the 24h window even
+    /// though every intervening resume made real progress. Manual resumes
+    /// already reset it (`transition_to_running` wipes provider metadata);
+    /// this makes the auto-resume path match.
     pub fn transition_from_running(
         &self,
         id: &str,
@@ -149,10 +167,17 @@ impl Store {
         } else {
             None
         };
+        let provider_metadata_expr = if new_status == SessionStatus::Completed {
+            "CASE WHEN json_valid(provider_metadata) THEN json_remove(provider_metadata, '$.staged.rateLimitAutoRecovery') ELSE provider_metadata END"
+        } else {
+            "provider_metadata"
+        };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4,
-                 owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
-             WHERE id = ?5 AND status = 'running'",
+            &format!(
+                "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, provider_metadata = {provider_metadata_expr}, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4,
+                     owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
+                 WHERE id = ?5 AND status = 'running'"
+            ),
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
         )?;
         Ok(rows > 0)
@@ -183,10 +208,76 @@ impl Store {
             None
         };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4,
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4,
                  owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
              WHERE id = ?5 AND status = 'running' AND updated_at = ?6",
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, observed_updated_at],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Pause a running session after the provider reports a retryable rate or usage limit.
+    pub fn transition_running_to_rate_limited(
+        &self,
+        id: &str,
+        error_message: Option<&str>,
+        rate_limit_resets_at: Option<&str>,
+        rate_limit_kind: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        self.transition_running_to_rate_limited_with_provider_metadata(
+            id,
+            error_message,
+            rate_limit_resets_at,
+            rate_limit_kind,
+            None,
+        )
+    }
+
+    /// [`transition_running_to_rate_limited`](Self::transition_running_to_rate_limited)
+    /// that also merges `provider_metadata` into the row in the same guarded
+    /// write.
+    ///
+    /// The rate-limit scheduler lists `paused` rows and builds retry
+    /// bookkeeping for any that carry none, so the pause path has to land the
+    /// bookkeeping no later than the status flip: written afterwards, a tick in
+    /// between sees a bare paused row, writes attempt 1 itself, and the pause
+    /// path then bumps that to attempt 2. Merging here means the row is never
+    /// observable as paused without its bookkeeping, and a lost race (a Stop
+    /// that cancelled the row first) writes nothing at all.
+    pub fn transition_running_to_rate_limited_with_provider_metadata(
+        &self,
+        id: &str,
+        error_message: Option<&str>,
+        rate_limit_resets_at: Option<&str>,
+        rate_limit_kind: Option<&str>,
+        provider_metadata: Option<&serde_json::Value>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let merged_json = match provider_metadata {
+            Some(patch) => {
+                let existing_json: Option<String> = conn
+                    .query_row(
+                        "SELECT provider_metadata FROM sessions WHERE id = ?1",
+                        params![id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let mut merged = existing_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                merge_json(&mut merged, patch.clone());
+                Some(serde_json::to_string(&merged).map_err(|e| {
+                    StoreError(format!("Failed to serialize provider metadata: {e}"))
+                })?)
+            }
+            None => None,
+        };
+        let rows = conn.execute(
+            "UPDATE sessions SET status = 'paused', error_message = ?1, completion_reason = 'rate_limited', rate_limit_resets_at = ?2, rate_limit_kind = ?3, provider_metadata = COALESCE(?4, provider_metadata), updated_at = ?5
+             WHERE id = ?6 AND status = 'running'",
+            params![error_message, rate_limit_resets_at, rate_limit_kind, merged_json, now_timestamp(), id],
         )?;
         Ok(rows > 0)
     }
@@ -224,7 +315,7 @@ impl Store {
             None
         };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4,
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4,
                  owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
              WHERE id = ?5 AND (status = 'queued' OR (status = 'running' AND owner_pid = ?6))",
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, owner_pid],
@@ -274,7 +365,7 @@ impl Store {
             None
         };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4
              WHERE id = ?5 AND status = 'queued'",
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
         )?;
@@ -347,7 +438,7 @@ impl Store {
     pub fn transition_queued_to_running(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2, blox_command_id = NULL
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, provider_metadata = NULL, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?1, owner_pid = ?2, blox_command_id = NULL
              WHERE id = ?3 AND status = 'queued'",
             params![now_timestamp(), std::process::id(), id],
         )?;
@@ -389,6 +480,9 @@ impl Store {
              SET status = 'running',
                  error_message = NULL,
                  completion_reason = NULL,
+                 provider_metadata = NULL,
+                 rate_limit_resets_at = NULL,
+                 rate_limit_kind = NULL,
                  updated_at = ?1,
                  owner_pid = ?2,
                  agent_id = CASE
@@ -424,6 +518,35 @@ impl Store {
                AND completion_reason = 'app_quit'
                AND branch_id IS NOT NULL",
             params![now_timestamp(), id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Atomically claim a rate-limited paused session for auto-resume,
+    /// transitioning it to `Running` while replacing provider metadata.
+    ///
+    /// Auto rate-limit recovery uses this to preserve only its retry bookkeeping
+    /// across a retry attempt while dropping stale ACP error metadata that would
+    /// otherwise affect the next completion classification.
+    ///
+    /// The claim only matches rows still in the paused/rate-limited state, so a
+    /// manual resume (or any other transition) that lands between the
+    /// scheduler's scan and this update wins the race: this returns `false`
+    /// instead of yanking the session back to running.
+    pub fn transition_to_running_with_provider_metadata(
+        &self,
+        id: &str,
+        provider_metadata: Option<&serde_json::Value>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let provider_metadata_json = provider_metadata
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StoreError(format!("Failed to serialize provider metadata: {e}")))?;
+        let rows = conn.execute(
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, provider_metadata = ?1, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?2, owner_pid = ?3, blox_command_id = NULL
+             WHERE id = ?4 AND status = 'paused' AND completion_reason = 'rate_limited'",
+            params![provider_metadata_json, now_timestamp(), std::process::id(), id],
         )?;
         Ok(rows > 0)
     }
@@ -633,6 +756,23 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(children)
+    }
+
+    /// Sessions parked by a provider rate limit, oldest pause first.
+    ///
+    /// Backs the auto-recovery scheduler's scan.
+    pub fn get_rate_limited_paused_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions
+             WHERE status = 'paused' AND completion_reason = 'rate_limited'
+             ORDER BY updated_at ASC"
+        ))?;
+        let sessions = stmt
+            .query_map([], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
     }
 
     /// Store the ACP session ID returned by the agent after `new_session`.
@@ -1111,11 +1251,51 @@ impl Store {
         Ok(())
     }
 
+    /// Merge protocol/provider metadata into the session's JSON metadata bag.
+    ///
+    /// Object values are merged recursively so separate ACP events can fill in
+    /// `promptError`, `promptResponse`, and `usageUpdate` independently.
+    pub fn merge_session_provider_metadata(
+        &self,
+        id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let existing_json: Option<String> = conn
+            .query_row(
+                "SELECT provider_metadata FROM sessions WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+
+        let mut merged = existing_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        merge_json(&mut merged, metadata.clone());
+        let merged_json = serde_json::to_string(&merged)
+            .map_err(|e| StoreError(format!("Failed to serialize provider metadata: {e}")))?;
+
+        conn.execute(
+            "UPDATE sessions SET provider_metadata = ?1, updated_at = ?2 WHERE id = ?3",
+            params![merged_json, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         let status_str: String = row.get(2)?;
         let reason_str: Option<String> = row.get(7)?;
-        let pipeline_json: Option<String> = row.get(11)?;
-        let acp_config_selection_json: Option<String> = row.get(12)?;
+        let provider_metadata_json: Option<String> = row.get(8)?;
+        let provider_metadata = provider_metadata_json.as_deref().and_then(|s| {
+            serde_json::from_str(s)
+                .map_err(|e| log::warn!("Failed to deserialize provider metadata JSON: {e}"))
+                .ok()
+        });
+        let pipeline_json: Option<String> = row.get(14)?;
+        let acp_config_selection_json: Option<String> = row.get(15)?;
         let pipeline = pipeline_json.as_deref().and_then(|s| {
             serde_json::from_str(s)
                 .map_err(|e| log::warn!("Failed to deserialize pipeline JSON: {e}"))
@@ -1135,18 +1315,21 @@ impl Store {
             agent_id: row.get(5)?,
             error_message: row.get(6)?,
             completion_reason: reason_str.as_deref().and_then(CompletionReason::parse),
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
-            owner_pid: row.get(10)?,
+            provider_metadata,
+            rate_limit_resets_at: row.get(9)?,
+            rate_limit_kind: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+            owner_pid: row.get(13)?,
             pipeline,
             acp_config_selection,
-            acp_title: row.get(13)?,
-            branch_id: row.get(14)?,
-            completion_effects_at: row.get(15)?,
-            parent_session_id: row.get(16)?,
-            pre_head_sha: row.get(17)?,
-            blox_command_id: row.get(18)?,
-            started_by: row.get(19)?,
+            acp_title: row.get(16)?,
+            branch_id: row.get(17)?,
+            completion_effects_at: row.get(18)?,
+            parent_session_id: row.get(19)?,
+            pre_head_sha: row.get(20)?,
+            blox_command_id: row.get(21)?,
+            started_by: row.get(22)?,
         })
     }
 }
@@ -1158,4 +1341,22 @@ fn serialize_acp_config_selection(
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| StoreError(format!("Failed to serialize ACP config selection: {e}")))
+}
+
+fn merge_json(target: &mut serde_json::Value, patch: serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                match target.get_mut(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => {
+                        target.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, patch) => {
+            *target = patch;
+        }
+    }
 }

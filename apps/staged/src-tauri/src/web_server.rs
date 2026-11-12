@@ -1292,7 +1292,8 @@ pub(crate) async fn dispatch(
                 default_branch,
                 head_repo,
             )
-            .await?;
+            .await?
+            .repo;
             Ok(serde_json::to_value(repo).unwrap())
         }
         "update_project_repo_branch_name" => {
@@ -1701,6 +1702,8 @@ pub(crate) async fn dispatch(
                             completion_reason: None,
                             session_error_message: None,
                             pipeline_kind: None,
+                            rate_limit_resets_at: None,
+                            rate_limit_kind: None,
                             is_own_commit: false,
                         })
                     })

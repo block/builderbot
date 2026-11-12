@@ -51,6 +51,7 @@ pub(crate) use deferred::{
 };
 pub(crate) use git_pipeline::start_queued_git_pipeline_for_branch;
 pub use pipeline::BranchPipelineResponse;
+pub(crate) use pipeline::{branch_work_in_flight, BranchWorkInFlight};
 pub(crate) use pr_status::{
     clear_branch_pr_status_impl, refresh_pr_status_impl, refresh_project_pr_statuses,
     PrStatusEvent, PR_REFRESH_CONCURRENCY,

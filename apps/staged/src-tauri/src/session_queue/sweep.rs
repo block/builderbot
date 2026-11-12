@@ -123,6 +123,7 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
                 SessionStatus::Disconnected.as_str(),
                 None,
                 None,
+                None,
                 session.branch_id.clone(),
                 project_id,
             );
@@ -133,6 +134,7 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
                 "error",
                 Some(STRANDED_SESSION_MESSAGE.to_string()),
                 Some(&CompletionReason::Crashed),
+                None,
                 session.branch_id.clone(),
                 project_id,
             );

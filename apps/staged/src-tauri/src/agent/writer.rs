@@ -128,6 +128,32 @@ fn acp_event_role(metadata: &AcpMessageMetadata) -> MessageRole {
     }
 }
 
+/// Session-level provider metadata fragment for an ACP event, if the event
+/// carries state that recovery logic reads back after the run ends (rate-limit
+/// status from usage updates, structured prompt errors, stop reasons).
+fn provider_metadata_for_acp_event(metadata: &AcpEventMetadata) -> Option<serde_json::Value> {
+    let key = match metadata.event_kind.as_deref() {
+        Some("usage_update") => "usageUpdate",
+        Some("prompt_response") => "promptResponse",
+        Some("prompt_error") => "promptError",
+        _ => return None,
+    };
+    let content = metadata.content.clone()?;
+    // Usage updates stream for the whole life of a run, but recovery only ever
+    // reads the rate-limit fragment back out of the session row. Skip the
+    // per-tick row write unless that fragment is present; prompt errors and
+    // responses are once-per-turn and always persisted.
+    if key == "usageUpdate"
+        && content
+            .get("_meta")
+            .and_then(|meta| meta.get("_claude/rateLimit"))
+            .is_none()
+    {
+        return None;
+    }
+    Some(serde_json::json!({ "acp": { key: content } }))
+}
+
 impl MessageWriter {
     pub fn new(session_id: String, store: Arc<Store>) -> Self {
         Self {
@@ -620,6 +646,14 @@ impl acp_client::MessageWriter for MessageWriter {
     }
 
     async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
+        if let Some(provider_metadata) = provider_metadata_for_acp_event(&metadata) {
+            if let Err(e) = self
+                .store
+                .merge_session_provider_metadata(&self.session_id, &provider_metadata)
+            {
+                log::warn!("Failed to persist provider metadata: {e}");
+            }
+        }
         let metadata = acp_event_metadata(metadata);
         let role = acp_event_role(&metadata);
         if let Err(e) =
@@ -1435,5 +1469,48 @@ mod tests {
 
         let session = store.get_session(&session_id).unwrap().unwrap();
         assert_eq!(session.acp_title.as_deref(), Some("Earlier title"));
+    }
+
+    fn acp_event(event_kind: &str, content: serde_json::Value) -> acp_client::AcpEventMetadata {
+        acp_client::AcpEventMetadata {
+            event_kind: Some(event_kind.to_string()),
+            content: Some(content),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn usage_update_without_rate_limit_fragment_skips_session_row_write() {
+        let metadata = acp_event(
+            "usage_update",
+            serde_json::json!({ "used": 123, "size": 200000 }),
+        );
+        assert_eq!(super::provider_metadata_for_acp_event(&metadata), None);
+    }
+
+    #[test]
+    fn usage_update_with_rate_limit_fragment_persists_provider_metadata() {
+        let content = serde_json::json!({
+            "used": 123,
+            "size": 200000,
+            "_meta": { "_claude/rateLimit": { "status": "rejected" } }
+        });
+        let metadata = acp_event("usage_update", content.clone());
+        assert_eq!(
+            super::provider_metadata_for_acp_event(&metadata),
+            Some(serde_json::json!({ "acp": { "usageUpdate": content } }))
+        );
+    }
+
+    #[test]
+    fn prompt_events_persist_provider_metadata_without_a_rate_limit_fragment() {
+        let error = acp_event("prompt_error", serde_json::json!({ "code": -32603 }));
+        assert!(super::provider_metadata_for_acp_event(&error).is_some());
+
+        let response = acp_event(
+            "prompt_response",
+            serde_json::json!({ "stopReason": "end" }),
+        );
+        assert!(super::provider_metadata_for_acp_event(&response).is_some());
     }
 }

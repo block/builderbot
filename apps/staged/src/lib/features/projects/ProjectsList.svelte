@@ -44,7 +44,9 @@
   import { boardViewPrefs, setProjectsViewMode } from '../board/boardViewPrefs.svelte';
 
   import {
+    captureGridStickyProject,
     finishProjectsListRestore,
+    gridStickyProjectId,
     projectsListViewState,
     setProjectsListScrollTop,
   } from './projectsListViewState.svelte';
@@ -115,42 +117,22 @@
   const projectCardElements = new Map<string, HTMLElement>();
 
   // The card you just came back from stays in the grid even when the active
-  // filters no longer match it: visiting a project marks it read, so with
-  // Unread active the card returnTargetProjectId points at — the one the
-  // scroll restore is aiming for — would otherwise be gone on arrival. Same
-  // exception the sidebar makes for the selected project. Captured on each
-  // visit — at mount, then before each render that brings the layer back —
-  // but only while a restore is actually pending: returnTargetProjectId is
-  // never cleared, so an ordinary visit — landing → settings → back, where
-  // requestProjectsListRestore(null) early-returns — would otherwise pin a
-  // project from a previous visit. restorePending is still true here; the
-  // effect that finishes the restore runs after.
-  function pendingStickyProjectId(): string | null {
-    return projectsListViewState.restorePending
-      ? projectsListViewState.returnTargetProjectId
-      : null;
-  }
-  let stickyProjectId = $state(pendingStickyProjectId());
-  // The exception lasts only until the first filter change, so a deliberate
-  // re-filter hides the card. The store replaces the Set on every change, so
-  // identity is the signal — derived rather than tracked in an effect, which
-  // would paint the stale card once under the new filters before removing it.
-  let filtersAtVisit = $state(projectFiltersStore.activeFilters);
+  // filters no longer match it, until the filters next change. The rule and
+  // its state live in projectsListViewState (captureGridStickyProject,
+  // gridStickyProjectId), where the ⌘K palette reads the same card. Captured
+  // on each visit: at mount, then before each render that brings the layer
+  // back.
+  captureGridStickyProject(projectFiltersStore.activeFilters);
   $effect.pre(() => {
-    // The initialisers capture at mount; this re-captures per activation. That
+    // The line above captures at mount; this re-captures per activation. That
     // includes the mount when the layer is already activated — a cold start
     // into a project, then the first goHome, flips homeLayerRetained after the
-    // layer counted that activation — where it repeats the initialisers' values.
+    // layer counted that activation — where it repeats the mount's values.
     if (layer.activations === 0) return;
-    untrack(() => {
-      stickyProjectId = pendingStickyProjectId();
-      filtersAtVisit = projectFiltersStore.activeFilters;
-    });
+    untrack(() => captureGridStickyProject(projectFiltersStore.activeFilters));
   });
 
-  let effectiveStickyId = $derived(
-    projectFiltersStore.activeFilters === filtersAtVisit ? stickyProjectId : null
-  );
+  let effectiveStickyId = $derived(gridStickyProjectId(projectFiltersStore.activeFilters));
 
   // The query the grid applies: the shared one, followed key by key only
   // while the grid is on screen. Covered by a project, the query changing is

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { failedArtifactSubtitle } from './sessionFailureCopy';
+import { failedArtifactSubtitle, formatRateLimitResetTime } from './sessionFailureCopy';
 import {
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_NO_WORKSPACE,
@@ -64,6 +64,21 @@ describe('failedArtifactSubtitle', () => {
   it('falls back to the reason for any other message', () => {
     expect(failedArtifactSubtitle('crashed', 'commit', 'Blox process exited with code 1')).toBe(
       'Session crashed — no commit created'
+    );
+  });
+
+  it('explains API limit failures', () => {
+    expect(failedArtifactSubtitle('rate_limited', 'review')).toBe(
+      'Paused by API limit — no comments yet'
+    );
+  });
+
+  it('includes API limit reset time when available', () => {
+    const resetTime = formatRateLimitResetTime('2026-06-24T15:45:00Z');
+
+    expect(resetTime).toBeTruthy();
+    expect(failedArtifactSubtitle('rate_limited', 'commit', null, '2026-06-24T15:45:00Z')).toBe(
+      `Paused by API limit — resets around ${resetTime}`
     );
   });
 });

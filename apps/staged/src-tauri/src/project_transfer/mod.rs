@@ -58,6 +58,8 @@ pub use preflight::{
 pub(crate) use preflight_scan::{
     cancel_project_transfer_preflight_impl, start_project_transfer_preflight_impl,
 };
+#[cfg(test)]
+pub(crate) use registry::begin;
 pub use registry::{
     ensure_branch_not_transferring, ensure_project_not_transferring,
     ensure_workspace_not_transferring, is_branch_transferring, TRANSFER_IN_PROGRESS,

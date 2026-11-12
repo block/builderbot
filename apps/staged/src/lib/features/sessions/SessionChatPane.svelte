@@ -33,6 +33,7 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { toast } from 'svelte-sonner';
   import { slide } from 'svelte/transition';
   import X from '@lucide/svelte/icons/x';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
@@ -225,6 +226,12 @@
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { getNoteFollowupLabel, noteActivityLabel, type LinkedNoteContext } from './noteFreshness';
   import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
+  import {
+    restoreUnstartedAttachments,
+    restoreUnstartedDraft,
+    unstartedDraftMessage,
+    unstartedDraftToast,
+  } from './unstartedDraft';
   import NoteActivityCard from './NoteActivityCard.svelte';
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
@@ -263,10 +270,12 @@
     /**
      * Start a new session from the composer's draft instead of sending it
      * (the note dialog's "New note" / "New commit"). Resolves whether the
-     * session started. The pane takes the draft out of the box before
-     * calling, as a send does, and puts it back on `false`; the host may
-     * close the dialog (parking this pane) as soon as it is called. When
-     * absent the composer does not offer the actions.
+     * session started; on `false` the host has reported why. The pane takes
+     * the draft out of the box before calling, as a send does, and on
+     * `false` (or a throw) puts it back above anything typed since and says
+     * so, by toast when it is no longer on screen; the host may close the
+     * dialog (parking this pane) as soon as it is called. When absent the
+     * composer does not offer the actions.
      */
     onStartNewSession?: (
       kind: ComposerNewSessionKind,
@@ -398,6 +407,11 @@
   // otherwise a keystroke typed during the load window is never scheduled.
   let loadedDraftSessionId = $state<string | null>(null);
   let draftLoadGeneration = 0;
+  // The newest draft load (it never rejects), for `putBackUnstartedDraft` to
+  // wait out before it decides whether the box or the store holds the draft.
+  let replyDraftLoad: Promise<void> = Promise.resolve();
+  // Unmounted (a transient or evicted pane): nothing will show this box again.
+  let destroyed = false;
   // One-shot: set when a failed load re-opens the save gate while the composer
   // may still hold the previously shown session's text; the save effect skips
   // exactly that run so inherited text isn't filed under this session's key.
@@ -509,8 +523,15 @@
     }
   });
   let canSendLive = $derived(isLive && liveDelivery.supported);
+  // The one send control: `handleSend` acts on it and `ChatComposer` draws
+  // it, so what the button shows and what pressing it does cannot diverge.
   let sendControl = $derived(
-    composerSendControl({ isLive, canSendLive, mode: preferences.composerSendMode })
+    composerSendControl({
+      isLive,
+      canSendLive,
+      mode: preferences.composerSendMode,
+      canStartNewSession: onStartNewSession !== undefined,
+    })
   );
   // Holding is a sub-state of running, so the session stays live and only the
   // activity row changes: the wait plus its live task count, and a Stop that
@@ -884,6 +905,7 @@
 
   onDestroy(() => {
     closed = true;
+    destroyed = true;
     // A restore still waiting on its frame has nothing to scroll once the pane
     // is gone; cancel it here rather than rely on the pool parking first.
     deferredRestore.take();
@@ -971,7 +993,7 @@
     const inputTextWhenLoadStarted = untrack(() => inputText);
     suppressNextReplySave = false;
     loadedDraftSessionId = null;
-    void loadReplyDraft(id, generation, inputTextWhenLoadStarted);
+    replyDraftLoad = loadReplyDraft(id, generation, inputTextWhenLoadStarted);
   });
 
   $effect(() => {
@@ -1753,10 +1775,8 @@
    * "New note" / "New commit". The draft leaves the box and the store first,
    * as in `handleSend`, because the host closes the dialog as it starts the
    * session and this pane is parked with whatever the box still holds. A
-   * start that failed (the host reports it) puts the draft back. By then the
-   * pane is usually parked, where the autosave effect does not run and the
-   * next open reloads the box from the store, so the text is written there
-   * directly.
+   * start that failed (the host reports it, or throws) puts the draft back:
+   * see `putBackUnstartedDraft`.
    */
   async function handleStartNewSession(kind: ComposerNewSessionKind) {
     const start = onStartNewSession;
@@ -1766,8 +1786,7 @@
     const text = inputText.trim();
     if (!text) return;
     const id = sessionId;
-    const draftKey = replyDraftKey(id);
-    void replyDraftWriter.clearNow(draftKey);
+    void replyDraftWriter.clearNow(replyDraftKey(id));
     inputText = '';
     const imageIds = [...replyImageIds];
     replyImageIds = [];
@@ -1778,20 +1797,100 @@
     sending = true;
     beginComposerAction();
     let started = false;
+    let reason: string | null = null;
     try {
       started = await start(kind, { text, imageIds });
     } catch (e) {
-      sendError = `Failed to start: ${e instanceof Error ? e.message : String(e)}`;
+      reason = e instanceof Error ? e.message : String(e);
     } finally {
       sending = false;
     }
     if (started) return;
-    void replyDraftWriter.saveNow(draftKey, text);
-    // The box is this session's only while the pane still shows it.
-    if (sessionId !== id) return;
-    inputText = text;
-    replyImageIds = imageIds;
-    tick().then(() => autoResize());
+    await putBackUnstartedDraft(id, text, imageIds, reason);
+  }
+
+  /**
+   * Put back a draft whose new session did not start, and say so.
+   *
+   * The start can take a while and the dialog is closed while it runs, so
+   * the user may have reopened the note and typed something else (the box
+   * stays editable while a send is in flight). The returned message never
+   * replaces that text: it goes back above it (`restoreUnstartedDraft`), in
+   * whichever of the two places holds the draft right now.
+   *
+   * - A pane on screen with its draft loaded holds the newest text in its
+   *   box, so the join happens there, in one synchronous step, and is saved.
+   * - Otherwise the store does: a parked pane's autosave does not run and
+   *   the next open reloads the box from the store. Pending writes are
+   *   flushed, the stored text read and the joined text written back. The
+   *   write is queued in the same step as the last "still not on screen"
+   *   check, so a reopen after it loads the joined text.
+   * - A pane reopened in between is still loading its draft and does not yet
+   *   know what its box should hold; the load is waited out first.
+   *
+   * The failure is reported on the composer's own line, which is still
+   * there when the note's chat is opened again, and by a toast when the pane
+   * is not on screen to show it.
+   */
+  async function putBackUnstartedDraft(
+    id: string,
+    text: string,
+    imageIds: string[],
+    reason: string | null
+  ) {
+    const draftKey = replyDraftKey(id);
+    const onScreen = () => !destroyed && active && sessionId === id;
+    for (;;) {
+      // Bounded so a load that somehow never opens the gate cannot spin here
+      // on microtasks; the box is then used as it stands.
+      for (let waits = 0; waits < 8 && onScreen() && loadedDraftSessionId !== id; waits++) {
+        // The load effect for this open may not have run yet.
+        await tick();
+        await replyDraftLoad;
+      }
+      if (onScreen()) {
+        const restored = restoreUnstartedDraft(text, inputText);
+        inputText = restored.text;
+        replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
+        void replyDraftWriter.saveNow(draftKey, restored.text);
+        sendError = unstartedDraftMessage({ reason, keptNewerText: restored.keptNewerText });
+        tick().then(() => autoResize());
+        return;
+      }
+
+      // This pane's own box, parked: what its writer last sent to the store.
+      const parkedBox = !destroyed && sessionId === id;
+      // Every open starts a draft load, so this also tells an open that came
+      // and went again while the store was being read.
+      const loadsBeforeRead = draftLoadGeneration;
+      let stored: string;
+      try {
+        await replyDraftWriter.flush();
+        stored = (await loadDraft(draftKey)) ?? '';
+      } catch (err) {
+        console.error('[SessionChatPane] Failed to read the reply draft to restore into:', err);
+        stored = parkedBox ? inputText : '';
+      }
+      // Reopened while the store was read: the box is the place after all,
+      // or, if it was closed again too, the store may hold newer text now.
+      if (onScreen() || draftLoadGeneration !== loadsBeforeRead) continue;
+      const restored = restoreUnstartedDraft(text, stored);
+      void replyDraftWriter.saveNow(draftKey, restored.text);
+      const notice = { reason, keptNewerText: restored.keptNewerText };
+      if (!destroyed && sessionId === id) {
+        // Kept with the parked pane for its next open. The box itself is
+        // reloaded from the store then; attachments are not stored.
+        replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
+        sendError = unstartedDraftMessage(notice);
+      }
+      // A host that resolved `false` has reported why itself (the launch
+      // helper's error toast); a throw is reported only here. Either stays
+      // until dismissed: it says where the message went.
+      const { title, description } = unstartedDraftToast(notice);
+      if (reason === null) toast.info(title, { description, duration: Infinity });
+      else toast.error(title, { description, duration: Infinity });
+      return;
+    }
   }
 
   async function handleNoteFollowupClick() {
@@ -3507,7 +3606,7 @@
       <ChatComposer
         bind:textareaEl={inputEl}
         bind:value={inputText}
-        placeholder={sendControl.placeholder}
+        {sendControl}
         {hashtagItems}
         onkeydown={handleInputKeydown}
         oninput={handleInput}
@@ -3518,7 +3617,6 @@
         onRemoveImage={removeReplyImage}
         {attachError}
         {isLive}
-        {canSendLive}
         sendMode={preferences.composerSendMode}
         onSendModeChange={setComposerSendMode}
         {sending}

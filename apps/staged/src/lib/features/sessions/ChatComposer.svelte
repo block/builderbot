@@ -7,11 +7,12 @@
   chat pane, so the composer looks and behaves identically everywhere: the
   text input gets its own full-width row with the controls beneath it.
 
-  The submit control follows `composerSendControl`: a plain "Send" on an idle
+  The submit control is the `sendControl` the pane derived with
+  `composerSendControl` and acts on itself: a plain "Send" on an idle
   session, a plain "Queue" on a running one — and, when the backend reports
-  the running session can take a message now (`canSendLive`), a split button
-  whose primary segment performs the remembered mode (Queue / Send) and whose
-  dropdown switches it. While the pane has no session row to submit to
+  the running session can take a message now, a split button whose primary
+  segment performs the remembered mode (Queue / Send) and whose dropdown
+  switches it. While the pane has no session row to submit to
   (`sessionBlock`: still loading, or the load settled without one) the
   control is disabled with a title saying which, but the draft can be typed.
 
@@ -54,11 +55,11 @@
   import {
     COMPOSER_NEW_SESSION_OPTIONS,
     COMPOSER_SEND_MODE_OPTIONS,
-    composerSendControl,
     composerSendMenuTitle,
     composerSubmitBlock,
     composerSubmitBlockTitle,
     type ComposerNewSessionKind,
+    type ComposerSendControl,
     type ComposerSendMode,
     type ComposerSessionBlock,
   } from './composerSendControl';
@@ -75,7 +76,13 @@
     value: string;
     /** The contenteditable input element (for focus/resize from the parent). */
     textareaEl?: HTMLElement | null;
-    placeholder?: string;
+    /**
+     * What the submit control shows (label, title, placeholder, whether it
+     * is split and what its dropdown lists), as derived by the pane with
+     * `composerSendControl`. The pane acts on the same object, so this
+     * component never derives one of its own.
+     */
+    sendControl: ComposerSendControl;
     hashtagItems?: HashtagItem[];
     onkeydown?: (e: KeyboardEvent) => void;
     oninput?: (e: Event) => void;
@@ -89,14 +96,9 @@
     onRemoveImage?: (imageId: string) => void;
     /** Why the last attachment was rejected, shown until the next attempt. */
     attachError?: string | null;
-    /** Session is running — attach/remove disabled, send queues instead. */
+    /** Session is running — attach/remove disabled. */
     isLive?: boolean;
-    /**
-     * The running session can take a message now (backend-reported), so the
-     * submit control offers "Send" beside "Queue". Ignored unless `isLive`.
-     */
-    canSendLive?: boolean;
-    /** The remembered submit mode for live-capable sessions. */
+    /** The remembered submit mode, checked in the dropdown's mode switch. */
     sendMode?: ComposerSendMode;
     /** The user picked a mode from the split button's menu. */
     onSendModeChange?: (mode: ComposerSendMode) => void;
@@ -116,9 +118,9 @@
     sendError?: string | null;
     onSend?: () => void;
     /**
-     * Start a new session of `kind` from the draft instead of sending it.
-     * When set, the dropdown lists the new-session actions (and the button
-     * is split in every state to carry them).
+     * Start a new session of `kind` from the draft instead of sending it:
+     * what the dropdown's new-session actions call. Whether they are listed
+     * is `sendControl.newSessionMenu`.
      */
     onStartNewSession?: (kind: ComposerNewSessionKind) => void;
     /** The host cannot start a session right now: the actions show disabled. */
@@ -130,7 +132,7 @@
   let {
     value = $bindable(''),
     textareaEl = $bindable(null),
-    placeholder = '',
+    sendControl,
     hashtagItems = [],
     onkeydown,
     oninput,
@@ -141,7 +143,6 @@
     onRemoveImage,
     attachError = null,
     isLive = false,
-    canSendLive = false,
     sendMode = 'queue',
     onSendModeChange,
     sending = false,
@@ -155,16 +156,12 @@
 
   let fileInputEl = $state<HTMLInputElement>();
 
-  let canStartNewSession = $derived(onStartNewSession !== undefined);
-  let sendControl = $derived(
-    composerSendControl({ isLive, canSendLive, mode: sendMode, canStartNewSession })
-  );
   let submitBlock = $derived(
     composerSubmitBlock({ sessionBlock, sending, hasText: value.trim().length > 0 })
   );
   let sendDisabled = $derived(submitBlock !== null);
   let sendTitle = $derived(composerSubmitBlockTitle(submitBlock) ?? sendControl.title);
-  let sendMenuTitle = $derived(composerSendMenuTitle(canStartNewSession));
+  let sendMenuTitle = $derived(composerSendMenuTitle(sendControl.newSessionMenu));
 
   function handleSendModeChange(value: string) {
     if (value === 'queue' || value === 'send') onSendModeChange?.(value);
@@ -265,7 +262,7 @@
     bind:composing
     oncompositionend={handleCompositionEnd}
     class="message-input"
-    {placeholder}
+    placeholder={sendControl.placeholder}
     rows={1}
     {onkeydown}
     {oninput}
@@ -335,7 +332,7 @@
                 {/each}
               </DropdownMenu.RadioGroup>
             {/if}
-            {#if canStartNewSession}
+            {#if sendControl.newSessionMenu}
               {#if sendControl.modeMenu}
                 <DropdownMenu.Separator />
               {/if}

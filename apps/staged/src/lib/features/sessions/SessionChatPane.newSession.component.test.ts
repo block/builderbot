@@ -7,12 +7,16 @@ import type { ComposerNewSessionDraft, ComposerNewSessionKind } from './composer
  * The composer's "New note" / "New commit": the pane hands its draft to the
  * host to start a new session with, instead of sending it into its own
  * session. The draft leaves the box and the store like a sent one, and comes
- * back when the host reports the start failed.
+ * back when the host reports the start failed: above anything typed since,
+ * in the box when the pane is on screen and in the store when it is not,
+ * with the failure said on the composer's line and, for a closed dialog, by
+ * a toast.
  */
 
 const SESSION_ID = 'note-session';
 
-const { writer, loadDraftMock, resumeSessionMock } = vi.hoisted(() => ({
+const { writer, loadDraftMock, resumeSessionMock, toastMock } = vi.hoisted(() => ({
+  toastMock: { error: vi.fn(), info: vi.fn() },
   writer: {
     scheduleSave: vi.fn(),
     saveNow: vi.fn(async () => {}),
@@ -39,11 +43,16 @@ vi.mock(
 );
 vi.mock('../branches/dragDrop', () => ({ subscribeDragDrop: () => () => {} }));
 vi.mock('../agents/agent.svelte', () => ({ agentState: { providers: [] } }));
-vi.mock('../settings/preferences.svelte', () => ({ setAcpConfigPref: vi.fn() }));
+vi.mock('../settings/preferences.svelte', () => ({
+  // Read by the send control the pane hands the composer stub.
+  preferences: { composerSendMode: 'queue' },
+  setAcpConfigPref: vi.fn(),
+}));
 vi.mock('../../transport', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../transport')>()),
   listenToEvent: () => () => {},
 }));
+vi.mock('svelte-sonner', () => ({ toast: toastMock }));
 vi.mock('../../shared/draftCache', () => ({
   createDraftWriteScheduler: () => writer,
   loadDraft: (key: string) => loadDraftMock(key),
@@ -100,6 +109,12 @@ const composerInput = () => {
   return input;
 };
 
+/** What the pane has put in the box (the stub mirrors the bound value). */
+const boxText = () => composerInput().dataset.value;
+
+const sendErrorLine = () =>
+  document.querySelector('[data-testid="composer-send-error"]')?.textContent;
+
 function typeInComposer(text: string) {
   const input = composerInput();
   input.textContent = text;
@@ -129,6 +144,31 @@ function deferredStarter() {
   return { starter, settleStart: (started: boolean) => settleStart(started) };
 }
 
+/** Makes every draft read from here on wait until the test settles it. */
+function deferDraftLoads() {
+  const settlers: Array<(draft: string | null) => void> = [];
+  loadDraftMock.mockImplementation(
+    () =>
+      new Promise<string | null>((resolve) => {
+        settlers.push(resolve);
+      })
+  );
+  return {
+    pending: () => settlers.length,
+    /** Settle the oldest read still waiting. */
+    settleNext: (draft: string | null) => {
+      const settleLoad = settlers.shift();
+      if (!settleLoad) throw new Error('no draft read is waiting');
+      settleLoad(draft);
+    },
+  };
+}
+
+const NOT_STARTED = 'The new session did not start. Your message is back in the box.';
+const NOT_STARTED_ABOVE =
+  'The new session did not start. Your message is back in the box, above what you typed since.';
+const TOAST_TITLE = 'The new session did not start';
+
 describe('SessionChatPane new session from the draft', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
@@ -136,6 +176,8 @@ describe('SessionChatPane new session from the draft', () => {
     loadDraftMock.mockReset();
     loadDraftMock.mockImplementation(async () => null);
     resumeSessionMock.mockReset();
+    toastMock.error.mockClear();
+    toastMock.info.mockClear();
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -148,6 +190,19 @@ describe('SessionChatPane new session from the draft', () => {
     await mountPane({});
     expect(newSessionButton('note')).toBeNull();
     expect(newSessionButton('commit')).toBeNull();
+  });
+
+  it('hands the composer one control, split exactly when the host can start a session', async () => {
+    // The pane derives the control it acts on with the same inputs the
+    // composer draws from, so an idle session's button is split only here.
+    await mountPane({});
+    expect(composerInput().dataset.sendSplit).toBe('false');
+    if (pane) unmount(pane);
+    pane = null;
+    document.body.innerHTML = '';
+
+    await mountPane({ onStartNewSession: vi.fn<Starter>(async () => true) });
+    expect(composerInput().dataset.sendSplit).toBe('true');
   });
 
   it('hands the trimmed draft to the host and clears it, without sending to its own session', async () => {
@@ -248,36 +303,32 @@ describe('SessionChatPane new session from the draft', () => {
 
     choose('note');
     await settle();
+    expect(boxText()).toBe('');
     writer.scheduleSave.mockClear();
     settleStart(false);
     await settle();
 
-    // Written straight to the store: a parked pane's autosave does not run,
-    // and the next open reloads the box from there.
+    // Written straight to the store as well as through the box's autosave.
     expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me');
-    // And back in the box for a pane that is still (or again) on screen.
+    expect(boxText()).toBe('Keep me');
     expect(writer.scheduleSave).toHaveBeenLastCalledWith(DRAFT_KEY, 'Keep me');
   });
 
-  it('restores the draft to the store when the pane was parked meanwhile', async () => {
-    const { starter, settleStart } = deferredStarter();
-    const props = await mountPane({ onStartNewSession: starter });
+  it('says on the composer that the session did not start and the message is back', async () => {
+    const starter = vi.fn<Starter>(async () => false);
+    await mountPane({ onStartNewSession: starter });
     typeInComposer('Keep me');
 
     choose('note');
     await settle();
-    // The host closed the dialog as it started the session.
-    props.active = false;
-    flushSync();
-    writer.scheduleSave.mockClear();
-    settleStart(false);
-    await settle();
 
-    expect(writer.scheduleSave).not.toHaveBeenCalled();
-    expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me');
+    expect(sendErrorLine()).toBe(NOT_STARTED);
+    // The pane is on screen, so its own line says it: no toast on top.
+    expect(toastMock.info).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
   });
 
-  it('reports a starter that threw and keeps the draft', async () => {
+  it('reports a starter that threw, with its reason, and keeps the draft', async () => {
     const starter = vi.fn<Starter>(async () => {
       throw new Error('boom');
     });
@@ -287,9 +338,318 @@ describe('SessionChatPane new session from the draft', () => {
     choose('commit');
     await settle();
 
-    expect(document.querySelector('[data-testid="composer-send-error"]')?.textContent).toBe(
-      'Failed to start: boom'
+    expect(sendErrorLine()).toBe(
+      'The new session did not start (boom). Your message is back in the box.'
     );
+    expect(boxText()).toBe('Keep me');
     expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me');
+  });
+
+  describe('when something was typed after the draft was handed over', () => {
+    it('puts the message back above text typed while the start was in flight', async () => {
+      const { starter, settleStart } = deferredStarter();
+      await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      // The box stays editable while the start is in flight.
+      typeInComposer('typed since');
+      await settle();
+      settleStart(false);
+      await settle();
+
+      expect(boxText()).toBe('Keep me\n\ntyped since');
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me\n\ntyped since');
+      expect(writer.scheduleSave).toHaveBeenLastCalledWith(DRAFT_KEY, 'Keep me\n\ntyped since');
+      expect(sendErrorLine()).toBe(NOT_STARTED_ABOVE);
+      expect(toastMock.info).not.toHaveBeenCalled();
+    });
+
+    it('puts the message back above text typed after the note was reopened', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      // The host closed the dialog; the user opens the note again and types.
+      props.active = false;
+      flushSync();
+      props.active = true;
+      flushSync();
+      await settle();
+      typeInComposer('typed since');
+      await settle();
+      settleStart(false);
+      await settle();
+
+      expect(boxText()).toBe('Keep me\n\ntyped since');
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me\n\ntyped since');
+      expect(sendErrorLine()).toBe(NOT_STARTED_ABOVE);
+    });
+
+    it('joins in the store when the pane is parked again, after flushing its pending write', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      // Closed by the host, reopened, typed in, and closed again: the newer
+      // text is in the store (or still in the writer's debounce) by now.
+      props.active = false;
+      flushSync();
+      loadDraftMock.mockImplementation(async () => 'typed after closing');
+      writer.flush.mockClear();
+      writer.scheduleSave.mockClear();
+      settleStart(false);
+      await settle();
+
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me\n\ntyped after closing');
+      // The read saw the writer's pending keystrokes, not a stale value.
+      expect(writer.flush).toHaveBeenCalled();
+      expect(writer.flush.mock.invocationCallOrder[0]).toBeLessThan(
+        loadDraftMock.mock.invocationCallOrder.at(-1)!
+      );
+      expect(writer.scheduleSave).not.toHaveBeenCalled();
+    });
+
+    it('waits out a draft load still in flight, then joins in the box', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      props.active = false;
+      flushSync();
+      // Reopened: the box does not yet hold what the store has for it.
+      const loads = deferDraftLoads();
+      props.active = true;
+      flushSync();
+      await settle();
+      expect(loads.pending()).toBe(1);
+      settleStart(false);
+      await settle();
+      // Neither place is written while it is unknown which holds the draft.
+      expect(writer.saveNow).not.toHaveBeenCalled();
+      expect(boxText()).toBe('');
+
+      loads.settleNext('typed in an earlier open');
+      await settle();
+
+      expect(boxText()).toBe('Keep me\n\ntyped in an earlier open');
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me\n\ntyped in an earlier open');
+      expect(sendErrorLine()).toBe(NOT_STARTED_ABOVE);
+      expect(toastMock.info).not.toHaveBeenCalled();
+    });
+
+    it('joins in the box when the note is reopened while the store is being read', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      props.active = false;
+      flushSync();
+      const loads = deferDraftLoads();
+      settleStart(false);
+      await settle();
+      // The parked pane is reading the store to join into it...
+      expect(loads.pending()).toBe(1);
+      // ...when the note is reopened, which starts the box's own load.
+      props.active = true;
+      flushSync();
+      await settle();
+      expect(loads.pending()).toBe(2);
+
+      loads.settleNext('typed earlier');
+      await settle();
+      // The store is no longer the place: nothing is written to it blind.
+      expect(writer.saveNow).not.toHaveBeenCalled();
+      loads.settleNext('typed earlier');
+      await settle();
+
+      expect(boxText()).toBe('Keep me\n\ntyped earlier');
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me\n\ntyped earlier');
+      expect(toastMock.info).not.toHaveBeenCalled();
+    });
+
+    it('reads the store again when the note was opened and closed during the read', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      props.active = false;
+      flushSync();
+      const loads = deferDraftLoads();
+      settleStart(false);
+      await settle();
+      expect(loads.pending()).toBe(1);
+      // Opened, typed in and closed again before that read came back.
+      props.active = true;
+      flushSync();
+      await settle();
+      props.active = false;
+      flushSync();
+      await settle();
+
+      // The first read predates what was typed: it is not written from.
+      loads.settleNext(null);
+      await settle();
+      expect(writer.saveNow).not.toHaveBeenCalled();
+      // The open's own load, abandoned when the pane was parked again.
+      loads.settleNext(null);
+      await settle();
+      expect(writer.saveNow).not.toHaveBeenCalled();
+      loads.settleNext('typed in between');
+      await settle();
+
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me\n\ntyped in between');
+    });
+
+    it("falls back to the parked box's text when the store cannot be read", async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      typeInComposer('typed since');
+      await settle();
+      props.active = false;
+      flushSync();
+      loadDraftMock.mockImplementation(async () => {
+        throw new Error('store unavailable');
+      });
+      settleStart(false);
+      await settle();
+
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me\n\ntyped since');
+    });
+  });
+
+  describe('when the dialog is closed by the time the start fails', () => {
+    it('restores the draft to the store, not the parked box', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      // The host closed the dialog as it started the session.
+      props.active = false;
+      flushSync();
+      writer.scheduleSave.mockClear();
+      settleStart(false);
+      await settle();
+
+      // A parked pane's autosave does not run, and the next open reloads the
+      // box from the store.
+      expect(writer.scheduleSave).not.toHaveBeenCalled();
+      expect(writer.saveNow).toHaveBeenCalledTimes(1);
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me');
+    });
+
+    it("toasts that the session did not start and the message is back in the note's chat", async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      props.active = false;
+      flushSync();
+      settleStart(false);
+      await settle();
+
+      // The host's launch helper has already toasted why; this one says
+      // where the message went, and stays until dismissed.
+      expect(toastMock.error).not.toHaveBeenCalled();
+      expect(toastMock.info).toHaveBeenCalledTimes(1);
+      expect(toastMock.info).toHaveBeenCalledWith(TOAST_TITLE, {
+        description: "Your message is back in the note's chat box.",
+        duration: Infinity,
+      });
+    });
+
+    it('says in the toast when the message went back above newer text', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      props.active = false;
+      flushSync();
+      loadDraftMock.mockImplementation(async () => 'typed after closing');
+      settleStart(false);
+      await settle();
+
+      expect(toastMock.info).toHaveBeenCalledWith(TOAST_TITLE, {
+        description: "Your message is back in the note's chat box, above what you typed since.",
+        duration: Infinity,
+      });
+    });
+
+    it('toasts a starter that threw as an error, with its reason', async () => {
+      let failStart!: (error: Error) => void;
+      const starter = vi.fn<Starter>(
+        () =>
+          new Promise<boolean>((_resolve, reject) => {
+            failStart = reject;
+          })
+      );
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('commit');
+      await settle();
+      props.active = false;
+      flushSync();
+      failStart(new Error('boom'));
+      await settle();
+
+      expect(toastMock.info).not.toHaveBeenCalled();
+      expect(toastMock.error).toHaveBeenCalledTimes(1);
+      expect(toastMock.error).toHaveBeenCalledWith(TOAST_TITLE, {
+        description: "boom. Your message is back in the note's chat box.",
+        duration: Infinity,
+      });
+      expect(writer.saveNow).toHaveBeenCalledWith(DRAFT_KEY, 'Keep me');
+    });
+
+    it('still shows the failure beside the restored message when the note is reopened', async () => {
+      const { starter, settleStart } = deferredStarter();
+      const props = await mountPane({ onStartNewSession: starter });
+      typeInComposer('Keep me');
+
+      choose('note');
+      await settle();
+      props.active = false;
+      flushSync();
+      settleStart(false);
+      await settle();
+      // The store now holds what was written back.
+      const restored = writer.saveNow.mock.calls.at(-1) as unknown as [string, string];
+      loadDraftMock.mockImplementation(async () => restored[1]);
+      props.active = true;
+      flushSync();
+      await settle();
+
+      expect(boxText()).toBe('Keep me');
+      expect(sendErrorLine()).toBe(NOT_STARTED);
+    });
   });
 });

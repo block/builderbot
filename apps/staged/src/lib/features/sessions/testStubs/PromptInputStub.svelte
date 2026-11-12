@@ -2,20 +2,24 @@
   Test stub for HashtagInput: a bare contenteditable that mirrors the two-way
   `value` binding, so component tests can simulate typing without pulling in
   the hashtag editor's dependencies. Stands in for ChatComposer too, so it
-  echoes the composer's `sendError` where tests can read it, and renders a
-  button per new-session action when the pane offers them.
+  echoes the composer's `sendError` where tests can read it, renders a
+  button per new-session action when the pane offers them, and mirrors what
+  the pane put in the box (`data-value`) and whether the control it handed
+  down is split (`data-send-split`).
 -->
 <script lang="ts">
   let {
     value = $bindable(''),
     textareaEl = $bindable(null),
     sendError = null,
+    sendControl,
     onStartNewSession,
     newSessionDisabled = false,
   }: {
     value?: string;
     textareaEl?: HTMLElement | null;
     sendError?: string | null;
+    sendControl?: { split: boolean };
     onStartNewSession?: (kind: 'note' | 'commit') => void;
     newSessionDisabled?: boolean;
   } = $props();
@@ -28,6 +32,8 @@
   tabindex="0"
   contenteditable="true"
   data-testid="prompt-input"
+  data-value={value}
+  data-send-split={sendControl?.split}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
 {#if sendError}

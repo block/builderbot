@@ -14,6 +14,10 @@
  * it (the note dialog: see `COMPOSER_NEW_SESSION_OPTIONS`), the button splits
  * in every state, and the dropdown lists those actions below the modes, or on
  * their own when there is no mode to switch.
+ *
+ * The control is derived once, by the pane (`SessionChatPane`), and handed
+ * to `ChatComposer` whole: the pane acts on `action` and the composer draws
+ * the rest, so the two cannot be looking at different controls.
  */
 
 /** How the composer submits a message while the session is running. */
@@ -40,6 +44,12 @@ export interface ComposerSendControl {
   split: boolean;
   /** Whether that dropdown offers the Queue / Send mode switch. */
   modeMenu: boolean;
+  /**
+   * Whether that dropdown lists the new-session actions
+   * (`COMPOSER_NEW_SESSION_OPTIONS`). Carried here, not re-derived by the
+   * composer, so the entries and the split that holds them cannot disagree.
+   */
+  newSessionMenu: boolean;
   action: ComposerSendAction;
   /** Primary segment label. */
   label: string;
@@ -74,6 +84,7 @@ export function composerSendControl({
     return {
       split: canStartNewSession,
       modeMenu: false,
+      newSessionMenu: canStartNewSession,
       action: 'start',
       label: 'Send',
       title: 'Send message',
@@ -84,6 +95,7 @@ export function composerSendControl({
     return {
       split: canSendLive || canStartNewSession,
       modeMenu: canSendLive,
+      newSessionMenu: canStartNewSession,
       action: 'queue',
       label: 'Queue',
       title: 'Queue message for after this turn',
@@ -93,6 +105,7 @@ export function composerSendControl({
   return {
     split: true,
     modeMenu: true,
+    newSessionMenu: canStartNewSession,
     action: 'send-now',
     label: 'Send',
     title: 'Send to the running agent now',

@@ -91,7 +91,22 @@ describe('composerSendControl with new-session actions', () => {
       for (const mode of ['queue', 'send'] as const) {
         const plain = composerSendControl({ ...state, mode });
         const withActions = composerSendControl({ ...state, mode, canStartNewSession: true });
-        expect(withActions).toEqual({ ...plain, split: true });
+        expect(plain.newSessionMenu).toBe(false);
+        expect(withActions).toEqual({ ...plain, split: true, newSessionMenu: true });
+      }
+    }
+  });
+
+  it('never lists the actions without the split that holds them', () => {
+    for (const isLive of [false, true]) {
+      for (const canSendLive of [false, true]) {
+        for (const mode of ['queue', 'send'] as const) {
+          for (const canStartNewSession of [false, true]) {
+            const control = composerSendControl({ isLive, canSendLive, mode, canStartNewSession });
+            expect(control.newSessionMenu).toBe(canStartNewSession);
+            expect(control.split).toBe(control.modeMenu || control.newSessionMenu);
+          }
+        }
       }
     }
   });

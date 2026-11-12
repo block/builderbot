@@ -28,13 +28,35 @@ vi.mock('./HashtagInput.svelte', () => import('./testStubs/PromptInputStub.svelt
 vi.mock('./AttachmentThumb.svelte', () => import('./testStubs/EmptyStub.svelte'));
 
 import ChatComposer from './ChatComposer.svelte';
+import { composerSendControl, type ComposerNewSessionKind } from './composerSendControl';
 
 let component: ReturnType<typeof mount> | null = null;
 
-function mountComposer(props: Record<string, unknown>) {
+/**
+ * Mounts the composer with the control the pane would hand it for this
+ * session state (`isLive`, `canSendLive`) and host (`onStartNewSession`).
+ */
+function mountComposer({
+  canSendLive = false,
+  ...props
+}: {
+  isLive?: boolean;
+  canSendLive?: boolean;
+  onStartNewSession?: (kind: ComposerNewSessionKind) => void;
+  [prop: string]: unknown;
+}) {
+  const sendControl = composerSendControl({
+    isLive: props.isLive ?? false,
+    canSendLive,
+    mode: 'queue',
+    canStartNewSession: props.onStartNewSession !== undefined,
+  });
   const target = document.createElement('div');
   document.body.appendChild(target);
-  component = mount(ChatComposer, { target, props: { value: 'A message', ...props } });
+  component = mount(ChatComposer, {
+    target,
+    props: { value: 'A message', sendControl, ...props },
+  });
   flushSync();
 }
 

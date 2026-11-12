@@ -30,7 +30,11 @@ vi.mock(
 );
 vi.mock('../branches/dragDrop', () => ({ subscribeDragDrop: () => () => {} }));
 vi.mock('../agents/agent.svelte', () => ({ agentState: { providers: [] } }));
-vi.mock('../settings/preferences.svelte', () => ({ setAcpConfigPref: vi.fn() }));
+vi.mock('../settings/preferences.svelte', () => ({
+  // Read by the send control the pane hands the composer stub.
+  preferences: { composerSendMode: 'queue' },
+  setAcpConfigPref: vi.fn(),
+}));
 vi.mock('../../transport', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../transport')>()),
   listenToEvent: () => () => {},

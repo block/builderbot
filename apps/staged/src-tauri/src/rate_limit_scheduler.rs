@@ -244,17 +244,30 @@ async fn run_tick(
                 ticket,
             )
             .await;
-            if let Err(e) = result {
-                log::warn!("[rate_limit_recovery] auto-resume failed for {session_id}: {e}");
-                crate::rate_limit_metrics::record_recovery_start_failed(
-                    &session_id,
-                    "resume_start_failed",
-                );
-                reschedule_after_start_failure(
-                    &store_for_task,
-                    &session_id,
-                    crate::store::now_timestamp(),
-                );
+            match result {
+                Ok(()) => {}
+                // A Stop (or a delete) took the row while the resume was being
+                // prepared, and the recheck before the launch refused to
+                // start an agent on it. That is a lost claim, as if it had
+                // lost at `claim_for_auto_resume`: not a failed start, and
+                // the row and its retry bookkeeping are the winner's.
+                Err(e) if e == crate::session_commands::RESUME_CLAIM_LOST_ERROR => {
+                    log::info!(
+                        "[rate_limit_recovery] skipping auto-resume for session {session_id}: no longer running after its claim"
+                    );
+                }
+                Err(e) => {
+                    log::warn!("[rate_limit_recovery] auto-resume failed for {session_id}: {e}");
+                    crate::rate_limit_metrics::record_recovery_start_failed(
+                        &session_id,
+                        "resume_start_failed",
+                    );
+                    reschedule_after_start_failure(
+                        &store_for_task,
+                        &session_id,
+                        crate::store::now_timestamp(),
+                    );
+                }
             }
             scheduler_for_task.clear_in_flight(&session_id);
         });
@@ -1744,6 +1757,89 @@ mod tests {
             auto_recovery_from_metadata(session.provider_metadata.as_ref()),
             None
         );
+
+        // Cancelled: a Stop landed while the claimed resume was being
+        // prepared, and the recheck before the launch refused the start with
+        // `RESUME_CLAIM_LOST_ERROR`.
+        use crate::store::{CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = Session::new_running("test", Path::new("/tmp")).with_agent("agent-session");
+        store.create_session(&session).unwrap();
+        pause_with_rate_limit(&store, &session.id);
+        record_rate_limit_pause(&store, &session.id, 10_000).unwrap();
+        let AutoResumeClaim::Claimed(ticket) = claim_for_auto_resume(&store, &session.id).unwrap()
+        else {
+            panic!("a due paused session with a free branch is claimed");
+        };
+        let claimed = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(claimed.status, SessionStatus::Running);
+        // What the Stop's store fallback writes.
+        store
+            .update_session_status(
+                &session.id,
+                SessionStatus::Cancelled,
+                None,
+                Some(&CompletionReason::Interrupted),
+            )
+            .unwrap();
+
+        // The failed resume's re-park is guarded on `running`: it writes
+        // nothing, so there is no paused row for the reschedule to touch.
+        assert!(!store
+            .transition_running_to_rate_limited(
+                &session.id,
+                Some(crate::session_commands::RESUME_CLAIM_LOST_ERROR),
+                ticket.rate_limit_resets_at.as_deref(),
+                ticket.rate_limit_kind.as_deref(),
+            )
+            .unwrap());
+        reschedule_after_start_failure(&store, &session.id, 20_000);
+
+        let stopped = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(stopped.status, SessionStatus::Cancelled);
+        assert_eq!(
+            stopped.completion_reason,
+            Some(CompletionReason::Interrupted)
+        );
+        assert_eq!(stopped.rate_limit_resets_at, None);
+        assert_eq!(
+            stopped.provider_metadata, claimed.provider_metadata,
+            "the retry bookkeeping is untouched when the claim is lost"
+        );
+        assert!(store.get_rate_limited_paused_sessions().unwrap().is_empty());
+    }
+
+    /// A claimed resume that finds its row stopped during the preparation
+    /// returns `RESUME_CLAIM_LOST_ERROR` without launching. `run_tick` must
+    /// read that as a lost claim, not a failed start: no start-failure metric
+    /// and no reschedule. Pinned by source text, like
+    /// `run_tick_holds_liveness_before_its_claim`, because `run_tick` needs a
+    /// concrete app runtime to drive.
+    #[test]
+    fn run_tick_treats_a_stop_during_resume_preparation_as_a_lost_claim() {
+        let source = include_str!("rate_limit_scheduler.rs");
+        let start = "async fn run_tick(";
+        let body = &source[source.find(start).expect(start)..];
+        let body = &body[..body.find("\n}\n").expect("fn end")];
+        let resume = body
+            .find("auto_resume_rate_limited_session(")
+            .expect("resume call");
+        let task = &body[resume..];
+
+        let lost_arm = "Err(e) if e == crate::session_commands::RESUME_CLAIM_LOST_ERROR => {";
+        let lost = task.find(lost_arm).expect(lost_arm);
+        let failed = lost + task[lost..].find("Err(e) => {").expect("failed-start arm");
+        let lost_body = &task[lost..failed];
+        assert!(lost_body.contains("log::info!("));
+        assert!(
+            !lost_body.contains("record_recovery_start_failed(")
+                && !lost_body.contains("reschedule_after_start_failure("),
+            "a lost claim is not a failed start: {lost_body}"
+        );
+        let failed_body = &task[failed..];
+        assert!(failed_body.contains("record_recovery_start_failed("));
+        assert!(failed_body.contains("reschedule_after_start_failure("));
     }
 
     #[test]

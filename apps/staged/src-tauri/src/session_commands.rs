@@ -1692,16 +1692,25 @@ pub(crate) async fn resume_session_for_store(
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
     let _liveness = registry.hold(&session_id);
-    if claim == ResumeClaim::Transition {
-        let transitioned = store
-            .transition_to_running_clearing_agent_id(
-                &session_id,
-                plan.pending_start_agent_id.as_deref(),
-            )
-            .map_err(|e| e.to_string())?;
-        if !transitioned {
-            return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
+    match claim {
+        ResumeClaim::Transition => {
+            let transitioned = store
+                .transition_to_running_clearing_agent_id(
+                    &session_id,
+                    plan.pending_start_agent_id.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+            if !transitioned {
+                return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
+            }
         }
+        // The caller's claim predates `prepare_resume`, and the hold that
+        // keeps the row live is invisible to a Stop: one that landed during
+        // the preparation wrote `cancelled` and kicked the branch's queue.
+        // Launching regardless would start the stopped session on a branch
+        // that now reads free. Nothing between this read and the runner
+        // registering in `launch_resume` can suspend.
+        ResumeClaim::AlreadyClaimed => ensure_claimed_resume_still_running(&store, &session_id)?,
     }
 
     launch_resume(
@@ -1717,6 +1726,30 @@ pub(crate) async fn resume_session_for_store(
         queued_message_id,
     )
     .map(|_| ())
+}
+
+/// The refusal `resume_session_for_store` returns for a
+/// [`ResumeClaim::AlreadyClaimed`] resume whose row stopped being `running`
+/// while the resume was prepared: a Stop (or a delete) took the session after
+/// the claim. The rate-limit scheduler reads it back as a lost claim rather
+/// than a failed start.
+pub(crate) const RESUME_CLAIM_LOST_ERROR: &str =
+    "Session was stopped before its resume could start";
+
+/// Whether a row claimed before `prepare_resume` is still the claimant's to
+/// launch: it must still be `running`.
+///
+/// The claim wrote `running`, and the only thing covering the row since is a
+/// liveness hold, which `SessionRegistry::cancel` does not see. A Stop in that
+/// stretch therefore takes [`cancel_session_impl`]'s store fallback and writes
+/// `cancelled`; a row that is gone was deleted. Either way the session is no
+/// longer this resume's, and the caller's own re-park (guarded on `running`)
+/// writes nothing.
+fn ensure_claimed_resume_still_running(store: &Store, session_id: &str) -> Result<(), String> {
+    match store.get_session(session_id).map_err(|e| e.to_string())? {
+        Some(row) if row.status == store::SessionStatus::Running => Ok(()),
+        _ => Err(RESUME_CLAIM_LOST_ERROR.to_string()),
+    }
 }
 
 /// Everything a resume reads before the row is claimed: the session's
@@ -8998,6 +9031,42 @@ mod tests {
         }
     }
 
+    /// An already-claimed resume (rate-limit auto-resume) took its row to
+    /// `running` before `prepare_resume`, and a Stop during the preparation
+    /// writes `cancelled` past the liveness hold. So the row is read back
+    /// after the preparation, under the hold, and nothing may suspend between
+    /// that read and the launch. Pinned by source text, like the checks above,
+    /// because the resume needs a concrete app runtime to drive.
+    #[test]
+    fn claimed_resume_rechecks_its_row_between_preparation_and_launch() {
+        let source = include_str!("session_commands.rs");
+        let start = "pub(crate) async fn resume_session_for_store(";
+        let body = &source[source.find(start).expect(start)..];
+        let body = &body[..body.find("\n}\n").expect("fn end")];
+
+        let prepared = body.find("prepare_resume(&store").expect("preparation");
+        let held = body.find("registry.hold(&session_id)").expect("hold");
+        let arm = body
+            .find("ResumeClaim::AlreadyClaimed =>")
+            .expect("already-claimed arm");
+        let check = "ensure_claimed_resume_still_running(&store, &session_id)?";
+        let checked = body.find(check).expect(check);
+        let launched = checked
+            + body[checked..]
+                .find("\n    launch_resume(")
+                .expect("launch_resume call");
+
+        assert!(prepared < held, "the hold is taken after the preparation");
+        assert!(
+            held < arm && arm < checked,
+            "the already-claimed arm rechecks the row under the hold"
+        );
+        assert!(
+            !body[checked..launched].contains(".await"),
+            "`{start}` awaits between its recheck and `launch_resume(`"
+        );
+    }
+
     fn schedule(kind: BranchSessionScheduleKind) -> BranchSessionSchedule {
         BranchSessionSchedule {
             kind,
@@ -9475,6 +9544,78 @@ mod tests {
         assert_eq!(event["completionReason"], "project_session_interrupted");
         assert!(event["rateLimitResetsAt"].is_null());
         assert!(event["rateLimitKind"].is_null());
+    }
+
+    /// The recheck an already-claimed resume makes before it launches. The
+    /// rate-limit scheduler claims the paused row to `running` and holds it
+    /// live, but a hold is invisible to a Stop: one that lands while the
+    /// resume is prepared writes `cancelled` through the store fallback. The
+    /// launch used to go ahead regardless, starting the stopped session on a
+    /// branch the Stop had just freed. The recheck refuses it, and the
+    /// scheduler's re-park, guarded on `running`, leaves the row cancelled.
+    #[test]
+    fn a_claimed_resume_stopped_during_preparation_is_refused_before_launch() {
+        let (store, branch) = setup_branch_store();
+        let paused =
+            store::Session::new_running("rebase", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&paused).unwrap();
+        store
+            .create_commit(
+                &store::Commit::new_with_sha(&branch.id, "abc123").with_session(&paused.id),
+            )
+            .unwrap();
+        assert!(store
+            .transition_running_to_rate_limited(
+                &paused.id,
+                Some("rate limit"),
+                Some("2026-11-12T09:00:00Z"),
+                Some("five_hour"),
+            )
+            .unwrap());
+
+        // The scheduler's claim, with the hold it takes first.
+        let registry = Arc::new(session_runner::SessionRegistry::new());
+        let _liveness = registry.hold(&paused.id);
+        assert!(store
+            .transition_to_running_with_provider_metadata(&paused.id, None)
+            .unwrap());
+        assert_eq!(
+            ensure_claimed_resume_still_running(&store, &paused.id),
+            Ok(()),
+            "an untouched claim launches"
+        );
+
+        cancel_through_shared_body(&registry, &store, &paused.id);
+
+        assert_eq!(
+            ensure_claimed_resume_still_running(&store, &paused.id),
+            Err(RESUME_CLAIM_LOST_ERROR.to_string())
+        );
+        // The failed resume's re-park writes nothing: the row stays stopped,
+        // with nothing for the scheduler to list or claim again.
+        assert!(!store
+            .transition_running_to_rate_limited(
+                &paused.id,
+                Some(RESUME_CLAIM_LOST_ERROR),
+                Some("2026-11-12T09:00:00Z"),
+                Some("five_hour"),
+            )
+            .unwrap());
+        let row = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+        assert_eq!(row.rate_limit_resets_at, None);
+        assert_eq!(row.rate_limit_kind, None);
+        assert!(store.get_rate_limited_paused_sessions().unwrap().is_empty());
+
+        // A row deleted during the preparation is no longer the claim's either.
+        assert_eq!(
+            ensure_claimed_resume_still_running(&store, "no-such-session"),
+            Err(RESUME_CLAIM_LOST_ERROR.to_string())
+        );
     }
 
     /// The fallback is only for rows with no live token. A registered session

@@ -38,11 +38,13 @@ use crate::note_tool::{
 };
 
 /// Empty the session's outbox and remove its directory once it is empty.
-/// Runs after a note has been collected *and* ingested (or after a run
-/// observed the outbox and settled: see `session_runner`'s
-/// `remote_outbox_is_cleared_at_run_end`) — never blind at session start,
-/// where a `done` marker may be a finished note the laptop lost before it
-/// could read it (see [`recover_uncollected_outbox`]). The `rmdir` is
+/// Runs after a note has been collected *and* ingested, after a run read the
+/// outbox once its last turn had ended, or after a Stop the user asked for
+/// (see `session_runner`'s `remote_outbox_clear_at_run_end`) — never blind:
+/// not at session start, where a `done` marker may be a finished note the
+/// laptop lost before it could read it (see [`recover_uncollected_outbox`]),
+/// and not at the end of a run that did not read the outbox, which uses
+/// [`clear_unpublished_outbox`] instead. The `rmdir` is
 /// best-effort: a directory `write_note` is still writing into, or one
 /// holding another tool's files, is left alone.
 /// Always exits 0.
@@ -77,6 +79,58 @@ pub(crate) fn clear_outbox(exec: RemoteExec, session_id: &str) -> Result<(), Str
     exec(&["sh", "-c", &clear_outbox_script(session_id)])
         .map(|_| ())
         .map_err(|e| format!("failed to clear the remote note outbox: {e}"))
+}
+
+/// What [`clear_unpublished_outbox_script`] prints when it found a `done`
+/// marker and removed nothing.
+const PUBLISHED_NOTE_KEPT_MARKER: &str = "staged-published-note-kept";
+
+/// [`clear_outbox_script`] for a caller that has not read the outbox since
+/// the agent last could have written to it: the files are removed only when
+/// no `done` marker is there. A marker means a published note nobody has
+/// collected, and then nothing is touched — not the note, and not the draft
+/// it was published from — so the next reader (the start-of-run recovery of
+/// a Resume) finds it whole. The test and the removal are one command on
+/// the workstation, so there is no window between a laptop-side read and
+/// the clear. Always exits 0.
+pub(crate) fn clear_unpublished_outbox_script(session_id: &str) -> String {
+    let dir = session_dir_expr(session_id);
+    format!(
+        "d={dir}; if [ -f \"$d/done\" ]; then echo {PUBLISHED_NOTE_KEPT_MARKER}; exit 0; fi; \
+         {remove}; rmdir \"$d\" 2>/dev/null; exit 0",
+        remove = remove_session_files_fragment()
+    )
+}
+
+/// What [`clear_unpublished_outbox`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnreadOutboxClear {
+    /// No published note was there; the partial files and the draft are gone.
+    Cleared,
+    /// A `done` marker was there: a published note no run has collected.
+    /// Everything was left in place.
+    PublishedNoteKept,
+}
+
+/// Empty the session's outbox unless it holds a published note (see
+/// [`clear_unpublished_outbox_script`]).
+pub(crate) fn clear_unpublished_outbox(
+    exec: RemoteExec,
+    session_id: &str,
+) -> Result<UnreadOutboxClear, String> {
+    validate_session_id(session_id)?;
+    let output = exec(&["sh", "-c", &clear_unpublished_outbox_script(session_id)])
+        .map_err(|e| format!("failed to clear the remote note outbox: {e}"))?;
+    Ok(
+        if output
+            .lines()
+            .any(|line| line.trim() == PUBLISHED_NOTE_KEPT_MARKER)
+        {
+            UnreadOutboxClear::PublishedNoteKept
+        } else {
+            UnreadOutboxClear::Cleared
+        },
+    )
 }
 
 /// Largest base64 payload put on one command line, the same bound
@@ -1655,6 +1709,7 @@ mod tests {
     fn every_clear_removes_the_seed_temp_file() {
         for script in [
             clear_outbox_script("sess-1"),
+            clear_unpublished_outbox_script("sess-1"),
             clear_outbox_and_seed_script("sess-1", None),
             clear_outbox_and_seed_script("sess-1", Some("QQ==")),
         ] {
@@ -1695,6 +1750,79 @@ mod tests {
             std::fs::read_dir(&outbox).unwrap().count(),
             1,
             "only draft.md"
+        );
+    }
+
+    /// The end-of-run clear of a run that never read the outbox after its
+    /// last turn, against a real shell: a published note stays whole, with
+    /// its draft, and anything else goes.
+    #[test]
+    fn the_unread_clear_keeps_a_published_note_and_removes_anything_else() {
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let files = [
+            ("note.md", "Body"),
+            (
+                "meta.json",
+                r#"{"title":"Kept","turn":"turn-1","writtenAt":1}"#,
+            ),
+            ("done", ""),
+            ("draft.md", "Body"),
+        ];
+
+        std::fs::create_dir_all(&outbox).unwrap();
+        for (file, content) in files {
+            std::fs::write(outbox.join(file), content).unwrap();
+        }
+        assert_eq!(
+            clear_unpublished_outbox(&exec, "sess-1").unwrap(),
+            UnreadOutboxClear::PublishedNoteKept
+        );
+        for (file, content) in files {
+            assert_eq!(
+                std::fs::read_to_string(outbox.join(file)).unwrap(),
+                content,
+                "{file} is untouched"
+            );
+        }
+        assert!(
+            matches!(
+                collect(&exec, "sess-1", None).unwrap(),
+                OutboxState::Delivered(submission)
+                    if submission.title == "Kept" && submission.body == "Body"
+            ),
+            "the next run's recovery still finds the note"
+        );
+
+        // Not published: a half-written note and the draft go, and the
+        // directory with them.
+        std::fs::remove_file(outbox.join("done")).unwrap();
+        assert_eq!(
+            clear_unpublished_outbox(&exec, "sess-1").unwrap(),
+            UnreadOutboxClear::Cleared
+        );
+        assert!(!outbox.exists(), "{outbox:?}");
+
+        // Nothing there at all.
+        assert_eq!(
+            clear_unpublished_outbox(&exec, "sess-1").unwrap(),
+            UnreadOutboxClear::Cleared
+        );
+
+        // The marker is matched as a whole line of the script's output.
+        let kept = |_: &[&str]| Ok(format!("  {PUBLISHED_NOTE_KEPT_MARKER}\n"));
+        assert_eq!(
+            clear_unpublished_outbox(&kept, "sess-1").unwrap(),
+            UnreadOutboxClear::PublishedNoteKept
+        );
+        let unreachable = |_: &[&str]| Err::<String, String>("no route".to_string());
+        assert!(clear_unpublished_outbox(&unreachable, "sess-1")
+            .unwrap_err()
+            .contains("no route"));
+        assert!(
+            clear_unpublished_outbox(&exec, "../sess-1").is_err(),
+            "a session id that is not a plain name never reaches the shell"
         );
     }
 

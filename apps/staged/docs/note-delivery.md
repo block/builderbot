@@ -410,6 +410,17 @@ lets the outbox decide (`lost_remote_agent_detail`,
 - no note → `error` / `detached` with the "keeps checking" message, and the
   sweep polls the outbox from then on (see _Polling a detached row_ below).
 
+A turn whose `sq blox acp` proxy dies while bloxlet still runs the agent is
+not one of those endings. The connection reports it as `Remote agent
+detached: …` (`acp_client::is_remote_agent_detached_error`), which is not a
+lost agent, and the run picks the turn back up over a fresh proxy and waits
+it out (`pick_up_detached_turn`, `reattach_detached_turn`). That happens
+inside the turn loop, before the loop looks at the turn's result, so a turn
+that ends on the reattach is an ordinary turn end: the collection above, the
+Pikchr check, the follow-up and the hooks all run for it, and the row never
+leaves `running`. _A turn that outlives its connection_ below covers the
+cases where the run itself is gone.
+
 Three endings count as losing the agent, each leaving it plausibly still at
 work on the workstation with the outbox as the only way to its note:
 
@@ -444,33 +455,50 @@ A Pikchr repair loop that gave up (`AgentRunError::PikchrRepairExhausted`,
 matched as a variant, not by message text) never enters that rescue because
 its note is known bad.
 
-The outbox is cleared at the end of every run that observed its state: a
-clean turn (note ingested or not), a Stop the agent acknowledged after a
-`write_note` call, an exhausted repair loop, a crash, and the lost-agent
-cases above except the last. The clear is one more `ws exec` after the terminal status is
-written, so it never holds the row in `running`. It removes `draft.md` and
-the seed's temp file `.draft.md.seed` along
-with the three outbox files, and the now-empty
-`~/.staged/sessions/<session-id>/` directory too. Two states keep the outbox
-and the draft
-(`remote_outbox_is_cleared_at_run_end`, `RemoteOutboxUse`):
+The end of a run decides what happens to the outbox
+(`remote_outbox_clear_at_run_end`, `RemoteOutboxUse`, `RunEndOutboxClear`).
+It acts with one more `ws exec` after the terminal status is written, so it
+never holds the row in `running`. A clear removes `draft.md` and the seed's
+temp file `.draft.md.seed` along with the three outbox files, and the
+now-empty `~/.staged/sessions/<session-id>/` directory too. A run only
+removes a published note it has dealt with:
 
-- a lost connection with _no_ note found, because the agent may still write
-  into it and the sweep (or the next run's start-of-run recovery) is what
-  reads it;
-- a run whose start-of-run recovery did not settle — the workstation dropped
-  between installing the Staged MCP on Blox and reading the outbox, or a
-  waiting note could not be stored — and that never collected its own note.
-  (A draft seed that failed after the outbox was read and cleared is not
-  this state: `remote_outbox_recovery_settled_for_run` counts that run as
-  settled. Treating it as unsettled kept the outbox after a Stop that
-  followed `write_note`, and the next run's recovery then ingested the note
-  the Stop was meant to discard.) An
-  earlier run's finished note may still be sitting there unread (the per-turn
-  collector reports it as a stale turn and ignores it), and the clear would
-  delete the only copy; the next run's recovery gets another chance. Once the
-  run collects its own note the earlier one has been overwritten, and the
-  clear is back on.
+- **Clear.** The run read the outbox after its last turn ended
+  (`RemoteOutboxUse::read_after_last_turn`): a clean turn (note ingested or
+  not), an exhausted repair loop, and the lost-agent and hold-stopped endings
+  whose collection after the run went through. What was there has been
+  stored, or judged and rejected. A Stop the user asked for clears as well,
+  read or not, because it discards the turn's output (see _Design
+  decisions_).
+- **Clear unless published** (`note_outbox::clear_unpublished_outbox`). The
+  run ended without that read: its last turn crashed, the agent cancelled its
+  own turn, or the read itself failed. One command on the workstation tests
+  for `done` and removes the files only when the marker is absent, so there
+  is no window between a read and the clear. A published note stays whole,
+  with its draft, and the next run's start-of-run recovery ingests it. These
+  runs used to clear the outbox outright, which could delete a note nobody
+  had read.
+- **Keep.** Four states leave the outbox and the draft untouched:
+  - a run that never attached the Staged MCP on Blox, which has no outbox;
+  - a lost connection with _no_ note found, because the agent may still
+    write into it and the sweep (or the next run's start-of-run recovery) is
+    what reads it;
+  - a run whose start-of-run recovery did not settle — the workstation
+    dropped between installing the Staged MCP on Blox and reading the
+    outbox, or a waiting note could not be stored — and that never collected
+    its own note. (A draft seed that failed after the outbox was read and
+    cleared is not this state: `remote_outbox_recovery_settled_for_run`
+    counts that run as settled. Treating it as unsettled kept the outbox
+    after a Stop that followed `write_note`, and the next run's recovery
+    then ingested the note the Stop was meant to discard.) An earlier run's
+    finished note may still be sitting there unread (the per-turn collector
+    reports it as a stale turn and ignores it), and the clear would delete
+    the only copy; the next run's recovery gets another chance. Once the run
+    collects its own note the earlier one has been overwritten, and the
+    clear is back on;
+  - a collected note the hooks could not store (a media ingest or a store
+    write failed): the outbox is the only copy, and the next run's recovery
+    ingests it.
 
 The outbox is never cleared at start, which is what lets that recovery tell
 an uncollected note from an old one.
@@ -678,8 +706,10 @@ parser`) when that fallback produces a note.
 
 `recover_dead_sessions` (startup and the 60 s sweep) used to mark every
 running session whose owner process died as `error` / `app_quit` and skip the
-hooks. For a note session on a branch with a Blox workspace it now spawns a
-collection thread instead (guarded against overlapping sweeps in-process):
+hooks. For a note session on a branch with a Blox workspace whose turn it
+does not reattach to (see _A turn that outlives its connection_), it now
+spawns a collection thread instead (guarded against overlapping sweeps
+in-process):
 
 1. The row is claimed first: `transition_from_running` to `error` /
    `detached`. Two Staged instances sharing `~/.staged/data.db` both see the
@@ -706,6 +736,54 @@ collection thread instead (guarded against overlapping sweeps in-process):
 `CompletionReason::Detached` is a new enum variant (backend `store/models.rs`,
 frontend `src/lib/types.ts`, `RESUMABLE_REASONS`, failure copy). It is a data
 model addition and is flagged for human review per `AGENTS.md`.
+
+### A turn that outlives its connection
+
+Blox keeps the agent and its turn alive when the laptop side goes away, and
+Staged follows such a turn to its end instead of failing it. Three paths do
+that, and each one stores the note the agent published:
+
+| What went away                                                                       | Who follows the turn                                           | Where the outbox is read                                                              |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| The `sq blox acp` proxy; the run is alive                                            | The run itself, inside its turn loop (`pick_up_detached_turn`) | The loop's own collection, with the run's turn id                                     |
+| The Staged process (killed or crashed), after the agent answered the turn's prompt   | The dead-owner sweep (`reattach_dead_owner_session`)           | `taken_over_note::reattached_turn_run_end`, any turn id                               |
+| The run, leaving the row `disconnected`: a quit mid-turn, or a reattach that gave up | Reconcile (`Reconciler::run_completion_hooks`)                 | `taken_over_note::collect_taken_over_note` through `ReconcileBlox::exec`, any turn id |
+
+The first path is a normal turn end (see _Collector_). The other two are
+takeovers: the run that prompted the turn is gone, and with it the
+submission slot and the turn id. They read the outbox once the turn has
+completed and settle from what it holds (`TakenOverNote`):
+
+- a published note whose Pikchr blocks parse goes to the post-completion
+  hooks like the note of any completed turn, and the outbox is cleared once
+  the hooks report it stored. A note they could not store stays there for
+  the next run's recovery;
+- a published note with a block that does not parse is not stored, because
+  the repair loop went with the run. The row ends `error` / `detached` with
+  the message a lost connection gets for such a note, without the polling
+  marker, and the outbox is cleared so a Resume has the agent publish again;
+- nothing published: the turn completes as it did before, through the `---`
+  fallback or with an empty note, and the outbox is cleared;
+- an outbox that could not be read is never taken for an empty one. The row
+  ends `error` / `detached` with the polling marker and nothing is cleared,
+  so the sweep keeps reading it (_Polling a detached row_).
+
+A reattached turn that was stopped or that failed is not read. Its
+end-of-run clear follows the rule in _Collector_, so it removes a published
+note only after a Stop.
+
+All three paths used to lose the note. The proxy case reattached after the
+turn loop, where the submission slot had already been read: the run
+completed with an empty note and then cleared the outbox, deleting the only
+copy. The two takeovers ran the hooks with no note at all, so the row
+completed with an empty note and the published one sat in the outbox until
+a Resume ingested it. Sessions that write no note are unaffected, since
+they have no outbox.
+
+The dead-owner sweep reattaches only when the agent answered the turn's
+prompt (`dead_owner_recovery`). A note session on a Blox workspace that it
+does not reattach to takes the claim-and-collect path at the top of this
+section.
 
 ### Polling a detached row
 
@@ -940,14 +1018,20 @@ them by accident:
   which is the cost the draft removes.
 - **Clear policy.** The draft follows the outbox: removed locally at run
   end, removed on the workstation by the same command that clears the
-  outbox, and kept wherever the outbox is kept. The outbox is cleared at the end of every run that saw
-  its state, and kept only when the sweep is still polling for the note or
-  when the start-of-run recovery did not settle and the run never collected
-  its own note (above). The sweep clears it again after it stores a late
-  note, and after a hold-stopped row's window expires. Clearing at start
-  was rejected because it would delete an uncollected note on every resume;
-  never clearing was rejected because a stored note would be re-ingested on
-  the next run, over whatever the user edited meanwhile.
+  outbox, and kept wherever the outbox is kept. The outbox is cleared at the
+  end of every run that read it after its last turn, and after a Stop. A run
+  that ended without that read removes only an unpublished outbox, so a
+  published note is never deleted unread. It is kept outright when the sweep
+  is still polling for the note, when the start-of-run recovery did not
+  settle and the run never collected its own note, and when a collected note
+  could not be stored (above). The sweep clears it again after it stores a
+  late note, and after a hold-stopped row's window expires. Clearing at
+  start was rejected because it would delete an uncollected note on every
+  resume; never clearing was rejected because a stored note would be
+  re-ingested on the next run, over whatever the user edited meanwhile.
+  Clearing at the end whatever the run had read was what the first version
+  did: a run that reattached after its proxy died stored an empty note and
+  then deleted the published one.
 - **Detached polling window.** 30 minutes from the detaching write, with
   one last poll before expiring. Shorter windows miss the agent finishing a
   long turn (Blox keeps the turn alive); longer ones keep spending `ws exec`
@@ -1034,9 +1118,28 @@ note draft at <path>` names the same file. After the `write_note` call,
    absolute path from its prompt, edit it in place, and call
    `staged: write note` with a title and next steps only. The stored note
    has the new paragraph and every earlier section byte-for-byte.
-3. Disconnect test: start a remote note session with a long prompt, then quit
-   Staged (or kill the `sq blox acp` child). Relaunch Staged: the startup
-   sweep logs `Recovered detached remote session … note "<title>" found` and
+3. Disconnect tests. Use a prompt that keeps the turn open after the note
+   is published, for example "write the note, call `write_note`, then run
+   `sleep 120`", and wait for the "Saved note" row before each kill.
+   Proxy kill: run `pkill -9 -f 'acp <workspace-name>'` on the laptop. The
+   log shows `Remote agent detached: … reattaching to its turn`, the row
+   stays `running`, and when the turn ends the log shows `collected note
+"<title>" from the workstation outbox`. The note row fills in with the
+   published body and `~/.staged/sessions/<session-id>/` is gone afterwards.
+   The log must not show `storing an empty note`.
+   App kill: `kill -9` the Staged process instead and relaunch. The sweep
+   reattaches to the turn, and when it ends the log shows `collected note
+"<title>" from the workstation outbox after its turn ended on a takeover`.
+   The note row fills in with no Resume and the session directory is gone.
+   Quit: quit Staged mid-turn and relaunch. The row is `disconnected` until
+   reconcile finds the turn over, then the same takeover log line appears
+   and the note row fills in.
+   Detached sweep: this path is reached when the connection to the agent is
+   lost rather than the proxy (the hung-proxy test below), or when Staged
+   dies after sending the prompt and before the agent's first output. For
+   the second, start a remote note session, `kill -9` Staged as soon as the
+   row shows `running`, and relaunch once the agent has had time to write
+   its note. The startup sweep logs `Recovered detached remote session … note "<title>" found` and
    the note row fills in; if the agent had not finished, the chat pane shows
    "Staged lost the connection to this remote session. The workstation agent
    may still be running; Staged is checking for its note…" in an

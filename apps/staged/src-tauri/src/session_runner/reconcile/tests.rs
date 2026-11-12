@@ -17,6 +17,8 @@ use crate::session_runner::SessionStatusEvent;
 use crate::store::{self, CompletionReason, MessageRole, Session, SessionStatus};
 use crate::test_utils::TempGitRepo;
 
+mod taken_over_note;
+
 /// The live hold's per-task cap, which reconcile holds a row to.
 fn hold_cap() -> Duration {
     acp_client::BackgroundHoldConfig::default().hold_cap
@@ -71,6 +73,12 @@ struct FakeBlox {
     hook_dirs: Mutex<Vec<Option<std::path::PathBuf>>>,
     /// `Some` fails resolving the branch's checkout on the workstation.
     working_dir_error: Mutex<Option<String>>,
+    /// What the note outbox's collect script prints on the workstation, or
+    /// the error every `ws exec` fails with. No published note until a test
+    /// sets one.
+    outbox: Mutex<Result<String, String>>,
+    /// The script of every `ws exec`, in order.
+    execs: Mutex<Vec<String>>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -92,8 +100,32 @@ impl FakeBlox {
             cancel_pins: Mutex::new(Vec::new()),
             hook_dirs: Mutex::new(Vec::new()),
             working_dir_error: Mutex::new(None),
+            outbox: Mutex::new(Ok("pending\n\n\npending\n".to_string())),
+            execs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The note outbox on the workstation holds a published note.
+    fn publish_note(&self, title: &str, body: &str) {
+        use base64::Engine;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let meta = serde_json::json!({ "title": title, "turn": "gone-run", "writtenAt": 1 });
+        *self.outbox.lock().unwrap() = Ok(format!(
+            "done\n{}\n{}\ndone\n",
+            encode(meta.to_string().as_bytes()),
+            encode(body.as_bytes())
+        ));
+    }
+
+    /// Every `ws exec` fails: the workstation cannot be reached.
+    fn outbox_unreachable(&self, error: &str) {
+        *self.outbox.lock().unwrap() = Err(error.to_string());
+    }
+
+    /// The scripts run on the workstation, in order.
+    fn execs(&self) -> Vec<String> {
+        self.execs.lock().unwrap().clone()
     }
 
     fn set_workspace(&self, probe: WorkspaceProbe) {
@@ -293,6 +325,16 @@ impl ReconcileBlox for FakeBlox {
             .push(target.remote_working_dir.clone());
         // The test checkout is local.
         None
+    }
+
+    /// Answers the note outbox's collect script with the scripted outbox;
+    /// anything else (a clear) prints nothing.
+    fn exec(&self, _: &ReconcileTarget, args: &[&str]) -> Result<String, String> {
+        let script = args.last().copied().unwrap_or_default().to_string();
+        let collects = script.contains("echo done; else echo pending");
+        self.execs.lock().unwrap().push(script);
+        let outbox = self.outbox.lock().unwrap().clone()?;
+        Ok(if collects { outbox } else { String::new() })
     }
 }
 

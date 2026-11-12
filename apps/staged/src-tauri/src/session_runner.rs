@@ -43,6 +43,7 @@ pub(crate) mod reconcile;
 
 pub(crate) use disconnect::may_still_run_on_workstation;
 pub(crate) mod remote_note_watchdog;
+pub(crate) mod taken_over_note;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -1782,6 +1783,12 @@ pub fn start_session(
         // the work still going (see `SessionSettled::background_work_left`).
         // Reset with `settle_reason`.
         let background_work_left = Cell::new(false);
+        // Whether the last turn ended on a reattach: its `sq` proxy went while
+        // bloxlet still ran the agent, and the run picked the turn back up
+        // there (see `pick_up_detached_turn`). Such a turn was in flight on
+        // the agent, so losing it again leaves it there
+        // (`REATTACHED_TURN_IN_FLIGHT`). Reset with `settle_reason`.
+        let reattached = Cell::new(false);
 
         // Where this turn's `write_note` call lands (see `note_tool`). Shared
         // with the tool server and the message writer inside the run, and
@@ -1792,10 +1799,14 @@ pub fn start_session(
         // `write_note` stamps into the outbox, so the collector after the
         // run can tell this run's note from an older one.
         let remote_note_turn: std::cell::OnceCell<String> = std::cell::OnceCell::new();
-        // Whether the last turn's settle already pulled the workstation
-        // outbox into `note_slot` (one `ws exec` round trip per turn). The
-        // post-run collection below only runs when it did not — a turn that
-        // ended in a connection error never got that far.
+        // Whether the workstation outbox has been read since the last turn
+        // ended (one `ws exec` round trip per turn, into `note_slot`). The
+        // post-run collection below only runs when it has not — a turn that
+        // ended in a connection error never got that far — and the
+        // end-of-run clear removes a published note only when it has (see
+        // `RemoteOutboxUse::read_after_last_turn`). A turn picked back up
+        // after its proxy went resets it: the agent went on writing after
+        // anything read before.
         let remote_outbox_collected_for_turn: Cell<bool> = Cell::new(false);
         // Whether the start-of-run outbox recovery saw the outbox through:
         // false when the workstation dropped between installing the Staged
@@ -2325,6 +2336,7 @@ pub fn start_session(
                 transport_loss.set(None);
                 cancel_unacknowledged.set(false);
                 background_work_left.set(false);
+                reattached.set(false);
                 let turn_result = match driver
                     .connect(
                         &config.session_id,
@@ -2424,6 +2436,66 @@ pub fn start_session(
                 };
 
                 remote_agent_idle_at_settle.set(Some(activity.idle_for()));
+
+                // The `sq` proxy went while bloxlet still runs the agent,
+                // which may still be finishing the turn: pick it back up
+                // there — unless a quit detached it, which means to leave
+                // the turn running. This happens here, inside the turn
+                // loop, so the turn's end is an ordinary turn end whichever
+                // connection saw it: the outbox collection, the Pikchr
+                // check, the `write_note` follow-up and the hooks below all
+                // run for it. (It used to happen after the loop, where the
+                // note submission had already been taken and nothing read
+                // the outbox again: a note published before the proxy died
+                // was stored empty and then cleared off the workstation.)
+                //
+                // The reattached turn ends like a dead owner's does (see
+                // `ReattachEnd::settlement`); it was in flight on the agent,
+                // so losing it again leaves it there.
+                let picked_up = pick_up_detached_turn(
+                    turn_result,
+                    cancel_token.is_cancelled(),
+                    settle_reason.get(),
+                    |error| {
+                        // Marked before the quit check: a quit after it
+                        // detaches the reattach, and one before it is seen
+                        // here.
+                        let detached = registry.reattaching(&config.session_id);
+                        let quitting = crate::app_lifecycle::is_quitting(&app_handle);
+                        let (store, config, cancel_token, registry) =
+                            (&store, &config, &cancel_token, &registry);
+                        async move {
+                            if quitting {
+                                return None;
+                            }
+                            let on_detach_handle = |handle: acp_client::DetachHandle| {
+                                registry.set_detach_handle(&config.session_id, handle)
+                            };
+                            reattach_detached_turn(
+                                store,
+                                config,
+                                turn_start_message_id,
+                                cancel_token,
+                                &detached,
+                                &error,
+                                &on_detach_handle,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await;
+                if let Some(settlement) = picked_up.reattached {
+                    settle_reason.set(settlement.settle_reason);
+                    transport_loss.set(settlement.transport_loss);
+                    cancel_unacknowledged.set(settlement.cancel_unacknowledged);
+                    background_work_left.set(settlement.background_work_left);
+                    reattached.set(true);
+                    // The agent went on with the turn after anything read
+                    // from the outbox before (the watchdog's probe).
+                    remote_outbox_collected_for_turn.set(false);
+                }
+                let turn_result = picked_up.result;
 
                 if !should_validate_pikchr_after_turn(&turn_result, cancel_token.is_cancelled()) {
                     return turn_result.map_err(AgentRunError::from);
@@ -2613,6 +2685,17 @@ pub fn start_session(
             remove_local_note_draft_after_run(&config.session_id, path);
         }
 
+        // How the run's last turn ended, beyond its result. A turn the run
+        // picked back up after its `sq` proxy went (inside the loop, see
+        // `pick_up_detached_turn`) has the reattach's settlement.
+        let settlement = RunSettlement {
+            settle_reason: settle_reason.get(),
+            transport_loss: transport_loss.get(),
+            cancel_unacknowledged: cancel_unacknowledged.get(),
+            background_work_left: background_work_left.get(),
+        };
+        let reattached = reattached.get();
+
         // Why, if at all, the run lost its remote agent mid-turn — the only
         // ending the outbox can rescue, and the only one that leaves the
         // agent plausibly still working on the workstation. A transport
@@ -2622,19 +2705,28 @@ pub fn start_session(
         // never started (the startup timeout) or a local persistence error
         // is a plain crash, whatever the outbox holds; and without the
         // Staged MCP on Blox attached there is no outbox to rescue from.
-        let lost_remote_agent = match (remote_note_turn.get(), config.workspace_name.as_deref()) {
-            (Some(_), Some(_)) => lost_remote_agent_detail(
-                &result,
-                settle_reason.get(),
-                cancel_unacknowledged.get(),
-                inactivity_probe_found_note.get(),
-                UnacknowledgedCancelContext {
-                    stop_requested: cancel_token.is_cancelled(),
-                    agent_idle: remote_agent_idle_at_settle.get(),
-                },
-            ),
-            _ => None,
-        };
+        //
+        // A remote turn the connection lost — dropped transport, or a quit's
+        // detach — may still be running on the workstation, as may background
+        // work a hold lost: the row is recorded `disconnected` further down,
+        // with no hooks, completion effects or queue drain. A remote note
+        // session with the Staged MCP on Blox attached whose agent was lost
+        // settles from its outbox instead (`detached` while the sweep keeps
+        // checking it; see `lost_remote_agent_terminal_state`).
+        let lost_remote_note_agent =
+            match (remote_note_turn.get(), config.workspace_name.as_deref()) {
+                (Some(_), Some(_)) => lost_remote_agent_detail(
+                    &result,
+                    settlement.settle_reason,
+                    settlement.cancel_unacknowledged,
+                    inactivity_probe_found_note.get(),
+                    UnacknowledgedCancelContext {
+                        stop_requested: cancel_token.is_cancelled(),
+                        agent_idle: remote_agent_idle_at_settle.get(),
+                    },
+                ),
+                _ => None,
+            };
         // The settled turn's collection (inside the loop) already pulled a
         // remote note into the slot. Two cases it could not cover: a turn
         // that never settled cleanly — the connection to the remote agent
@@ -2649,26 +2741,34 @@ pub fn start_session(
         // the agent may have finished the note just before the proxy went
         // dark, and a Stop that threw that away would be the one outcome the
         // outbox exists to prevent.
-        let hold_stopped = settle_reason.get() == Some(SessionSettleReason::HoldStopped);
+        //
+        // Every other ending that did not read the outbox after its last
+        // turn (a crash, a turn the agent cancelled, a collection that
+        // failed) is not read here either: nothing would be done with a note
+        // found, and the end-of-run clear leaves a published one in place
+        // for the next run (`RunEndOutboxClear::ClearUnlessPublished`).
+        let hold_stopped = settlement.settle_reason == Some(SessionSettleReason::HoldStopped);
         if let (Some(turn_id), Some(ws_name)) =
             (remote_note_turn.get(), config.workspace_name.as_deref())
         {
-            if (lost_remote_agent.is_some() || hold_stopped)
+            if (lost_remote_note_agent.is_some() || hold_stopped)
                 && !remote_outbox_collected_for_turn.get()
             {
-                let why = if lost_remote_agent.is_some() {
+                let why = if lost_remote_note_agent.is_some() {
                     "after the connection failed"
                 } else {
                     "after the background hold was stopped"
                 };
                 let exec = remote_staged_mcp::workspace_exec(ws_name);
-                match note_outbox::collect_turn_into_slot(
+                let collected = note_outbox::collect_turn_into_slot(
                     &exec,
                     &session_id_for_status,
                     turn_id,
                     &note_slot,
                     &remote_note_memory,
-                ) {
+                );
+                remote_outbox_collected_for_turn.set(collected.is_ok());
+                match collected {
                     Ok(OutboxState::Delivered(submission)) => {
                         remote_outbox_own_note_collected.set(true);
                         log::info!(
@@ -2692,6 +2792,8 @@ pub fn start_session(
                 }
             }
         }
+        // Read only now, after every collection the run makes: the slot is
+        // what the hooks store.
         let note_submission = crate::note_tool::current_submission(&note_slot);
 
         if let Err(ref e) = result {
@@ -2708,88 +2810,12 @@ pub fn start_session(
             }
         }
 
-        // The `sq` proxy went while bloxlet still runs the agent, which may
-        // still be finishing the turn: pick it back up there — unless a quit
-        // detached it, which means to leave the turn running. The reattached
-        // turn ends like a dead owner's does (see `ReattachEnd::settlement`);
-        // it was in flight on the agent, so losing it again leaves it there.
-        let last_settlement = RunSettlement {
-            settle_reason: settle_reason.get(),
-            transport_loss: transport_loss.get(),
-            cancel_unacknowledged: cancel_unacknowledged.get(),
-            background_work_left: background_work_left.get(),
-        };
-        let (result, settlement, reattached) = match result {
-            Err(error)
-                if disconnect::run_picks_up_detached_turn(
-                    error.message(),
-                    cancel_token.is_cancelled(),
-                    last_settlement.settle_reason,
-                ) =>
-            {
-                // Marked before the quit check: a quit after it detaches
-                // the reattach, and one before it is seen here.
-                let detached = registry.reattaching(&session_id_for_status);
-                if crate::app_lifecycle::is_quitting(&app_handle) {
-                    (Err(error), last_settlement, false)
-                } else {
-                    let on_detach_handle = |handle: acp_client::DetachHandle| {
-                        registry.set_detach_handle(&session_id_for_status, handle)
-                    };
-                    let reattached = local.block_on(
-                        &rt,
-                        reattach_detached_turn(
-                            &store_for_status,
-                            &config,
-                            turn_start_message_id,
-                            &cancel_token,
-                            &detached,
-                            error.message(),
-                            &on_detach_handle,
-                        ),
-                    );
-                    match reattached {
-                        Some(end) => {
-                            let settlement = end.settlement();
-                            (end.result.map_err(AgentRunError::from), settlement, true)
-                        }
-                        None => (Err(error), last_settlement, false),
-                    }
-                }
-            }
-            result => (result, last_settlement, false),
-        };
-
-        // A remote turn the connection lost — dropped transport, or a quit's
-        // detach — may still be running on the workstation, as may background
-        // work a hold lost: record the row `disconnected`, with no hooks,
-        // completion effects or queue drain.
-        // A remote note session with the Staged MCP on Blox attached whose
-        // agent was lost settles from its outbox instead
-        // (`detached` while the sweep keeps checking it; see
-        // `lost_remote_agent_terminal_state` and `lost_remote_agent_detail`).
-        // Judged on the result the run ended with: a reattach may have
-        // changed it.
         let remote_outbox_use = RemoteOutboxUse {
             staged_mcp_attached: remote_note_turn.get().is_some(),
             recovery_settled: remote_outbox_recovery_settled.get(),
             own_note_collected: remote_outbox_own_note_collected.get(),
+            read_after_last_turn: remote_outbox_collected_for_turn.get(),
         };
-        let lost_remote_note_agent =
-            if remote_outbox_use.staged_mcp_attached && config.workspace_name.is_some() {
-                lost_remote_agent_detail(
-                    &result,
-                    settlement.settle_reason,
-                    settlement.cancel_unacknowledged,
-                    inactivity_probe_found_note.get(),
-                    UnacknowledgedCancelContext {
-                        stop_requested: cancel_token.is_cancelled(),
-                        agent_idle: remote_agent_idle_at_settle.get(),
-                    },
-                )
-            } else {
-                None
-            };
         if lost_remote_note_agent.is_none()
             && disconnect::run_leaves_session_disconnected(
                 config.workspace_name.is_some(),
@@ -3253,7 +3279,13 @@ fn finish_session_run(
     // is torn down) — under a background hold that is quiescence or the
     // hold cap, not the prompt resolving — so a commit made by an
     // out-of-turn background continuation is visible to these hooks.
-    detect_turn_artifacts(
+    //
+    // A note collected from the workstation outbox that the hooks could not
+    // store stays there: see `RunEndForOutbox::collected_note_unstored`.
+    let note_collected_from_outbox = note_submission
+        .as_ref()
+        .is_some_and(|submission| submission.source == NoteSubmissionSource::Outbox);
+    let hooks = detect_turn_artifacts(
         config,
         completed_successfully,
         &completion_reason,
@@ -3261,6 +3293,8 @@ fn finish_session_run(
         turn_start_message_id,
         note_submission,
     );
+    let collected_note_unstored =
+        note_collected_from_outbox && hooks.is_some_and(|hooks| !hooks.note_stored);
 
     // The registry entry is still in place during the hooks, so a Stop
     // that lands while they run fires this token: `cancel` answers `true`
@@ -3380,29 +3414,31 @@ fn finish_session_run(
 
     // This run is done with the workstation outbox: empty it (the draft
     // too), so the next run of this session does not find a `done` marker
-    // it would take for an uncollected note — and store a note this run already
-    // ingested (over whatever the user edited meanwhile), gave up on
+    // it would take for an uncollected note — and store a note this run
+    // already ingested (over whatever the user edited meanwhile), gave up on
     // (the Pikchr repair loop ran out of attempts), or threw away (a Stop
-    // after the agent had already called `write_note`). The one state
-    // that keeps the outbox is `detached` while the sweep is still
-    // checking it: there the note has not arrived yet and the sweep is
-    // what collects it. After the terminal status so the round trip does
-    // not hold the row in `running`; a failure here only costs a
-    // re-ingest on resume, so it is logged and otherwise ignored.
-    if remote_outbox_is_cleared_at_run_end(
+    // after the agent had already called `write_note`). A run that did not
+    // read the outbox after its last turn removes only an unpublished one:
+    // a `done` marker it never saw is a note nobody has stored, and stays
+    // for the next run. The one state that keeps the outbox outright is
+    // `detached` while the sweep is still checking it: there the note has
+    // not arrived yet and the sweep is what collects it (see
+    // `remote_outbox_clear_at_run_end`). After the terminal status so the
+    // round trip does not hold the row in `running`.
+    let outbox_clear = remote_outbox_clear_at_run_end(
         remote_outbox_use,
         &completion_reason,
         error_msg.as_deref(),
-    ) {
-        if let Some(ws_name) = config.workspace_name.as_deref() {
-            let exec = remote_staged_mcp::workspace_exec(ws_name);
-            if let Err(e) = note_outbox::clear_outbox(&exec, &session_id_for_status) {
-                log::warn!(
-                    "Session {session_id_for_status}: failed to clear the workstation note \
-                     outbox at the end of the run: {e}"
-                );
-            }
-        }
+        RunEndForOutbox {
+            user_stopped: new_status == "cancelled"
+                && cancel_token.is_cancelled()
+                && completion_reason != CompletionReason::AppQuit,
+            collected_note_unstored,
+        },
+    );
+    if let Some(ws_name) = config.workspace_name.as_deref() {
+        let exec = remote_staged_mcp::workspace_exec(ws_name);
+        clear_remote_outbox_at_run_end(&exec, &session_id_for_status, outbox_clear);
     }
 
     if transitioned {
@@ -4258,10 +4294,12 @@ fn debug_string_fields(text: &str, prefix: &str) -> Vec<String> {
 }
 
 /// What a run did with its session's workstation outbox, for the end-of-run
-/// clear decision ([`remote_outbox_is_cleared_at_run_end`]).
+/// clear decision ([`remote_outbox_clear_at_run_end`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RemoteOutboxUse {
-    /// The Staged MCP on Blox was attached: the run owned the outbox.
+    /// The run owned the outbox: it attached the Staged MCP on Blox, or it
+    /// took over a turn another run had prompted and read the outbox for it
+    /// (see `taken_over_note`).
     staged_mcp_attached: bool,
     /// The start-of-run recovery saw the outbox through (ingested a waiting
     /// note, discarded unusable content, or found it empty). False when the
@@ -4273,31 +4311,115 @@ struct RemoteOutboxUse {
     /// A collection during this run found this run's own note, so whatever
     /// an earlier run left in the outbox has been overwritten by it.
     own_note_collected: bool,
+    /// The run read the outbox after its last turn ended — the turn it
+    /// prompted, or the one it picked back up after its proxy went — so
+    /// whatever the outbox holds has been seen and judged. False for a run
+    /// that ended without that read: its last turn failed, was cancelled, or
+    /// the read itself failed.
+    read_after_last_turn: bool,
 }
 
-/// Whether the end of a run empties the session's workstation outbox.
+/// What the end of a run does with its session's workstation outbox (see
+/// [`remote_outbox_clear_at_run_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunEndOutboxClear {
+    /// Leave everything in place.
+    Keep,
+    /// Empty it, whatever it holds.
+    Clear,
+    /// Empty it only when it holds no `done` marker
+    /// (`note_outbox::clear_unpublished_outbox`): a published note nobody
+    /// has collected stays, with its draft, for the next run's start-of-run
+    /// recovery.
+    ClearUnlessPublished,
+}
+
+/// How a run ended, as far as the end-of-run outbox clear is concerned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RunEndForOutbox {
+    /// The row ended `cancelled` because the user pressed Stop — not a
+    /// quit's cancel, and not an agent that cancelled its own turn.
+    user_stopped: bool,
+    /// The hooks were handed a note collected from the outbox and did not
+    /// store it (a media ingest or a store write failed).
+    collected_note_unstored: bool,
+}
+
+/// What the end of a run does with the session's workstation outbox.
 ///
-/// A run that attached the Staged MCP on Blox owns the outbox for its
-/// duration and leaves it empty, whatever its terminal status: a stored note
-/// must not be re-ingested on resume, and neither must a note the run
-/// rejected (Pikchr repair exhausted) or discarded (Stop after the call).
-/// Two exceptions keep it:
+/// A run that owns the outbox leaves it empty, whatever its terminal status:
+/// a stored note must not be re-ingested on resume, and neither must a note
+/// the run rejected (Pikchr repair exhausted) or the user discarded (Stop
+/// after the call). But it only ever removes a published note it has dealt
+/// with. The rule, in order:
 ///
-/// - a row the sweep is still polling ([`detached_note_poll_is_pending`]):
-///   its note has not arrived yet, and the outbox is where it will;
+/// - a run that did not own the outbox keeps it;
+/// - a row the sweep is still polling ([`detached_note_poll_is_pending`])
+///   keeps it: its note has not arrived yet, and the outbox is where it will;
 /// - a run whose start-of-run recovery did not settle and that never saw its
-///   own note in the outbox: an earlier run's finished note may still be
-///   there, unread by anyone (the per-turn collector reports it as a stale
-///   turn and ignores it), and clearing would delete the only copy. The next
-///   run's recovery gets another chance at it.
-fn remote_outbox_is_cleared_at_run_end(
+///   own note in the outbox keeps it: an earlier run's finished note may
+///   still be there, unread by anyone (the per-turn collector reports it as
+///   a stale turn and ignores it), and clearing would delete the only copy.
+///   The next run's recovery gets another chance at it;
+/// - a collected note the hooks could not store keeps it: the outbox is the
+///   only copy, and the next run's recovery ingests it;
+/// - a Stop the user asked for clears it: the user discarded the turn's
+///   output, and a later Resume must not bring the note back;
+/// - a run that read the outbox after its last turn ended clears it: what
+///   was there has been stored, or judged and rejected;
+/// - any other run — one whose last turn failed or ended without a read, or
+///   whose read failed — removes only an outbox with no `done` marker
+///   ([`RunEndOutboxClear::ClearUnlessPublished`]). It never saw what the
+///   agent may have published in that turn, so a published note stays for
+///   the next run's start-of-run recovery.
+fn remote_outbox_clear_at_run_end(
     outbox_use: RemoteOutboxUse,
     completion_reason: &CompletionReason,
     error_message: Option<&str>,
-) -> bool {
-    outbox_use.staged_mcp_attached
-        && (outbox_use.recovery_settled || outbox_use.own_note_collected)
-        && !detached_note_poll_is_pending(completion_reason, error_message)
+    run_end: RunEndForOutbox,
+) -> RunEndOutboxClear {
+    if !outbox_use.staged_mcp_attached
+        || detached_note_poll_is_pending(completion_reason, error_message)
+        || !(outbox_use.recovery_settled || outbox_use.own_note_collected)
+        || run_end.collected_note_unstored
+    {
+        RunEndOutboxClear::Keep
+    } else if run_end.user_stopped || outbox_use.read_after_last_turn {
+        RunEndOutboxClear::Clear
+    } else {
+        RunEndOutboxClear::ClearUnlessPublished
+    }
+}
+
+/// Carry out [`remote_outbox_clear_at_run_end`]'s decision on the
+/// workstation. A failure only costs a re-ingest (or a leftover draft) on
+/// resume, so it is logged and otherwise ignored.
+fn clear_remote_outbox_at_run_end(
+    exec: remote_staged_mcp::RemoteExec,
+    session_id: &str,
+    clear: RunEndOutboxClear,
+) {
+    let result = match clear {
+        RunEndOutboxClear::Keep => return,
+        RunEndOutboxClear::Clear => note_outbox::clear_outbox(exec, session_id),
+        RunEndOutboxClear::ClearUnlessPublished => {
+            note_outbox::clear_unpublished_outbox(exec, session_id).map(|cleared| {
+                if cleared == note_outbox::UnreadOutboxClear::PublishedNoteKept {
+                    log::warn!(
+                        "Session {session_id}: this run ended without reading the workstation \
+                         note outbox after its last turn, and the outbox holds a published \
+                         note; leaving it there for the next run to ingest"
+                    );
+                }
+            })
+        }
+    };
+    if let Err(e) = result {
+        log::warn!(
+            "Session {session_id}: failed to clear the workstation note outbox at the end of \
+             the run: {e}"
+        );
+    }
 }
 
 /// The first invalid `pikchr` block in the note body handed to `write_note`,
@@ -6259,6 +6381,21 @@ fn reattach_dead_owner_session(
             }
             Ok((config, turn_start_message_id, end)) => {
                 let settlement = end.settlement();
+                // The run that prompted this turn went with its owner, and
+                // with it the submission slot a remote note session's
+                // outbox is collected into. Read the outbox here, so the
+                // note the agent published is what the hooks store (see
+                // `taken_over_note`) instead of an empty one.
+                let ws_name = config.workspace_name.clone().unwrap_or_default();
+                let exec = remote_staged_mcp::workspace_exec(&ws_name);
+                let note = taken_over_note::reattached_turn_run_end(
+                    &store,
+                    &config.session_id,
+                    config.workspace_name.as_deref(),
+                    matches!(end.result, Ok(AgentRunOutcome::Completed))
+                        && !cancel_token.is_cancelled(),
+                    &exec,
+                );
                 finish_session_run(
                     &config,
                     end.result.map_err(AgentRunError::from),
@@ -6269,9 +6406,9 @@ fn reattach_dead_owner_session(
                     store,
                     registry,
                     app_handle,
-                    None,
-                    RemoteOutboxUse::default(),
-                    None,
+                    note.note_submission,
+                    note.outbox_use,
+                    note.lost_remote_note_agent,
                 )
             }
             Err(error) => {
@@ -6567,6 +6704,65 @@ where
 /// left there.
 const QUIT_WHILE_REATTACHING: &str =
     "Detached with the turn still in flight (Staged quit while reattaching to it)";
+
+/// A prompt turn's result once a turn its `sq` proxy dropped has been picked
+/// back up (see [`pick_up_detached_turn`]).
+#[derive(Debug)]
+struct PickedUpTurn {
+    /// How the turn ended: on the connection that prompted it, or on the
+    /// reattach.
+    result: Result<AgentRunOutcome, String>,
+    /// The reattach's settlement, when the turn was picked back up: it
+    /// replaces the settlement of the connection that went.
+    reattached: Option<RunSettlement>,
+}
+
+/// The result of the turn a run just prompted, with a turn whose `sq` proxy
+/// went while bloxlet still ran the agent picked back up there (see
+/// [`disconnect::run_picks_up_detached_turn`]) and waited out.
+///
+/// `reattach` is given the connection's error and resolves to how the
+/// reattached turn ended, or to `None` when the turn is not picked up — a
+/// quit is in progress, or the prompt never reached the agent — and the
+/// error stands.
+///
+/// The run's turn loop calls this before it looks at the result, so a turn
+/// that ends on the reattach is settled exactly like one that ended on its
+/// own connection: a remote note session's outbox is collected into the
+/// submission slot, the Pikchr check and the `write_note` follow-up run, and
+/// the hooks store the note.
+async fn pick_up_detached_turn<F, Fut>(
+    turn_result: Result<AgentRunOutcome, String>,
+    stopped: bool,
+    settle_reason: Option<acp_client::SessionSettleReason>,
+    reattach: F,
+) -> PickedUpTurn
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<ReattachEnd>>,
+{
+    let error = match turn_result {
+        Err(error) if disconnect::run_picks_up_detached_turn(&error, stopped, settle_reason) => {
+            error
+        }
+        result => {
+            return PickedUpTurn {
+                result,
+                reattached: None,
+            }
+        }
+    };
+    match reattach(error.clone()).await {
+        Some(end) => PickedUpTurn {
+            reattached: Some(end.settlement()),
+            result: end.result,
+        },
+        None => PickedUpTurn {
+            result: Err(error),
+            reattached: None,
+        },
+    }
+}
 
 /// Pick up the turn `config` prompted (its prompt is row
 /// `turn_start_message_id`) after its `sq` proxy went with `error` while
@@ -8297,7 +8493,8 @@ fn turn_artifact_hooks(
 }
 
 /// Run the post-completion hooks a turn that has reached its terminal state
-/// calls for (see [`turn_artifact_hooks`]).
+/// calls for (see [`turn_artifact_hooks`]). Returns what the full hooks got
+/// done, `None` when they did not run.
 fn detect_turn_artifacts(
     config: &SessionConfig,
     completed_successfully: bool,
@@ -8305,33 +8502,34 @@ fn detect_turn_artifacts(
     store: &Arc<Store>,
     turn_start_message_id: i64,
     note_submission: Option<NoteSubmission>,
-) {
+) -> Option<HooksOutcome> {
     let remote_working_dir = config
         .remote_working_dir
         .as_deref()
         .and_then(|dir| dir.to_str());
     match turn_artifact_hooks(completed_successfully, completion_reason) {
-        TurnArtifactHooks::All => {
-            run_post_completion_hooks(
-                &config.session_id,
-                &config.working_dir,
-                config.pre_head_sha.as_deref(),
-                config.workspace_name.as_deref(),
-                remote_working_dir,
-                store,
-                turn_start_message_id,
-                note_submission,
-            );
-        }
-        TurnArtifactHooks::CommitOnly => detect_session_commit(
+        TurnArtifactHooks::All => Some(run_post_completion_hooks(
             &config.session_id,
             &config.working_dir,
             config.pre_head_sha.as_deref(),
             config.workspace_name.as_deref(),
             remote_working_dir,
             store,
-        ),
-        TurnArtifactHooks::Skip => {}
+            turn_start_message_id,
+            note_submission,
+        )),
+        TurnArtifactHooks::CommitOnly => {
+            detect_session_commit(
+                &config.session_id,
+                &config.working_dir,
+                config.pre_head_sha.as_deref(),
+                config.workspace_name.as_deref(),
+                remote_working_dir,
+                store,
+            );
+            None
+        }
+        TurnArtifactHooks::Skip => None,
     }
 }
 
@@ -9129,8 +9327,10 @@ pub fn emit_session_running(
 #[cfg(test)]
 mod tests {
     mod detached_recovery;
+    mod detached_turn_pickup;
     mod note_completion;
     mod note_draft;
+    mod taken_over_note;
     use super::*;
     use crate::git::strip_git_env;
     use std::cell::RefCell;

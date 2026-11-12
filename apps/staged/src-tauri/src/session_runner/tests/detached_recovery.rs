@@ -9,7 +9,7 @@ use crate::store::{Branch, Note, Project, Session};
 use std::cell::RefCell;
 
 /// A running note session on a remote branch; returns (session id, note id).
-fn remote_note_session(store: &Arc<Store>) -> (String, String) {
+pub(super) fn remote_note_session(store: &Arc<Store>) -> (String, String) {
     let project = Project::new("test/remote-notes");
     store.create_project(&project).unwrap();
     let branch = Branch::new_remote(&project.id, "notes", "main", "ws-1");
@@ -22,7 +22,7 @@ fn remote_note_session(store: &Arc<Store>) -> (String, String) {
     (session.id, note.id)
 }
 
-fn b64(bytes: &[u8]) -> String {
+pub(super) fn b64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -33,13 +33,13 @@ fn done_output() -> String {
     format!("done\n{}\n{}\n", b64(meta.as_bytes()), b64(b"Body"))
 }
 
-fn is_collect(args: &[&str]) -> bool {
+pub(super) fn is_collect(args: &[&str]) -> bool {
     args.len() == 3 && args[2].contains("echo done; else echo pending")
 }
 
 /// Records every workstation command and answers the collect script with
 /// `collect_output`.
-fn recording_exec<'a>(
+pub(super) fn recording_exec<'a>(
     collect_output: &'a str,
     log: &'a RefCell<Vec<Vec<String>>>,
 ) -> impl Fn(&[&str]) -> Result<String, String> + 'a {
@@ -719,8 +719,9 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
             && !e.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)),
         "a known-bad note is not stored and not polled for: {error:?}"
     );
-    assert!(
-        remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, error.as_deref()),
+    assert_eq!(
+        clear_at_run_end(SETTLED_RUN, &reason, error.as_deref()),
+        RunEndOutboxClear::Clear,
         "...and the outbox holding it is emptied"
     );
 
@@ -738,19 +739,31 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
                 && e.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)),
         "{error:?}"
     );
-    assert!(
-        !remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, error.as_deref()),
+    assert_eq!(
+        clear_at_run_end(SETTLED_RUN, &reason, error.as_deref()),
+        RunEndOutboxClear::Keep,
         "the sweep still needs the outbox"
     );
 }
 
 /// A run that attached the Staged MCP on Blox, whose start-of-run recovery
-/// went through.
+/// went through, and that read the outbox after its last turn ended.
 const SETTLED_RUN: RemoteOutboxUse = RemoteOutboxUse {
     staged_mcp_attached: true,
     recovery_settled: true,
     own_note_collected: false,
+    read_after_last_turn: true,
 };
+
+/// The end-of-run clear decision for a run that was not stopped and whose
+/// hooks stored whatever note they were handed.
+fn clear_at_run_end(
+    outbox_use: RemoteOutboxUse,
+    reason: &CompletionReason,
+    message: Option<&str>,
+) -> RunEndOutboxClear {
+    remote_outbox_clear_at_run_end(outbox_use, reason, message, RunEndForOutbox::default())
+}
 
 #[test]
 fn the_detached_message_carries_the_innermost_error_not_the_debug_dump() {
@@ -855,12 +868,13 @@ fn an_unsettled_start_of_run_recovery_keeps_the_outbox_unless_the_run_saw_its_ow
         (CompletionReason::Crashed, Some("auth required")),
         (CompletionReason::Interrupted, None),
     ] {
-        assert!(
-            !remote_outbox_is_cleared_at_run_end(unsettled, &reason, message),
+        assert_eq!(
+            clear_at_run_end(unsettled, &reason, message),
+            RunEndOutboxClear::Keep,
             "an earlier run's note may still be waiting unseen: {reason:?}"
         );
-        assert!(
-            remote_outbox_is_cleared_at_run_end(
+        assert_eq!(
+            clear_at_run_end(
                 RemoteOutboxUse {
                     own_note_collected: true,
                     ..unsettled
@@ -868,6 +882,7 @@ fn an_unsettled_start_of_run_recovery_keeps_the_outbox_unless_the_run_saw_its_ow
                 &reason,
                 message
             ),
+            RunEndOutboxClear::Clear,
             "this run's note overwrote whatever was there: {reason:?}"
         );
     }
@@ -1219,8 +1234,9 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
             && error.ends_with(AWAITING_REMOTE_NOTE_SUFFIX),
         "the copy does not promise a note: {error}"
     );
-    assert!(
-        !remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, Some(&error)),
+    assert_eq!(
+        clear_at_run_end(SETTLED_RUN, &reason, Some(&error)),
+        RunEndOutboxClear::Keep,
         "the outbox is kept for the sweep"
     );
 
@@ -1412,19 +1428,19 @@ fn the_outbox_is_cleared_whenever_the_run_is_done_with_it() {
             Some("a note whose Pikchr block does not parse"),
         ),
     ] {
-        assert!(
-            remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, message),
+        assert_eq!(
+            clear_at_run_end(SETTLED_RUN, &reason, message),
+            RunEndOutboxClear::Clear,
             "{reason:?} / {message:?}"
         );
     }
     let awaiting = awaiting_remote_note_message("ws-1", Some("incoming transport closed"));
-    assert!(!remote_outbox_is_cleared_at_run_end(
-        SETTLED_RUN,
-        &CompletionReason::Detached,
-        Some(&awaiting)
-    ));
-    assert!(
-        !remote_outbox_is_cleared_at_run_end(
+    assert_eq!(
+        clear_at_run_end(SETTLED_RUN, &CompletionReason::Detached, Some(&awaiting)),
+        RunEndOutboxClear::Keep
+    );
+    assert_eq!(
+        clear_at_run_end(
             RemoteOutboxUse {
                 staged_mcp_attached: false,
                 ..SETTLED_RUN
@@ -1432,7 +1448,94 @@ fn the_outbox_is_cleared_whenever_the_run_is_done_with_it() {
             &CompletionReason::TurnComplete,
             None
         ),
+        RunEndOutboxClear::Keep,
         "a run without the Staged MCP on Blox never touched the outbox"
+    );
+}
+
+/// The lost note of scenario 9: a run that ends without having read the
+/// outbox after its last turn must not delete a note the agent published in
+/// that turn. Before the fix every one of these endings cleared the outbox
+/// outright.
+#[test]
+fn a_run_that_never_read_the_outbox_after_its_last_turn_keeps_a_published_note() {
+    let unread = RemoteOutboxUse {
+        read_after_last_turn: false,
+        ..SETTLED_RUN
+    };
+    for (reason, message) in [
+        // The shape of the defect: the turn completed on a path that never
+        // collected.
+        (CompletionReason::TurnComplete, None),
+        // The in-loop collection failed (the workstation did not answer).
+        (CompletionReason::HeldUntilCap, None),
+        // The last turn failed outright.
+        (CompletionReason::Crashed, Some("auth required")),
+        // The agent cancelled its own turn; nobody pressed Stop.
+        (CompletionReason::Interrupted, None),
+    ] {
+        assert_eq!(
+            clear_at_run_end(unread, &reason, message),
+            RunEndOutboxClear::ClearUnlessPublished,
+            "{reason:?} / {message:?}"
+        );
+    }
+
+    // A Stop the user asked for discards the turn's output, read or not.
+    assert_eq!(
+        remote_outbox_clear_at_run_end(
+            unread,
+            &CompletionReason::Interrupted,
+            None,
+            RunEndForOutbox {
+                user_stopped: true,
+                collected_note_unstored: false,
+            },
+        ),
+        RunEndOutboxClear::Clear
+    );
+
+    // A collected note the hooks could not store is the only copy: it
+    // stays, even after a Stop.
+    for user_stopped in [false, true] {
+        assert_eq!(
+            remote_outbox_clear_at_run_end(
+                SETTLED_RUN,
+                &CompletionReason::TurnComplete,
+                None,
+                RunEndForOutbox {
+                    user_stopped,
+                    collected_note_unstored: true,
+                },
+            ),
+            RunEndOutboxClear::Keep
+        );
+    }
+}
+
+/// Carrying out the decision: `Keep` runs nothing, `Clear` removes the
+/// outbox outright, and `ClearUnlessPublished` runs the guarded script.
+#[test]
+fn the_run_end_clear_runs_the_script_its_decision_names() {
+    let log = RefCell::new(Vec::new());
+    let exec = recording_exec("", &log);
+    clear_remote_outbox_at_run_end(&exec, "sess-1", RunEndOutboxClear::Keep);
+    assert!(log.borrow().is_empty());
+
+    clear_remote_outbox_at_run_end(&exec, "sess-1", RunEndOutboxClear::Clear);
+    clear_remote_outbox_at_run_end(&exec, "sess-1", RunEndOutboxClear::ClearUnlessPublished);
+    let scripts: Vec<String> = log.borrow().iter().map(|args| args[2].clone()).collect();
+    assert_eq!(
+        scripts,
+        vec![
+            clear_outbox_script("sess-1"),
+            crate::remote_staged_mcp::note_outbox::clear_unpublished_outbox_script("sess-1"),
+        ]
+    );
+    assert!(
+        scripts[1].contains("if [ -f \"$d/done\" ]"),
+        "the guarded clear checks the marker on the workstation: {}",
+        scripts[1]
     );
 }
 

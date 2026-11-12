@@ -181,9 +181,11 @@ impl PublishedNoteStamp {
 ///
 /// `rejected` is the one published note the caller *has* read: a note its
 /// run collected and then turned down (a Pikchr block that does not parse).
-/// A marker that still belongs to that note is no reason to keep anything —
-/// the next run's recovery would ingest the rejected note unchecked — so it
-/// is removed with the rest. The script recognises it by the `cksum` of
+/// A marker that still belongs to that note is no reason to keep anything:
+/// the note is known bad, and not every later reader checks it (the next
+/// run's recovery does, see [`recover_uncollected_outbox`], but the detached
+/// sweep reads with any turn id and stores what it finds). So it is removed
+/// with the rest. The script recognises it by the `cksum` of
 /// `meta.json` and of `note.md`; a note published since has a different
 /// `writtenAt` or body and stays. A workstation without `cksum` matches
 /// nothing and keeps the note, which is the rule without `rejected`.
@@ -693,9 +695,11 @@ pub(crate) enum OutboxRecovery {
     Empty,
     /// A finished note from an earlier run was handed to `ingest`, then cleared.
     Ingested,
-    /// The outbox held something marked `done` that is not a usable note (a
-    /// file missing beside the marker, or a body the tool would reject). It
-    /// was logged and cleared so the session is not stuck on it forever.
+    /// The outbox held something marked `done` that is not a note to store:
+    /// content the collector cannot turn into one (a file missing beside the
+    /// marker, a body the tool would reject), or a note with a Pikchr block
+    /// that does not parse. It was logged and cleared so the session is not
+    /// stuck on it forever.
     Discarded,
 }
 
@@ -712,6 +716,17 @@ pub(crate) enum OutboxRecovery {
 /// body to seed `draft.md` with (an amendment), or `None` to leave no draft
 /// (a fresh note). A seed that fits one command line shares the clear's
 /// round trip ([`clear_outbox_and_seed`]).
+///
+/// The waiting note is checked before it is handed over: no run is left to
+/// ask for a repair, so a note with a Pikchr block that does not parse is
+/// not stored. It is logged, cleared and reported as
+/// [`OutboxRecovery::Discarded`], which is what a takeover does with such a
+/// note (`session_runner::taken_over_note`), and the run that is starting
+/// has the agent write it again. This is the check that covers a note an
+/// earlier run rejected, had republished still broken, and then never read
+/// again: that note carries a new `writtenAt`, so the earlier run's guarded
+/// clear kept it as one nobody had read
+/// ([`clear_unpublished_outbox_script`]).
 ///
 /// Two failures leave the outbox alone for the next attempt and are errors
 /// here: a workstation that could not be reached, and a waiting note that
@@ -739,19 +754,37 @@ pub(crate) fn recover_uncollected_outbox(
 ) -> Result<RunStartRecovery, String> {
     let outbox = match collect_classified(exec, session_id, None) {
         Ok(OutboxState::Delivered(submission)) => {
-            log::warn!(
-                "Session {session_id}: the workstation outbox holds an uncollected note \
-                 \"{}\" from an earlier run; ingesting it before this run starts",
-                submission.title
-            );
-            let title = submission.title.clone();
-            if !ingest(submission) {
-                return Err(format!(
-                    "the uncollected note \"{title}\" could not be stored; leaving it in the \
-                     outbox"
-                ));
+            match crate::pikchr_validation::validate_pikchr_blocks(&submission.body)
+                .into_iter()
+                .next()
+            {
+                Some(pikchr_error) => {
+                    log::warn!(
+                        "Session {session_id}: the workstation outbox holds an uncollected \
+                         note \"{}\" from an earlier run whose Pikchr block at line {} does \
+                         not parse ({}); discarding it instead of storing it",
+                        submission.title,
+                        pikchr_error.line_number,
+                        pikchr_error.message
+                    );
+                    OutboxRecovery::Discarded
+                }
+                None => {
+                    log::warn!(
+                        "Session {session_id}: the workstation outbox holds an uncollected \
+                         note \"{}\" from an earlier run; ingesting it before this run starts",
+                        submission.title
+                    );
+                    let title = submission.title.clone();
+                    if !ingest(submission) {
+                        return Err(format!(
+                            "the uncollected note \"{title}\" could not be stored; leaving it \
+                             in the outbox"
+                        ));
+                    }
+                    OutboxRecovery::Ingested
+                }
             }
-            OutboxRecovery::Ingested
         }
         // `collect(.., None)` accepts any turn, so the stale arm cannot fire.
         Ok(OutboxState::Pending | OutboxState::StaleTurn { .. }) => OutboxRecovery::Empty,
@@ -1169,6 +1202,44 @@ mod tests {
         .unwrap();
         assert_eq!(recovery.outbox, OutboxRecovery::Discarded);
         assert_eq!(ingested, 0);
+        let commands = log.borrow();
+        assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
+        assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));
+    }
+
+    /// A waiting note is checked before it is stored: no run is left to ask
+    /// for a repair of a diagram that does not parse, so the note is
+    /// discarded like unusable content, and the draft is still put in its
+    /// run-start state. Before this check the note went to the hooks as it
+    /// was.
+    #[test]
+    fn session_start_discards_a_note_with_a_broken_pikchr_block_and_continues() {
+        let log = RefCell::new(Vec::new());
+        let meta = r#"{"title":"Plan","turn":"earlier-run","writtenAt":7}"#;
+        let output = format!(
+            "done\n{}\n{}\ndone\n",
+            b64(meta.as_bytes()),
+            b64(b"Body\n```pikchr\nboxx \"bad\"\n```")
+        );
+        let exec = collecting_exec(&output, &log);
+        let mut ingested = 0;
+        let mut seed_asked = 0;
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |_| {
+                ingested += 1;
+                true
+            },
+            &mut || {
+                seed_asked += 1;
+                None
+            },
+        )
+        .unwrap();
+        assert_eq!(recovery.outbox, OutboxRecovery::Discarded);
+        assert_eq!(ingested, 0, "a note that fails the check is not stored");
+        assert_eq!(seed_asked, 1);
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
         assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));

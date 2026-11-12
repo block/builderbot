@@ -9,6 +9,12 @@
 //! - the run completed, but the read after its last turn failed. It stored
 //!   an empty note and left the row `completed`, with a published note
 //!   possibly sitting on the workstation and nothing looking for it.
+//!
+//! And the two the review of d395ca77 found in those fixes: a repair turn
+//! that republished a note that is still broken, which the guarded clear
+//! keeps as unread and the next run's recovery then stored unchecked, and a
+//! Stop pressed while the second read of the completed run was out, which
+//! the settlement from that read overrode.
 
 use super::detached_recovery::{b64, recording_exec, remote_note_session, SETTLED_RUN};
 use super::*;
@@ -71,8 +77,9 @@ fn recovered_by_the_next_run(home: &std::path::Path) -> (OutboxRecovery, Vec<Str
 /// Review warning 1, against a real shell. Turn 1 publishes a note with a
 /// broken diagram and the run reads it; the repair turn ends in an agent
 /// error (a usage limit, expired auth) without republishing and without a
-/// read. The end-of-run clear must remove that note: the next Resume's
-/// recovery ingests whatever is published with no Pikchr check.
+/// read. The end-of-run clear must remove that note: it is known bad, and
+/// when this was written the next Resume's recovery stored whatever was
+/// published with no Pikchr check.
 #[test]
 fn a_note_the_run_read_and_rejected_is_not_left_for_the_next_run_to_store() {
     let home = tempfile::tempdir().unwrap();
@@ -301,19 +308,20 @@ fn unreachable(args: &[&str]) -> Result<String, String> {
 
 /// What a completed run does after its loop when the read after its last
 /// turn failed, in the runner's order: it reads the outbox once more, into
-/// its slot, and settles from what that returns. Gives whether the outbox
-/// was read and the detail the run settles from. A run that does not see
-/// the failed read reads nothing more and completes with what its slot
-/// holds.
+/// its slot, asks whether the user pressed Stop while that read was out
+/// (`stopped_during_read`), and settles from the two. Gives whether the
+/// outbox was read and how the run ends. A run that does not see the failed
+/// read reads nothing more and completes with what its slot holds.
 fn second_read(
     exec: remote_staged_mcp::RemoteExec,
     session_id: &str,
     slot: &NoteSubmissionSlot,
-) -> (bool, Option<String>) {
+    stopped_during_read: &dyn Fn() -> bool,
+) -> (bool, UnreadOutboxSettlement) {
     let Some(read_error) =
         completed_run_outbox_unread(&Ok(AgentRunOutcome::Completed), false, Some(READ_FAILED))
     else {
-        return (false, None);
+        return (false, UnreadOutboxSettlement::Complete);
     };
     let retried = collect_turn_into_slot(
         exec,
@@ -324,8 +332,16 @@ fn second_read(
     );
     (
         retried.is_ok(),
-        unread_outbox_settlement(&read_error, &retried),
+        unread_outbox_settlement(&read_error, &retried, stopped_during_read()),
     )
+}
+
+/// The settlement of a run whose second read decided it from the outbox.
+fn from_outbox(settlement: UnreadOutboxSettlement) -> OutboxSettlement {
+    match settlement {
+        UnreadOutboxSettlement::FromOutbox(detail) => OutboxSettlement::TurnEndedUnread(detail),
+        other => panic!("the run settles from the outbox, not {other:?}"),
+    }
 }
 
 /// Only a run that completed, unstopped, with its last turn's read failed is
@@ -370,22 +386,27 @@ fn a_completed_run_that_cannot_read_its_outbox_is_parked_for_the_sweep() {
     let (session_id, note_id) = remote_note_session(&store);
     let slot = crate::note_tool::new_submission_slot();
 
-    let (read, detail) = second_read(&unreachable, &session_id, &slot);
+    let (read, settlement) = second_read(&unreachable, &session_id, &slot, &|| false);
     assert!(!read);
-    let detail = detail.expect("an outbox nobody could read is not judged empty");
+    // An outbox nobody could read is not judged empty.
+    let settlement = from_outbox(settlement);
     assert!(crate::note_tool::current_submission(&slot).is_none());
 
-    // The terminal state `finish_session_run` writes for that detail.
-    let (status, error, reason) = lost_remote_agent_terminal_state(&detail, "ws-1", None);
+    // The terminal state `finish_session_run` writes for that settlement.
+    let (status, error, reason) = settlement.terminal_state("ws-1", None);
     assert_eq!(
         (status, reason.clone()),
         ("error", CompletionReason::Detached)
     );
     let message = error.expect("a parked row says why");
+    // Its own wording: the turn ended and no connection was lost. The
+    // polling marker is still the message's tail.
     assert!(
-        message.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)
-            && message.contains("could not be read when the turn ended")
-            && message.contains("Operation timed out"),
+        message.starts_with("This session's turn ended on ws-1")
+            && message.contains(UNREAD_OUTBOX_DETAIL_MARKER)
+            && message.contains("Operation timed out")
+            && message.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)
+            && !message.contains("lost the connection"),
         "{message}"
     );
     assert!(detached_note_poll_is_pending(&reason, Some(&message)));
@@ -481,12 +502,15 @@ fn a_second_read_that_goes_through_decides_the_completed_run() {
     // A valid note: the session completes from it.
     let output = published("Published; the first read failed.");
     let slot = crate::note_tool::new_submission_slot();
-    let (read, detail) = second_read(&recording_exec(&output, &log), &session_id, &slot);
+    let (read, settlement) =
+        second_read(&recording_exec(&output, &log), &session_id, &slot, &|| {
+            false
+        });
     assert!(read);
-    let detail = detail.expect("a note found after the loop is checked before it is stored");
+    // A note found after the loop is checked before it is stored.
+    let settlement = from_outbox(settlement);
     let submission = crate::note_tool::current_submission(&slot).unwrap();
-    let (status, error, reason) =
-        lost_remote_agent_terminal_state(&detail, "ws-1", Some(&submission));
+    let (status, error, reason) = settlement.terminal_state("ws-1", Some(&submission));
     assert_eq!(
         (status, error, reason.clone()),
         ("completed", None, CompletionReason::TurnComplete)
@@ -515,17 +539,21 @@ fn a_second_read_that_goes_through_decides_the_completed_run() {
     // is not stored, the row says so, and the note is cleared.
     let output = published(BROKEN_PIKCHR);
     let slot = crate::note_tool::new_submission_slot();
-    let (_, detail) = second_read(&recording_exec(&output, &log), &session_id, &slot);
+    let (_, settlement) = second_read(&recording_exec(&output, &log), &session_id, &slot, &|| {
+        false
+    });
     let submission = crate::note_tool::current_submission(&slot).unwrap();
-    let (status, error, reason) =
-        lost_remote_agent_terminal_state(&detail.unwrap(), "ws-1", Some(&submission));
+    let (status, error, reason) = from_outbox(settlement).terminal_state("ws-1", Some(&submission));
     let message = error.unwrap();
     assert_eq!(
         (status, reason.clone()),
         ("error", CompletionReason::Detached)
     );
     assert!(
-        message.contains("does not parse") && !message.ends_with(AWAITING_REMOTE_NOTE_SUFFIX),
+        message.starts_with("This session's turn ended on ws-1")
+            && message.contains("does not parse")
+            && !message.contains("lost the connection")
+            && !message.ends_with(AWAITING_REMOTE_NOTE_SUFFIX),
         "{message}"
     );
     assert_eq!(
@@ -541,9 +569,14 @@ fn a_second_read_that_goes_through_decides_the_completed_run() {
     // Nothing published: the outbox was read, so the run completes as a
     // turn that delivered nothing does.
     let slot = crate::note_tool::new_submission_slot();
-    let (read, detail) = second_read(&recording_exec(NOTHING_PUBLISHED, &log), &session_id, &slot);
+    let (read, settlement) = second_read(
+        &recording_exec(NOTHING_PUBLISHED, &log),
+        &session_id,
+        &slot,
+        &|| false,
+    );
     assert!(read);
-    assert_eq!(detail, None);
+    assert_eq!(settlement, UnreadOutboxSettlement::Complete);
     assert_eq!(
         remote_outbox_clear_at_run_end(
             SETTLED_RUN,
@@ -554,4 +587,124 @@ fn a_second_read_that_goes_through_decides_the_completed_run() {
         RunEndOutboxClear::Clear
     );
     assert!(clear_unpublished_outbox_script(&session_id, None).contains("done"));
+}
+
+/// Review of d395ca77, warning 1. The stamp only recognises the note the
+/// run rejected. A repair turn that publishes again, with a diagram that is
+/// still broken, and then ends with no read (a usage limit, expired auth)
+/// leaves a note with a new `writtenAt`: the guarded clear keeps it as one
+/// nobody has read, and the next Resume's start-of-run recovery used to
+/// store it with no Pikchr check. The recovery now checks the note it finds
+/// and discards one that does not pass. Against a real shell.
+#[test]
+fn a_still_broken_note_the_repair_turn_republished_is_never_stored_unchecked() {
+    const STILL_BROKEN: &str = "Body, second try\n```pikchr\nboxx \"still bad\"\n```";
+    // A different body, and the very same body published again a few
+    // seconds later (`meta.json` is part of the stamp).
+    for republished in [STILL_BROKEN, BROKEN_PIKCHR] {
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let slot = crate::note_tool::new_submission_slot();
+        let memory = new_collected_note_memory();
+
+        // Turn 1: published, read by the loop, and rejected.
+        publish(home.path(), 1, BROKEN_PIKCHR);
+        collect_turn_into_slot(&exec, "sess-1", "run-1", &slot, &memory).unwrap();
+        // The repair turn republishes, then fails before the run reads it.
+        publish(home.path(), 7, republished);
+        let clear = remote_outbox_clear_at_run_end(
+            unread_after(&memory),
+            &CompletionReason::Crashed,
+            Some("usage limit reached"),
+            RunEndForOutbox::default(),
+        );
+        clear_remote_outbox_at_run_end(&exec, "sess-1", clear);
+        assert!(
+            outbox.join("done").exists(),
+            "a note published since the rejected one is kept as unread"
+        );
+
+        // The Resume: the recovery finds the note, checks it, and does not
+        // hand it to the hooks.
+        let (recovery, ingested) = recovered_by_the_next_run(home.path());
+        assert_eq!(recovery, OutboxRecovery::Discarded, "{republished:?}");
+        assert_eq!(ingested, Vec::<String>::new(), "{republished:?}");
+        // Discarded means cleared: the run that is starting does not trip
+        // over it, and nothing later reads it.
+        for file in ["done", "note.md", "meta.json", "draft.md"] {
+            assert!(!outbox.join(file).exists(), "{file} is gone");
+        }
+    }
+}
+
+/// Review of d395ca77, warning 2. The Stop was sampled before the second
+/// read of a completed run's unread outbox, and that read is a round trip
+/// to a workstation that had just failed to answer, with the row still
+/// `running`. A Stop pressed meanwhile was recorded by nobody, and the
+/// settlement from the read outranked the cancel: the note was stored, or
+/// the row was parked for the sweep to store it later. The Stop now wins
+/// whatever the read returned.
+#[test]
+fn a_stop_during_the_second_read_ends_the_run_as_stopped() {
+    let registry = SessionRegistry::new();
+    let valid = published("Published; the first read failed.");
+    let broken = published(BROKEN_PIKCHR);
+    for (session_id, output) in [
+        ("sess-valid", Ok(valid.clone())),
+        ("sess-broken", Ok(broken)),
+        ("sess-unreachable", Err("ssh: timed out".to_string())),
+    ] {
+        let (token, _) = registry.register(session_id);
+        assert!(!user_stop_requested(&token, &registry, session_id));
+        // The user presses Stop while the read is out.
+        let exec = |_: &[&str]| -> Result<String, String> {
+            assert!(registry.cancel(session_id));
+            output.clone()
+        };
+        let slot = crate::note_tool::new_submission_slot();
+        let (_, settlement) = second_read(&exec, session_id, &slot, &|| {
+            user_stop_requested(&token, &registry, session_id)
+        });
+        assert_eq!(
+            settlement,
+            UnreadOutboxSettlement::Stopped,
+            "{session_id}: the run ends as a stopped one"
+        );
+    }
+    // The stopped run ends `cancelled` with no hooks, and its clear discards
+    // the outbox, a read and valid note included.
+    assert_eq!(
+        remote_outbox_clear_at_run_end(
+            RemoteOutboxUse {
+                own_note_collected: true,
+                ..SETTLED_RUN
+            },
+            &CompletionReason::Interrupted,
+            None,
+            RunEndForOutbox {
+                user_stopped: true,
+                collected_note_hooks_skipped: true,
+                ..RunEndForOutbox::default()
+            },
+        ),
+        RunEndOutboxClear::Clear
+    );
+
+    // A quit that lands during the read is not a Stop: the run settles from
+    // the read, and the sweep recovers a parked row after the relaunch.
+    let (token, _) = registry.register("sess-quit");
+    let exec = |_: &[&str]| -> Result<String, String> {
+        assert!(registry.cancel_with_completion_reason("sess-quit", CompletionReason::AppQuit));
+        Ok(valid.clone())
+    };
+    let slot = crate::note_tool::new_submission_slot();
+    let (_, settlement) = second_read(&exec, "sess-quit", &slot, &|| {
+        user_stop_requested(&token, &registry, "sess-quit")
+    });
+    assert!(token.is_cancelled());
+    assert!(
+        matches!(settlement, UnreadOutboxSettlement::FromOutbox(_)),
+        "{settlement:?}"
+    );
 }

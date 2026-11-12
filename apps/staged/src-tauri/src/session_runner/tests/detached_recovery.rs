@@ -1577,6 +1577,20 @@ fn the_frontend_mirrors_the_polling_marker() {
         "REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER in sessionModalHelpers.ts must equal \
          UNACKNOWLEDGED_STOP_DETAIL_MARKER"
     );
+    assert!(
+        helpers.contains(&format!("'{UNREAD_OUTBOX_DETAIL_MARKER}'")),
+        "REMOTE_NOTE_UNREAD_OUTBOX_MARKER in sessionModalHelpers.ts must equal \
+         UNREAD_OUTBOX_DETAIL_MARKER"
+    );
+    // The unread-outbox row is still a polling row: its dedicated wording
+    // sits in front of the marker the sweep and the chat pane key on.
+    let unread = unread_remote_note_message("ws-1", "ssh: timed out");
+    assert!(
+        unread.contains(UNREAD_OUTBOX_DETAIL_MARKER)
+            && unread.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)
+            && detached_note_poll_is_pending(&CompletionReason::Detached, Some(&unread)),
+        "{unread}"
+    );
 }
 
 #[test]

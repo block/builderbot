@@ -10,7 +10,9 @@ import {
   reconnectedOutcomeMessage,
   REMOTE_NOTE_POLL_SUFFIX,
   REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER,
+  REMOTE_NOTE_UNREAD_OUTBOX_MARKER,
   isUnacknowledgedRemoteStop,
+  isUnreadRemoteOutbox,
   REMOTE_NOTE_STORING_SUFFIX,
   sessionEndMessage,
   sessionErrorMessage,
@@ -437,6 +439,27 @@ describe('detached remote note sessions', () => {
       'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.';
     expect(sessionEndMessage({ completionReason: 'detached', errorMessage: expired })).toBe(
       expired
+    );
+  });
+
+  it('says the turn ended when only the note outbox could not be read', () => {
+    const unread = `This session's turn ended on ws-1, but Staged ${REMOTE_NOTE_UNREAD_OUTBOX_MARKER} (failed to read the remote note outbox: ssh: connect to host ws-1: Operation timed out); ${REMOTE_NOTE_POLL_SUFFIX}`;
+    expect(isUnreadRemoteOutbox(unread)).toBe(true);
+    expect(isAwaitingRemoteNote(unread)).toBe(true);
+    expect(isUnreadRemoteOutbox(null)).toBe(false);
+    const message = sessionEndMessage({ completionReason: 'detached', errorMessage: unread });
+    expect(message).toBe(
+      'The turn of this remote session ended, but Staged could not read its note from the ' +
+        'workstation. Staged keeps checking and will complete the session when it finds the ' +
+        'note.'
+    );
+    expect(message).not.toContain('lost the connection');
+    expect(message).not.toContain('may still be running');
+    // A row that lost its connection keeps the lost-connection copy.
+    const lost = `Staged lost the connection to this session while the agent was running on ws-1 (incoming transport closed); ${REMOTE_NOTE_POLL_SUFFIX}`;
+    expect(isUnreadRemoteOutbox(lost)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: lost })).toContain(
+      'Staged lost the connection to this remote session'
     );
   });
 

@@ -311,28 +311,46 @@ pub(super) struct TakenOverRunEnd {
 /// interrupt it on some bridges, the agent answers the owner's prompt as
 /// cancelled, and the turn fails as `remote_agent_lost`: a note the agent
 /// had already published stayed in the outbox until the user pressed Resume.
+///
+/// `ending` was decided before the read, and the read is a round trip to
+/// the workstation with the row still `running`. `stopped_since` is asked
+/// after it whether the user has pressed Stop meanwhile (not a quit, see
+/// `user_stop_requested`). If so the turn ends as a stopped one and what
+/// the read returned is dropped: a note or an unreadable outbox would
+/// otherwise settle the row ahead of the cancel, storing the note or
+/// parking the row for the sweep to store it later.
 pub(super) fn reattached_turn_run_end(
     store: &Store,
     session_id: &str,
     workspace_name: Option<&str>,
     ending: ReattachedTurnEnding<'_>,
     exec: remote_staged_mcp::RemoteExec,
+    stopped_since: &dyn Fn() -> bool,
 ) -> TakenOverRunEnd {
     if !delivers_note_through_outbox(store, session_id, workspace_name) {
         return TakenOverRunEnd::default();
     }
-    match ending {
+    let stopped = || TakenOverRunEnd {
+        note_submission: None,
+        outbox_use: taken_over_outbox_use(false, false),
+        lost_remote_note_agent: None,
+    };
+    let read = match ending {
         ReattachedTurnEnding::Completed => {
             collect_taken_over_note(exec, session_id).run_end(OWNER_PROCESS_ENDED)
         }
         ReattachedTurnEnding::Failed(error) => collect_taken_over_note(exec, session_id)
             .run_end_of_failed_turn(OWNER_PROCESS_ENDED, error),
-        ReattachedTurnEnding::Stopped => TakenOverRunEnd {
-            note_submission: None,
-            outbox_use: taken_over_outbox_use(false, false),
-            lost_remote_note_agent: None,
-        },
+        ReattachedTurnEnding::Stopped => return stopped(),
+    };
+    if stopped_since() {
+        log::info!(
+            "Session {session_id}: stopped while the workstation note outbox was read after \
+             its turn ended on a takeover; ending as stopped"
+        );
+        return stopped();
     }
+    read
 }
 
 fn unreadable_outbox_detail(takeover: &str, error: &str) -> String {

@@ -233,6 +233,7 @@ fn a_dead_owners_reattached_turn_reads_the_outbox_unless_it_was_stopped() {
         Some("ws-1"),
         ReattachedTurnEnding::Completed,
         &exec,
+        &|| false,
     );
     assert_eq!(run_end.outbox_use, read_outbox(true));
     assert_eq!(run_end.lost_remote_note_agent, None);
@@ -270,6 +271,7 @@ fn a_dead_owners_reattached_turn_reads_the_outbox_unless_it_was_stopped() {
         Some("ws-1"),
         ReattachedTurnEnding::Stopped,
         &exec,
+        &|| false,
     );
     assert!(log.borrow().is_empty());
     assert_eq!(unread.note_submission, None);
@@ -335,6 +337,7 @@ fn a_reattached_turn_answered_as_cancelled_still_stores_its_published_note() {
         Some("ws-1"),
         ReattachedTurnEnding::Failed(ANSWERED_AS_CANCELLED),
         &exec,
+        &|| false,
     );
     assert_eq!(log.borrow().len(), 1, "one read: {:?}", log.borrow());
     assert!(is_collect(
@@ -417,6 +420,7 @@ fn a_reattached_turn_answered_as_cancelled_rejects_a_note_with_a_broken_diagram(
         Some("ws-1"),
         ReattachedTurnEnding::Failed(ANSWERED_AS_CANCELLED),
         &exec,
+        &|| false,
     );
     let detail = run_end.lost_remote_note_agent.clone().unwrap();
     let submission = run_end.note_submission.clone().unwrap();
@@ -470,6 +474,7 @@ fn a_reattached_turn_answered_as_cancelled_with_no_note_fails_as_before() {
         Some("ws-1"),
         ReattachedTurnEnding::Failed(ANSWERED_AS_CANCELLED),
         &recording_exec(NOTHING_PUBLISHED, &log),
+        &|| false,
     );
     assert_eq!(nothing.note_submission, None);
     assert_eq!(
@@ -497,6 +502,7 @@ fn a_reattached_turn_answered_as_cancelled_with_no_note_fails_as_before() {
         Some("ws-1"),
         ReattachedTurnEnding::Failed(ANSWERED_AS_CANCELLED),
         &unreachable,
+        &|| false,
     );
     assert_eq!(unread.note_submission, None);
     assert_eq!(unread.lost_remote_note_agent, None);
@@ -510,6 +516,97 @@ fn a_reattached_turn_answered_as_cancelled_with_no_note_fails_as_before() {
         RunEndOutboxClear::ClearUnlessPublished,
         "a published note nobody could read is never removed"
     );
+}
+
+/// Review of d395ca77, warning 3. The Stop was read before the takeover's
+/// outbox read, which is a round trip to the workstation with the row still
+/// `running`. A Stop pressed meanwhile reached `finish_session_run` behind a
+/// settlement that outranks the cancel arms: a failed turn's valid note was
+/// stored, a broken one ended the row `detached`, and an unreadable outbox
+/// parked it for the sweep to store the note later. The takeover now asks
+/// again after the read and ends the turn as a stopped one.
+#[test]
+fn a_stop_during_the_takeover_read_ends_the_turn_as_stopped() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    let placeholder = store.get_note(&note_id).unwrap().unwrap();
+    let registry = SessionRegistry::new();
+    let (token, _) = registry.register(&session_id);
+    let valid = published("Published before the app was killed.");
+    let broken = published(BROKEN_PIKCHR);
+    let stopped = TakenOverRunEnd {
+        note_submission: None,
+        outbox_use: RemoteOutboxUse {
+            read_after_last_turn: false,
+            ..read_outbox(false)
+        },
+        lost_remote_note_agent: None,
+    };
+
+    for ending in [
+        ReattachedTurnEnding::Failed(ANSWERED_AS_CANCELLED),
+        ReattachedTurnEnding::Completed,
+    ] {
+        for output in [
+            Ok(valid.clone()),
+            Ok(broken.clone()),
+            Err("ssh: timed out".to_string()),
+        ] {
+            let reads = std::cell::Cell::new(0);
+            // The user presses Stop while the read is out.
+            let exec = |_: &[&str]| -> Result<String, String> {
+                reads.set(reads.get() + 1);
+                registry.cancel(&session_id);
+                output.clone()
+            };
+            let run_end =
+                reattached_turn_run_end(&store, &session_id, Some("ws-1"), ending, &exec, &|| {
+                    user_stop_requested(&token, &registry, &session_id)
+                });
+            assert_eq!(reads.get(), 1);
+            assert_eq!(run_end, stopped, "{ending:?} with {output:?}");
+        }
+    }
+    // What `finish_session_run` does with that: no settlement outranks the
+    // cancel, the row ends `cancelled`, the hooks do not run, and the clear
+    // discards the outbox as after any Stop.
+    assert_eq!(
+        remote_outbox_clear_at_run_end(
+            stopped.outbox_use,
+            &CompletionReason::Interrupted,
+            None,
+            RunEndForOutbox {
+                user_stopped: true,
+                ..RunEndForOutbox::default()
+            },
+        ),
+        RunEndOutboxClear::Clear
+    );
+    let note = store.get_note(&note_id).unwrap().unwrap();
+    assert_eq!(
+        (note.title, note.content),
+        (placeholder.title, placeholder.content),
+        "nothing was stored"
+    );
+
+    // A quit that lands during the read is not a Stop: the turn is over and
+    // its published note is still the session's.
+    let quitting = SessionRegistry::new();
+    let (token, _) = quitting.register(&session_id);
+    let exec = |_: &[&str]| -> Result<String, String> {
+        quitting.cancel_with_completion_reason(&session_id, CompletionReason::AppQuit);
+        Ok(valid.clone())
+    };
+    let run_end = reattached_turn_run_end(
+        &store,
+        &session_id,
+        Some("ws-1"),
+        ReattachedTurnEnding::Failed(ANSWERED_AS_CANCELLED),
+        &exec,
+        &|| user_stop_requested(&token, &quitting, &session_id),
+    );
+    assert!(token.is_cancelled());
+    assert!(run_end.note_submission.is_some() && run_end.lost_remote_note_agent.is_some());
 }
 
 #[test]
@@ -547,7 +644,8 @@ fn a_session_without_an_outbox_is_left_alone() {
             &session.id,
             Some("ws-1"),
             ReattachedTurnEnding::Completed,
-            &exec
+            &exec,
+            &|| false
         ),
         TakenOverRunEnd::default()
     );
@@ -557,7 +655,8 @@ fn a_session_without_an_outbox_is_left_alone() {
             &session.id,
             Some("ws-1"),
             ReattachedTurnEnding::Failed(ANSWERED_AS_CANCELLED),
-            &exec
+            &exec,
+            &|| false
         ),
         TakenOverRunEnd::default(),
         "a failed turn of a session with no outbox is not read either"

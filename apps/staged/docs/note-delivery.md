@@ -269,7 +269,15 @@ At remote note session start, the session runner:
    workstation leaves the outbox alone and is logged, while unusable content
    (`meta.json` that does not parse, a body that is not valid base64, a title
    the tool would reject) is logged, cleared and skipped, because nothing
-   will ever make it ingestible. Either way the server is still attached and
+   will ever make it ingestible. A waiting note is checked before it is
+   handed to the hooks: one with a Pikchr block that does not parse is
+   logged, cleared and not stored (`OutboxRecovery::Discarded`), which is
+   what a takeover does with such a note, and the run that is starting has
+   the agent write it again. No run is left to ask for a repair of it, and
+   this is the read that would otherwise store a note an earlier run had
+   rejected, had republished still broken, and then never read again (see
+   _Clear unless republished_ under _Collector_). Either way the server is
+   still attached and
    the run starts: a recovery failure must not cost the session its tool.
    The command that empties the outbox also puts `draft.md` in its
    run-start state (`clear_outbox_and_seed`): removed for a fresh note,
@@ -483,8 +491,7 @@ removes a published note it has dealt with:
   it down: a Pikchr block did not parse, the run asked for a repair, and the
   repair turn ended with no read (a usage limit, expired auth, a turn the
   agent cancelled). The published note on the workstation may still be the
-  rejected one, and the next run's recovery stores what it finds with no
-  Pikchr check, so keeping it would store a note the run had refused. The
+  rejected one, which is known bad and is removed at once. The
   collector records a stamp of every note it reads
   (`note_outbox::PublishedNoteStamp`: the POSIX `cksum` checksum and byte
   count of `meta.json` and of `note.md`), and `rejected_remote_note` hands
@@ -494,7 +501,13 @@ removes a published note it has dealt with:
   else is a note the repair turn published before it failed, which nobody
   has read and which stays. `meta.json` carries `writtenAt`, so a repair
   that republished the same body is still a different note. A note the run
-  read and found valid is never treated as rejected.
+  read and found valid is never treated as rejected. The stamp cannot
+  recognise a repair turn's republish that is still broken; that note stays
+  as unread, and the next run's start-of-run recovery checks it and discards
+  it (above). The stamp is kept beside that check, because the detached
+  sweep reads the outbox with any turn id and stores what it finds
+  unchecked: a rejected note left on the workstation could reach it through
+  a later run whose recovery did not settle and whose agent was then lost.
 - **Keep.** Five states leave the outbox and the draft untouched:
   - a run that never attached the Staged MCP on Blox, which has no outbox;
   - a lost connection with _no_ note found, because the agent may still
@@ -528,19 +541,48 @@ policy (`completed_run_outbox_unread`). Nothing is known about what the
 turn published, and completing would store an empty note while a published
 one may sit on the workstation with nothing looking for it. The run reads
 the outbox once more after its loop and settles from that read
-(`unread_outbox_settlement`), by the rule a takeover uses for an outbox it
-cannot read (_A turn that outlives its connection_):
+(`unread_outbox_settlement`, `OutboxSettlement::TurnEndedUnread`), by the
+rule a takeover uses for an outbox it cannot read (_A turn that outlives
+its connection_):
 
 - still unreadable: the row ends `error` / `detached` with the polling
   marker, the outbox is kept, and the detached sweep stores the note once
   the workstation answers (_Polling a detached row_). No empty note is
   stored;
 - a published note: it never went through the loop's Pikchr check, so it
-  settles through `lost_remote_agent_terminal_state`. A valid one completes
+  is checked here (`unread_outbox_terminal_state`). A valid one completes
   the turn and is stored. A broken one ends the row `error` / `detached`
   without the polling marker and is cleared;
 - nothing published: the run completes as a turn that delivered nothing
   does, and the outbox is cleared.
+
+No connection was lost in this state and the agent is not still running, so
+the two `detached` rows have their own text instead of the lost-connection
+messages. The parked row reads "This session's turn ended on `<ws>`, but
+Staged could not read its note from the workstation (`<read error>`); …"
+and still ends with the polling marker, which is what the sweep and the
+frontend key on. The phrase "could not read its note from the workstation"
+is a second marker (`UNREAD_OUTBOX_DETAIL_MARKER`, mirrored as
+`REMOTE_NOTE_UNREAD_OUTBOX_MARKER` and pinned by the same backend test):
+the chat pane then says the turn ended and that Staged keeps checking,
+instead of that the connection was lost and the agent may still be
+running. The broken-diagram row reads "This session's turn ended on
+`<ws>`, but the note it saved has a Pikchr block at line N that does not
+parse (…); that note was not stored. Resume to have the agent write it
+again." The sweep's later messages for a parked row (the expired window,
+the unreachable workstation) are unchanged.
+
+A Stop the user presses while that second read is out wins over whatever
+it returns (`user_stop_requested`, asked again after the read; the first
+sample is from before it). The read is a round trip to a workstation that
+has just failed to answer, with the row still `running`, and nobody else
+records that Stop. The run ends as a Stop during the turn does:
+`cancelled`, no hooks, and the end-of-run clear discards the outbox. It
+does not settle from the read, and it does not complete under the
+late-cancel rule (`completed_turn_survives_late_cancel`) with the note the
+read had just put in the slot, which the loop never checked. A quit that
+lands during the read is not a Stop: the run settles from the read, and
+the sweep recovers a parked row after the relaunch.
 
 A failed read inside the loop is not final while the `write_note`
 follow-up has an attempt left: the turn counts as one that delivered no
@@ -850,7 +892,15 @@ published nothing.
 
 A reattached turn that was stopped, or that the agent cancelled on its
 own, is not read. Its end-of-run clear follows the rule in _Collector_, so
-it removes a published note only after a Stop. Why `session/load`
+it removes a published note only after a Stop. The Stop is looked for
+twice: before the read, and again after it (`reattached_turn_run_end`'s
+`stopped_since`), because the read is a round trip with the row still
+`running`. A Stop the user presses meanwhile ends the turn as a stopped
+one and what the read returned is dropped; it used to reach the terminal
+state behind a settlement that outranks the cancel, so a failed turn's
+valid note was stored and an unreadable outbox parked the row for the
+sweep. A quit during the read is not a Stop and changes nothing. Why
+`session/load`
 interrupts a live turn on that bridge is not settled here, and neither is
 the Quit row that stays `disconnected` after a mid-turn relaunch (reconcile
 reads that turn as ended with background work still live).
@@ -951,7 +1001,10 @@ says "Staged lost the connection to this remote session. The workstation
 agent may still be running; Staged is checking for its note and will
 complete the session when it appears." (or, for a storing claim, "…but the
 workstation agent finished its note. Staged is storing it and will complete
-the session."). Once both are gone the row drops the "yet", and the chat
+the session."; or, for a turn that ended with its outbox unread, "The turn
+of this remote session ended, but Staged could not read its note from the
+workstation. Staged keeps checking and will complete the session when it
+finds the note."). Once both are gone the row drops the "yet", and the chat
 pane shows the backend's own sentence (the expired window, the unreachable
 workstation, the unstored note, the broken diagram) — each written to say
 what Resume will do. Every `detached` row carries an error message, so the
@@ -1055,6 +1108,28 @@ them by accident:
   may have reached the agent after all; and an interrupt's unacknowledged
   cancel counts as lost only when the agent was silent for the whole 30 s
   wait, since an interrupt is not the user giving up on the session.
+- **A takeover's prompt answered as cancelled is read as the reattach
+  interrupting the turn, and its note is stored.** When a dead owner's turn
+  fails because the agent answered the owner's prompt as cancelled
+  (`ReattachedTurnEnding::Failed`), Staged takes the cause to be the
+  reattach's own `session/load`, which interrupts a live turn on some
+  bridges, and stores a valid published note. A Stop the dead owner sent
+  just before it died produces the same answer, and the two cannot be told
+  apart from here: the Stop went with the process that sent it, and the
+  agent says only "cancelled". So a note published before such a Stop is
+  stored, against the rule above. The window is the cancel's acknowledgement
+  time (0.6 s measured on Blox) followed by the owner dying before it
+  records the Stop, and the other reading would lose the note of every
+  mid-turn relaunch, which is the common case. A Stop pressed in the
+  instance that took the turn over is a different matter and does win, up
+  to and including the takeover's outbox read.
+- **A Stop pressed during a late outbox read is still a Stop.** Two reads
+  happen after the turn is over with the row still `running`: the second
+  read of a completed run whose first read failed, and the read on a
+  taken-over turn's ending. Both look for the Stop again after the read and
+  end the run `cancelled` with the outbox discarded, instead of settling
+  from the read ahead of the cancel. A quit is not a Stop and does not
+  discard anything.
 - **A stopped background hold collects the outbox once, then the sweep
   takes over.** A remote note turn that completed and was then stopped
   during its background hold (`HoldStopped`) skips the in-loop collection,
@@ -1364,7 +1439,7 @@ injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),
 `remote_staged_mcp::note_outbox::tests` (outbox parsing including a
 marker that changed between the reads, transport vs content failures,
 per-turn collection into the slot, start-of-run recovery that discards
-unusable content, `write_note` run as a subprocess with fake JSON-RPC
+unusable content and a note with a broken Pikchr block, `write_note` run as a subprocess with fake JSON-RPC
 including a rewrite blocked between its renames and a call with no
 `draft.md`, the clear removing `draft.md`, the seed riding the recovery's
 clear command and a seed too large for one command, a failed seed reported
@@ -1396,7 +1471,8 @@ innermost error in the message; an unacknowledged Stop and a watchdog hit
 count as a lost agent, an acknowledged Stop does not, and an unacknowledged
 interrupt counts only when the agent was silent throughout; the Stop copy
 promises no note; the crashed row's innermost sentence; the timeline flag;
-frontend marker parity for both suffixes and the Stop marker),
+frontend marker parity for both suffixes, the Stop marker and the
+unread-outbox marker),
 `remote_staged_mcp::note_outbox::tests` (a probe reports the note already
 collected as pending until its stamp or content changes; `FileCksum`
 agrees with the `cksum` command; against a real shell the guarded clear
@@ -1404,12 +1480,18 @@ removes the note whose stamp it is given and keeps a republished one),
 `session_runner::tests::unread_run_end` (a rejected note is cleared at an
 unread ending and the next run's recovery finds nothing, while a
 republished or never-rejected note stays; a completed run whose last read
-failed is parked for the sweep, which then stores the note, or settles
-from a second read that went through; a valid note the hooks never ran for
-is kept), `session_runner::tests::taken_over_note` (the takeover endings,
+failed is parked for the sweep with the turn-ended wording, which then
+stores the note, or settles from a second read that went through; a valid
+note the hooks never ran for is kept; a still-broken note a repair turn
+republished survives the guarded clear and is discarded, not stored, by
+the next run's recovery; a Stop during the second read ends the run as
+stopped whatever the read returned, and a quit there does not),
+`session_runner::tests::taken_over_note` (the takeover endings,
 including a dead owner's turn answered as cancelled: a valid published
 note completes the session, a broken one is rejected and cleared, and no
-note or an unreadable outbox fails as before),
+note or an unreadable outbox fails as before; a Stop during the takeover's
+read ends the turn as stopped for every ending and outbox state, and a
+quit there does not),
 `session_runner::remote_note_watchdog::tests` (interval parsing, one probe
 per silent interval until the note appears, an active agent is never
 probed), `project_mcp::tests` (a completed child's status omits the sweep's
@@ -1432,7 +1514,7 @@ returns the workstation home from its last command), and on the frontend
 `NoteToolDetails.component.test.ts` (no body preview or "No note body"
 row), `toolCallViewModel.test.ts` /
 `acpTranscript.test.ts` (the `write_note` row for both agents, interrupted
-pending calls), `sessionModalHelpers.test.ts` (the detached and storing copy and which
+pending calls), `sessionModalHelpers.test.ts` (the detached, storing and unread-outbox copy and which
 end-of-session notice the chat pane renders), `acpTranscript.test.ts` (only
 the final turn's unsettled calls are relabelled in a completed session) and
 `sessionFailureCopy.test.ts` (the timeline copy says "yet" only while

@@ -99,6 +99,20 @@ export function isUnacknowledgedRemoteStop(errorMessage: string | null | undefin
   return !!errorMessage?.includes(REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER);
 }
 
+/**
+ * Phrase in the message of a `detached` row whose turn ended while Staged
+ * could not read its note outbox on the workstation
+ * (`UNREAD_OUTBOX_DETAIL_MARKER` in `src-tauri/src/session_runner.rs`, pinned
+ * by the same backend test). No connection was lost and the agent is not
+ * still running, so the polling copy must not say either.
+ */
+export const REMOTE_NOTE_UNREAD_OUTBOX_MARKER = 'could not read its note from the workstation';
+
+/** Whether this detached row's turn ended with its workstation note outbox unread. */
+export function isUnreadRemoteOutbox(errorMessage: string | null | undefined): boolean {
+  return !!errorMessage?.includes(REMOTE_NOTE_UNREAD_OUTBOX_MARKER);
+}
+
 /** Whether the backend's dead-session sweep is still polling the workstation for this row's note. */
 export function isAwaitingRemoteNote(errorMessage: string | null | undefined): boolean {
   return !!errorMessage?.trimEnd().endsWith(REMOTE_NOTE_POLL_SUFFIX);
@@ -183,6 +197,13 @@ function detachedEndMessage(errorMessage: string | null | undefined): string {
         'You stopped this remote session, but the workstation did not confirm it in time. ' +
         'The stop may still have reached the agent, so a note may or may not appear; ' +
         'Staged is checking the workstation and will complete the session if one does.'
+      );
+    }
+    if (isUnreadRemoteOutbox(errorMessage)) {
+      return (
+        'The turn of this remote session ended, but Staged could not read its note from the ' +
+        'workstation. Staged keeps checking and will complete the session when it finds the ' +
+        'note.'
       );
     }
     return (

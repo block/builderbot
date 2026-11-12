@@ -172,6 +172,15 @@
   // Each open starts from the top, with what a query will search on its way:
   // every project's branches and repos (the idle drip may not have reached
   // them all) and the note/review title index.
+  //
+  // The top of the list too. An open usually mounts a new list, but one that
+  // comes while the last close is still fading out (⌘K straight after
+  // Escape) takes over the dialog as it stands, with the list scrolled to
+  // wherever the arrow keys or the wheel left it. The highlight is back on
+  // the top row, and nothing else would bring that row into view: an
+  // unmoved highlight is never revealed (its index hasn't changed), and a
+  // reveal measures a panel the animation is still scaling, so it stops
+  // short.
   $effect.pre(() => {
     if (!commandPalette.open) return;
     untrack(() => {
@@ -182,6 +191,7 @@
       openingId = null;
       movedByPointer = false;
       pointerAt = null;
+      if (listEl) listEl.scrollTop = 0;
       projectSearchIndex.ensureLoaded();
       void projectsDataStore.ensureProjectsHydrated();
     });

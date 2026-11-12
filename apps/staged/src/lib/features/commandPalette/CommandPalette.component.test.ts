@@ -1073,6 +1073,101 @@ describe('CommandPalette while it closes', () => {
     await dialogGone();
   });
 
+  // An open that comes before the dialog has left takes over the dialog and
+  // the list it has, scroll position included: nothing mounts afresh.
+  describe('reopened before the dialog has left', () => {
+    const list = () => dialog()!.querySelector<HTMLElement>('[role="listbox"]')!;
+
+    /** Escape, then the palette opened again in the same frame. Returns the
+     *  dialog and list elements the close left behind. */
+    function closeAndReopen() {
+      const held = { dialog: dialog()!, list: list() };
+      pressAndHoldFrame('Escape');
+      expect(commandPalette.open).toBe(false);
+      expect(dialog()?.dataset.state).toBe('closed');
+
+      expect(openCommandPalette()).toBe(true);
+      flushSync();
+      return held;
+    }
+
+    /** The reopened palette is the one that was closing, back at the top. */
+    async function expectTopOfSameList(held: { dialog: HTMLElement; list: HTMLElement }) {
+      const check = () => {
+        // What makes this the case under test: had the dialog left and
+        // come back, the list would be a new element, at the top anyway.
+        expect(dialog()).toBe(held.dialog);
+        expect(list()).toBe(held.list);
+        expect(dialog()!.dataset.state).toBe('open');
+        expect(list().scrollTop).toBe(0);
+        expect(selectedIds()).toEqual(['alpha']);
+        expect(input().getAttribute('aria-activedescendant')).toBe(optionFor('alpha').id);
+      };
+      check();
+      // And it stays there once the frames the close had queued have run.
+      await settle();
+      check();
+      expect(document.activeElement).toBe(input());
+      expect(input().value).toBe('');
+    }
+
+    it('starts from the top of the list after the arrow keys scrolled it', async () => {
+      await openPalette();
+      await press('ArrowDown');
+      await press('ArrowDown');
+      expect(selectedIds()).toEqual(['gamma']);
+      // Where keeping the highlight in view had scrolled the list to (jsdom
+      // lays nothing out, and the reveal is a spy here).
+      list().scrollTop = 320;
+      spies.revealWithin.mockClear();
+
+      const held = closeAndReopen();
+
+      await expectTopOfSameList(held);
+      // The highlight went back to the top row, so that row is what the
+      // reveal was asked for, and nothing further down.
+      expect(spies.revealWithin.mock.calls.length).toBeGreaterThan(0);
+      for (const [row] of spies.revealWithin.mock.calls) expect(row).toBe(optionFor('alpha'));
+    });
+
+    it('starts from the top of the list after the wheel scrolled it, the highlight unmoved', async () => {
+      await openPalette();
+      expect(selectedIds()).toEqual(['alpha']);
+      list().scrollTop = 320;
+      spies.revealWithin.mockClear();
+
+      const held = closeAndReopen();
+
+      await expectTopOfSameList(held);
+      // The highlight never left the top row, so no reveal ran: the reset is
+      // all that brings the row back.
+      expect(spies.revealWithin).not.toHaveBeenCalled();
+    });
+
+    it('does the same when the close opened a project', async () => {
+      await openPalette();
+      await press('ArrowDown');
+      list().scrollTop = 320;
+      const held = { dialog: dialog()!, list: list() };
+      pressAndHoldFrame('Enter');
+      expect(commandPalette.open).toBe(false);
+      expect(spies.selectProject).toHaveBeenCalledWith('beta');
+
+      expect(openCommandPalette()).toBe(true);
+      flushSync();
+
+      // Beta is the project on screen now, and listed last.
+      expect(dialog()).toBe(held.dialog);
+      expect(list()).toBe(held.list);
+      expect(optionIds()).toEqual(['alpha', 'gamma', 'beta']);
+      expect(selectedIds()).toEqual(['alpha']);
+      expect(list().scrollTop).toBe(0);
+      await settle();
+      expect(list()).toBe(held.list);
+      expect(list().scrollTop).toBe(0);
+    });
+  });
+
   it('shows the stores as they are again on the next open', async () => {
     await openPalette();
     await press('Enter');

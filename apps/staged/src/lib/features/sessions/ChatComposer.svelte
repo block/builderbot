@@ -203,14 +203,31 @@
   );
 
   /**
-   * Scroll the field so the input being typed in is in view: on focus, and
-   * as the cap moves under it. Only the field scrolls; the pane and the page
-   * around it stay where they are.
+   * Scroll the field so the input being typed in is in view: on focus, as
+   * the cap moves under it, and after each caret placed by hand below. Only
+   * the field scrolls; the pane and the page around it stay where they are,
+   * which is also why every focus call here passes `preventScroll` — the
+   * browser's own scroll-on-focus would take the dialog and the page along
+   * to an input below the fold.
+   *
+   * On `focusin` the caret isn't placed yet (the helpers focus first and
+   * set the range after), so for an input taller than the field's view —
+   * where only the caret's line can say where to scroll — the handlers
+   * call this again once the range is in.
    */
   function revealFocused() {
     const active = document.activeElement;
     if (!fieldEl || !(active instanceof HTMLElement) || !fieldEl.contains(active)) return;
     revealInField(fieldEl, active);
+  }
+
+  const noScroll = { preventScroll: true } as const;
+
+  /** Focus `editor` with the caret at one end, then bring that caret into the field's view. */
+  function placeCaretIn(editor: HTMLElement | null, caret: 'start' | 'end') {
+    if (caret === 'start') focusAtStartSync(editor, noScroll);
+    else focusAtEndSync(editor, noScroll);
+    revealFocused();
   }
 
   $effect(() => {
@@ -252,8 +269,7 @@
       if (!nearest || distance <= nearest.distance) nearest = { editor, distance, below };
     }
     if (!nearest) return;
-    if (nearest.below) focusAtEndSync(nearest.editor);
-    else focusAtStartSync(nearest.editor);
+    placeCaretIn(nearest.editor, nearest.below ? 'end' : 'start');
   }
 
   /**
@@ -277,8 +293,7 @@
     const next = adjacentEditor(editors, target, direction);
     if (!next) return;
     event.preventDefault();
-    if (direction === 'up') focusAtEndSync(next);
-    else focusAtStartSync(next);
+    placeCaretIn(next, direction === 'up' ? 'end' : 'start');
   }
 
   /**
@@ -298,14 +313,15 @@
     if (!hadFocus) return;
     await tick();
     const caret = hadText ? 'end' : 'start';
-    if (nextId !== null && draftQuotesView?.focusGap(nextId, caret)) return;
-    if (caret === 'start') focusAtStartSync(textareaEl);
-    else focusAtEndSync(textareaEl);
+    if (nextId !== null && draftQuotesView?.focusGap(nextId, caret)) revealFocused();
+    else placeCaretIn(textareaEl, caret);
   }
 
   /** Put the caret at the end of a quote block's reply; false if the block isn't shown. */
   export function focusQuoteReply(id: string): boolean {
-    return draftQuotesView?.focusReply(id) ?? false;
+    const focused = draftQuotesView?.focusReply(id) ?? false;
+    if (focused) revealFocused();
+    return focused;
   }
 
   let submitBlock = $derived(
@@ -439,6 +455,7 @@
         bind:quotes
         bind:composing={quotesComposing}
         oncompositionend={handleCompositionEnd}
+        onCaretPlaced={revealFocused}
         {hashtagItems}
         {onkeydown}
         {oninput}

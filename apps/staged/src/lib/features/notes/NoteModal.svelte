@@ -222,11 +222,20 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
   let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
-  /** The docked Reply button (a phone, a selection standing) has the bottom bar's place. */
+  /**
+   * The docked Reply button (a phone, a selection standing) covers the
+   * bottom bar. The bar stays in the layout under it, only hidden: taking
+   * it out would give its height to the note's scroll box, whose offset is
+   * then clamped by that much — the text moving under the finger that is
+   * still extending the selection, which lands on whatever arrives there.
+   */
   let replyDocked = $state(false);
   /** The chat is hidden and its draft holds something: the bottom bar offers it. */
-  let showReplyDraft = $derived(
-    canOpenSession && !chatOpen && replyDraftLabel !== null && !replyDocked
+  let showReplyDraft = $derived(canOpenSession && !chatOpen && replyDraftLabel !== null);
+  let showBottomBar = $derived(
+    showReplyDraft ||
+      showChatInfo ||
+      Boolean(nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))
   );
   const readTracker = new NoteReadTracker();
   let readToggleLabel = $derived(readTracker.unread ? 'Mark as read' : 'Mark as unread');
@@ -364,35 +373,42 @@
   let markdownEl = $state<HTMLDivElement>();
   /** The dialog's box, which the phone's reply sheet is laid over. */
   let dialogEl = $state<HTMLElement | null>(null);
-  /** Where a phone's Reply button docks: over the bottom of the note, above its bottom bar. */
+  /** Where a phone's Reply button docks: over the note pane's bottom slot (see `.note-bottom`). */
   let dockEl = $state<HTMLElement | null>(null);
+  /** The pane's bottom slot: the bottom bar, when there is one, with the dock laid over it. */
+  let bottomSlotEl = $state<HTMLElement | null>(null);
   /**
-   * The docked button's height while it shows, else 0. The note's content
-   * is padded by it (`--selection-dock-height`) so the end of a selection
-   * near the bottom of the note can scroll clear of the button rather than
-   * sit behind it. Observed rather than measured on `replyDocked`, so it
-   * follows the button in and out whatever the order of the two renders.
+   * The docked button's height while it shows, else 0, and the bottom
+   * slot's. The button stands on the slot's bottom edge, so it covers the
+   * slot first and only what is taller than the slot reaches up over the
+   * note; the note's content is padded by that overlap
+   * (`--selection-dock-overlap`) so the end of a selection near the bottom
+   * of the note can scroll clear of the button rather than sit behind it.
+   * Observed rather than measured on `replyDocked`, so they follow the
+   * button in and out whatever the order of the renders.
    */
   let dockHeight = $state(0);
-  $effect(() => {
-    const el = dockEl;
+  let bottomSlotHeight = $state(0);
+  let dockOverlap = $derived(Math.max(0, dockHeight - bottomSlotHeight));
+  $effect(() => observeHeight(dockEl, (height) => (dockHeight = height)));
+  $effect(() => observeHeight(bottomSlotEl, (height) => (bottomSlotHeight = height)));
+  function observeHeight(el: HTMLElement | null, set: (height: number) => void) {
     if (!el || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(() => {
-      dockHeight = el.offsetHeight;
-    });
+    const observer = new ResizeObserver(() => set(el.offsetHeight));
     observer.observe(el);
     return () => observer.disconnect();
-  });
+  }
   // The button appears over the end of a selection made in the last lines of
   // the note (the padding above runs the content under it rather than
   // shortening it). Once the content is padded, the least scroll that puts
-  // the end clear of the button. Keyed on the measured height rather than
-  // `replyDocked`: that is the render the padding lands in.
+  // the end clear of the button. Keyed on the measured overlap rather than
+  // `replyDocked`: that is the render the padding lands in. With a bottom
+  // bar under the note the button covers the bar instead and nothing moves.
   let dockWasShown = false;
   $effect(() => {
-    const height = dockHeight;
-    const appeared = height > 0 && !dockWasShown;
-    dockWasShown = height > 0;
+    const overlap = dockOverlap;
+    const appeared = overlap > 0 && !dockWasShown;
+    dockWasShown = overlap > 0;
     if (!appeared) return;
     untrack(() => {
       const container = contentEl;
@@ -400,7 +416,7 @@
       if (!container || !markdownEl || !current || current.rangeCount === 0) return;
       const range = current.getRangeAt(0);
       if (current.isCollapsed || !markdownEl.contains(range.commonAncestorContainer)) return;
-      scrollRangeEndIntoView(container, range, height);
+      scrollRangeEndIntoView(container, range, overlap);
     });
   });
   let unregisterSearchTarget: (() => void) | null = null;
@@ -970,11 +986,12 @@
         aria-hidden={chatOnly}
         aria-label="Note content"
       >
-        <div class="note-scroll" style:--selection-dock-height="{dockHeight}px">
+        <div class="note-scroll" style:--selection-dock-overlap="{dockOverlap}px">
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="modal-content"
+            class:ends-pane={!showBottomBar}
             bind:this={contentEl}
             onclick={handleContentClick}
             onkeydown={handleContentKeydown}
@@ -1004,69 +1021,72 @@
               />
             {/if}
           </div>
-
-          <!-- A phone's Reply button docks here, over the bottom of the note and
-               above the bottom bar (NoteSelectionReply). -->
-          <div class="selection-dock" bind:this={dockEl}></div>
         </div>
 
-        {#if showReplyDraft || showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
-          <div class="next-steps">
-            {#if showReplyDraft || showChatInfo}
-              <div class="chat-info-row">
-                {#if showReplyDraft}
+        <!-- The pane's bottom slot: the bottom bar, and over it the place a
+             phone's Reply button docks (NoteSelectionReply). The bar keeps its
+             height under the button so the note's scroll box doesn't change. -->
+        <div class="note-bottom" bind:this={bottomSlotEl}>
+          {#if showBottomBar}
+            <div class="next-steps" class:is-covered={replyDocked} aria-hidden={replyDocked}>
+              {#if showReplyDraft || showChatInfo}
+                <div class="chat-info-row">
+                  {#if showReplyDraft}
+                    <Button
+                      variant="outline"
+                      class="reply-draft-button h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
+                      title={viewport.canSplit
+                        ? 'Open the chat to finish your reply'
+                        : 'View the chat to finish your reply'}
+                      onclick={() => setChatOpen(true)}
+                    >
+                      <PencilLine size={16} class="text-[var(--ui-accent)]" aria-hidden="true" />
+                      <span class="min-w-0 truncate">{replyDraftLabel}</span>
+                    </Button>
+                  {/if}
+                  {#if showChatInfo}
+                    <Button
+                      variant="outline"
+                      class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
+                      onclick={() => setChatOpen(true)}
+                    >
+                      <MessageCircle size={16} aria-hidden="true" />
+                      <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span
+                      >
+                    </Button>
+                  {/if}
+                </div>
+              {/if}
+              {#if nextSteps && onStartSession && nextSteps.noteStep}
+                <div class="next-step-row">
+                  <span class="next-step-prompt">{nextSteps.noteStep}</span>
                   <Button
                     variant="outline"
-                    class="reply-draft-button h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
-                    title={viewport.canSplit
-                      ? 'Open the chat to finish your reply'
-                      : 'View the chat to finish your reply'}
-                    onclick={() => setChatOpen(true)}
+                    size="sm"
+                    class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
+                    onclick={() => onStartSession('note', nextSteps!.noteStep!)}
                   >
-                    <PencilLine size={16} class="text-[var(--ui-accent)]" aria-hidden="true" />
-                    <span class="min-w-0 truncate">{replyDraftLabel}</span>
+                    Start note
                   </Button>
-                {/if}
-                {#if showChatInfo}
+                </div>
+              {/if}
+              {#if nextSteps && onStartSession && nextSteps.commitStep}
+                <div class="next-step-row">
+                  <span class="next-step-prompt">{nextSteps.commitStep}</span>
                   <Button
                     variant="outline"
-                    class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
-                    onclick={() => setChatOpen(true)}
+                    size="sm"
+                    class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
+                    onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
                   >
-                    <MessageCircle size={16} aria-hidden="true" />
-                    <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span>
+                    Start commit
                   </Button>
-                {/if}
-              </div>
-            {/if}
-            {#if nextSteps && onStartSession && nextSteps.noteStep}
-              <div class="next-step-row">
-                <span class="next-step-prompt">{nextSteps.noteStep}</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
-                  onclick={() => onStartSession('note', nextSteps!.noteStep!)}
-                >
-                  Start note
-                </Button>
-              </div>
-            {/if}
-            {#if nextSteps && onStartSession && nextSteps.commitStep}
-              <div class="next-step-row">
-                <span class="next-step-prompt">{nextSteps.commitStep}</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
-                  onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
-                >
-                  Start commit
-                </Button>
-              </div>
-            {/if}
-          </div>
-        {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
+          <div class="selection-dock" bind:this={dockEl}></div>
+        </div>
       </section>
 
       {#if sessionId && chatOpen}
@@ -1251,11 +1271,9 @@
     border-left: none;
   }
 
-  /* The note's scroll area with the docked Reply button laid over its
-     bottom edge (see `.selection-dock`); the bottom bar, if any, follows
-     below both. */
+  /* The note's scroll area; the pane's bottom slot (`.note-bottom`) follows
+     it. */
   .note-scroll {
-    position: relative;
     display: flex;
     flex: 1;
     min-height: 0;
@@ -1264,9 +1282,9 @@
 
   /* The note spans a full-screen dialog's width, so a swipe over the side
      insets still scrolls it; its text clears them. While the Reply button
-     is docked over the bottom edge the text clears that too
-     (`--selection-dock-height`, measured above), so a selection ending in
-     the last lines can scroll out from behind it. */
+     is docked and reaches up over the note's bottom edge the text clears
+     that too (`--selection-dock-overlap`, measured above), so a selection
+     ending in the last lines can scroll out from behind it. */
   /* Positioned for the selection's Reply button, which scrolls with the text. */
   .modal-content {
     position: relative;
@@ -1275,19 +1293,19 @@
     padding: 24px;
     padding-left: calc(24px + var(--dialog-safe-left, 0px));
     padding-right: calc(24px + var(--dialog-safe-right, 0px));
-    padding-bottom: calc(24px + var(--selection-dock-height, 0px));
+    padding-bottom: calc(24px + var(--selection-dock-overlap, 0px));
     min-height: 0;
     background: var(--bg-primary);
   }
 
-  /* With no next steps below it the note ends the dialog: it scrolls behind
+  /* With no bottom bar below it the note ends the dialog: it scrolls behind
      the home indicator of a full-screen dialog, and its last line can still
      scroll clear of it (`--dialog-safe-bottom`, see dialog-content). The
-     docked button clears the indicator itself, so its height stands in for
+     docked button clears the indicator itself, so its overlap stands in for
      the inset while it shows. */
-  .note-scroll:last-child .modal-content {
+  .modal-content.ends-pane {
     padding-bottom: calc(
-      24px + max(var(--selection-dock-height, 0px), var(--dialog-safe-bottom, 0px))
+      24px + max(var(--selection-dock-overlap, 0px), var(--dialog-safe-bottom, 0px))
     );
   }
 
@@ -1489,21 +1507,39 @@
     gap: 8px;
   }
 
-  /* Holds the docked Reply button on a phone; nothing otherwise. Laid over
-     the bottom of the note's scroll area rather than in the pane's flow, so
-     its arrival takes no height from the note (the content is padded by
-     its height instead, and keeps scrolling under it). Ending the pane (no
-     bottom bar under it), it clears the home indicator. */
+  /* The pane's bottom slot. Its height in the flow is the bottom bar's, or
+     nothing; the docked Reply button is laid over it rather than in the
+     flow, so the button's arrival takes no height from the note above (what
+     it covers is the bar, hidden meanwhile, and the note's content is
+     padded by whatever reaches past the slot, and keeps scrolling under
+     it). The note's scroll box keeps its height, and so its offset, while
+     the finger that made the selection is still on the text. */
+  .note-bottom {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  /* Holds the docked Reply button on a phone; nothing otherwise. Stands on
+     the slot's bottom edge and covers at least the slot, so none of the bar
+     shows past it; the chrome fills what the row leaves. Always the end of
+     the pane, it clears the home indicator. */
   .selection-dock {
     position: absolute;
     left: 0;
     right: 0;
     bottom: 0;
+    min-height: 100%;
   }
 
-  .note-scroll:last-child .selection-dock:not(:empty) {
+  .selection-dock:not(:empty) {
     padding-bottom: var(--dialog-safe-bottom, 0px);
     background: var(--bg-chrome);
+  }
+
+  /* The bar under the docked button keeps its box, and nothing else: not
+     painted, not pressable, not read. */
+  .next-steps.is-covered {
+    visibility: hidden;
   }
 
   /* One button on a phone fills the bar, a finger-sized row. */

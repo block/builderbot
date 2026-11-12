@@ -562,8 +562,9 @@
   /**
    * Take a quote block out of the draft. One with a reply typed under it is
    * offered back in a toast (there is no other undo for a block): Undo puts
-   * it back where it was, reply and lead-in text included, and the caret in
-   * its reply. An unanswered block just goes.
+   * it back where it was, reply and lead-in text included, and — with a
+   * pointer, not a touch screen — the caret in its reply. An unanswered
+   * block just goes.
    */
   function removeQuote(id: string) {
     const taken = takeDraftQuote(currentDraft(), id);
@@ -595,7 +596,10 @@
             // composer, or held until this session's draft has loaded, so a
             // load in flight can't land over it.
             receiveDraftEdit(sid, (draft) => restoreDraftQuote(draft, removed));
-            focusDraftQuoteReply(removed.quote.id);
+            // The caret goes back into the reply for a keyboard user; with
+            // a touch screen that would raise the on-screen keyboard over
+            // the restored draft, which the user hasn't asked to type in.
+            if (!viewport.hasCoarsePointer) focusDraftQuoteReply(removed.quote.id);
             return;
           }
           // This pane has moved on: another pane showing the draft takes it,

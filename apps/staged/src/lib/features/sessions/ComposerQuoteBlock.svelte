@@ -5,10 +5,9 @@
 
   The block is an inset in the field rather than a card of its own — a
   rounded tint of the field's surface with no border, so the free text around
-  it and the reply inside it read as one message. A click on the block's own
-  padding puts the caret at the end of its reply; the inputs and the X are
-  left to themselves, and a drag that ends on the padding keeps the text it
-  selected.
+  it and the reply inside it read as one message. A press anywhere on the
+  block that isn't its reply, its X or the quoted text puts the caret at the
+  end of its reply; the quoted text is left to be selected and copied.
 
   Pressing the X doesn't take focus: `onRemove` moves focus on from the input
   it was in, and WebKit would otherwise have blurred that input to the page
@@ -32,6 +31,8 @@
     composing?: boolean;
     oncompositionend?: () => void;
     onRemove: () => void;
+    /** The press below put the caret in the reply, for the field to bring into view. */
+    onCaretPlaced?: () => void;
   }
 
   let {
@@ -42,25 +43,29 @@
     composing = $bindable(false),
     oncompositionend,
     onRemove,
+    onCaretPlaced,
   }: Props = $props();
 
   let blockEl = $state<HTMLDivElement>();
   let replyEl = $state<HTMLElement | null>(null);
 
   /**
-   * A press on the block's own padding or the excerpt's margin puts the
-   * caret at the end of the reply. On mousedown with the default prevented,
-   * as the field does for its surface, so the input that had focus isn't
-   * blurred to the page in between. A press on the quote text, the reply or
-   * the X means those, and a drag over the quote text is left to select it.
+   * A press on the block — its padding, the breadcrumb, the excerpt's own
+   * column — puts the caret at the end of the reply. On mousedown with the
+   * default prevented, as the field does for its surface, so the input that
+   * had focus isn't blurred to the page in between (dropping the field's
+   * focus ring, closing an open hashtag dropdown, arming iOS's viewport
+   * re-measure). Matched by exclusion: a press on the reply or the X means
+   * those, and one on the quoted text is left alone so a drag can select it.
    */
   function handleMousedown(event: MouseEvent) {
     if (event.button !== 0 || event.shiftKey) return;
     const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-    if (target !== blockEl && !target.classList.contains('composer-quote-excerpt')) return;
+    if (!(target instanceof Element)) return;
+    if (target.closest('.hashtag-editor, .composer-quote-remove, .quote-text')) return;
     event.preventDefault();
-    focusAtEndSync(replyEl);
+    focusAtEndSync(replyEl, { preventScroll: true });
+    onCaretPlaced?.();
   }
 </script>
 

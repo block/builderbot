@@ -11,9 +11,9 @@ import {
 // of so many lines, and ranges report rects as WebKit does — none for a
 // collapsed range, one for a range over a character, on that character's
 // line. The cases cover the measurement from the characters next to the
-// caret, the caret at a soft wrap and around line breaks, the ends known
-// without a layout, the guards around the selection, and the walk through
-// the inputs.
+// caret, the caret at a soft wrap, around line breaks and around the
+// `<div>` lines a browser's Enter makes, the ends known without a layout,
+// the guards around the selection, and the walk through the inputs.
 
 const LINE_HEIGHT = 20;
 const LINE_TOP = 100;
@@ -144,16 +144,18 @@ describe('caretLineEdges', () => {
     expect(caretLineEdges(el)).toEqual({ first: false, last: true });
   });
 
-  it('reads a caret at a soft wrap as on the line in the arrow’s direction', () => {
+  it('reads a caret at a soft wrap as at the start of the lower line, where a browser draws it', () => {
     const el = wrapped('abcdefghijklmnopqrstuvwxyz1234', 10);
     const text = el.firstChild as Text;
 
-    // Between the first and second line: up counts it on the first.
+    // Between the first and second line: on the second, so ArrowUp from
+    // where ArrowDown out of the first line landed goes back up a line
+    // rather than out of the input.
     placeCaret(text, 10);
-    expect(caretLineEdges(el)).toEqual({ first: true, last: false });
+    expect(caretLineEdges(el)).toEqual({ first: false, last: false });
 
-    // Between the second and the last: down counts it on the last, so the
-    // first ArrowDown crosses rather than the browser moving to the end.
+    // Between the second and the last: on the last, so the first ArrowDown
+    // crosses rather than the browser moving to the end.
     placeCaret(text, 20);
     expect(caretLineEdges(el)).toEqual({ first: false, last: true });
   });
@@ -203,6 +205,68 @@ describe('caretLineEdges', () => {
     expect(caretLineEdges(el)).toEqual({ first: true, last: true });
     placeCaret(a, 1);
     expect(caretLineEdges(el)).toEqual({ first: true, last: true });
+  });
+
+  it('treats the block a browser wraps the next line in as a line boundary', () => {
+    // `line1<div>line2</div>`: Enter in Chromium and WebKit, where the
+    // extractor reads a line break; nothing re-renders it from the value.
+    const el = editor();
+    const a = document.createTextNode('abc');
+    const div = document.createElement('div');
+    const b = document.createTextNode('def');
+    div.append(b);
+    el.append(a, div);
+    layOut(el, 2);
+    div.getBoundingClientRect = () => lineRect(1);
+    stubRangeRects((node) => (node === a ? 0 : node === b ? 1 : null));
+
+    // The end of the first line: the block after it says nothing about the
+    // caret's line, so the character before is read, and ArrowDown moves
+    // onto the second line rather than out of the input.
+    placeCaret(a, 3);
+    expect(caretLineEdges(el)).toEqual({ first: true, last: false });
+    placeCaret(el, 1);
+    expect(caretLineEdges(el)).toEqual({ first: true, last: false });
+
+    // Inside the block.
+    placeCaret(b, 0);
+    expect(caretLineEdges(el)).toEqual({ first: false, last: true });
+    placeCaret(b, 3);
+    expect(caretLineEdges(el)).toEqual({ first: false, last: true });
+
+    // After the block, with nothing following: its last line.
+    placeCaret(el, 2);
+    expect(caretLineEdges(el)).toEqual({ first: false, last: true });
+  });
+
+  it('puts a caret after a block with more below it on the line below the block', () => {
+    // `<div>abc</div><div>def</div>` with the caret between the blocks, and
+    // an empty line (`<div><br></div>`) at the end, as Enter twice leaves.
+    const el = editor();
+    const first = document.createElement('div');
+    first.append('abc');
+    const second = document.createElement('div');
+    second.append('def');
+    const empty = document.createElement('div');
+    const br = document.createElement('br');
+    empty.append(br);
+    el.append(first, second, empty);
+    layOut(el, 3);
+    first.getBoundingClientRect = () => lineRect(0);
+    second.getBoundingClientRect = () => lineRect(1);
+    empty.getBoundingClientRect = () => lineRect(2);
+    br.getBoundingClientRect = () =>
+      rect(LINE_TOP + 2 * LINE_HEIGHT, LINE_TOP + 3 * LINE_HEIGHT, 0);
+    stubRangeRects((node) =>
+      node === first.firstChild ? 0 : node === second.firstChild ? 1 : null
+    );
+
+    placeCaret(el, 1);
+    expect(caretLineEdges(el)).toEqual({ first: false, last: false });
+
+    // The empty last line, by its break.
+    placeCaret(empty, 0);
+    expect(caretLineEdges(el)).toEqual({ first: false, last: true });
   });
 
   it('leaves the line alone when nothing by the caret can be measured', () => {

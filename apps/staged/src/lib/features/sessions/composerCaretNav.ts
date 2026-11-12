@@ -38,9 +38,14 @@ const ZERO_WIDTH_SPACE = '​';
  * the content next to it — a collapsed range has no rect of its own in
  * WebKit or Firefox — and compared with the input's content box. At a soft
  * wrap the character before the caret ends one line and the one after starts
- * the next, and the DOM doesn't say which the caret is drawn on; the edge
- * check reads the one in the arrow's direction, so a caret at the wrap
- * crosses on the first press rather than needing a second.
+ * the next, and the DOM doesn't say which the caret is drawn on. The
+ * character after is read for both edges: a browser places the caret at a
+ * wrap with downstream affinity after a click, Home, or an arrow from the
+ * line above, i.e. at the start of the lower line, so that is the line the
+ * caret is drawn on in every case but one — End (or ArrowRight to the end
+ * of the line) leaves it drawn at the end of the upper line, and ArrowUp
+ * there costs the extra press the browser takes to move it. At the end of
+ * the content, where nothing follows, the character before is read.
  */
 export function caretLineEdges(editor: HTMLElement): CaretLineEdges | null {
   const range = collapsedCaretIn(editor);
@@ -53,16 +58,10 @@ export function caretLineEdges(editor: HTMLElement): CaretLineEdges | null {
 
   const box = contentBox(editor);
   if (!box) return null;
-  if (!first) {
-    const rect = caretLineRect(editor, range, 'before');
-    if (!rect) return null;
-    first = rect.top - box.top < box.tolerance;
-  }
-  if (!last) {
-    const rect = caretLineRect(editor, range, 'after');
-    if (!rect) return null;
-    last = box.bottom - rect.bottom < box.tolerance;
-  }
+  const rect = caretLineRect(editor, range, 'after');
+  if (!rect) return null;
+  if (!first) first = rect.top - box.top < box.tolerance;
+  if (!last) last = box.bottom - rect.bottom < box.tolerance;
   return { first, last };
 }
 
@@ -129,9 +128,14 @@ function caretLineRect(
 /**
  * The line of the content next to the caret on `side`: the character there
  * (a one-character range has a rect where a collapsed one may not), or the
- * nearest sibling node with a box. A `<br>` before the caret ends the line
- * above it, so the caret is a line lower — unless nothing follows it, when
- * it is the trailing break a block renders no line for.
+ * nearest sibling node with a box. Line boundaries are hard: a `<br>` before
+ * the caret ends the line above it, so the caret is a line lower — unless
+ * nothing follows it, when it is the trailing break a block renders no line
+ * for. A block-level sibling (the `<div>` a browser's Enter wraps the next
+ * line in) is the same boundary with its own lines inside: after the caret
+ * it says nothing about the caret's line, so the other side is left to
+ * measure; before the caret, the caret is on the line below it, or on the
+ * block's last line when nothing follows.
  */
 function neighbourRect(
   editor: HTMLElement,
@@ -151,6 +155,15 @@ function neighbourRect(
     if (node instanceof Text) {
       if (node.data.length > 0) return charRect(node, side === 'before' ? node.data.length - 1 : 0);
     } else if (node instanceof Element) {
+      if (isBlockLevel(node)) {
+        if (side === 'after') return null;
+        const rect = node.getBoundingClientRect();
+        if (rect.height === 0) return null;
+        const line = lineHeightOf(editor);
+        return hasContentAfterNode(editor, node)
+          ? { top: rect.bottom, bottom: rect.bottom + line }
+          : { top: rect.bottom - line, bottom: rect.bottom };
+      }
       const rect = node.getBoundingClientRect();
       if (rect.height > 0) {
         if (side === 'before' && node.tagName === 'BR' && hasContentAfterNode(editor, node)) {
@@ -162,6 +175,13 @@ function neighbourRect(
     node = side === 'before' ? node.previousSibling : node.nextSibling;
   }
   return null;
+}
+
+/** Whether `el` starts a line of its own: a `<div>` or `<p>`, or anything laid out as a block. */
+function isBlockLevel(el: Element): boolean {
+  if (el.tagName === 'DIV' || el.tagName === 'P') return true;
+  const display = getComputedStyle(el).display;
+  return display === 'block' || display === 'flex' || display === 'grid' || display === 'list-item';
 }
 
 function hasContentAfterNode(editor: HTMLElement, node: Node): boolean {
@@ -198,6 +218,13 @@ function markerRect(caret: Range): LineRect | null {
   return rect.height > 0 ? { top: rect.top, bottom: rect.bottom } : null;
 }
 
+/** The height of one line of the editor's text. */
+function lineHeightOf(editor: HTMLElement): number {
+  const style = getComputedStyle(editor);
+  const fontSize = parseFloat(style.fontSize) || 13;
+  return parseFloat(style.lineHeight) || fontSize * 1.5;
+}
+
 /** The editor's content box (inside its padding) and the tolerance for a line at its edges. */
 function contentBox(
   editor: HTMLElement
@@ -205,12 +232,10 @@ function contentBox(
   const box = editor.getBoundingClientRect();
   if (box.height === 0) return null;
   const style = getComputedStyle(editor);
-  const fontSize = parseFloat(style.fontSize) || 13;
-  const lineHeight = parseFloat(style.lineHeight) || fontSize * 1.5;
   return {
     top: box.top + (parseFloat(style.paddingTop) || 0),
     bottom: box.bottom - (parseFloat(style.paddingBottom) || 0),
-    tolerance: lineHeight * EDGE_TOLERANCE,
+    tolerance: lineHeightOf(editor) * EDGE_TOLERANCE,
   };
 }
 

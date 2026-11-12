@@ -10,7 +10,8 @@ import { reactiveProps } from './testStubs/reactiveProps.svelte';
 // where it was so the composer can move it on, and a composition open in any
 // gap or reply is reported through one `composing` flag so the composer's
 // Send gate sees it — the main input isn't the only place a word can be
-// half-typed. A press on a block's own padding puts the caret in its reply.
+// half-typed. A press on a block anywhere but its reply, its X or the quoted
+// text puts the caret in its reply.
 // The field around the list (its box, cap and arrows) is covered by
 // ChatComposer.component.test.ts.
 
@@ -24,17 +25,19 @@ let target: HTMLElement;
 function render(quotes: DraftQuote[]) {
   const onRemoveQuote = vi.fn();
   const oncompositionend = vi.fn();
+  const onCaretPlaced = vi.fn();
   const props = reactiveProps({
     quotes,
     composing: false,
     onRemoveQuote,
     oncompositionend,
+    onCaretPlaced,
   });
   target = document.createElement('div');
   document.body.appendChild(target);
   component = mount(ComposerDraftQuotes, { target, props });
   flushSync();
-  return { props, onRemoveQuote, oncompositionend };
+  return { props, onRemoveQuote, oncompositionend, onCaretPlaced };
 }
 
 function gapOf(id: string): HTMLElement {
@@ -198,23 +201,62 @@ describe('ComposerDraftQuotes block surface', () => {
     return block;
   }
 
+  function pressOn(el: HTMLElement) {
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    el.dispatchEvent(event);
+    flushSync();
+    return event;
+  }
+
+  function textBeforeCaret(el: HTMLElement): string {
+    const selection = window.getSelection();
+    if (!selection?.anchorNode) throw new Error('no selection');
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(el);
+    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
+    return beforeCaret.toString();
+  }
+
   it('puts the caret at the end of the reply on a press on its own padding', () => {
-    render([quote('a', '', 'so far')]);
+    const { onCaretPlaced } = render([quote('a', '', 'so far')]);
     gapOf('a').focus();
 
-    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
-    blockOf('a').dispatchEvent(event);
-    flushSync();
+    const event = pressOn(blockOf('a'));
 
     // Prevented, so the gap that had focus was never blurred to the page first.
     expect(event.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(replyOf('a'));
-    const selection = window.getSelection();
-    if (!selection?.anchorNode) throw new Error('no selection');
-    const beforeCaret = document.createRange();
-    beforeCaret.selectNodeContents(replyOf('a'));
-    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
-    expect(beforeCaret.toString()).toBe('so far');
+    expect(textBeforeCaret(replyOf('a'))).toBe('so far');
+    // The field is told, to bring the caret into its view.
+    expect(onCaretPlaced).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes a press on the breadcrumb or the excerpt’s column to the reply too', () => {
+    render([{ ...quote('a', '', 'so far'), headings: ['Design', 'Layout'] }]);
+    gapOf('a').focus();
+
+    const path = blockOf('a').querySelector<HTMLElement>('.quote-path-segment');
+    if (!path) throw new Error('no breadcrumb');
+    expect(pressOn(path).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(replyOf('a'));
+
+    gapOf('a').focus();
+    const excerpt = blockOf('a').querySelector<HTMLElement>('.quote-excerpt');
+    if (!excerpt) throw new Error('no excerpt');
+    expect(pressOn(excerpt).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(replyOf('a'));
+  });
+
+  it('leaves a press on the reply itself and on the X to them', () => {
+    const { onCaretPlaced } = render([quote('a', '', 'so far')]);
+    gapOf('a').focus();
+
+    pressOn(removeButtonOf('a'));
+    expect(document.activeElement).toBe(gapOf('a'));
+
+    pressOn(replyOf('a'));
+    // Not moved to the end by the block: the browser places this caret.
+    expect(onCaretPlaced).not.toHaveBeenCalled();
   });
 
   it('leaves a press on the quote text, and the click that ends a drag, alone', () => {
@@ -222,9 +264,7 @@ describe('ComposerDraftQuotes block surface', () => {
     const text = blockOf('a').querySelector<HTMLElement>('.quote-text');
     if (!text) throw new Error('no quote text');
 
-    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
-    text.dispatchEvent(event);
-    flushSync();
+    const event = pressOn(text);
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).not.toBe(replyOf('a'));
 

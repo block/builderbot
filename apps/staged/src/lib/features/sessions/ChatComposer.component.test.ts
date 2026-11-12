@@ -167,6 +167,49 @@ describe('ChatComposer field', () => {
     expect(ancestors).not.toHaveBeenCalled();
     ancestors.mockRestore();
   });
+
+  it('brings a caret it places in a tall input into view, once the caret is in, and never scrolls the page', () => {
+    render([quote('a')], 'abc');
+    const fieldEl = layOutField();
+    // The main input is taller than the field's view, so only the caret's
+    // line can say where to scroll — and at `focusin` the caret isn't placed
+    // yet. Its first and last lines are the same, just under the view.
+    mainInput().getBoundingClientRect = () => rect(320, 720);
+    const originalRects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects');
+    Object.defineProperty(Range.prototype, 'getClientRects', {
+      configurable: true,
+      writable: true,
+      value(this: Range) {
+        return this.collapsed ? [] : [rect(320, 340)];
+      },
+    });
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    const ancestors = vi.spyOn(Element.prototype, 'scrollIntoView');
+    try {
+      focusWithCaret(replyOf('a'));
+      // The reply has no box in jsdom; the focus above scrolled to its 0.
+      fieldEl.scrollTop = 0;
+      focus.mockClear();
+
+      arrow(replyOf('a'), 'ArrowDown');
+      expect(document.activeElement).toBe(mainInput());
+      expect(fieldEl.scrollTop).toBe(39);
+      // The browser's own scroll-on-focus is turned off: it would take the
+      // dialog and the page along.
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+
+      fieldEl.scrollTop = 0;
+      press(fieldEl, { clientY: 800 });
+      expect(document.activeElement).toBe(mainInput());
+      expect(fieldEl.scrollTop).toBe(39);
+      expect(ancestors).not.toHaveBeenCalled();
+    } finally {
+      focus.mockRestore();
+      ancestors.mockRestore();
+      if (originalRects) Object.defineProperty(Range.prototype, 'getClientRects', originalRects);
+      else delete (Range.prototype as Partial<Range>).getClientRects;
+    }
+  });
 });
 
 describe('ChatComposer placeholder', () => {

@@ -35,6 +35,11 @@
     /** That composition ended (committed or cancelled). */
     oncompositionend?: () => void;
     onRemoveQuote: (id: string) => void;
+    /**
+     * A caret was placed by hand in one of the inputs here (Backspace moving
+     * into a reply, a press on a block), for the field to bring into view.
+     */
+    onCaretPlaced?: () => void;
   }
 
   let {
@@ -45,9 +50,12 @@
     composing = $bindable(false),
     oncompositionend,
     onRemoveQuote,
+    onCaretPlaced,
   }: Props = $props();
 
   let listEl = $state<HTMLDivElement>();
+  /** The field reveals the input itself; the browser's scroll-on-focus would move the page too. */
+  const noScroll = { preventScroll: true } as const;
   // From nothing, so the first run — the list mounting with a restored
   // draft, or with the quote that started it — counts as growth too.
   let shownCount = 0;
@@ -103,7 +111,10 @@
     ) {
       event.preventDefault();
       if (quote.reply.trim() === '') onRemoveQuote(quote.id);
-      else focusAtEndSync(replyFor(quote.id));
+      else {
+        focusAtEndSync(replyFor(quote.id), noScroll);
+        onCaretPlaced?.();
+      }
       return;
     }
     onkeydown?.(event);
@@ -130,7 +141,7 @@
   export function focusReply(id: string): boolean {
     const reply = replyFor(id);
     if (!reply) return false;
-    focusAtEndSync(reply);
+    focusAtEndSync(reply, noScroll);
     return true;
   }
 
@@ -138,8 +149,8 @@
   export function focusGap(id: string, caret: 'start' | 'end'): boolean {
     const gap = entryFor(id)?.querySelector<HTMLElement>('.composer-gap-input') ?? null;
     if (!gap) return false;
-    if (caret === 'start') focusAtStartSync(gap);
-    else focusAtEndSync(gap);
+    if (caret === 'start') focusAtStartSync(gap, noScroll);
+    else focusAtEndSync(gap, noScroll);
     return true;
   }
 </script>
@@ -172,6 +183,7 @@
         {onkeydown}
         {oninput}
         onRemove={() => onRemoveQuote(quote.id)}
+        {onCaretPlaced}
       />
     </div>
   {/each}

@@ -32,6 +32,7 @@
   import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
   import { tabDirection } from './lib/shared/tabDirection';
   import { safeAreaOffset } from './lib/shared/safeArea';
+  import { viewport } from './lib/shared/viewport.svelte';
   import { guardDocumentScroll } from './lib/shared/documentScroll';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
@@ -830,8 +831,14 @@
   <ControlAuthorizationDialog />
 
   <ReferenceModalHost />
+  <!-- Toasts stack at the bottom right, clear of the content, except on a
+       phone, where the bottom of the screen is the chat composer's Send
+       button (and its on-screen keyboard): a toast there — the Undo offered
+       for a removed quote, for one — sat over Send for its lifetime, and a
+       tap meant for it after it had gone sent the message. On a phone they
+       drop in from the top, over the dialog header. -->
   <Toaster
-    position="bottom-right"
+    position={viewport.sheetMenus ? 'top-center' : 'bottom-right'}
     visibleToasts={4}
     duration={8000}
     closeButton

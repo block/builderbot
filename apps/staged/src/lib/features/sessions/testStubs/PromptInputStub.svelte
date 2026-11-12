@@ -9,7 +9,8 @@
   count it shows as `data-quote-count`, and offers a remove button per quote
   (`data-testid="remove-quote-<id>"`) that calls `onRemoveQuote` as the
   composer's X would, a Send button (`data-testid="composer-send"`) that
-  calls `onSend`, and a `focusQuoteReply` that places no caret.
+  calls `onSend`, and a `focusQuoteReply` that places no caret but records
+  the ids asked for on the input (`data-focused-quotes`).
 -->
 <script lang="ts">
   let {
@@ -34,8 +35,10 @@
     onSend?: () => void;
   } = $props();
 
-  /** The composer's caret placement, which the stub lays nothing out for. */
-  export function focusQuoteReply(_id: string): boolean {
+  /** The composer's caret placement, which the stub lays nothing out for; the asks are recorded. */
+  let focusedQuotes = $state<string[]>([]);
+  export function focusQuoteReply(id: string): boolean {
+    focusedQuotes = [...focusedQuotes, id];
     return false;
   }
 </script>
@@ -50,6 +53,7 @@
   data-value={value}
   data-send-split={sendControl?.split}
   data-quote-count={quotes.length}
+  data-focused-quotes={focusedQuotes.join(' ')}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
 {#each quotes as quote (quote.id)}

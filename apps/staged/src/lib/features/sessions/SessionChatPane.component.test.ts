@@ -2,32 +2,47 @@ import { flushSync, mount, tick, unmount } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from '../../types';
 
-const { writer, loadDraftMock, saveDraftMock, toastMock, resumeSessionMock } = vi.hoisted(() => {
-  let toastIds = 0;
-  const toastMock = Object.assign(
-    vi.fn((_message: string, _options?: unknown) => `toast-${++toastIds}`),
-    { error: vi.fn(), success: vi.fn(), dismiss: vi.fn() }
-  );
-  return {
-    writer: {
-      scheduleSave: vi.fn(),
-      saveNow: vi.fn(async () => {}),
-      clearNow: vi.fn(async () => {}),
-      flush: vi.fn(async () => {}),
-      run: vi.fn(<T>(task: () => Promise<T>) => task()),
-    },
-    /** A stored draft: a plain string, or a whole draft entry with its blocks. */
-    loadDraftMock: vi.fn(
-      async (_key: string): Promise<string | { value: string; structured?: unknown } | null> => null
-    ),
-    saveDraftMock: vi.fn(async (_key: string, _content: unknown) => {}),
-    toastMock,
-    /** The idle composer's send; rejects to fail one. */
-    resumeSessionMock: vi.fn(async () => ({ outcome: 'resumed' })),
-  };
-});
+const { writer, loadDraftMock, saveDraftMock, toastMock, resumeSessionMock, viewportMock } =
+  vi.hoisted(() => {
+    let toastIds = 0;
+    const toastMock = Object.assign(
+      vi.fn((_message: string, _options?: unknown) => `toast-${++toastIds}`),
+      { error: vi.fn(), success: vi.fn(), dismiss: vi.fn() }
+    );
+    return {
+      writer: {
+        scheduleSave: vi.fn(),
+        saveNow: vi.fn(async () => {}),
+        clearNow: vi.fn(async () => {}),
+        flush: vi.fn(async () => {}),
+        run: vi.fn(<T>(task: () => Promise<T>) => task()),
+      },
+      /** A stored draft: a plain string, or a whole draft entry with its blocks. */
+      loadDraftMock: vi.fn(
+        async (_key: string): Promise<string | { value: string; structured?: unknown } | null> =>
+          null
+      ),
+      saveDraftMock: vi.fn(async (_key: string, _content: unknown) => {}),
+      toastMock,
+      /** The idle composer's send; rejects to fail one. */
+      resumeSessionMock: vi.fn(async () => ({ outcome: 'resumed' })),
+      /** The layout the pane reads: a desktop with a pointer unless a test says otherwise. */
+      viewportMock: {
+        isMobile: false,
+        canSplit: true,
+        showShortcutHints: true,
+        hasCoarsePointer: false,
+        sheetMenus: false,
+        shortWindow: false,
+      },
+    };
+  });
 
 vi.mock('svelte-sonner', () => ({ toast: toastMock }));
+vi.mock('../../shared/viewport.svelte', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../shared/viewport.svelte')>()),
+  viewport: viewportMock,
+}));
 
 // Heavy leaf components are stubbed out: the tests exercise the pane's
 // reply-draft effect wiring, not the transcript/composer internals.
@@ -241,6 +256,12 @@ describe('SessionChatPane quoted replies', () => {
     return Number(input?.dataset.quoteCount ?? NaN);
   }
 
+  /** The quote replies the pane asked the composer to put the caret in. */
+  function focusedQuotes(): string[] {
+    const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
+    return (input?.dataset.focusedQuotes ?? '').split(' ').filter(Boolean);
+  }
+
   function lastSaved(key: string) {
     const calls = writer.scheduleSave.mock.calls.filter(([savedKey]) => savedKey === key);
     return calls[calls.length - 1]?.[1];
@@ -304,6 +325,28 @@ describe('SessionChatPane quoted replies', () => {
     expect(toastMock).toHaveBeenCalledTimes(1);
 
     unmount(pane);
+  });
+
+  it('puts the caret in the restored reply for a pointer, but not on a touch screen', async () => {
+    const first = await removeMiddleQuote('session-caret');
+    lastUndo().action.onClick();
+    await settle();
+    expect(quoteCount()).toBe(3);
+    expect(focusedQuotes()).toEqual([first.second.id]);
+    unmount(first.pane);
+
+    // A touch screen's keyboard would rise over the restored draft.
+    viewportMock.hasCoarsePointer = true;
+    try {
+      const second = await removeMiddleQuote('session-caret-touch');
+      lastUndo().action.onClick();
+      await settle();
+      expect(quoteCount()).toBe(3);
+      expect(focusedQuotes()).toEqual([]);
+      unmount(second.pane);
+    } finally {
+      viewportMock.hasCoarsePointer = false;
+    }
   });
 
   it('takes the Undo toast down with a send, and a late Undo puts nothing back', async () => {

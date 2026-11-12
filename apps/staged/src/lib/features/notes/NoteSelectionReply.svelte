@@ -40,9 +40,9 @@
   phone (`viewport.sheetMenus`) the button is not by the selection at all:
   iOS draws its edit menu (Copy, Look Up, …) right there, over anything
   else. It is a full-width "Reply to selection" row instead, docked in
-  `dockHost` above the note's bottom bar, with a line of the selected text,
+  `dockHost` over the note's bottom bar, with a line of the selected text,
   shown while a selection stands and withdrawn as it collapses
-  (`onDockedChange` lets the bar make room). A tablet with a coarse pointer
+  (`onDockedChange` lets the bar hide under it). A tablet with a coarse pointer
   but no sheet menus keeps the button by the selection, clear of the end
   handle's knob (see replyButtonOffset).
 -->

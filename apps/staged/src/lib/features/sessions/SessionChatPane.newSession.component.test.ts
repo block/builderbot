@@ -63,6 +63,10 @@ vi.mock('svelte-sonner', () => ({ toast: toastMock }));
 vi.mock('../../shared/draftCache', () => ({
   createDraftWriteScheduler: () => writer,
   loadDraft: (key: string) => loadDraftMock(key),
+  loadDraftContent: async (key: string) => {
+    const value = await loadDraftMock(key);
+    return value === null ? null : { value };
+  },
 }));
 vi.mock('../../commands', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../commands')>()),

@@ -13,6 +13,7 @@ import type { Branch, Project, ProjectRepo } from '../../types';
 const spies = vi.hoisted(() => ({
   selectProject: vi.fn(),
   ensureProjectsHydrated: vi.fn(async () => {}),
+  whenLoaded: vi.fn(async () => {}),
   ensureIndexLoaded: vi.fn(),
   toggleFilter: vi.fn(),
   clearFilters: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock('../../stores/projectsData.svelte', async () => {
       isProjectDeleting: (id: string) => world.deleting.has(id),
       isProjectHydrated: () => true,
       ensureProjectsHydrated: spies.ensureProjectsHydrated,
+      whenLoaded: spies.whenLoaded,
     },
   };
 });
@@ -369,6 +371,7 @@ beforeEach(() => {
   projectsListViewState.stickyFilters = null;
   for (const spy of Object.values(spies)) spy.mockReset();
   spies.ensureProjectsHydrated.mockResolvedValue(undefined);
+  spies.whenLoaded.mockResolvedValue(undefined);
   // The navigation the app's selectProject performs, as far as the palette
   // can see it.
   spies.selectProject.mockImplementation((id: string) => world.showProject(id));
@@ -1617,6 +1620,137 @@ describe('CommandPalette when the projects change while it is open', () => {
     });
 
     expect(badges()).toEqual({ beta: ['Filtered out'], gamma: [], alpha: ['Current'] });
+  });
+});
+
+// A query searches branches, pull requests and secondary repos too, which
+// the store fetches per project: on its idle drip, one project at a time, or
+// at once for whoever asks for the sweep (ensureProjectsHydrated). The sweep
+// covers the projects the store knows when it is asked, so one asked for
+// before the project list has landed covers none. The palette asks once per
+// open, when the list is there.
+describe('CommandPalette and the project list loading', () => {
+  it("asks for every project's branches and repos once per open", async () => {
+    await openPalette();
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+
+    // Not again as what it asked for lands, or as projects come and go.
+    await change(() => (world.branches = new Map([['gamma', [branch('gamma', 99)]]])));
+    await change(() => (world.projects = [project('delta', 'Delta', 5), gamma, alpha, beta]));
+    await change(() => (world.projects = [beta, alpha]));
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+
+    await press('Escape');
+    await dialogGone();
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+
+    // The next open asks again; the store skips what it has fetched.
+    await openPalette();
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks when the list arrives, when it was opened before that, and not again after', async () => {
+    world.projects = [];
+    world.loaded = false;
+    await openPalette();
+    expect(liveRegion()!.textContent).toBe('Loading projects…');
+    // Asked now, the sweep would find no project and never run for this open.
+    expect(spies.ensureProjectsHydrated).not.toHaveBeenCalled();
+
+    await change(() => {
+      world.projects = [gamma, alpha, beta];
+      world.loaded = true;
+    });
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+    expect(optionIds()).toEqual(['alpha', 'beta', 'gamma']);
+    expect(selectedIds()).toEqual(['alpha']);
+
+    // What it asked for lands and reorders the recents, a project is
+    // created, one is removed: none of it asks again.
+    spies.revealWithin.mockClear();
+    await change(() => (world.branches = new Map([['gamma', [branch('gamma', 99)]]])));
+    await change(() => (world.projects = [project('delta', 'Delta', 5), gamma, alpha, beta]));
+    await change(() => (world.projects = [gamma, alpha]));
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+    // The highlight nobody moved is still the top row's, and nothing scrolled.
+    expect(optionIds()).toEqual(['gamma', 'alpha']);
+    expect(selectedIds()).toEqual(['gamma']);
+    expect(spies.revealWithin).not.toHaveBeenCalled();
+  });
+
+  it('does not start the open over when the list arrives or changes', async () => {
+    // The store can hold projects before its list has loaded (one created
+    // or refreshed meanwhile), which leaves rows to move the highlight on.
+    world.loaded = false;
+    await openPalette();
+    await press('ArrowDown');
+    expect(selectedIds()).toEqual(['beta']);
+    const listbox = document.querySelector<HTMLElement>('[data-command-palette] [role="listbox"]')!;
+    // jsdom lays nothing out; a list the user has scrolled.
+    listbox.scrollTop = 120;
+
+    await change(() => (world.loaded = true));
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+    expect(selectedIds()).toEqual(['beta']);
+    expect(listbox.scrollTop).toBe(120);
+
+    await change(() => (world.projects = [project('delta', 'Delta', 5), gamma, alpha, beta]));
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+    expect(selectedIds()).toEqual(['beta']);
+    expect(listbox.scrollTop).toBe(120);
+
+    await press('Enter');
+    expect(spies.selectProject).toHaveBeenCalledWith('beta');
+  });
+
+  it('asks for nothing once closed, when the list arrives after that', async () => {
+    world.projects = [];
+    world.loaded = false;
+    await openPalette();
+
+    // Closed, with the dialog still mounted for its exit animation.
+    pressAndHoldFrame('Escape');
+    expect(commandPalette.open).toBe(false);
+    expect(dialog()).not.toBeNull();
+    world.projects = [gamma, alpha, beta];
+    world.loaded = true;
+    flushSync();
+    expect(spies.ensureProjectsHydrated).not.toHaveBeenCalled();
+
+    await dialogGone();
+    await change(() => (world.projects = [alpha, beta]));
+    expect(spies.ensureProjectsHydrated).not.toHaveBeenCalled();
+
+    await openPalette();
+    expect(spies.ensureProjectsHydrated).toHaveBeenCalledTimes(1);
+  });
+
+  // The store's whenLoaded starts the project list load again when the first
+  // one failed, joins one already on its way, and does nothing once there is
+  // a list (projectsData.component.test.ts). The palette calls it per open.
+  it('gives a project list that has not loaded another go on each open, and only then', async () => {
+    world.projects = [];
+    world.loaded = false;
+    expect(spies.whenLoaded).not.toHaveBeenCalled();
+
+    await openPalette();
+    expect(spies.whenLoaded).toHaveBeenCalledTimes(1);
+
+    // Not on a keystroke, nor when the list lands.
+    await type('al');
+    await change(() => {
+      world.projects = [gamma, alpha, beta];
+      world.loaded = true;
+    });
+    await change(() => (world.projects = [alpha, beta]));
+    expect(spies.whenLoaded).toHaveBeenCalledTimes(1);
+
+    await press('Escape');
+    await dialogGone();
+    expect(spies.whenLoaded).toHaveBeenCalledTimes(1);
+
+    await openPalette();
+    expect(spies.whenLoaded).toHaveBeenCalledTimes(2);
   });
 });
 

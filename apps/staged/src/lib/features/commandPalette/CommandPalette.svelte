@@ -170,8 +170,11 @@
   let rows = $derived(results.rows);
 
   // Each open starts from the top, with what a query will search on its way:
-  // every project's branches and repos (the idle drip may not have reached
-  // them all) and the note/review title index.
+  // the note/review title index here, every project's branches and repos in
+  // the effect below. And the project list itself, if the app has none: a
+  // first load that failed is tried again (whenLoaded is how the store's
+  // callers ask for that; it does nothing once there is a list, and joins a
+  // load already on its way).
   //
   // The top of the list too. An open usually mounts a new list, but one that
   // comes while the last close is still fading out (⌘K straight after
@@ -193,8 +196,23 @@
       pointerAt = null;
       if (listEl) listEl.scrollTop = 0;
       projectSearchIndex.ensureLoaded();
-      void projectsDataStore.ensureProjectsHydrated();
+      void projectsDataStore.whenLoaded();
     });
+  });
+
+  // Every project's branches and repos, which a query also searches, pulled
+  // forward off the store's idle drip (one project at a time, and it may not
+  // have reached them all). The store's sweep covers the projects it knows
+  // when it is asked, so the palette asks once the list is there: at once
+  // on most opens, and when the list lands on one that came before it (a
+  // cold start into a project, where nothing else asks for the sweep). Once
+  // per open, and never while closed. Only `open` and `loaded` are tracked,
+  // so projects changing later don't ask again (the store hydrates the ones
+  // it learns of itself), and this is kept out of the reset above, which
+  // must not run again mid-open.
+  $effect.pre(() => {
+    if (!commandPalette.open || !projectsDataStore.loaded) return;
+    untrack(() => void projectsDataStore.ensureProjectsHydrated());
   });
 
   // The highlighted row: the top one until the highlight is moved, then

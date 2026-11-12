@@ -218,6 +218,17 @@ pub(crate) fn check_with_store(
             let Some(allowed) = scope else {
                 return Ok(());
             };
+            // A grouped tag becomes an option in a shared group, which every
+            // project's pill for that group then offers: a catalog edit, not
+            // what the picker's "Create tag" row does (ungrouped, assigned).
+            let group_id: Option<String> = opt_arg(args, "groupId")?;
+            if group_id.is_some() {
+                return Err(denied(format!(
+                    "{cmd} with a groupId adds an option to a shared tag group; this credential \
+                     is confined to project {allowed} and may only create an ungrouped tag it \
+                     assigns to that project"
+                )));
+            }
             let assign_project_id: Option<String> = opt_arg(args, "assignProjectId")?;
             match assign_project_id {
                 Some(project_id) => require_in_scope(scope, &project_id, "project"),
@@ -697,6 +708,25 @@ mod tests {
             ),
             "another project",
         );
+        // Nor put the tag in a group, even assigned to its own project: that
+        // adds an option every project's pill for the group then offers.
+        assert_denied(
+            check_with_store(
+                "create_tag",
+                &json!({ "name": "q4", "groupId": "g", "assignProjectId": f.project_a }),
+                &g,
+                &f.store,
+            ),
+            "groupId",
+        );
+        // An explicit null groupId is the ungrouped case.
+        check_with_store(
+            "create_tag",
+            &json!({ "name": "q4", "groupId": null, "assignProjectId": f.project_a }),
+            &g,
+            &f.store,
+        )
+        .unwrap();
         // An unconfined grant may create a tag anywhere, assigned or not.
         let all = ControlGrant::test_all_projects();
         check_with_store("create_tag", &json!({ "name": "q4" }), &all, &f.store).unwrap();

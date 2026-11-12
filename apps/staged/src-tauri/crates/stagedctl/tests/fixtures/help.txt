@@ -644,6 +644,11 @@ The tag keeps its id and every project carrying it, so this is how a tag
 is renamed in place. The new name must not match another tag in the same
 group (or another ungrouped tag), ignoring case.
 
+The edit reads the tag, fills the unset flags from it and sends the whole
+value, so a change made elsewhere (Settings ▸ Tags, another stagedctl)
+between that read and the write is overwritten; the printed row is the
+tag as it stands afterwards.
+
 Needs a credential that reaches every project (exit 4, `scope_denied`,
 under a session's own credential). Shows at once in Settings ▸ Tags.
 

@@ -27,6 +27,11 @@ fn main() {
             }
         }
         Err(err) => {
+            // A multi-step write that failed part-way says what landed on
+            // stdout, then the error on stderr, as a success would have.
+            if let Some(partial) = err.partial_output(json) {
+                println!("{partial}");
+            }
             eprintln!("{err}");
             std::process::exit(err.exit_code());
         }

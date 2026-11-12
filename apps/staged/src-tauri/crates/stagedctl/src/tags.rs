@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cli::{GroupTemplate, TagColor};
-use crate::client::{Client, CtlError};
+use crate::client::{Client, CredentialScope, CtlError};
 use crate::commands::{find_project, parse, CmdOutput, Project};
 
 /// The dispatch commands that only a Staged with tags answers. An older app
@@ -231,20 +231,33 @@ pub fn find_group<'a>(state: &'a TagStateWire, needle: &str) -> Result<&'a TagGr
 /// (group by name or id, name exact then case-insensitive); then the whole
 /// input as a name, exact then case-insensitive, which must be unique
 /// across the catalog.
+///
+/// A `<group>` that names more than one group is `ambiguous` rather than a
+/// fall-through to the whole-name search, which would call it `not_found`.
+/// Only a group named like another group's id can bring that about, since
+/// the app keeps group names unique ignoring case.
 pub fn find_tag<'a>(state: &'a TagStateWire, needle: &str) -> Result<&'a TagWire, CtlError> {
     if let Some(tag) = state.tags.iter().find(|t| t.id == needle) {
         return Ok(tag);
     }
     if let TagRef::Qualified { group, name } = TagRef::parse(needle) {
-        if let Ok(group) = find_group(state, &group) {
-            let in_group = state.tags_in(Some(&group.id));
-            if let Some(tag) = in_group
-                .iter()
-                .find(|t| t.name == name)
-                .or_else(|| in_group.iter().find(|t| t.name.eq_ignore_ascii_case(&name)))
-            {
-                return Ok(tag);
+        match find_group(state, &group) {
+            Ok(group) => {
+                let in_group = state.tags_in(Some(&group.id));
+                if let Some(tag) = in_group
+                    .iter()
+                    .find(|t| t.name == name)
+                    .or_else(|| in_group.iter().find(|t| t.name.eq_ignore_ascii_case(&name)))
+                {
+                    return Ok(tag);
+                }
             }
+            Err(
+                err @ CtlError::Command {
+                    code: "ambiguous", ..
+                },
+            ) => return Err(err),
+            Err(_) => {}
         }
     }
     let exact: Vec<&TagWire> = state.tags.iter().filter(|t| t.name == needle).collect();
@@ -484,6 +497,30 @@ pub(crate) fn render_tag_show(
     lines.join("\n")
 }
 
+/// The usage counts' reach, for output that shows them. The app confines
+/// `get_tag_state`'s assignments (and `list_projects`) to a project-scoped
+/// credential's own project, so under one every count is 0 or 1 and a tag
+/// that reads as unused may be carried by other projects. `--json` carries
+/// it as `usageScope`; the human output gets [`USAGE_SCOPE_NOTE`].
+pub fn usage_scope(scope: CredentialScope) -> &'static str {
+    match scope {
+        CredentialScope::AllProjects => "all",
+        CredentialScope::Project => "project",
+    }
+}
+
+/// The line under a scoped credential's counts.
+pub const USAGE_SCOPE_NOTE: &str =
+    "(project counts cover only this credential's project; other projects' tags are not shown)";
+
+/// `human` with the note appended when `scope` is confined.
+fn with_usage_scope_note(human: String, scope: CredentialScope) -> String {
+    match scope {
+        CredentialScope::AllProjects => human,
+        CredentialScope::Project => format!("{human}\n{USAGE_SCOPE_NOTE}"),
+    }
+}
+
 // =============================================================================
 // Verbs
 // =============================================================================
@@ -494,13 +531,14 @@ pub fn tag_list(client: &Client, group: Option<&str>) -> Result<CmdOutput, CtlEr
         Some(needle) => Some(find_group(&state, needle)?),
         None => None,
     };
-    let human = render_tag_list(&state, only);
+    let human = with_usage_scope_note(render_tag_list(&state, only), client.scope);
     let usage: serde_json::Map<String, Value> = usage_counts(&state)
         .into_iter()
         .map(|(id, n)| (id.to_string(), json!(n)))
         .collect();
     if let Some(object) = raw.as_object_mut() {
         object.insert("usage".to_string(), Value::Object(usage));
+        object.insert("usageScope".to_string(), json!(usage_scope(client.scope)));
     }
     Ok(CmdOutput { json: raw, human })
 }
@@ -525,7 +563,7 @@ pub fn tag_show(client: &Client, needle: &str) -> Result<CmdOutput, CtlError> {
         .iter()
         .filter(|p| carrying.contains(&p.id.as_str()))
         .collect();
-    let human = render_tag_show(&state, tag, &carrying);
+    let human = with_usage_scope_note(render_tag_show(&state, tag, &carrying), client.scope);
     let group = tag
         .group_id
         .as_deref()
@@ -538,6 +576,7 @@ pub fn tag_show(client: &Client, needle: &str) -> Result<CmdOutput, CtlError> {
             .iter()
             .map(|p| json!({"id": p.id, "name": p.name}))
             .collect::<Vec<_>>(),
+        "usageScope": usage_scope(client.scope),
     });
     Ok(CmdOutput { json, human })
 }
@@ -829,9 +868,75 @@ pub(crate) fn render_steps(
     lines.join("\n")
 }
 
+/// Run `steps` in order through `invoke`, stopping at the first failure.
+/// `Ok` holds one result per step. `Err` holds the results of the steps
+/// that landed before the failing one, and its error: each step is its own
+/// transaction on the app, so those stay applied.
+pub(crate) fn run_steps(
+    mut invoke: impl FnMut(&str, Value) -> Result<Value, CtlError>,
+    project_id: &str,
+    steps: &[Step],
+) -> Result<Vec<Value>, (Vec<Value>, CtlError)> {
+    let mut results: Vec<Value> = Vec::with_capacity(steps.len());
+    for step in steps {
+        match invoke(step.command(), step.args(project_id)) {
+            Ok(result) => results.push(result),
+            Err(err) => return Err((results, err)),
+        }
+    }
+    Ok(results)
+}
+
+/// The `create_tag` rows among `results`, in order, for [`render_steps`].
+fn created_rows(steps: &[Step], results: &[Value]) -> Vec<Value> {
+    steps
+        .iter()
+        .zip(results)
+        .filter(|(step, _)| matches!(step, Step::Create { .. }))
+        .map(|(_, result)| result.clone())
+        .collect()
+}
+
+/// The error for a plan that failed at step `results.len()`: the failing
+/// step's error, carrying the applied steps as [`render_steps`] would have
+/// printed them and as `{ command, args, result }` rows for `--json`.
+pub(crate) fn partial_failure(
+    before: &TagStateWire,
+    project: &Project,
+    steps: &[Step],
+    results: Vec<Value>,
+    heading: &str,
+    error: CtlError,
+) -> CtlError {
+    let landed = &steps[..results.len()];
+    let created = created_rows(landed, &results);
+    let human = format!(
+        "{}\n  (the remaining {} not applied)",
+        render_steps(before, project, landed, &created, heading),
+        plural(steps.len() - landed.len(), "step")
+    );
+    let applied = landed
+        .iter()
+        .zip(results)
+        .map(|(step, result)| {
+            json!({
+                "command": step.command(),
+                "args": step.args(&project.id),
+                "result": result,
+            })
+        })
+        .collect();
+    CtlError::Partial {
+        error: Box::new(error),
+        applied,
+        human,
+    }
+}
+
 /// Run a plan in order and print the project's tags as they stand after
 /// it. `--json` is the `project tags` shape under `ok: true`, plus the
-/// `created` rows.
+/// `created` rows. A failure after the first step is a
+/// [`CtlError::Partial`] naming the steps that landed.
 fn apply_steps(
     client: &Client,
     before: &TagStateWire,
@@ -840,13 +945,19 @@ fn apply_steps(
     steps: &[Step],
     heading: &str,
 ) -> Result<CmdOutput, CtlError> {
-    let mut created: Vec<Value> = Vec::new();
-    for step in steps {
-        let result = client.invoke(step.command(), step.args(&project.id))?;
-        if matches!(step, Step::Create { .. }) {
-            created.push(result);
+    let results = run_steps(
+        |command, args| client.invoke(command, args),
+        &project.id,
+        steps,
+    )
+    .map_err(|(results, err)| {
+        if results.is_empty() {
+            err
+        } else {
+            partial_failure(before, project, steps, results, heading, err)
         }
-    }
+    })?;
+    let created = created_rows(steps, &results);
     let human = render_steps(before, project, steps, &created, heading);
     let (after, raw) = fetch_state(client)?;
     let mut json = project_tags_json(&after, &raw, projects_raw, project);
@@ -1526,6 +1637,136 @@ mod tests {
         assert_eq!(find_tag(&state, "q4-launch").unwrap().id, "t-q4");
         // A name holding a slash is tried whole once group/name fails.
         assert_eq!(find_tag(&state, "a/b").unwrap().id, "t-slash");
+    }
+
+    #[test]
+    fn find_tag_passes_on_an_ambiguous_group_in_slash_form() {
+        // Two groups a case-insensitive "STATUS" fits: only reachable when
+        // one group is named like another's id, since the app keeps names
+        // unique ignoring case, but then the answer must say "ambiguous",
+        // not "not_found" from the whole-name search.
+        let mut state = catalog();
+        state.groups.push(group("g-other", "status", false, false));
+        let err = find_tag(&state, "STATUS/Done").unwrap_err();
+        let text = err.to_string();
+        assert!(text.starts_with("ambiguous: "), "{text}");
+        assert!(text.contains("tag group"), "{text}");
+        // The exact forms still resolve.
+        assert_eq!(find_tag(&state, "Status/Done").unwrap().id, "t-done");
+        assert_eq!(find_tag(&state, "g-status/Done").unwrap().id, "t-done");
+        // A group nothing answers to still falls through to the whole name.
+        assert_eq!(find_tag(&state, "a/b").unwrap().id, "t-slash");
+    }
+
+    #[test]
+    fn usage_counts_say_when_they_cover_one_project_only() {
+        assert_eq!(usage_scope(CredentialScope::AllProjects), "all");
+        assert_eq!(usage_scope(CredentialScope::Project), "project");
+        let text = with_usage_scope_note("Tags\n  a".to_string(), CredentialScope::AllProjects);
+        assert_eq!(text, "Tags\n  a");
+        let text = with_usage_scope_note("Tags\n  a".to_string(), CredentialScope::Project);
+        assert_eq!(text, format!("Tags\n  a\n{USAGE_SCOPE_NOTE}"));
+        assert!(
+            USAGE_SCOPE_NOTE.contains("only this credential's project"),
+            "{USAGE_SCOPE_NOTE}"
+        );
+    }
+
+    #[test]
+    fn a_step_that_fails_after_others_landed_reports_what_was_applied() {
+        let state = catalog();
+        let p1 = project("p1", "Widgets");
+        let steps = vec![
+            choose("g-status", "t-done"),
+            Step::Create { name: "q4".into() },
+            assign("t-infra", true),
+        ];
+        let mut calls = 0;
+        let outcome = run_steps(
+            |command, args| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert_eq!(command, "set_project_group_tag");
+                        assert_eq!(args["tagId"], "t-done");
+                        Ok(Value::Null)
+                    }
+                    2 => {
+                        assert_eq!(command, "create_tag");
+                        Err(CtlError::command(
+                            "app_error",
+                            "A tag named \"q4\" already exists",
+                        ))
+                    }
+                    _ => panic!("the third step must not be sent after a failure"),
+                }
+            },
+            "p1",
+            &steps,
+        );
+        let (results, err) = outcome.unwrap_err();
+        assert_eq!(results, vec![Value::Null]);
+        let err = partial_failure(&state, &p1, &steps, results, "tagged", err);
+        assert_eq!(err.exit_code(), 1, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "app_error: A tag named \"q4\" already exists"
+        );
+        assert_eq!(
+            err.partial_output(false).as_deref(),
+            Some(
+                "tagged Widgets  id:p1\n\
+                 \x20 Status: Done\n\
+                 \x20 (the remaining 2 steps not applied)"
+            )
+        );
+        let json: Value = serde_json::from_str(&err.partial_output(true).unwrap()).unwrap();
+        assert_eq!(
+            json,
+            json!({
+                "ok": false,
+                "applied": [{
+                    "command": "set_project_group_tag",
+                    "args": { "projectId": "p1", "groupId": "g-status", "tagId": "t-done" },
+                    "result": null,
+                }],
+                "error": {
+                    "code": "app_error",
+                    "message": "A tag named \"q4\" already exists",
+                },
+            })
+        );
+
+        // A failure on the very first step has nothing to report: the
+        // error goes out as it is.
+        let outcome = run_steps(
+            |_, _| Err(CtlError::command("app_error", "boom")),
+            "p1",
+            &steps,
+        );
+        let (results, err) = outcome.unwrap_err();
+        assert!(results.is_empty());
+        assert!(matches!(err, CtlError::Command { .. }));
+
+        // Every step landing returns one result per step, in order, and
+        // the create rows are picked out for the step lines.
+        let results = run_steps(
+            |command, _| {
+                Ok(if command == "create_tag" {
+                    json!({ "id": "t-new" })
+                } else {
+                    Value::Null
+                })
+            },
+            "p1",
+            &steps,
+        )
+        .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            created_rows(&steps, &results),
+            vec![json!({ "id": "t-new" })]
+        );
     }
 
     #[test]

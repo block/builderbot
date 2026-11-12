@@ -203,7 +203,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "repo_actions", "icon"));
     assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
     assert!(column_exists(&conn, "session_messages", "acp_origin"));
-    // Frozen since tags (0044): nothing reads or writes it except the one-shot
+    // Frozen since tags (0045): nothing reads or writes it except the one-shot
     // legacy import, but it stays as a recovery source.
     assert!(column_exists(&conn, "projects", "status_override"));
     assert!(column_exists(&conn, "images", "width"));

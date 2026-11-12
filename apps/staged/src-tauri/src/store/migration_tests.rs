@@ -1609,6 +1609,8 @@ fn test_project_tags_migration_then_import_moves_status_overrides_into_tags() {
             app_version TEXT NOT NULL
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- 0047 and 0048 only alter `sessions`.
+        CREATE TABLE sessions (id TEXT PRIMARY KEY);
         -- The projects table as of 0032 (baseline + status_override). 0044 only
         -- alters `branches`, so start past it.
         CREATE TABLE projects (
@@ -1782,6 +1784,8 @@ fn test_tag_group_sidebar_migration_adds_the_column_off_for_existing_groups() {
             app_version TEXT NOT NULL
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- 0047 and 0048 only alter `sessions`.
+        CREATE TABLE sessions (id TEXT PRIMARY KEY);
         CREATE TABLE projects (
             id              TEXT PRIMARY KEY,
             name            TEXT NOT NULL,

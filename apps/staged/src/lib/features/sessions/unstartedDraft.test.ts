@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  offerUnstartedDraftBox,
+  otherUnstartedDraftBox,
   restoreUnstartedAttachments,
   restoreUnstartedDraft,
   unstartedDraftMessage,
@@ -79,5 +81,88 @@ describe('unstarted draft notices', () => {
     expect(unstartedDraftToast({ reason: 'boom', keptNewerText: false }).description).toBe(
       "boom. Your message is back in the note's chat box."
     );
+  });
+
+  it('does not double the full stop of a reason that ends in one', () => {
+    expect(unstartedDraftToast({ reason: 'Agent not found.', keptNewerText: false })).toEqual({
+      title: 'The new session did not start',
+      description: "Agent not found. Your message is back in the note's chat box.",
+    });
+    expect(unstartedDraftToast({ reason: 'Not allowed! ', keptNewerText: false }).description).toBe(
+      "Not allowed! Your message is back in the note's chat box."
+    );
+    expect(unstartedDraftMessage({ reason: 'Agent not found.', keptNewerText: false })).toBe(
+      'The new session did not start (Agent not found). Your message is back in the box.'
+    );
+  });
+
+  it('gives no reason when it is only blank space or a full stop', () => {
+    expect(unstartedDraftToast({ reason: ' . ', keptNewerText: false }).description).toBe(
+      "Your message is back in the note's chat box."
+    );
+    expect(unstartedDraftMessage({ reason: '', keptNewerText: false })).toBe(
+      'The new session did not start. Your message is back in the box.'
+    );
+  });
+
+  it('claims no box when the pane that held the message is gone', () => {
+    expect(unstartedDraftToast({ keptNewerText: false, boxGone: true }).description).toBe(
+      "Your message was saved as the note's chat draft. Copy it from here if the chat does not show it."
+    );
+    expect(
+      unstartedDraftToast({ reason: 'boom', keptNewerText: true, boxGone: true }).description
+    ).toBe(
+      "boom. Your message was saved as the note's chat draft, above what you typed since. Copy it from here if the chat does not show it."
+    );
+  });
+
+  it('says when the attachments went with that pane', () => {
+    expect(
+      unstartedDraftToast({ keptNewerText: false, boxGone: true, attachmentsLost: true })
+        .description
+    ).toBe(
+      "Your message was saved as the note's chat draft. Copy it from here if the chat does not show it. Its attachments were not kept."
+    );
+    // A pane that still has its box keeps them with it.
+    expect(unstartedDraftToast({ keptNewerText: false, attachmentsLost: true }).description).toBe(
+      "Your message is back in the note's chat box."
+    );
+  });
+});
+
+describe('open composer boxes', () => {
+  const box = () => async () => {};
+
+  it('finds another box showing the session, never the asking pane or another session', () => {
+    const own = box();
+    const other = box();
+    expect(otherUnstartedDraftBox('s1', own)).toBeNull();
+
+    const withdrawOwn = offerUnstartedDraftBox('s1', own);
+    const withdrawElsewhere = offerUnstartedDraftBox('s2', other);
+    expect(otherUnstartedDraftBox('s1', own)).toBeNull();
+
+    const withdrawOther = offerUnstartedDraftBox('s1', other);
+    expect(otherUnstartedDraftBox('s1', own)).toBe(other);
+    expect(otherUnstartedDraftBox('s1', other)).toBe(own);
+
+    withdrawOther();
+    expect(otherUnstartedDraftBox('s1', own)).toBeNull();
+    withdrawOwn();
+    withdrawElsewhere();
+    expect(otherUnstartedDraftBox('s2', own)).toBeNull();
+  });
+
+  it('keeps a box offered again after an earlier offer was withdrawn', () => {
+    const own = box();
+    const other = box();
+    const withdrawFirst = offerUnstartedDraftBox('s1', other);
+    withdrawFirst();
+    const withdrawSecond = offerUnstartedDraftBox('s1', other);
+    // A stale withdrawal does not take the newer offer with it.
+    withdrawFirst();
+    expect(otherUnstartedDraftBox('s1', own)).toBe(other);
+    withdrawSecond();
+    expect(otherUnstartedDraftBox('s1', own)).toBeNull();
   });
 });

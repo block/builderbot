@@ -51,17 +51,32 @@ export interface UnstartedDraftNotice {
   keptNewerText: boolean;
 }
 
+/** `reason` without the full stop the notice supplies itself, or `null`. */
+function bareReason(reason: string | null | undefined): string | null {
+  return reason?.trim().replace(/\.+$/, '').trimEnd() || null;
+}
+
 /**
  * The composer's failure line: the session did not start, and where the
  * message went. Shown beside the box that holds it again.
  */
 export function unstartedDraftMessage({ reason, keptNewerText }: UnstartedDraftNotice): string {
-  const failed = reason
-    ? `The new session did not start (${reason}).`
-    : 'The new session did not start.';
+  const why = bareReason(reason);
+  const failed = why ? `The new session did not start (${why}).` : 'The new session did not start.';
   return keptNewerText
     ? `${failed} Your message is back in the box, above what you typed since.`
     : `${failed} Your message is back in the box.`;
+}
+
+export interface UnstartedDraftToastNotice extends UnstartedDraftNotice {
+  /**
+   * The pane that held the message is gone (unmounted, or showing another
+   * session), so only the stored draft could be written: no box is known to
+   * hold the message, and the toast must not say one does.
+   */
+  boxGone?: boolean;
+  /** The message's attachments went with that pane. */
+  attachmentsLost?: boolean;
 }
 
 /**
@@ -69,15 +84,64 @@ export function unstartedDraftMessage({ reason, keptNewerText }: UnstartedDraftN
  * dialog is closed by then, so the composer's failure line cannot be seen
  * until the note's chat is opened again.
  */
-export function unstartedDraftToast({ reason, keptNewerText }: UnstartedDraftNotice): {
+export function unstartedDraftToast({
+  reason,
+  keptNewerText,
+  boxGone = false,
+  attachmentsLost = false,
+}: UnstartedDraftToastNotice): {
   title: string;
   description: string;
 } {
-  const where = keptNewerText
-    ? "Your message is back in the note's chat box, above what you typed since."
-    : "Your message is back in the note's chat box.";
+  const above = keptNewerText ? ', above what you typed since' : '';
+  let where = boxGone
+    ? `Your message was saved as the note's chat draft${above}. Copy it from here if the chat does not show it.`
+    : `Your message is back in the note's chat box${above}.`;
+  if (boxGone && attachmentsLost) where += ' Its attachments were not kept.';
+  const why = bareReason(reason);
   return {
     title: 'The new session did not start',
-    description: reason ? `${reason}. ${where}` : where,
+    // A reason that ends its own sentence ("Not allowed!") gets no full stop.
+    description: why ? `${why}${/[!?]$/.test(why) ? '' : '.'} ${where}` : where,
   };
+}
+
+/**
+ * Takes a returned draft into a composer: the pane's own put-back, with the
+ * session, the message, its attachments and why the start failed.
+ */
+export type UnstartedDraftBox = (
+  sessionId: string,
+  text: string,
+  imageIds: string[],
+  reason: string | null
+) => Promise<void>;
+
+/** The composers on screen right now, by the session they show. */
+const openBoxes = new Map<string, Set<UnstartedDraftBox>>();
+
+/**
+ * A pane has `sessionId`'s composer on screen: a draft returned to that
+ * session by a pane that no longer shows it can go into this box. Returns
+ * the withdrawal, for when the pane leaves the screen.
+ */
+export function offerUnstartedDraftBox(sessionId: string, box: UnstartedDraftBox): () => void {
+  const boxes = openBoxes.get(sessionId) ?? new Set<UnstartedDraftBox>();
+  openBoxes.set(sessionId, boxes);
+  boxes.add(box);
+  return () => {
+    boxes.delete(box);
+    if (boxes.size === 0 && openBoxes.get(sessionId) === boxes) openBoxes.delete(sessionId);
+  };
+}
+
+/** A composer showing `sessionId` on screen that is not `own`, if any. */
+export function otherUnstartedDraftBox(
+  sessionId: string,
+  own: UnstartedDraftBox
+): UnstartedDraftBox | null {
+  for (const box of openBoxes.get(sessionId) ?? []) {
+    if (box !== own) return box;
+  }
+  return null;
 }

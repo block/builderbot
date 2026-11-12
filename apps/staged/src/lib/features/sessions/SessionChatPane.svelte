@@ -90,7 +90,7 @@
     type AcpConfigDiscovery,
     type AcpConfigSelector,
   } from '../../api/commands';
-  import { listenToEvent, type UnlistenFn } from '../../transport';
+  import { listenToEvent, writeClipboardText, type UnlistenFn } from '../../transport';
   import { openSettings } from '../layout/navigation.svelte';
   import AgentLoginPrompt from '../doctor/AgentLoginPrompt.svelte';
   import { isAuthenticationError } from './authRecovery';
@@ -227,6 +227,8 @@
   import { getNoteFollowupLabel, noteActivityLabel, type LinkedNoteContext } from './noteFreshness';
   import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
   import {
+    offerUnstartedDraftBox,
+    otherUnstartedDraftBox,
     restoreUnstartedAttachments,
     restoreUnstartedDraft,
     unstartedDraftMessage,
@@ -412,6 +414,10 @@
   let replyDraftLoad: Promise<void> = Promise.resolve();
   // Unmounted (a transient or evicted pane): nothing will show this box again.
   let destroyed = false;
+  // The toast `putBackUnstartedDraft` raised while this pane was parked, and
+  // the session it was about: taken down when the pane next shows that
+  // session, where the composer's own line says the same.
+  let unstartedDraftToastShown: { toastId: string | number; sessionId: string } | null = null;
   // One-shot: set when a failed load re-opens the save gate while the composer
   // may still hold the previously shown session's text; the save effect skips
   // exactly that run so inherited text isn't filed under this session's key.
@@ -994,6 +1000,20 @@
     suppressNextReplySave = false;
     loadedDraftSessionId = null;
     replyDraftLoad = loadReplyDraft(id, generation, inputTextWhenLoadStarted);
+  });
+
+  // While this pane has the session's composer on screen, a draft returned
+  // to that session by a pane that no longer shows it belongs in this box
+  // (see `putBackUnstartedDraft`); and this pane's own toast about a draft it
+  // put back while parked has been answered by opening the chat.
+  $effect(() => {
+    const id = sessionId;
+    if (!active || !id) return;
+    if (unstartedDraftToastShown?.sessionId === id) {
+      toast.dismiss(unstartedDraftToastShown.toastId);
+      unstartedDraftToastShown = null;
+    }
+    return offerUnstartedDraftBox(id, putBackUnstartedDraft);
   });
 
   $effect(() => {
@@ -1824,13 +1844,22 @@
    *   the next open reloads the box from the store. Pending writes are
    *   flushed, the stored text read and the joined text written back. The
    *   write is queued in the same step as the last "still not on screen"
-   *   check, so a reopen after it loads the joined text.
+   *   check, so a reopen after it loads the joined text. The parked box is
+   *   given the same text, so it agrees with the store even if that reload
+   *   fails.
    * - A pane reopened in between is still loading its draft and does not yet
    *   know what its box should hold; the load is waited out first.
+   * - When this pane is not showing the session but another pane is (this
+   *   one was a transient pane, or was evicted from the pool, and the chat
+   *   was opened again), that pane's box holds the newest text, and its next
+   *   keystroke would save over anything written to the store behind its
+   *   back. The draft is handed to it (`offerUnstartedDraftBox`).
    *
    * The failure is reported on the composer's own line, which is still
    * there when the note's chat is opened again, and by a toast when the pane
-   * is not on screen to show it.
+   * is not on screen to show it. A pane that is gone (unmounted, or showing
+   * another session by now) has no box to point at: its toast says the
+   * message was saved as the draft, and offers the message to copy.
    */
   async function putBackUnstartedDraft(
     id: string,
@@ -1840,7 +1869,11 @@
   ) {
     const draftKey = replyDraftKey(id);
     const onScreen = () => !destroyed && active && sessionId === id;
+    const boxElsewhere = () =>
+      onScreen() ? null : otherUnstartedDraftBox(id, putBackUnstartedDraft);
     for (;;) {
+      const elsewhere = boxElsewhere();
+      if (elsewhere) return elsewhere(id, text, imageIds, reason);
       // Bounded so a load that somehow never opens the gate cannot spin here
       // on microtasks; the box is then used as it stands.
       for (let waits = 0; waits < 8 && onScreen() && loadedDraftSessionId !== id; waits++) {
@@ -1871,26 +1904,59 @@
         console.error('[SessionChatPane] Failed to read the reply draft to restore into:', err);
         stored = parkedBox ? inputText : '';
       }
-      // Reopened while the store was read: the box is the place after all,
-      // or, if it was closed again too, the store may hold newer text now.
-      if (onScreen() || draftLoadGeneration !== loadsBeforeRead) continue;
+      // Reopened while the store was read, here or in another pane: a box is
+      // the place after all. Or, if this pane was closed again too, the store
+      // may hold newer text now.
+      if (onScreen() || draftLoadGeneration !== loadsBeforeRead || boxElsewhere()) continue;
       const restored = restoreUnstartedDraft(text, stored);
       void replyDraftWriter.saveNow(draftKey, restored.text);
-      const notice = { reason, keptNewerText: restored.keptNewerText };
-      if (!destroyed && sessionId === id) {
-        // Kept with the parked pane for its next open. The box itself is
-        // reloaded from the store then; attachments are not stored.
+      const boxGone = destroyed || sessionId !== id;
+      if (!boxGone) {
+        // Kept with the parked pane for its next open. That open reloads the
+        // box from the store; until it has, and if it cannot, the box holds
+        // the same text (a parked pane's autosave does not run, so this
+        // writes nothing). Attachments are not stored.
+        inputText = restored.text;
         replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
-        sendError = unstartedDraftMessage(notice);
+        sendError = unstartedDraftMessage({ reason, keptNewerText: restored.keptNewerText });
       }
       // A host that resolved `false` has reported why itself (the launch
       // helper's error toast); a throw is reported only here. Either stays
-      // until dismissed: it says where the message went.
-      const { title, description } = unstartedDraftToast(notice);
-      if (reason === null) toast.info(title, { description, duration: Infinity });
-      else toast.error(title, { description, duration: Infinity });
+      // until dismissed or, for a parked pane, until its chat is opened
+      // again: it says where the message went.
+      const { title, description } = unstartedDraftToast({
+        reason,
+        keptNewerText: restored.keptNewerText,
+        boxGone,
+        attachmentsLost: imageIds.length > 0,
+      });
+      const toastId: string | number = (reason === null ? toast.info : toast.error)(title, {
+        description,
+        duration: Infinity,
+        // No box is known to hold the message, so the toast carries it.
+        ...(boxGone ? { action: copyUnstartedDraftAction(text, () => toastId) } : {}),
+      });
+      if (!boxGone) unstartedDraftToastShown = { toastId, sessionId: id };
       return;
     }
+  }
+
+  /**
+   * The toast's "Copy message" for a draft whose pane is gone. The toast
+   * stays up until the copy has worked, since it is the one place the
+   * message can still be taken from.
+   */
+  function copyUnstartedDraftAction(text: string, toastId: () => string | number) {
+    return {
+      label: 'Copy message',
+      onClick: (event: MouseEvent) => {
+        event.preventDefault();
+        writeClipboardText(text).then(
+          () => toast.dismiss(toastId()),
+          (err) => console.error('[SessionChatPane] Failed to copy the unstarted draft:', err)
+        );
+      },
+    };
   }
 
   async function handleNoteFollowupClick() {

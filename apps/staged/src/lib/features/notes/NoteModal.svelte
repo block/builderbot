@@ -12,6 +12,17 @@
 
   Showing a note marks it read, and the header's toggle marks it read or
   unread; see `NoteReadTracker` for when the viewer marks it on its own.
+
+  A note with a chat can be replied to a passage at a time: selecting text
+  offers a Reply button (`NoteSelectionReply`; on a phone it is docked above
+  the bottom bar, out of the way of the system's edit menu), and each reply
+  lands in the chat's draft as a quote block (see sessions/replyDrafts.ts) —
+  straight into the composer when the chat shows beside the note, otherwise
+  typed in the note and written to the stored draft as it goes, the user
+  staying on the note to select the next passage. While the chat is hidden
+  and the draft holds anything, the note's bottom bar offers it: one button
+  that opens the chat with the composer. The docked Reply button stands in
+  for it while a selection is being offered a reply.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -24,6 +35,8 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
+  import PencilLine from '@lucide/svelte/icons/pencil-line';
+  import { toast } from 'svelte-sonner';
   import * as Dialog from '$lib/components/ui/dialog';
   import {
     createDialogWidth,
@@ -54,6 +67,7 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
+  import { scrollRangeEndIntoView } from './noteSelection';
   import '../../shared/markdown/diagramStyles.css';
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
   import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
@@ -80,6 +94,16 @@
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
+  import NoteSelectionReply from './NoteSelectionReply.svelte';
+  import type { NewDraftQuote } from '../sessions/composerDraft';
+  import {
+    addQuoteToReplyDraft,
+    focusReplyDraftQuote,
+    replyDraftPresence,
+    startLiveQuoteReply,
+    type LiveQuoteReply,
+  } from '../sessions/replyDrafts';
+  import { formatReplyDraftLabel } from './replyDraftLabel';
   import { isSessionActive } from '../../shared/sessionStatus';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
@@ -174,6 +198,8 @@
   let chatAutoOpenDecisionKey = $state<string | null>(null);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
   let canOpenSession = $derived(Boolean(sessionId));
+  let replyDraftSummary = $derived(replyDraftPresence.summary(sessionId));
+  let replyDraftLabel = $derived(formatReplyDraftLabel(replyDraftSummary));
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0 && !chatOpen);
   let displayTitle = $derived(liveNote?.title ?? title);
   let displayContent = $derived(liveNote?.content ?? content);
@@ -196,6 +222,21 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
   let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
+  /**
+   * The docked Reply button (a phone, a selection standing) covers the
+   * bottom bar. The bar stays in the layout under it, only hidden: taking
+   * it out would give its height to the note's scroll box, whose offset is
+   * then clamped by that much — the text moving under the finger that is
+   * still extending the selection, which lands on whatever arrives there.
+   */
+  let replyDocked = $state(false);
+  /** The chat is hidden and its draft holds something: the bottom bar offers it. */
+  let showReplyDraft = $derived(canOpenSession && !chatOpen && replyDraftLabel !== null);
+  let showBottomBar = $derived(
+    showReplyDraft ||
+      showChatInfo ||
+      Boolean(nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))
+  );
   const readTracker = new NoteReadTracker();
   let readToggleLabel = $derived(readTracker.unread ? 'Mark as read' : 'Mark as unread');
 
@@ -328,7 +369,56 @@
   let matchCount = $state(0);
   let currentMatchIndex = $state(0);
   let matchElements: HTMLElement[] = [];
-  let contentEl: HTMLDivElement | undefined;
+  let contentEl = $state<HTMLDivElement>();
+  let markdownEl = $state<HTMLDivElement>();
+  /** The dialog's box, which the phone's reply sheet is laid over. */
+  let dialogEl = $state<HTMLElement | null>(null);
+  /** Where a phone's Reply button docks: over the note pane's bottom slot (see `.note-bottom`). */
+  let dockEl = $state<HTMLElement | null>(null);
+  /** The pane's bottom slot: the bottom bar, when there is one, with the dock laid over it. */
+  let bottomSlotEl = $state<HTMLElement | null>(null);
+  /**
+   * The docked button's height while it shows, else 0, and the bottom
+   * slot's. The button stands on the slot's bottom edge, so it covers the
+   * slot first and only what is taller than the slot reaches up over the
+   * note; the note's content is padded by that overlap
+   * (`--selection-dock-overlap`) so the end of a selection near the bottom
+   * of the note can scroll clear of the button rather than sit behind it.
+   * Observed rather than measured on `replyDocked`, so they follow the
+   * button in and out whatever the order of the renders.
+   */
+  let dockHeight = $state(0);
+  let bottomSlotHeight = $state(0);
+  let dockOverlap = $derived(Math.max(0, dockHeight - bottomSlotHeight));
+  $effect(() => observeHeight(dockEl, (height) => (dockHeight = height)));
+  $effect(() => observeHeight(bottomSlotEl, (height) => (bottomSlotHeight = height)));
+  function observeHeight(el: HTMLElement | null, set: (height: number) => void) {
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => set(el.offsetHeight));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }
+  // The button appears over the end of a selection made in the last lines of
+  // the note (the padding above runs the content under it rather than
+  // shortening it). Once the content is padded, the least scroll that puts
+  // the end clear of the button. Keyed on the measured overlap rather than
+  // `replyDocked`: that is the render the padding lands in. With a bottom
+  // bar under the note the button covers the bar instead and nothing moves.
+  let dockWasShown = false;
+  $effect(() => {
+    const overlap = dockOverlap;
+    const appeared = overlap > 0 && !dockWasShown;
+    dockWasShown = overlap > 0;
+    if (!appeared) return;
+    untrack(() => {
+      const container = contentEl;
+      const current = document.getSelection();
+      if (!container || !markdownEl || !current || current.rangeCount === 0) return;
+      const range = current.getRangeAt(0);
+      if (current.isCollapsed || !markdownEl.contains(range.commonAncestorContainer)) return;
+      scrollRangeEndIntoView(container, range, overlap);
+    });
+  });
   let unregisterSearchTarget: (() => void) | null = null;
 
   // Register the global search-shortcut target only while the visible note pane can be searched.
@@ -531,6 +621,63 @@
       void refreshLiveNote();
     }
     previousSessionStatus = next?.status ?? null;
+  }
+
+  /** The title heading the note is rendered under heads every path, so it is left out. */
+  function isTitleHeading(heading: Element): boolean {
+    return (
+      !!displayTitle.trim() &&
+      heading.tagName === 'H1' &&
+      heading.parentElement === markdownEl &&
+      heading === markdownEl?.firstElementChild
+    );
+  }
+
+  /**
+   * With the composer showing beside the note, a selected passage goes
+   * straight into it as a quote block and the caret lands in the block's
+   * reply. Returns whether it was added: on failure the Reply button stays
+   * for another try.
+   */
+  async function handleQuoteAdd(quote: NewDraftQuote): Promise<boolean> {
+    const sid = sessionId;
+    if (!sid) return false;
+    let id: string;
+    try {
+      id = await addQuoteToReplyDraft(sid, quote);
+    } catch (error) {
+      console.error('Failed to add quote to reply draft', error);
+      toast.error('Could not add the quote to your reply draft');
+      return false;
+    }
+    focusReplyDraftQuote(sid, id);
+    return true;
+  }
+
+  /**
+   * With the chat hidden, the reply to a selected passage is typed in the
+   * note and the draft follows it (see replyDrafts.startLiveQuoteReply).
+   * Closing the field leaves the user on the note, whatever the width, so
+   * the next passage can be selected without the view changing underfoot;
+   * the bottom bar's draft button offers the chat (`showReplyDraft`).
+   */
+  function handleQuoteReply(quote: NewDraftQuote): LiveQuoteReply {
+    const sid = sessionId;
+    if (!sid) {
+      return { setReply() {}, finish: async () => {} };
+    }
+    const live = startLiveQuoteReply(sid, quote);
+    return {
+      setReply: live.setReply,
+      finish: async () => {
+        try {
+          await live.finish();
+        } catch (error) {
+          console.error('Failed to save the reply draft', error);
+          toast.error('Could not save your reply draft');
+        }
+      },
+    };
   }
 
   function handleChatToggle() {
@@ -762,6 +909,7 @@
   }}
 >
   <Dialog.Content
+    bind:ref={dialogEl}
     class={contentClass}
     style={dialogWidthStyle(totalWidth)}
     showCloseButton={false}
@@ -838,67 +986,107 @@
         aria-hidden={chatOnly}
         aria-label="Note content"
       >
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          class="modal-content"
-          bind:this={contentEl}
-          onclick={handleContentClick}
-          onkeydown={handleContentKeydown}
-        >
-          {#if hasNoteContent}
-            {#if renderedNoteHtml !== null}
-              <div class="markdown-content">
-                {@html renderedNoteHtml}
-              </div>
+        <div class="note-scroll" style:--selection-dock-overlap="{dockOverlap}px">
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="modal-content"
+            class:ends-pane={!showBottomBar}
+            bind:this={contentEl}
+            onclick={handleContentClick}
+            onkeydown={handleContentKeydown}
+          >
+            {#if hasNoteContent}
+              {#if renderedNoteHtml !== null}
+                <div class="markdown-content" bind:this={markdownEl}>
+                  {@html renderedNoteHtml}
+                </div>
+              {/if}
+            {:else}
+              <p class="empty-note">This note has no content.</p>
             {/if}
-          {:else}
-            <p class="empty-note">This note has no content.</p>
-          {/if}
-        </div>
-
-        {#if showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
-          <div class="next-steps">
-            {#if showChatInfo}
-              <div class="chat-info-row">
-                <Button
-                  variant="outline"
-                  class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  onclick={() => setChatOpen(true)}
-                >
-                  <MessageCircle size={16} aria-hidden="true" />
-                  <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span>
-                </Button>
-              </div>
-            {/if}
-            {#if nextSteps && onStartSession && nextSteps.noteStep}
-              <div class="next-step-row">
-                <span class="next-step-prompt">{nextSteps.noteStep}</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
-                  onclick={() => onStartSession('note', nextSteps!.noteStep!)}
-                >
-                  Start note
-                </Button>
-              </div>
-            {/if}
-            {#if nextSteps && onStartSession && nextSteps.commitStep}
-              <div class="next-step-row">
-                <span class="next-step-prompt">{nextSteps.commitStep}</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
-                  onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
-                >
-                  Start commit
-                </Button>
-              </div>
+            {#if canOpenSession && hasNoteContent}
+              <NoteSelectionReply
+                scrollEl={contentEl}
+                contentEl={markdownEl}
+                enabled={open && !chatOnly && renderedNoteHtml !== null}
+                {chatOpen}
+                chatVisible={splitChatOpen}
+                sheetHost={dialogEl}
+                dockHost={dockEl}
+                onDockedChange={(docked) => (replyDocked = docked)}
+                ignoreHeading={isTitleHeading}
+                onAdd={handleQuoteAdd}
+                onReply={handleQuoteReply}
+              />
             {/if}
           </div>
-        {/if}
+        </div>
+
+        <!-- The pane's bottom slot: the bottom bar, and over it the place a
+             phone's Reply button docks (NoteSelectionReply). The bar keeps its
+             height under the button so the note's scroll box doesn't change. -->
+        <div class="note-bottom" bind:this={bottomSlotEl}>
+          {#if showBottomBar}
+            <div class="next-steps" class:is-covered={replyDocked} aria-hidden={replyDocked}>
+              {#if showReplyDraft || showChatInfo}
+                <div class="chat-info-row">
+                  {#if showReplyDraft}
+                    <Button
+                      variant="outline"
+                      class="reply-draft-button h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
+                      title={viewport.canSplit
+                        ? 'Open the chat to finish your reply'
+                        : 'View the chat to finish your reply'}
+                      onclick={() => setChatOpen(true)}
+                    >
+                      <PencilLine size={16} class="text-[var(--ui-accent)]" aria-hidden="true" />
+                      <span class="min-w-0 truncate">{replyDraftLabel}</span>
+                    </Button>
+                  {/if}
+                  {#if showChatInfo}
+                    <Button
+                      variant="outline"
+                      class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground mobile:min-h-[44px]"
+                      onclick={() => setChatOpen(true)}
+                    >
+                      <MessageCircle size={16} aria-hidden="true" />
+                      <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span
+                      >
+                    </Button>
+                  {/if}
+                </div>
+              {/if}
+              {#if nextSteps && onStartSession && nextSteps.noteStep}
+                <div class="next-step-row">
+                  <span class="next-step-prompt">{nextSteps.noteStep}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
+                    onclick={() => onStartSession('note', nextSteps!.noteStep!)}
+                  >
+                    Start note
+                  </Button>
+                </div>
+              {/if}
+              {#if nextSteps && onStartSession && nextSteps.commitStep}
+                <div class="next-step-row">
+                  <span class="next-step-prompt">{nextSteps.commitStep}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
+                    onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
+                  >
+                    Start commit
+                  </Button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+          <div class="selection-dock" bind:this={dockEl}></div>
+        </div>
       </section>
 
       {#if sessionId && chatOpen}
@@ -1083,23 +1271,42 @@
     border-left: none;
   }
 
+  /* The note's scroll area; the pane's bottom slot (`.note-bottom`) follows
+     it. */
+  .note-scroll {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+  }
+
   /* The note spans a full-screen dialog's width, so a swipe over the side
-     insets still scrolls it; its text clears them. */
+     insets still scrolls it; its text clears them. While the Reply button
+     is docked and reaches up over the note's bottom edge the text clears
+     that too (`--selection-dock-overlap`, measured above), so a selection
+     ending in the last lines can scroll out from behind it. */
+  /* Positioned for the selection's Reply button, which scrolls with the text. */
   .modal-content {
+    position: relative;
     flex: 1;
     overflow-y: auto;
     padding: 24px;
     padding-left: calc(24px + var(--dialog-safe-left, 0px));
     padding-right: calc(24px + var(--dialog-safe-right, 0px));
+    padding-bottom: calc(24px + var(--selection-dock-overlap, 0px));
     min-height: 0;
     background: var(--bg-primary);
   }
 
-  /* With no next steps below it the note ends the dialog: it scrolls behind
+  /* With no bottom bar below it the note ends the dialog: it scrolls behind
      the home indicator of a full-screen dialog, and its last line can still
-     scroll clear of it (`--dialog-safe-bottom`, see dialog-content). */
-  .modal-content:last-child {
-    padding-bottom: calc(24px + var(--dialog-safe-bottom, 0px));
+     scroll clear of it (`--dialog-safe-bottom`, see dialog-content). The
+     docked button clears the indicator itself, so its overlap stands in for
+     the inset while it shows. */
+  .modal-content.ends-pane {
+    padding-bottom: calc(
+      24px + max(var(--selection-dock-overlap, 0px), var(--dialog-safe-bottom, 0px))
+    );
   }
 
   .modal-content::-webkit-scrollbar {
@@ -1295,6 +1502,54 @@
 
   .chat-info-row {
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
+    gap: 8px;
+  }
+
+  /* The pane's bottom slot. Its height in the flow is the bottom bar's, or
+     nothing; the docked Reply button is laid over it rather than in the
+     flow, so the button's arrival takes no height from the note above (what
+     it covers is the bar, hidden meanwhile, and the note's content is
+     padded by whatever reaches past the slot, and keeps scrolling under
+     it). The note's scroll box keeps its height, and so its offset, while
+     the finger that made the selection is still on the text. */
+  .note-bottom {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  /* Holds the docked Reply button on a phone; nothing otherwise. Stands on
+     the slot's bottom edge and covers at least the slot, so none of the bar
+     shows past it; the chrome fills what the row leaves. Always the end of
+     the pane, it clears the home indicator. The box is there whether or not
+     the row is, laid over the bar at the slot's size, so it takes no
+     presses itself: empty, a press on it is for the bar's buttons under it;
+     docked, the row (`.selection-reply-dock`) takes its own. */
+  .selection-dock {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    min-height: 100%;
+    pointer-events: none;
+  }
+
+  .selection-dock:not(:empty) {
+    padding-bottom: var(--dialog-safe-bottom, 0px);
+    background: var(--bg-chrome);
+  }
+
+  /* The bar under the docked button keeps its box, and nothing else: not
+     painted, not pressable, not read. */
+  .next-steps.is-covered {
+    visibility: hidden;
+  }
+
+  /* One button on a phone fills the bar, a finger-sized row. */
+  @media (pointer: coarse) {
+    .chat-info-row > :global(.reply-draft-button:only-child) {
+      width: 100%;
+    }
   }
 </style>

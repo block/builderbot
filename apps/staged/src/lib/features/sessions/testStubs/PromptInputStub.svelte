@@ -3,26 +3,51 @@
   `value` binding, so component tests can simulate typing without pulling in
   the hashtag editor's dependencies. Stands in for ChatComposer too, so it
   echoes the composer's `sendError` where tests can read it, renders a
-  button per new-session action when the pane offers them, and mirrors what
+  button per new-session action when the pane offers them, mirrors what
   the pane put in the box (`data-value`) and whether the control it handed
-  down is split (`data-send-split`).
+  down is split (`data-send-split`), takes its bindable `quotes`, whose
+  count it shows as `data-quote-count`, and offers a remove button per quote
+  (`data-testid="remove-quote-<id>"`) that calls `onRemoveQuote` as the
+  composer's X would, a Send button (`data-testid="composer-send"`) that
+  calls `onSend`, a `focusQuoteReply` that places no caret but records the
+  ids asked for on the input (`data-focused-quotes`), and a `revealQuote`
+  that scrolls nothing but records likewise (`data-revealed-quotes`).
 -->
 <script lang="ts">
   let {
     value = $bindable(''),
+    quotes = $bindable([]),
     textareaEl = $bindable(null),
     sendError = null,
     sendControl,
     onStartNewSession,
     newSessionDisabled = false,
+    onRemoveQuote,
+    onSend,
   }: {
     value?: string;
+    quotes?: Array<{ id: string }>;
     textareaEl?: HTMLElement | null;
     sendError?: string | null;
     sendControl?: { split: boolean };
     onStartNewSession?: (kind: 'note' | 'commit') => void;
     newSessionDisabled?: boolean;
+    onRemoveQuote?: (id: string) => void;
+    onSend?: () => void;
   } = $props();
+
+  /** The composer's caret placement, which the stub lays nothing out for; the asks are recorded. */
+  let focusedQuotes = $state<string[]>([]);
+  export function focusQuoteReply(id: string): boolean {
+    focusedQuotes = [...focusedQuotes, id];
+    return false;
+  }
+  /** The composer's scroll to a block, likewise recorded. */
+  let revealedQuotes = $state<string[]>([]);
+  export function revealQuote(id: string): boolean {
+    revealedQuotes = [...revealedQuotes, id];
+    return false;
+  }
 </script>
 
 <div
@@ -34,8 +59,21 @@
   data-testid="prompt-input"
   data-value={value}
   data-send-split={sendControl?.split}
+  data-quote-count={quotes.length}
+  data-focused-quotes={focusedQuotes.join(' ')}
+  data-revealed-quotes={revealedQuotes.join(' ')}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
+{#each quotes as quote (quote.id)}
+  <button
+    type="button"
+    aria-label="Remove quote"
+    data-testid="remove-quote-{quote.id}"
+    onclick={() => onRemoveQuote?.(quote.id)}
+  ></button>
+{/each}
+<button type="button" data-testid="composer-send" onclick={() => onSend?.()}>Send</button>
+
 {#if sendError}
   <p data-testid="composer-send-error">{sendError}</p>
 {/if}

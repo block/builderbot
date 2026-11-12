@@ -32,6 +32,7 @@
   import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
   import { tabDirection } from './lib/shared/tabDirection';
   import { safeAreaOffset } from './lib/shared/safeArea';
+  import { viewport } from './lib/shared/viewport.svelte';
   import { guardDocumentScroll } from './lib/shared/documentScroll';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
@@ -69,6 +70,7 @@
   import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { sweepExpiredDrafts } from './lib/shared/draftCache';
+  import { replyDraftPresence } from './lib/features/sessions/replyDrafts';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
@@ -425,6 +427,8 @@
     void sweepExpiredDrafts().catch((e) => {
       console.error('Failed to sweep expired drafts:', e);
     });
+    // Which sessions hold an unsent reply, for the draft icon on note rows.
+    replyDraftPresence.start();
 
     // Restore persisted unread state and sync the dock badge.
     try {
@@ -827,12 +831,24 @@
   <ControlAuthorizationDialog />
 
   <ReferenceModalHost />
+  <!-- Toasts stack at the bottom right, clear of the content, except on a
+       phone, where the bottom of the screen is the chat composer's Send
+       button (and its on-screen keyboard): a toast there — the Undo offered
+       for a removed quote, for one — sat over Send for its lifetime, and a
+       tap meant for it after it had gone sent the message. On a phone they
+       drop in from the top, over the dialog header — the full width of the
+       screen (svelte-sonner's narrow layout), Close button included — so
+       there they stay half as long and stack behind one another rather
+       than expanded, to cover as little of the header for as short a time
+       as the Undo needs. A press on a toast is kept from counting as a
+       press outside a dialog wherever the toast is (dialog-content.svelte
+       looks for the toaster up the target's ancestors, not at a position). -->
   <Toaster
-    position="bottom-right"
+    position={viewport.sheetMenus ? 'top-center' : 'bottom-right'}
     visibleToasts={4}
-    duration={8000}
+    duration={viewport.sheetMenus ? 4000 : 8000}
     closeButton
-    expand
+    expand={!viewport.sheetMenus}
     offset={safeAreaOffset('24px')}
     mobileOffset={safeAreaOffset('16px')}
   />

@@ -70,6 +70,7 @@
     type ReferenceHistoryEntry,
   } from '../references/referenceHistory.svelte';
   import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
+  import { replyDraftPresence } from '../sessions/replyDrafts';
 
   interface Props {
     project: Project;
@@ -964,6 +965,7 @@
               sessionId={note.sessionId ?? undefined}
               chatState={row.type === 'note' ? noteChatState(note) : 'none'}
               unread={projectNoteReadState(note) === 'unread'}
+              hasDraft={row.type === 'note' && replyDraftPresence.has(note.sessionId)}
               onItemClick={row.type === 'note' ? () => openProjectNote(note) : undefined}
               onSessionClick={(sid) => {
                 openProjectNote({ ...note, sessionId: sid }, true);

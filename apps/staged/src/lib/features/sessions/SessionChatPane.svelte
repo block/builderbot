@@ -225,7 +225,6 @@
   import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { getNoteFollowupLabel, noteActivityLabel, type LinkedNoteContext } from './noteFreshness';
-  import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
   import {
     offerUnstartedDraftBox,
     otherUnstartedDraftBox,
@@ -234,6 +233,32 @@
     unstartedDraftMessage,
     unstartedDraftToast,
   } from './unstartedDraft';
+  import {
+    loadReplyDraft as loadStoredReplyDraft,
+    amendStoredReplyDraft,
+    restoreQuoteInReplyDraft,
+    registerReplyComposer,
+    replyDraftKey,
+    replyDraftWriter,
+  } from './replyDrafts';
+  import {
+    appendDraftQuote,
+    cloneComposerDraft,
+    composerDraftContent,
+    composerDraftsEqual,
+    emptyComposerDraft,
+    hasQuotedParts,
+    isComposerDraftEmpty,
+    parseQuotedMessage,
+    restoreDraftQuote,
+    serializeComposerDraft,
+    setDraftQuoteReply,
+    takeDraftQuote,
+    type ComposerDraft,
+    type DraftQuote,
+    type RemovedDraftQuote,
+  } from './composerDraft';
+  import QuoteExcerpt from './QuoteExcerpt.svelte';
   import NoteActivityCard from './NoteActivityCard.svelte';
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
@@ -351,6 +376,7 @@
   let observedDisconnect = $state<{ sessionId: string; userMessageId: number | null } | null>(null);
   let messagesEl: HTMLDivElement;
   let inputEl: HTMLElement | null = $state(null);
+  let composerView = $state<ReturnType<typeof ChatComposer>>();
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   /** A terminal status arrived while a tick was in flight; poll once more
@@ -397,7 +423,10 @@
     getSession: () => session,
   });
 
+  /** The draft's free text after its last quote — the composer's main input. */
   let inputText = $state('');
+  /** The draft's quote blocks, each with the free text before it (see composerDraft.ts). */
+  let draftQuotes = $state<DraftQuote[]>([]);
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
   let queueActionIds = $state<Set<string>>(new Set());
   let copiedId = $state<number | string | null>(null);
@@ -405,7 +434,9 @@
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
 
-  const replyDraftWriter = createDraftWriteScheduler();
+  // Reply drafts persist through the writer every pane shares (see
+  // replyDrafts.ts), so a quote added from a note while no composer shows the
+  // draft can amend the stored copy without racing this pane's debounced save.
   // $state so the save effect re-runs when a finished load opens the gate —
   // otherwise a keystroke typed during the load window is never scheduled.
   let loadedDraftSessionId = $state<string | null>(null);
@@ -423,9 +454,37 @@
   // may still hold the previously shown session's text; the save effect skips
   // exactly that run so inherited text isn't filed under this session's key.
   let suppressNextReplySave = false;
+  /**
+   * Edits a note made to this session's draft (a quote added, its reply
+   * typed, a removed block put back) while the draft's load was still in
+   * flight: they are applied once the stored draft has landed, rather than
+   * being replaced by it, and what was to follow each in the composer (the
+   * caret into the block, or the field scrolled to it) runs then too, once
+   * the block is rendered. Keyed to the session they were made for.
+   */
+  let pendingDraftEdits: {
+    sessionId: string;
+    edits: Array<{ edit: (draft: ComposerDraft) => ComposerDraft; then?: () => void }>;
+  } | null = null;
+  /**
+   * Undo toasts for removed quote blocks still on screen (svelte-sonner
+   * keeps one up for seconds). A send the backend accepts clears the draft
+   * they were taken from, and a switch shows another session's; either
+   * dismisses them, so Undo can't put a block into a draft it never belonged
+   * to. `draftEpoch` counts the sends, for a click that lands as the toast
+   * is leaving.
+   */
+  let quoteUndoToasts: Array<{ toastId: string | number; sessionId: string }> = [];
+  let draftEpoch = 0;
 
-  function replyDraftKey(id: string): string {
-    return `draft:session-reply:${id}`;
+  /** The composer's draft as one value (live `$state`; clone before keeping it). */
+  function currentDraft(): ComposerDraft {
+    return { quotes: draftQuotes, text: inputText };
+  }
+
+  function setDraft(draft: ComposerDraft) {
+    draftQuotes = draft.quotes;
+    inputText = draft.text;
   }
 
   /**
@@ -436,32 +495,185 @@
    * direct store read would restore the stale value — which the save effect
    * below would then write back, superseding the pending newer text.
    */
-  async function loadReplyDraft(id: string, generation: number, textWhenLoadStarted: string) {
+  async function loadReplyDraft(
+    id: string,
+    generation: number,
+    draftWhenLoadStarted: ComposerDraft
+  ) {
     try {
       await replyDraftWriter.flush();
-      const draft = await loadDraft(replyDraftKey(id));
+      const draft = await loadStoredReplyDraft(id);
       if (generation !== draftLoadGeneration || !active || sessionId !== id) return;
-      if (inputText === textWhenLoadStarted) {
-        inputText = draft ?? '';
+      if (composerDraftsEqual(cloneComposerDraft(currentDraft()), draftWhenLoadStarted)) {
+        setDraft(draft);
       }
       loadedDraftSessionId = id;
-      await tick();
-      autoResize();
+      applyPendingDraftEdits(id);
     } catch (err) {
       console.error('[SessionChatPane] Failed to load reply draft:', err);
       // Leave the composer as the user left it, but re-enable saving so
       // further keystrokes still reach the store. Re-enabling fires the save
       // effect once immediately: when the composer still holds exactly the
-      // text from before this load began, that text was inherited from the
+      // draft from before this load began, that draft was inherited from the
       // previously shown session (a switch A → B where B's load failed), and
       // letting that run through would overwrite B's stored draft with A's
       // text. Suppress it — text typed during the load window was written
       // while this session was displayed, so it still saves.
       if (generation === draftLoadGeneration && active && sessionId === id) {
-        suppressNextReplySave = inputText === textWhenLoadStarted;
+        suppressNextReplySave = composerDraftsEqual(
+          cloneComposerDraft(currentDraft()),
+          draftWhenLoadStarted
+        );
         loadedDraftSessionId = id;
+        applyPendingDraftEdits(id);
       }
     }
+  }
+
+  /**
+   * A note edited this session's draft while the composer shows it (see
+   * replyDrafts.ts): applied to the composer, or held until its draft has
+   * loaded. `then` follows the edit into the composer — at once, or after
+   * the held edits land — so a caret or scroll meant for a block the edit
+   * adds finds it rendered rather than running against the loading draft.
+   * It is dropped with the edits that go to the stored draft instead when
+   * the pane moves on, there being no composer to act in.
+   */
+  function receiveDraftEdit(
+    id: string,
+    edit: (draft: ComposerDraft) => ComposerDraft,
+    then?: () => void
+  ) {
+    if (loadedDraftSessionId !== id) {
+      if (pendingDraftEdits?.sessionId !== id) pendingDraftEdits = { sessionId: id, edits: [] };
+      pendingDraftEdits.edits.push({ edit, then });
+      return;
+    }
+    // Quoting is a draft edit: the last failure line has been read.
+    sendError = null;
+    setDraft(edit(currentDraft()));
+    then?.();
+  }
+
+  function applyPendingDraftEdits(id: string) {
+    const pending = pendingDraftEdits;
+    pendingDraftEdits = null;
+    if (pending?.sessionId !== id) return;
+    setDraft(pending.edits.reduce((draft, { edit }) => edit(draft), currentDraft()));
+    for (const { then } of pending.edits) then?.();
+  }
+
+  /** Put the caret in a quote block's reply, once the block is rendered. */
+  function focusDraftQuoteReply(quoteId: string) {
+    tick().then(() => {
+      if (!closed && active) composerView?.focusQuoteReply(quoteId);
+    });
+  }
+
+  /**
+   * Run `then` once this session's draft is in the composer: at once, or
+   * behind the held edits when the draft is still loading (the block a note
+   * just added is among them, and isn't rendered yet).
+   */
+  function whenDraftLoaded(id: string, then: () => void) {
+    if (loadedDraftSessionId === id) {
+      then();
+      return;
+    }
+    if (pendingDraftEdits?.sessionId !== id) pendingDraftEdits = { sessionId: id, edits: [] };
+    pendingDraftEdits.edits.push({ edit: (draft) => draft, then });
+  }
+
+  /** Scroll the composer's field to a quote block, once it is rendered, leaving focus where it is. */
+  function revealDraftQuote(quoteId: string) {
+    tick().then(() => {
+      if (!closed && active) composerView?.revealQuote(quoteId);
+    });
+  }
+
+  /**
+   * Take a quote block out of the draft. One with a reply typed under it is
+   * offered back in a toast (there is no other undo for a block): Undo puts
+   * it back where it was, reply and lead-in text included, and — with a
+   * pointer, not a touch screen — the caret in its reply; on a touch screen
+   * the field is scrolled to show it instead. An unanswered block just goes.
+   */
+  function removeQuote(id: string) {
+    const taken = takeDraftQuote(currentDraft(), id);
+    if (!taken) return;
+    sendError = null;
+    setDraft(taken.draft);
+    if (taken.removed.quote.reply.trim() !== '') offerQuoteUndo(sessionId, taken.removed);
+  }
+
+  function offerQuoteUndo(sid: string | null, removed: RemovedDraftQuote) {
+    if (!sid) return;
+    const epoch = draftEpoch;
+    const forget = () => {
+      quoteUndoToasts = quoteUndoToasts.filter((entry) => entry.toastId !== toastId);
+    };
+    const toastId = toast('Quote removed from your reply', {
+      onDismiss: forget,
+      onAutoClose: forget,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          // The toast goes with the press (svelte-sonner deletes it without
+          // `onDismiss`), so it is forgotten here.
+          forget();
+          // The draft the block was taken from has been sent since.
+          if (epoch !== draftEpoch) return;
+          if (active && sessionId === sid) {
+            // The same way in as a quote a note adds: applied to the
+            // composer, or held until this session's draft has loaded, so a
+            // load in flight can't land over it.
+            // The caret goes back into the reply for a keyboard user; with
+            // a touch screen that would raise the on-screen keyboard over
+            // the restored draft, which the user hasn't asked to type in,
+            // so there the field is only scrolled to the block, which in a
+            // capped field that has scrolled on may otherwise come back
+            // out of view. Either follows the block into the composer, so
+            // a restore held for the load isn't looked for before it lands.
+            receiveDraftEdit(
+              sid,
+              (draft) => restoreDraftQuote(draft, removed),
+              () => {
+                if (!viewport.hasCoarsePointer) focusDraftQuoteReply(removed.quote.id);
+                else revealDraftQuote(removed.quote.id);
+              }
+            );
+            return;
+          }
+          // This pane has moved on: another pane showing the draft takes it,
+          // or else the stored draft.
+          restoreQuoteInReplyDraft(sid, removed).catch((err) => {
+            console.error('[SessionChatPane] Failed to restore the quote:', err);
+            toast.error('Could not restore the quote');
+          });
+        },
+      },
+    });
+    quoteUndoToasts = [...quoteUndoToasts, { toastId, sessionId: sid }];
+  }
+
+  /** Take down the Undo toasts whose draft is gone or off screen (all, by default). */
+  function dismissQuoteUndo(keep: (sessionId: string) => boolean = () => false) {
+    const going = quoteUndoToasts.filter((entry) => !keep(entry.sessionId));
+    if (going.length === 0) return;
+    quoteUndoToasts = quoteUndoToasts.filter((entry) => keep(entry.sessionId));
+    for (const entry of going) toast.dismiss(entry.toastId);
+  }
+
+  /**
+   * The draft has gone with a message the backend accepted: a block removed
+   * from it has nothing to go back into. Not before — a send that fails puts
+   * the draft back in the box, and the block's Undo should still hold then.
+   * (Pressed while the send is in flight, Undo puts the block into the
+   * emptied box, where it is a new draft.)
+   */
+  function draftSent() {
+    draftEpoch += 1;
+    dismissQuoteUndo();
   }
 
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
@@ -997,10 +1209,13 @@
     }
 
     const generation = ++draftLoadGeneration;
-    const inputTextWhenLoadStarted = untrack(() => inputText);
+    const draftWhenLoadStarted = untrack(() => cloneComposerDraft(currentDraft()));
     suppressNextReplySave = false;
     loadedDraftSessionId = null;
-    replyDraftLoad = loadReplyDraft(id, generation, inputTextWhenLoadStarted);
+    // Another session's draft is coming up: an Undo for a block removed from
+    // the previous one would read as this one's.
+    dismissQuoteUndo((sid) => sid === id);
+    replyDraftLoad = loadReplyDraft(id, generation, draftWhenLoadStarted);
   });
 
   // While this pane has the session's composer on screen, a draft returned
@@ -1020,13 +1235,44 @@
   $effect(() => {
     const isActive = active;
     const id = sessionId;
-    const text = inputText;
+    // Reads every field of the draft, so any edit — the main input, a gap,
+    // a quote's reply — schedules a save.
+    const content = composerDraftContent(currentDraft());
     if (!isActive || !id || loadedDraftSessionId !== id) return;
     if (suppressNextReplySave) {
       suppressNextReplySave = false;
       return;
     }
-    replyDraftWriter.scheduleSave(replyDraftKey(id), text);
+    replyDraftWriter.scheduleSave(replyDraftKey(id), content);
+  });
+
+  // While this pane shows a session's draft it takes the quotes a note adds
+  // to it (see replyDrafts.ts). Quotes still waiting on the draft's load when
+  // the pane moves on go to the stored draft instead of being dropped.
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id) return;
+    const unregister = registerReplyComposer(id, {
+      addQuote: (quote, quoteId) =>
+        receiveDraftEdit(id, (draft) => appendDraftQuote(draft, quote, quoteId)),
+      setQuoteReply: (quoteId, reply) =>
+        receiveDraftEdit(id, (draft) => setDraftQuoteReply(draft, quoteId, reply)),
+      restoreQuote: (removed) => receiveDraftEdit(id, (draft) => restoreDraftQuote(draft, removed)),
+      focusQuoteReply: (quoteId) => whenDraftLoaded(id, () => focusDraftQuoteReply(quoteId)),
+    });
+    return () => {
+      unregister();
+      const pending = pendingDraftEdits;
+      if (pending?.sessionId !== id) return;
+      pendingDraftEdits = null;
+      amendStoredReplyDraft(id, (draft) =>
+        pending.edits.reduce((next, { edit }) => edit(next), draft)
+      ).catch((err) => {
+        console.error('[SessionChatPane] Failed to save quoted reply:', err);
+        toast.error('Could not save the quote in your reply draft');
+      });
+    };
   });
 
   $effect(() => {
@@ -1597,19 +1843,20 @@
     // until it settles; a second Cmd+Enter meanwhile must not clear the draft
     // typed since, so the guard comes before anything is taken out of the box.
     if (sending) return;
-    const text = inputText.trim();
+    // Kept whole so a failed send puts the quote blocks back, not just text.
+    const draft = cloneComposerDraft(currentDraft());
+    if (isComposerDraftEmpty(draft)) return;
+    const text = serializeComposerDraft(draft);
     if (!text) return;
     void replyDraftWriter.clearNow(replyDraftKey(sessionId));
-    inputText = '';
+    setDraft(emptyComposerDraft());
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];
     imagePreviews = new Map();
     attachError = null;
-    // Reset textarea height after clearing (oninput won't fire for programmatic changes)
-    tick().then(() => autoResize());
 
     if (sendControl.action === 'send-now') {
-      await sendMessageNow(text, imageIdsToSend);
+      if (await sendMessageNow(text, imageIdsToSend, draft)) draftSent();
       return;
     }
 
@@ -1617,10 +1864,11 @@
       beginComposerAction();
       try {
         await queueSessionMessage(sessionId, text, imageIdsToSend, branchId ?? null);
+        draftSent();
         await refreshQueuedMessages();
       } catch (e) {
         sendError = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
-        inputText = text;
+        setDraft(draft);
         replyImageIds = imageIdsToSend ?? [];
       }
       return;
@@ -1628,8 +1876,10 @@
 
     // Session is idle — send immediately. `sendMessage` reports the failure
     // itself; the draft goes back in the box so it can be retried.
-    if (!(await sendMessage(text, imageIdsToSend))) {
-      inputText = text;
+    if (await sendMessage(text, imageIdsToSend)) {
+      draftSent();
+    } else {
+      setDraft(draft);
       replyImageIds = imageIdsToSend ?? [];
     }
   }
@@ -1645,16 +1895,20 @@
    * not delivered (`blocked`, `rejected_queued`, `not_resumable`, or a kind
    * this pane does not know) is reported and the draft restored — never
    * re-queued behind the user's back, since a blocked steer may already have
-   * landed.
+   * landed. Resolves whether the message was delivered.
    */
-  async function sendMessageNow(text: string, imageIds?: string[]) {
-    if (!session || sending) return;
+  async function sendMessageNow(
+    text: string,
+    imageIds: string[] | undefined,
+    draft: ComposerDraft
+  ): Promise<boolean> {
+    if (!session || sending) return false;
     const id = session.id;
     sending = true;
     beginComposerAction();
     try {
       const result = await sendSessionMessageNow(id, text, imageIds);
-      if (session?.id !== id) return;
+      if (session?.id !== id) return true;
       switch (result.delivery) {
         case 'injected':
         case 'interrupted_and_reprompted':
@@ -1663,7 +1917,7 @@
           // it up.
           startPolling();
           scrollToBottom();
-          return;
+          return true;
         case 'resumed':
           // The command does not resume (see `not_running`); the kind belongs
           // to the shared MCP spelling. Should it ever arrive, the row is
@@ -1673,7 +1927,7 @@
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
           startPolling();
           scrollToBottom();
-          return;
+          return true;
         case 'not_running':
           // Stopped since the last poll: resume it the way the idle composer
           // does, with the branch override and follow-up config. `sending` is
@@ -1682,7 +1936,7 @@
           // so the row is already running) has set `sendError`; fall through
           // to the draft restore below without overwriting it.
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
-          if (await sendMessage(text, imageIds, true)) return;
+          if (await sendMessage(text, imageIds, true)) return true;
           break;
         case 'rejected_queued':
           sendError = 'The session has not started yet; queue the message instead.';
@@ -1707,12 +1961,14 @@
           break;
         }
       }
-      inputText = text;
+      setDraft(draft);
       replyImageIds = imageIds ?? [];
+      return false;
     } catch (e) {
       sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
-      inputText = text;
+      setDraft(draft);
       replyImageIds = imageIds ?? [];
+      return false;
     } finally {
       sending = false;
     }
@@ -1804,16 +2060,17 @@
     if (!start || newSessionDisabled) return;
     // Same gates as `handleSend`: a row to act on, no send in flight, text.
     if (composerBlock || sending) return;
-    const text = inputText.trim();
+    const draft = cloneComposerDraft(currentDraft());
+    if (isComposerDraftEmpty(draft)) return;
+    const text = serializeComposerDraft(draft);
     if (!text) return;
     const id = sessionId;
     void replyDraftWriter.clearNow(replyDraftKey(id));
-    inputText = '';
+    setDraft(emptyComposerDraft());
     const imageIds = [...replyImageIds];
     replyImageIds = [];
     imagePreviews = new Map();
     attachError = null;
-    tick().then(() => autoResize());
 
     sending = true;
     beginComposerAction();
@@ -1883,12 +2140,13 @@
         await replyDraftLoad;
       }
       if (onScreen()) {
+        // The message goes above the main input; quote blocks added since
+        // stay where they are, ahead of it.
         const restored = restoreUnstartedDraft(text, inputText);
         inputText = restored.text;
         replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
-        void replyDraftWriter.saveNow(draftKey, restored.text);
+        void replyDraftWriter.saveNow(draftKey, composerDraftContent(currentDraft()));
         sendError = unstartedDraftMessage({ reason, keptNewerText: restored.keptNewerText });
-        tick().then(() => autoResize());
         return;
       }
 
@@ -1897,27 +2155,28 @@
       // Every open starts a draft load, so this also tells an open that came
       // and went again while the store was being read.
       const loadsBeforeRead = draftLoadGeneration;
-      let stored: string;
+      let stored: ComposerDraft;
       try {
         await replyDraftWriter.flush();
-        stored = (await loadDraft(draftKey)) ?? '';
+        stored = await loadStoredReplyDraft(id);
       } catch (err) {
         console.error('[SessionChatPane] Failed to read the reply draft to restore into:', err);
-        stored = parkedBox ? inputText : '';
+        stored = parkedBox ? cloneComposerDraft(currentDraft()) : emptyComposerDraft();
       }
       // Reopened while the store was read, here or in another pane: a box is
       // the place after all. Or, if this pane was closed again too, the store
       // may hold newer text now.
       if (onScreen() || draftLoadGeneration !== loadsBeforeRead || boxElsewhere()) continue;
-      const restored = restoreUnstartedDraft(text, stored);
-      void replyDraftWriter.saveNow(draftKey, restored.text);
+      const restored = restoreUnstartedDraft(text, stored.text);
+      const restoredDraft: ComposerDraft = { quotes: stored.quotes, text: restored.text };
+      void replyDraftWriter.saveNow(draftKey, composerDraftContent(restoredDraft));
       const boxGone = destroyed || sessionId !== id;
       if (!boxGone) {
         // Kept with the parked pane for its next open. That open reloads the
         // box from the store; until it has, and if it cannot, the box holds
-        // the same text (a parked pane's autosave does not run, so this
+        // the same draft (a parked pane's autosave does not run, so this
         // writes nothing). Attachments are not stored.
-        inputText = restored.text;
+        setDraft(cloneComposerDraft(restoredDraft));
         replyImageIds = restoreUnstartedAttachments(imageIds, replyImageIds);
         sendError = unstartedDraftMessage({ reason, keptNewerText: restored.keptNewerText });
       }
@@ -2144,20 +2403,6 @@
   /** The draft changed: the last failure line has been read, so drop it. */
   function handleInput() {
     sendError = null;
-    autoResize();
-  }
-
-  function autoResize() {
-    if (!inputEl) return;
-    inputEl.style.height = 'auto';
-    inputEl.style.overflow = 'hidden';
-    const borderY = inputEl.offsetHeight - inputEl.clientHeight;
-    const maxHeight = 120;
-    const height = Math.min(inputEl.scrollHeight + borderY, maxHeight);
-    inputEl.style.height = height + 'px';
-    if (height >= maxHeight) {
-      inputEl.style.overflow = 'auto';
-    }
   }
 
   // =========================================================================
@@ -2996,6 +3241,8 @@
 
   let slashCommands = $derived.by(() => latestAvailableCommands(acpMetadataMessages));
   let slashQuery = $derived.by(() => {
+    // A command starts the message; with quotes above it the input doesn't.
+    if (draftQuotes.length > 0) return null;
     const trimmed = inputText.trimStart();
     return trimmed.startsWith('/') ? trimmed.slice(1).toLowerCase() : null;
   });
@@ -3029,10 +3276,7 @@
 
   function insertSlashCommand(command: AcpCommand) {
     inputText = `/${command.name}${command.inputHint ? ' ' : ''}`;
-    tick().then(() => {
-      inputEl?.focus();
-      autoResize();
-    });
+    tick().then(() => inputEl?.focus());
   }
 
   function acpEventSummary(event: AcpTranscriptEvent): string {
@@ -3254,9 +3498,24 @@
                 <div class="message-row human-message">
                   <div class="group/bubble human-bubble">
                     {#if userText.trim()}
-                      <span class="human-text"
-                        >{@html renderHashtagTokens(userText.trim(), hashtagItems)}</span
-                      >
+                      {@const userParts = parseQuotedMessage(userText.trim())}
+                      {#if hasQuotedParts(userParts)}
+                        <div class="human-quoted">
+                          {#each userParts as part, partIdx (partIdx)}
+                            {#if part.type === 'quote'}
+                              <QuoteExcerpt quote={part.quote} headings={part.headings} />
+                            {:else}
+                              <span class="human-text"
+                                >{@html renderHashtagTokens(part.text, hashtagItems)}</span
+                              >
+                            {/if}
+                          {/each}
+                        </div>
+                      {:else}
+                        <span class="human-text"
+                          >{@html renderHashtagTokens(userText.trim(), hashtagItems)}</span
+                        >
+                      {/if}
                     {/if}
                     {#if group.message.imageIds && group.message.imageIds.length > 0}
                       <div class="message-images">
@@ -3674,8 +3933,11 @@
         </div>
       {/if}
       <ChatComposer
+        bind:this={composerView}
         bind:textareaEl={inputEl}
         bind:value={inputText}
+        bind:quotes={draftQuotes}
+        onRemoveQuote={removeQuote}
         {sendControl}
         {hashtagItems}
         onkeydown={handleInputKeydown}
@@ -3892,6 +4154,17 @@
   .human-text {
     display: block;
     white-space: pre-wrap;
+  }
+
+  /* A reply built from note quotes: each quote, then the text around it. */
+  .human-quoted {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .human-quoted :global(.quote-excerpt + .quote-excerpt) {
+    margin-top: 4px;
   }
 
   /* Images attached to user messages */

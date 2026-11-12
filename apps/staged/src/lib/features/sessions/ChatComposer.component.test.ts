@@ -1,162 +1,346 @@
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
-/**
- * The submit control's dropdown: the Queue / Send mode switch, and, where the
- * host can start a new session from the draft (the note dialog), the
- * "New note" / "New commit" actions.
- */
-
-// The menu's parts render inline: the trigger and content pass their children
-// through, and an item is a plain button, so entries can be read and picked
-// without opening a floating menu under jsdom.
-vi.mock('$lib/components/ui/dropdown-menu', async () => {
-  const { default: Passthrough } = await import('./testStubs/PassthroughStub.svelte');
-  const { default: MenuItem } = await import('./testStubs/MenuItemStub.svelte');
-  const { default: Empty } = await import('./testStubs/EmptyStub.svelte');
-  return {
-    Root: Passthrough,
-    Trigger: Passthrough,
-    Content: Passthrough,
-    RadioGroup: Passthrough,
-    RadioItem: MenuItem,
-    Item: MenuItem,
-    Separator: Empty,
-  };
-});
-vi.mock('./HashtagInput.svelte', () => import('./testStubs/PromptInputStub.svelte'));
-vi.mock('./AttachmentThumb.svelte', () => import('./testStubs/EmptyStub.svelte'));
-
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ChatComposer from './ChatComposer.svelte';
-import { composerSendControl, type ComposerNewSessionKind } from './composerSendControl';
+import type { DraftQuote } from './composerDraft';
+import { composerSendControl } from './composerSendControl';
+import { reactiveProps } from './testStubs/reactiveProps.svelte';
 
-let component: ReturnType<typeof mount> | null = null;
+// The composer's field: one box holding the quote blocks, the text between
+// them and the main input, which the user works as one editor. Covered here
+// are the ways the field ties its inputs together — the arrows walking from
+// one into the next, a press on its surface landing the caret in an input,
+// the single placeholder, the keyboard cap on the whole field and the
+// focused input kept in view by the field's own scroll — while the inputs'
+// own behaviour is under ComposerDraftQuotes.component.test.ts.
 
-/**
- * Mounts the composer with the control the pane would hand it for this
- * session state (`isLive`, `canSendLive`) and host (`onStartNewSession`).
- */
-function mountComposer({
-  canSendLive = false,
-  ...props
-}: {
-  isLive?: boolean;
-  canSendLive?: boolean;
-  onStartNewSession?: (kind: ComposerNewSessionKind) => void;
-  [prop: string]: unknown;
-}) {
-  const sendControl = composerSendControl({
-    isLive: props.isLive ?? false,
-    canSendLive,
-    mode: 'queue',
-    canStartNewSession: props.onStartNewSession !== undefined,
-  });
-  const target = document.createElement('div');
-  document.body.appendChild(target);
-  component = mount(ChatComposer, {
-    target,
-    props: { value: 'A message', sendControl, ...props },
-  });
-  flushSync();
+// The on-screen-keyboard cap reads the visible viewport; stand it in with a
+// keyboard up, so the cap is a share of the 400px left.
+vi.mock('../../shared/visualViewport.svelte', () => ({
+  visibleViewport: { height: 400 },
+  watchVisualViewport: () => () => {},
+}));
+
+function quote(id: string, before = '', reply = ''): DraftQuote {
+  return { id, before, quote: `Quoted ${id}`, headings: [], reply };
 }
 
-const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-// An entry is a label over a one-line description; the label names it.
-const itemLabel = (el: Element) => el.querySelector('.flex-col > span')?.textContent;
-const itemLabels = () => menuItems().map(itemLabel);
-const item = (label: string) => {
-  const found = menuItems().find((el) => itemLabel(el) === label);
-  if (!found) throw new Error(`no "${label}" menu item`);
-  return found;
-};
-const primaryLabel = () =>
-  document.querySelector('.composer-send button')?.textContent?.replace(/\s+/g, ' ').trim();
-const isSplit = () => document.querySelector('.composer-send-split') !== null;
+let component: ReturnType<typeof mount> | null = null;
+let target: HTMLElement;
 
-describe('ChatComposer send menu', () => {
-  afterEach(() => {
-    if (component) unmount(component);
-    component = null;
-    document.body.innerHTML = '';
+function render(quotes: DraftQuote[], value = '') {
+  const props = reactiveProps({
+    value,
+    quotes,
+    // The control the pane would hand an idle session's composer; its
+    // placeholder is the field's one.
+    sendControl: composerSendControl({
+      isLive: false,
+      canSendLive: false,
+      mode: 'queue',
+      canStartNewSession: false,
+    }),
+    onRemoveQuote: vi.fn(),
+  });
+  target = document.createElement('div');
+  document.body.appendChild(target);
+  component = mount(ChatComposer, { target, props });
+  flushSync();
+  return props;
+}
+
+function field(): HTMLElement {
+  const el = target.querySelector<HTMLElement>('.composer-field');
+  if (!el) throw new Error('no field');
+  return el;
+}
+
+function editors(): HTMLElement[] {
+  return [...field().querySelectorAll<HTMLElement>('.hashtag-editor')];
+}
+
+function mainInput(): HTMLElement {
+  const el = target.querySelector<HTMLElement>('.message-input');
+  if (!el) throw new Error('no main input');
+  return el;
+}
+
+function replyOf(id: string): HTMLElement {
+  const el = target.querySelector<HTMLElement>(`[data-quote-entry="${id}"] .composer-quote-reply`);
+  if (!el) throw new Error(`no reply for ${id}`);
+  return el;
+}
+
+function gapOf(id: string): HTMLElement {
+  const el = target.querySelector<HTMLElement>(`[data-quote-entry="${id}"] .composer-gap-input`);
+  if (!el) throw new Error(`no gap for ${id}`);
+  return el;
+}
+
+function focusWithCaret(el: HTMLElement) {
+  el.focus();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(true);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function arrow(el: HTMLElement, key: 'ArrowUp' | 'ArrowDown', init: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+  el.dispatchEvent(event);
+  flushSync();
+  return event;
+}
+
+function press(el: HTMLElement, init: MouseEventInit = {}) {
+  const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, ...init });
+  el.dispatchEvent(event);
+  flushSync();
+  return event;
+}
+
+function rect(top: number, bottom: number): DOMRect {
+  return { top, bottom, height: bottom - top, left: 0, right: 10, width: 10 } as DOMRect;
+}
+
+/** Give the field a 100px view from 201 to 301 (1px border) and a scroll offset of its own. */
+function layOutField(): HTMLElement {
+  const el = field();
+  Object.defineProperty(el, 'clientHeight', { value: 100 });
+  Object.defineProperty(el, 'clientTop', { value: 1 });
+  let scroll = 0;
+  Object.defineProperty(el, 'scrollTop', {
+    get: () => scroll,
+    set: (value: number) => {
+      scroll = value;
+    },
+  });
+  el.getBoundingClientRect = () => rect(200, 302);
+  return el;
+}
+
+beforeEach(() => {
+  // jsdom has no scrollIntoView; the tests watch that the field doesn't reach for it.
+  if (!('scrollIntoView' in Element.prototype)) {
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: () => {},
+    });
+  }
+});
+
+afterEach(() => {
+  if (component) unmount(component);
+  component = null;
+  target.remove();
+  window.getSelection()?.removeAllRanges();
+});
+
+describe('ChatComposer field', () => {
+  it('holds the quote list and the main input in one box, in document order', () => {
+    render([quote('a'), quote('b')]);
+
+    expect(field().querySelector('.composer-draft-quotes')).not.toBeNull();
+    expect(field().contains(mainInput())).toBe(true);
+    expect(editors()).toEqual([gapOf('a'), replyOf('a'), gapOf('b'), replyOf('b'), mainInput()]);
+    expect(field().classList.contains('has-quotes')).toBe(true);
   });
 
-  it('has no menu on an idle session that cannot start a new session', () => {
-    mountComposer({});
-    expect(isSplit()).toBe(false);
-    expect(menuItems()).toEqual([]);
-    expect(primaryLabel()).toBe('Send');
+  it('caps the whole field to a share of the visible viewport while the keyboard is up', () => {
+    render([quote('a')]);
+
+    expect(field().style.getPropertyValue('--composer-field-cap')).toBe('160px');
   });
 
-  it('keeps the menu to the two delivery modes without a new-session starter', () => {
-    mountComposer({ isLive: true, canSendLive: true });
-    expect(isSplit()).toBe(true);
-    expect(itemLabels()).toEqual(['Queue', 'Send']);
+  it('scrolls the field, and nothing above it, to the input that takes focus', () => {
+    render([quote('a'), quote('b')]);
+    const fieldEl = layOutField();
+    replyOf('b').getBoundingClientRect = () => rect(320, 350);
+    const ancestors = vi.spyOn(Element.prototype, 'scrollIntoView');
+
+    replyOf('b').focus();
+    flushSync();
+
+    expect(fieldEl.scrollTop).toBe(49);
+    expect(ancestors).not.toHaveBeenCalled();
+    ancestors.mockRestore();
   });
 
-  it('splits an idle Send to offer New note and New commit, and nothing else', () => {
-    mountComposer({ onStartNewSession: vi.fn() });
-    expect(isSplit()).toBe(true);
-    expect(primaryLabel()).toBe('Send');
-    expect(itemLabels()).toEqual(['New note', 'New commit']);
+  it('brings a caret it places in a tall input into view, once the caret is in, and never scrolls the page', () => {
+    render([quote('a')], 'abc');
+    const fieldEl = layOutField();
+    // The main input is taller than the field's view, so only the caret's
+    // line can say where to scroll — and at `focusin` the caret isn't placed
+    // yet. Its first and last lines are the same, just under the view.
+    mainInput().getBoundingClientRect = () => rect(320, 720);
+    const originalRects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects');
+    Object.defineProperty(Range.prototype, 'getClientRects', {
+      configurable: true,
+      writable: true,
+      value(this: Range) {
+        return this.collapsed ? [] : [rect(320, 340)];
+      },
+    });
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    const ancestors = vi.spyOn(Element.prototype, 'scrollIntoView');
+    try {
+      focusWithCaret(replyOf('a'));
+      // The reply has no box in jsdom; the focus above scrolled to its 0.
+      fieldEl.scrollTop = 0;
+      focus.mockClear();
+
+      arrow(replyOf('a'), 'ArrowDown');
+      expect(document.activeElement).toBe(mainInput());
+      expect(fieldEl.scrollTop).toBe(39);
+      // The browser's own scroll-on-focus is turned off: it would take the
+      // dialog and the page along.
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+
+      fieldEl.scrollTop = 0;
+      press(fieldEl, { clientY: 800 });
+      expect(document.activeElement).toBe(mainInput());
+      expect(fieldEl.scrollTop).toBe(39);
+      expect(ancestors).not.toHaveBeenCalled();
+    } finally {
+      focus.mockRestore();
+      ancestors.mockRestore();
+      if (originalRects) Object.defineProperty(Range.prototype, 'getClientRects', originalRects);
+      else delete (Range.prototype as Partial<Range>).getClientRects;
+    }
   });
 
-  it('lists the new-session actions below the delivery modes on a live session', () => {
-    mountComposer({ isLive: true, canSendLive: true, onStartNewSession: vi.fn() });
-    expect(itemLabels()).toEqual(['Queue', 'Send', 'New note', 'New commit']);
+  it('scrolls the field to a quote block on request without moving focus', () => {
+    render([quote('a'), quote('b')]);
+    const fieldEl = layOutField();
+    const block = target.querySelector<HTMLElement>('[data-quote-entry="b"] .composer-quote');
+    if (!block) throw new Error('no block');
+    block.getBoundingClientRect = () => rect(320, 380);
+    const ancestors = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const focused = document.activeElement;
+
+    expect(component!.revealQuote('b')).toBe(true);
+    expect(fieldEl.scrollTop).toBe(79);
+    expect(document.activeElement).toBe(focused);
+    expect(ancestors).not.toHaveBeenCalled();
+    // A block that isn't shown is reported, not scrolled to.
+    expect(component!.revealQuote('missing')).toBe(false);
+    expect(fieldEl.scrollTop).toBe(79);
+    ancestors.mockRestore();
+  });
+});
+
+describe('ChatComposer placeholder', () => {
+  it('marks the field once anything is typed anywhere, so only an empty draft shows one', () => {
+    const props = render([quote('a')]);
+    expect(field().classList.contains('has-draft-text')).toBe(false);
+
+    props.quotes = [quote('a', '', 'a reply')];
+    flushSync();
+    expect(field().classList.contains('has-draft-text')).toBe(true);
+
+    props.quotes = [quote('a', 'lead-in')];
+    flushSync();
+    expect(field().classList.contains('has-draft-text')).toBe(true);
+
+    props.quotes = [quote('a')];
+    props.value = 'trailing';
+    flushSync();
+    expect(field().classList.contains('has-draft-text')).toBe(true);
+  });
+});
+
+describe('ChatComposer surface press', () => {
+  it('puts the caret in the nearest input on mousedown — the last, when nothing is nearer', () => {
+    render([quote('a')]);
+    gapOf('a').focus();
+
+    const event = press(field(), { clientY: 300 });
+
+    expect(document.activeElement).toBe(mainInput());
+    // The press's default is prevented, so the gap was never blurred to the page.
+    expect(event.defaultPrevented).toBe(true);
   });
 
-  it('offers only the new-session actions when the running session only queues', () => {
-    mountComposer({ isLive: true, canSendLive: false, onStartNewSession: vi.fn() });
-    expect(primaryLabel()).toBe('Queue');
-    expect(itemLabels()).toEqual(['New note', 'New commit']);
+  it('leaves a press on an input or a block to them', () => {
+    render([quote('a')]);
+    gapOf('a').focus();
+
+    expect(press(gapOf('a'), { clientY: 10 }).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(gapOf('a'));
+
+    const block = target.querySelector<HTMLElement>('.composer-quote');
+    if (!block) throw new Error('no block');
+    press(block, { clientY: 10 });
+    // The block's own padding takes the caret to its reply, not the field's nearest.
+    expect(document.activeElement).toBe(replyOf('a'));
   });
 
-  it('starts the chosen kind without sending the message', () => {
-    const onStartNewSession = vi.fn();
-    const onSend = vi.fn();
-    mountComposer({ onStartNewSession, onSend });
+  it('leaves a Shift-press, a secondary button and a click alone', () => {
+    render([quote('a')]);
+    gapOf('a').focus();
 
-    item('New note').click();
-    expect(onStartNewSession).toHaveBeenLastCalledWith('note');
-    item('New commit').click();
-    expect(onStartNewSession).toHaveBeenLastCalledWith('commit');
-    expect(onStartNewSession).toHaveBeenCalledTimes(2);
-    expect(onSend).not.toHaveBeenCalled();
+    expect(press(field(), { clientY: 300, shiftKey: true }).defaultPrevented).toBe(false);
+    expect(press(field(), { clientY: 300, button: 2 }).defaultPrevented).toBe(false);
+    field().dispatchEvent(new MouseEvent('click', { bubbles: true, clientY: 300 }));
+    flushSync();
+    expect(document.activeElement).toBe(gapOf('a'));
+  });
+});
+
+describe('ChatComposer arrows between inputs', () => {
+  it('moves down from the last line of a reply into the main input, and up again', () => {
+    render([quote('a')]);
+    focusWithCaret(replyOf('a'));
+
+    const down = arrow(replyOf('a'), 'ArrowDown');
+    expect(down.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(mainInput());
+
+    const up = arrow(mainInput(), 'ArrowUp');
+    expect(up.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(replyOf('a'));
   });
 
-  it('disables the actions with an empty draft, like Send', () => {
-    mountComposer({ value: '   ', onStartNewSession: vi.fn() });
-    expect(document.querySelector<HTMLButtonElement>('.composer-send-primary')?.disabled).toBe(
-      true
-    );
-    expect(item('New note').disabled).toBe(true);
-    expect(item('New commit').disabled).toBe(true);
+  it('stops at the field’s ends', () => {
+    render([quote('a')]);
+    focusWithCaret(gapOf('a'));
+
+    expect(arrow(gapOf('a'), 'ArrowUp').defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(gapOf('a'));
+
+    focusWithCaret(mainInput());
+    expect(arrow(mainInput(), 'ArrowDown').defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(mainInput());
   });
 
-  it('disables the actions while a send is in flight', () => {
-    mountComposer({ sending: true, onStartNewSession: vi.fn() });
-    expect(item('New note').disabled).toBe(true);
-    expect(item('New commit').disabled).toBe(true);
+  it('leaves a modified arrow, a composing one and one already handled alone', () => {
+    render([quote('a')]);
+    focusWithCaret(replyOf('a'));
+
+    expect(arrow(replyOf('a'), 'ArrowDown', { shiftKey: true }).defaultPrevented).toBe(false);
+    expect(arrow(replyOf('a'), 'ArrowDown', { metaKey: true }).defaultPrevented).toBe(false);
+    expect(arrow(replyOf('a'), 'ArrowDown', { isComposing: true }).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(replyOf('a'));
+
+    const handled = new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      bubbles: true,
+      cancelable: true,
+    });
+    replyOf('a').addEventListener('keydown', (e) => e.preventDefault(), { once: true });
+    replyOf('a').dispatchEvent(handled);
+    flushSync();
+    expect(document.activeElement).toBe(replyOf('a'));
   });
 
-  it('disables the actions while there is no session row to act on', () => {
-    mountComposer({ sessionBlock: 'loading', onStartNewSession: vi.fn() });
-    expect(item('New note').disabled).toBe(true);
-    expect(item('New commit').disabled).toBe(true);
-  });
+  it('leaves the arrow to an input whose caret line it can’t tell', () => {
+    render([quote('a', '', 'two\nlines')]);
+    focusWithCaret(replyOf('a'));
 
-  it('disables the actions, but not Send, while the host cannot start a session', () => {
-    mountComposer({ onStartNewSession: vi.fn(), newSessionDisabled: true });
-    expect(document.querySelector<HTMLButtonElement>('.composer-send-primary')?.disabled).toBe(
-      false
-    );
-    expect(item('New note').disabled).toBe(true);
-    expect(item('New commit').disabled).toBe(true);
-  });
-
-  it('enables the actions once there is text and the host can start a session', () => {
-    mountComposer({ onStartNewSession: vi.fn() });
-    expect(item('New note').disabled).toBe(false);
-    expect(item('New commit').disabled).toBe(false);
+    // jsdom gives the caret no rect, so the line is unknown and the key is left alone.
+    expect(arrow(replyOf('a'), 'ArrowDown').defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(replyOf('a'));
   });
 });

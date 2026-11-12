@@ -4,7 +4,8 @@
   Icon + title + meta. Compact. The whole row is clickable to view the item.
   Hover reveals session and delete actions on the right; a note's chat button
   stays visible while its chat has replies since the note. An unread note
-  carries a dot on its icon.
+  carries a dot on its icon, and a note whose chat holds an unsent reply
+  draft a pencil on the opposite corner.
 -->
 <script lang="ts">
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
@@ -21,6 +22,7 @@
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import ChevronsDown from '@lucide/svelte/icons/chevrons-down';
   import CloudOff from '@lucide/svelte/icons/cloud-off';
+  import PencilLine from '@lucide/svelte/icons/pencil-line';
   import Spinner from '../../shared/Spinner.svelte';
   import ChildSessionBadge from './ChildSessionBadge.svelte';
   import type { ChildSessionBadgeProps } from './childSessionBadges';
@@ -88,6 +90,8 @@
     chatState?: NoteChatState;
     /** The note landed and the user hasn't opened it since (see `isNoteUnread`). */
     unread?: boolean;
+    /** The note's chat has an unsent reply draft (see `replyDraftPresence`). */
+    hasDraft?: boolean;
     onItemClick?: () => void;
     onSessionClick?: (sessionId: string) => void;
     onDeleteClick?: (opts?: { altKey: boolean }) => void;
@@ -140,6 +144,7 @@
     sessionId,
     chatState = 'none',
     unread = false,
+    hasDraft = false,
     onItemClick,
     onSessionClick,
     onDeleteClick,
@@ -381,6 +386,16 @@
         {/if}
         {#if unread}
           <span class="unread-dot" role="img" aria-label="Unread" title="Unread"></span>
+        {/if}
+        {#if hasDraft}
+          <span
+            class="draft-badge"
+            role="img"
+            aria-label="Unsent reply draft"
+            title="Unsent reply draft"
+          >
+            <PencilLine size={7} strokeWidth={3} aria-hidden="true" />
+          </span>
         {/if}
       </div>
       {#if showConnector && !isLast}
@@ -757,6 +772,31 @@
     border-radius: 50%;
     background-color: var(--ui-accent);
     pointer-events: none;
+  }
+
+  /* An unsent reply in the note's chat: a pencil in the unread dot's colour,
+     on the icon's bottom-right corner so the two can show together. Unlike
+     the dot, a 7px pencil doesn't explain itself, so the badge takes the
+     pointer for its tooltip (a click on it still reaches the row), over a
+     hit area a little larger than it is drawn. */
+  .draft-badge {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background-color: var(--ui-accent);
+    color: var(--primary-foreground);
+  }
+
+  .draft-badge::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
   }
 
   .timeline-icon.commit-icon {

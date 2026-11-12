@@ -120,6 +120,7 @@ export interface Theme {
   shadow: {
     overlay: string; // Modal backdrop
     elevated: string; // Floating element shadows
+    raised: string; // Small controls floating over content (e.g. a pill button)
     glow: string; // Selection glow effect
   };
 
@@ -548,6 +549,10 @@ export function createAdaptiveTheme(
       elevated: isDark
         ? `0 8px 24px ${overlay('#000000', 0.4)}`
         : `0 8px 24px ${overlay('#000000', 0.15)}`,
+      // Small controls floating just above content - a tighter, lighter lift
+      raised: isDark
+        ? `0 2px 8px ${overlay('#000000', 0.18)}`
+        : `0 2px 8px ${overlay('#000000', 0.1)}`,
       // Selection glow - subtle glow using foreground color
       glow: `0 0 0 1px ${overlay(syntaxFg, isDark ? 0.1 : 0.08)}`,
     },
@@ -650,6 +655,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
 
     '--shadow-overlay': t.shadow.overlay,
     '--shadow-elevated': t.shadow.elevated,
+    '--shadow-raised': t.shadow.raised,
     '--shadow-glow': t.shadow.glow,
 
     '--commit-color': t.timeline.commitColor,

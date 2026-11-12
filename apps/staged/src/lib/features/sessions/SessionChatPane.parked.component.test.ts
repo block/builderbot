@@ -43,6 +43,7 @@ vi.mock('../../shared/draftCache', () => ({
     flush: vi.fn(async () => {}),
   }),
   loadDraft: async () => null,
+  loadDraftContent: async () => null,
 }));
 vi.mock('../../transport', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../transport')>()),

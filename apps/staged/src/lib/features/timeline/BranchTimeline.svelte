@@ -64,6 +64,7 @@
   import { disconnectedLabel } from '../../shared/disconnectedSession';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
   import { sessionRowTitle } from './sessionRowTitle';
+  import { replyDraftPresence } from '../sessions/replyDrafts';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
 
   type PendingItem = {
@@ -1271,6 +1272,7 @@
             sessionId={item.sessionId}
             chatState={item.chatState}
             unread={item.noteReadState === 'unread'}
+            hasDraft={item.type === 'note' && replyDraftPresence.has(item.sessionId)}
             deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
             contextMenuKey={hasContextMenuAction(item) ? item.key : undefined}
             showConnector={item.showConnector}

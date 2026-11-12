@@ -24,6 +24,7 @@
     onpointerdown: onPointerDown,
     onOpenAutoFocus,
     onCloseAutoFocus,
+    onInteractOutside,
     ...restProps
   }: WithoutChildrenOrChild<DialogPrimitive.ContentProps> & {
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof DialogPortal>>;
@@ -150,6 +151,25 @@
     focusRestore.restore(event);
   }
 
+  /**
+   * A press outside the dialog closes it, except in a toast. The toaster
+   * (svelte-sonner, mounted at the app root) is portalled beside the dialog
+   * rather than behind it, so a toast's Undo or its close button is part of
+   * the current interaction, not a return to the page: the dialog stays open
+   * and the press reaches the toast. The caller's handler runs first and can
+   * prevent the close on its own grounds.
+   */
+  function handleInteractOutside(event: PointerEvent) {
+    onInteractOutside?.(event);
+    if (event.defaultPrevented) return;
+    if (isToastInteraction(event)) event.preventDefault();
+  }
+
+  function isToastInteraction(event: Event): boolean {
+    const target = event.target;
+    return target instanceof Element && target.closest('[data-sonner-toaster]') !== null;
+  }
+
   const dragRegionSelector =
     '[data-dialog-drag-region], [data-slot="dialog-header"], .modal-header, .diagram-viewer-header';
   const noDragSelector =
@@ -232,6 +252,7 @@
     data-cramped={cramped ? '' : undefined}
     onOpenAutoFocus={handleOpenAutoFocus}
     onCloseAutoFocus={handleCloseAutoFocus}
+    onInteractOutside={handleInteractOutside}
     onpointerdown={handlePointerDown}
     preventOverflowTextSelection={false}
     preventScroll={false}

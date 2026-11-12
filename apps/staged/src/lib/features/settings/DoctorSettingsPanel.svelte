@@ -219,6 +219,8 @@
     min-height: 0;
     overflow-y: auto;
     padding: 14px;
+    /* The phone layout's bottom inset (SettingsPage's `.panel-pad`). */
+    padding-bottom: calc(14px + var(--settings-panel-inset-bottom, 0px));
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -287,6 +289,14 @@
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
+  }
+
+  /* Finger-sized Copy details / Re-run on a touch screen. */
+  @media (pointer: coarse) {
+    .header-actions :global([data-slot='button']) {
+      min-height: 36px;
+      padding-inline: 10px;
+    }
   }
 
   @media (max-width: 920px) {

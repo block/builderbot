@@ -254,6 +254,13 @@
       flex-wrap: wrap;
     }
 
+    /* The name field keeps a readable width and the swatches wrap under it
+       rather than squeezing it to a few letters beside them (seven 30px
+       swatches left it about 48px on a 402px phone). */
+    .status-option-row > :global(input) {
+      flex-basis: 160px;
+    }
+
     .swatches {
       gap: 4px;
     }

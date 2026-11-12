@@ -598,6 +598,22 @@
     color: var(--status-added);
   }
 
+  /* Finger-sized rows and review toggles on a touch screen: the rows are
+     26px tall at their padding and the toggle 20px square. The toggle grows
+     within its row rather than past it, so a tap just above or below a row
+     still reaches the neighbouring row and not this row's toggle. */
+  @media (pointer: coarse) {
+    .tree-item {
+      min-height: 36px;
+    }
+
+    .status-icon {
+      width: 32px;
+      height: 32px;
+      margin: -2px -6px;
+    }
+  }
+
   .status-icon-static {
     cursor: default;
   }

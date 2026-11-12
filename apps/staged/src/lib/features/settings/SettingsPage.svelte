@@ -234,11 +234,16 @@
   }
 
   /* The panels are cards on the page's chrome; the bottom inset keeps them
-     clear of the home indicator (App.svelte's main leaves it to the panes). */
+     clear of the home indicator (App.svelte's main leaves it to the panes).
+     On a phone (below) the card is dropped and the inset moves into the
+     panel body's padding through `--settings-panel-inset-bottom`, so the
+     body scrolls under the home indicator instead of stopping at a band of
+     chrome above it. */
   .panel-pad {
     padding: 14px;
     padding-bottom: calc(14px + env(safe-area-inset-bottom));
     overflow: hidden;
+    --settings-panel-inset-bottom: 0px;
   }
 
   @media (max-width: 920px) {
@@ -276,6 +281,30 @@
 
     .nav-meta {
       display: none;
+    }
+
+    /* Full-bleed panel: the nav row above is the only chrome, the panel
+       runs to the screen's edges and its body takes the bottom inset. */
+    .panel-pad {
+      padding: 0;
+      --settings-panel-inset-bottom: env(safe-area-inset-bottom);
+    }
+
+    /* Each panel's root sets its own border and radius at (0,2,0) specificity
+       (`.general-settings-panel.svelte-x`), the same as a bare
+       `.panel-pad > :global(*)` here. That tie is decided by bundle order,
+       which only happens to favour this file; the extra ancestor makes this
+       rule win on specificity so lazy-loading a panel cannot regress it. */
+    .settings-body .panel-pad > :global(*) {
+      border: 0;
+      border-radius: 0;
+    }
+  }
+
+  /* A finger-sized tab row: the tabs are 32px tall at their padding. */
+  @media (max-width: 920px) and (pointer: coarse) {
+    .nav-item {
+      min-height: 44px;
     }
   }
 </style>

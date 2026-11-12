@@ -425,7 +425,7 @@ describe('SessionChatPane quoted replies', () => {
     // same session within the toast's lifetime. Its draft is loading again
     // when Undo is pressed: the restore waits for the load, rather than
     // being applied to the composer and then replaced by the stored draft.
-    const { pane, props, before } = await removeMiddleQuote('session-reload');
+    const { pane, props, before, second } = await removeMiddleQuote('session-reload');
     const stored = lastSaved(replyKey('session-reload'));
     const undo = lastUndo();
 
@@ -448,11 +448,18 @@ describe('SessionChatPane quoted replies', () => {
     undo.action.onClick();
     await settle();
     expect(saveDraftMock).not.toHaveBeenCalled();
+    // The caret follows the block into the composer: not yet, while the
+    // block is still held with the restore, or it would be looked for
+    // before it is rendered and the ask dropped.
+    expect(focusedQuotes()).toEqual([]);
+    expect(revealedQuotes()).toEqual([]);
 
     land(stored);
     await settle();
     expect(quoteCount()).toBe(3);
     expect(composerDraftFromContent(lastSaved(replyKey('session-reload')))).toEqual(before);
+    expect(focusedQuotes()).toEqual([second.id]);
+    expect(revealedQuotes()).toEqual([]);
 
     unmount(pane);
   });

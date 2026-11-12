@@ -457,13 +457,15 @@
   let suppressNextReplySave = false;
   /**
    * Edits a note made to this session's draft (a quote added, its reply
-   * typed) while the draft's load was still in flight: they are applied once
-   * the stored draft has landed, rather than being replaced by it. Keyed to
-   * the session they were made for.
+   * typed, a removed block put back) while the draft's load was still in
+   * flight: they are applied once the stored draft has landed, rather than
+   * being replaced by it, and what was to follow each in the composer (the
+   * caret into the block, or the field scrolled to it) runs then too, once
+   * the block is rendered. Keyed to the session they were made for.
    */
   let pendingDraftEdits: {
     sessionId: string;
-    edits: Array<(draft: ComposerDraft) => ComposerDraft>;
+    edits: Array<{ edit: (draft: ComposerDraft) => ComposerDraft; then?: () => void }>;
   } | null = null;
   /**
    * Undo toasts for removed quote blocks still on screen (svelte-sonner
@@ -532,24 +534,34 @@
   /**
    * A note edited this session's draft while the composer shows it (see
    * replyDrafts.ts): applied to the composer, or held until its draft has
-   * loaded.
+   * loaded. `then` follows the edit into the composer — at once, or after
+   * the held edits land — so a caret or scroll meant for a block the edit
+   * adds finds it rendered rather than running against the loading draft.
+   * It is dropped with the edits that go to the stored draft instead when
+   * the pane moves on, there being no composer to act in.
    */
-  function receiveDraftEdit(id: string, edit: (draft: ComposerDraft) => ComposerDraft) {
+  function receiveDraftEdit(
+    id: string,
+    edit: (draft: ComposerDraft) => ComposerDraft,
+    then?: () => void
+  ) {
     if (loadedDraftSessionId !== id) {
       if (pendingDraftEdits?.sessionId !== id) pendingDraftEdits = { sessionId: id, edits: [] };
-      pendingDraftEdits.edits.push(edit);
+      pendingDraftEdits.edits.push({ edit, then });
       return;
     }
     // Quoting is a draft edit: the last failure line has been read.
     sendError = null;
     setDraft(edit(currentDraft()));
+    then?.();
   }
 
   function applyPendingDraftEdits(id: string) {
     const pending = pendingDraftEdits;
     pendingDraftEdits = null;
     if (pending?.sessionId !== id) return;
-    setDraft(pending.edits.reduce((draft, edit) => edit(draft), currentDraft()));
+    setDraft(pending.edits.reduce((draft, { edit }) => edit(draft), currentDraft()));
+    for (const { then } of pending.edits) then?.();
   }
 
   /** Put the caret in a quote block's reply, once the block is rendered. */
@@ -557,6 +569,20 @@
     tick().then(() => {
       if (!closed && active) composerView?.focusQuoteReply(quoteId);
     });
+  }
+
+  /**
+   * Run `then` once this session's draft is in the composer: at once, or
+   * behind the held edits when the draft is still loading (the block a note
+   * just added is among them, and isn't rendered yet).
+   */
+  function whenDraftLoaded(id: string, then: () => void) {
+    if (loadedDraftSessionId === id) {
+      then();
+      return;
+    }
+    if (pendingDraftEdits?.sessionId !== id) pendingDraftEdits = { sessionId: id, edits: [] };
+    pendingDraftEdits.edits.push({ edit: (draft) => draft, then });
   }
 
   /** Scroll the composer's field to a quote block, once it is rendered, leaving focus where it is. */
@@ -602,15 +628,21 @@
             // The same way in as a quote a note adds: applied to the
             // composer, or held until this session's draft has loaded, so a
             // load in flight can't land over it.
-            receiveDraftEdit(sid, (draft) => restoreDraftQuote(draft, removed));
             // The caret goes back into the reply for a keyboard user; with
             // a touch screen that would raise the on-screen keyboard over
             // the restored draft, which the user hasn't asked to type in,
             // so there the field is only scrolled to the block, which in a
             // capped field that has scrolled on may otherwise come back
-            // out of view.
-            if (!viewport.hasCoarsePointer) focusDraftQuoteReply(removed.quote.id);
-            else revealDraftQuote(removed.quote.id);
+            // out of view. Either follows the block into the composer, so
+            // a restore held for the load isn't looked for before it lands.
+            receiveDraftEdit(
+              sid,
+              (draft) => restoreDraftQuote(draft, removed),
+              () => {
+                if (!viewport.hasCoarsePointer) focusDraftQuoteReply(removed.quote.id);
+                else revealDraftQuote(removed.quote.id);
+              }
+            );
             return;
           }
           // This pane has moved on: another pane showing the draft takes it,
@@ -1228,7 +1260,7 @@
       setQuoteReply: (quoteId, reply) =>
         receiveDraftEdit(id, (draft) => setDraftQuoteReply(draft, quoteId, reply)),
       restoreQuote: (removed) => receiveDraftEdit(id, (draft) => restoreDraftQuote(draft, removed)),
-      focusQuoteReply: focusDraftQuoteReply,
+      focusQuoteReply: (quoteId) => whenDraftLoaded(id, () => focusDraftQuoteReply(quoteId)),
     });
     return () => {
       unregister();
@@ -1236,7 +1268,7 @@
       if (pending?.sessionId !== id) return;
       pendingDraftEdits = null;
       amendStoredReplyDraft(id, (draft) =>
-        pending.edits.reduce((next, edit) => edit(next), draft)
+        pending.edits.reduce((next, { edit }) => edit(next), draft)
       ).catch((err) => {
         console.error('[SessionChatPane] Failed to save quoted reply:', err);
         toast.error('Could not save the quote in your reply draft');

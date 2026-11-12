@@ -160,40 +160,63 @@ describe('caretLineEdges', () => {
     expect(caretLineEdges(el)).toEqual({ first: false, last: true });
   });
 
-  it('takes the caret’s own rect where the browser gives it one, and measures the neighbours only without it', () => {
-    // Chromium gives a collapsed range in a text node a rect, on the line
-    // the caret is drawn on: after End on the first of two wrapped lines
-    // that is the end of the upper line, though the next character starts
-    // the lower. Read from the neighbours alone, that caret would count as
-    // on the last line and ArrowDown would skip the second line.
+  it('takes the caret’s own rect only where it lies on one line, and measures the neighbours at a wrap', () => {
+    // Chromium gives a collapsed range in a text node rects where WebKit
+    // gives none. Mid-line there is one, on the caret's line. At a soft
+    // wrap there are two — the end of the upper line and the start of the
+    // lower — whichever line the caret is drawn on (probed: the same pair
+    // after End, after Home and after a collapse), so they say nothing
+    // about the caret's line and the neighbours are read as in WebKit.
+    // Taking the first of the pair put every caret at a wrap on the upper
+    // line, and ArrowUp from the start of the second line left the input.
     const el = wrapped('abcdefghijklmnopqrst', 10);
     const text = el.firstChild as Text;
     const neighbours = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects')!
       .value as (this: Range) => DOMRect[];
+    let neighbourReads = 0;
     Object.defineProperty(Range.prototype, 'getClientRects', {
       configurable: true,
       writable: true,
       value(this: Range) {
-        if (!this.collapsed) return neighbours.call(this);
+        if (!this.collapsed) {
+          neighbourReads += 1;
+          return neighbours.call(this);
+        }
         if (this.startContainer !== text) return [];
-        // At the wrap, the caret drawn on the upper line; elsewhere a rect
-        // with no height, as good as none.
-        return this.startOffset === 10 ? [lineRect(0)] : [rect(0, 0, 0)];
+        // At the wrap, a rect on each line; mid-line, the caret's own line;
+        // elsewhere a rect with no height, as good as none.
+        if (this.startOffset === 10) return [lineRect(0), lineRect(1)];
+        if (this.startOffset === 15) return [lineRect(1)];
+        return [rect(0, 0, 0)];
       },
     });
 
+    // At the wrap the caret counts as on the lower line, read from the
+    // character after it: ArrowUp from there moves up a line in the input.
     placeCaret(text, 10);
-    expect(caretLineEdges(el)).toEqual({ first: true, last: false });
-    expect(caretLineRectIn(el)).toEqual({ top: LINE_TOP, bottom: LINE_TOP + LINE_HEIGHT });
+    expect(caretLineEdges(el)).toEqual({ first: false, last: true });
+    expect(caretLineRectIn(el)).toEqual({
+      top: LINE_TOP + LINE_HEIGHT,
+      bottom: LINE_TOP + 2 * LINE_HEIGHT,
+    });
+    expect(neighbourReads).toBeGreaterThan(0);
 
-    // Without a usable rect of its own the caret is measured from its
-    // neighbours as before: the character after, on the lower line.
+    // Mid-line the caret's own rect is taken, and nothing else is measured.
+    neighbourReads = 0;
     placeCaret(text, 15);
     expect(caretLineEdges(el)).toEqual({ first: false, last: true });
     expect(caretLineRectIn(el)).toEqual({
       top: LINE_TOP + LINE_HEIGHT,
       bottom: LINE_TOP + 2 * LINE_HEIGHT,
     });
+    expect(neighbourReads).toBe(0);
+
+    // Without a usable rect of its own the caret is measured from its
+    // neighbours: the character after, on the upper line here.
+    placeCaret(text, 5);
+    expect(caretLineEdges(el)).toEqual({ first: true, last: false });
+    expect(caretLineRectIn(el)).toEqual({ top: LINE_TOP, bottom: LINE_TOP + LINE_HEIGHT });
+    expect(neighbourReads).toBeGreaterThan(0);
   });
 
   it('knows a caret at either end of the content without measuring that side', () => {

@@ -1802,7 +1802,9 @@ pub fn start_session(
         // MCP on Blox and reading the outbox, or when a finished note it
         // found could not be stored. Either way an uncollected `done` from
         // an earlier run may still be there unseen, and the end-of-run clear
-        // must not delete it (see `RemoteOutboxUse`).
+        // must not delete it (see `RemoteOutboxUse`). A draft seed that
+        // failed after the outbox was read and cleared does not count: see
+        // `remote_outbox_recovery_settled_for_run`.
         let remote_outbox_recovery_settled: Cell<bool> = Cell::new(true);
         // Whether a collection during this run found this run's own note, so
         // whatever an earlier run left in the outbox has been overwritten.
@@ -1829,14 +1831,22 @@ pub fn start_session(
         // the Staged MCP on Blox install has reported the workstation home.
         // The prompts built during the run (Pikchr correction, write_note
         // follow-up) name whichever applies.
+        //
+        // `note_draft_path` is the draft of the `write_note` tool attached
+        // to this run, and `None` when no tool is attached: the local server
+        // did not start, or the Staged MCP on Blox could not be installed.
+        // Such a run can only deliver through the `---` fallback, so its
+        // prompts must not ask for a `write_note` call.
         let is_note_session = session_has_note_artifact(&store, &config.session_id);
         let local_note_draft: Option<PathBuf> = (is_note_session
             && config.workspace_name.is_none())
         .then(|| crate::note_draft::local_draft_path(&config.session_id));
+        let local_note_tool_attached: Cell<bool> = Cell::new(false);
         let remote_note_draft: std::cell::OnceCell<String> = std::cell::OnceCell::new();
         let note_draft_path = || -> Option<String> {
             local_note_draft
                 .as_ref()
+                .filter(|_| local_note_tool_attached.get())
                 .map(|path| path.to_string_lossy().into_owned())
                 .or_else(|| remote_note_draft.get().cloned())
         };
@@ -2082,6 +2092,7 @@ pub fn start_session(
                             NOTE_MCP_SERVER_NAME,
                             format!("http://127.0.0.1:{port}/mcp"),
                         )));
+                        local_note_tool_attached.set(true);
                         Some(handle)
                     }
                     Err(e) => {
@@ -2136,35 +2147,37 @@ pub fn start_session(
                     // so a note recovered just now is what gets seeded), or
                     // removes a stale draft for a fresh note — in the same
                     // round trip either way.
-                    let recovery_settled = match note_outbox::recover_uncollected_outbox(
-                        &exec,
+                    //
+                    // When the recovery fails before its clear, the draft is
+                    // neither removed nor seeded: `draft.md` is whatever the
+                    // lost run left, possibly text it never published, and
+                    // the prompt's "it holds the note as last saved" is then
+                    // not true of it. No round trip is spent on that: only a
+                    // `write_note` call in this run can publish the file
+                    // (the outbox collectors read `note.md`, never the
+                    // draft), and the usual outcome is the agent carrying on
+                    // from its own earlier draft.
+                    let recovery_settled = remote_outbox_recovery_settled_for_run(
                         &session_id,
-                        &mut |submission| {
-                            run_post_completion_hooks(
-                                &session_id,
-                                &working_dir,
-                                None,
-                                Some(&ws_name),
-                                remote_working_dir.as_deref(),
-                                &store_for_recovery,
-                                0,
-                                Some(submission),
-                            )
-                            .note_stored
-                        },
-                        &mut || remote_note_draft_seed(&store_for_recovery, &session_id),
-                    ) {
-                        Ok(_) => true,
-                        Err(e) => {
-                            log::warn!(
-                                "Session {session_id}: could not settle the workstation note \
-                                 outbox before this run (attaching the Staged MCP on Blox \
-                                 anyway; the outbox is kept at the end of this run unless it \
-                                 delivers this run's note): {e}"
-                            );
-                            false
-                        }
-                    };
+                        note_outbox::recover_uncollected_outbox(
+                            &exec,
+                            &session_id,
+                            &mut |submission| {
+                                run_post_completion_hooks(
+                                    &session_id,
+                                    &working_dir,
+                                    None,
+                                    Some(&ws_name),
+                                    remote_working_dir.as_deref(),
+                                    &store_for_recovery,
+                                    0,
+                                    Some(submission),
+                                )
+                                .note_stored
+                            },
+                            &mut || remote_note_draft_seed(&store_for_recovery, &session_id),
+                        ),
+                    );
                     Ok::<_, String>((
                         remote_staged_mcp::stdio_mcp_server(
                             &staged_mcp,
@@ -2466,13 +2479,20 @@ pub fn start_session(
                 // to `write_note` — locally through the tool, remotely through
                 // the outbox collected just above — which the transcript never
                 // carries.
+                // Where the error was found travels with it: its line number
+                // counts the final message's lines or the published body's,
+                // and the correction prompt may only point at the draft file
+                // for the latter.
                 let pikchr_error = match validate_latest_session_pikchr(&store, &config.session_id)?
                 {
-                    LatestAssistantPikchrValidation::Invalid(error) => Some(error),
+                    LatestAssistantPikchrValidation::Invalid(error) => {
+                        Some((error, PikchrErrorOrigin::FinalMessage))
+                    }
                     LatestAssistantPikchrValidation::SkippedFinalMessage
                     | LatestAssistantPikchrValidation::NoPikchr
                     | LatestAssistantPikchrValidation::Valid => {
                         validate_submitted_note_pikchr(&note_slot)
+                            .map(|error| (error, PikchrErrorOrigin::SubmittedNote))
                     }
                 };
                 match pikchr_error {
@@ -2525,7 +2545,7 @@ pub fn start_session(
                         }
                         return Ok(AgentRunOutcome::Completed);
                     }
-                    Some(error) => {
+                    Some((error, origin)) => {
                         if repair_attempts >= PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS {
                             return Err(AgentRunError::PikchrRepairExhausted(format!(
                                 "Pikchr validation failed after {} repair attempts: block starting at line {}: {}",
@@ -2539,6 +2559,7 @@ pub fn start_session(
                         let draft_for_note = note_draft_path();
                         let corrective_prompt = build_pikchr_correction_prompt(
                             &error,
+                            origin,
                             is_note_session,
                             draft_for_note.as_deref(),
                         );
@@ -3524,21 +3545,64 @@ pub(crate) fn session_has_note_artifact(store: &Store, session_id: &str) -> bool
             .is_some()
 }
 
-/// The prompt that asks for a Pikchr repair. For a note (`note_format_required`)
-/// it points at the block's line in the draft file the agent published
-/// (`note_draft_path`, when the session has one), so the repair is an edit of
-/// that file and another `write_note` call, not a re-emitted note. Without a
-/// draft path — a remote run whose Staged MCP on Blox could not be attached,
-/// so the runner never learned the workstation home — it refers to the draft
-/// file the session's instructions named.
+/// Where the invalid Pikchr block a repair turn is asked to fix was found.
+/// The error's line number counts that text's lines, so the correction
+/// prompt has to know which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PikchrErrorOrigin {
+    /// The final assistant message: a plain session's reply, a note
+    /// delivered through the `---` fallback, or a diagram the agent echoed
+    /// in its reply beside a `write_note` call.
+    FinalMessage,
+    /// The note body `write_note` published (the submission slot): the
+    /// draft file's contents from its first non-blank line.
+    SubmittedNote,
+}
+
+/// How a note session without a `write_note` tool hands its note back: the
+/// `---` contract the post-completion hooks still parse. Shared by the
+/// Pikchr correction and the follow-up prompt of such a run.
+const NOTE_SEPARATOR_FALLBACK_FORMAT: &str = "a line containing only `---`, then the note: a \
+markdown H1 title (`# <Title>`) on the next line, followed by the full note body in markdown, not \
+wrapped in code fences";
+
+/// The prompt that asks for a Pikchr repair.
+///
+/// For a note session (`note_format_required`) what it asks for depends on
+/// where the error was found and on whether a `write_note` tool is attached
+/// (`note_draft_path` is its draft, `None` when the run has no tool — the
+/// local server did not start, or the Staged MCP on Blox could not be
+/// installed):
+///
+/// - **Submitted note**: the broken block is in the body `write_note`
+///   published, so the prompt points at its line in the draft file and asks
+///   for an edit there and another call. Only this case may say the draft
+///   holds the saved note at that line.
+/// - **Final message, tool attached**: the line number is the reply's, and
+///   the reply is not the note. The prompt says so, asks for the diagram to
+///   be right in the draft file and for a `write_note` call, and makes no
+///   claim about what the draft holds (a fresh note may have none yet).
+/// - **Final message, no tool**: the note is taken from the reply, so the
+///   prompt asks for a corrected reply in the `---` format and never
+///   mentions calling `write_note`.
 fn build_pikchr_correction_prompt(
     error: &crate::pikchr_validation::PikchrValidationError,
+    origin: PikchrErrorOrigin,
     note_format_required: bool,
     note_draft_path: Option<&str>,
 ) -> String {
-    let (subject, delivery, scope) = match (note_format_required, note_draft_path) {
-        (true, Some(draft_path)) => (
-            "The note you saved contains an invalid fenced `pikchr` code block.".to_string(),
+    const NOTE_REPAIR_SCOPE: &str = "Do not edit any other file, run git operations, create \
+commits, or change repository state.";
+    const REPLY_REPAIR_SCOPE: &str =
+        "Do not edit files, run git operations, create commits, or change repository state.";
+    const SAVED_NOTE_SUBJECT: &str =
+        "The note you saved contains an invalid fenced `pikchr` code block.";
+    const FINAL_REPLY_SUBJECT: &str =
+        "The final assistant response contains an invalid fenced `pikchr` code block.";
+
+    let (subject, delivery, scope) = match (note_format_required, origin, note_draft_path) {
+        (true, PikchrErrorOrigin::SubmittedNote, Some(draft_path)) => (
+            SAVED_NOTE_SUBJECT,
             format!(
                 "Your draft file `{draft_path}` holds the note you saved. Edit the Pikchr block \
 starting at line {} of the note body in that file (the body starts at the file's first non-blank \
@@ -3547,11 +3611,13 @@ steps. The call republishes the file and replaces the saved note; your assistant
 saved, so do not paste the note into your reply.",
                 error.line_number
             ),
-            "Do not edit any other file, run git operations, create commits, or change repository \
-state.",
+            NOTE_REPAIR_SCOPE,
         ),
-        (true, None) => (
-            "The note you saved contains an invalid fenced `pikchr` code block.".to_string(),
+        // A submission exists only when a tool published it, and an attached
+        // tool always has a known draft, so this arm is not expected; it
+        // still must not invent a path.
+        (true, PikchrErrorOrigin::SubmittedNote, None) => (
+            SAVED_NOTE_SUBJECT,
             format!(
                 "Edit the Pikchr block starting at line {} of the note body in your note draft \
 file (its path is in your instructions) and change nothing else, then call `write_note` again \
@@ -3559,14 +3625,32 @@ with the title and suggested next steps. The call republishes the file and repla
 note; your assistant text is not saved, so do not paste the note into your reply.",
                 error.line_number
             ),
-            "Do not edit any other file, run git operations, create commits, or change repository \
-state.",
+            NOTE_REPAIR_SCOPE,
         ),
-        (false, _) => (
-            "The final assistant response contains an invalid fenced `pikchr` code block."
-                .to_string(),
+        (true, PikchrErrorOrigin::FinalMessage, Some(draft_path)) => (
+            FINAL_REPLY_SUBJECT,
+            format!(
+                "That line number counts the lines of your reply, not of your draft file. Your \
+reply is not saved: the note is your draft file `{draft_path}`, published by `write_note`. Make \
+sure that file holds the full note body with this diagram corrected (write the file if it does \
+not exist yet), then call `write_note` with the title and suggested next steps, and leave the \
+diagram and the note out of your reply."
+            ),
+            NOTE_REPAIR_SCOPE,
+        ),
+        (true, PikchrErrorOrigin::FinalMessage, None) => (
+            FINAL_REPLY_SUBJECT,
+            format!(
+                "The `write_note` tool is not available in this session, so Staged takes the \
+note from your reply. Return a complete corrected final response: \
+{NOTE_SEPARATOR_FALLBACK_FORMAT}."
+            ),
+            REPLY_REPAIR_SCOPE,
+        ),
+        (false, _, _) => (
+            FINAL_REPLY_SUBJECT,
             "Return a complete corrected final response.".to_string(),
-            "Do not edit files, run git operations, create commits, or change repository state.",
+            REPLY_REPAIR_SCOPE,
         ),
     };
 
@@ -3628,31 +3712,69 @@ impl std::fmt::Display for AgentRunError {
 /// session cannot loop.
 const NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS: u32 = 1;
 
-/// Follow-up prompt for a note session whose turn ended without `write_note`:
-/// write or finish the draft at `note_draft_path`, then call the tool. A run
-/// that never learned the path (see [`build_pikchr_correction_prompt`])
-/// refers to the draft file the session's instructions named.
+/// Follow-up prompt for a note session whose turn ended without delivering
+/// a note. With a `write_note` tool attached (`note_draft_path` is its
+/// draft): write or finish the draft, then call the tool. With none attached
+/// (`None`; see [`build_pikchr_correction_prompt`]) the tool cannot be
+/// called, so the prompt asks for the note in the reply, in the `---` format
+/// the post-completion hooks parse.
 fn note_write_followup_prompt(note_draft_path: Option<&str>) -> String {
-    let draft = match note_draft_path {
+    match note_draft_path {
         Some(path) => format!(
-            "Write or finish the draft at `{path}` (the full note body in markdown, without the \
-title), then call the `write_note` tool with `title` (plain text) and `suggested_next_steps` (an \
-object with nullable `suggestedNextCommitStep` and `suggestedNextNoteStep`); it publishes the \
-draft file as the note."
-        ),
-        None => "Write or finish your note draft file (its path is in your instructions; the full \
-note body in markdown, without the title), then call the `write_note` tool with `title` (plain \
-text) and `suggested_next_steps` (an object with nullable `suggestedNextCommitStep` and \
-`suggestedNextNoteStep`); it publishes the draft file as the note."
-            .to_string(),
-    };
-    format!(
-        "<action>\n\
-Your turn ended without a `write_note` call, so no note was saved. {draft} A draft that is never \
-published is not saved either: your assistant text is not saved — only the tool call is. Do not \
-create commits or change other files.\n\
+            "<action>\n\
+Your turn ended without a `write_note` call, so no note was saved. Write or finish the draft at \
+`{path}` (the full note body in markdown, without the title), then call the `write_note` tool \
+with `title` (plain text) and `suggested_next_steps` (an object with nullable \
+`suggestedNextCommitStep` and `suggestedNextNoteStep`); it publishes the draft file as the note. \
+A draft that is never published is not saved either: your assistant text is not saved — only \
+the tool call is. Do not create commits or change other files.\n\
 </action>"
-    )
+        ),
+        None => format!(
+            "<action>\n\
+Your turn ended without delivering a note, so no note was saved. The `write_note` tool is not \
+available in this session, so Staged takes the note from your reply instead. Reply with \
+{NOTE_SEPARATOR_FALLBACK_FORMAT}. If you already wrote the body into your note draft file, use \
+its contents as the body. Do not create commits or change other files.\n\
+</action>"
+        ),
+    }
+}
+
+/// Whether the start-of-run outbox recovery saw the workstation outbox
+/// through, for the end-of-run clear policy ([`RemoteOutboxUse`]).
+///
+/// An error means the outbox was not read, or a waiting note could not be
+/// stored: an uncollected `done` may still be there, so the run is
+/// unsettled. A draft seed that failed is different. By then the outbox was
+/// read, any waiting note ingested and the files removed, so the run is
+/// settled and only the agent's starting point is affected: it finds no
+/// draft, and `write_note` names the path to write.
+fn remote_outbox_recovery_settled_for_run(
+    session_id: &str,
+    recovery: Result<note_outbox::RunStartRecovery, String>,
+) -> bool {
+    match recovery {
+        Ok(recovery) => {
+            if let note_outbox::DraftSeed::Failed(e) = &recovery.draft {
+                log::warn!(
+                    "Session {session_id}: the workstation note outbox is settled but the note \
+                     draft could not be seeded with the stored note (the agent finds no draft \
+                     file; write_note names the path to write): {e}"
+                );
+            }
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "Session {session_id}: could not settle the workstation note outbox before \
+                 this run (attaching the Staged MCP on Blox anyway; the outbox is kept at the \
+                 end of this run unless it delivers this run's note, and the note draft there \
+                 is whatever an earlier run left): {e}"
+            );
+            false
+        }
+    }
 }
 
 /// The body to seed a note session's draft with at run start: the stored
@@ -9648,7 +9770,14 @@ mod tests {
                 assert_eq!(error.line_number, 2);
                 assert!(!error.message.is_empty());
 
-                let prompt = build_pikchr_correction_prompt(&error, true, None);
+                // The same error found in the note `write_note` published,
+                // by a run that somehow has no draft path to name.
+                let prompt = build_pikchr_correction_prompt(
+                    &error,
+                    PikchrErrorOrigin::SubmittedNote,
+                    true,
+                    None,
+                );
                 assert!(prompt.contains("line 2"));
                 assert!(prompt.contains(&error.message));
                 assert!(prompt.contains(
@@ -9665,7 +9794,12 @@ draft file"
                 assert!(!prompt.contains("```suggested-next-steps"));
                 assert!(!prompt.contains("`---` separator"));
 
-                let response_prompt = build_pikchr_correction_prompt(&error, false, None);
+                let response_prompt = build_pikchr_correction_prompt(
+                    &error,
+                    PikchrErrorOrigin::FinalMessage,
+                    false,
+                    None,
+                );
                 assert!(response_prompt.contains("complete corrected final response"));
                 assert!(!response_prompt.contains("write_note"));
             }

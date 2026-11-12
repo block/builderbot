@@ -19,9 +19,10 @@
 //!   empty file would trip Claude Code's read-before-write gate — and any
 //!   stale draft from an earlier run is removed at run start.
 //! - **Amendment or Pikchr repair** (stored note non-empty): the file is
-//!   seeded with the stored body ([`seed_body`]: H1 stripped,
-//!   `staged-media://` references verbatim) before the agent starts, and the
-//!   prompt says to read it and edit only what changes.
+//!   seeded with the stored body ([`seed_body`]: verbatim, so a heading
+//!   the body opens with and its `staged-media://` references survive)
+//!   before the agent starts, and the prompt says to read it and edit only
+//!   what changes.
 //! - **Run end**: the local draft is removed ([`remove_local_draft`]); the
 //!   remote one is cleared with the outbox and kept in the states that keep
 //!   the outbox (`remote_staged_mcp::note_outbox`).
@@ -79,18 +80,33 @@ pub(crate) enum DraftLocation<'a> {
     Remote { home: Option<&'a str> },
 }
 
+/// What stands in for the workstation home in a draft path whose home could
+/// not be resolved.
+const UNRESOLVED_HOME: &str = "$HOME";
+
 /// The draft path a note prompt names. It is the path the `write_note`
 /// handler reads: [`local_draft_path`] locally, [`remote_draft_path`] on a
 /// workstation. A workstation whose home could not be resolved gets the
-/// `$HOME/…` spelling — right for any agent that goes through a shell, and
-/// the Staged MCP on Blox names the absolute path in its `initialize`
-/// instructions and in every draft error.
+/// `$HOME/…` spelling. That text is a placeholder, not a path: a file tool
+/// that does not expand variables would create a `$HOME` directory in the
+/// worktree, so the prompt that carries it must say so
+/// ([`names_unresolved_home`]). The Staged MCP on Blox names the absolute
+/// path in its `initialize` instructions and in every draft error.
 pub(crate) fn prompt_draft_path(session_id: &str, location: DraftLocation<'_>) -> String {
     match location {
         DraftLocation::Local => local_draft_path(session_id).to_string_lossy().into_owned(),
         DraftLocation::Remote { home: Some(home) } => remote_draft_path(home, session_id),
-        DraftLocation::Remote { home: None } => remote_draft_path("$HOME", session_id),
+        DraftLocation::Remote { home: None } => remote_draft_path(UNRESOLVED_HOME, session_id),
     }
+}
+
+/// Whether `draft_path` is the [`prompt_draft_path`] spelling for a
+/// workstation whose home could not be resolved. A resolved path is
+/// absolute, so it never starts with the placeholder.
+pub(crate) fn names_unresolved_home(draft_path: &str) -> bool {
+    draft_path
+        .strip_prefix(UNRESOLVED_HOME)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Why a draft could not be published.
@@ -140,37 +156,85 @@ impl DraftError {
     }
 }
 
+/// Open the draft for reading in a way that cannot block. `O_NONBLOCK` makes
+/// opening a FIFO that has no writer return at once instead of waiting for
+/// one (the handle is then rejected as not a regular file); it changes
+/// nothing for a regular file.
+fn open_draft(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
 /// Read and validate the draft: a regular file, at most [`DRAFT_MAX_BYTES`],
-/// UTF-8, non-empty after trimming. Returns the trimmed body.
+/// UTF-8, non-empty once a leading byte order mark and the surrounding
+/// whitespace are removed. Returns that body.
+///
+/// The file is opened once and everything is asked of the handle, so the
+/// file that is checked is the file that is read: a path swapped for a FIFO
+/// or another file after the check changes nothing, and the read stops one
+/// byte past the cap however much the file grows meanwhile. The open follows
+/// symbolic links, so a draft that is a link to a regular file publishes
+/// that file's contents; the agent already has the access to read it.
+///
+/// `staged-mcp.cjs` (`readDraft`) applies the same steps in the same order;
+/// `write_note_reads_the_same_drafts_on_both_transports` in
+/// `remote_staged_mcp::note_outbox` runs both over the same files.
 pub(crate) fn read_draft(path: &Path) -> Result<String, DraftError> {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
+    use std::io::Read;
+
+    let file = match open_draft(path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(DraftError::Missing),
+        // Where a directory cannot be opened for reading at all (Windows).
+        Err(_) if path.is_dir() => return Err(DraftError::NotRegular),
         Err(e) => return Err(DraftError::Io(e.to_string())),
     };
+    let metadata = file.metadata().map_err(|e| DraftError::Io(e.to_string()))?;
     if !metadata.is_file() {
         return Err(DraftError::NotRegular);
     }
     if metadata.len() > DRAFT_MAX_BYTES {
         return Err(DraftError::Oversized(metadata.len()));
     }
-    let bytes = std::fs::read(path).map_err(|e| DraftError::Io(e.to_string()))?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(DRAFT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| DraftError::Io(e.to_string()))?;
+    let read = bytes.len() as u64;
+    if read > DRAFT_MAX_BYTES {
+        // The file grew past the cap after the size check.
+        let size = file.metadata().map_or(read, |m| m.len().max(read));
+        return Err(DraftError::Oversized(size));
+    }
     let text = String::from_utf8(bytes).map_err(|_| DraftError::NotUtf8)?;
-    let body = text.trim();
+    // One leading U+FEFF is an encoding mark some editors write, not note
+    // text; `trim` does not count it as whitespace.
+    let body = text.strip_prefix('\u{feff}').unwrap_or(&text).trim();
     if body.is_empty() {
         return Err(DraftError::Empty);
     }
     Ok(body.to_string())
 }
 
-/// The body to seed an amendment's draft with: the stored note content with
-/// a leading H1 removed (the store keeps the body without the title, but an
-/// older note may carry one), `staged-media://` references untouched. `None`
-/// when the stored note is empty — a fresh note gets no file.
+/// The body to seed an amendment's draft with: the stored note body exactly
+/// as stored, `staged-media://` references and any heading it opens with
+/// included. `None` when the stored note is blank — a fresh note gets no
+/// file.
+///
+/// Verbatim is what keeps the seed and the publish in agreement. The store
+/// holds the body without the title, and `write_note` treats an H1 at the
+/// top of the draft as body text (the title is a call argument), so a body
+/// that opens with `# Section` must come back from a seed, an untouched
+/// republish and the store with that heading still in place.
 pub(crate) fn seed_body(stored_content: &str) -> Option<String> {
-    let (_, body) = crate::session_runner::extract_note_title(stored_content);
-    let body = body.trim();
-    (!body.is_empty()).then(|| body.to_string())
+    (!stored_content.trim().is_empty()).then(|| stored_content.to_string())
 }
 
 /// Put the local draft in its run-start state: seeded with `seed` for an
@@ -235,10 +299,18 @@ mod tests {
             ),
             "/home/bloxer/.staged/sessions/abc-123/draft.md"
         );
-        assert_eq!(
-            prompt_draft_path("abc-123", DraftLocation::Remote { home: None }),
-            "$HOME/.staged/sessions/abc-123/draft.md"
-        );
+        let unresolved = prompt_draft_path("abc-123", DraftLocation::Remote { home: None });
+        assert_eq!(unresolved, "$HOME/.staged/sessions/abc-123/draft.md");
+
+        // Only that spelling is flagged as a placeholder for the prompt.
+        assert!(names_unresolved_home(&unresolved));
+        assert!(!names_unresolved_home(
+            "/home/bloxer/.staged/sessions/abc-123/draft.md"
+        ));
+        assert!(!names_unresolved_home(
+            &local_draft_path("abc-123").to_string_lossy()
+        ));
+        assert!(!names_unresolved_home("$HOMEWORK/draft.md"));
     }
 
     #[test]
@@ -293,6 +365,77 @@ mod tests {
     }
 
     #[test]
+    fn read_draft_drops_one_leading_byte_order_mark_before_trimming() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+
+        // Nothing but the mark, with or without whitespace: an empty draft,
+        // not a three-byte invisible note.
+        std::fs::write(&path, "\u{feff}").unwrap();
+        assert_eq!(read_draft(&path), Err(DraftError::Empty));
+        std::fs::write(&path, "\u{feff} \n\t\n").unwrap();
+        assert_eq!(read_draft(&path), Err(DraftError::Empty));
+
+        // The mark goes, then the whitespace around the body.
+        std::fs::write(&path, "\u{feff}\n# Section\nBody.\n").unwrap();
+        assert_eq!(read_draft(&path).unwrap(), "# Section\nBody.");
+
+        // Only one, and only at the very start: anything else is text.
+        std::fs::write(&path, "\u{feff}\u{feff}Body\u{feff}").unwrap();
+        assert_eq!(read_draft(&path).unwrap(), "\u{feff}Body\u{feff}");
+        std::fs::write(&path, " \u{feff}Body").unwrap();
+        assert_eq!(read_draft(&path).unwrap(), "\u{feff}Body");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_draft_follows_a_symlink_and_never_waits_on_a_fifo() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+
+        // A link to a regular file publishes that file; a dangling link is
+        // a missing draft.
+        let target = dir.path().join("elsewhere.md");
+        std::fs::write(&target, "Linked body\n").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert_eq!(read_draft(&path).unwrap(), "Linked body");
+        std::fs::remove_file(&target).unwrap();
+        assert_eq!(read_draft(&path), Err(DraftError::Missing));
+        std::fs::remove_file(&path).unwrap();
+
+        // A FIFO with no writer: a blocking open would hang the handler
+        // here for good. The test finishing is the assertion.
+        let fifo = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(read_draft(&path), Err(DraftError::NotRegular));
+        std::fs::remove_file(&path).unwrap();
+
+        // A file the handler may not read is an I/O error naming the cause.
+        // Root reads it regardless, so the check only runs where the mode
+        // is enforced.
+        std::fs::write(&path, "Body").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&path).is_err() {
+            match read_draft(&path) {
+                Err(DraftError::Io(error)) => {
+                    let text = DraftError::Io(error).describe("/tmp/draft.md");
+                    assert!(
+                        text.starts_with(
+                            "write_note rejected: the draft file `/tmp/draft.md` could not be \
+                             read: "
+                        ),
+                        "{text}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn error_text_names_the_path_and_asks_for_another_call() {
         let text = DraftError::Missing.describe("/tmp/draft.md");
         assert!(text.starts_with("write_note rejected: "), "{text}");
@@ -304,17 +447,29 @@ mod tests {
     }
 
     #[test]
-    fn seed_body_strips_the_h1_and_keeps_media_references() {
+    fn seed_body_is_the_stored_body_verbatim() {
         assert_eq!(seed_body(""), None);
         assert_eq!(seed_body("  \n"), None);
+        // A heading the body opens with is body text, exactly as it is when
+        // `write_note` publishes the draft.
         assert_eq!(
-            seed_body("# Title\n\nBody ![Shot](staged-media://abc.png)\n").as_deref(),
-            Some("Body ![Shot](staged-media://abc.png)")
+            seed_body("# Section\n\nBody ![Shot](staged-media://abc.png)\n").as_deref(),
+            Some("# Section\n\nBody ![Shot](staged-media://abc.png)\n")
         );
         assert_eq!(
             seed_body("No heading\n## Section").as_deref(),
             Some("No heading\n## Section")
         );
+    }
+
+    #[test]
+    fn a_seeded_draft_republishes_the_stored_body_heading_included() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("staged-note-draft-s1.md");
+        let stored = "# Section\n\nFirst paragraph.\n\n## Details\nMore.";
+
+        prepare_local_draft(&path, seed_body(stored).as_deref()).unwrap();
+        assert_eq!(read_draft(&path).unwrap(), stored);
     }
 
     #[test]

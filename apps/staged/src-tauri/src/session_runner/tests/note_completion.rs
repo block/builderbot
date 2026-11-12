@@ -34,7 +34,14 @@ async fn finished_notes_preserve_diagram_repair_and_completion_hooks() {
             LatestAssistantPikchrValidation::Invalid(error) => error,
             other => panic!("expected diagram repair, got {other:?}"),
         };
-        let correction = build_pikchr_correction_prompt(&error, true, None);
+        // No `write_note` tool in this run: the error is in the reply and the
+        // repair is a corrected reply in the `---` format.
+        let correction =
+            build_pikchr_correction_prompt(&error, PikchrErrorOrigin::FinalMessage, true, None);
+        assert!(
+            correction.contains("a line containing only `---`"),
+            "{correction}"
+        );
         store
             .add_session_message(&session.id, MessageRole::User, &correction)
             .unwrap();

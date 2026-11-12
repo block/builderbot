@@ -144,7 +144,14 @@ scratch area shared by every tool of that session:
 - A file can be the agent's to write rather than the tool's. `draft.md` is:
   the agent writes and edits it with its own file tools, and `write_note`
   only reads it (a regular file, UTF-8, non-empty, at most 1 MiB) and
-  answers a tool error naming the absolute path otherwise.
+  answers a tool error naming the absolute path otherwise. Read such a file
+  the way `readDraft` does: open it once with `O_NONBLOCK`, take the type
+  and size from the descriptor, and read at most one byte past the cap, all
+  inside one `try` so that an unreadable or vanished file is a rejected
+  call and not a thrown error. The open follows symbolic links. The steps
+  mirror `note_draft::read_draft` on the laptop, including the dropped
+  leading byte order mark and a trim that matches Rust's `str::trim`
+  (`rustTrim`), so one file gives one body on both transports.
 - Write atomically (`writeAtomic`: temp file, `fsync`, rename, mode 600).
   When the laptop must read several files as one unit, bracket them with a
   marker the way `write_note` does with `done`.
@@ -169,7 +176,11 @@ done       marker, removed first and written last
 
 `note.md`, `meta.json` and `done` are the outbox the laptop collects.
 `draft.md` is never collected: the laptop seeds it at run start for an
-amendment and removes it whenever it clears the outbox. The layout,
+amendment and removes it whenever it clears the outbox, together with
+`.draft.md.seed`, the temp file a seed is decoded into. Because the laptop
+creates the directory at run start, an empty directory or an unpublished
+`draft.md` can remain in the states that keep the outbox, until a Resume
+or the sweep clears it. The layout,
 collector, seed rule and clear policy are described in
 [`note-delivery.md`](./note-delivery.md).
 
@@ -200,7 +211,10 @@ Nothing has to change for the upload. The new script has a new checksum, so
 every workstation gets it on its next session. Bump `SERVER_VERSION` only
 when a reader on the laptop needs to tell the old shape of a tool's output
 from the new one, or when a tool's contract changes (version 3: `write_note`
-takes no `body` and publishes `draft.md`).
+takes no `body` and publishes `draft.md`; version 4: the draft read drops a
+leading byte order mark, trims as Rust does, reports an unreadable draft as
+a rejected call, and the saved-note text counts UTF-8 bytes as the laptop
+does).
 
 On the laptop:
 

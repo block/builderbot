@@ -510,11 +510,25 @@ fn background_hold_from_overrides(
 /// it: an agent that writes the note into its reply produces nothing the user
 /// sees unless that fallback fires.
 pub(crate) fn note_delivery_guidance(draft_path: &str) -> String {
+    // A workstation whose home could not be resolved gets the path spelled
+    // with `$HOME`. A file tool that does not expand variables would take
+    // that text as a relative path and create a `$HOME` directory in the
+    // worktree, so the prompt has to say it is a placeholder.
+    let unresolved_home = if crate::note_draft::names_unresolved_home(draft_path) {
+        "\n\nStaged could not resolve this machine's home directory, so `$HOME` in that path is \
+a placeholder, not a directory name. Do not use the literal `$HOME/...` text as a path: a file \
+tool would create a `$HOME` directory inside your working directory. Resolve it first (for \
+example with `printf '%s' \"$HOME\"` in a shell) and use the absolute path, or take the absolute \
+path from the `staged` MCP server's instructions, which name the draft file."
+    } else {
+        ""
+    };
     format!(
         "Your note draft file is `{draft_path}`. This file is your note. Write it, edit it, and \
 when it is ready call `write_note`. Put the full note body in it as markdown, without the title \
 and without wrapping it in code fences, using your file tools. If the file already exists, it \
-holds the note as last saved: Read it and edit only what changes instead of rewriting it.\n\
+holds the note as last saved: Read it and edit only what changes instead of rewriting it.\
+{unresolved_home}\n\
 \n\
 To publish the note, call the `write_note` tool from the `staged` MCP server. In Claude Code \
 its full name is `mcp__staged__write_note` and it may be deferred: if it is not in your loaded \
@@ -14738,6 +14752,62 @@ it, and when it is ready call `write_note`."
             } else {
                 "Please write the note for this session."
             }));
+        }
+    }
+
+    /// A workstation whose home could not be resolved gets the draft path
+    /// spelled with `$HOME`. Every prompt that carries that spelling says it
+    /// is a placeholder; a prompt with a real path says nothing of the kind.
+    #[test]
+    fn a_draft_path_with_an_unresolved_home_is_flagged_as_a_placeholder() {
+        let unresolved = crate::note_draft::prompt_draft_path(
+            "sess-1",
+            crate::note_draft::DraftLocation::Remote { home: None },
+        );
+        assert!(unresolved.starts_with("$HOME/"), "{unresolved}");
+        let prompts = [
+            note_delivery_guidance(&unresolved),
+            build_note_followup_message_with_pikchr_reference(
+                true,
+                "https://example.invalid/grammar.md",
+                false,
+                &unresolved,
+            ),
+        ];
+        for prompt in &prompts {
+            assert!(
+                prompt.contains(&format!("Your note draft file is `{unresolved}`.")),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains("Do not use the literal `$HOME/...` text as a path"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("Resolve it first"), "{prompt}");
+            assert!(
+                prompt
+                    .contains("take the absolute path from the `staged` MCP server's instructions"),
+                "{prompt}"
+            );
+            // The caution sits with the path, before the publishing rules.
+            assert!(
+                prompt.find("a placeholder").unwrap() < prompt.find("To publish the note").unwrap(),
+                "{prompt}"
+            );
+        }
+
+        for resolved in [
+            crate::note_draft::prompt_draft_path(
+                "sess-1",
+                crate::note_draft::DraftLocation::Remote {
+                    home: Some("/home/bloxer"),
+                },
+            ),
+            crate::note_draft::prompt_draft_path("sess-1", crate::note_draft::DraftLocation::Local),
+        ] {
+            let prompt = note_delivery_guidance(&resolved);
+            assert!(!prompt.contains("$HOME"), "{prompt}");
+            assert!(!prompt.contains("placeholder"), "{prompt}");
         }
     }
 

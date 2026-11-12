@@ -17,7 +17,12 @@
 //! The draft is the laptop's to seed and clear (`note_draft`): the
 //! start-of-run recovery's clear seeds it with the stored body for an
 //! amendment, in the same round trip ([`clear_outbox_and_seed`]), and every
-//! clear removes it with the outbox.
+//! clear removes it with the outbox, along with `.draft.md.seed`, the temp
+//! file a seed is decoded into before it is renamed into place.
+//!
+//! Only `note.md` beside a `done` marker is ever read as a note. The draft
+//! is never collected: whatever state a lost run left it in, nothing is
+//! stored without a `write_note` call.
 //!
 //! After the turn — or on the dead-owner sweep, when the laptop lost the
 //! session — the collector pulls the outbox over `ws exec` and turns it into
@@ -44,9 +49,26 @@ use crate::note_tool::{
 pub(crate) fn clear_outbox_script(session_id: &str) -> String {
     let dir = session_dir_expr(session_id);
     format!(
-        "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\" \"$d/{DRAFT}\"; \
-         rmdir \"$d\" 2>/dev/null; exit 0",
-        DRAFT = crate::note_draft::REMOTE_DRAFT_FILE_NAME
+        "d={dir}; {remove}; rmdir \"$d\" 2>/dev/null; exit 0",
+        remove = remove_session_files_fragment()
+    )
+}
+
+/// The temp file a seed is decoded into, beside the draft, before it is
+/// renamed to `draft.md`.
+fn seed_temp_file_name() -> String {
+    format!(".{}.seed", crate::note_draft::REMOTE_DRAFT_FILE_NAME)
+}
+
+/// The `rm -f` every clear script starts with: the outbox's three files, the
+/// draft, and the seed's temp file (a chunked seed that failed part-way
+/// leaves one, and the session directory could never be removed around it).
+/// Expects `$d` to be the session directory.
+fn remove_session_files_fragment() -> String {
+    format!(
+        "rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\" \"$d/{draft}\" \"$d/{seed}\"",
+        draft = crate::note_draft::REMOTE_DRAFT_FILE_NAME,
+        seed = seed_temp_file_name()
     )
 }
 
@@ -61,6 +83,27 @@ pub(crate) fn clear_outbox(exec: RemoteExec, session_id: &str) -> Result<(), Str
 /// `session_commands::write_bytes_to_remote_with` uses to stay under ARG_MAX.
 const SEED_CHUNK_SIZE: usize = 500_000;
 
+/// The line the seeding clear prints when the outbox was emptied but the
+/// seed could not be written. It exits 0 either way, so a failed command
+/// means the clear itself may not have run.
+const SEED_FAILED_MARKER: &str = "staged-draft-seed-failed";
+
+/// How `draft.md` came out of the run-start clear. Kept apart from whether
+/// the outbox was settled: by the time a seed fails, the collect, the ingest
+/// and the clear's `rm -f` have all happened, so the run has observed the
+/// outbox and its end-of-run clear policy must not change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DraftSeed {
+    /// A fresh note: no draft was written and any stale one is gone.
+    Absent,
+    /// An amendment: `draft.md` holds the stored body.
+    Seeded,
+    /// An amendment whose seed could not be written. The outbox is cleared
+    /// and there is no `draft.md`; `write_note` reports the missing draft
+    /// by path and the agent writes the file.
+    Failed(String),
+}
+
 /// The run-start form of [`clear_outbox_script`]: one round trip that
 /// empties the outbox and puts `draft.md` in its run-start state.
 ///
@@ -68,24 +111,28 @@ const SEED_CHUNK_SIZE: usize = 500_000;
 /// left in place (created if need be, mode 700) so the agent's first write
 /// of `draft.md` needs no `mkdir` — not every agent's file tool creates
 /// parent directories. With `seed_b64` (an amendment's stored body, base64)
-/// the seed is decoded into a temp file and renamed into place, and a failed
-/// seed exits 1 so the caller hears about it. Without one (a fresh note) no
-/// file is created, the `mkdir` is best-effort and the script always exits
-/// 0, like the plain clear.
+/// the seed is decoded into a temp file and renamed into place; a seed that
+/// fails removes its temp file and prints [`SEED_FAILED_MARKER`]. Without
+/// one (a fresh note) no file is created and the `mkdir` is best-effort.
+/// Always exits 0, like the plain clear, so the caller can tell a failed
+/// seed (the marker) from a command that never ran (an error).
 pub(crate) fn clear_outbox_and_seed_script(session_id: &str, seed_b64: Option<&str>) -> String {
     let dir = session_dir_expr(session_id);
     let draft = crate::note_draft::REMOTE_DRAFT_FILE_NAME;
+    let remove = remove_session_files_fragment();
     let Some(seed) = seed_b64 else {
         return format!(
-            "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\" \"$d/{draft}\"; \
+            "d={dir}; {remove}; \
              mkdir -p \"$d\" 2>/dev/null && chmod 700 \"$d\" 2>/dev/null; exit 0"
         );
     };
+    let temp = seed_temp_file_name();
     format!(
-        "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\" \"$d/{draft}\"; \
+        "d={dir}; {remove}; \
          mkdir -p \"$d\" && chmod 700 \"$d\" && \
-         echo '{seed}' | base64 -d > \"$d/.{draft}.seed\" && \
-         mv -f \"$d/.{draft}.seed\" \"$d/{draft}\" || exit 1; exit 0"
+         echo '{seed}' | base64 -d > \"$d/{temp}\" && \
+         mv -f \"$d/{temp}\" \"$d/{draft}\" || \
+         {{ rm -f \"$d/{temp}\"; echo {SEED_FAILED_MARKER}; }}; exit 0"
     )
 }
 
@@ -93,31 +140,45 @@ pub(crate) fn clear_outbox_and_seed_script(session_id: &str, seed_b64: Option<&s
 /// `seed` (the stored note body). One round trip, as [`clear_outbox`] is,
 /// for a fresh note and for a seed that fits one command line; a larger
 /// seed is appended in [`SEED_CHUNK_SIZE`] base64 chunks after the clear.
+///
+/// `Err` means the clear itself failed or could not be confirmed (the
+/// workstation was not reached), so the outbox is in an unknown state. A
+/// seed that failed after the clear is `Ok(DraftSeed::Failed)`.
 pub(crate) fn clear_outbox_and_seed(
     exec: RemoteExec,
     session_id: &str,
     seed: Option<&[u8]>,
-) -> Result<(), String> {
+) -> Result<DraftSeed, String> {
     use base64::Engine;
     validate_session_id(session_id)?;
     let Some(seed) = seed else {
         return exec(&["sh", "-c", &clear_outbox_and_seed_script(session_id, None)])
-            .map(|_| ())
+            .map(|_| DraftSeed::Absent)
             .map_err(|e| format!("failed to clear the remote note outbox: {e}"));
     };
     let encoded = base64::engine::general_purpose::STANDARD.encode(seed);
     if encoded.len() <= SEED_CHUNK_SIZE {
-        return exec(&[
+        let output = exec(&[
             "sh",
             "-c",
             &clear_outbox_and_seed_script(session_id, Some(&encoded)),
         ])
-        .map(|_| ())
-        .map_err(|e| format!("failed to clear the remote note outbox and seed the draft: {e}"));
+        .map_err(|e| format!("failed to clear the remote note outbox and seed the draft: {e}"))?;
+        return Ok(
+            if output.lines().any(|line| line.trim() == SEED_FAILED_MARKER) {
+                DraftSeed::Failed(
+                    "the workstation could not write the seed into the session directory"
+                        .to_string(),
+                )
+            } else {
+                DraftSeed::Seeded
+            },
+        );
     }
     clear_outbox(exec, session_id)?;
     let dir = session_dir_expr(session_id);
     let draft = crate::note_draft::REMOTE_DRAFT_FILE_NAME;
+    let temp = seed_temp_file_name();
     let chunks: Vec<&str> = encoded
         .as_bytes()
         .chunks(SEED_CHUNK_SIZE)
@@ -127,18 +188,24 @@ pub(crate) fn clear_outbox_and_seed(
     for (i, chunk) in chunks.into_iter().enumerate() {
         let redirect = if i == 0 { ">" } else { ">>" };
         let publish = if i == last {
-            format!(" && mv -f \"$d/.{draft}.seed\" \"$d/{draft}\"")
+            format!(" && mv -f \"$d/{temp}\" \"$d/{draft}\"")
         } else {
             String::new()
         };
         let script = format!(
             "d={dir}; mkdir -p \"$d\" && chmod 700 \"$d\" && \
-             echo '{chunk}' | base64 -d {redirect} \"$d/.{draft}.seed\"{publish}"
+             echo '{chunk}' | base64 -d {redirect} \"$d/{temp}\"{publish}"
         );
-        exec(&["sh", "-c", &script])
-            .map_err(|e| format!("failed to seed the remote note draft (chunk {i}): {e}"))?;
+        // The outbox is already cleared: from here on a failure costs the
+        // seed only. The temp file a failed chunk leaves goes with the next
+        // clear.
+        if let Err(e) = exec(&["sh", "-c", &script]) {
+            return Ok(DraftSeed::Failed(format!(
+                "failed to seed the remote note draft (chunk {i}): {e}"
+            )));
+        }
     }
-    Ok(())
+    Ok(DraftSeed::Seeded)
 }
 
 /// Print the outbox as four lines: `done`/`pending`, then `meta.json` and
@@ -439,6 +506,14 @@ pub(crate) fn probe_turn_into_slot(
     Ok(OutboxState::Delivered(found.submission))
 }
 
+/// What [`recover_uncollected_outbox`] did at session start: what it found
+/// in the outbox, and — separately — how the draft came out of the clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunStartRecovery {
+    pub outbox: OutboxRecovery,
+    pub draft: DraftSeed,
+}
+
 /// What [`recover_uncollected_outbox`] found at session start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutboxRecovery {
@@ -474,13 +549,23 @@ pub(crate) enum OutboxRecovery {
 /// rejected) is cleared and reported as [`OutboxRecovery::Discarded`], since
 /// every later resume would otherwise trip over the same bytes and the
 /// session would be stuck on the `---` fallback for good.
+///
+/// After an error the draft is neither removed nor seeded: `draft.md` is
+/// whatever the lost run left, possibly text it never published. That is
+/// safe because the draft is never collected — only a `write_note` call in
+/// the new run publishes it.
+///
+/// A seed that could not be written is not an error: the outbox was read,
+/// any waiting note ingested and the files removed by then, so the result is
+/// `Ok` with [`DraftSeed::Failed`] and the caller treats the outbox as
+/// settled.
 pub(crate) fn recover_uncollected_outbox(
     exec: RemoteExec,
     session_id: &str,
     ingest: &mut dyn FnMut(NoteSubmission) -> bool,
     seed: &mut dyn FnMut() -> Option<Vec<u8>>,
-) -> Result<OutboxRecovery, String> {
-    let recovery = match collect_classified(exec, session_id, None) {
+) -> Result<RunStartRecovery, String> {
+    let outbox = match collect_classified(exec, session_id, None) {
         Ok(OutboxState::Delivered(submission)) => {
             log::warn!(
                 "Session {session_id}: the workstation outbox holds an uncollected note \
@@ -508,8 +593,8 @@ pub(crate) fn recover_uncollected_outbox(
         Err(CollectError::Transport(message)) => return Err(message),
     };
     let seed = seed();
-    clear_outbox_and_seed(exec, session_id, seed.as_deref())?;
-    Ok(recovery)
+    let draft = clear_outbox_and_seed(exec, session_id, seed.as_deref())?;
+    Ok(RunStartRecovery { outbox, draft })
 }
 
 #[cfg(test)]
@@ -847,7 +932,8 @@ mod tests {
             &mut || None,
         )
         .unwrap();
-        assert_eq!(recovery, OutboxRecovery::Ingested);
+        assert_eq!(recovery.outbox, OutboxRecovery::Ingested);
+        assert_eq!(recovery.draft, DraftSeed::Absent);
         assert_eq!(ingested.len(), 1);
         assert_eq!(ingested[0].title, "Plan");
         assert_eq!(ingested[0].source, NoteSubmissionSource::Outbox);
@@ -886,7 +972,7 @@ mod tests {
             &mut || None,
         )
         .unwrap();
-        assert_eq!(recovery, OutboxRecovery::Empty);
+        assert_eq!(recovery.outbox, OutboxRecovery::Empty);
         assert_eq!(ingested, 0);
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "{commands:?}");
@@ -909,7 +995,7 @@ mod tests {
             &mut || None,
         )
         .unwrap();
-        assert_eq!(recovery, OutboxRecovery::Discarded);
+        assert_eq!(recovery.outbox, OutboxRecovery::Discarded);
         assert_eq!(ingested, 0);
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
@@ -964,12 +1050,13 @@ mod tests {
         log.borrow_mut().clear();
         let seed = b"Stored body ![Shot](staged-media://abc.png)";
         let mut asked = 0;
-        recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || {
+        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || {
             asked += 1;
             Some(seed.to_vec())
         })
         .unwrap();
         assert_eq!(asked, 1);
+        assert_eq!(recovery.draft, DraftSeed::Seeded);
         let commands = log.borrow();
         assert_eq!(
             commands.len(),
@@ -994,7 +1081,10 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let exec = collecting_exec("pending\n\n\n", &log);
         let seed = vec![b'x'; SEED_CHUNK_SIZE + 10];
-        clear_outbox_and_seed(&exec, "sess-1", Some(&seed)).unwrap();
+        assert_eq!(
+            clear_outbox_and_seed(&exec, "sess-1", Some(&seed)).unwrap(),
+            DraftSeed::Seeded
+        );
         let commands = log.borrow();
         assert_eq!(commands.len(), 3, "clear, then two chunks: {commands:?}");
         assert_eq!(commands[0][2], clear_outbox_script("sess-1"));
@@ -1319,7 +1409,8 @@ mod tests {
                 },
                 &mut || None
             )
-            .unwrap(),
+            .unwrap()
+            .outbox,
             OutboxRecovery::Ingested
         );
         assert_eq!(ingested.len(), 1);
@@ -1346,7 +1437,8 @@ mod tests {
                 &mut |_| panic!("nothing to ingest"),
                 &mut || None
             )
-            .unwrap(),
+            .unwrap()
+            .outbox,
             OutboxRecovery::Empty
         );
 
@@ -1415,7 +1507,8 @@ mod tests {
                 },
                 &mut || Some(seed.as_bytes().to_vec()),
             )
-            .unwrap(),
+            .unwrap()
+            .outbox,
             OutboxRecovery::Ingested
         );
         assert_eq!(ingested[0].body, "old draft");
@@ -1469,8 +1562,508 @@ mod tests {
 
         // A large seed goes in chunks and arrives whole.
         let large = vec![b'y'; SEED_CHUNK_SIZE + 1];
-        clear_outbox_and_seed(&exec, "sess-1", Some(&large)).unwrap();
+        assert_eq!(
+            clear_outbox_and_seed(&exec, "sess-1", Some(&large)).unwrap(),
+            DraftSeed::Seeded
+        );
         assert_eq!(std::fs::read(outbox.join("draft.md")).unwrap(), large);
         assert!(!outbox.join(".draft.md.seed").exists());
+    }
+
+    /// An exec that answers the collect with `collect_output` and every
+    /// other command through `other`, which sees the command's index among
+    /// those others.
+    fn scripted_exec<'a>(
+        collect_output: &'a str,
+        log: &'a RefCell<Vec<String>>,
+        other: impl Fn(usize) -> Result<String, String> + 'a,
+    ) -> impl Fn(&[&str]) -> Result<String, String> + 'a {
+        move |args: &[&str]| {
+            if args[2].contains("echo done; else echo pending") {
+                return Ok(collect_output.to_string());
+            }
+            let index = log.borrow().len();
+            log.borrow_mut().push(args[2].to_string());
+            other(index)
+        }
+    }
+
+    #[test]
+    fn a_failed_seed_is_reported_apart_from_the_settled_recovery() {
+        // The seeding clear ran — the outbox is empty — but printed the
+        // marker: the recovery is settled, and only the draft is missing.
+        let log = RefCell::new(Vec::new());
+        let done = done_output("earlier-run");
+        let exec = scripted_exec(&done, &log, |_| Ok(format!("{SEED_FAILED_MARKER}\n")));
+        let mut ingested = 0;
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |_| {
+                ingested += 1;
+                true
+            },
+            &mut || Some(b"Stored body".to_vec()),
+        )
+        .expect("a failed seed is not a failed recovery");
+        assert_eq!(ingested, 1);
+        assert_eq!(recovery.outbox, OutboxRecovery::Ingested);
+        assert!(
+            matches!(recovery.draft, DraftSeed::Failed(_)),
+            "{recovery:?}"
+        );
+        assert_eq!(log.borrow().len(), 1, "one clear, no retry");
+
+        // A chunked seed: once the clear's own round trip has succeeded, a
+        // chunk that fails costs the seed, not the recovery.
+        let log = RefCell::new(Vec::new());
+        let exec = scripted_exec("pending\n\n\n", &log, |index| match index {
+            0 | 1 => Ok(String::new()),
+            _ => Err("workstation suspended".to_string()),
+        });
+        let large = vec![b'x'; SEED_CHUNK_SIZE + 10];
+        match clear_outbox_and_seed(&exec, "sess-1", Some(&large)).unwrap() {
+            DraftSeed::Failed(error) => {
+                assert!(error.contains("chunk 1"), "{error}");
+                assert!(error.contains("workstation suspended"), "{error}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(log.borrow()[0], clear_outbox_script("sess-1"));
+
+        // A clear that could not be confirmed is still an error: the outbox
+        // is in an unknown state, with or without a seed.
+        for seed in [
+            None,
+            Some(b"Stored body".as_slice()),
+            Some(large.as_slice()),
+        ] {
+            let log = RefCell::new(Vec::new());
+            let exec = scripted_exec("pending\n\n\n", &log, |_| {
+                Err("workstation suspended".to_string())
+            });
+            let error = recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || {
+                seed.map(<[u8]>::to_vec)
+            })
+            .unwrap_err();
+            assert!(error.contains("workstation suspended"), "{error}");
+            assert_eq!(log.borrow().len(), 1, "nothing after the failed clear");
+        }
+    }
+
+    #[test]
+    fn every_clear_removes_the_seed_temp_file() {
+        for script in [
+            clear_outbox_script("sess-1"),
+            clear_outbox_and_seed_script("sess-1", None),
+            clear_outbox_and_seed_script("sess-1", Some("QQ==")),
+        ] {
+            let remove = script
+                .split(';')
+                .find(|part| part.trim_start().starts_with("rm -f \"$d/note.md\""))
+                .unwrap_or_else(|| panic!("no rm -f in {script}"));
+            for file in ["note.md", "meta.json", "done", "draft.md", ".draft.md.seed"] {
+                assert!(
+                    remove.contains(&format!("\"$d/{file}\"")),
+                    "{file}: {script}"
+                );
+            }
+        }
+
+        // Against a real shell: the temp file a failed chunked seed left
+        // behind no longer pins the session directory.
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        std::fs::create_dir_all(&outbox).unwrap();
+        std::fs::write(outbox.join(".draft.md.seed"), "half a seed").unwrap();
+        clear_outbox(&exec, "sess-1").unwrap();
+        assert!(!outbox.exists(), "{outbox:?}");
+
+        std::fs::create_dir_all(&outbox).unwrap();
+        std::fs::write(outbox.join(".draft.md.seed"), "half a seed").unwrap();
+        assert_eq!(
+            clear_outbox_and_seed(&exec, "sess-1", None).unwrap(),
+            DraftSeed::Absent
+        );
+        assert_eq!(std::fs::read_dir(&outbox).unwrap().count(), 0);
+        assert_eq!(
+            clear_outbox_and_seed(&exec, "sess-1", Some(b"Stored body")).unwrap(),
+            DraftSeed::Seeded
+        );
+        assert_eq!(
+            std::fs::read_dir(&outbox).unwrap().count(),
+            1,
+            "only draft.md"
+        );
+    }
+
+    #[test]
+    fn a_seed_the_workstation_cannot_write_still_clears_and_reports_it() {
+        // The session directory's path is taken by a plain file, so the
+        // seed has nowhere to go. The command still exits 0 and says so.
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let sessions = home.path().join(".staged/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("sess-1"), "in the way").unwrap();
+        assert!(matches!(
+            clear_outbox_and_seed(&exec, "sess-1", Some(b"Stored body")).unwrap(),
+            DraftSeed::Failed(_)
+        ));
+    }
+
+    /// The state an unsettled recovery leaves (see
+    /// [`recover_uncollected_outbox`]): the draft on the workstation is
+    /// whatever the lost run left. Nothing reads it as a note.
+    #[test]
+    fn a_draft_left_by_a_lost_run_is_never_stored_without_a_write_note_call() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping lost-draft test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let unpublished = "Unpublished text from a lost run";
+
+        // A draft and no call: every reader the laptop has sees no note.
+        write_draft(home.path(), unpublished);
+        let raw = exec(&["sh", "-c", &collect_script("sess-1")]).unwrap();
+        assert!(!raw.contains(&b64(unpublished.as_bytes())), "{raw}");
+        assert_eq!(
+            collect(&exec, "sess-1", None).unwrap(),
+            OutboxState::Pending
+        );
+        let slot = crate::note_tool::new_submission_slot();
+        let memory = new_collected_note_memory();
+        assert_eq!(
+            collect_turn_into_slot(&exec, "sess-1", "turn-1", &slot, &memory).unwrap(),
+            OutboxState::Pending
+        );
+        assert_eq!(
+            probe_turn_into_slot(&exec, "sess-1", "turn-1", &slot, &memory).unwrap(),
+            OutboxState::Pending
+        );
+        assert!(!crate::note_tool::has_submission(&slot));
+
+        // The recovery that cannot reach the workstation: an error, nothing
+        // ingested, and the draft exactly as the lost run left it.
+        let unreachable = |_: &[&str]| Err::<String, String>("workstation suspended".to_string());
+        recover_uncollected_outbox(
+            &unreachable,
+            "sess-1",
+            &mut |_| panic!("nothing was published"),
+            &mut || None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+            unpublished
+        );
+
+        // A published note beside a draft edited afterwards, in a recovery
+        // that cannot store it: what is offered — and kept — is the
+        // published body, never the later edit.
+        write_draft(home.path(), "Published body");
+        run_script(
+            home.path(),
+            &node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Published"}}}),
+            ],
+        );
+        write_draft(home.path(), "Edited after the call, never republished");
+        let mut offered = Vec::new();
+        recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |submission| {
+                offered.push(submission.body);
+                false
+            },
+            &mut || None,
+        )
+        .unwrap_err();
+        assert_eq!(offered, ["Published body"]);
+        assert!(matches!(
+            collect(&exec, "sess-1", None).unwrap(),
+            OutboxState::Delivered(submission) if submission.body == "Published body"
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+            "Edited after the call, never republished"
+        );
+
+        // The next settled recovery ingests that note and removes the draft
+        // before the agent starts.
+        let recovery =
+            recover_uncollected_outbox(&exec, "sess-1", &mut |_| true, &mut || None).unwrap();
+        assert_eq!(recovery.outbox, OutboxRecovery::Ingested);
+        assert_eq!(std::fs::read_dir(&outbox).unwrap().count(), 0);
+    }
+
+    /// One draft fixture for the two-transport comparison.
+    enum DraftFixture {
+        /// No file at the path.
+        Missing,
+        /// A regular file holding these bytes.
+        Bytes(Vec<u8>),
+        /// A sparse regular file of this many bytes.
+        Sparse(u64),
+        Directory,
+        Fifo,
+        /// A symbolic link to a regular file holding this text.
+        SymlinkTo(&'static str),
+        /// A regular file with mode 000.
+        Unreadable,
+    }
+
+    /// What `write_note` answered: the result text, and the body it
+    /// published when it accepted the draft.
+    #[derive(Debug, PartialEq, Eq)]
+    struct DraftOutcome {
+        text: String,
+        body: Option<String>,
+    }
+
+    /// `write_note` has two implementations of the draft read: the laptop's
+    /// (`note_draft::read_draft` behind `note_tool::handle_write_note`) and
+    /// the script's `readDraft`. They must accept and reject the same files,
+    /// in the same words, and publish the same body.
+    #[cfg(unix)]
+    #[test]
+    fn write_note_reads_the_same_drafts_on_both_transports() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping two-transport draft test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        std::fs::create_dir_all(&outbox).unwrap();
+        let draft = outbox.join("draft.md");
+        let shown = draft.to_string_lossy().into_owned();
+        let elsewhere = home.path().join("elsewhere.md");
+        let max = crate::note_draft::DRAFT_MAX_BYTES;
+
+        // Both servers name the draft in their `initialize` instructions.
+        let init = run_script(
+            home.path(),
+            &node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}),
+            ],
+        );
+        assert_eq!(
+            init[0]["result"]["instructions"].as_str().unwrap(),
+            crate::note_tool::draft_instructions(&shown)
+        );
+
+        // (what, fixture, the rejection's wording or None for an accepted
+        // draft with its published body)
+        let cases: Vec<(&str, DraftFixture, Result<&str, &str>)> = vec![
+            ("missing", DraftFixture::Missing, Err("does not exist")),
+            (
+                "whitespace only",
+                DraftFixture::Bytes(b"  \n\t\n".to_vec()),
+                Err("is empty"),
+            ),
+            (
+                "byte order mark only",
+                DraftFixture::Bytes("\u{feff}".into()),
+                Err("is empty"),
+            ),
+            (
+                "byte order mark and whitespace",
+                DraftFixture::Bytes("\u{feff} \n\u{a0}\n".into()),
+                Err("is empty"),
+            ),
+            (
+                "byte order mark before the body",
+                DraftFixture::Bytes("\u{feff}\n# Section\nBody.\n".into()),
+                Ok("# Section\nBody."),
+            ),
+            (
+                "only the first mark is dropped",
+                DraftFixture::Bytes("\u{feff}\u{feff}Body\u{feff}".into()),
+                Ok("\u{feff}Body\u{feff}"),
+            ),
+            (
+                "a mark after whitespace is text",
+                DraftFixture::Bytes(" \u{feff}Body".into()),
+                Ok("\u{feff}Body"),
+            ),
+            (
+                // U+0085 and U+3000 are whitespace to Rust; JavaScript's
+                // own `trim` would keep the first.
+                "unicode whitespace is trimmed alike",
+                DraftFixture::Bytes("\u{85}\u{3000}Body \u{2028}\u{85}".into()),
+                Ok("Body"),
+            ),
+            (
+                "not UTF-8",
+                DraftFixture::Bytes(vec![0xff, 0xfe, b'x']),
+                Err("not valid UTF-8"),
+            ),
+            (
+                "one byte over the cap",
+                DraftFixture::Sparse(max + 1),
+                Err("byte limit"),
+            ),
+            (
+                "a directory",
+                DraftFixture::Directory,
+                Err("not a regular file"),
+            ),
+            ("a FIFO", DraftFixture::Fifo, Err("not a regular file")),
+            (
+                "a link to a regular file",
+                DraftFixture::SymlinkTo("Linked body\n"),
+                Ok("Linked body"),
+            ),
+            (
+                "unreadable",
+                DraftFixture::Unreadable,
+                Err("could not be read: "),
+            ),
+        ];
+
+        for (what, fixture, expected) in cases {
+            // A clean session directory holding only the fixture.
+            for entry in std::fs::read_dir(&outbox).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                if meta.is_dir() {
+                    std::fs::remove_dir_all(&path).unwrap();
+                } else {
+                    std::fs::remove_file(&path).unwrap();
+                }
+            }
+            match &fixture {
+                DraftFixture::Missing => {}
+                DraftFixture::Bytes(bytes) => std::fs::write(&draft, bytes).unwrap(),
+                DraftFixture::Sparse(len) => std::fs::File::create(&draft)
+                    .unwrap()
+                    .set_len(*len)
+                    .unwrap(),
+                DraftFixture::Directory => std::fs::create_dir(&draft).unwrap(),
+                DraftFixture::Fifo => {
+                    let path = std::ffi::CString::new(draft.as_os_str().as_bytes()).unwrap();
+                    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                }
+                DraftFixture::SymlinkTo(text) => {
+                    std::fs::write(&elsewhere, text).unwrap();
+                    std::os::unix::fs::symlink(&elsewhere, &draft).unwrap();
+                }
+                DraftFixture::Unreadable => {
+                    std::fs::write(&draft, "Body").unwrap();
+                    std::fs::set_permissions(&draft, std::fs::Permissions::from_mode(0o000))
+                        .unwrap();
+                    if std::fs::File::open(&draft).is_ok() {
+                        eprintln!("running as root; skipping the unreadable draft");
+                        continue;
+                    }
+                }
+            }
+
+            // The laptop's handler.
+            let slot = crate::note_tool::new_submission_slot();
+            let result = crate::note_tool::handle_write_note(
+                "sess-1",
+                &slot,
+                &draft,
+                WriteNoteParams {
+                    title: "Title".to_string(),
+                    suggested_next_steps: None,
+                },
+            );
+            let content = serde_json::to_value(&result.content).unwrap();
+            let laptop = DraftOutcome {
+                text: content[0]["text"].as_str().unwrap().to_string(),
+                body: crate::note_tool::current_submission(&slot).map(|s| s.body),
+            };
+            assert_eq!(
+                result.is_error == Some(true),
+                laptop.body.is_none(),
+                "{what}"
+            );
+
+            // The script, on the same file.
+            let responses = run_script(
+                home.path(),
+                &node,
+                &[
+                    serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Title"}}}),
+                ],
+            );
+            let is_error = responses[0]["result"]["isError"] == true;
+            let script = DraftOutcome {
+                text: responses[0]["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                body: std::fs::read_to_string(outbox.join("note.md")).ok(),
+            };
+            assert_eq!(is_error, script.body.is_none(), "{what}: {script:?}");
+            assert_eq!(
+                outbox.join("done").exists(),
+                !is_error,
+                "{what}: a rejected draft leaves the outbox untouched"
+            );
+
+            match expected {
+                Ok(body) => {
+                    assert_eq!(laptop.body.as_deref(), Some(body), "{what}");
+                    assert_eq!(script, laptop, "{what}");
+                }
+                // The cause after the colon is the platform's own message
+                // and differs between Rust and Node; the wording up to it
+                // is shared.
+                Err(wording) if matches!(fixture, DraftFixture::Unreadable) => {
+                    let prefix = format!("write_note rejected: the draft file `{shown}` {wording}");
+                    assert!(laptop.text.starts_with(&prefix), "{what}: {laptop:?}");
+                    assert!(script.text.starts_with(&prefix), "{what}: {script:?}");
+                    for text in [&laptop.text, &script.text] {
+                        assert!(
+                            text.ends_with(", then call write_note again."),
+                            "{what}: {text}"
+                        );
+                    }
+                }
+                Err(wording) => {
+                    assert!(laptop.text.contains(wording), "{what}: {laptop:?}");
+                    assert!(laptop.text.contains(&shown), "{what}: {laptop:?}");
+                    assert_eq!(script, laptop, "{what}");
+                }
+            }
+        }
+
+        // A draft exactly at the cap is published whole by both.
+        std::fs::remove_file(&draft).unwrap();
+        std::fs::write(&draft, vec![b'x'; max as usize]).unwrap();
+        let slot = crate::note_tool::new_submission_slot();
+        crate::note_tool::handle_write_note(
+            "sess-1",
+            &slot,
+            &draft,
+            WriteNoteParams {
+                title: "Title".to_string(),
+                suggested_next_steps: None,
+            },
+        );
+        let laptop = crate::note_tool::current_submission(&slot).expect("published");
+        run_script(
+            home.path(),
+            &node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Title"}}}),
+            ],
+        );
+        let script = std::fs::read(outbox.join("note.md")).unwrap();
+        assert_eq!(script.len() as u64, max);
+        assert_eq!(laptop.body.as_bytes(), script.as_slice());
     }
 }

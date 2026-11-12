@@ -182,6 +182,20 @@ end your turn now without repeating it in your reply."
     )
 }
 
+/// The sentence the `staged` server puts in its `initialize` instructions on
+/// both transports, naming the draft `write_note` publishes. The tool's
+/// description says the path "is in your instructions"; this is what makes
+/// that true even for a session whose prompt names no path. The Staged MCP
+/// on Blox spells the same sentence out
+/// (`write_note_reads_the_same_drafts_on_both_transports` compares them).
+pub(crate) fn draft_instructions(draft_path: &str) -> String {
+    format!(
+        "Your note draft file is `{draft_path}`. This file is your note: write it, edit it, and \
+when it is ready call write_note (title and suggested next steps) to publish it; your assistant \
+text is not saved."
+    )
+}
+
 /// Per-turn slot the `write_note` tool fills and the post-completion hooks
 /// drain. Last call wins: each call overwrites the previous submission.
 pub type NoteSubmissionSlot = Arc<Mutex<Option<NoteSubmission>>>;
@@ -295,6 +309,7 @@ pub(crate) fn handle_write_note(
 impl ServerHandler for NoteToolsHandler {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(draft_instructions(&self.draft_path.to_string_lossy()))
     }
 }
 
@@ -359,6 +374,21 @@ mod tests {
             tools[0].description.as_deref(),
             Some(WRITE_NOTE_DESCRIPTION),
             "the #[tool] description must match the shared constant"
+        );
+    }
+
+    #[test]
+    fn initialize_instructions_name_the_draft_file() {
+        let path = PathBuf::from("/tmp/staged-note-draft-s1.md");
+        let handler = NoteToolsHandler::new("s1".to_string(), new_submission_slot(), path);
+        let instructions = handler.get_info().instructions.expect("instructions");
+        assert_eq!(
+            instructions,
+            draft_instructions("/tmp/staged-note-draft-s1.md")
+        );
+        assert!(
+            instructions.starts_with("Your note draft file is `/tmp/staged-note-draft-s1.md`."),
+            "{instructions}"
         );
     }
 

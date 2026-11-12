@@ -59,7 +59,7 @@ const readline = require("readline");
 
 // Reported as `serverInfo.version` and stamped by tools into what they write
 // (`write_note`'s `meta.json` keeps it under its original `helperVersion` key).
-const SERVER_VERSION = 3;
+const SERVER_VERSION = 4;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -215,15 +215,97 @@ function draftRejection(what) {
 }
 
 /**
+ * Whether `code` is a character Rust's `str::trim` strips (the Unicode
+ * White_Space property), which is how the laptop trims a draft. JavaScript's
+ * `trim()` is not the same set: it also strips U+FEFF and leaves U+0085.
+ */
+function isRustWhitespace(code) {
+  return (
+    (code >= 0x09 && code <= 0x0d) ||
+    code === 0x20 ||
+    code === 0x85 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000
+  );
+}
+
+/** `text` trimmed exactly as Rust's `str::trim` would trim it. */
+function rustTrim(text) {
+  let start = 0;
+  let end = text.length;
+  while (start < end && isRustWhitespace(text.charCodeAt(start))) start++;
+  while (end > start && isRustWhitespace(text.charCodeAt(end - 1))) end--;
+  return text.slice(start, end);
+}
+
+/** Up to `limit` bytes from the open file `fd`, read from its start. */
+function readUpTo(fd, limit) {
+  const chunks = [];
+  let total = 0;
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  while (total < limit) {
+    const read = fs.readSync(fd, chunk, 0, Math.min(chunk.length, limit - total), null);
+    if (read === 0) break;
+    chunks.push(Buffer.from(chunk.subarray(0, read)));
+    total += read;
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
  * Read and validate the draft: a regular file, at most DRAFT_MAX_BYTES,
- * UTF-8, non-empty after trimming. Returns `{ body }` or `{ error }` with
- * the same wording as `note_draft::DraftError::describe` on the laptop.
+ * UTF-8, non-empty once a leading byte order mark and the surrounding
+ * whitespace are removed. Returns `{ body }` or `{ error }` with the same
+ * wording as `note_draft::DraftError::describe` on the laptop.
+ *
+ * Same steps, in the same order, as `note_draft::read_draft`. The file is
+ * opened once and everything is asked of the descriptor, so the file that is
+ * checked is the file that is read and the read stops one byte past the cap.
+ * `O_NONBLOCK` keeps the open from waiting on a FIFO that has no writer. The
+ * open follows symbolic links, so a draft that is a link to a regular file
+ * publishes that file. Every failure of the open, the stat or the read is
+ * reported as a rejected call naming the path, never thrown: a draft the
+ * server may not read, or one that vanished, gets the laptop's wording.
  */
 function readDraft(context) {
   const filePath = draftPath(context);
-  let stat;
+  const oversized = function (size) {
+    return {
+      error: draftRejection(
+        "the draft file `" +
+          filePath +
+          "` is " +
+          size +
+          " bytes, over the " +
+          DRAFT_MAX_BYTES +
+          " byte limit. Shorten it"
+      ),
+    };
+  };
+  let bytes;
+  let fd = null;
   try {
-    stat = fs.statSync(filePath);
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      return {
+        error: draftRejection(
+          "`" + filePath + "` is not a regular file. The draft must be a plain file holding the note body"
+        ),
+      };
+    }
+    if (stat.size > DRAFT_MAX_BYTES) return oversized(stat.size);
+    bytes = readUpTo(fd, DRAFT_MAX_BYTES + 1);
+    if (bytes.length > DRAFT_MAX_BYTES) {
+      // The file grew past the cap after the size check.
+      return oversized(Math.max(fs.fstatSync(fd).size, bytes.length));
+    }
   } catch (error) {
     if (error && error.code === "ENOENT") {
       return {
@@ -236,39 +318,35 @@ function readDraft(context) {
       };
     }
     return {
-      error: draftRejection("the draft file `" + filePath + "` could not be read: " + error.message),
-    };
-  }
-  if (!stat.isFile()) {
-    return {
-      error: draftRejection(
-        "`" + filePath + "` is not a regular file. The draft must be a plain file holding the note body"
-      ),
-    };
-  }
-  if (stat.size > DRAFT_MAX_BYTES) {
-    return {
       error: draftRejection(
         "the draft file `" +
           filePath +
-          "` is " +
-          stat.size +
-          " bytes, over the " +
-          DRAFT_MAX_BYTES +
-          " byte limit. Shorten it"
+          "` could not be read: " +
+          (error && error.message ? error.message : error)
       ),
     };
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_error) {
+        // Nothing to do for a descriptor that will not close.
+      }
+    }
   }
-  const bytes = fs.readFileSync(filePath);
   let text;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // `ignoreBOM` keeps a leading U+FEFF in the output, so the one mark that
+    // is dropped is dropped here, in step with the laptop.
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch (_error) {
     return {
       error: draftRejection("the draft file `" + filePath + "` is not valid UTF-8. Rewrite it as UTF-8 text"),
     };
   }
-  const body = text.trim();
+  // One leading U+FEFF is an encoding mark some editors write, not note text.
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  const body = rustTrim(text);
   if (body.length === 0) {
     return {
       error: draftRejection(
@@ -380,7 +458,8 @@ function writeNote(context, args) {
   log(
     "saved note " + JSON.stringify(title) + " (" + body.length + " chars) for session " + context.sessionId
   );
-  return { text: savedMessage(title, body.length), isError: false };
+  // The laptop reports the body's UTF-8 length (`note_tool::saved_message`).
+  return { text: savedMessage(title, Buffer.byteLength(body, "utf8")), isError: false };
 }
 
 const WRITE_NOTE_TOOL = {

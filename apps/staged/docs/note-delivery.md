@@ -39,7 +39,8 @@ the session's draft file (`note_draft::read_draft` locally, `readDraft` in
 the Staged MCP on Blox) and publishes its trimmed contents as the body. The
 draft must be a regular file, valid UTF-8, non-empty after trimming, and at
 most 1 MiB (`DRAFT_MAX_BYTES`; the largest stored note is 145 kB). A draft
-that is missing, empty, oversized, not UTF-8 or not a regular file is a tool
+that is missing, empty, oversized, not UTF-8, not a regular file or
+unreadable is a tool
 error (`isError: true`) that names the file by absolute path and says what
 to fix, for example ``write_note rejected: the draft file
 `/…/draft.md` does not exist. This file is your note: write the full note
@@ -48,9 +49,36 @@ A rejected call leaves the submission slot and the outbox untouched, so an
 earlier publish in the same turn stands. An empty or multi-line title is
 rejected the same way.
 
+Both handlers read the draft the same way, step for step:
+
+- The file is opened once, non-blocking, and the type, the size and the
+  bytes are all taken from that one handle. The file that is checked is the
+  file that is read, so a path swapped after the check changes nothing. A
+  FIFO at the path is rejected as not a regular file instead of blocking
+  the handler on a writer that never comes. The read stops one byte past
+  the cap, so a file that grows after the size check is still rejected as
+  oversized.
+- The open follows symbolic links. A draft that is a link to a regular file
+  publishes that file's contents; a dangling link is a missing draft. This
+  is not a boundary: the agent that could plant the link already has the
+  session's file access and could have copied the file into the draft.
+- One leading byte order mark (U+FEFF) is dropped before the trim. Some
+  editors write one, and without this a draft holding only the mark would
+  be published as an invisible three-byte note. A draft that is only the
+  mark, or the mark and whitespace, is rejected as empty. A second mark, or
+  one anywhere else, is text and is kept.
+- The trim is Rust's `str::trim` (Unicode `White_Space`) on both sides. The
+  script does not use JavaScript's `trim()`, which also strips U+FEFF and
+  leaves U+0085, so the same file yields the same body on both transports.
+- A file the handler may not read (mode 000, for instance) is rejected with
+  ``write_note rejected: the draft file `…` could not be read: <cause>,
+then call write_note again.`` on both; the cause is the platform's own
+  message.
+
 Each call republishes the file; the last call of the turn wins. The result
 text is `Saved note "<title>" (<n> characters from the draft file). The note
-is stored; end your turn now without repeating it in your reply.` The message
+is stored; end your turn now without repeating it in your reply.` (`<n>` is
+the body's UTF-8 length on both transports.) The message
 writer treats a completed `write_note` call like the old separator: the
 session finishes after the response that follows it instead of holding for
 background work.
@@ -81,9 +109,13 @@ What the file holds at run start depends on the stored note
   empty file would trip Claude Code's read-before-write gate, and Write on a
   missing path needs no Read. A stale draft from an earlier run is removed.
 - **Amendment or Pikchr repair** (the stored note has a body): the file is
-  seeded with the stored body before the agent starts, with a leading H1
-  stripped and `staged-media://` references left verbatim, so the agent
-  reads it and edits only what changes.
+  seeded with the stored body before the agent starts, verbatim, so the
+  agent reads it and edits only what changes. Verbatim includes a heading
+  the body opens with and every `staged-media://` reference. The store
+  keeps the body without the title, and `write_note` treats an H1 at the
+  top of the draft as body text, so the seed must not strip one either: a
+  body that opens with `# Section` comes back from a seed, an untouched
+  republish and the store with that heading in place.
 
 When the run is over the local draft is removed. The remote draft is removed
 with the outbox and kept in the states that keep the outbox (below).
@@ -97,12 +129,38 @@ call `write_note`." It adds the amendment rule ("If the file already exists,
 it holds the note as last saved: Read it and edit only what changes instead
 of rewriting it"), and says that assistant text is not saved and that the
 call takes no body. One wording serves a fresh note and an amendment because
-the seed rule above decides whether the file exists. The Pikchr correction
-prompt (`build_pikchr_correction_prompt`) points at the broken block's line
-in the draft file and asks for an edit there followed by another
-`write_note` call with the title and next steps only; the line number is
-relative to the body the call published, which starts at the file's first
-non-blank line. The guidance names the
+the seed rule above decides whether the file exists. When the path is the
+`$HOME/…` spelling of a workstation whose home could not be resolved (see
+_Remote (Blox) sessions_), the guidance adds that `$HOME` there is a
+placeholder: the agent must not use the literal text as a path, and must
+resolve it first or take the absolute path from the `staged` server's
+instructions.
+
+The Pikchr correction prompt (`build_pikchr_correction_prompt`) carries
+where the error was found (`PikchrErrorOrigin`), because the two checks
+read different text and the line number counts that text's lines:
+
+| Error found in                  | `write_note` attached | The prompt asks for                                                                                                                                                                                       |
+| ------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The note the call published     | yes                   | An edit of the block at line N of the draft file, then another `write_note` call with the title and next steps only. The line counts the published body, which starts at the file's first non-blank line. |
+| The final assistant message     | yes                   | The diagram corrected in the draft file (written if it does not exist yet), then a `write_note` call. It says the line number is the reply's and makes no claim about what the draft holds.               |
+| The final assistant message     | no                    | A corrected reply in the `---` format. It says the tool is not available and does not ask for a call.                                                                                                     |
+| A plain session's final message | n/a                   | A complete corrected final response.                                                                                                                                                                      |
+
+The final message is checked first, so an agent that echoed a diagram in its
+reply, or one that delivered through the `---` fallback, gets a prompt about
+the reply. Only an error in the published note may say "your draft file
+holds the note you saved" and point at a line in it: a fresh note whose
+agent never wrote a draft has no such file.
+
+"`write_note` attached" is per run. It is false when the local server did
+not start, or when the Staged MCP on Blox could not be installed, and such a
+run can only deliver through the `---` fallback. The runner then has no
+draft path to hand the prompt builders, and both the correction prompt and
+the follow-up (below) describe the `---` format instead of asking for a
+call that cannot be made.
+
+The guidance names the
 tool both as `write_note` and by its Claude Code name `mcp__staged__write_note`,
 says that Claude Code may have deferred it, and tells the agent to load it
 with `ToolSearch select:mcp__staged__write_note` before calling it rather than
@@ -137,7 +195,11 @@ Source: `src-tauri/src/note_tool.rs` (schema, handler, in-process server),
 Locally the server is an in-process rmcp streamable-HTTP server bound to
 `127.0.0.1:0`, exactly like the `project` and `pikchr` servers, and is passed
 to `session/new` as `McpServer::Http`. The handler is bound to the session's
-draft path when the server starts. On each call it reads the draft and
+draft path when the server starts, and names it in the server's `initialize`
+instructions (`note_tool::draft_instructions`) with the sentence the Staged
+MCP on Blox uses. The tool description says the path "is in your
+instructions", and this is what makes that true on both transports, even
+for a session whose prompt predates the draft file. On each call it reads the draft and
 writes the title, body and next steps into a per-run `NoteSubmissionSlot`
 shared with the message writer, the post-turn Pikchr validation (which
 checks the published body, since the transcript does not carry the note),
@@ -157,8 +219,10 @@ The draft's run lifecycle is three steps in the session runner:
    whatever the terminal status. The slot already holds the body the hooks
    store; the next run seeds again from the stored note.
 
-A project session creates its session row before it builds the prompt, so
-the prompt can name the draft by session id.
+A project session fixes its session id before it builds the prompt, so the
+prompt can name the draft by session id. Only the id exists at that point:
+the `Session` value is built in memory first, the prompt is written into
+it, and the row is inserted afterwards.
 
 ## Remote (Blox) sessions and the workstation outbox
 
@@ -192,7 +256,16 @@ At remote note session start, the session runner:
    written from the stored body for an amendment. It leaves the session
    directory in place (mode 700) either way, so the agent's first write of
    the draft needs no `mkdir`. The seed is asked for after any ingest, so a
-   note recovered a moment ago is what gets seeded;
+   note recovered a moment ago is what gets seeded. The recovery reports
+   two things separately (`RunStartRecovery`): what it found in the outbox,
+   and how the draft came out (`DraftSeed`). A seed that could not be
+   written is not a failed recovery. By then the outbox was read, any
+   waiting note ingested and the files removed, so the run counts as
+   settled and its end-of-run clear is unchanged; the seed failure is
+   logged, the agent finds no draft, and `write_note` names the path to
+   write. The seeding command always exits 0 and prints
+   `staged-draft-seed-failed` when the seed failed, which is how a failed
+   seed is told from a command that never ran;
 3. injects the server into `session/new` / `session/load` with this run's
    turn id.
 
@@ -202,8 +275,37 @@ waiting), each a few seconds on a cold `sq blox` connection. That is the
 price of a session whose deliverable survives the laptop disconnecting. The
 draft adds none: the seed travels base64-encoded inside the clear command,
 and only a seed over 500 kB encoded (no stored note is that large) is
-appended in further commands. When step 2 cannot reach the workstation the
-draft is left as it was; a missing draft is then the tool's "does not exist"
+appended in further commands. The seed is decoded into `.draft.md.seed`
+beside the draft and renamed into place. A chunked seed that fails part-way
+leaves that temp file behind, so every clear script removes it along with
+the draft; otherwise the session directory could never be removed.
+
+**The session directory exists from run start.** Before the draft file,
+the directory was created by the first `write_note` call. Now the run-start
+clear creates it, so a session whose agent never publishes still has an
+empty directory, or one holding an unpublished `draft.md`, until something
+clears it. In the two states that keep the outbox (below) that is what
+stays on the workstation: a lost connection with no note leaves the
+directory and whatever draft the agent had written, and so does a run whose
+recovery did not settle. The next Resume's recovery, or the sweep when it
+stores a late note or expires a hold-stopped row, removes them. Nothing
+reads the directory in between except the collectors, which look only for
+`done`.
+
+**When the run-start recovery does not settle.** If step 2 fails before its
+clear (the outbox could not be read, or a waiting note could not be
+stored), the draft is neither removed nor seeded, and the server is
+attached anyway. `draft.md` is then whatever the lost run left: nothing, the
+note that run published, or text it wrote and never published. The prompt's
+"if the file already exists, it holds the note as last saved" is not true of
+the last case. No round trip is spent on fixing that, for two reasons.
+Nothing in that state can become the note without a call: every reader on
+the laptop (the per-turn collector, the watchdog's probe, the sweep, the
+detached and hold-stopped polling, the next recovery) reads `note.md`
+beside a `done` marker and never the draft, so an unpublished draft is
+stored only if this run's agent calls `write_note` on it. And the usual
+outcome is benign: the agent resumes its own session and carries on from
+its own earlier draft. A missing draft is the tool's "does not exist"
 error, which the agent fixes by writing the file.
 
 The prompt needs the draft's absolute path before the run starts, so the
@@ -213,10 +315,16 @@ with `&& printf '%s' "$HOME"` (`write_bytes_to_remote_then_with`,
 `note_draft::REMOTE_HOME_EPILOGUE`). A note prompt with no grammar to upload
 asks in a `ws exec` of its own, and a workstation that reports no home gets
 the path spelled `$HOME/.staged/sessions/<session-id>/draft.md`, logged at
-warn level. The Staged MCP on Blox also names the absolute path in its
-`initialize` instructions and in every draft error. The runner takes the
-same home from the install probe (`RemoteStagedMcp::home`) for the
-correction and follow-up prompts.
+warn level. That spelling is a placeholder, not a path. A file tool that
+does not expand variables would treat it as relative and create a `$HOME`
+directory inside the worktree before `write_note` rejected the call. So
+`note_delivery_guidance` adds a paragraph whenever the path starts with
+`$HOME/` (`note_draft::names_unresolved_home`): do not use the literal
+`$HOME/...` text as a path; resolve `$HOME` first, or take the absolute
+path from the `staged` server's instructions. The Staged MCP on Blox names
+the absolute path in its `initialize` instructions and in every draft
+error. The runner takes the same home from the install probe
+(`RemoteStagedMcp::home`) for the correction and follow-up prompts.
 
 On the workstation `write_note` reads `draft.md` from the session's scratch
 directory and writes atomically (temp file + rename) into the outbox, the
@@ -319,7 +427,8 @@ The outbox is cleared at the end of every run that observed its state: a
 clean turn (note ingested or not), a Stop the agent acknowledged after a
 `write_note` call, an exhausted repair loop, a crash, and the lost-agent
 cases above except the last. The clear is one more `ws exec` after the terminal status is
-written, so it never holds the row in `running`. It removes `draft.md` along
+written, so it never holds the row in `running`. It removes `draft.md` and
+the seed's temp file `.draft.md.seed` along
 with the three outbox files, and the now-empty
 `~/.staged/sessions/<session-id>/` directory too. Two states keep the outbox
 and the draft
@@ -330,7 +439,12 @@ and the draft
   reads it;
 - a run whose start-of-run recovery did not settle — the workstation dropped
   between installing the Staged MCP on Blox and reading the outbox, or a
-  waiting note could not be stored — and that never collected its own note. An
+  waiting note could not be stored — and that never collected its own note.
+  (A draft seed that failed after the outbox was read and cleared is not
+  this state: `remote_outbox_recovery_settled_for_run` counts that run as
+  settled. Treating it as unsettled kept the outbox after a Stop that
+  followed `write_note`, and the next run's recovery then ingested the note
+  the Stop was meant to discard.) An
   earlier run's finished note may still be sitting there unread (the per-turn
   collector reports it as a stale turn and ignores it), and the clear would
   delete the only copy; the next run's recovery gets another chance. Once the
@@ -484,6 +598,17 @@ tool with `title` and `suggested_next_steps`". A draft the agent wrote but
 never published is covered by the same prompt: it only has to call the
 tool. It does this once; a second silent turn stores the empty note as
 before, so a session cannot loop.
+
+A run with no `write_note` tool attached (the local server did not start,
+or the Staged MCP on Blox could not be installed) gets a different
+follow-up, because the call it would ask for cannot be made: "The
+`write_note` tool is not available in this session, so Staged takes the
+note from your reply instead. Reply with a line containing only `---`, then
+the note: a markdown H1 title (`# <Title>`) on the next line, followed by
+the full note body". That is the format the fallback parser below accepts.
+The session's first prompt still describes `write_note`, since it is built
+before the run knows whether the tool will attach; the follow-up is where
+the run corrects it.
 
 The `---` parser is kept only as a fallback. When the hooks receive no
 submission they scan the turn's assistant messages as before, and log at warn
@@ -742,7 +867,11 @@ them by accident:
   body to arrive, and mirroring an inline body into the file would make the
   file a copy rather than the note. The title stays an argument (required in
   both schemas) rather than the draft's H1, so the body never needs parsing
-  for it and an H1 in the draft stays body text. Publishing stays an
+  for it and an H1 in the draft stays body text. The seed follows the same
+  rule and writes the stored body verbatim; stripping a leading H1 from the
+  seed, as the first version did for older notes that might carry a title
+  line, silently dropped a real `# Section` heading on the next amendment
+  (and no stored note was found to start with a title line). Publishing stays an
   explicit call rather than "whatever the file holds when the turn ends":
   a half-written draft must not become the note because a turn ended.
 - **A fresh note gets no file; an amendment gets the stored body.** An empty
@@ -808,7 +937,7 @@ fresh note`. The agent writes that file with its file tool, then calls
    holds an embedded image, send "Please update the note: add a short
    Risks section". The log shows `note draft … seeded with the stored note
 for amendment`, and before the agent's first tool call the file holds the
-   stored body with no H1 and the `staged-media://` reference unchanged
+   stored body verbatim, with the `staged-media://` reference unchanged
    (`cat "$TMPDIR"/staged-note-draft-<session-id>.md`). The transcript must
    show a Read of the draft, an Edit that adds the section, and a
    `write_note` call; it must not show a Write of the whole note. The stored
@@ -840,8 +969,8 @@ note draft at <path>` names the same file. After the `write_note` call,
    Goose amendment on Blox: on a Goose remote note session whose note is
    stored, send a follow-up asking for one added paragraph. Before the
    agent's first tool call, `cat ~/.staged/sessions/<session-id>/draft.md`
-   on the workstation shows the stored body (no H1, `staged-media://`
-   references verbatim); no extra `ws exec` was spent on it (the clear
+   on the workstation shows the stored body verbatim (`staged-media://`
+   references included); no extra `ws exec` was spent on it (the clear
    command carries the base64 seed). Goose must open the file by the
    absolute path from its prompt, edit it in place, and call
    `staged: write note` with a title and next steps only. The stored note
@@ -935,16 +1064,26 @@ workstation outbox; storing it`, the note fills in on the timeline, the
    nothing into the outbox.
 
 Automated coverage: `note_draft::tests` (paths, each bad-draft case and its
-error text, the seed with H1 stripped and media references kept, seeding and
-removal, the prompt path and the home epilogue), `note_tool::tests` (schema
-with a required `title` and no `body`, the handler publishing and
+error text, one leading byte order mark dropped before the trim, a symlink
+followed, a FIFO rejected without blocking, an unreadable file, the seed
+verbatim with a leading heading and media references kept, a seeded draft
+republishing the stored body, seeding and removal, the prompt path, the
+unresolved-home placeholder and the home epilogue), `note_tool::tests`
+(schema with a required `title` and no `body`, the `initialize`
+instructions naming the draft, the handler publishing and
 republishing the draft, each bad draft rejected by path without touching the
 slot),
 `session_runner::tests::note_draft` (a fresh local run removes a stale draft
-and creates none, an amending run seeds it for branch and project notes, the
+and creates none, an amending run seeds it for branch and project notes, a
+body that opens with `# Section` survives seed, untouched republish and
+store twice over, the
 draft is removed at run end, a remote run start costs the same two commands
-with or without a seed, the follow-up and Pikchr repair prompts name the
-draft),
+with or without a seed, a failed seed leaves the recovery settled, the
+follow-up and Pikchr repair prompts name the
+draft, an error found in the reply makes no claim about the draft, a run
+without the tool is pointed at the `---` format and never asked to call
+`write_note`), `session_commands::tests` (the `$HOME` placeholder caution
+appears with an unresolved home and only then),
 `remote_staged_mcp::tests` (the Staged MCP on Blox itself: install,
 injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),
 `remote_staged_mcp::note_outbox::tests` (outbox parsing including a
@@ -953,9 +1092,16 @@ per-turn collection into the slot, start-of-run recovery that discards
 unusable content, `write_note` run as a subprocess with fake JSON-RPC
 including a rewrite blocked between its renames and a call with no
 `draft.md`, the clear removing `draft.md`, the seed riding the recovery's
-clear command and a seed too large for one command, local `sh` run of the
+clear command and a seed too large for one command, a failed seed reported
+apart from the settled recovery, every clear removing `.draft.md.seed`, a
+draft left by a lost run never collected or ingested without a call, local
+`sh` run of the
 collect, clear, seed-in-clear and recovery scripts, schema parity with the
-Rust tool), `session_runner::tests::detached_recovery` (claim-first
+Rust tool, and `write_note_reads_the_same_drafts_on_both_transports`, which
+runs the laptop's handler and the script over the same draft
+files — missing, blank, byte order mark cases, Unicode whitespace, not
+UTF-8, over and at the cap, a directory, a FIFO, a symlink, an unreadable
+file — and requires the same result text and published body), `session_runner::tests::detached_recovery` (claim-first
 sweep: one winner, resume during collection; the poll window and its marker;
 a poll that finds the note claims with the storing marker, then ingests once,
 then completes; two instances that read the row before either claimed settle

@@ -20,10 +20,12 @@
   import ProjectsSidebar from './lib/features/projects/ProjectsSidebar.svelte';
   import ProjectDeleteDialog from './lib/features/projects/ProjectDeleteDialog.svelte';
   import ProjectTransferDialog from './lib/features/projects/ProjectTransferDialog.svelte';
+  import NewTagDialog from './lib/features/tags/NewTagDialog.svelte';
   import ResumeOnLaunchDialog from './lib/features/sessions/ResumeOnLaunchDialog.svelte';
   import ControlAuthorizationDialog from './lib/features/settings/ControlAuthorizationDialog.svelte';
   import { resumeOnLaunch } from './lib/features/sessions/resumeOnLaunch.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
+  import BoardView from './lib/features/board/BoardView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import DiffModal from './lib/features/diff/DiffModal.svelte';
@@ -67,6 +69,7 @@
   import { projectFiltersStore } from './lib/features/projects/projectFilters.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { projectsDataStore } from './lib/stores/projectsData.svelte';
+  import { tagsStore } from './lib/stores/tags.svelte';
   import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { sweepExpiredDrafts } from './lib/shared/draftCache';
@@ -183,7 +186,16 @@
   // window-local; see windowTitle.ts for the format and the IPC guards.
   // =========================================================================
   $effect(() => {
-    void applyWindowTitle(formatWindowTitle(projectFiltersStore.activeFilters));
+    // The base route's board, if that's what the workspace shows: under
+    // settings or a diff the board is still the window's view.
+    const layer = navigation.projectLayer;
+    const boardName =
+      !navigation.homeActive && layer?.kind === 'board'
+        ? (tagsStore.catalog.groupsById.get(layer.groupId)?.name ?? null)
+        : null;
+    void applyWindowTitle(
+      formatWindowTitle(projectFiltersStore.activeFilters, tagsStore.tagsById, boardName)
+    );
   });
 
   // Refresh git state (TTL-gated) for the selected project's branches when the
@@ -264,6 +276,15 @@
     if (navigation.currentRoute.kind !== 'project') return false;
 
     const event = new CustomEvent('staged:delete-current-project', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }
+
+  /** The T shortcut: ask the project page to open its tag picker. */
+  function requestOpenTagPicker(): boolean {
+    if (navigation.currentRoute.kind !== 'project') return false;
+
+    const event = new CustomEvent('staged:open-tag-picker', { cancelable: true });
     window.dispatchEvent(event);
     return event.defaultPrevented;
   }
@@ -381,6 +402,11 @@
     // Keep the shared project-list cache fresh for the app's lifetime — the
     // store dedupes, so starting before any view consumes it is safe.
     projectsDataStore.startListeners();
+    // Tags back every project's status icon, so they load alongside the
+    // project list rather than waiting on a view; icons stay placeholders
+    // until they land.
+    tagsStore.startListeners();
+    void tagsStore.load();
     // Run-action state feeds the shared project filters (Running chip,
     // filtered lists), which every route renders via the sidebar or the
     // landing grid — so its listeners are app-lifetime too. A view-scoped
@@ -501,6 +527,16 @@
         keys: ['Backspace', 'Delete'],
         modifiers: { meta: true },
         handler: requestDeleteCurrentProject,
+      },
+      // The registry's first unmodified letter: the handler declines,
+      // leaving the key alone, unless the project page is showing with no
+      // dialog or menu open (see ProjectHome). Text fields never trigger it.
+      {
+        id: 'project-tags',
+        description: 'Tag project',
+        category: 'app',
+        keys: ['t'],
+        handler: requestOpenTagPicker,
       },
       {
         id: 'search-find',
@@ -629,6 +665,7 @@
     unlistenStoreReset?.();
     unlistenUpdaterOwnerAvailable?.();
     projectsDataStore.stopListeners();
+    tagsStore.stopListeners();
     projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();
     stopUpdaterMirror?.();
@@ -768,10 +805,12 @@
               {#if navigation.projectLayer}
                 {@const projectLayer = navigation.projectLayer}
                 <!-- Hoisted out of ProjectHome so it survives project↔repos
-                     transitions. -->
+                     and project↔board transitions. -->
                 <ProjectsSidebar />
                 {#if projectLayer.kind === 'repos'}
                   <ReposListView />
+                {:else if projectLayer.kind === 'board'}
+                  <BoardView groupId={projectLayer.groupId} />
                 {:else}
                   <ProjectHome selectedProjectId={projectLayer.projectId} />
                 {/if}
@@ -822,6 +861,8 @@
   <ProjectDeleteDialog />
   <!-- Shared transfer confirmation, likewise. -->
   <ProjectTransferDialog />
+  <!-- "New tag…" from a project's context menu (the menu unmounts as it closes). -->
+  <NewTagDialog />
 
   <!-- Launch-time "Resume interrupted sessions?" — opened by resumeOnLaunch.load()
        from onMount on the desktop main window; stays closed everywhere else. -->

@@ -7,8 +7,8 @@
   grid. An empty query gets the curated shortlist; anything else substring-
   matches the kebab-case names, capped so the grid never tries to paint 1,600
   SVGs. "Default" clears back to the action type's own icon; callers without
-  an action type get no Default entry and supply their own trigger icon and
-  shortlist.
+  an action type supply their own trigger icon and shortlist, and get a
+  clear entry only if they name it (`clearLabel`, e.g. a tag's "No icon").
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
@@ -30,9 +30,13 @@
     curated?: readonly string[];
     /** Renders the trigger's icon; defaults to the action's icon. */
     triggerIcon?: Snippet;
+    /** Without an action type: label an entry that selects null. */
+    clearLabel?: string;
+    /** The clear entry's icon. */
+    clearIcon?: Snippet;
   }
 
-  let { icon, actionType, onSelect, curated, triggerIcon }: Props = $props();
+  let { icon, actionType, onSelect, curated, triggerIcon, clearLabel, clearIcon }: Props = $props();
 
   let open = $state(false);
   let query = $state('');
@@ -88,6 +92,18 @@
       >
         <TypeIcon size={14} />
         Default for {actionType}
+      </button>
+    {:else if clearLabel}
+      <button
+        class="icon-default"
+        class:selected={icon === null}
+        onclick={() => {
+          onSelect(null);
+          open = false;
+        }}
+      >
+        {@render clearIcon?.()}
+        {clearLabel}
       </button>
     {/if}
 

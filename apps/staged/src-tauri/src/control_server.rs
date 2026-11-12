@@ -61,8 +61,13 @@
 //! **What a caller can do.** The fixed verb table: [`ALLOWED_COMMANDS`] maps
 //! the `stagedctl` surface to specific dispatch commands — every one
 //! UI-visible and read-only or reversible — and nothing else is reachable.
-//! No deletes, no history rewrites, no `create_pr` / `push_branch`. Exposing
-//! a destructive verb reopens the auth design and must come with a
+//! That includes the project-tag commands: assigning a project's tags, and
+//! the reversible catalog edits (create, rename, recolour, move, reorder,
+//! the icon and sidebar flags), each of which Settings › Tags undoes with
+//! one more edit. No deletes — `delete_tag` and `delete_tag_group` drop
+//! assignments on every project carrying the tag, which nothing in the UI
+//! undoes — no history rewrites, no `create_pr` / `push_branch`. Exposing a
+//! destructive verb reopens the auth design and must come with a
 //! [`PROTOCOL_VERSION`] bump.
 //!
 //! **Discovery.** Once the listener is bound — synchronously at app setup,
@@ -167,6 +172,21 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "cancel_session",
     // image add
     "create_image",
+    // tag list / show, project tags / list --tag
+    "get_tag_state",
+    // project tag / untag
+    "set_project_group_tag",
+    "set_project_tag_assigned",
+    // tag create / edit / move
+    "create_tag",
+    "update_tag",
+    "move_tag",
+    // tag group create / rename / set-icon / set-sidebar / reorder
+    "create_tag_group",
+    "rename_tag_group",
+    "set_icon_tag_group",
+    "set_tag_group_sidebar",
+    "reorder_tag_groups",
 ];
 
 /// Request body cap for `POST /api/invoke/{command}`. Control payloads are
@@ -1592,20 +1612,31 @@ mod tests {
     /// The allowlist is the security boundary: pin it exactly so growing the
     /// CLI surface is always a deliberate, reviewed change here.
     #[test]
-    fn allowlist_is_exactly_the_v1_command_table() {
+    fn allowlist_is_exactly_the_command_table() {
         let expected = [
             "cancel_session",
             "create_image",
+            "create_tag",
+            "create_tag_group",
             "get_active_sessions",
             "get_branch_timeline",
             "get_project_timeline",
             "get_session",
+            "get_tag_state",
             "list_branches_for_project",
             "list_project_notes",
             "list_project_repos",
             "list_projects",
+            "move_tag",
+            "rename_tag_group",
+            "reorder_tag_groups",
+            "set_icon_tag_group",
+            "set_project_group_tag",
+            "set_project_tag_assigned",
+            "set_tag_group_sidebar",
             "start_branch_session",
             "start_project_session",
+            "update_tag",
         ];
         let mut actual: Vec<&str> = ALLOWED_COMMANDS.to_vec();
         actual.sort_unstable();

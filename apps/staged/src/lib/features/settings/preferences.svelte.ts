@@ -26,11 +26,7 @@ import { darkMode } from '../../stores/isDark.svelte';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
 import { normalizeAgentEnvVars, type AgentEnvVar, type AgentEnvVars } from './agentEnvVars';
 import type { AcpConfigValueSelection, ProjectLocation } from '../../types';
-import {
-  DEFAULT_PROJECT_STATUS_OPTIONS,
-  normalizeProjectStatusOptions,
-  type ProjectStatusOption,
-} from '../projects/projectStatusDisplay';
+import { loadBoardViewPrefs } from '../board/boardViewPrefs.svelte';
 import {
   DEFAULT_COMPOSER_SEND_MODE,
   normalizeComposerSendMode,
@@ -92,8 +88,6 @@ const AGENT_ENV_VARS_STORE_KEY = 'agent-env-vars';
 const DIAGRAM_SUBSESSION_CONFIG_STORE_KEY = 'diagram-subsession-config';
 /** Prefix applied to branch names inferred from project names (backend-read). */
 const BRANCH_PREFIX_STORE_KEY = 'branch-prefix';
-/** The statuses a project can be manually set to (frontend-only). */
-const PROJECT_STATUS_OPTIONS_STORE_KEY = 'project-status-options';
 /**
  * How the chat composer submits to a running session that can take a message
  * now: queue it for after the turn, or send it live. Global, not per session
@@ -223,14 +217,6 @@ export const preferences = $state({
    */
   branchPrefix: '',
   /**
-   * The statuses a project can be set to in place of its computed PR status.
-   * Projects store the chosen option's id; one whose option is removed here
-   * falls back to Default.
-   */
-  projectStatusOptions: DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({
-    ...o,
-  })) as ProjectStatusOption[],
-  /**
    * The chat composer's last-used submit mode for running sessions whose
    * agent can take a message now. Remembered globally; defaults to queueing.
    */
@@ -326,11 +312,6 @@ function ensureSystemModeListener() {
 // Initialization
 // =============================================================================
 
-const projectStatusOptionsSync = syncedStoreValue(PROJECT_STATUS_OPTIONS_STORE_KEY, (value) => {
-  preferences.projectStatusOptions =
-    normalizeProjectStatusOptions(value) ?? DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o }));
-});
-
 // Global, so a mode picked in one window must reach the others: a stale `send`
 // would deliver into (or interrupt) a running turn the user meant to queue behind.
 const composerSendModeSync = syncedStoreValue(COMPOSER_SEND_MODE_STORE_KEY, (value) => {
@@ -360,7 +341,6 @@ const agentEnvVarsSync = syncedStoreValue(AGENT_ENV_VARS_STORE_KEY, (value) => {
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    projectStatusOptionsSync.dispose();
     composerSendModeSync.dispose();
     newProjectLocationSync.dispose();
     transferUncommittedChangesSync.dispose();
@@ -376,16 +356,14 @@ if (import.meta.hot) {
 export async function initPreferences(): Promise<void> {
   await initPersistentStore();
 
-  // Loads without waiting for the web event socket to connect. Statuses
-  // belong to the first project paint, ahead of the slower diff-theme loading.
-  await projectStatusOptionsSync.start();
-
   // The new-project location seeds forms that can be in the first paint (the
-  // splash screen's), so it loads alongside these rather than after `loaded`.
+  // splash screen's), and the home page's Grid/Board choice decides what it
+  // paints, so they load alongside these rather than after `loaded`.
   const [savedSize, savedMode] = await Promise.all([
     getStoreValue<number>(SIZE_STORE_KEY),
     getStoreValue<AppMode>(APP_MODE_STORE_KEY),
     newProjectLocationSync.start(),
+    loadBoardViewPrefs(),
   ]);
 
   // Load size
@@ -578,21 +556,6 @@ export function setTransferUncommittedChanges(include: boolean): void {
 export function setTransferIgnoredFiles(include: boolean): void {
   preferences.transferIgnoredFiles = include;
   transferIgnoredFilesSync.save(include);
-}
-
-// =============================================================================
-// Project Status Option Actions
-// =============================================================================
-
-/** Replace the list of statuses a project can be set to. */
-export function setProjectStatusOptions(options: ProjectStatusOption[]): void {
-  preferences.projectStatusOptions = options;
-  projectStatusOptionsSync.save(options);
-}
-
-/** Restore the built-in project statuses. */
-export function resetProjectStatusOptions(): void {
-  setProjectStatusOptions(DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o })));
 }
 
 // =============================================================================

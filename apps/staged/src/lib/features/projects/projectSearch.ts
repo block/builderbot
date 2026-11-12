@@ -7,10 +7,10 @@
  * ProjectsList.
  *
  * The work is split by how often it runs. `buildSearchSnapshot` runs when
- * the data changes: it lower-cases every name, repo label, branch and title
- * once, and hands back the previous snapshot when nothing matching reads has
- * moved, so a PR status poll (fresh branch objects, same names and titles)
- * doesn't re-run a search held on screen. `searchProjects` runs per
+ * the data changes: it lower-cases every name, repo label, branch, tag and
+ * title once, and hands back the previous snapshot when nothing matching
+ * reads has moved, so a PR status poll (fresh branch objects, same names and
+ * titles) doesn't re-run a search held on screen. `searchProjects` runs per
  * keystroke: it parses the query once, tests the prepared strings in place,
  * scores each match (FIELD_WEIGHTS), builds a label only for the item each
  * result shows, and returns the ranked matches and their reasons from one
@@ -40,9 +40,10 @@ import { projectDisplayName } from '../../shared/utils';
 // equal scores keep the unsearched order. Each term scores the weight of the
 // best field it was found in, and a project's score is the sum over its
 // terms, plus MATCH_BONUS.allInName when every term is in the project's
-// name, or MATCH_BONUS.allInOneItem when a single branch (with its PR), note
-// or review holds every term of a multi-word query. The weights are powers
-// of two, so a one-word query orders strictly by the best field it hit.
+// name, or MATCH_BONUS.allInOneItem when a single branch (with its PR), tag,
+// note or review holds every term of a multi-word query. The weights are
+// powers of two, so a one-word query orders strictly by the best field it
+// hit; tags and repo labels share a tier.
 //
 // A bare `pr` is a PR term. In a project with a PR it scores as the PR,
 // however many words of the name contain the two letters (improved, project,
@@ -53,6 +54,11 @@ import { projectDisplayName } from '../../shared/utils';
 // repo label holds is one the card already shows, so it never puts an item
 // on the reason line, even where an item's field outscores the repo label
 // and lifts the card.
+//
+// A project's tags are items, not identity: they score with the repo labels,
+// as both are labels on the card, but a tag that explains a match gets the
+// reason line. Sidebar rows show no tag chips, and a grid card shows its
+// icon group's tag only as an icon and at most three chips.
 
 /** What a query term is worth, by the best field it was found in. */
 export const FIELD_WEIGHTS = {
@@ -64,6 +70,8 @@ export const FIELD_WEIGHTS = {
   branch: 16,
   /** A repo's path, fork head repo or badge short name. */
   repo: 8,
+  /** The name of one of the project's tags. */
+  tag: 8,
   /** A project note's title. */
   projectNote: 4,
   /** A branch note's title. */
@@ -80,6 +88,7 @@ export type SearchField = keyof typeof FIELD_WEIGHTS;
 const MAX_ITEM_WEIGHT = Math.max(
   FIELD_WEIGHTS.pr,
   FIELD_WEIGHTS.branch,
+  FIELD_WEIGHTS.tag,
   FIELD_WEIGHTS.projectNote,
   FIELD_WEIGHTS.note,
   FIELD_WEIGHTS.review
@@ -95,13 +104,14 @@ const FIELD_BIT: Record<SearchField, number> = {
   projectNote: 16,
   note: 32,
   review: 64,
+  tag: 128,
 };
 
 /** Added once to a project's score when every term lands in one place. */
 export const MATCH_BONUS = {
   /** Every term is in the project's name. */
   allInName: 64,
-  /** One branch, note or review holds every term. Multi-word queries only:
+  /** One branch, tag, note or review holds every term. Multi-word queries only:
    *  one word is in one item whenever an item holds it at all. */
   allInOneItem: 32,
 } as const;
@@ -131,9 +141,11 @@ export interface SearchContext {
   repoShortName?: (githubRepo: string, subpath: string | null) => string | undefined;
   /** Note, project-note and review titles; absent until the index loads. */
   index?: ProjectSearchIndex | null;
+  /** The names of the project's tags, pending writes included (tagsStore). */
+  tagNames?: (projectId: string) => readonly string[];
 }
 
-export type MatchReasonKind = 'branch' | 'pr' | ProjectSearchItemKind;
+export type MatchReasonKind = 'branch' | 'pr' | 'tag' | ProjectSearchItemKind;
 
 /**
  * Why a project matched when its name and repos alone don't explain it: the
@@ -174,16 +186,16 @@ export interface ProjectSearchResult {
 /** A searchable thing inside a project, its text lower-cased in advance. */
 interface SearchItem {
   kind: MatchReasonKind;
-  /** The branch name or title, as shown. */
+  /** The branch name, tag name or title, as shown. */
   name: string;
   /** The PR's title, on a branch with a PR once a poll or link brings it. */
   prTitle: string | null;
   /** Matched exactly by a number term, never as text: `12` must not find PR 123. */
   prNumber: number | null;
   updatedAt: number;
-  /** `name` lower-cased: a branch name or a title. */
+  /** `name` lower-cased: a branch name, tag name or title. */
   text: string;
-  /** The field `text` is: a branch name, or the index item's kind. */
+  /** The field `text` is: a branch name, a tag, or the index item's kind. */
   field: SearchField;
   /** `prTitle` lower-cased, in the `pr` field. */
   prText: string | null;
@@ -205,6 +217,8 @@ export interface SearchSnapshotEntry {
    *  an entry is kept, so an unchanged list skips the item-by-item compare. */
   branches: readonly Branch[] | undefined;
   indexItems: readonly ProjectSearchIndexItem[] | undefined;
+  /** The project's tag names, the source of its tag items. */
+  tagNames: readonly string[];
 }
 
 /** Everything a search matches against, by project id (buildSearchSnapshot). */
@@ -272,11 +286,12 @@ function repoLabels(project: Project, ctx: SearchContext): string[] {
 /**
  * The project's items: one per branch (its name, PR number and PR title
  * together, so the reason line and the one-item bonus see a branch and its
- * PR as one thing), then whatever the index holds for it.
+ * PR as one thing), then whatever the index holds for it, then one per tag.
  */
 function projectItems(
   branches: readonly Branch[] | undefined,
-  indexItems: readonly ProjectSearchIndexItem[] | undefined
+  indexItems: readonly ProjectSearchIndexItem[] | undefined,
+  tagNames: readonly string[]
 ): SearchItem[] {
   const items: SearchItem[] = [];
   for (const b of branches ?? []) {
@@ -305,6 +320,21 @@ function projectItems(
       field: item.kind,
       prText: null,
       fields: FIELD_BIT[item.kind],
+    });
+  }
+  for (const name of tagNames) {
+    // Tags carry no recency: on a score tie a dated item shows over a tag,
+    // and of two tags, the first in catalog order.
+    items.push({
+      kind: 'tag',
+      name,
+      prTitle: null,
+      prNumber: null,
+      updatedAt: 0,
+      text: name.toLowerCase(),
+      field: 'tag',
+      prText: null,
+      fields: FIELD_BIT.tag,
     });
   }
   return items;
@@ -341,20 +371,27 @@ function projectEntry(
   const repos = repoLabels(project, ctx);
   const branches = ctx.branchesByProject.get(project.id);
   const indexItems = ctx.index?.get(project.id);
+  const tagNames = ctx.tagNames?.(project.id) ?? NO_STRINGS;
   let items: readonly SearchItem[];
-  if (prev && prev.branches === branches && prev.indexItems === indexItems) {
+  if (
+    prev &&
+    prev.branches === branches &&
+    prev.indexItems === indexItems &&
+    sameStrings(prev.tagNames, tagNames)
+  ) {
     items = prev.items;
   } else {
-    const built = projectItems(branches, indexItems);
+    const built = projectItems(branches, indexItems, tagNames);
     items = prev && sameItems(prev.items, built) ? prev.items : built;
   }
   if (prev && items === prev.items && name === prev.name && sameStrings(prev.repos, repos)) {
     prev.branches = branches;
     prev.indexItems = indexItems;
+    prev.tagNames = tagNames;
     return prev;
   }
   const hasPr = items.some((item) => item.prNumber !== null);
-  return { name, repos, items, hasPr, branches, indexItems };
+  return { name, repos, items, hasPr, branches, indexItems, tagNames };
 }
 
 /**
@@ -363,7 +400,7 @@ function projectEntry(
  *
  * Pass the snapshot this returned last time as `previous`: when nothing a
  * search reads — names, repo labels, branch names, PR numbers and titles,
- * index titles, and the recency that picks a reason — has changed,
+ * index titles, tag names, and the recency that picks a reason — has changed,
  * `previous` itself comes back, so a `$derived` over it doesn't invalidate
  * the results when, say, a PR status poll replaces every branch object with
  * one whose checks moved. Projects missing from the snapshot match on their
@@ -393,6 +430,7 @@ function nameOnlyEntry(project: Project): SearchSnapshotEntry {
     hasPr: false,
     branches: undefined,
     indexItems: undefined,
+    tagNames: NO_STRINGS,
   };
 }
 
@@ -528,8 +566,8 @@ function reasonFor(
  * NO_MATCH; its reason, if it shows one, in `s.reason`.
  *
  * A project matches when every term is a substring of some field of it —
- * the name, a repo label, any branch name, PR or title — case-insensitively,
- * in any order, however the terms spread across them. A number term (`123`,
+ * the name, a repo label, any branch name, PR, tag or title —
+ * case-insensitively, in any order, however the terms spread across them. A number term (`123`,
  * `#123`, `pr123`, `pr#123`) also matches a branch whose PR is exactly that
  * number, and a bare `pr` any branch with a PR, so `pr 123` and `PR #123`
  * find PR 123 the way its label reads.

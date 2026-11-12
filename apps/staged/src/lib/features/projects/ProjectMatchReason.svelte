@@ -15,6 +15,7 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+  import TagIcon from '@lucide/svelte/icons/tag';
   import { clampText, labelTerms, matchLabelSegments } from './matchReasonLabel';
   import type { MatchReason, MatchReasonKind } from './projectSearch';
 
@@ -30,6 +31,7 @@
   const ICONS = {
     branch: GitBranch,
     pr: GitPullRequest,
+    tag: TagIcon,
     note: FileText,
     projectNote: FileText,
     review: FileSearch,
@@ -38,6 +40,7 @@
   const KIND_NAMES: Record<MatchReasonKind, string> = {
     branch: 'Branch',
     pr: 'Pull request',
+    tag: 'Tag',
     note: 'Note',
     projectNote: 'Project note',
     review: 'Review',

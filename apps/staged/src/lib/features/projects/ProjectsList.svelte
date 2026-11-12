@@ -5,18 +5,14 @@
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import { fade } from 'svelte/transition';
-  import Mail from '@lucide/svelte/icons/mail';
   import Plus from '@lucide/svelte/icons/plus';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
-  import Trash2 from '@lucide/svelte/icons/trash-2';
-  import CloudOff from '@lucide/svelte/icons/cloud-off';
   import type { Project } from '../../types';
   import RepoCard from './RepoCard.svelte';
   import { projectDisplayName, projectActivity } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
+  import { disconnectedActivity } from '../../shared/disconnectedSession';
   import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
-  import { disconnectedActivity, disconnectedLabel } from '../../shared/disconnectedSession';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
@@ -31,29 +27,30 @@
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
-  import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
-  import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
-  import { transferringTitle } from './projectTransfer';
+  import ProjectCardTagChips from './ProjectCardTagChips.svelte';
+  import ProjectCardMenuContent from './ProjectCardMenuContent.svelte';
+  import ProjectCardStatusIndicator from './ProjectCardStatusIndicator.svelte';
+  import ProjectRepoBadges from './ProjectRepoBadges.svelte';
   import { projectActions } from './projectActions.svelte';
   import { neighbourAfterRemove } from './focusAfterRemove';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
-  import Spinner from '../../shared/Spinner.svelte';
-  import SineWave from '../../shared/SineWave.svelte';
   import SearchField from '../../shared/SearchField.svelte';
-  import RepoLabel from '../../shared/RepoLabel.svelte';
   import { Button } from '$lib/components/ui/button';
+  import { tagsStore } from '../../stores/tags.svelte';
+  import ProjectsBoard from '../board/ProjectsBoard.svelte';
+  import BoardToolbar from '../board/BoardToolbar.svelte';
+  import { resolveBoardGroup } from '../board/boardPrefs';
+  import { boardViewPrefs, setProjectsViewMode } from '../board/boardViewPrefs.svelte';
 
   import {
     finishProjectsListRestore,
     projectsListViewState,
     setProjectsListScrollTop,
   } from './projectsListViewState.svelte';
-  import { darkMode } from '../../stores/isDark.svelte';
-  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
-  import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
+  import ProjectsViewToggle from './ProjectsViewToggle.svelte';
   import {
     projectShortcutNumbers,
     searchOrderHold,
@@ -88,6 +85,12 @@
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
+
+  // Grid or Board, remembered per window (boardViewPrefs). The board shows the
+  // same cards, chips and search as the grid, arranged by one tag group.
+  let boardMode = $derived(boardViewPrefs.viewMode === 'board');
+  let boardGroup = $derived(resolveBoardGroup(boardViewPrefs.groupId, tagsStore.catalog));
+  let board = $state<ReturnType<typeof ProjectsBoard> | null>(null);
 
   // This view is the workspace's home layer: mounted on the first visit and
   // then kept, covered, under the project view (App.svelte). Anything that
@@ -252,7 +255,9 @@
 
       mainPanelEl.scrollTop = projectsListViewState.scrollTop;
       const targetProjectId = projectsListViewState.returnTargetProjectId;
-      const targetEl = targetProjectId ? projectCardElements.get(targetProjectId) : null;
+      const targetEl = targetProjectId
+        ? (projectCardElements.get(targetProjectId) ?? board?.cardFor(targetProjectId))
+        : null;
       targetEl?.scrollIntoView({ block: 'nearest' });
       restored = true;
     } finally {
@@ -419,8 +424,11 @@
       verifyCommandKeyState(e);
     }
 
-    // Command+1-9 to open projects by number
-    if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+    // Command+1-9 to open projects by number. Grid only: the numbers are
+    // the grid's reading order, which the board's columns don't share, and
+    // only grid cards show them, so on the board the shortcut would open a
+    // project the user can't see numbered anywhere.
+    if (!boardMode && (e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
       e.preventDefault();
       const index = parseInt(e.key) - 1;
       if (index < filteredProjects.length) {
@@ -489,7 +497,11 @@
 
 <div class="projects-list-page">
   <div class="main-panel" bind:this={mainPanelEl} onscroll={handleMainPanelScroll}>
-    <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
+    <div
+      class="content"
+      class:empty-layout={!loading && !error && projects.length === 0}
+      class:board={boardMode}
+    >
       {#if error}
         <div class="state error">{error}</div>
       {:else if loading}
@@ -529,6 +541,10 @@
             onfocus={() => projectSearchIndex.ensureLoaded()}
             onkeydown={cardOrder.fieldKeydown}
           />
+          <ProjectsViewToggle value={boardViewPrefs.viewMode} onChange={setProjectsViewMode} />
+          {#if boardMode && boardGroup && tagsStore.loaded && !viewport.isMobile}
+            <BoardToolbar group={boardGroup} />
+          {/if}
         </div>
 
         <ProjectFilterChips />
@@ -553,204 +569,92 @@
             </span>
           {/if}
         </div>
-        <div class="projects-grid" onpointerdowncapture={cardOrder.rowsPointerdown}>
-          {#each cardOrder.rows as project (project.id)}
-            {@const status = getProjectStatus(
-              project.id,
-              deletingProjectNames,
-              projectBranches.get(project.id) || [],
-              workspaceLifecycle.getWorktreeErrors(),
-              projectsDataStore.transferringProjects
-            )}
-            {@const busy =
-              status.kind === 'running' ||
-              status.kind === 'backgroundHold' ||
-              status.kind === 'transferring'}
-            {@const busyTitle =
-              status.kind === 'backgroundHold'
-                ? 'Waiting on background work'
-                : status.kind === 'transferring'
-                  ? transferringTitle(projectsDataStore.transferringProjects.get(project.id))
-                  : undefined}
-            {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
-            {@const repos = reposByProject.get(project.id) ?? []}
-            {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
-            {@const reconcileState =
-              status.kind === 'disconnected'
-                ? disconnectedSessionsStore.projectReconcileState(project.id)
-                : null}
-            {@const activity =
-              projectActivity(sessionTypes, status.runActionPhase) ||
-              (status.kind === 'disconnected' ? disconnectedActivity(reconcileState) : '')}
-            {@const shortcut = shortcutNumbers.get(project.id)}
-            {@const matchReason = matchReasons.get(project.id)}
-            <div
-              class="project-card-wrapper"
-              hidden={searchRank !== null && !searchRank.has(project.id)}
-              style:order={cardOrder.orderOf(project.id)}
-              use:trackProjectCard={project.id}
-            >
-              <ContextMenu.Root>
-                <ContextMenu.Trigger class="contents">
-                  <button class="project-card" onclick={() => openProject(project.id)}>
-                    {#if viewport.showShortcutHints && isCommandKeyHeld && shortcut !== undefined}
-                      <div class="keyboard-shortcut-overlay">
-                        <span class="command-icon">⌘</span>
-                        <span class="number">{shortcut}</span>
-                      </div>
-                    {/if}
-                    {#if status.runActionPhase === 'running' && busy}
-                      <div
-                        class="status-indicator wave-spinner"
-                        title={busyTitle}
-                        in:fade={{ duration: 300, delay: 150 }}
-                        out:fade={{ duration: 150 }}
-                      >
-                        <SineWave size={14} />
-                        <Spinner size={14} />
-                      </div>
-                    {:else if status.runActionPhase === 'running'}
-                      <div
-                        class="status-indicator wave"
-                        in:fade={{ duration: 300, delay: 150 }}
-                        out:fade={{ duration: 150 }}
-                      >
-                        <SineWave size={14} />
-                      </div>
-                    {:else if status.kind === 'runAction' || busy}
-                      <div
-                        class="status-indicator spinner"
-                        title={busyTitle}
-                        in:fade={{ duration: 300, delay: 150 }}
-                        out:fade={{ duration: 150 }}
-                      >
-                        <Spinner size={14} />
-                      </div>
-                    {:else if status.kind === 'disconnected'}
-                      {@const label = disconnectedLabel(reconcileState)}
-                      <div
-                        class="status-indicator disconnected"
-                        title={label}
-                        aria-label={label}
-                        in:fade={{ duration: 300, delay: 150 }}
-                        out:fade={{ duration: 150 }}
-                      >
-                        <CloudOff size={14} />
-                      </div>
-                    {:else if status.kind === 'unread'}
-                      <div
-                        class="status-indicator unread-dot"
-                        in:fade={{ duration: 300, delay: 150 }}
-                        out:fade={{ duration: 150 }}
-                      ></div>
-                    {/if}
-                    <div class="card-header">
-                      <!-- Chosen statuses paint at once; only the PR status
-                           waits on branches. -->
-                      <ProjectStatusIcon
-                        {project}
-                        branches={projectBranches.get(project.id) || []}
-                        {hydrated}
-                        size={16}
-                      />
-                      <span>{projectDisplayName(project)}</span>
-                    </div>
-                    {#if matchReason}
-                      <div class="card-match">
-                        <ProjectMatchReason reason={matchReason} terms={searchTerms} />
-                      </div>
-                    {/if}
-                    {#if activity}
-                      <div class="card-activity">
-                        {activity}
-                      </div>
-                    {/if}
-                    <div class="card-footer">
-                      {#if project.location === 'remote'}
-                        <RemoteProjectIcon size={14} />
+        {#if boardMode}
+          <ProjectsBoard
+            bind:this={board}
+            group={boardGroup}
+            projects={gridProjects}
+            {searchRank}
+            onOpen={openProject}
+          />
+        {:else}
+          <div class="projects-grid" onpointerdowncapture={cardOrder.rowsPointerdown}>
+            {#each cardOrder.rows as project (project.id)}
+              {@const status = getProjectStatus(
+                project.id,
+                deletingProjectNames,
+                projectBranches.get(project.id) || [],
+                workspaceLifecycle.getWorktreeErrors(),
+                projectsDataStore.transferringProjects
+              )}
+              {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
+              {@const repos = reposByProject.get(project.id) ?? []}
+              {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
+              {@const reconcileState =
+                status.kind === 'disconnected'
+                  ? disconnectedSessionsStore.projectReconcileState(project.id)
+                  : null}
+              {@const activity =
+                projectActivity(sessionTypes, status.runActionPhase) ||
+                (status.kind === 'disconnected' ? disconnectedActivity(reconcileState) : '')}
+              {@const shortcut = shortcutNumbers.get(project.id)}
+              {@const matchReason = matchReasons.get(project.id)}
+              <div
+                class="project-card-wrapper"
+                hidden={searchRank !== null && !searchRank.has(project.id)}
+                style:order={cardOrder.orderOf(project.id)}
+                use:trackProjectCard={project.id}
+              >
+                <ContextMenu.Root>
+                  <ContextMenu.Trigger class="contents">
+                    <button class="project-card" onclick={() => openProject(project.id)}>
+                      {#if viewport.showShortcutHints && isCommandKeyHeld && shortcut !== undefined}
+                        <div class="keyboard-shortcut-overlay">
+                          <span class="command-icon">⌘</span>
+                          <span class="number">{shortcut}</span>
+                        </div>
                       {/if}
-                      <div class="repo">
-                        {#if repos.length > 0}
-                          {#each [...repos].sort((a, b) => {
-                            const aKey = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
-                            const bKey = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
-                            return aKey.localeCompare(bKey);
-                          }) as r}
-                            {@const badge = repoBadgeStore.lookup(r.githubRepo, r.subpath)}
-                            {#if badge}
-                              <span
-                                class="repo-badge-label"
-                                style="background: {badgeBg(
-                                  badge.hue,
-                                  darkMode.value
-                                )}; color: {badgeFg(badge.hue, darkMode.value)};"
-                              >
-                                <RepoLabel
-                                  githubRepo={r.headRepo ?? r.githubRepo}
-                                  subpath={r.subpath}
-                                />
-                              </span>
-                            {:else}
-                              <span class="repo-line">
-                                <RepoLabel
-                                  githubRepo={r.headRepo ?? r.githubRepo}
-                                  subpath={r.subpath}
-                                />
-                              </span>
-                            {/if}
-                          {/each}
-                        {:else if project.githubRepo}
-                          {@const badge = repoBadgeStore.lookup(
-                            project.githubRepo,
-                            project.subpath
-                          )}
-                          {#if badge}
-                            <span
-                              class="repo-badge-label"
-                              style="background: {badgeBg(
-                                badge.hue,
-                                darkMode.value
-                              )}; color: {badgeFg(badge.hue, darkMode.value)};"
-                            >
-                              <RepoLabel
-                                githubRepo={project.githubRepo}
-                                subpath={project.subpath}
-                              />
-                            </span>
-                          {:else}
-                            <span class="repo-line">
-                              <RepoLabel
-                                githubRepo={project.githubRepo}
-                                subpath={project.subpath}
-                              />
-                            </span>
-                          {/if}
-                        {:else}
-                          No repo attached
-                        {/if}
+                      <ProjectCardStatusIndicator projectId={project.id} {status} />
+                      <div class="card-header">
+                        <!-- Chosen statuses paint at once; only the PR status
+                           waits on branches. -->
+                        <ProjectStatusIcon
+                          {project}
+                          branches={projectBranches.get(project.id) || []}
+                          {hydrated}
+                          size={16}
+                        />
+                        <span>{projectDisplayName(project)}</span>
                       </div>
-                    </div>
-                  </button>
-                </ContextMenu.Trigger>
-                <ContextMenu.Content class="min-w-[172px]">
-                  <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
-                    <Mail size={14} /> Mark as Unread
-                  </ContextMenu.Item>
-                  <ProjectStatusSubmenu {project} />
-                  <ContextMenu.Separator />
-                  <ProjectTransferMenuItem {project} />
-                  <ContextMenu.Item
-                    variant="destructive"
-                    disabled={status.kind === 'transferring'}
-                    onSelect={() => removeProject(project)}
-                  >
-                    <Trash2 size={14} /> Remove Project
-                  </ContextMenu.Item>
-                </ContextMenu.Content>
-              </ContextMenu.Root>
-            </div>
-          {/each}
-        </div>
+                      <ProjectCardTagChips projectId={project.id} />
+                      {#if matchReason}
+                        <div class="card-match">
+                          <ProjectMatchReason reason={matchReason} terms={searchTerms} />
+                        </div>
+                      {/if}
+                      {#if activity}
+                        <div class="card-activity">
+                          {activity}
+                        </div>
+                      {/if}
+                      <div class="card-footer">
+                        {#if project.location === 'remote'}
+                          <RemoteProjectIcon size={14} />
+                        {/if}
+                        <ProjectRepoBadges {project} {repos} />
+                      </div>
+                    </button>
+                  </ContextMenu.Trigger>
+                  <ProjectCardMenuContent
+                    {project}
+                    transferring={status.kind === 'transferring'}
+                    onRemove={() => removeProject(project)}
+                  />
+                </ContextMenu.Root>
+              </div>
+            {/each}
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -793,6 +697,11 @@
     display: flex;
     flex-direction: column;
     min-height: 100%;
+  }
+
+  /* The board spreads its columns across the window. */
+  .content.board {
+    max-width: none;
   }
 
   .content.empty-layout {
@@ -855,7 +764,16 @@
   }
 
   .search-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 14px;
+  }
+
+  .search-row > :global(.search-field) {
+    flex: 1 1 240px;
+    min-width: 0;
   }
 
   /* A grid, not just for the columns: until a query settles, each shown
@@ -953,49 +871,6 @@
     width: 16px;
   }
 
-  .repo {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--size-sm);
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 2px 4px;
-    overflow: hidden;
-  }
-
-  .repo-line {
-    display: inline-flex;
-    align-items: center;
-    max-width: 100%;
-    gap: 5px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .repo-badge-label {
-    display: inline-flex;
-    align-items: center;
-    max-width: 100%;
-    padding: 1px 5px;
-    border-radius: 4px;
-    font-weight: 600;
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .repo-badge-label :global(.repo-label-prefix) {
-    color: inherit;
-    opacity: 0.6;
-  }
-
-  .repo-badge-label :global(.repo-label-emphasis) {
-    color: inherit;
-  }
-
   .keyboard-shortcut-overlay {
     position: absolute;
     top: 8px;
@@ -1023,40 +898,6 @@
   .keyboard-shortcut-overlay .number {
     font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
     color: var(--ui-accent);
-  }
-
-  .status-indicator {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    z-index: 5;
-  }
-
-  .status-indicator.spinner {
-    color: var(--ui-accent);
-  }
-
-  .status-indicator.wave {
-    color: var(--ui-accent);
-  }
-
-  .status-indicator.wave-spinner {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--ui-accent);
-  }
-
-  .status-indicator.disconnected {
-    display: flex;
-    color: var(--ui-warning);
-  }
-
-  .status-indicator.unread-dot {
-    width: 8px;
-    height: 8px;
-    background-color: var(--ui-accent);
-    border-radius: 50%;
   }
 
   @media (max-width: 900px) {

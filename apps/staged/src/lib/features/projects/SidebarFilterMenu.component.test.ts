@@ -1,20 +1,36 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { group, tag } from '../tags/testStubs/tagFixtures';
+import type { TagFilterSection } from './projectFilters.svelte';
 
-const { filters } = vi.hoisted(() => ({ filters: { active: new Set<string>() } }));
+const { filters } = vi.hoisted(() => ({
+  filters: {
+    active: new Set<string>(),
+    /** The active set minus stale tag keys; the active set itself when null. */
+    effective: null as Set<string> | null,
+    sections: [] as TagFilterSection[],
+  },
+}));
 
 vi.mock('./projectFilters.svelte', () => ({
   projectFiltersStore: {
     get activeFilters() {
       return filters.active;
     },
-    get hasActiveFilters() {
-      return filters.active.size > 0;
+    get effectiveActiveFilters() {
+      return filters.effective ?? filters.active;
     },
-    isFilterActive: (filter: string) => filters.active.has(filter),
+    get hasActiveFilters() {
+      return (filters.effective ?? filters.active).size > 0;
+    },
+    isFilterActive: (filter: string | { tagId: string }) =>
+      filters.active.has(typeof filter === 'string' ? filter : `tag:${filter.tagId}`),
     unreadCount: 2,
     runningCount: 1,
     repoFilters: [],
+    get tagFilterSections() {
+      return filters.sections;
+    },
     toggleFilter: vi.fn(),
     clearFilters: vi.fn(),
   },
@@ -26,6 +42,7 @@ vi.mock('../../stores/repoBadges.svelte', () => ({ repoBadgeStore: { lookup: () 
 vi.mock('../layout/navigation.svelte', () => ({ onViewHidden: () => {} }));
 
 import SidebarFilterMenu from './SidebarFilterMenu.svelte';
+import { projectFiltersStore } from './projectFilters.svelte';
 
 let component: ReturnType<typeof mount> | null = null;
 
@@ -99,6 +116,8 @@ describe('SidebarFilterMenu Clear filters placement', () => {
 
   beforeEach(() => {
     filters.active = new Set(['unread']);
+    filters.effective = null;
+    filters.sections = [];
   });
 
   afterEach(() => {
@@ -208,5 +227,112 @@ describe('SidebarFilterMenu Clear filters placement', () => {
     const content = await openMenu();
 
     expect(rows(content)).toEqual(['Unread', 'Running']);
+  });
+});
+
+describe('SidebarFilterMenu tags', () => {
+  const status = group('status', 0, { name: 'Status', isIconGroup: true });
+
+  beforeAll(() => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    })) as unknown as typeof window.matchMedia;
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+  });
+
+  afterAll(() => {
+    delete (window as Partial<Window>).matchMedia;
+    delete (globalThis as Partial<typeof globalThis>).ResizeObserver;
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    filters.active = new Set(['tag:q4']);
+    filters.effective = null;
+    filters.sections = [
+      {
+        key: 'group:status',
+        label: 'Status',
+        filters: [{ tag: tag('doing', 'status', 1, { name: 'Doing' }), group: status, count: 2 }],
+      },
+      {
+        key: 'ungrouped',
+        label: 'Tags',
+        filters: [{ tag: tag('q4', null, 0, { name: 'q4' }), group: null, count: 1 }],
+      },
+    ];
+  });
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = null;
+    document.body.innerHTML = '';
+  });
+
+  it('lists the tags under a heading per group, then Tags, after the activity filters', async () => {
+    const content = await openMenu();
+    await placeOn(content, 'bottom');
+
+    expect(rows(content)).toEqual([
+      'Clear',
+      '---',
+      'Unread',
+      'Running',
+      '---',
+      'Doing',
+      '---',
+      'q4',
+    ]);
+    const headings = [...content.querySelectorAll('[data-slot="dropdown-menu-label"]')].map((el) =>
+      el.textContent?.trim()
+    );
+    // The built-in section isn't "Status": the default tag group is.
+    expect(headings).toEqual(['Activity', 'Status', 'Tags']);
+    const q4 = [...content.querySelectorAll('[role="menuitemcheckbox"]')].find(
+      (el) => label(el) === 'q4'
+    );
+    expect(q4?.getAttribute('aria-checked')).toBe('true');
+    expect(q4?.textContent).toContain('1');
+  });
+
+  it('toggles a tag additively, keeping the menu open', async () => {
+    const content = await openMenu();
+    const doing = [...content.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')].find(
+      (el) => label(el) === 'Doing'
+    )!;
+    doing.click();
+    await settle();
+
+    expect(projectFiltersStore.toggleFilter).toHaveBeenCalledWith(
+      { tagId: 'doing' },
+      { additive: true }
+    );
+    expect(document.querySelector('[data-slot="dropdown-menu-content"]')).not.toBeNull();
+  });
+
+  it('counts only the filters still in effect on its trigger', async () => {
+    filters.active = new Set(['unread', 'tag:gone']);
+    filters.effective = new Set(['unread']);
+    const content = await openMenu();
+
+    expect(document.querySelector('[title="Filter projects"]')?.textContent).toContain('1 filter');
+    expect(rows(content)[0]).toBe('Clear');
+  });
+
+  it('hides Clear filters when only a deleted tag’s filter is left', async () => {
+    filters.active = new Set(['tag:gone']);
+    filters.effective = new Set();
+    filters.sections = [];
+    const content = await openMenu();
+
+    expect(rows(content)).toEqual(['Unread', 'Running']);
+    expect(document.querySelector('[title="Filter projects"]')?.textContent?.trim()).toBe('Filter');
   });
 });

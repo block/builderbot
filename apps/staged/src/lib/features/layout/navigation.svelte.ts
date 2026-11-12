@@ -37,7 +37,8 @@ const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
  */
 export const INITIAL_ROUTE_TIMEOUT_MS = 300;
 
-export type SettingsSection = 'general' | 'repo' | 'keyboard' | 'doctor' | 'connected-apps';
+export type SettingsSection =
+  'general' | 'repo' | 'tags' | 'keyboard' | 'doctor' | 'connected-apps';
 
 export type DiffDetailRoute = {
   kind: 'diff';
@@ -61,6 +62,8 @@ export type DetailRoute =
   | { kind: 'projects' }
   | { kind: 'repos' }
   | { kind: 'project'; projectId: string }
+  /** A tag group's board, opened from its pinned row in the sidebar. */
+  | { kind: 'board'; groupId: string }
   | { kind: 'settings'; section: SettingsSection }
   | DiffDetailRoute;
 
@@ -84,11 +87,12 @@ const initialDetailStack: DetailRoute[] = initialProject
   : [rootRoute()];
 
 /**
- * The non-home view the workspace's project layer holds: the last project or
- * repos base route. It outlives the base route so the layer can stay mounted
- * (covered or clipped) while home is shown.
+ * The non-home view the workspace's project layer holds: the last project,
+ * repos or board base route. It outlives the base route so the layer can stay
+ * mounted (covered or clipped) while home is shown.
  */
-export type ProjectLayer = { kind: 'project'; projectId: string } | { kind: 'repos' };
+export type ProjectLayer =
+  { kind: 'project'; projectId: string } | { kind: 'repos' } | { kind: 'board'; groupId: string };
 
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
@@ -261,6 +265,9 @@ function syncCompatibilityState(): void {
       navigation.projectLayer = { kind: 'project', projectId: base.projectId };
   } else if (base.kind === 'repos') {
     if (layer?.kind !== 'repos') navigation.projectLayer = { kind: 'repos' };
+  } else if (base.kind === 'board') {
+    if (!(layer?.kind === 'board' && layer.groupId === base.groupId))
+      navigation.projectLayer = { kind: 'board', groupId: base.groupId };
   }
 }
 
@@ -294,6 +301,18 @@ function settleInitialRoute(): void {
 export function releaseProjectLayer(projectId: string): void {
   const layer = navigation.projectLayer;
   if (!navigation.homeActive || layer?.kind !== 'project' || layer.projectId !== projectId) return;
+  navigation.projectLayer = null;
+}
+
+/**
+ * Drop the retained board layer for `groupId` — because the group was deleted
+ * or its board unpinned — so the layer unmounts rather than showing a board
+ * that is no longer offered. Only while home is active, as for projects: on
+ * screen, the board's route is what goes (leaveBoard).
+ */
+export function releaseBoardLayer(groupId: string): void {
+  const layer = navigation.projectLayer;
+  if (!navigation.homeActive || layer?.kind !== 'board' || layer.groupId !== groupId) return;
   navigation.projectLayer = null;
 }
 
@@ -451,9 +470,61 @@ export async function initNavigation(): Promise<void> {
   await projectStateStore.pruneDeletedProjects(existingIds);
 }
 
-/** Navigate to the repos list view. */
+/**
+ * Navigate to the repos list view. Over a project it stacks, so Back returns
+ * to the project; a board and the repos view are sidebar siblings, so from a
+ * board it replaces (board → All repos → board would otherwise grow the stack
+ * on every round trip).
+ */
 export function showAllRepos(): void {
-  pushOrReplaceRoute({ kind: 'repos' });
+  if (currentRoute().kind === 'board') {
+    replaceCurrentRoute({ kind: 'repos' });
+  } else {
+    pushOrReplaceRoute({ kind: 'repos' });
+  }
+}
+
+/**
+ * Navigate to a tag group's board (its pinned sidebar row). Like the repos
+ * view it takes the project layer, and is not persisted as the last route.
+ * Mirrors selectProject: the board replaces a project, repos or board route
+ * and is pushed only over the root, so clicking between sidebar rows never
+ * stacks routes.
+ */
+export function selectBoard(groupId: string): void {
+  const current = currentRoute();
+  const route: DetailRoute = { kind: 'board', groupId };
+  if (current.kind === 'project' || current.kind === 'repos' || current.kind === 'board') {
+    replaceCurrentRoute(route);
+  } else if (current.kind === 'settings') {
+    setDetailStack([...navigation.detailStack.slice(0, -1), route]);
+  } else {
+    setDetailStack([rootRoute(), route]);
+  }
+}
+
+/**
+ * The board for `groupId` is no longer offered (its group deleted, or its
+ * board unpinned, here or in another window). Take every route for it out of
+ * the stack, wherever they sit, leaving whatever is above them — settings,
+ * where the unpinning most likely happened, or a diff — in place, so the
+ * user isn't thrown out of what they were doing. What was under the board
+ * becomes the base route: home, or a project when the board was opened over
+ * one ([projects, project p1, board] lands back on p1, as Back would), and
+ * that is what's persisted. A board only retained under home has no route;
+ * its layer is released so it unmounts rather than show a board nobody
+ * offers.
+ */
+export function leaveBoard(groupId: string): void {
+  const stack = navigation.detailStack;
+  const rest = stack.filter((route) => !(route.kind === 'board' && route.groupId === groupId));
+  if (rest.length !== stack.length) {
+    setDetailStack(rest);
+    const base = workspaceRoute();
+    if (base.kind === 'projects') persistLastProject(null);
+    else if (base.kind === 'project') persistLastProject(base.projectId);
+  }
+  releaseBoardLayer(groupId);
 }
 
 /** Navigate to a specific project's detail view. */
@@ -461,7 +532,7 @@ export function selectProject(projectId: string): void {
   const current = currentRoute();
   if (current.kind === 'projects') {
     setDetailStack([rootRoute(), { kind: 'project', projectId }]);
-  } else if (current.kind === 'project' || current.kind === 'repos') {
+  } else if (current.kind === 'project' || current.kind === 'repos' || current.kind === 'board') {
     replaceCurrentRoute({ kind: 'project', projectId });
   } else if (current.kind === 'settings') {
     setDetailStack([...navigation.detailStack.slice(0, -1), { kind: 'project', projectId }]);

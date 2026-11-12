@@ -5,8 +5,9 @@ use rusqlite::{params, OptionalExtension};
 use super::models::{Project, ProjectLocation};
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
-const PROJECT_COLUMNS: &str =
-    "id, name, github_repo, location, subpath, created_at, updated_at, status_override";
+// `projects.status_override` (0032) is frozen: tags replaced it, and only the
+// one-shot legacy import (`tag_import.rs`) still reads it.
+const PROJECT_COLUMNS: &str = "id, name, github_repo, location, subpath, created_at, updated_at";
 
 fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let location_str: String = row.get(3)?;
@@ -18,7 +19,6 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         subpath: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
-        status_override: row.get(7)?,
     })
 }
 
@@ -27,7 +27,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             &format!(
-                "INSERT INTO projects ({PROJECT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                "INSERT INTO projects ({PROJECT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             ),
             params![
                 project.id,
@@ -37,7 +37,6 @@ impl Store {
                 project.subpath,
                 project.created_at,
                 project.updated_at,
-                project.status_override,
             ],
         )?;
         self.publish(StoreChange::Project {
@@ -116,31 +115,15 @@ impl Store {
         Ok(())
     }
 
-    /// Set or clear (`None`) the user-chosen status shown in place of the
-    /// computed PR/cloud status. Separate from `update_project` so callers
-    /// that rewrite the primary repo never have to carry it through.
-    pub fn set_project_status_override(
-        &self,
-        id: &str,
-        status_override: Option<&str>,
-    ) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE projects SET status_override = ?1, updated_at = ?2 WHERE id = ?3",
-            params![status_override, now_timestamp(), id],
-        )?;
-        self.publish(StoreChange::Project {
-            project_id: Some(id.to_string()),
-        });
-        Ok(())
-    }
-
+    /// Delete a project. Its `project_tags` rows go with it (FK cascade), so
+    /// this publishes [`StoreChange::Tags`] as well.
     pub fn delete_project(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
         self.publish(StoreChange::Project {
             project_id: Some(id.to_string()),
         });
+        self.publish(StoreChange::Tags);
         Ok(())
     }
 }

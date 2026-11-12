@@ -65,7 +65,6 @@ function project(overrides: Partial<Project> = {}): Project {
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
-    statusOverride: null,
     ...overrides,
   };
 }
@@ -188,6 +187,19 @@ describe('sidebarProjectMatches', () => {
       new Map([['p2', { kind: 'branch', label: 'fix-login', more: 0, itemTerms: ['login'] }]])
     );
     expect(sidebarProjectMatches(projects, 'beta', snapshot).reasons.size).toBe(0);
+  });
+
+  // Rows show no tag chips, so a tag that matched says so on the meta line.
+  it('matches a tag name, giving the tag as the reason', () => {
+    const snapshot = buildSearchSnapshot(projects, {
+      branchesByProject: new Map(),
+      reposByProject: new Map(),
+      tagNames: (projectId) => (projectId === 'p1' ? ['q4-launch'] : []),
+    });
+    expect(ids('q4', snapshot)).toEqual(new Set(['p1']));
+    expect(sidebarProjectMatches(projects, 'q4', snapshot).reasons).toEqual(
+      new Map([['p1', { kind: 'tag', label: 'q4-launch', more: 0, itemTerms: ['q4'] }]])
+    );
   });
 
   it('matches terms spread across branches', () => {

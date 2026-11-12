@@ -106,14 +106,19 @@
   --ui-danger-bg: rgba(248, 81, 73, 0.1);
   --ui-selection: rgba(255, 255, 255, 0.08);
 
-  /* ── Project status palette (see projectStatusDisplay.ts). Each colour
-   *    aliases the token it visually matches so the picker stays theme-aware,
-   *    while giving statuses their own tokens: retinting a diff/review colour
-   *    doesn't have to retint project statuses, and vice versa. ── */
+  --tag-blue: #58a6ff;
+
+  /* ── Tag palette, named for the project statuses it first served (see
+   *    features/tags/tagColors.ts). Each colour aliases the token it visually
+   *    matches so the picker stays theme-aware, while giving tags their own
+   *    tokens: retinting a diff/review colour doesn't have to retint tags,
+   *    and vice versa. Blue is the exception: --status-renamed follows the
+   *    git "modified" colour, which dark syntax themes paint amber, so it
+   *    would match the amber swatch. --tag-blue is set by the theme. ── */
   --project-status-green: var(--ui-success);
   --project-status-red: var(--ui-danger);
   --project-status-amber: var(--status-modified);
-  --project-status-blue: var(--status-renamed);
+  --project-status-blue: var(--tag-blue);
   --project-status-purple: var(--review-color);
   --project-status-cyan: var(--image-color);
   --project-status-gray: var(--text-muted);

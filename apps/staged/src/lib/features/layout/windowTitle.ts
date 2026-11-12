@@ -22,18 +22,22 @@
 
 import { getWindowSync } from '../../transport';
 import { repoEmphasis } from '../../shared/repoLabel';
-import { parseRepoFilterKey, type RepoFilterRef } from '../projects/projectFilters.svelte';
+import {
+  parseRepoFilterKey,
+  parseTagFilterKey,
+  type RepoFilterRef,
+} from '../projects/projectFilters.svelte';
 
 /** The title of an unfiltered window — and what the conf already sets. */
 export const DEFAULT_WINDOW_TITLE = 'Staged';
 
-/** Repo filters named before the rest collapse into "+N more". */
-const MAX_REPOS_NAMED = 2;
+/** Repo (and tag) filters named before the rest collapse into "+N more". */
+const MAX_NAMED = 2;
 
 /**
  * The window title for a filter set, mirroring the sidebar summary's ordering
  * so the two surfaces say the same thing: status filters first (in a fixed
- * order, not selection order), then the repo filters.
+ * order, not selection order), then the repo filters, then the tag filters.
  *
  * Repos are named by their emphasised segment only (see repoLabel.ts) and
  * never by `repoBadgeStore` short names: badges load asynchronously, so a
@@ -41,9 +45,24 @@ const MAX_REPOS_NAMED = 2;
  * keys alone keeps this a pure function of the filter set — which also means a
  * stale filter naming a repo no longer in any project still titles the window,
  * exactly as `activeRepoFilters` still summarises it in the sidebar.
+ *
+ * Tags, by contrast, are only known by id, so they're named from `tagsById`
+ * (the catalog as the window has it). A tag filter whose tag the catalog
+ * doesn't hold is skipped: `effectiveActiveFilters` ignores it too, so it
+ * narrows nothing and the chips don't show it. Until the catalog loads, that
+ * means a tag-filtered window is briefly titled by its other filters only.
+ *
+ * A window showing a pinned board (the sidebar's board route) leads with the
+ * board's name — "Status board" — since that, not a filter, is what the
+ * window is looking at; the filters that narrow the board follow.
  */
-export function formatWindowTitle(activeFilters: Set<string>): string {
+export function formatWindowTitle(
+  activeFilters: Set<string>,
+  tagsById: ReadonlyMap<string, { name: string }> = new Map(),
+  boardName: string | null = null
+): string {
   const segments: string[] = [];
+  if (boardName) segments.push(`${boardName} board`);
   if (activeFilters.has('unread')) segments.push('Unread');
   if (activeFilters.has('running')) segments.push('Running');
 
@@ -54,12 +73,16 @@ export function formatWindowTitle(activeFilters: Set<string>): string {
   const repos = [...activeFilters]
     .map(parseRepoFilterKey)
     .filter((ref): ref is RepoFilterRef => ref !== null)
-    .map((ref) => repoEmphasis(ref))
-    .sort((a, b) => a.localeCompare(b));
+    .map((ref) => repoEmphasis(ref));
+  const tags = [...activeFilters]
+    .map(parseTagFilterKey)
+    .map((ref) => (ref ? tagsById.get(ref.tagId)?.name : undefined))
+    .filter((name): name is string => name !== undefined);
 
-  if (repos.length > 0) {
-    const named = repos.slice(0, MAX_REPOS_NAMED);
-    if (repos.length > named.length) named.push(`+${repos.length - named.length} more`);
+  for (const names of [repos, tags]) {
+    if (names.length === 0) continue;
+    const named = names.sort((a, b) => a.localeCompare(b)).slice(0, MAX_NAMED);
+    if (names.length > named.length) named.push(`+${names.length - named.length} more`);
     segments.push(named.join(', '));
   }
 

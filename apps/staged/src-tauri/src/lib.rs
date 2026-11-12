@@ -50,6 +50,7 @@ pub mod session_runner;
 pub mod shell_env;
 pub mod store;
 pub mod store_events;
+mod tag_commands;
 pub(crate) mod terminal_output;
 pub mod timeline;
 mod upstream_repair;
@@ -61,7 +62,7 @@ pub mod window_commands;
 pub mod test_utils;
 
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use store::Store;
 use tauri::{Emitter, Manager};
@@ -334,6 +335,61 @@ fn get_store_status(db_state: tauri::State<'_, DbState>) -> Option<StoreIncompat
     db_state.needs_reset.lock().unwrap().clone()
 }
 
+/// Open the store at `db_path` with the change feed attached, then run the
+/// one-time legacy project status import
+/// ([`Store::import_legacy_project_statuses`]). Both the launch and reset
+/// paths open the store through here, so a fresh or reset database gets the
+/// Status group too.
+///
+/// The import reads the frontend's `preferences.json` from beside the
+/// database (where `preferences_store_path_buf` points in the app). Only a
+/// missing file counts as no preferences; see [`read_legacy_preferences`].
+/// The backend never writes that file. An import failure, or an unreadable
+/// file, is logged, not fatal: the marker stays, so it retries next launch,
+/// and meanwhile projects show their computed status.
+fn open_store(
+    db_path: &Path,
+    tx: tokio::sync::broadcast::Sender<store::StoreChange>,
+) -> Result<Store, String> {
+    let store = Store::new(db_path)
+        .map_err(|e| e.to_string())?
+        .with_change_sender(tx);
+    match read_legacy_preferences(&db_path.with_file_name("preferences.json")) {
+        Ok(prefs) => {
+            let options = store::parse_legacy_status_options(prefs.as_ref());
+            if let Err(e) = store.import_legacy_project_statuses(&options) {
+                log::error!("Legacy project status import failed; it will retry next launch: {e}");
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "Skipping the legacy project status import until preferences.json can be read; \
+                 it will retry next launch: {e}"
+            );
+        }
+    }
+    Ok(store)
+}
+
+/// Read the frontend's `preferences.json` for the legacy status import.
+///
+/// `Ok(None)` only when the file doesn't exist (a fresh install never had
+/// custom statuses). Any other read error, or a parse error, is `Err`: a
+/// transient failure, or a half-written file from another instance saving
+/// at that moment, must not import the seven defaults over a user's custom
+/// list, since the import runs once and then drops every selection that
+/// names a custom id.
+fn read_legacy_preferences(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|e| format!("parsing {}: {e}", path.display()))
+}
+
 /// Delete the old database and create a fresh store.
 ///
 /// Called after the user confirms the reset dialog.
@@ -358,11 +414,7 @@ fn reset_store(
 
     store::remove_db_files(&db_state.db_path).map_err(|e| e.to_string())?;
 
-    let store = Arc::new(
-        Store::new(&db_state.db_path)
-            .map_err(|e| e.to_string())?
-            .with_change_sender(store_change_tx.clone()),
-    );
+    let store = Arc::new(open_store(&db_state.db_path, store_change_tx.clone())?);
     *store_slot.lock().unwrap() = Some(Arc::clone(&store));
     *needs_reset = None;
     Ok(Some(store))
@@ -682,19 +734,6 @@ async fn remove_project_repo(
         app_handle,
     };
     branch_teardown::remove_project_repo_impl(services, project_id, project_repo_id).await
-}
-
-/// Set or clear (`None`) the user-chosen status shown in place of a project's
-/// computed PR/cloud status.
-#[tauri::command(rename_all = "camelCase")]
-fn set_project_status_override(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    project_id: String,
-    status_override: Option<String>,
-) -> Result<(), String> {
-    get_store(&store)?
-        .set_project_status_override(&project_id, status_override.as_deref())
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1952,9 +1991,8 @@ pub fn run() {
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
-                    let s = Store::new(&db_path)
-                        .map_err(|e| format!("Failed to open store: {e}"))?
-                        .with_change_sender(store_change_tx.clone());
+                    let s = open_store(&db_path, store_change_tx.clone())
+                        .map_err(|e| format!("Failed to open store: {e}"))?;
                     let store_arc = Arc::new(s);
                     session_runner::recover_stale_queued_session_messages(&store_arc);
                     // Release action-detection windows whose owner process is
@@ -2238,8 +2276,21 @@ pub fn run() {
             clear_project_repo_reason,
             remove_project_repo,
             set_primary_project_repo,
-            set_project_status_override,
             delete_project,
+            // Tags
+            tag_commands::get_tag_state,
+            tag_commands::create_tag_group,
+            tag_commands::rename_tag_group,
+            tag_commands::set_icon_tag_group,
+            tag_commands::set_tag_group_sidebar,
+            tag_commands::reorder_tag_groups,
+            tag_commands::delete_tag_group,
+            tag_commands::create_tag,
+            tag_commands::update_tag,
+            tag_commands::move_tag,
+            tag_commands::delete_tag,
+            tag_commands::set_project_group_tag,
+            tag_commands::set_project_tag_assigned,
             // Repo badges
             get_all_repo_badges,
             ensure_repo_badges,
@@ -2497,7 +2548,11 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch_menu_event, reset_store, DbState, MenuDispatch, StoreIncompatibility};
+    use super::{
+        dispatch_menu_event, open_store, read_legacy_preferences, reset_store, DbState,
+        MenuDispatch, StoreIncompatibility,
+    };
+    use crate::store::{LegacyImportOutcome, LegacyStatusOptions};
     use std::sync::{Arc, Barrier, Mutex};
 
     fn reset_info(kind: &str) -> StoreIncompatibility {
@@ -2544,6 +2599,84 @@ mod tests {
         assert!(store_slot.lock().unwrap().is_some());
         assert!(db_state.needs_reset.lock().unwrap().is_none());
         assert!(db_state.db_path.exists());
+    }
+
+    #[test]
+    fn legacy_preferences_are_none_only_when_the_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+
+        assert_eq!(read_legacy_preferences(&path), Ok(None));
+
+        std::fs::write(&path, "{\"project-status-options\": [").unwrap();
+        let error = read_legacy_preferences(&path).unwrap_err();
+        assert!(error.contains("parsing"), "{error}");
+
+        std::fs::write(&path, "{\"project-status-options\": []}").unwrap();
+        let prefs = read_legacy_preferences(&path).unwrap().unwrap();
+        assert_eq!(prefs["project-status-options"], serde_json::json!([]));
+
+        // A directory where the file should be is an error, not "missing".
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(read_legacy_preferences(&path).is_err());
+    }
+
+    #[test]
+    fn open_store_imports_the_defaults_when_there_are_no_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+
+        let store = open_store(&dir.path().join("data.db"), tx).unwrap();
+
+        // The marker is gone, so a second import is a no-op...
+        assert_eq!(
+            store
+                .import_legacy_project_statuses(&LegacyStatusOptions::Defaults)
+                .unwrap(),
+            LegacyImportOutcome::AlreadyImported
+        );
+        // ...and the Status group holds the seven defaults.
+        let state = store.get_tag_state().unwrap();
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.tags.len(), 7);
+    }
+
+    #[test]
+    fn open_store_holds_the_import_while_preferences_are_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let prefs_path = dir.path().join("preferences.json");
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+
+        // A half-written file: another instance may be saving it right now.
+        std::fs::write(&prefs_path, "{\"project-status-options\": [{\"id\": \"cu").unwrap();
+        let store = open_store(&db_path, tx.clone()).unwrap();
+
+        // Nothing was imported and the marker is still there.
+        assert!(store.get_tag_state().unwrap().groups.is_empty());
+        drop(store);
+
+        // Next launch, the file is whole: the user's custom list is imported.
+        std::fs::write(
+            &prefs_path,
+            "{\"project-status-options\": [{\"id\": \"custom\", \"label\": \"Custom\"}]}",
+        )
+        .unwrap();
+        let store = open_store(&db_path, tx).unwrap();
+
+        let state = store.get_tag_state().unwrap();
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(
+            state.tags.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["custom"]
+        );
+        assert_eq!(
+            store
+                .import_legacy_project_statuses(&LegacyStatusOptions::Defaults)
+                .unwrap(),
+            LegacyImportOutcome::AlreadyImported
+        );
     }
 
     #[test]

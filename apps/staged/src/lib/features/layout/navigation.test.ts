@@ -596,6 +596,168 @@ describe('workspace layers', () => {
     expect(navigation.projectLayer).toBe(repos);
   });
 
+  it('shows a pinned board in the project layer, and releases it only under home', async () => {
+    const {
+      restoreInitialRoute,
+      selectBoard,
+      selectProject,
+      goHome,
+      releaseBoardLayer,
+      navigation,
+    } = await importNavigation();
+    await restoreInitialRoute();
+
+    selectBoard('g1');
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g1' });
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.selectedProjectId).toBeNull();
+    expect(navigation.showReposList).toBe(false);
+    const board = navigation.projectLayer;
+    expect(board).toEqual({ kind: 'board', groupId: 'g1' });
+    // The board is never the persisted route.
+    expect(setStoreValue).not.toHaveBeenCalledWith('last-viewed-project', 'g1');
+
+    // On screen, the view itself leaves for home; a release here is ignored.
+    releaseBoardLayer('g1');
+    expect(navigation.projectLayer).toBe(board);
+
+    // Another board replaces the route rather than stacking on it.
+    selectBoard('g2');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    expect(navigation.projectLayer).toEqual({ kind: 'board', groupId: 'g2' });
+
+    // A project opened from the board replaces it, as from the repos view.
+    selectProject('p1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'project']);
+
+    selectBoard('g2');
+    goHome();
+    const retained = navigation.projectLayer;
+    expect(retained).toEqual({ kind: 'board', groupId: 'g2' });
+    releaseBoardLayer('other');
+    expect(navigation.projectLayer).toBe(retained);
+    releaseBoardLayer('g2');
+    expect(navigation.projectLayer).toBeNull();
+  });
+
+  it('leaves a board that is no longer offered from wherever it sits in the stack', async () => {
+    const { restoreInitialRoute, selectBoard, openSettings, goHome, leaveBoard, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    // On screen: home.
+    selectBoard('g1');
+    leaveBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects']);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
+
+    // Under settings (where the unpinning was done): settings stays open,
+    // over the home grid, so Back lands on home.
+    selectBoard('g1');
+    openSettings('tags');
+    leaveBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'settings']);
+    expect(navigation.currentRoute.kind).toBe('settings');
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+
+    // Retained under home: the layer is released, the stack untouched.
+    goHome();
+    selectBoard('g2');
+    goHome();
+    expect(navigation.projectLayer).toEqual({ kind: 'board', groupId: 'g2' });
+    leaveBoard('g2');
+    expect(navigation.projectLayer).toBeNull();
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects']);
+
+    // Another group's board: nothing changes.
+    selectBoard('g3');
+    leaveBoard('g2');
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g3' });
+  });
+
+  it('keeps the stack bounded through board ↔ All repos ↔ board round trips', async () => {
+    const { restoreInitialRoute, selectBoard, showAllRepos, selectProject, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    selectBoard('g1');
+    showAllRepos();
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'repos']);
+    selectBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    for (let i = 0; i < 5; i++) {
+      showAllRepos();
+      selectBoard('g1');
+    }
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g1' });
+
+    // A board picked from a project replaces it too; All repos over a
+    // project still stacks, so Back returns to the project.
+    selectProject('p1');
+    selectBoard('g2');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    selectProject('p1');
+    showAllRepos();
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual([
+      'projects',
+      'project',
+      'repos',
+    ]);
+  });
+
+  it('leaves every route of an unpinned board, landing on what was under it', async () => {
+    const { restoreInitialRoute, selectBoard, showAllRepos, leaveBoard, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    // After a round trip the on-screen board goes, even with its route
+    // present more than once (a stack from before the replace rules, say).
+    selectBoard('g1');
+    showAllRepos();
+    selectBoard('g1');
+    leaveBoard('g1');
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects']);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+
+    // Duplicates are all removed, and routes for other groups stay.
+    navigation.detailStack = [
+      { kind: 'projects' },
+      { kind: 'board', groupId: 'g1' },
+      { kind: 'repos' },
+      { kind: 'board', groupId: 'g1' },
+      { kind: 'board', groupId: 'g2' },
+    ];
+    leaveBoard('g1');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'repos' },
+      { kind: 'board', groupId: 'g2' },
+    ]);
+    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g2' });
+
+    // A board over a project lands back on the project, which is persisted.
+    navigation.detailStack = [
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+      { kind: 'board', groupId: 'g1' },
+    ];
+    setStoreValue.mockClear();
+    leaveBoard('g1');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.selectedProjectId).toBe('p1');
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'p1');
+  });
+
   it('keeps both layers through settings and a diff over home', async () => {
     vi.stubGlobal('window', { dispatchEvent: vi.fn() });
     const {

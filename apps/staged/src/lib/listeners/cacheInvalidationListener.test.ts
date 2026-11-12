@@ -29,6 +29,10 @@ function emitReposChanged(payload: ReposChangedEvent): void {
   eventCallbacks.get('repos-changed')?.(payload);
 }
 
+function emitTagsChanged(): void {
+  eventCallbacks.get('tags-changed')?.({});
+}
+
 async function startListening() {
   const { listenForCacheInvalidation } = await import('./cacheInvalidationListener');
   return listenForCacheInvalidation();
@@ -113,6 +117,21 @@ describe('repos-changed cache invalidation', () => {
 
     expect(invalidateCache.mock.calls).toEqual([['get_all_repo_badges']]);
     expect(invalidateCacheByCommand).not.toHaveBeenCalled();
+  });
+});
+
+describe('tags-changed cache invalidation', () => {
+  it('drops just the tag-state key, never the project list', async () => {
+    await startListening();
+
+    emitTagsChanged();
+
+    // get_tag_state takes no args, so the per-key drop covers it in full. A
+    // tag write must not touch the project list: its reload restarts every
+    // project's hydration.
+    expect(invalidateCache.mock.calls).toEqual([['get_tag_state']]);
+    expect(invalidateCacheByCommand).not.toHaveBeenCalled();
+    expect(invalidateCacheByArgs).not.toHaveBeenCalled();
   });
 });
 

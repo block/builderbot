@@ -9,7 +9,8 @@
 //!
 //! Tables: app_metadata, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, project_notes, reviews, images,
-//! action_contexts, repo_actions, repo_affinities, queued_session_messages.
+//! action_contexts, repo_actions, repo_affinities, queued_session_messages,
+//! tag_groups, tags, project_tags.
 
 pub mod models;
 
@@ -26,6 +27,7 @@ mod notes;
 mod project_notes;
 mod project_repos;
 mod project_search;
+mod project_tags;
 mod project_transfer;
 mod projects;
 mod queued_messages;
@@ -36,12 +38,16 @@ mod reviews;
 mod session_poll;
 mod session_titles;
 mod sessions;
+mod tag_import;
+mod tags;
 mod tool_bodies;
 mod tool_images;
 mod workdirs;
 
 #[cfg(test)]
 mod migration_tests;
+#[cfg(test)]
+mod tags_tests;
 #[cfg(test)]
 mod tests;
 
@@ -58,6 +64,11 @@ pub use repo_badges::{fallback_short_name, next_hue};
 pub use session_poll::{SessionPoll, SessionPollRequest};
 pub use session_titles::{non_empty_acp_title, pending_commit_subject, review_title};
 pub use sessions::ChildSessionInfo;
+pub use tag_import::{
+    parse_legacy_status_options, LegacyImportOutcome, LegacyStatusOption, LegacyStatusOptions,
+    LEGACY_DEFAULT_STATUSES, LEGACY_STATUS_GROUP_ID, LEGACY_STATUS_OPTIONS_KEY,
+};
+pub use tags::{DeleteTagGroupMode, NewTag, ProjectTag, Tag, TagColor, TagGroup, TagState};
 pub use tool_bodies::{ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES};
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 
@@ -110,6 +121,11 @@ pub enum StoreChange {
     },
     /// Repo badges, recent repos, or repo affinities changed.
     Repos { github_repo: Option<String> },
+    /// Tag groups, tags, or project tag assignments changed. No ids: the
+    /// whole `TagState` is small enough to refetch every time. Deliberately
+    /// not [`StoreChange::Project`], whose event hard-reloads the project
+    /// list and restarts hydration for every project.
+    Tags,
 }
 
 // =============================================================================

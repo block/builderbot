@@ -938,6 +938,20 @@ fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static s
     }
 }
 
+/// The tag catalog as a control caller may see it: the shared groups and
+/// tags whole, and the per-project `assignments` confined to the caller's
+/// project when its credential is scoped to one, so a session learns which
+/// tags exist but not which other projects carry them. Unconfined callers
+/// get the state unchanged.
+fn confine_tag_state(mut state: store::TagState, caller: &DispatchCaller) -> store::TagState {
+    if let Some(project_id) = control_scope::project_filter(caller) {
+        state
+            .assignments
+            .retain(|assignment| assignment.project_id == project_id);
+    }
+    state
+}
+
 /// The `create_image` args the control surface accepts, enforcing that the
 /// created image is UI-visible: `pending: true` (hidden until a session
 /// attaches it) and a missing `branchId` (project-scoped images are
@@ -1321,15 +1335,6 @@ pub(crate) async fn dispatch(
             .await?;
             Ok(Value::Null)
         }
-        "set_project_status_override" => {
-            let store = get_store(store_mutex)?;
-            let project_id: String = arg(&args, "projectId")?;
-            let status_override: Option<String> = opt_arg(&args, "statusOverride")?;
-            store
-                .set_project_status_override(&project_id, status_override.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
-        }
         "set_primary_project_repo" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
@@ -1366,6 +1371,129 @@ pub(crate) async fn dispatch(
                 app_handle: app_handle.clone(),
             };
             detached(crate::branch_teardown::delete_project_impl(services, id)).await?;
+            Ok(Value::Null)
+        }
+
+        // =====================================================================
+        // Tags (mirrors `tag_commands`)
+        // =====================================================================
+        "get_tag_state" => {
+            let store = get_store(store_mutex)?;
+            let state = store.get_tag_state().map_err(|e| e.to_string())?;
+            let state = confine_tag_state(state, &caller);
+            Ok(serde_json::to_value(state).unwrap())
+        }
+        "create_tag_group" => {
+            let store = get_store(store_mutex)?;
+            let name: String = arg(&args, "name")?;
+            let tags: Vec<store::NewTag> = arg(&args, "tags")?;
+            let group = store
+                .create_tag_group(&name, &tags)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(group).unwrap())
+        }
+        "rename_tag_group" => {
+            let store = get_store(store_mutex)?;
+            let group_id: String = arg(&args, "groupId")?;
+            let name: String = arg(&args, "name")?;
+            store
+                .rename_tag_group(&group_id, &name)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "set_icon_tag_group" => {
+            let store = get_store(store_mutex)?;
+            let group_id: Option<String> = opt_arg(&args, "groupId")?;
+            store
+                .set_icon_tag_group(group_id.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "set_tag_group_sidebar" => {
+            let store = get_store(store_mutex)?;
+            let group_id: String = arg(&args, "groupId")?;
+            let shown: bool = arg(&args, "shown")?;
+            store
+                .set_tag_group_sidebar(&group_id, shown)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "reorder_tag_groups" => {
+            let store = get_store(store_mutex)?;
+            let group_ids: Vec<String> = arg(&args, "groupIds")?;
+            store
+                .reorder_tag_groups(&group_ids)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_tag_group" => {
+            let store = get_store(store_mutex)?;
+            let group_id: String = arg(&args, "groupId")?;
+            let mode: store::DeleteTagGroupMode = arg(&args, "mode")?;
+            store
+                .delete_tag_group(&group_id, mode)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "create_tag" => {
+            let store = get_store(store_mutex)?;
+            let new = store::NewTag {
+                name: arg(&args, "name")?,
+                color: opt_arg(&args, "color")?,
+                icon: opt_arg(&args, "icon")?,
+            };
+            let group_id: Option<String> = opt_arg(&args, "groupId")?;
+            let assign_project_id: Option<String> = opt_arg(&args, "assignProjectId")?;
+            let tag = store
+                .create_tag(&new, group_id.as_deref(), assign_project_id.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(tag).unwrap())
+        }
+        "update_tag" => {
+            let store = get_store(store_mutex)?;
+            let tag_id: String = arg(&args, "tagId")?;
+            let name: String = arg(&args, "name")?;
+            let color: store::TagColor = arg(&args, "color")?;
+            let icon: Option<String> = opt_arg(&args, "icon")?;
+            store
+                .update_tag(&tag_id, &name, color, icon.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "move_tag" => {
+            let store = get_store(store_mutex)?;
+            let tag_id: String = arg(&args, "tagId")?;
+            let group_id: Option<String> = opt_arg(&args, "groupId")?;
+            let index: usize = arg(&args, "index")?;
+            store
+                .move_tag(&tag_id, group_id.as_deref(), index)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_tag" => {
+            let store = get_store(store_mutex)?;
+            let tag_id: String = arg(&args, "tagId")?;
+            store.delete_tag(&tag_id).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "set_project_group_tag" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let group_id: String = arg(&args, "groupId")?;
+            let tag_id: Option<String> = opt_arg(&args, "tagId")?;
+            store
+                .set_project_group_tag(&project_id, &group_id, tag_id.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "set_project_tag_assigned" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let tag_id: String = arg(&args, "tagId")?;
+            let assigned: bool = arg(&args, "assigned")?;
+            store
+                .set_project_tag_assigned(&project_id, &tag_id, assigned)
+                .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
 
@@ -4430,6 +4558,96 @@ mod tests {
         assert!(
             include_str!("web_server.rs").contains(&call_site),
             "dispatch() must gate on web_caller_rejection before its match"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // get_tag_state through the control surface shows one project's tags
+    // -------------------------------------------------------------------
+
+    /// A project-scoped control caller gets the whole catalog but only its
+    /// own project's assignments; an unconfined caller, and the web, get
+    /// everything. Pins that the arm goes through the helper, since
+    /// `dispatch` itself can't run in a unit test.
+    #[test]
+    fn get_tag_state_filters_assignments_for_a_scoped_caller() {
+        use super::confine_tag_state;
+        use crate::control_server::{Access, Actor, ControlGrant, Scope};
+        use crate::store::{self, Store};
+
+        let store = Store::in_memory().unwrap();
+        let own = store::Project::named("alpha");
+        let other = store::Project::named("beta");
+        store.create_project(&own).unwrap();
+        store.create_project(&other).unwrap();
+        let group = store
+            .create_tag_group(
+                "Status",
+                &[store::NewTag {
+                    name: "Done".to_string(),
+                    color: None,
+                    icon: None,
+                }],
+            )
+            .unwrap();
+        let done = store.get_tag_state().unwrap().tags[0].id.clone();
+        let q4 = store
+            .create_tag(
+                &store::NewTag {
+                    name: "q4".to_string(),
+                    color: None,
+                    icon: None,
+                },
+                None,
+                Some(&other.id),
+            )
+            .unwrap();
+        store
+            .set_project_group_tag(&own.id, &group.id, Some(&done))
+            .unwrap();
+        store
+            .set_project_group_tag(&other.id, &group.id, Some(&done))
+            .unwrap();
+        let state = store.get_tag_state().unwrap();
+        assert_eq!(state.assignments.len(), 3, "two Done, one q4");
+
+        let scoped = DispatchCaller::Control(ControlGrant {
+            actor: Actor::Session {
+                session_id: "s1".to_string(),
+                epoch: 1,
+            },
+            scope: Scope::Project(own.id.clone()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        });
+        let confined = confine_tag_state(state.clone(), &scoped);
+        assert_eq!(confined.groups.len(), 1);
+        assert!(
+            confined.tags.iter().any(|tag| tag.id == q4.id),
+            "the whole catalog, another project's q4 included"
+        );
+        assert_eq!(
+            confined
+                .assignments
+                .iter()
+                .map(|a| (a.project_id.as_str(), a.tag_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(own.id.as_str(), done.as_str())]
+        );
+
+        let all = DispatchCaller::Control(ControlGrant::test_all_projects());
+        assert_eq!(confine_tag_state(state.clone(), &all).assignments.len(), 3);
+        assert_eq!(
+            confine_tag_state(state.clone(), &DispatchCaller::Web)
+                .assignments
+                .len(),
+            3
+        );
+
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "get_tag_state");
+        assert!(
+            arm.contains("confine_tag_state(state, &caller)"),
+            "the get_tag_state arm must confine assignments for control callers: {arm}"
         );
     }
 

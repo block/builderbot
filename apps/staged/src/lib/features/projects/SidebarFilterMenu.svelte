@@ -1,15 +1,18 @@
 <!--
   SidebarFilterMenu.svelte - "Filter ▾" dropdown for the sidebar's projects header.
 
-  A Status group (Unread, Running) and a Repo group with project counts, all
-  reading and toggling projectFiltersStore so the landing page's chip bar and
-  this menu can never drift. Menu checkboxes toggle additively (the chips'
-  shift-click semantics): a menu is a place to stack filters, and exclusive
-  selection would make "Unread + my repo" impossible to express here. The
-  trigger shows how many filters are active, and a Clear filters item appears
-  while any are — repo filters can outlive their menu entry (delete the last
-  project using a repo and its filter stays active with nothing to uncheck),
-  so clearing has to be reachable from the menu itself. It sits on the edge
+  An Activity group (Unread, Running; not "Status", which the default tag
+  group is called), a Repo group, and the tags under a heading per tag group
+  then "Tags" for the ungrouped ones (as in the tag picker), all
+  with project counts, reading and toggling projectFiltersStore so the landing
+  page's chip bar and this menu can never drift. Menu checkboxes toggle
+  additively (the chips' shift-click semantics): a menu is a place to stack
+  filters, and exclusive selection would make "Unread + my repo" impossible to
+  express here. The trigger shows how many filters are active (a deleted tag's
+  filter doesn't count), and a Clear filters item appears while any are — repo
+  filters can outlive their menu entry (delete the last project using a repo
+  and its filter stays active with nothing to uncheck), so clearing has to be
+  reachable from the menu itself. It sits on the edge
   facing the trigger, the shortest reach from opening the menu, and keeps
   keyboard focus if the menu flips sides while it has it.
 -->
@@ -22,6 +25,7 @@
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import TagIcon from '../tags/TagIcon.svelte';
   import { projectFiltersStore, type FilterKind } from './projectFilters.svelte';
   import { onViewHidden } from '../layout/navigation.svelte';
 
@@ -33,7 +37,7 @@
     open = false;
   });
 
-  let activeCount = $derived(projectFiltersStore.activeFilters.size);
+  let activeCount = $derived(projectFiltersStore.effectiveActiveFilters.size);
 
   // Checkbox semantics: toggle within the current set.
   function toggle(filter: FilterKind) {
@@ -123,7 +127,7 @@
       {@render clearItem()}
       <DropdownMenu.Separator />
     {/if}
-    <DropdownMenu.Label>Status</DropdownMenu.Label>
+    <DropdownMenu.Label>Activity</DropdownMenu.Label>
     <DropdownMenu.CheckboxItem
       checked={projectFiltersStore.isFilterActive('unread')}
       closeOnSelect={false}
@@ -167,6 +171,22 @@
         </DropdownMenu.CheckboxItem>
       {/each}
     {/if}
+    {#each projectFiltersStore.tagFilterSections as section (section.key)}
+      <DropdownMenu.Separator />
+      <DropdownMenu.Label>{section.label}</DropdownMenu.Label>
+      {#each section.filters as tf (tf.tag.id)}
+        {@const filter = { tagId: tf.tag.id }}
+        <DropdownMenu.CheckboxItem
+          checked={projectFiltersStore.isFilterActive(filter)}
+          closeOnSelect={false}
+          onCheckedChange={() => toggle(filter)}
+        >
+          <TagIcon tag={tf.tag} size={12} />
+          <span class="tag-name">{tf.tag.name}</span>
+          <span class="menu-count">{tf.count}</span>
+        </DropdownMenu.CheckboxItem>
+      {/each}
+    {/each}
     {#if projectFiltersStore.hasActiveFilters && clearAtBottom}
       <DropdownMenu.Separator />
       {@render clearItem()}
@@ -212,6 +232,14 @@
     padding-right: 4px;
     color: var(--text-faint);
     font-variant-numeric: tabular-nums;
+  }
+
+  .tag-name {
+    min-width: 0;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .repo-fallback {

@@ -9,7 +9,6 @@
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import DiagramConfigSetting from './DiagramConfigSetting.svelte';
-  import ProjectStatusOptionsSetting from './ProjectStatusOptionsSetting.svelte';
   import UpdateSettings from './UpdateSettings.svelte';
   import { isTauri } from '../../transport';
   import { updaterState, checkForUpdatesNow } from '../../services/updater.svelte';
@@ -95,11 +94,14 @@
   <div class="panel-body">
     <div class="field">
       <span class="field-label">Appearance</span>
+      <!-- A function binding: bits-ui clears a single toggle group when its
+           pressed item is clicked again, and with a one-way value that '' would
+           stick in the wrapper and leave no segment pressed. The setter ignores
+           it and the getter hands the real mode back. -->
       <ToggleGroup.Root
         type="single"
         variant="outline"
-        value={preferences.mode}
-        onValueChange={(v) => v && setMode(v as AppMode)}
+        bind:value={() => preferences.mode, (v) => v && setMode(v as AppMode)}
         class="w-fit"
       >
         {#each modeOptions as opt (opt.value)}
@@ -199,10 +201,6 @@
           This prefix will be added to branch names along with a slash separator.
         {/if}
       </p>
-    </div>
-
-    <div class="field">
-      <ProjectStatusOptionsSetting />
     </div>
   </div>
 </div>

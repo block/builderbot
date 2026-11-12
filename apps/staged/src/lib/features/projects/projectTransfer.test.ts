@@ -338,7 +338,6 @@ describe('placeholderPreflight', () => {
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
-    statusOverride: null,
   };
   const branch = (overrides: Partial<Branch> = {}): Branch => ({
     id: 'b1',

@@ -42,7 +42,6 @@ function mountRow(location: ProjectLocation) {
     subpath: null,
     createdAt: 1,
     updatedAt: 1,
-    statusOverride: null,
   } as Project;
   const target = document.createElement('div');
   document.body.appendChild(target);

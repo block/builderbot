@@ -28,7 +28,6 @@ function project(overrides: Partial<Project> = {}): Project {
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
-    statusOverride: null,
     ...overrides,
   };
 }
@@ -165,6 +164,7 @@ function context(
     repos?: Record<string, ProjectRepo[]>;
     shortNames?: Record<string, string>;
     index?: Record<string, ProjectSearchIndexItem[]>;
+    tags?: Record<string, string[]>;
   } = {}
 ): SearchContext {
   return {
@@ -173,6 +173,8 @@ function context(
     repoShortName: (githubRepo, subpath) =>
       data.shortNames?.[subpath ? `${githubRepo}/${subpath}` : githubRepo],
     index: data.index ? new Map(Object.entries(data.index)) : undefined,
+    // A fresh array per call, as tagsStore hands them out.
+    tagNames: data.tags ? (projectId) => [...(data.tags?.[projectId] ?? [])] : undefined,
   };
 }
 
@@ -498,6 +500,57 @@ describe('the matching rule', () => {
     });
   });
 
+  describe('tags', () => {
+    const ctx = context({
+      branches: { p1: [branch({ branchName: 'launch-prep' })] },
+      tags: { p1: ['In progress', 'q4-launch', 'infra'] },
+    });
+
+    it('matches a tag name, case-insensitively, with the tag as the reason', () => {
+      expect(match(app, 'PROGRESS', ctx)).toEqual({
+        matched: true,
+        reason: { kind: 'tag', label: 'In progress', more: 0, itemTerms: ['progress'] },
+      });
+      expect(match(app, 'blocked', ctx).matched).toBe(false);
+    });
+
+    it('lets terms spread across the name and tags', () => {
+      expect(match(app, 'checkout infra', ctx)).toEqual({
+        matched: true,
+        reason: { kind: 'tag', label: 'infra', more: 0, itemTerms: ['infra'] },
+      });
+    });
+
+    it('shows a branch over a tag holding the same term', () => {
+      // "launch" is in the branch name (16) and the tag (8).
+      expect(match(app, 'launch', ctx).reason).toEqual({
+        kind: 'branch',
+        label: 'launch-prep',
+        more: 0,
+        itemTerms: ['launch'],
+      });
+    });
+
+    it('shows the tag holding every term of a multi-word query', () => {
+      expect(match(app, 'q4 launch', ctx).reason).toEqual({
+        kind: 'tag',
+        label: 'q4-launch',
+        more: 1,
+        itemTerms: ['q4', 'launch'],
+      });
+    });
+
+    it('gives no reason for a term a repo label holds too', () => {
+      const both = context({ tags: { p1: ['builderbot-infra'] } });
+      expect(match(app, 'builderbot', both)).toEqual({ matched: true, reason: null });
+    });
+
+    it('gives no reason for a term the name already holds', () => {
+      const named = context({ tags: { p1: ['checkout-flow'] } });
+      expect(match(app, 'checkout', named)).toEqual({ matched: true, reason: null });
+    });
+  });
+
   describe('index items', () => {
     const ctx = context({
       branches: { p1: [branch({ branchName: 'login-page', updatedAt: 1 })] },
@@ -686,6 +739,26 @@ describe('searchProjects ranking', () => {
     expect(ranked([...shuffled].reverse(), 'zz', tiers)).toEqual(tierOrder);
   });
 
+  it('ranks a tag with the repo labels: below branch names, above project notes', () => {
+    const inTag = project({ id: 'tag', name: 'P tag' });
+    const withTag = context({
+      branches: { branch: [branch({ projectId: 'branch', branchName: 'zz-branch' })] },
+      index: {
+        projectNote: [indexItem({ kind: 'projectNote', id: 'pn', title: 'zz plan' })],
+      },
+      tags: { tag: ['zz-tag'] },
+    });
+    expect(FIELD_WEIGHTS.tag).toBe(FIELD_WEIGHTS.repo);
+    expect(ranked([inProjectNote, inRepo, inTag, inBranch], 'zz', withTag)).toEqual([
+      'branch',
+      'repo',
+      'tag',
+      'projectNote',
+    ]);
+    // Tied with the repo label, input order decides.
+    expect(ranked([inTag, inRepo], 'zz', withTag)).toEqual(['tag', 'repo']);
+  });
+
   it('ranks a PR number with PR titles, above branch names', () => {
     const byNumber = project({ id: 'number', name: 'By number' });
     const byBranch = project({ id: 'branch', name: 'By branch' });
@@ -797,9 +870,15 @@ describe('searchProjects ranking', () => {
     expect(result.reasons.size).toBe(0);
   });
 
-  it('gives every field its own weight, so a field is never mistaken for another', () => {
-    const weights = Object.values(FIELD_WEIGHTS);
+  it('gives every field its own weight but tags, which share the repo labels’ tier', () => {
+    // Both are labels on the card. Sharing a weight can't mix the two up: a
+    // term a repo label holds is the card's identity whichever of them is
+    // named its field, and only a term no repo label holds makes a tag the
+    // reason.
+    const { tag, ...rest } = FIELD_WEIGHTS;
+    const weights = Object.values(rest);
     expect(new Set(weights).size).toBe(weights.length);
+    expect(tag).toBe(FIELD_WEIGHTS.repo);
   });
 
   describe('a bare `pr`', () => {
@@ -1020,6 +1099,12 @@ describe('buildSearchSnapshot', () => {
     expect(buildSearchSnapshot(all, base(), first)).toBe(first);
   });
 
+  it('hands back the previous snapshot when the tags refetch with the same names', () => {
+    const tagged = () => ({ ...base(), tagNames: () => ['q4-launch', 'infra'] });
+    const first = buildSearchSnapshot(all, tagged());
+    expect(buildSearchSnapshot(all, tagged(), first)).toBe(first);
+  });
+
   it('hands back the previous snapshot when the index refetches the same titles', () => {
     const first = buildSearchSnapshot(all, base());
     const refetched = base();
@@ -1040,6 +1125,7 @@ describe('buildSearchSnapshot', () => {
         { index: new Map([['p1', [indexItem({ id: 'n1', title: 'Login plan' })]]]) },
       ],
       ['a badge short name', { repoShortName: () => 'alp' }],
+      ['a tag', { tagNames: (id: string) => (id === 'p1' ? ['q4-launch'] : []) }],
       ['a repo', { reposByProject: new Map([['p1', [projectRepo({ headRepo: 'fork/x' })]]]) }],
     ];
     for (const [what, change] of changes) {

@@ -82,6 +82,17 @@ pub enum CtlError {
     /// something outside the credential's scope. `code` is one of
     /// [`AUTHORIZATION_CODES`].
     Authorization { code: String, message: String },
+    /// A multi-step write (`project tag`, `project untag`) failed after
+    /// some of its steps landed. Each step is its own transaction on the
+    /// app, so the earlier ones stay applied; `applied` lists them
+    /// (`{ command, args, result }`, in order) and `human` is their lines
+    /// as the command would have printed them. The exit code and the
+    /// stderr line are the failing step's own (`error`).
+    Partial {
+        error: Box<CtlError>,
+        applied: Vec<Value>,
+        human: String,
+    },
 }
 
 impl CtlError {
@@ -92,12 +103,59 @@ impl CtlError {
         }
     }
 
+    /// The machine-readable code: the app's or the client's for a command
+    /// or authorization failure, else the variant's name.
+    pub fn code(&self) -> &str {
+        match self {
+            Self::Command { code, .. } => code,
+            Self::Authorization { code, .. } => code,
+            Self::Transport(_) => "transport",
+            Self::Environment(_) => "environment",
+            Self::Partial { error, .. } => error.code(),
+        }
+    }
+
+    /// The failing step's message, without the code.
+    fn message(&self) -> String {
+        match self {
+            Self::Command { message, .. } | Self::Authorization { message, .. } => message.clone(),
+            Self::Transport(message) | Self::Environment(message) => message.clone(),
+            Self::Partial { error, .. } => error.message(),
+        }
+    }
+
+    /// What goes on stdout before the error line when a multi-step write
+    /// failed part-way: the applied steps' lines, or under `--json`
+    /// `{ ok: false, applied: [...], error: { code, message } }`. `None`
+    /// for every other error.
+    pub fn partial_output(&self, json: bool) -> Option<String> {
+        let Self::Partial {
+            error,
+            applied,
+            human,
+        } = self
+        else {
+            return None;
+        };
+        if json {
+            let value = serde_json::json!({
+                "ok": false,
+                "applied": applied,
+                "error": { "code": error.code(), "message": error.message() },
+            });
+            Some(serde_json::to_string_pretty(&value).expect("error output is always serializable"))
+        } else {
+            Some(human.clone())
+        }
+    }
+
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Command { .. } => 1,
             Self::Transport(_) => 2,
             Self::Environment(_) => 3,
             Self::Authorization { .. } => 4,
+            Self::Partial { error, .. } => error.exit_code(),
         }
     }
 }
@@ -109,6 +167,7 @@ impl std::fmt::Display for CtlError {
             Self::Transport(message) => write!(f, "transport: {message}"),
             Self::Environment(message) => write!(f, "{message}"),
             Self::Authorization { code, message } => write!(f, "{code}: {message}"),
+            Self::Partial { error, .. } => write!(f, "{error}"),
         }
     }
 }
@@ -217,6 +276,10 @@ pub fn discover_and_connect(
         if let Some(data_dir) = data_dir {
             client.attach_grant_credential(data_dir)?;
         }
+    } else {
+        // A per-session control file carries a session lease, which the
+        // app confines to the session's project.
+        client.scope = CredentialScope::Project;
     }
     Ok(client)
 }
@@ -517,6 +580,18 @@ struct PingResponse {
 }
 
 /// A verified connection to one Staged instance's control server.
+/// How far the credential this client sends reaches, as far as the client
+/// can tell without a round trip. The app confines two kinds of credential
+/// to one project: a session lease (a per-session control file) and a
+/// grant approved for one project (`connect --project`); both are known at
+/// connect time. Anything else is either unconfined or refused by the app
+/// as `authorization_required` before any answer is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialScope {
+    AllProjects,
+    Project,
+}
+
 #[derive(Debug)]
 pub struct Client {
     http: reqwest::blocking::Client,
@@ -528,6 +603,10 @@ pub struct Client {
     /// What the handshake confirmed, for the grant the client later writes.
     pub pid: u32,
     pub generation: u64,
+    /// See [`CredentialScope`]. Reads the app confines to the credential's
+    /// project (`get_tag_state`'s assignments, `list_projects`) are
+    /// labelled from this.
+    pub scope: CredentialScope,
 }
 
 impl Client {
@@ -623,6 +702,7 @@ impl Client {
             bearer: discovery.token.clone(),
             pid: discovery.pid,
             generation: discovery.generation,
+            scope: CredentialScope::AllProjects,
         })
     }
 
@@ -804,6 +884,12 @@ impl Client {
             .accept_renewal(expires_at, crate::grants::now_ms())
             .map_err(CtlError::Transport)?;
         self.bearer = Some(token.to_string());
+        // The grant file's claim, copied from the approval body at connect
+        // time; the app's own confinement is not re-read here.
+        self.scope = match grant.scope.project_id {
+            Some(_) => CredentialScope::Project,
+            None => CredentialScope::AllProjects,
+        };
         Ok(Reconnected { expires_at })
     }
 
@@ -943,7 +1029,16 @@ pub struct Approval {
 fn classify(what: &str, status: u16, body: Value) -> Result<Value, CtlError> {
     match status {
         200 => Ok(body),
-        400 | 404 => Err(CtlError::command("app_error", error_message(&body))),
+        400 => Err(CtlError::command("app_error", error_message(&body))),
+        404 => {
+            // Not allowlisted. For a tag command the likely cause is a Staged
+            // from before tags reached the control server, not a typo.
+            let mut message = error_message(&body);
+            if crate::tags::is_tag_command(what) {
+                message.push_str(" (this Staged does not have tags yet; update it)");
+            }
+            Err(CtlError::command("app_error", message))
+        }
         401 | 403 => match authorization_code(&body) {
             Some(code) => Err(CtlError::Authorization {
                 code: code.to_string(),
@@ -1043,6 +1138,38 @@ mod tests {
             .exit_code(),
             4
         );
+    }
+
+    #[test]
+    fn a_404_on_a_tag_command_hints_at_updating_staged() {
+        // An app from before tags reached the control server answers a tag
+        // command the way it answers any unknown command. Only the tag
+        // commands get the hint; a 400 from a current app is passed through.
+        let refusal = || serde_json::json!({"error": "command not available through stagedctl: get_tag_state"});
+        let err = classify("get_tag_state", 404, refusal()).unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            "app_error: command not available through stagedctl: get_tag_state \
+             (this Staged does not have tags yet; update it)"
+        );
+        let err = classify(
+            "list_projects",
+            404,
+            serde_json::json!({"error": "command not available through stagedctl: list_projects"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "app_error: command not available through stagedctl: list_projects"
+        );
+        let err = classify(
+            "set_project_group_tag",
+            400,
+            serde_json::json!({"error": "Tag group not found: g1"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "app_error: Tag group not found: g1");
     }
 
     #[test]
@@ -2011,6 +2138,78 @@ mod tests {
         let client = discover_and_connect(Some(&session_file), None, Some(dir.path())).unwrap();
         assert_eq!(client.bearer(), Some(token.as_str()));
         assert_eq!(seen.lock().unwrap().len(), 1, "ping only; no challenge");
+        // A session lease is confined to its project; the client knows
+        // without asking.
+        assert_eq!(client.scope, CredentialScope::Project);
+    }
+
+    #[test]
+    fn the_credential_scope_follows_the_grant_that_attached() {
+        let pid = std::process::id();
+        let now = crate::grants::now_ms();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (port, _handle) = grant_aware_server(
+            pid,
+            vec![("a1".to_string(), "s".to_string())],
+            now + crate::grants::GRANT_LIFETIME_MS,
+            seen,
+        );
+        let dir = private_tempdir();
+        write_tcp_discovery(dir.path(), pid, port, 1);
+        let unconfined = grant_file("a1", "s", now + 1000);
+        crate::grants::write_grant_file(dir.path(), &unconfined).unwrap();
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.scope, CredentialScope::AllProjects);
+
+        let scoped = crate::grants::GrantFile {
+            scope: crate::grants::GrantScope {
+                project_id: Some("p-1".to_string()),
+            },
+            ..unconfined
+        };
+        crate::grants::write_grant_file(dir.path(), &scoped).unwrap();
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert_eq!(client.scope, CredentialScope::Project);
+    }
+
+    #[test]
+    fn a_partial_failure_reports_the_applied_steps_then_the_inner_error() {
+        let inner = CtlError::command("app_error", "Tag not found: t-x");
+        let err = CtlError::Partial {
+            error: Box::new(inner),
+            applied: vec![serde_json::json!({ "command": "set_project_group_tag" })],
+            human: "tagged Widgets  id:p1\n  Status: Done".to_string(),
+        };
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.code(), "app_error");
+        assert_eq!(err.to_string(), "app_error: Tag not found: t-x");
+        assert_eq!(
+            err.partial_output(false).as_deref(),
+            Some("tagged Widgets  id:p1\n  Status: Done")
+        );
+        let json: Value = serde_json::from_str(&err.partial_output(true).unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "ok": false,
+                "applied": [{ "command": "set_project_group_tag" }],
+                "error": { "code": "app_error", "message": "Tag not found: t-x" },
+            })
+        );
+        // An authorization failure part-way keeps its own exit code.
+        let err = CtlError::Partial {
+            error: Box::new(CtlError::Authorization {
+                code: "scope_denied".to_string(),
+                message: "outside".to_string(),
+            }),
+            applied: Vec::new(),
+            human: String::new(),
+        };
+        assert_eq!(err.exit_code(), 4);
+        assert_eq!(err.code(), "scope_denied");
+        // Other errors have nothing to put on stdout.
+        assert_eq!(CtlError::command("x", "y").partial_output(true), None);
+        assert_eq!(CtlError::Transport("t".into()).partial_output(false), None);
     }
 
     #[test]

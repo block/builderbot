@@ -25,6 +25,20 @@ fn table_exists(conn: &Connection, table: &str) -> bool {
         == 1
 }
 
+fn index_exists(conn: &Connection, index: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'index' AND name = ?1
+        )",
+        params![index],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap()
+        == 1
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -161,7 +175,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -189,11 +203,31 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "repo_actions", "icon"));
     assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
     assert!(column_exists(&conn, "session_messages", "acp_origin"));
+    // Frozen since tags (0045): nothing reads or writes it except the one-shot
+    // legacy import, but it stays as a recovery source.
     assert!(column_exists(&conn, "projects", "status_override"));
     assert!(column_exists(&conn, "images", "width"));
     assert!(column_exists(&conn, "images", "height"));
     assert!(column_exists(&conn, "images", "density"));
     assert!(column_exists(&conn, "branches", "pr_title"));
+    assert!(table_exists(&conn, "tag_groups"));
+    assert!(table_exists(&conn, "tags"));
+    assert!(table_exists(&conn, "project_tags"));
+    assert!(index_exists(&conn, "idx_tag_groups_name"));
+    assert!(index_exists(&conn, "idx_tag_groups_icon"));
+    assert!(index_exists(&conn, "idx_tags_scope_name"));
+    // 0046: a group's board can be pinned to the sidebar.
+    assert!(column_exists(&conn, "tag_groups", "show_in_sidebar"));
+    // The legacy status import's marker, until the app runs the import.
+    assert!(table_exists(&conn, "legacy_project_status_import"));
+    let marker_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_project_status_import WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker_rows, 1);
 
     let trigger_count: i64 = conn
         .query_row(
@@ -296,7 +330,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -393,7 +427,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -485,7 +519,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -568,7 +602,7 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(!column_exists(&conn, "reviews", "is_auto"));
 
     // Reviews the removed auto-review feature created in the background are
@@ -649,7 +683,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set
@@ -734,7 +768,7 @@ fn test_note_migrations_backfill_subtype_and_completion_for_session_less_notes()
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "notes", "subtype"));
 
     let subtype = |id: &str| -> Option<String> {
@@ -840,7 +874,7 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "repo_actions", "pinned"));
     assert!(column_exists(&conn, "repo_actions", "icon"));
 
@@ -918,7 +952,7 @@ fn test_auto_commit_removal_migration_drops_flag_and_keeps_actions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
 
     // Only the flag goes: an action that had auto-commit enabled keeps running
@@ -982,7 +1016,7 @@ fn test_session_branch_id_backfill_links_artifact_backed_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
 
     let branch_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -1040,7 +1074,7 @@ fn test_session_chat_read_at_migration_marks_existing_chats_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "sessions", "chat_read_at"));
 
     let read_at = |id: &str| -> Option<i64> {
@@ -1099,7 +1133,7 @@ fn test_pr_title_migration_adds_an_empty_title_to_existing_branches() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "branches", "pr_title"));
 
     // No backfill: a linked PR's title arrives with the next status poll.
@@ -1149,7 +1183,7 @@ fn test_note_read_at_migration_marks_landed_notes_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
 
     for (table, landed_at) in [("notes", 1000), ("project_notes", 2000)] {
         assert!(column_exists(&conn, table, "read_at"));
@@ -1214,7 +1248,7 @@ fn test_child_note_repair_detaches_only_cross_project_parents() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
 
     let parent_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -1269,7 +1303,7 @@ fn test_session_pre_head_and_blox_command_migration_leaves_existing_rows_null() 
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     let (pre_head, command): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT pre_head_sha, blox_command_id FROM sessions WHERE id = 'old'",
@@ -1311,7 +1345,7 @@ fn test_session_started_by_migration_leaves_existing_rows_null() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     let started_by: Option<String> = conn
         .query_row(
             "SELECT started_by FROM sessions WHERE id = 'old'",
@@ -1371,7 +1405,7 @@ fn test_artifact_delete_cleanup_migration_spares_disconnected_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     for (table, prefix) in [
         ("commits", "c"),
         ("notes", "n"),
@@ -1433,7 +1467,7 @@ fn test_control_grants_migration_creates_the_table_and_cascades_on_project() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(table_exists(&conn, "control_grants"));
     for column in [
         "id",
@@ -1503,7 +1537,7 @@ fn test_branch_deferred_push_migration_leaves_existing_branches_unarmed() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 44);
+    assert_eq!(version, 46);
     assert!(column_exists(&conn, "branches", "deferred_push"));
     assert!(column_exists(
         &conn,
@@ -1546,6 +1580,270 @@ fn test_fresh_store_has_the_deferred_push_columns() {
         Some(armed)
     );
     drop(store);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_project_tags_migration_then_import_moves_status_overrides_into_tags() {
+    let path = temp_db_path("project-tags-import");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 44;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- The projects table as of 0032 (baseline + status_override). 0044 only
+        -- alters `branches`, so start past it.
+        CREATE TABLE projects (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            github_repo     TEXT,
+            location        TEXT NOT NULL DEFAULT 'local',
+            subpath         TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            status_override TEXT
+        );
+        CREATE UNIQUE INDEX idx_projects_name ON projects(name);
+        INSERT INTO projects (id, name, created_at, updated_at, status_override) VALUES
+            ('p-custom', 'custom', 1, 1, 'c0ffee00-0000-4000-8000-000000000001'),
+            ('p-builtin', 'builtin', 2, 2, 'done'),
+            ('p-dangling', 'dangling', 3, 3, 'deleted-option'),
+            ('p-default', 'default', 4, 4, NULL);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    let prefs = serde_json::json!({
+        "theme": "dark",
+        "project-status-options": [
+            { "id": "done", "label": "Done", "icon": "circle-check", "color": "green" },
+            {
+                "id": "c0ffee00-0000-4000-8000-000000000001",
+                "label": "Waiting on design",
+                "icon": "palette",
+                "color": "purple"
+            }
+        ]
+    });
+    let options = super::parse_legacy_status_options(Some(&prefs));
+    assert_eq!(
+        store.import_legacy_project_statuses(&options).unwrap(),
+        super::LegacyImportOutcome::Imported {
+            tags: 2,
+            assignments: 2,
+            dropped_dangling: 1,
+        }
+    );
+    // A later launch finds the marker gone.
+    assert_eq!(
+        store.import_legacy_project_statuses(&options).unwrap(),
+        super::LegacyImportOutcome::AlreadyImported
+    );
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 46);
+    assert!(!table_exists(&conn, "legacy_project_status_import"));
+
+    let group: (String, String, i64, i64) = conn
+        .query_row(
+            "SELECT id, name, position, is_icon_group FROM tag_groups",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(group, ("status".into(), "Status".into(), 0, 1));
+
+    let mut stmt = conn
+        .prepare("SELECT id, name, color, icon, position FROM tags ORDER BY position")
+        .unwrap();
+    let tags = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        tags,
+        vec![
+            (
+                "done".to_string(),
+                "Done".to_string(),
+                "green".to_string(),
+                "circle-check".to_string(),
+                0
+            ),
+            (
+                "c0ffee00-0000-4000-8000-000000000001".to_string(),
+                "Waiting on design".to_string(),
+                "purple".to_string(),
+                "palette".to_string(),
+                1
+            ),
+        ]
+    );
+    drop(stmt);
+
+    let mut stmt = conn
+        .prepare("SELECT project_id, tag_id, sort_order FROM project_tags ORDER BY project_id")
+        .unwrap();
+    let assignments = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        assignments,
+        vec![
+            ("p-builtin".to_string(), "done".to_string(), None),
+            (
+                "p-custom".to_string(),
+                "c0ffee00-0000-4000-8000-000000000001".to_string(),
+                None
+            ),
+        ]
+    );
+    drop(stmt);
+
+    // The old column is frozen, not cleared: it stays a recovery source.
+    let mut stmt = conn
+        .prepare("SELECT id, status_override FROM projects ORDER BY id")
+        .unwrap();
+    let overrides = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        overrides,
+        vec![
+            ("p-builtin".to_string(), Some("done".to_string())),
+            (
+                "p-custom".to_string(),
+                Some("c0ffee00-0000-4000-8000-000000000001".to_string())
+            ),
+            ("p-dangling".to_string(), Some("deleted-option".to_string())),
+            ("p-default".to_string(), None),
+        ]
+    );
+    drop(stmt);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_tag_group_sidebar_migration_adds_the_column_off_for_existing_groups() {
+    let path = temp_db_path("tag-group-sidebar");
+    let conn = Connection::open(&path).unwrap();
+    // The tag tables as of 0045, with a group already in them.
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 45;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        CREATE TABLE projects (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            github_repo     TEXT,
+            location        TEXT NOT NULL DEFAULT 'local',
+            subpath         TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            status_override TEXT
+        );
+        CREATE TABLE tag_groups (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            position      INTEGER NOT NULL,
+            is_icon_group INTEGER NOT NULL DEFAULT 0 CHECK (is_icon_group IN (0, 1)),
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_tag_groups_name ON tag_groups (name COLLATE NOCASE);
+        CREATE UNIQUE INDEX idx_tag_groups_icon ON tag_groups (is_icon_group) WHERE is_icon_group = 1;
+        CREATE TABLE tags (
+            id         TEXT PRIMARY KEY,
+            group_id   TEXT REFERENCES tag_groups (id),
+            name       TEXT NOT NULL,
+            color      TEXT NOT NULL CHECK (color IN ('green','red','amber','blue','purple','cyan','gray')),
+            icon       TEXT,
+            position   INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_tags_scope_name ON tags (ifnull(group_id, ''), name COLLATE NOCASE);
+        CREATE INDEX idx_tags_group ON tags (group_id, position);
+        CREATE TABLE project_tags (
+            project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+            tag_id     TEXT NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
+            sort_order INTEGER,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (project_id, tag_id)
+        );
+        CREATE INDEX idx_project_tags_tag ON project_tags (tag_id);
+        INSERT INTO tag_groups (id, name, position, is_icon_group, created_at, updated_at)
+            VALUES ('status', 'Status', 0, 1, 1, 1);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    let state = store.get_tag_state().unwrap();
+    assert_eq!(state.groups.len(), 1);
+    // An existing group's board starts unpinned, and the icon flag is kept.
+    assert!(!state.groups[0].show_in_sidebar);
+    assert!(state.groups[0].is_icon_group);
+    store.set_tag_group_sidebar("status", true).unwrap();
+    assert!(store.get_tag_state().unwrap().groups[0].show_in_sidebar);
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 46);
+    assert!(column_exists(&conn, "tag_groups", "show_in_sidebar"));
+    let shown: i64 = conn
+        .query_row(
+            "SELECT show_in_sidebar FROM tag_groups WHERE id = 'status'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(shown, 1);
+    // The CHECK admits only 0 and 1.
+    assert!(conn
+        .execute("UPDATE tag_groups SET show_in_sidebar = 2", [])
+        .is_err());
 
     cleanup_db(&path);
 }

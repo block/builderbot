@@ -48,6 +48,7 @@
   import { bloxAvailable } from '../settings/sq.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import { tagsStore } from '../../stores/tags.svelte';
   import {
     canDeleteProjectWithoutConfirmation,
     computeSafeToDeleteSignature,
@@ -132,6 +133,9 @@
   // before projectActions.pendingDelete/deletingProjectNames are set, so a held
   // key only deletes once.
   let deleteShortcutPending = $state(false);
+  // Bumped by the T shortcut; the project's tag pills open their picker on
+  // each bump.
+  let tagPickerRequest = $state(0);
 
   // Set on unmount so checkStoreAndLoad's continuation can't hydrate a project
   // this view no longer shows (the retained layer is released when its project
@@ -172,6 +176,11 @@
       handleDeleteCurrentProjectShortcut(event);
     };
     window.addEventListener('staged:delete-current-project', onDeleteCurrentProject);
+    const onOpenTagPicker = (event: Event) => {
+      if (!layer.visible) return;
+      handleOpenTagPickerShortcut(event);
+    };
+    window.addEventListener('staged:open-tag-picker', onOpenTagPicker);
 
     const unlistenDetection = listenToRepoActionsDetection((event) => {
       const matchingProjectIds = projectsDataStore.projects
@@ -194,6 +203,7 @@
       destroyed = true;
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:delete-current-project', onDeleteCurrentProject);
+      window.removeEventListener('staged:open-tag-picker', onOpenTagPicker);
       unlistenDetection();
       workspaceLifecycle.stop();
     };
@@ -548,6 +558,30 @@
     void projectActions.requestRemoveProject(selectedProject).finally(() => {
       deleteShortcutPending = false;
     });
+  }
+
+  /**
+   * The T shortcut: open the selected project's tag picker. Unhandled (so the
+   * key does nothing) while the project is going away, before tags load, or
+   * while a dialog, popover or menu is open — the key belongs to that.
+   */
+  function handleOpenTagPickerShortcut(event: Event) {
+    if (
+      !selectedProject ||
+      !tagsStore.loaded ||
+      selectedProjectDeleting ||
+      projectActions.pendingDelete ||
+      projectActions.pendingTransfer ||
+      branchToDelete ||
+      showNewProjectModal ||
+      showAddRepoModal ||
+      document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    tagPickerRequest++;
   }
 
   // ── Branch actions ──
@@ -965,6 +999,7 @@
             onProjectTitleElement={selectedProjectId ? setProjectTitleElement : undefined}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
+            {tagPickerRequest}
           />
         {/each}
       </div>

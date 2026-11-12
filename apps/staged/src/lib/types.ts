@@ -12,15 +12,68 @@ export interface Project {
   subpath: string | null;
   createdAt: number;
   updatedAt: number;
-  /**
-   * Id of the user-chosen status option shown instead of the computed PR
-   * status, or null for Default. Ids that match no configured option render as
-   * Default.
-   */
-  statusOverride: string | null;
 }
 
 export type ProjectLocation = 'local' | 'remote';
+
+// =============================================================================
+// Project tags (src-tauri/src/store/tags.rs)
+// =============================================================================
+
+/** The fixed tag palette, themed through the `--project-status-*` tokens. */
+export type TagColor = 'green' | 'red' | 'amber' | 'blue' | 'purple' | 'cyan' | 'gray';
+
+/**
+ * A named set of tags, of which a project has at most one. At most one group
+ * is the icon group: its tag stands in for the computed PR status icon.
+ */
+export interface TagGroup {
+  id: string;
+  name: string;
+  /** Dense 0..n-1 order of groups. */
+  position: number;
+  isIconGroup: boolean;
+  /** The group's board is pinned to the projects sidebar. Any number may be. */
+  showInSidebar: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Tag {
+  id: string;
+  /** Null for an ungrouped tag, which projects add and remove freely. */
+  groupId: string | null;
+  name: string;
+  color: TagColor;
+  /** Kebab-case Lucide icon name, or null for a coloured dot. */
+  icon: string | null;
+  /** Dense 0..n-1 order within its group, or among ungrouped tags. */
+  position: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectTag {
+  projectId: string;
+  tagId: string;
+}
+
+/** The whole tag catalog plus every assignment, as `get_tag_state` returns it. */
+export interface TagState {
+  groups: TagGroup[];
+  tags: Tag[];
+  assignments: ProjectTag[];
+}
+
+/** A tag to create; the backend picks the least-used colour when none is given. */
+export interface NewTag {
+  name: string;
+  color?: TagColor | null;
+  icon?: string | null;
+}
+
+/** What `deleteTagGroup` does with the group's tags. */
+export type DeleteTagGroupMode = 'ungroup' | 'deleteTags';
 
 export interface ProjectRepo {
   id: string;
@@ -165,6 +218,9 @@ export interface ReviewChangedEvent {
 export interface ReposChangedEvent {
   githubRepo: string | null;
 }
+
+/** Any tag catalog or assignment write. Small enough to refetch whole. */
+export type TagsChangedEvent = Record<string, never>;
 
 export interface CommitTimelineItem {
   /** DB id — present for pending/failed commits so they can be deleted by id. */

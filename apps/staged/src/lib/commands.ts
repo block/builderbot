@@ -67,6 +67,12 @@ import type {
   SuggestedRepo,
   ToolCallBody,
   WorkspaceInfo,
+  DeleteTagGroupMode,
+  NewTag,
+  Tag,
+  TagColor,
+  TagGroup,
+  TagState,
 } from './types';
 
 export type DiffScope = 'branch' | 'commit' | 'worktree';
@@ -294,15 +300,6 @@ export async function setPrimaryProjectRepo(
 ): Promise<void> {
   await invokeCommand('set_primary_project_repo', { projectId, projectRepoId });
   await invalidateCache('list_project_repos', { projectId });
-}
-
-/** Set a project's status option id, or clear it back to Default with null. */
-export async function setProjectStatusOverride(
-  projectId: string,
-  statusOverride: string | null
-): Promise<void> {
-  await invokeCommand('set_project_status_override', { projectId, statusOverride });
-  await invalidateCacheByCommand('list_projects');
 }
 
 export function getSuggestedRepos(projectId: string, limit?: number): Promise<SuggestedRepo[]> {
@@ -2604,6 +2601,120 @@ export function updateRepoBadge(
 
 export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<void> {
   return invokeCommand('delete_repo_badge', { githubRepo, subpath });
+}
+
+// =============================================================================
+// Project Tags
+// =============================================================================
+//
+// Every write publishes `tags-changed` (never `project-changed`), and drops
+// the one argless `get_tag_state` cache key before returning, so a read
+// issued after the write resolves never sees a pre-write snapshot.
+
+/** The tag catalog and every project's tags. */
+export function getTagState(options: ForceRefreshOptions = {}): Promise<SwrResult<TagState>> {
+  return cachedCommand('get_tag_state', undefined, {
+    ttl: 5 * 60_000,
+    bypassRead: options.force,
+  });
+}
+
+/** Append a group, with its initial tags in the order given. */
+export async function createTagGroup(name: string, tags: NewTag[] = []): Promise<TagGroup> {
+  const group = await invokeCommand<TagGroup>('create_tag_group', { name, tags });
+  await invalidateCache('get_tag_state');
+  return group;
+}
+
+export async function renameTagGroup(groupId: string, name: string): Promise<void> {
+  await invokeCommand('rename_tag_group', { groupId, name });
+  await invalidateCache('get_tag_state');
+}
+
+/** Make a group the icon group, or turn the icon group off with null. */
+export async function setIconTagGroup(groupId: string | null): Promise<void> {
+  await invokeCommand('set_icon_tag_group', { groupId });
+  await invalidateCache('get_tag_state');
+}
+
+/** Pin a group's board to the projects sidebar, or unpin it. */
+export async function setTagGroupSidebar(groupId: string, shown: boolean): Promise<void> {
+  await invokeCommand('set_tag_group_sidebar', { groupId, shown });
+  await invalidateCache('get_tag_state');
+}
+
+/** Reorder groups; `groupIds` must name every group exactly once. */
+export async function reorderTagGroups(groupIds: string[]): Promise<void> {
+  await invokeCommand('reorder_tag_groups', { groupIds });
+  await invalidateCache('get_tag_state');
+}
+
+export async function deleteTagGroup(groupId: string, mode: DeleteTagGroupMode): Promise<void> {
+  await invokeCommand('delete_tag_group', { groupId, mode });
+  await invalidateCache('get_tag_state');
+}
+
+/**
+ * Append a tag to a group, or to the ungrouped tags. With `assignProjectId`
+ * the new tag is assigned in the same transaction (replacing the project's
+ * tag in that group).
+ */
+export async function createTag(input: {
+  name: string;
+  groupId?: string | null;
+  color?: TagColor | null;
+  icon?: string | null;
+  assignProjectId?: string | null;
+}): Promise<Tag> {
+  const tag = await invokeCommand<Tag>('create_tag', {
+    name: input.name,
+    groupId: input.groupId ?? null,
+    color: input.color ?? null,
+    icon: input.icon ?? null,
+    assignProjectId: input.assignProjectId ?? null,
+  });
+  await invalidateCache('get_tag_state');
+  return tag;
+}
+
+/** Replace a tag's name, colour and icon (no patch semantics). */
+export async function updateTag(
+  tagId: string,
+  value: { name: string; color: TagColor; icon: string | null }
+): Promise<void> {
+  await invokeCommand('update_tag', { tagId, ...value });
+  await invalidateCache('get_tag_state');
+}
+
+/** Move a tag to `index` within a group (or ungrouped, with null). */
+export async function moveTag(tagId: string, groupId: string | null, index: number): Promise<void> {
+  await invokeCommand('move_tag', { tagId, groupId, index });
+  await invalidateCache('get_tag_state');
+}
+
+export async function deleteTag(tagId: string): Promise<void> {
+  await invokeCommand('delete_tag', { tagId });
+  await invalidateCache('get_tag_state');
+}
+
+/** Replace a project's tag in a group, or clear it with null. Idempotent. */
+export async function setProjectGroupTag(
+  projectId: string,
+  groupId: string,
+  tagId: string | null
+): Promise<void> {
+  await invokeCommand('set_project_group_tag', { projectId, groupId, tagId });
+  await invalidateCache('get_tag_state');
+}
+
+/** Add or remove one tag. Adding a grouped tag replaces its siblings. Idempotent. */
+export async function setProjectTagAssigned(
+  projectId: string,
+  tagId: string,
+  assigned: boolean
+): Promise<void> {
+  await invokeCommand('set_project_tag_assigned', { projectId, tagId, assigned });
+  await invalidateCache('get_tag_state');
 }
 
 // =============================================================================

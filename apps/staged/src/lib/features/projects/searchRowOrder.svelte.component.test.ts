@@ -23,7 +23,6 @@ function project(id: string): Project {
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
-    statusOverride: null,
   };
 }
 

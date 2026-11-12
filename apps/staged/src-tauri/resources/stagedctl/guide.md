@@ -69,6 +69,29 @@ Verbs that start sessions spawn real agents, which cost real money. They
 appear immediately in the UI, where the user can watch and cancel them —
 start sessions only when the task genuinely calls for it.
 
+Tag assignments (`stagedctl project tag`, `stagedctl project untag`) fit the
+invariant: they show at once as the pills and chips in the project header,
+where the user can undo them with a group pill's None or a chip's ×. A tag
+name the catalog does not have exits 1 rather than growing the catalog;
+pass `--create` only when a new ungrouped tag is genuinely what the task
+calls for, since the tag then exists for every project until the user
+deletes it in Settings ▸ Tags. Each tag in one call is its own write: if a
+later one fails, or the re-read after them fails, the steps that landed
+stay applied and are reported (`--json`: `{ ok: false, applied: [...],
+error }`, where each `applied` row carries only the request and the app's
+raw result). Run `stagedctl project tags` for the project's final state.
+
+Catalog edits (`stagedctl tag create|edit|move`, `stagedctl tag group …`)
+show at once in Settings ▸ Tags, where the user can rename, move or delete
+what you changed, and they need a credential that reaches every project
+(a session's own credential is refused, exit 4). They change what every
+project's tags mean, so make them only when the task asks for a catalog
+change, not to tidy up. `tag move --yes` is the one edit that drops
+assignments (projects already holding a tag in the destination group lose
+the moving tag); the command refuses without `--yes` when that would
+happen, and the user can re-tag those projects. Deleting tags and groups
+is deliberately not available.
+
 ## When stagedctl is unavailable
 
 The CLI needs the spawning app instance to be alive and reachable over

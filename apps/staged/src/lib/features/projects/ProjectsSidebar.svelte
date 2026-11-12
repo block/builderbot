@@ -13,6 +13,7 @@
     followWhileVisible,
     goHome,
     navigation,
+    selectBoard,
     selectProject,
     showAllRepos,
   } from '../layout/navigation.svelte';
@@ -37,8 +38,9 @@
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import PinnedRepoCards from './PinnedRepoCards.svelte';
   import ProjectRowContent from './ProjectRowContent.svelte';
-  import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
+  import ProjectTagMenuItems from './ProjectTagMenuItems.svelte';
   import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
+  import SidebarBoardRows from './SidebarBoardRows.svelte';
   import { transferringTitle } from './projectTransfer';
   import SidebarFilterMenu from './SidebarFilterMenu.svelte';
   import SidebarSearchField from './SidebarSearchField.svelte';
@@ -113,6 +115,11 @@
     navigation.projectLayer?.kind === 'project' ? navigation.projectLayer.projectId : null
   );
   let layerShowsRepos = $derived(navigation.projectLayer?.kind === 'repos');
+  // The pinned board the layer shows, if any; its row highlights like a
+  // project's. The rows themselves come from the tag catalog (SidebarBoardRows).
+  let layerBoardGroupId = $derived(
+    navigation.projectLayer?.kind === 'board' ? navigation.projectLayer.groupId : null
+  );
 
   // Any repo (pinned or not) earns the repos section and its All repos link;
   // keeping it while the repos view is active means the link highlighting
@@ -520,13 +527,19 @@
             <SidebarSectionHead
               label={searching ? 'Projects' : 'All projects'}
               count={searching ? resultsLabel(visibleProjectCount) : visibleProjectCount}
-              active={layerProjectId === null && !layerShowsRepos}
+              active={layerProjectId === null && !layerShowsRepos && layerBoardGroupId === null}
               onclick={openAllProjects}
             >
               {#snippet trailing()}
                 <SidebarFilterMenu />
               {/snippet}
             </SidebarSectionHead>
+            <!-- The pinned boards, between the heading and the rows. A search
+                 lists project matches only, so they step aside while one is
+                 typed, like the heading's label changes. -->
+            {#if !searching}
+              <SidebarBoardRows activeGroupId={layerBoardGroupId} onSelect={selectBoard} />
+            {/if}
             {#if visibleProjectCount === 0}
               <div class="state no-matches">
                 {#if searching}
@@ -639,7 +652,7 @@
                     <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
                       <Mail size={14} /> Mark as Unread
                     </ContextMenu.Item>
-                    <ProjectStatusSubmenu {project} />
+                    <ProjectTagMenuItems {project} />
                     <ContextMenu.Separator />
                     <ProjectTransferMenuItem {project} />
                     <ContextMenu.Item

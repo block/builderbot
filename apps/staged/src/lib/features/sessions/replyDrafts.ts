@@ -72,18 +72,35 @@ export type ReplyComposerTarget = {
   focusQuoteReply(id: string): void;
 };
 
-const composers = new Map<string, ReplyComposerTarget>();
+/**
+ * The composers showing each session's draft, oldest first. Usually one; two
+ * dialogs open on the same session (`sessionPanePool.acquire` mounts a
+ * transient pane beside the pooled one) register two, and each keeps its own
+ * copy of the draft and saves it in turn, so an edit routed to only one
+ * would be overwritten by the other's next save. Edits therefore go to every
+ * registered composer; the caret goes to the newest, the one just opened.
+ */
+const composers = new Map<string, ReplyComposerTarget[]>();
 
 /**
  * Route quote edits for `sessionId` to an open composer while it is
  * registered. The composer owns the draft while it shows it: a quote written
- * to the store underneath it would be overwritten by its next save.
+ * to the store underneath it would be overwritten by its next save. A
+ * composer that unregisters leaves any others for the session registered.
  */
 export function registerReplyComposer(sessionId: string, target: ReplyComposerTarget): () => void {
-  composers.set(sessionId, target);
+  const targets = composers.get(sessionId) ?? [];
+  composers.set(sessionId, [...targets, target]);
   return () => {
-    if (composers.get(sessionId) === target) composers.delete(sessionId);
+    const remaining = (composers.get(sessionId) ?? []).filter((t) => t !== target);
+    if (remaining.length > 0) composers.set(sessionId, remaining);
+    else composers.delete(sessionId);
   };
+}
+
+/** The composers showing `sessionId`'s draft, oldest first; empty when none does. */
+function liveComposers(sessionId: string): ReplyComposerTarget[] {
+  return composers.get(sessionId) ?? [];
 }
 
 /**
@@ -101,9 +118,9 @@ export function addQuoteToReplyDraft(
   quote: NewDraftQuote,
   id = newDraftQuoteId()
 ): Promise<string> {
-  const composer = composers.get(sessionId);
-  if (composer) {
-    composer.addQuote(quote, id);
+  const live = liveComposers(sessionId);
+  if (live.length > 0) {
+    for (const composer of live) composer.addQuote(quote, id);
     return Promise.resolve(id);
   }
   return amendStoredReplyDraft(sessionId, (draft) => appendDraftQuote(draft, quote, id)).then(
@@ -121,9 +138,9 @@ export function setReplyDraftQuoteReply(
   id: string,
   reply: string
 ): Promise<void> {
-  const composer = composers.get(sessionId);
-  if (composer) {
-    composer.setQuoteReply(id, reply);
+  const live = liveComposers(sessionId);
+  if (live.length > 0) {
+    for (const composer of live) composer.setQuoteReply(id, reply);
     return Promise.resolve();
   }
   return amendStoredReplyDraft(sessionId, (draft) => setDraftQuoteReply(draft, id, reply));
@@ -141,9 +158,11 @@ export function restoreQuoteInReplyDraft(
   sessionId: string,
   removed: RemovedDraftQuote
 ): Promise<void> {
-  const composer = composers.get(sessionId);
-  if (composer) {
-    composer.restoreQuote(removed);
+  const live = liveComposers(sessionId);
+  if (live.length > 0) {
+    // A composer that didn't remove the block still holds it; its restore is
+    // a no-op (see `restoreDraftQuote`).
+    for (const composer of live) composer.restoreQuote(removed);
     return Promise.resolve();
   }
   return amendStoredReplyDraft(sessionId, (draft) => restoreDraftQuote(draft, removed));
@@ -151,10 +170,11 @@ export function restoreQuoteInReplyDraft(
 
 /**
  * Put the caret in a quote block's reply input. Only a composer showing the
- * draft can; returns whether one did.
+ * draft can; returns whether one did. With several showing it, the newest
+ * registered — the one opened last — takes the caret.
  */
 export function focusReplyDraftQuote(sessionId: string, id: string): boolean {
-  const composer = composers.get(sessionId);
+  const composer = liveComposers(sessionId).at(-1);
   if (!composer) return false;
   composer.focusQuoteReply(id);
   return true;

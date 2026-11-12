@@ -109,6 +109,13 @@ describe('takeDraftQuote and restoreDraftQuote', () => {
     expect(restoreDraftQuote(taken.draft, taken.removed)).toEqual(review());
   });
 
+  it('leaves a draft that still holds the block alone, so a second composer does not double it', () => {
+    const taken = takeDraftQuote(review(), 'q1')!;
+    const untouched = review();
+
+    expect(restoreDraftQuote(untouched, taken.removed)).toBe(untouched);
+  });
+
   it('puts the last quote back before the main input', () => {
     const taken = takeDraftQuote(review(), 'q2')!;
     expect(taken.draft.text).toBe('And one more.\n\nThanks!');

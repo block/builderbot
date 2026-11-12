@@ -165,9 +165,12 @@ export function takeDraftQuote(
  * with its reply and its `before` text, and the text it was merged into is
  * split again — as long as that text still reads as the merge left it. Text
  * edited since stays whole where it is, and the block comes back with no
- * leading text, so nothing typed is lost or doubled.
+ * leading text, so nothing typed is lost or doubled. A draft that still
+ * holds the block (another composer's copy, which never removed it) is
+ * returned as it was, so the block isn't doubled there.
  */
 export function restoreDraftQuote(draft: ComposerDraft, removed: RemovedDraftQuote): ComposerDraft {
+  if (draft.quotes.some((quote) => quote.id === removed.quote.id)) return draft;
   const index = Math.min(removed.index, draft.quotes.length);
   const quotes = [...draft.quotes];
   const next = quotes[index];

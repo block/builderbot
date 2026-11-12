@@ -26,7 +26,12 @@ vi.mock('../../shared/persistentStore', () => ({
 
 import { setStoreValue } from '../../shared/persistentStore';
 import { saveDraft, DRAFT_TTL_MS } from '../../shared/draftCache';
-import { composerDraftContent, serializeComposerDraft, takeDraftQuote } from './composerDraft';
+import {
+  appendDraftQuote,
+  composerDraftContent,
+  serializeComposerDraft,
+  takeDraftQuote,
+} from './composerDraft';
 import {
   addQuoteToReplyDraft,
   focusReplyDraftQuote,
@@ -122,13 +127,67 @@ describe('addQuoteToReplyDraft', () => {
     const older = fakeComposer();
     const newer = fakeComposer();
     const unregisterOlder = registerReplyComposer('s4', older);
-    registerReplyComposer('s4', newer);
+    const unregisterNewer = registerReplyComposer('s4', newer);
     unregisterOlder();
 
     const id = await addQuoteToReplyDraft('s4', quote);
 
     expect(older.addQuote).not.toHaveBeenCalled();
     expect(newer.addQuote).toHaveBeenCalledWith(quote, id);
+    expect(store.has(replyDraftKey('s4'))).toBe(false);
+    unregisterNewer();
+  });
+
+  it('keeps the older composer when the newer one unregisters, as a second dialog on the session closes', async () => {
+    const older = fakeComposer();
+    const newer = fakeComposer();
+    const unregisterOlder = registerReplyComposer('s6', older);
+    const unregisterNewer = registerReplyComposer('s6', newer);
+    unregisterNewer();
+
+    const id = await addQuoteToReplyDraft('s6', quote);
+    await setReplyDraftQuoteReply('s6', id, 'Because.');
+    const removed = takeDraftQuote(
+      appendDraftQuote({ quotes: [], text: '' }, quote, id),
+      id
+    )!.removed;
+    await restoreQuoteInReplyDraft('s6', removed);
+
+    expect(newer.addQuote).not.toHaveBeenCalled();
+    expect(older.addQuote).toHaveBeenCalledWith(quote, id);
+    expect(older.setQuoteReply).toHaveBeenCalledWith(id, 'Because.');
+    expect(older.restoreQuote).toHaveBeenCalledWith(removed);
+    expect(focusReplyDraftQuote('s6', id)).toBe(true);
+    expect(older.focusQuoteReply).toHaveBeenCalledWith(id);
+    expect(newer.focusQuoteReply).not.toHaveBeenCalled();
+    // Nothing went to the store under the open composer.
+    expect(store.has(replyDraftKey('s6'))).toBe(false);
+
+    unregisterOlder();
+    expect(focusReplyDraftQuote('s6', id)).toBe(false);
+    await addQuoteToReplyDraft('s6', quote);
+    expect((await loadReplyDraft('s6')).quotes).toHaveLength(1);
+  });
+
+  it('gives every live composer the edit, and the caret to the newest', async () => {
+    const older = fakeComposer();
+    const newer = fakeComposer();
+    const unregisterOlder = registerReplyComposer('s7', older);
+    const unregisterNewer = registerReplyComposer('s7', newer);
+
+    const id = await addQuoteToReplyDraft('s7', quote);
+    await setReplyDraftQuoteReply('s7', id, 'Because.');
+    expect(focusReplyDraftQuote('s7', id)).toBe(true);
+
+    for (const composer of [older, newer]) {
+      expect(composer.addQuote).toHaveBeenCalledWith(quote, id);
+      expect(composer.setQuoteReply).toHaveBeenCalledWith(id, 'Because.');
+    }
+    expect(newer.focusQuoteReply).toHaveBeenCalledWith(id);
+    expect(older.focusQuoteReply).not.toHaveBeenCalled();
+
+    unregisterOlder();
+    unregisterNewer();
   });
 });
 

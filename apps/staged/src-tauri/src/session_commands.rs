@@ -3204,52 +3204,78 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                     | store::SessionStatus::Disconnected
                     | store::SessionStatus::Paused
             ) {
-                let _ = store.update_session_status(
-                    session_id,
-                    store::SessionStatus::Cancelled,
-                    None,
-                    Some(&store::CompletionReason::Interrupted),
-                );
-                let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
-                let project_id = store.get_project_id_for_session(session_id).ok().flatten();
-                crate::web_server::emit_to_all(
+                cancel_session_without_runner(
+                    &store,
                     app_handle,
-                    "session-status-changed",
-                    session_runner::SessionStatusEvent {
-                        session_id: session_id.to_string(),
-                        status: "cancelled".to_string(),
-                        error_message: None,
-                        completion_reason: Some("interrupted".to_string()),
-                        rate_limit_resets_at: None,
-                        rate_limit_kind: None,
-                        branch_id: branch_id.clone(),
-                        project_id,
-                        session_type: None,
-                        dependency_skipped: false,
-                    },
+                    session_id,
+                    store::CompletionReason::Interrupted,
+                    crate::session_queue::KickSource::CancelFallback,
                 );
-                // A running session's cancel drains the branch, which settles
-                // anything gated on it; this write does not, so settle its
-                // dependents here.
-                if let Err(e) = crate::pipeline_dependency::skip_dependents_of_cancelled(
-                    &store, app_handle, session_id,
-                ) {
-                    log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
-                }
-                // The row was the branch's busy marker (or a queued barrier);
-                // the terminal-state drain that would normally follow belongs
-                // to a runner this row never had.
-                if let Some(branch_id) = branch_id {
-                    crate::session_queue::kick(
-                        app_handle,
-                        &branch_id,
-                        crate::session_queue::KickSource::CancelFallback,
-                    );
-                }
             }
         }
     }
     Ok(())
+}
+
+/// End a session row no runner owns as `cancelled`, and do what that
+/// runner's terminal write would have: announce it, settle the work gated on
+/// it, and move the branch's queue along.
+///
+/// The store-write half of a Stop, shared by every entry point that can meet
+/// a row with no live token: [`cancel_session_impl`]'s fallback and the
+/// project MCP `cancel_repo_session` tool's `paused` arm. The caller decides
+/// the row is one this applies to — the write is not guarded on the status.
+///
+/// For a rate-limited `paused` session this is the whole cancel. Writing
+/// `cancelled` replaces `completion_reason = rate_limited` with
+/// `completion_reason` and clears the reset columns, so the rate-limit
+/// scheduler neither lists the row nor wins its claim
+/// (`transition_to_running_with_provider_metadata` only matches
+/// paused/rate-limited rows).
+pub(crate) fn cancel_session_without_runner<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &tauri::AppHandle<R>,
+    session_id: &str,
+    completion_reason: store::CompletionReason,
+    kick_source: crate::session_queue::KickSource,
+) {
+    let _ = store.update_session_status(
+        session_id,
+        store::SessionStatus::Cancelled,
+        None,
+        Some(&completion_reason),
+    );
+    let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
+    let project_id = store.get_project_id_for_session(session_id).ok().flatten();
+    crate::web_server::emit_to_all(
+        app_handle,
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
+            session_id: session_id.to_string(),
+            status: "cancelled".to_string(),
+            error_message: None,
+            completion_reason: Some(completion_reason.as_str().to_string()),
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
+            branch_id: branch_id.clone(),
+            project_id,
+            session_type: None,
+            dependency_skipped: false,
+        },
+    );
+    // A running session's cancel drains the branch, which settles anything
+    // gated on it; this write does not, so settle its dependents here.
+    if let Err(e) =
+        crate::pipeline_dependency::skip_dependents_of_cancelled(store, app_handle, session_id)
+    {
+        log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
+    }
+    // The row was the branch's busy marker (or a queued barrier); the
+    // terminal-state drain that would normally follow belongs to a runner
+    // this row never had.
+    if let Some(branch_id) = branch_id {
+        crate::session_queue::kick(app_handle, &branch_id, kick_source);
+    }
 }
 
 /// Cancel the queued session an artifact's delete left behind.
@@ -9357,6 +9383,96 @@ mod tests {
             store.get_session(&push.id).unwrap().unwrap().status,
             store::SessionStatus::Cancelled
         );
+    }
+
+    /// The project MCP `cancel_repo_session` tool cancels a paused child
+    /// through the same store write as the Stop above, under its own
+    /// completion reason. It used to have no arm for `paused`, so a parent
+    /// that aborted a rate-limited child was told `paused` and the scheduler
+    /// restarted the child at its next retry. The helper is driven directly
+    /// because the tool holds a concrete (non-mock) app handle.
+    #[test]
+    fn cancelling_a_paused_session_without_a_runner_keeps_the_callers_reason_and_stops_auto_resume()
+    {
+        use tauri::Listener;
+
+        let (store, branch) = setup_branch_store();
+        let paused =
+            store::Session::new_running("rebase", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&paused).unwrap();
+        store
+            .create_commit(
+                &store::Commit::new_with_sha(&branch.id, "abc123").with_session(&paused.id),
+            )
+            .unwrap();
+        assert!(store
+            .transition_running_to_rate_limited(
+                &paused.id,
+                Some("rate limit"),
+                Some("2026-11-12T09:00:00Z"),
+                Some("five_hour"),
+            )
+            .unwrap());
+        let mut push = store::Session::new_queued("push").with_branch(&branch.id);
+        push.pipeline = Some(
+            store::PipelineExecution::from_steps(&[])
+                .with_kind(store::PipelineKind::Push)
+                .with_depends_on_session_id(Some(paused.id.clone())),
+        );
+        store.create_session(&push).unwrap();
+        assert_eq!(
+            store.get_rate_limited_paused_sessions().unwrap().len(),
+            1,
+            "the scheduler lists the paused row before the cancel"
+        );
+
+        let app = mock_app();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let seen = Arc::clone(&events);
+        app.handle()
+            .listen_any("session-status-changed", move |event| {
+                seen.lock()
+                    .unwrap()
+                    .push(serde_json::from_str(event.payload()).unwrap());
+            });
+
+        cancel_session_without_runner(
+            &store,
+            app.handle(),
+            &paused.id,
+            store::CompletionReason::ProjectSessionInterrupted,
+            crate::session_queue::KickSource::Mcp,
+        );
+
+        let row = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::ProjectSessionInterrupted)
+        );
+        assert_eq!(row.rate_limit_resets_at, None);
+        assert_eq!(row.rate_limit_kind, None);
+        // The scheduler neither lists the row nor wins its claim, which only
+        // matches paused/rate-limited rows.
+        assert!(store.get_rate_limited_paused_sessions().unwrap().is_empty());
+        assert!(!store
+            .transition_to_running_with_provider_metadata(&paused.id, None)
+            .unwrap());
+        assert_eq!(
+            store.get_session(&push.id).unwrap().unwrap().status,
+            store::SessionStatus::Cancelled
+        );
+        // The event names the caller's reason, not a hard-coded
+        // `interrupted`, and carries no reset for the UI to keep showing.
+        let events = events.lock().unwrap().clone();
+        let event = events
+            .iter()
+            .find(|event| event["sessionId"] == paused.id.as_str())
+            .unwrap_or_else(|| panic!("no status event for the paused session: {events:?}"));
+        assert_eq!(event["status"], "cancelled");
+        assert_eq!(event["completionReason"], "project_session_interrupted");
+        assert!(event["rateLimitResetsAt"].is_null());
+        assert!(event["rateLimitKind"].is_null());
     }
 
     /// The fallback is only for rows with no live token. A registered session

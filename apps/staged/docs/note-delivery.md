@@ -145,7 +145,7 @@ read different text and the line number counts that text's lines:
 | ------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | The note the call published     | yes                   | An edit of the block at line N of the draft file, then another `write_note` call with the title and next steps only. The line counts the published body, which starts at the file's first non-blank line. |
 | The final assistant message     | yes                   | The diagram corrected in the draft file (written if it does not exist yet), then a `write_note` call. It says the line number is the reply's and makes no claim about what the draft holds.               |
-| The final assistant message     | no                    | A corrected reply in the `---` format. It says the tool is not available and does not ask for a call.                                                                                                     |
+| The final assistant message     | no                    | A corrected reply in the `---` format. It says the tool is not available in this run and does not ask for a call.                                                                                         |
 | A plain session's final message | n/a                   | A complete corrected final response.                                                                                                                                                                      |
 
 Which text is checked depends on what the turn will store
@@ -623,10 +623,31 @@ before, so a session cannot loop.
 A run with no `write_note` tool attached (the local server did not start,
 or the Staged MCP on Blox could not be installed) gets a different
 follow-up, because the call it would ask for cannot be made: "The
-`write_note` tool is not available in this session, so Staged takes the
+`write_note` tool is not available in this run, so Staged takes the
 note from your reply instead. Reply with a line containing only `---`, then
 the note: a markdown H1 title (`# <Title>`) on the next line, followed by
 the full note body". That is the format the fallback parser below accepts.
+The sentence says "in this run" on purpose: it stays in the agent's context,
+and a later Resume of the same session may attach the tool.
+
+The session's instructions describe the suggested next steps only as
+`write_note` arguments, so the follow-up also says where they go in a reply
+(`note_separator_fallback_next_steps`): above the `---` line, in the fenced
+block `extract_suggested_next_steps` reads. It gives the rules that parser
+applies and shows one block
+(`NOTE_SEPARATOR_FALLBACK_NEXT_STEPS_EXAMPLE`):
+
+````
+```suggested-next-steps
+{"suggestedNextCommitStep": "Implement this plan", "suggestedNextNoteStep": null}
+```
+````
+
+The opening fence line ends right after `suggested-next-steps`, the closing
+fence is three backticks alone on an unindented line, and the block holds one
+JSON object with the two keys the tool's `suggested_next_steps` argument
+uses, each a few words or null. The block is removed from the reply before
+the note is read, so it never lands in the note body.
 
 Such a run should not need the follow-up at all. The session's first prompt
 is built in `session_commands` before the run knows whether the tool will
@@ -634,10 +655,12 @@ attach, so it names the draft file and `write_note`. When neither attached,
 the runner appends a notice to that prompt before it is sent
 (`first_turn_prompt`): your instructions name a draft file and the
 tool, neither can be used in this run, do not write the draft file, and
-"The `write_note` tool is not available in this session, so Staged takes
-the note from your reply instead", followed by the same `---` format. The
-sentence and the format are the follow-up's own constants
-(`NOTE_TOOL_UNAVAILABLE`, `NOTE_SEPARATOR_FALLBACK_FORMAT`). The first turn
+"The `write_note` tool is not available in this run, so Staged takes
+the note from your reply instead", followed by the same `---` format and the
+same paragraph and example block for the suggested next steps. The
+sentence, the format and the next-steps paragraph are the follow-up's own
+(`NOTE_TOOL_UNAVAILABLE`, `NOTE_SEPARATOR_FALLBACK_FORMAT`,
+`note_separator_fallback_next_steps`). The first turn
 can therefore deliver, and the single follow-up stays in reserve for a turn
 that still delivered nothing. On a workstation it also keeps the agent from
 leaving a `draft.md` that no later step of the run would clear. A run with
@@ -1121,9 +1144,12 @@ without the tool is pointed at the `---` format and never asked to call
 `write_note`, a published note is validated instead of the unsaved reply
 while a run with no tool or no published note still has its reply checked,
 a remote repair turn is judged by the re-collected note and not by a broken
-block quoted in its reply, and a note run without the tool gets the notice
+block quoted in its reply, a note run without the tool gets the notice
 in its first prompt, locally and on a workstation, while a run with the tool
-gets none), `session_commands::tests` (the `$HOME` placeholder caution
+gets none, and the notice and the no-tool follow-up say "in this run" and
+show a `suggested-next-steps` block that `extract_suggested_next_steps`
+parses, both alone and when the whole prompt is fed to it),
+`session_commands::tests` (the `$HOME` placeholder caution
 appears with an unresolved home and only then),
 `remote_staged_mcp::tests` (the Staged MCP on Blox itself: install,
 injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),

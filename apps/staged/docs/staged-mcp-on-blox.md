@@ -91,9 +91,10 @@ Newline-delimited JSON-RPC 2.0 on stdin/stdout, the MCP stdio transport:
 - `initialize` answers with the client's protocol version when the server
   implements it (`2025-06-18`, `2025-03-26`, `2024-11-05`), otherwise with
   the newest one it speaks. It never echoes a version it does not implement.
-  The result carries `capabilities: { tools: {} }`, `serverInfo: { name:
-"staged", version: "3" }`, and `instructions` built from each tool's
-  `instructions` sentence, in `TOOLS` order.
+  The result carries `capabilities: { tools: {} }`, `serverInfo` with the
+  name `staged` and, as `version`, the script's `SERVER_VERSION` constant
+  as a string, and `instructions` built from each tool's `instructions`
+  sentence, in `TOOLS` order.
 - `ping` answers `{}`.
 - `tools/list` lists `TOOLS` in order. `tools/call` runs the named tool and
   returns its text with `isError`. An unknown tool is error `-32602`. A tool
@@ -252,8 +253,10 @@ Staged MCP on Blox` line and uploads nothing, because the probe's
    `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node
 ~/.staged/bin/staged-mcp.cjs test-session t1`. The `write_note` schema
    lists `title` and `suggested_next_steps` and no `body`. An `initialize`
-   request answers with `serverInfo.version` `"3"` and instructions that
-   name `/home/<user>/.staged/sessions/test-session/draft.md`.
+   request answers with a `serverInfo.version` equal to `SERVER_VERSION` in
+   the `staged-mcp.cjs` of the build under test (as a string) and
+   instructions that name
+   `/home/<user>/.staged/sessions/test-session/draft.md`.
 
 ## Automated coverage
 

@@ -3619,15 +3619,46 @@ enum PikchrErrorOrigin {
 
 /// How a note session without a `write_note` tool hands its note back: the
 /// `---` contract the post-completion hooks still parse. Shared by the
-/// Pikchr correction and the follow-up prompt of such a run.
+/// first-turn notice, the Pikchr correction and the follow-up prompt of such
+/// a run.
 const NOTE_SEPARATOR_FALLBACK_FORMAT: &str = "a line containing only `---`, then the note: a \
 markdown H1 title (`# <Title>`) on the next line, followed by the full note body in markdown, not \
 wrapped in code fences";
 
 /// What every prompt of a note run without a `write_note` tool says before
-/// it asks for the note in the reply.
-const NOTE_TOOL_UNAVAILABLE: &str = "The `write_note` tool is not available in this session, so \
+/// it asks for the note in the reply. It says "in this run", not "in this
+/// session": the sentence stays in the agent's context, and a later Resume
+/// of the same session may attach the tool.
+const NOTE_TOOL_UNAVAILABLE: &str = "The `write_note` tool is not available in this run, so \
 Staged takes the note from your reply";
+
+/// The fenced block a `---` fallback reply carries its suggested next steps
+/// in, exactly as [`extract_suggested_next_steps`] reads it: the opening
+/// fence ends its line right after `suggested-next-steps`, one JSON object
+/// with the two camelCase keys follows, and the closing fence is three
+/// backticks alone at the start of a line.
+const NOTE_SEPARATOR_FALLBACK_NEXT_STEPS_EXAMPLE: &str = "```suggested-next-steps\n\
+{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}\n\
+```";
+
+/// How a note run without a `write_note` tool gives its suggested next
+/// steps. The session's instructions describe them only as arguments of the
+/// tool, so the first-turn notice and the follow-up of such a run name the
+/// block the `---` fallback parses instead and show it
+/// ([`NOTE_SEPARATOR_FALLBACK_NEXT_STEPS_EXAMPLE`]). The JSON keys are the
+/// ones the tool's `suggested_next_steps` argument uses.
+fn note_separator_fallback_next_steps() -> String {
+    format!(
+        "Give your suggested next steps in the same reply, above the `---` line, in a \
+`suggested-next-steps` fenced block. The opening fence line must end right after \
+`suggested-next-steps`, the closing fence must be three backticks alone on an unindented line, \
+and the block must hold only one JSON object with the two fields `suggestedNextCommitStep` and \
+`suggestedNextNoteStep`, each a few words or null when there is no clear next action of that \
+kind. The values below are only an example:\n\
+\n\
+{NOTE_SEPARATOR_FALLBACK_NEXT_STEPS_EXAMPLE}"
+    )
+}
 
 /// The draft file of the `write_note` tool attached to a run, or `None`
 /// when the run has no tool. A local run has one once its note server has
@@ -3651,7 +3682,10 @@ fn attached_note_draft_path(
 /// notice appended, in the wording of that run's follow-up
 /// ([`note_write_followup_prompt`]), so its first turn can deliver through
 /// the `---` fallback instead of spending the single follow-up to learn
-/// how. Every other run gets the prompt unchanged.
+/// how. The notice also says where the suggested next steps go
+/// ([`note_separator_fallback_next_steps`]), which the built prompt
+/// describes only as `write_note` arguments. Every other run gets the
+/// prompt unchanged.
 fn first_turn_prompt(
     prompt: String,
     is_note_session: bool,
@@ -3660,12 +3694,15 @@ fn first_turn_prompt(
     if !is_note_session || write_note_tool_attached {
         return prompt;
     }
+    let next_steps = note_separator_fallback_next_steps();
     format!(
         "{prompt}\n\n\
 <action>\n\
 Your instructions name a note draft file and the `write_note` tool. Neither can be used in this \
 run, so do not write the draft file. {NOTE_TOOL_UNAVAILABLE} instead. End your reply with \
 {NOTE_SEPARATOR_FALLBACK_FORMAT}.\n\
+\n\
+{next_steps}\n\
 </action>"
     )
 }
@@ -3820,7 +3857,8 @@ const NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS: u32 = 1;
 /// draft): write or finish the draft, then call the tool. With none attached
 /// (`None`; see [`build_pikchr_correction_prompt`]) the tool cannot be
 /// called, so the prompt asks for the note in the reply, in the `---` format
-/// the post-completion hooks parse.
+/// the post-completion hooks parse, with the suggested next steps in the
+/// fenced block they read ([`note_separator_fallback_next_steps`]).
 fn note_write_followup_prompt(note_draft_path: Option<&str>) -> String {
     match note_draft_path {
         Some(path) => format!(
@@ -3833,13 +3871,18 @@ A draft that is never published is not saved either: your assistant text is not 
 the tool call is. Do not create commits or change other files.\n\
 </action>"
         ),
-        None => format!(
-            "<action>\n\
+        None => {
+            let next_steps = note_separator_fallback_next_steps();
+            format!(
+                "<action>\n\
 Your turn ended without delivering a note, so no note was saved. {NOTE_TOOL_UNAVAILABLE} \
 instead. Reply with {NOTE_SEPARATOR_FALLBACK_FORMAT}. If you already wrote the body into your \
 note draft file, use its contents as the body. Do not create commits or change other files.\n\
+\n\
+{next_steps}\n\
 </action>"
-        ),
+            )
+        }
     }
 }
 

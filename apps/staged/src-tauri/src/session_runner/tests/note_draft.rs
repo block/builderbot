@@ -443,10 +443,13 @@ fn a_run_without_the_write_note_tool_is_pointed_at_the_separator_fallback() {
         build_pikchr_correction_prompt(&error, PikchrErrorOrigin::FinalMessage, true, None);
 
     for prompt in [&followup, &repair] {
+        // "In this run": a later Resume of the session may attach the tool,
+        // and this sentence is still in the agent's context then.
         assert!(
-            prompt.contains("The `write_note` tool is not available in this session"),
+            prompt.contains("The `write_note` tool is not available in this run"),
             "{prompt}"
         );
+        assert!(!prompt.contains("in this session"), "{prompt}");
         assert!(prompt.contains("a line containing only `---`"), "{prompt}");
         assert!(prompt.contains("`# <Title>`"), "{prompt}");
         for ask in [
@@ -666,6 +669,12 @@ fn a_note_run_without_the_tool_is_told_so_in_its_first_prompt() {
             assert!(followup.contains(shared), "{shared}: {followup}");
         }
         assert!(notice.contains("do not write the draft file"), "{notice}");
+        // The tool is missing from this run only; a Resume may attach it.
+        assert!(
+            notice.contains("The `write_note` tool is not available in this run"),
+            "{notice}"
+        );
+        assert!(!notice.contains("in this session"), "{notice}");
         for ask in ["call `write_note`", "call the `write_note`", "then call"] {
             assert!(!notice.contains(ask), "{ask}: {notice}");
         }
@@ -688,4 +697,74 @@ fn a_note_run_without_the_tool_is_told_so_in_its_first_prompt() {
 
     // A session that writes no note never has the tool and gets no notice.
     assert_eq!(first_turn_prompt(built.to_string(), false, false), built);
+}
+
+/// The instructions of a note session describe the suggested next steps
+/// only as `write_note` arguments. A run without the tool is told, in its
+/// first-turn notice and in its follow-up, to give them in the fenced block
+/// the `---` fallback reads, and the block those prompts show is one
+/// `extract_suggested_next_steps` parses.
+#[test]
+fn the_no_tool_prompts_show_a_next_steps_block_the_fallback_parses() {
+    let example_steps = crate::note_tool::SuggestedNextSteps {
+        suggested_next_commit_step: Some("Implement this plan".to_string()),
+        suggested_next_note_step: None,
+    };
+    assert_eq!(
+        extract_suggested_next_steps(NOTE_SEPARATOR_FALLBACK_NEXT_STEPS_EXAMPLE),
+        Some(example_steps.clone())
+    );
+
+    let built = "<action>\nWrite the note in your draft file, then call `write_note`.\n</action>";
+    let notice = first_turn_prompt(built.to_string(), true, false);
+    let followup = note_write_followup_prompt(None);
+    let next_steps = note_separator_fallback_next_steps();
+    for prompt in [&notice, &followup] {
+        assert!(prompt.contains(&next_steps), "{prompt}");
+        assert!(prompt.ends_with("```\n</action>"), "{prompt}");
+        assert!(
+            prompt.contains("above the `---` line, in a `suggested-next-steps` fenced block"),
+            "{prompt}"
+        );
+        for key in ["`suggestedNextCommitStep`", "`suggestedNextNoteStep`"] {
+            assert!(prompt.contains(key), "{key}: {prompt}");
+        }
+        // The prompt's own text through the parser: the prose that names the
+        // block is not taken for a fence, so the block found is the example.
+        assert_eq!(
+            extract_suggested_next_steps(prompt),
+            Some(example_steps.clone()),
+            "{prompt}"
+        );
+    }
+
+    // A reply laid out as the notice asks: the block above the `---` line,
+    // then the title and the body. The steps are read and stay out of the
+    // note.
+    let reply = format!(
+        "The note is below.\n\n{NOTE_SEPARATOR_FALLBACK_NEXT_STEPS_EXAMPLE}\n\n---\n# Plan\n\nThe body."
+    );
+    assert_eq!(extract_suggested_next_steps(&reply), Some(example_steps));
+    assert_eq!(
+        extract_note_content(&reply).as_deref(),
+        Some("# Plan\n\nThe body.")
+    );
+
+    // The Pikchr correction of such a run asks for the same reply format and
+    // leaves the steps alone: the hooks read them from the run's earlier
+    // reply.
+    let error = crate::pikchr_validation::PikchrValidationError {
+        line_number: 3,
+        message: "syntax error near boxx".to_string(),
+    };
+    let repair =
+        build_pikchr_correction_prompt(&error, PikchrErrorOrigin::FinalMessage, true, None);
+    assert!(!repair.contains("suggested-next-steps"), "{repair}");
+
+    // A run with the tool attached is never shown the block.
+    assert_eq!(first_turn_prompt(built.to_string(), true, true), built);
+    assert!(
+        !note_write_followup_prompt(Some("/tmp/draft.md")).contains("```suggested-next-steps"),
+        "the follow-up of a run with the tool asks for the argument"
+    );
 }

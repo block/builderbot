@@ -180,6 +180,12 @@ the same step, which is what the tag picker's "Create tag" row does.
 Everything this verb does shows in the project header, where it can be
 undone with the group pill's None or the chip's ×.
 
+Each step is its own write on the app. If one fails, or the re-read after
+them fails, the steps that landed are printed before the error; under
+--json the result is { ok: false, applied: [...], error }, where each
+applied row carries the request and the app's raw result only. Run
+`stagedctl project tags` for the project's tags as they stand.
+
 Usage: stagedctl project tag [OPTIONS] <PROJECT> <TAG>...
 
 Arguments:
@@ -211,6 +217,12 @@ arguments are accepted.
 
 Everything this verb does shows in the project header, where it can be
 undone by picking the tag again.
+
+Each step is its own write on the app. If one fails, or the re-read after
+them fails, the steps that landed are printed before the error; under
+--json the result is { ok: false, applied: [...], error }, where each
+applied row carries the request and the app's raw result only. Run
+`stagedctl project tags` for the project's tags as they stand.
 
 Usage: stagedctl project untag [OPTIONS] <PROJECT> [TAG]...
 

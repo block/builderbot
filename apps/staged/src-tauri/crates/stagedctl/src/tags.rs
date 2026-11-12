@@ -899,7 +899,9 @@ fn created_rows(steps: &[Step], results: &[Value]) -> Vec<Value> {
 
 /// The error for a plan that failed at step `results.len()`: the failing
 /// step's error, carrying the applied steps as [`render_steps`] would have
-/// printed them and as `{ command, args, result }` rows for `--json`.
+/// printed them and as `{ command, args, result }` rows for `--json`. With
+/// every step landed (`results.len() == steps.len()`) the error is the
+/// re-read's, and the trailer says so instead of counting remaining steps.
 pub(crate) fn partial_failure(
     before: &TagStateWire,
     project: &Project,
@@ -910,10 +912,15 @@ pub(crate) fn partial_failure(
 ) -> CtlError {
     let landed = &steps[..results.len()];
     let created = created_rows(landed, &results);
+    let remaining = steps.len() - landed.len();
+    let trailer = if remaining == 0 {
+        "(every step applied; re-reading the project's tags failed)".to_string()
+    } else {
+        format!("(the remaining {} not applied)", plural(remaining, "step"))
+    };
     let human = format!(
-        "{}\n  (the remaining {} not applied)",
-        render_steps(before, project, landed, &created, heading),
-        plural(steps.len() - landed.len(), "step")
+        "{}\n  {trailer}",
+        render_steps(before, project, landed, &created, heading)
     );
     let applied = landed
         .iter()
@@ -936,7 +943,9 @@ pub(crate) fn partial_failure(
 /// Run a plan in order and print the project's tags as they stand after
 /// it. `--json` is the `project tags` shape under `ok: true`, plus the
 /// `created` rows. A failure after the first step is a
-/// [`CtlError::Partial`] naming the steps that landed.
+/// [`CtlError::Partial`] naming the steps that landed. So is a failure of
+/// the re-read once every step has landed: the writes are on the app
+/// whether or not they can be shown, so they are reported the same way.
 fn apply_steps(
     client: &Client,
     before: &TagStateWire,
@@ -945,12 +954,27 @@ fn apply_steps(
     steps: &[Step],
     heading: &str,
 ) -> Result<CmdOutput, CtlError> {
-    let results = run_steps(
+    apply_plan(
         |command, args| client.invoke(command, args),
-        &project.id,
+        before,
+        projects_raw,
+        project,
         steps,
+        heading,
     )
-    .map_err(|(results, err)| {
+}
+
+/// [`apply_steps`] over any `invoke`, so the re-read path can be tested
+/// without a Client.
+pub(crate) fn apply_plan(
+    mut invoke: impl FnMut(&str, Value) -> Result<Value, CtlError>,
+    before: &TagStateWire,
+    projects_raw: &Value,
+    project: &Project,
+    steps: &[Step],
+    heading: &str,
+) -> Result<CmdOutput, CtlError> {
+    let results = run_steps(&mut invoke, &project.id, steps).map_err(|(results, err)| {
         if results.is_empty() {
             err
         } else {
@@ -959,7 +983,21 @@ fn apply_steps(
     })?;
     let created = created_rows(steps, &results);
     let human = render_steps(before, project, steps, &created, heading);
-    let (after, raw) = fetch_state(client)?;
+    let (after, raw) = match invoke("get_tag_state", json!({})) {
+        Ok(raw) => match parse::<TagStateWire>(&raw, "tag state") {
+            Ok(after) => (after, raw),
+            Err(err) => {
+                return Err(partial_failure(
+                    before, project, steps, results, heading, err,
+                ))
+            }
+        },
+        Err(err) => {
+            return Err(partial_failure(
+                before, project, steps, results, heading, err,
+            ))
+        }
+    };
     let mut json = project_tags_json(&after, &raw, projects_raw, project);
     if let Some(object) = json.as_object_mut() {
         object.insert("ok".to_string(), json!(true));
@@ -1767,6 +1805,78 @@ mod tests {
             created_rows(&steps, &results),
             vec![json!({ "id": "t-new" })]
         );
+    }
+
+    #[test]
+    fn a_failed_re_read_after_every_step_landed_still_reports_the_steps() {
+        let state = catalog();
+        let p1 = project("p1", "Widgets");
+        let steps = vec![choose("g-status", "t-done"), assign("t-infra", true)];
+        let mut calls: Vec<String> = Vec::new();
+        let err = apply_plan(
+            |command, _| {
+                calls.push(command.to_string());
+                if command == "get_tag_state" {
+                    Err(CtlError::Transport("connection reset".to_string()))
+                } else {
+                    Ok(Value::Null)
+                }
+            },
+            &state,
+            &json!([]),
+            &p1,
+            &steps,
+            "tagged",
+        )
+        .unwrap_err();
+        assert_eq!(
+            calls,
+            [
+                "set_project_group_tag",
+                "set_project_tag_assigned",
+                "get_tag_state"
+            ]
+        );
+        // The exit code and the stderr line are the re-read's own.
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert_eq!(err.to_string(), "transport: connection reset");
+        assert_eq!(
+            err.partial_output(false).as_deref(),
+            Some(
+                "tagged Widgets  id:p1\n\
+                 \x20 Status: Done\n\
+                 \x20 + infra\n\
+                 \x20 (every step applied; re-reading the project's tags failed)"
+            )
+        );
+        let json: Value = serde_json::from_str(&err.partial_output(true).unwrap()).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["applied"].as_array().map(Vec::len), Some(2));
+        assert_eq!(json["applied"][1]["command"], "set_project_tag_assigned");
+        assert_eq!(json["error"]["code"], "transport");
+
+        // A re-read that succeeds reports the final state as before.
+        let after_raw = json!({
+            "groups": [{ "id": "g-status", "name": "Status" }],
+            "tags": [{ "id": "t-done", "name": "Done", "groupId": "g-status" }],
+            "assignments": [{ "projectId": "p1", "tagId": "t-done" }],
+        });
+        let out = apply_plan(
+            |command, _| {
+                Ok(if command == "get_tag_state" {
+                    after_raw.clone()
+                } else {
+                    Value::Null
+                })
+            },
+            &state,
+            &json!([]),
+            &p1,
+            &steps,
+            "tagged",
+        )
+        .unwrap();
+        assert_eq!(out.json["ok"], true);
     }
 
     #[test]

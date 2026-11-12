@@ -884,6 +884,8 @@ impl Client {
             .accept_renewal(expires_at, crate::grants::now_ms())
             .map_err(CtlError::Transport)?;
         self.bearer = Some(token.to_string());
+        // The grant file's claim, copied from the approval body at connect
+        // time; the app's own confinement is not re-read here.
         self.scope = match grant.scope.project_id {
             Some(_) => CredentialScope::Project,
             None => CredentialScope::AllProjects,

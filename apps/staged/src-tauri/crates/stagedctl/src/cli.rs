@@ -220,7 +220,13 @@ the same step, which is what the tag picker's \"Create tag\" row does.
 --group` for that, or name an existing tag.
 
 Everything this verb does shows in the project header, where it can be
-undone with the group pill's None or the chip's ×.")]
+undone with the group pill's None or the chip's ×.
+
+Each step is its own write on the app. If one fails, or the re-read after
+them fails, the steps that landed are printed before the error; under
+--json the result is { ok: false, applied: [...], error }, where each
+applied row carries the request and the app's raw result only. Run
+`stagedctl project tags` for the project's tags as they stand.")]
     Tag {
         /// Project name or id (see `stagedctl project list`)
         project: String,
@@ -244,7 +250,13 @@ group is cleared, whatever it is (the group pill's None), and no <tag>
 arguments are accepted.
 
 Everything this verb does shows in the project header, where it can be
-undone by picking the tag again.")]
+undone by picking the tag again.
+
+Each step is its own write on the app. If one fails, or the re-read after
+them fails, the steps that landed are printed before the error; under
+--json the result is { ok: false, applied: [...], error }, where each
+applied row carries the request and the app's raw result only. Run
+`stagedctl project tags` for the project's tags as they stand.")]
     Untag {
         /// Project name or id (see `stagedctl project list`)
         project: String,

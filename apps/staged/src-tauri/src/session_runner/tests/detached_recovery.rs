@@ -748,11 +748,12 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
 
 /// A run that attached the Staged MCP on Blox, whose start-of-run recovery
 /// went through, and that read the outbox after its last turn ended.
-const SETTLED_RUN: RemoteOutboxUse = RemoteOutboxUse {
+pub(super) const SETTLED_RUN: RemoteOutboxUse = RemoteOutboxUse {
     staged_mcp_attached: true,
     recovery_settled: true,
     own_note_collected: false,
     read_after_last_turn: true,
+    rejected_note: None,
 };
 
 /// The end-of-run clear decision for a run that was not stopped and whose
@@ -1489,7 +1490,7 @@ fn a_run_that_never_read_the_outbox_after_its_last_turn_keeps_a_published_note()
             None,
             RunEndForOutbox {
                 user_stopped: true,
-                collected_note_unstored: false,
+                ..RunEndForOutbox::default()
             },
         ),
         RunEndOutboxClear::Clear
@@ -1506,6 +1507,7 @@ fn a_run_that_never_read_the_outbox_after_its_last_turn_keeps_a_published_note()
                 RunEndForOutbox {
                     user_stopped,
                     collected_note_unstored: true,
+                    collected_note_hooks_skipped: false,
                 },
             ),
             RunEndOutboxClear::Keep
@@ -1514,28 +1516,44 @@ fn a_run_that_never_read_the_outbox_after_its_last_turn_keeps_a_published_note()
 }
 
 /// Carrying out the decision: `Keep` runs nothing, `Clear` removes the
-/// outbox outright, and `ClearUnlessPublished` runs the guarded script.
+/// outbox outright, `ClearUnlessPublished` runs the guarded script, and
+/// `ClearUnlessRepublished` runs it with the rejected note's checksums.
 #[test]
 fn the_run_end_clear_runs_the_script_its_decision_names() {
+    use crate::remote_staged_mcp::note_outbox::{
+        clear_unpublished_outbox_script, PublishedNoteStamp,
+    };
     let log = RefCell::new(Vec::new());
     let exec = recording_exec("", &log);
     clear_remote_outbox_at_run_end(&exec, "sess-1", RunEndOutboxClear::Keep);
     assert!(log.borrow().is_empty());
 
+    let rejected = PublishedNoteStamp::of(b"{}", b"Body");
     clear_remote_outbox_at_run_end(&exec, "sess-1", RunEndOutboxClear::Clear);
     clear_remote_outbox_at_run_end(&exec, "sess-1", RunEndOutboxClear::ClearUnlessPublished);
+    clear_remote_outbox_at_run_end(
+        &exec,
+        "sess-1",
+        RunEndOutboxClear::ClearUnlessRepublished(rejected),
+    );
     let scripts: Vec<String> = log.borrow().iter().map(|args| args[2].clone()).collect();
     assert_eq!(
         scripts,
         vec![
             clear_outbox_script("sess-1"),
-            crate::remote_staged_mcp::note_outbox::clear_unpublished_outbox_script("sess-1"),
+            clear_unpublished_outbox_script("sess-1", None),
+            clear_unpublished_outbox_script("sess-1", Some(rejected)),
         ]
     );
+    for guarded in &scripts[1..] {
+        assert!(
+            guarded.contains("if [ -f \"$d/done\" ]"),
+            "the guarded clear checks the marker on the workstation: {guarded}"
+        );
+    }
     assert!(
-        scripts[1].contains("if [ -f \"$d/done\" ]"),
-        "the guarded clear checks the marker on the workstation: {}",
-        scripts[1]
+        !scripts[1].contains("cksum") && scripts[2].contains("cksum < \"$d/note.md\""),
+        "only the rejected note is recognised by its checksums: {scripts:?}"
     );
 }
 

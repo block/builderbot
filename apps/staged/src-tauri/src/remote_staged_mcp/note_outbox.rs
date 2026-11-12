@@ -85,6 +85,91 @@ pub(crate) fn clear_outbox(exec: RemoteExec, session_id: &str) -> Result<(), Str
 /// marker and removed nothing.
 const PUBLISHED_NOTE_KEPT_MARKER: &str = "staged-published-note-kept";
 
+/// What [`clear_unpublished_outbox_script`] prints when the `done` marker it
+/// found belonged to the rejected note it was given, which it removed.
+const REJECTED_NOTE_CLEARED_MARKER: &str = "staged-rejected-note-cleared";
+
+/// The POSIX `cksum` of `bytes`: the CRC and the byte count, the two numbers
+/// `cksum < file` prints. Every POSIX system has the command, so a workstation
+/// script can tell whether a file still holds bytes the laptop has read
+/// without the laptop sending them back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileCksum {
+    crc: u32,
+    len: u64,
+}
+
+impl FileCksum {
+    pub(crate) fn of(bytes: &[u8]) -> Self {
+        // CRC-32/CKSUM: polynomial 0x04C11DB7, most significant bit first, no
+        // reflection, the length appended low byte first, complemented.
+        fn feed(crc: u32, byte: u8) -> u32 {
+            let mut crc = crc ^ (u32::from(byte) << 24);
+            for _ in 0..8 {
+                crc = if crc & 0x8000_0000 != 0 {
+                    (crc << 1) ^ 0x04C1_1DB7
+                } else {
+                    crc << 1
+                };
+            }
+            crc
+        }
+        let mut crc = bytes.iter().fold(0, |crc, byte| feed(crc, *byte));
+        let mut len = bytes.len() as u64;
+        while len != 0 {
+            crc = feed(crc, (len & 0xff) as u8);
+            len >>= 8;
+        }
+        Self {
+            crc: !crc,
+            len: bytes.len() as u64,
+        }
+    }
+}
+
+/// As `cksum < file` prints it.
+impl std::fmt::Display for FileCksum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.crc, self.len)
+    }
+}
+
+/// Which published note an outbox held when it was collected: the checksums
+/// of `meta.json` (title, next steps, turn id, `writtenAt`) and of `note.md`
+/// as they sat on the workstation. A later command there can test whether
+/// the outbox still holds that same note
+/// ([`clear_unpublished_outbox_script`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PublishedNoteStamp {
+    meta: FileCksum,
+    body: FileCksum,
+}
+
+impl PublishedNoteStamp {
+    /// The stamp of a published note with these `meta.json` and `note.md`
+    /// bytes.
+    pub(crate) fn of(meta: &[u8], body: &[u8]) -> Self {
+        Self {
+            meta: FileCksum::of(meta),
+            body: FileCksum::of(body),
+        }
+    }
+
+    /// The stamp of the note in a collect script's output; `None` when it
+    /// does not hold both files.
+    fn of_collect_output(output: &str) -> Option<Self> {
+        use base64::Engine;
+        let mut lines = output.lines().map(str::trim).skip(1);
+        let mut decode = || {
+            let line = lines.next().filter(|line| !line.is_empty())?;
+            base64::engine::general_purpose::STANDARD.decode(line).ok()
+        };
+        let meta = decode()?;
+        let body = decode()?;
+        Some(Self::of(&meta, &body))
+    }
+}
+
 /// [`clear_outbox_script`] for a caller that has not read the outbox since
 /// the agent last could have written to it: the files are removed only when
 /// no `done` marker is there. A marker means a published note nobody has
@@ -93,12 +178,35 @@ const PUBLISHED_NOTE_KEPT_MARKER: &str = "staged-published-note-kept";
 /// a Resume) finds it whole. The test and the removal are one command on
 /// the workstation, so there is no window between a laptop-side read and
 /// the clear. Always exits 0.
-pub(crate) fn clear_unpublished_outbox_script(session_id: &str) -> String {
+///
+/// `rejected` is the one published note the caller *has* read: a note its
+/// run collected and then turned down (a Pikchr block that does not parse).
+/// A marker that still belongs to that note is no reason to keep anything —
+/// the next run's recovery would ingest the rejected note unchecked — so it
+/// is removed with the rest. The script recognises it by the `cksum` of
+/// `meta.json` and of `note.md`; a note published since has a different
+/// `writtenAt` or body and stays. A workstation without `cksum` matches
+/// nothing and keeps the note, which is the rule without `rejected`.
+pub(crate) fn clear_unpublished_outbox_script(
+    session_id: &str,
+    rejected: Option<PublishedNoteStamp>,
+) -> String {
     let dir = session_dir_expr(session_id);
+    let remove = remove_session_files_fragment();
+    let keep = format!("echo {PUBLISHED_NOTE_KEPT_MARKER}; exit 0");
+    let published = match rejected {
+        None => keep,
+        Some(stamp) => format!(
+            "if [ \"$(cksum < \"$d/meta.json\" 2>/dev/null)\" = \"{meta}\" ] && \
+             [ \"$(cksum < \"$d/note.md\" 2>/dev/null)\" = \"{body}\" ]; \
+             then echo {REJECTED_NOTE_CLEARED_MARKER}; else {keep}; fi",
+            meta = stamp.meta,
+            body = stamp.body,
+        ),
+    };
     format!(
-        "d={dir}; if [ -f \"$d/done\" ]; then echo {PUBLISHED_NOTE_KEPT_MARKER}; exit 0; fi; \
-         {remove}; rmdir \"$d\" 2>/dev/null; exit 0",
-        remove = remove_session_files_fragment()
+        "d={dir}; if [ -f \"$d/done\" ]; then {published}; fi; \
+         {remove}; rmdir \"$d\" 2>/dev/null; exit 0"
     )
 }
 
@@ -107,30 +215,33 @@ pub(crate) fn clear_unpublished_outbox_script(session_id: &str) -> String {
 pub(crate) enum UnreadOutboxClear {
     /// No published note was there; the partial files and the draft are gone.
     Cleared,
+    /// The published note there was the one the caller had rejected; it is
+    /// gone with the rest.
+    RejectedNoteCleared,
     /// A `done` marker was there: a published note no run has collected.
     /// Everything was left in place.
     PublishedNoteKept,
 }
 
-/// Empty the session's outbox unless it holds a published note (see
-/// [`clear_unpublished_outbox_script`]).
+/// Empty the session's outbox unless it holds a published note other than
+/// `rejected` (see [`clear_unpublished_outbox_script`]).
 pub(crate) fn clear_unpublished_outbox(
     exec: RemoteExec,
     session_id: &str,
+    rejected: Option<PublishedNoteStamp>,
 ) -> Result<UnreadOutboxClear, String> {
     validate_session_id(session_id)?;
-    let output = exec(&["sh", "-c", &clear_unpublished_outbox_script(session_id)])
+    let script = clear_unpublished_outbox_script(session_id, rejected);
+    let output = exec(&["sh", "-c", &script])
         .map_err(|e| format!("failed to clear the remote note outbox: {e}"))?;
-    Ok(
-        if output
-            .lines()
-            .any(|line| line.trim() == PUBLISHED_NOTE_KEPT_MARKER)
-        {
-            UnreadOutboxClear::PublishedNoteKept
-        } else {
-            UnreadOutboxClear::Cleared
-        },
-    )
+    let printed = |marker: &str| output.lines().any(|line| line.trim() == marker);
+    Ok(if printed(PUBLISHED_NOTE_KEPT_MARKER) {
+        UnreadOutboxClear::PublishedNoteKept
+    } else if printed(REJECTED_NOTE_CLEARED_MARKER) {
+        UnreadOutboxClear::RejectedNoteCleared
+    } else {
+        UnreadOutboxClear::Cleared
+    })
 }
 
 /// Largest base64 payload put on one command line, the same bound
@@ -439,17 +550,17 @@ pub(crate) fn collect_classified(
     session_id: &str,
     expected_turn: Option<&str>,
 ) -> Result<OutboxState, CollectError> {
-    collect_with_written_at(exec, session_id, expected_turn).map(|(state, _)| state)
+    collect_with_written_at(exec, session_id, expected_turn).map(|(state, _, _)| state)
 }
 
 /// [`collect_classified`], also returning the `writtenAt` stamp of a complete
-/// note (`write_note` writes whole seconds), for callers that need to tell one
-/// `done` from the next ([`CollectedNote`]).
+/// note (`write_note` writes whole seconds) and the checksums of its files,
+/// for callers that need to tell one `done` from the next ([`CollectedNote`]).
 fn collect_with_written_at(
     exec: RemoteExec,
     session_id: &str,
     expected_turn: Option<&str>,
-) -> Result<(OutboxState, Option<i64>), CollectError> {
+) -> Result<(OutboxState, Option<i64>, Option<PublishedNoteStamp>), CollectError> {
     validate_session_id(session_id).map_err(CollectError::Transport)?;
     let output = exec(&["sh", "-c", &collect_script(session_id)]).map_err(|e| {
         CollectError::Transport(format!("failed to read the remote note outbox: {e}"))
@@ -457,7 +568,8 @@ fn collect_with_written_at(
     let snapshot = parse_collect_output(&output).map_err(CollectError::Content)?;
     let written_at = snapshot.meta.as_ref().and_then(|meta| meta.written_at);
     let state = outbox_state(snapshot, expected_turn).map_err(CollectError::Content)?;
-    Ok((state, written_at))
+    let stamp = PublishedNoteStamp::of_collect_output(&output);
+    Ok((state, written_at, stamp))
 }
 
 /// [`collect_classified`] for callers that treat every failure alike.
@@ -483,6 +595,10 @@ pub(crate) fn collect(
 pub(crate) struct CollectedNote {
     pub written_at: Option<i64>,
     pub submission: NoteSubmission,
+    /// The note's files as they sat on the workstation, for the end-of-run
+    /// clear of a run that rejected this note
+    /// ([`clear_unpublished_outbox_script`]).
+    pub stamp: Option<PublishedNoteStamp>,
 }
 
 /// Shared memory of the last [`CollectedNote`] within one run.
@@ -508,7 +624,7 @@ pub(crate) fn collect_turn_into_slot(
     slot: &NoteSubmissionSlot,
     memory: &CollectedNoteMemory,
 ) -> Result<OutboxState, String> {
-    let (state, written_at) = collect_with_written_at(exec, session_id, Some(turn_id))
+    let (state, written_at, stamp) = collect_with_written_at(exec, session_id, Some(turn_id))
         .map_err(|e| e.message().to_string())?;
     if let OutboxState::Delivered(submission) = &state {
         crate::note_tool::store_submission(slot, submission.clone());
@@ -517,6 +633,7 @@ pub(crate) fn collect_turn_into_slot(
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CollectedNote {
             written_at,
             submission: submission.clone(),
+            stamp,
         });
     }
     Ok(state)
@@ -535,7 +652,7 @@ pub(crate) fn probe_turn_into_slot(
     slot: &NoteSubmissionSlot,
     memory: &CollectedNoteMemory,
 ) -> Result<OutboxState, String> {
-    let (state, written_at) = collect_with_written_at(exec, session_id, Some(turn_id))
+    let (state, written_at, stamp) = collect_with_written_at(exec, session_id, Some(turn_id))
         .map_err(|e| e.message().to_string())?;
     let OutboxState::Delivered(submission) = state else {
         return Ok(state);
@@ -543,6 +660,7 @@ pub(crate) fn probe_turn_into_slot(
     let found = CollectedNote {
         written_at,
         submission,
+        stamp,
     };
     let mut remembered = memory
         .lock()
@@ -1709,7 +1827,8 @@ mod tests {
     fn every_clear_removes_the_seed_temp_file() {
         for script in [
             clear_outbox_script("sess-1"),
-            clear_unpublished_outbox_script("sess-1"),
+            clear_unpublished_outbox_script("sess-1", None),
+            clear_unpublished_outbox_script("sess-1", Some(PublishedNoteStamp::of(b"{}", b"Body"))),
             clear_outbox_and_seed_script("sess-1", None),
             clear_outbox_and_seed_script("sess-1", Some("QQ==")),
         ] {
@@ -1776,7 +1895,7 @@ mod tests {
             std::fs::write(outbox.join(file), content).unwrap();
         }
         assert_eq!(
-            clear_unpublished_outbox(&exec, "sess-1").unwrap(),
+            clear_unpublished_outbox(&exec, "sess-1", None).unwrap(),
             UnreadOutboxClear::PublishedNoteKept
         );
         for (file, content) in files {
@@ -1799,30 +1918,163 @@ mod tests {
         // directory with them.
         std::fs::remove_file(outbox.join("done")).unwrap();
         assert_eq!(
-            clear_unpublished_outbox(&exec, "sess-1").unwrap(),
+            clear_unpublished_outbox(&exec, "sess-1", None).unwrap(),
             UnreadOutboxClear::Cleared
         );
         assert!(!outbox.exists(), "{outbox:?}");
 
         // Nothing there at all.
         assert_eq!(
-            clear_unpublished_outbox(&exec, "sess-1").unwrap(),
+            clear_unpublished_outbox(&exec, "sess-1", None).unwrap(),
             UnreadOutboxClear::Cleared
         );
 
         // The marker is matched as a whole line of the script's output.
         let kept = |_: &[&str]| Ok(format!("  {PUBLISHED_NOTE_KEPT_MARKER}\n"));
         assert_eq!(
-            clear_unpublished_outbox(&kept, "sess-1").unwrap(),
+            clear_unpublished_outbox(&kept, "sess-1", None).unwrap(),
             UnreadOutboxClear::PublishedNoteKept
         );
         let unreachable = |_: &[&str]| Err::<String, String>("no route".to_string());
-        assert!(clear_unpublished_outbox(&unreachable, "sess-1")
+        assert!(clear_unpublished_outbox(&unreachable, "sess-1", None)
             .unwrap_err()
             .contains("no route"));
         assert!(
-            clear_unpublished_outbox(&exec, "../sess-1").is_err(),
+            clear_unpublished_outbox(&exec, "../sess-1", None).is_err(),
             "a session id that is not a plain name never reaches the shell"
+        );
+    }
+
+    /// `FileCksum` is what `cksum` prints: the published check values, and
+    /// whatever this machine's `cksum` says about the same bytes.
+    #[test]
+    fn file_cksum_matches_the_posix_cksum_command() {
+        assert_eq!(FileCksum::of(b"").to_string(), "4294967295 0");
+        assert_eq!(FileCksum::of(b"123456789").to_string(), "930766865 9");
+
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let samples: [&[u8]; 4] = [
+            b"Body",
+            "Unicode \u{2192} caf\u{e9}\n".as_bytes(),
+            &[0, 255, 10, 13, 0],
+            &[b'x'; 70_000],
+        ];
+        for bytes in samples {
+            std::fs::write(home.path().join("sample"), bytes).unwrap();
+            let printed = exec(&["sh", "-c", "cksum < \"$HOME/sample\""]).unwrap();
+            assert_eq!(
+                printed.split_whitespace().collect::<Vec<_>>().join(" "),
+                FileCksum::of(bytes).to_string(),
+                "{} bytes",
+                bytes.len()
+            );
+        }
+    }
+
+    /// Review of ea2ebbb3, warning 1. A run reads a note, rejects it (a
+    /// broken Pikchr block) and asks for a repair; the repair turn ends with
+    /// no read and without republishing. The guarded clear used to find the
+    /// rejected note's `done` and keep it, and the next Resume's recovery
+    /// ingested it unchecked. Against a real shell: the clear given the
+    /// rejected note's stamp removes that note, and still keeps a note
+    /// published after it.
+    #[test]
+    fn the_unread_clear_removes_the_note_its_run_rejected_and_keeps_a_newer_one() {
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let publish = |written_at: u64, body: &str| {
+            std::fs::create_dir_all(&outbox).unwrap();
+            for (file, content) in [
+                ("note.md", body.to_string()),
+                (
+                    "meta.json",
+                    format!(r#"{{"title":"Plan","turn":"turn-1","writtenAt":{written_at}}}"#),
+                ),
+                ("done", String::new()),
+                ("draft.md", body.to_string()),
+            ] {
+                std::fs::write(outbox.join(file), content).unwrap();
+            }
+        };
+        let broken = "Body\n```pikchr\nboxx \"bad\"\n```";
+
+        // The run's read of the note it then rejects.
+        publish(1, broken);
+        let slot = crate::note_tool::new_submission_slot();
+        let memory = new_collected_note_memory();
+        assert!(matches!(
+            collect_turn_into_slot(&exec, "sess-1", "turn-1", &slot, &memory).unwrap(),
+            OutboxState::Delivered(_)
+        ));
+        let rejected = memory.lock().unwrap().as_ref().unwrap().stamp;
+        assert!(rejected.is_some(), "a collected note carries its stamp");
+
+        // Without the stamp the marker alone decides, which is the defect:
+        // the rejected note stays for the next run's recovery.
+        assert_eq!(
+            clear_unpublished_outbox(&exec, "sess-1", None).unwrap(),
+            UnreadOutboxClear::PublishedNoteKept
+        );
+        assert!(matches!(
+            collect(&exec, "sess-1", None).unwrap(),
+            OutboxState::Delivered(_)
+        ));
+
+        // With it, the rejected note goes, draft and directory included.
+        assert_eq!(
+            clear_unpublished_outbox(&exec, "sess-1", rejected).unwrap(),
+            UnreadOutboxClear::RejectedNoteCleared
+        );
+        assert!(!outbox.exists(), "{outbox:?}");
+        assert_eq!(
+            clear_unpublished_outbox(&exec, "sess-1", rejected).unwrap(),
+            UnreadOutboxClear::Cleared,
+            "nothing published at all"
+        );
+
+        // A note the repair turn published before it failed is one nobody
+        // has read: a later `writtenAt`, or the same second and title with
+        // another body of the same length.
+        for (written_at, body) in [
+            (2, broken.to_string()),
+            (1, broken.replace("boxx", "boxy")),
+            (2, "Body\n```pikchr\nbox \"good\"\n```".to_string()),
+        ] {
+            publish(written_at, &body);
+            assert_eq!(
+                clear_unpublished_outbox(&exec, "sess-1", rejected).unwrap(),
+                UnreadOutboxClear::PublishedNoteKept,
+                "writtenAt {written_at}: {body}"
+            );
+            assert!(
+                matches!(
+                    collect(&exec, "sess-1", None).unwrap(),
+                    OutboxState::Delivered(submission) if submission.body == body
+                ),
+                "the next run's recovery still finds it"
+            );
+            assert_eq!(
+                std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+                body
+            );
+        }
+
+        // A rewrite in flight (`write_note` unlinks `done` first) is not a
+        // published note, with or without a stamp.
+        std::fs::remove_file(outbox.join("done")).unwrap();
+        assert_eq!(
+            clear_unpublished_outbox(&exec, "sess-1", rejected).unwrap(),
+            UnreadOutboxClear::Cleared
+        );
+        assert!(!outbox.exists(), "{outbox:?}");
+
+        // The markers are matched as whole lines of the script's output.
+        let cleared = |_: &[&str]| Ok(format!(" {REJECTED_NOTE_CLEARED_MARKER}\n"));
+        assert_eq!(
+            clear_unpublished_outbox(&cleared, "sess-1", rejected).unwrap(),
+            UnreadOutboxClear::RejectedNoteCleared
         );
     }
 

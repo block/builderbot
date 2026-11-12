@@ -29,7 +29,7 @@ pub(super) fn node() -> Option<String> {
 
 /// Run `args` locally with `HOME` pointed at `home`, mirroring what `ws
 /// exec` does on the workstation.
-pub(super) fn local_exec(
+pub(crate) fn local_exec(
     home: &std::path::Path,
 ) -> impl Fn(&[&str]) -> Result<String, String> + '_ {
     move |args: &[&str]| {

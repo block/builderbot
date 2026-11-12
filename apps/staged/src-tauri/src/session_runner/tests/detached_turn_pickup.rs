@@ -201,6 +201,7 @@ async fn a_note_published_before_the_proxy_died_is_stored_when_the_reattached_tu
             recovery_settled: true,
             own_note_collected: true,
             read_after_last_turn: true,
+            rejected_note: None,
         },
         &CompletionReason::TurnComplete,
         None,

@@ -32,7 +32,7 @@
 
 pub(crate) mod note_outbox;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use std::path::PathBuf;
 

@@ -45,7 +45,7 @@ pub(crate) use disconnect::may_still_run_on_workstation;
 pub(crate) mod remote_note_watchdog;
 pub(crate) mod taken_over_note;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -985,7 +985,8 @@ impl SessionRegistry {
     }
 
     /// Mark `session_id`'s run as reattaching to its remote turn, returning
-    /// the token every [`Self::detach`] of the entry fires from then on,
+    /// the token every [`Self::detach`] of the entry fires from then on
+    /// (until [`Self::reattach_ended`]),
     /// whether or not it also killed a live connection: the reattach stops
     /// (between attempts, while one connects, or once a detached attempt
     /// returns) and tries nothing again, and the run leaves the turn running
@@ -998,6 +999,18 @@ impl SessionRegistry {
             *running.reattach_detach.lock().unwrap() = Some(token.clone());
         }
         token
+    }
+
+    /// Take back [`Self::reattaching`]'s mark once the reattach has returned
+    /// and the run goes on (to an outbox collection, a follow-up turn). From
+    /// then on a [`Self::detach`] is answered by the entry's live connection
+    /// alone, as for a run that never reattached: a quit that finds none
+    /// cancels the run instead of counting it detached. A token already
+    /// fired stays fired; the reattach it stopped has returned by now.
+    fn reattach_ended(&self, session_id: &str) {
+        if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
+            *running.reattach_detach.lock().unwrap() = None;
+        }
     }
 
     /// [`Self::reattaching`], for tests outside this module that need a
@@ -1808,6 +1821,12 @@ pub fn start_session(
         // after its proxy went resets it: the agent went on writing after
         // anything read before.
         let remote_outbox_collected_for_turn: Cell<bool> = Cell::new(false);
+        // Why the read of the outbox after the last turn failed, when it
+        // did: the workstation did not answer, so nothing is known about
+        // what the turn published. A run that completes in that state is
+        // not judged to have published nothing (see
+        // `completed_run_outbox_unread`). Reset with the flag above.
+        let remote_outbox_read_error: RefCell<Option<String>> = RefCell::new(None);
         // Whether the start-of-run outbox recovery saw the outbox through:
         // false when the workstation dropped between installing the Staged
         // MCP on Blox and reading the outbox, or when a finished note it
@@ -2256,6 +2275,7 @@ pub fn start_session(
 
             loop {
                 remote_outbox_collected_for_turn.set(false);
+                remote_outbox_read_error.replace(None);
                 let activity = Arc::new(ActivityClock::new());
                 let writer = Arc::new(
                     MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
@@ -2485,6 +2505,14 @@ pub fn start_session(
                     },
                 )
                 .await;
+                // The reattach is over, however it ended, and the run may go
+                // on: to the outbox collection, a `write_note` follow-up, a
+                // Pikchr repair turn. Its mark on the registry entry goes
+                // now, so a quit from here on is answered by the entry's
+                // real state (a live connection is detached, anything else
+                // is cancelled) instead of counting a finished reattach as
+                // something it detached.
+                registry.reattach_ended(&config.session_id);
                 if let Some(settlement) = picked_up.reattached {
                     settle_reason.set(settlement.settle_reason);
                     transport_loss.set(settlement.transport_loss);
@@ -2507,9 +2535,13 @@ pub fn start_session(
                 // follow-up decision and the hooks below see the remote note
                 // exactly as they would a local one — and a repair turn's
                 // rewrite is picked up the same way on the next pass. A
-                // collection failure is logged and treated like a turn that
-                // delivered nothing: the follow-up prompt gives the agent a
-                // second chance rather than storing an empty note blind.
+                // collection failure is logged and, for the rest of the
+                // loop, treated like a turn that delivered nothing: the
+                // follow-up prompt gives the agent a second chance, and the
+                // read after that turn may go through. It is remembered,
+                // though: a run that would complete with its last turn's
+                // read failed does not store an empty note (see
+                // `completed_run_outbox_unread`).
                 if let (Some(turn_id), Some(ws_name)) =
                     (remote_note_turn.get(), config.workspace_name.clone())
                 {
@@ -2555,11 +2587,14 @@ pub fn start_session(
                                 config.session_id
                             );
                         }
-                        Err(e) => log::warn!(
-                            "Session {}: failed to collect the workstation note outbox after \
-                             the turn: {e}",
-                            config.session_id
-                        ),
+                        Err(e) => {
+                            log::warn!(
+                                "Session {}: failed to collect the workstation note outbox \
+                                 after the turn: {e}",
+                                config.session_id
+                            );
+                            remote_outbox_read_error.replace(Some(e));
+                        }
                     }
                 }
 
@@ -2742,22 +2777,41 @@ pub fn start_session(
         // dark, and a Stop that threw that away would be the one outcome the
         // outbox exists to prevent.
         //
+        // A third case: the run completed, but the read after its last turn
+        // failed (`completed_run_outbox_unread`). Nothing is known about
+        // what that turn published, and completing now would store an empty
+        // note over a published one. The read is tried once more here, and
+        // what it returns decides how the run ends
+        // (`unread_outbox_settlement`): a note found is checked and stored,
+        // an outbox read as empty completes as the turn would have, and an
+        // outbox that still cannot be read parks the row `detached` for the
+        // sweep, which is the rule a takeover follows for an unreadable
+        // outbox (`taken_over_note`).
+        //
         // Every other ending that did not read the outbox after its last
-        // turn (a crash, a turn the agent cancelled, a collection that
-        // failed) is not read here either: nothing would be done with a note
-        // found, and the end-of-run clear leaves a published one in place
-        // for the next run (`RunEndOutboxClear::ClearUnlessPublished`).
+        // turn (a crash, a turn the agent cancelled) is not read here
+        // either: nothing would be done with a note found, and the
+        // end-of-run clear leaves a published one in place for the next run
+        // (`RunEndOutboxClear::ClearUnlessPublished`).
         let hold_stopped = settlement.settle_reason == Some(SessionSettleReason::HoldStopped);
+        let unread_at_completion = completed_run_outbox_unread(
+            &result,
+            cancel_token.is_cancelled(),
+            remote_outbox_read_error.borrow().as_deref(),
+        );
+        let mut unread_outbox_detail = None;
         if let (Some(turn_id), Some(ws_name)) =
             (remote_note_turn.get(), config.workspace_name.as_deref())
         {
-            if (lost_remote_note_agent.is_some() || hold_stopped)
+            if (lost_remote_note_agent.is_some() || hold_stopped || unread_at_completion.is_some())
                 && !remote_outbox_collected_for_turn.get()
             {
                 let why = if lost_remote_note_agent.is_some() {
                     "after the connection failed"
-                } else {
+                } else if hold_stopped {
                     "after the background hold was stopped"
+                } else {
+                    "on a second read, after the read at the end of the turn failed"
                 };
                 let exec = remote_staged_mcp::workspace_exec(ws_name);
                 let collected = note_outbox::collect_turn_into_slot(
@@ -2768,6 +2822,9 @@ pub fn start_session(
                     &remote_note_memory,
                 );
                 remote_outbox_collected_for_turn.set(collected.is_ok());
+                if let Some(read_error) = unread_at_completion.as_deref() {
+                    unread_outbox_detail = unread_outbox_settlement(read_error, &collected);
+                }
                 match collected {
                     Ok(OutboxState::Delivered(submission)) => {
                         remote_outbox_own_note_collected.set(true);
@@ -2815,6 +2872,7 @@ pub fn start_session(
             recovery_settled: remote_outbox_recovery_settled.get(),
             own_note_collected: remote_outbox_own_note_collected.get(),
             read_after_last_turn: remote_outbox_collected_for_turn.get(),
+            rejected_note: rejected_remote_note(&remote_note_memory),
         };
         if lost_remote_note_agent.is_none()
             && disconnect::run_leaves_session_disconnected(
@@ -2855,7 +2913,11 @@ pub fn start_session(
             app_handle,
             note_submission,
             remote_outbox_use,
-            lost_remote_note_agent,
+            // A completed run that could not read its last turn's outbox
+            // settles from the outbox like a run that lost its agent: its
+            // note is checked and completes the turn, and no note parks
+            // the row for the sweep.
+            lost_remote_note_agent.or(unread_outbox_detail),
         );
     });
 
@@ -3285,6 +3347,16 @@ fn finish_session_run(
     let note_collected_from_outbox = note_submission
         .as_ref()
         .is_some_and(|submission| submission.source == NoteSubmissionSource::Outbox);
+    // Whether that note is fit to store. One that is, on a row that does not
+    // complete, is never handed to the hooks: see
+    // `RunEndForOutbox::collected_note_hooks_skipped`.
+    let collected_note_is_valid = note_submission.as_ref().is_some_and(|submission| {
+        submission.source == NoteSubmissionSource::Outbox
+            && crate::pikchr_validation::validate_pikchr_blocks(&submission.body)
+                .into_iter()
+                .next()
+                .is_none()
+    });
     let hooks = detect_turn_artifacts(
         config,
         completed_successfully,
@@ -3295,6 +3367,7 @@ fn finish_session_run(
     );
     let collected_note_unstored =
         note_collected_from_outbox && hooks.is_some_and(|hooks| !hooks.note_stored);
+    let collected_note_hooks_skipped = collected_note_is_valid && hooks.is_none();
 
     // The registry entry is still in place during the hooks, so a Stop
     // that lands while they run fires this token: `cancel` answers `true`
@@ -3420,11 +3493,13 @@ fn finish_session_run(
     // after the agent had already called `write_note`). A run that did not
     // read the outbox after its last turn removes only an unpublished one:
     // a `done` marker it never saw is a note nobody has stored, and stays
-    // for the next run. The one state that keeps the outbox outright is
-    // `detached` while the sweep is still checking it: there the note has
-    // not arrived yet and the sweep is what collects it (see
-    // `remote_outbox_clear_at_run_end`). After the terminal status so the
-    // round trip does not hold the row in `running`.
+    // for the next run — unless the marker still belongs to the note this
+    // run read earlier and rejected, which goes too. A valid note the run
+    // read for a row that did not complete stays as well. The one other
+    // state that keeps the outbox outright is `detached` while the sweep is
+    // still checking it: there the note has not arrived yet and the sweep is
+    // what collects it (see `remote_outbox_clear_at_run_end`). After the
+    // terminal status so the round trip does not hold the row in `running`.
     let outbox_clear = remote_outbox_clear_at_run_end(
         remote_outbox_use,
         &completion_reason,
@@ -3434,6 +3509,7 @@ fn finish_session_run(
                 && cancel_token.is_cancelled()
                 && completion_reason != CompletionReason::AppQuit,
             collected_note_unstored,
+            collected_note_hooks_skipped,
         },
     );
     if let Some(ws_name) = config.workspace_name.as_deref() {
@@ -4293,6 +4369,60 @@ fn debug_string_fields(text: &str, prefix: &str) -> Vec<String> {
     values
 }
 
+/// Why a run that completed has not settled its note yet: the read of the
+/// workstation outbox after its last turn failed with this error, so what
+/// the turn published is unknown. `None` for every other run — one that
+/// read the outbox, did not complete, or was stopped (a Stop discards the
+/// turn's output).
+///
+/// The turn loop carries on after a failed read as if nothing was delivered
+/// (it sends the `write_note` follow-up while it has one), so a run can come
+/// out `Completed` with an empty submission slot while a published note sits
+/// on the workstation. Storing an empty note there would also leave the row
+/// `completed`, with nothing looking for the note until a Resume.
+fn completed_run_outbox_unread(
+    result: &Result<AgentRunOutcome, AgentRunError>,
+    stop_requested: bool,
+    last_turn_read_error: Option<&str>,
+) -> Option<String> {
+    match (result, last_turn_read_error) {
+        (Ok(AgentRunOutcome::Completed), Some(error)) if !stop_requested => Some(error.to_string()),
+        _ => None,
+    }
+}
+
+/// How a completed run whose last turn's outbox read failed with
+/// `read_error` settles, given the one more read made after the run
+/// (`retried`). `Some` is the detail that makes the run settle from the
+/// outbox as a lost agent does (`lost_remote_agent_terminal_state`) instead
+/// of completing with whatever the submission slot holds:
+///
+/// - the second read found the note: it has not been through the turn
+///   loop's Pikchr check, so it settles from the outbox — stored when its
+///   blocks parse, and otherwise the row ends `detached` without it;
+/// - the second read failed too: the outbox is never judged empty unread.
+///   With no note in the slot the row is parked `error`/`detached` with the
+///   sweep's polling marker, the outbox is kept, and the detached-note sweep
+///   completes the session once the workstation answers — the rule a
+///   takeover follows (`taken_over_note::TakenOverNote::Unreadable`);
+/// - the second read found nothing published: `None`. The outbox was read,
+///   so the turn completes as one that delivered nothing does.
+fn unread_outbox_settlement(
+    read_error: &str,
+    retried: &Result<OutboxState, String>,
+) -> Option<String> {
+    match retried {
+        Ok(OutboxState::Delivered(_)) => Some(format!(
+            "the workstation note outbox could not be read when the turn ended ({read_error}), \
+             and was read once the run was over"
+        )),
+        Ok(OutboxState::Pending | OutboxState::StaleTurn { .. }) => None,
+        Err(error) => Some(format!(
+            "the workstation note outbox could not be read when the turn ended: {error}"
+        )),
+    }
+}
+
 /// What a run did with its session's workstation outbox, for the end-of-run
 /// clear decision ([`remote_outbox_clear_at_run_end`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -4317,6 +4447,13 @@ struct RemoteOutboxUse {
     /// that ended without that read: its last turn failed, was cancelled, or
     /// the read itself failed.
     read_after_last_turn: bool,
+    /// The note the run last read from the outbox, when that note does not
+    /// pass the Pikchr check: the run turned it down (and asked for a
+    /// repair), so its `done` marker is not a note waiting to be stored. A
+    /// run that ends without a read after its last turn still removes it
+    /// ([`RunEndOutboxClear::ClearUnlessRepublished`]). See
+    /// [`rejected_remote_note`].
+    rejected_note: Option<note_outbox::PublishedNoteStamp>,
 }
 
 /// What the end of a run does with its session's workstation outbox (see
@@ -4332,6 +4469,10 @@ enum RunEndOutboxClear {
     /// has collected stays, with its draft, for the next run's start-of-run
     /// recovery.
     ClearUnlessPublished,
+    /// [`Self::ClearUnlessPublished`] for a run that read a note and rejected
+    /// it: a `done` marker that still belongs to that note is removed with
+    /// the rest, and only a note published since stays.
+    ClearUnlessRepublished(note_outbox::PublishedNoteStamp),
 }
 
 /// How a run ended, as far as the end-of-run outbox clear is concerned.
@@ -4343,6 +4484,11 @@ struct RunEndForOutbox {
     /// The hooks were handed a note collected from the outbox and did not
     /// store it (a media ingest or a store write failed).
     collected_note_unstored: bool,
+    /// The run collected a note that passes the Pikchr check, and the row
+    /// did not complete, so the hooks never ran for it: a quit's cancel that
+    /// landed between the read and the terminal state, or a local error
+    /// after the read. The note was read but neither stored nor rejected.
+    collected_note_hooks_skipped: bool,
 }
 
 /// What the end of a run does with the session's workstation outbox.
@@ -4365,13 +4511,18 @@ struct RunEndForOutbox {
 ///   only copy, and the next run's recovery ingests it;
 /// - a Stop the user asked for clears it: the user discarded the turn's
 ///   output, and a later Resume must not bring the note back;
+/// - a valid note the run collected for a row that did not complete keeps
+///   it: the hooks never ran, so the note was neither stored nor rejected,
+///   and the next run's recovery ingests it;
 /// - a run that read the outbox after its last turn ended clears it: what
 ///   was there has been stored, or judged and rejected;
 /// - any other run — one whose last turn failed or ended without a read, or
-///   whose read failed — removes only an outbox with no `done` marker
-///   ([`RunEndOutboxClear::ClearUnlessPublished`]). It never saw what the
-///   agent may have published in that turn, so a published note stays for
-///   the next run's start-of-run recovery.
+///   whose read failed — removes only what it has dealt with. It never saw
+///   what the agent may have published in that turn, so a published note
+///   stays for the next run's start-of-run recovery
+///   ([`RunEndOutboxClear::ClearUnlessPublished`]) — except the note the run
+///   itself read earlier and rejected, which that recovery would ingest
+///   with no Pikchr check ([`RunEndOutboxClear::ClearUnlessRepublished`]).
 fn remote_outbox_clear_at_run_end(
     outbox_use: RemoteOutboxUse,
     completion_reason: &CompletionReason,
@@ -4384,11 +4535,42 @@ fn remote_outbox_clear_at_run_end(
         || run_end.collected_note_unstored
     {
         RunEndOutboxClear::Keep
-    } else if run_end.user_stopped || outbox_use.read_after_last_turn {
+    } else if run_end.user_stopped {
+        RunEndOutboxClear::Clear
+    } else if run_end.collected_note_hooks_skipped {
+        RunEndOutboxClear::Keep
+    } else if outbox_use.read_after_last_turn {
         RunEndOutboxClear::Clear
     } else {
-        RunEndOutboxClear::ClearUnlessPublished
+        match outbox_use.rejected_note {
+            Some(rejected) => RunEndOutboxClear::ClearUnlessRepublished(rejected),
+            None => RunEndOutboxClear::ClearUnlessPublished,
+        }
     }
+}
+
+/// The note a run last read from the workstation outbox, when the run has
+/// turned it down: `memory` is what the run's collector last pulled, and a
+/// note with a Pikchr block that does not parse is one the turn loop
+/// answered with a repair prompt (or would have). `None` when the run read
+/// no note, or the note it read is fit to store.
+///
+/// The end-of-run clear of a run that did not read the outbox after its
+/// last turn uses this to tell that note's `done` marker from a newer one:
+/// the repair turn may have ended (an agent error, a turn the agent
+/// cancelled, a quit) without republishing, and the marker still there is
+/// then the rejected note's.
+fn rejected_remote_note(
+    memory: &note_outbox::CollectedNoteMemory,
+) -> Option<note_outbox::PublishedNoteStamp> {
+    let remembered = memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let note = remembered.as_ref()?;
+    crate::pikchr_validation::validate_pikchr_blocks(&note.submission.body)
+        .into_iter()
+        .next()?;
+    note.stamp
 }
 
 /// Carry out [`remote_outbox_clear_at_run_end`]'s decision on the
@@ -4399,21 +4581,30 @@ fn clear_remote_outbox_at_run_end(
     session_id: &str,
     clear: RunEndOutboxClear,
 ) {
-    let result = match clear {
+    let rejected = match clear {
         RunEndOutboxClear::Keep => return,
-        RunEndOutboxClear::Clear => note_outbox::clear_outbox(exec, session_id),
-        RunEndOutboxClear::ClearUnlessPublished => {
-            note_outbox::clear_unpublished_outbox(exec, session_id).map(|cleared| {
-                if cleared == note_outbox::UnreadOutboxClear::PublishedNoteKept {
-                    log::warn!(
-                        "Session {session_id}: this run ended without reading the workstation \
-                         note outbox after its last turn, and the outbox holds a published \
-                         note; leaving it there for the next run to ingest"
-                    );
-                }
-            })
-        }
+        RunEndOutboxClear::Clear => None,
+        RunEndOutboxClear::ClearUnlessPublished => Some(None),
+        RunEndOutboxClear::ClearUnlessRepublished(rejected) => Some(Some(rejected)),
     };
+    let result =
+        match rejected {
+            None => note_outbox::clear_outbox(exec, session_id),
+            Some(rejected) => note_outbox::clear_unpublished_outbox(exec, session_id, rejected)
+                .map(|cleared| match cleared {
+                    note_outbox::UnreadOutboxClear::Cleared => {}
+                    note_outbox::UnreadOutboxClear::RejectedNoteCleared => log::info!(
+                        "Session {session_id}: this run ended without reading the workstation \
+                     note outbox after its last turn, and the outbox still held the note the \
+                     run had rejected; removed it"
+                    ),
+                    note_outbox::UnreadOutboxClear::PublishedNoteKept => log::warn!(
+                        "Session {session_id}: this run ended without reading the workstation \
+                     note outbox after its last turn, and the outbox holds a published \
+                     note; leaving it there for the next run to ingest"
+                    ),
+                }),
+        };
     if let Err(e) = result {
         log::warn!(
             "Session {session_id}: failed to clear the workstation note outbox at the end of \
@@ -6385,15 +6576,20 @@ fn reattach_dead_owner_session(
                 // with it the submission slot a remote note session's
                 // outbox is collected into. Read the outbox here, so the
                 // note the agent published is what the hooks store (see
-                // `taken_over_note`) instead of an empty one.
+                // `taken_over_note`) instead of an empty one. A turn that
+                // failed is read as well: the agent answered the dead
+                // owner's prompt as cancelled, or was lost, and a note it
+                // had published by then is still the session's.
                 let ws_name = config.workspace_name.clone().unwrap_or_default();
                 let exec = remote_staged_mcp::workspace_exec(&ws_name);
                 let note = taken_over_note::reattached_turn_run_end(
                     &store,
                     &config.session_id,
                     config.workspace_name.as_deref(),
-                    matches!(end.result, Ok(AgentRunOutcome::Completed))
-                        && !cancel_token.is_cancelled(),
+                    taken_over_note::ReattachedTurnEnding::of(
+                        &end.result,
+                        cancel_token.is_cancelled(),
+                    ),
                     &exec,
                 );
                 finish_session_run(
@@ -9331,6 +9527,7 @@ mod tests {
     mod note_completion;
     mod note_draft;
     mod taken_over_note;
+    mod unread_run_end;
     use super::*;
     use crate::git::strip_git_env;
     use std::cell::RefCell;
@@ -11164,6 +11361,38 @@ draft file"
             Some(CompletionReason::AppQuit)
         );
         assert!(!registry.reattaching("unknown").is_cancelled());
+    }
+
+    /// Once a run's in-loop reattach has returned and the run goes on, its
+    /// mark is gone: a quit then finds nothing to detach and cancels the
+    /// run, instead of counting a finished reattach as detached while the
+    /// run carries on into a follow-up turn.
+    #[test]
+    fn a_reattach_that_has_returned_no_longer_answers_a_quit() {
+        let registry = SessionRegistry::new();
+        let (token, epoch) = registry.register("session-reattached");
+        let detached = registry.reattaching("session-reattached");
+        assert!(registry.would_detach("session-reattached"));
+
+        registry.reattach_ended("session-reattached");
+        assert!(!registry.would_detach("session-reattached"));
+        assert!(
+            !registry.detach("session-reattached", CompletionReason::AppQuit),
+            "nothing to detach: the caller cancels instead"
+        );
+        assert!(!detached.is_cancelled());
+        assert!(!token.is_cancelled());
+        assert_eq!(
+            registry.detach_reason_of("session-reattached", epoch),
+            None,
+            "a detach that found nothing records no reason"
+        );
+
+        // A later reattach of the same run marks it again.
+        let again = registry.reattaching("session-reattached");
+        assert!(registry.detach("session-reattached", CompletionReason::AppQuit));
+        assert!(again.is_cancelled() && !detached.is_cancelled());
+        registry.reattach_ended("unknown");
     }
 
     fn reattached_connection_settled(cancel_unacknowledged: bool) -> acp_client::SessionSettled {

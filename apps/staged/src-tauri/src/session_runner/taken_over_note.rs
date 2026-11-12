@@ -33,6 +33,16 @@
 //!   detached-note sweep keeps reading it and completes the session from
 //!   the note once the workstation answers.
 //!
+//! A dead owner's reattached turn that *failed* is read too
+//! ([`ReattachedTurnEnding::Failed`]): the agent answered the dead owner's
+//! prompt as cancelled, or was lost for good, so the turn is over and
+//! nothing further will be published. A published note is the deliverable
+//! whatever became of the rest of the turn, as it is for a run that loses
+//! its agent after `write_note`: one whose Pikchr blocks parse completes the
+//! session and is stored, one with a broken block parks the row
+//! `error`/`detached` and is cleared. With nothing published the turn fails
+//! as it did before the read existed.
+//!
 //! The outbox is read with any turn id: the turn id lived in the run that
 //! is gone. Whatever `done` marker is there is a note nobody stored — a run
 //! clears the outbox once it has dealt with a note.
@@ -161,14 +171,6 @@ impl TakenOverNote {
     /// endings — the lost-agent detail that makes the run settle from the
     /// outbox instead of completing.
     pub(super) fn run_end(self, takeover: &str) -> TakenOverRunEnd {
-        // The takeover owns the outbox from here, and read it with any turn
-        // id: nothing an earlier run left can be sitting there unseen.
-        let outbox_use = |collected: bool, read: bool| RemoteOutboxUse {
-            staged_mcp_attached: true,
-            recovery_settled: true,
-            own_note_collected: collected,
-            read_after_last_turn: read,
-        };
         match self {
             TakenOverNote::Published(submission) => {
                 let broken = crate::pikchr_validation::validate_pikchr_blocks(&submission.body)
@@ -177,20 +179,109 @@ impl TakenOverNote {
                     .is_some();
                 TakenOverRunEnd {
                     note_submission: Some(submission),
-                    outbox_use: outbox_use(true, true),
+                    outbox_use: taken_over_outbox_use(true, true),
                     lost_remote_note_agent: broken.then(|| takeover.to_string()),
                 }
             }
             TakenOverNote::Unpublished => TakenOverRunEnd {
                 note_submission: None,
-                outbox_use: outbox_use(false, true),
+                outbox_use: taken_over_outbox_use(false, true),
                 lost_remote_note_agent: None,
             },
             TakenOverNote::Unreadable(error) => TakenOverRunEnd {
                 note_submission: None,
-                outbox_use: outbox_use(false, false),
+                outbox_use: taken_over_outbox_use(false, false),
                 lost_remote_note_agent: Some(unreadable_outbox_detail(takeover, &error)),
             },
+        }
+    }
+
+    /// [`Self::run_end`] for a taken-over turn that failed with `error`
+    /// instead of completing: the agent answered its prompt as cancelled, or
+    /// was lost. The turn is over either way, so what the outbox holds now
+    /// is all it will hold.
+    ///
+    /// - A published note settles the run from the outbox
+    ///   (`lost_remote_agent_terminal_state`): with every Pikchr block
+    ///   parsing the session completes and the hooks store it; with a broken
+    ///   one the row is parked `error`/`detached` and the note cleared.
+    /// - Nothing published: the run fails with its own error, as before.
+    ///   The outbox was read, so its leftovers (the draft) are cleared.
+    /// - An outbox that could not be read: the run fails with its own error
+    ///   too. It is not parked for the sweep as a completed turn is: the
+    ///   failure names why the agent was lost, which a polling message would
+    ///   replace, and the sweep stores what it finds without the Pikchr
+    ///   check. The outbox was not read, so the end-of-run clear removes
+    ///   only an unpublished one and a published note waits for a Resume.
+    pub(super) fn run_end_of_failed_turn(self, takeover: &str, error: &str) -> TakenOverRunEnd {
+        match self {
+            TakenOverNote::Published(submission) => TakenOverRunEnd {
+                note_submission: Some(submission),
+                outbox_use: taken_over_outbox_use(true, true),
+                lost_remote_note_agent: Some(format!(
+                    "{takeover}, and its turn then ended without finishing: {error}"
+                )),
+            },
+            TakenOverNote::Unpublished => TakenOverRunEnd {
+                note_submission: None,
+                outbox_use: taken_over_outbox_use(false, true),
+                lost_remote_note_agent: None,
+            },
+            TakenOverNote::Unreadable(_) => TakenOverRunEnd {
+                note_submission: None,
+                outbox_use: taken_over_outbox_use(false, false),
+                lost_remote_note_agent: None,
+            },
+        }
+    }
+}
+
+/// What a takeover did with the outbox, for the end-of-run clear. The
+/// takeover owns the outbox from the moment it takes the turn, and reads it
+/// with any turn id: nothing an earlier run left can be sitting there
+/// unseen. `collected` says a published note was found, `read` that the
+/// outbox was read at all.
+fn taken_over_outbox_use(collected: bool, read: bool) -> RemoteOutboxUse {
+    RemoteOutboxUse {
+        staged_mcp_attached: true,
+        recovery_settled: true,
+        own_note_collected: collected,
+        read_after_last_turn: read,
+        // A takeover never asks for a repair, so it never leaves a note it
+        // rejected behind an unread ending: a rejected note is cleared with
+        // the read that found it.
+        rejected_note: None,
+    }
+}
+
+/// How a dead owner's reattached turn ended, as far as its note goes (see
+/// [`reattached_turn_run_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReattachedTurnEnding<'a> {
+    /// The turn completed and no Stop asked for it to end.
+    Completed,
+    /// The turn failed with this error and no Stop asked for it to end: the
+    /// agent answered the dead owner's prompt as cancelled, or was lost.
+    /// (A reattach that merely lost its proxy leaves the row `disconnected`
+    /// and never gets here.)
+    Failed(&'a str),
+    /// A Stop ended it, or the agent cancelled it: the turn's output is
+    /// not wanted, or there is none.
+    Stopped,
+}
+
+impl<'a> ReattachedTurnEnding<'a> {
+    /// The ending of a reattached turn with this `result`, given whether a
+    /// Stop was requested.
+    pub(super) fn of<E: AsRef<str>>(
+        result: &'a Result<acp_client::AgentRunOutcome, E>,
+        stop_requested: bool,
+    ) -> Self {
+        match result {
+            _ if stop_requested => Self::Stopped,
+            Ok(acp_client::AgentRunOutcome::Completed) => Self::Completed,
+            Ok(_) => Self::Stopped,
+            Err(error) => Self::Failed(error.as_ref()),
         }
     }
 }
@@ -206,36 +297,42 @@ pub(super) struct TakenOverRunEnd {
 }
 
 /// How a dead owner's turn, reattached to by the sweep, ends as far as its
-/// note goes. `completed` says the reattached turn completed and no Stop
-/// asked for it to end; only then is the outbox read, through `exec`.
+/// note goes. The outbox is read, through `exec`, when the turn is over and
+/// was not stopped: it completed, or it failed
+/// ([`TakenOverNote::run_end`], [`TakenOverNote::run_end_of_failed_turn`]).
 ///
-/// Any other ending of a session with an outbox still owns it, unread: the
+/// A stopped turn of a session with an outbox still owns it, unread: the
 /// end-of-run clear then discards the note after a Stop, as for a run of its
 /// own, and otherwise removes only an unpublished outbox
 /// (`RunEndOutboxClear::ClearUnlessPublished`).
+///
+/// The failed ending used to be left unread as well. A relaunch while the
+/// dead owner's turn is still running has the reattach's `session/load`
+/// interrupt it on some bridges, the agent answers the owner's prompt as
+/// cancelled, and the turn fails as `remote_agent_lost`: a note the agent
+/// had already published stayed in the outbox until the user pressed Resume.
 pub(super) fn reattached_turn_run_end(
     store: &Store,
     session_id: &str,
     workspace_name: Option<&str>,
-    completed: bool,
+    ending: ReattachedTurnEnding<'_>,
     exec: remote_staged_mcp::RemoteExec,
 ) -> TakenOverRunEnd {
     if !delivers_note_through_outbox(store, session_id, workspace_name) {
         return TakenOverRunEnd::default();
     }
-    if !completed {
-        return TakenOverRunEnd {
+    match ending {
+        ReattachedTurnEnding::Completed => {
+            collect_taken_over_note(exec, session_id).run_end(OWNER_PROCESS_ENDED)
+        }
+        ReattachedTurnEnding::Failed(error) => collect_taken_over_note(exec, session_id)
+            .run_end_of_failed_turn(OWNER_PROCESS_ENDED, error),
+        ReattachedTurnEnding::Stopped => TakenOverRunEnd {
             note_submission: None,
-            outbox_use: RemoteOutboxUse {
-                staged_mcp_attached: true,
-                recovery_settled: true,
-                own_note_collected: false,
-                read_after_last_turn: false,
-            },
+            outbox_use: taken_over_outbox_use(false, false),
             lost_remote_note_agent: None,
-        };
+        },
     }
-    collect_taken_over_note(exec, session_id).run_end(OWNER_PROCESS_ENDED)
 }
 
 fn unreadable_outbox_detail(takeover: &str, error: &str) -> String {

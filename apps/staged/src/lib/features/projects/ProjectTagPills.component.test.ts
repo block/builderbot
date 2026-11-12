@@ -347,7 +347,9 @@ describe('ProjectTagPills', () => {
       await press(input, 'Enter');
 
       expect(openSettings).toHaveBeenCalledWith('tags');
-      expect(pickerInput()).toBeNull();
+      // The popover unmounts through bits-ui's presence layer, which can land
+      // a frame after the settle rounds on a loaded machine.
+      await vi.waitFor(() => expect(pickerInput()).toBeNull());
     });
 
     it('opens when the T shortcut bumps the request, but not on mount', async () => {

@@ -16,7 +16,8 @@
 
   It opens over Settings and the diff view too. A project opened from there
   replaces the workspace route underneath (selectProject), and the diff view
-  first saves what was typed into it (diffLeaveCheck).
+  first saves what was typed into it (diffLeaveCheck) while the row being
+  opened shows the wait.
 
   Matching and ranking live in paletteSearch.ts. The dialog is the design
   system's (focus trap, Escape, backdrop dismiss, focus restore, the
@@ -58,19 +59,21 @@
 
   let inputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
-  // The highlight is a project, not a position: `selectedId` names it, and
+  // The highlight starts on the top row and stays there, whichever project
+  // that becomes, until the arrow keys or the pointer move it. From then on
+  // it is a project, not a position: `selectedId` names it, and
   // `selectedIndex` is the row it was last seen at, used only once that
-  // project has left the list. Null means the top row (a fresh open, an
-  // edited query) until the list it applies to has rendered.
+  // project has left the list. Null means not moved yet (a fresh open, an
+  // edited query).
   let selectedId = $state<string | null>(null);
   let selectedIndex = $state(0);
   // Set when a result was opened, so closing sends focus to the view that
   // came up rather than back to a control in the one it replaced.
   let navigated = false;
-  // Which open this is, and whether it is waiting on the diff view to save
-  // before opening a result.
+  // Which open this is, and the project it is waiting on the diff view to
+  // save before opening (its row shows the wait).
   let openSession = 0;
-  let leaving = false;
+  let openingId = $state<string | null>(null);
   // The highlight was last moved by the pointer (see the reveal effect).
   let movedByPointer = false;
 
@@ -138,20 +141,21 @@
       selectedId = null;
       selectedIndex = 0;
       navigated = false;
-      leaving = false;
+      openingId = null;
       movedByPointer = false;
       projectSearchIndex.ensureLoaded();
       void projectsDataStore.ensureProjectsHydrated();
     });
   });
 
-  // The highlighted row: wherever the highlighted project is now. The list
-  // changes while the palette is open (opening it fetches every project's
-  // branches, and each one landing can reorder the recents; projects are
-  // created, renamed and removed), and Enter must open the project that was
-  // highlighted, not whichever one has taken its row. Only when that project
-  // is no longer listed does the highlight fall back to its old position,
-  // clamped to the list.
+  // The highlighted row: the top one until the highlight is moved, then
+  // wherever the highlighted project is now. The list changes while the
+  // palette is open (opening it fetches every project's branches, and each
+  // one landing can reorder the recents; projects are created, renamed and
+  // removed), and Enter must open the project that was highlighted, not
+  // whichever one has taken its row. Only when that project is no longer
+  // listed does the highlight fall back to its old position, clamped to the
+  // list.
   let selectedAt = $derived(
     selectedId === null ? -1 : rows.findIndex((row) => row.project.id === selectedId)
   );
@@ -167,15 +171,19 @@
     })
   );
 
-  // Follow the highlighted project: remember the row it sits at, and once
-  // the highlight has fallen to a position (the top row, or a clamp), pin it
-  // to the project found there, so the next change to the list doesn't move
-  // it again.
+  // Follow a highlight the user has moved: remember the row its project sits
+  // at, and once it has fallen to a position (a clamp, after that project
+  // left the list), pin it to the project found there, so the next change to
+  // the list doesn't move it again. One that was never moved is not pinned:
+  // results reorder as they load (branches land, the title index brings a
+  // better match), and a pinned default would follow the project that
+  // happened to be on top first, taking the list's scroll down with it.
   $effect.pre(() => {
     const id = activeId;
     const index = activeIndex;
     if (id === null) return;
     untrack(() => {
+      if (selectedId === null) return;
       selectedId = id;
       selectedIndex = index;
     });
@@ -201,6 +209,7 @@
   // One line for screen readers, in a live region that stays mounted (below):
   // how many projects are listed, or why none are.
   let status = $derived.by(() => {
+    if (openingId !== null) return 'Saving comment…';
     if (rows.length > 0) {
       if (results.total > rows.length) return `Top ${rows.length} of ${results.total} projects`;
       return `${results.total} ${results.total === 1 ? 'project' : 'projects'}`;
@@ -237,24 +246,26 @@
 
   async function openRow(index: number) {
     const project = rows[index]?.project;
-    if (!project || leaving || !openable(project.id)) return;
+    if (!project || openingId !== null || !openable(project.id)) return;
 
     // Over the diff view, opening a project leaves it. Comments typed there
     // save as they are written; like the diff view's own close, wait for the
     // last save and stay when it failed, so the text is still there to retry.
+    // The row says it is waiting, so a slow save doesn't read as a palette
+    // that ignored the key; Escape still closes, which calls the open off.
     const diffSaved = diffLeaveCheck();
     if (diffSaved) {
       const session = openSession;
-      leaving = true;
+      openingId = project.id;
       let saved = false;
       try {
         saved = await diffSaved();
       } catch (e) {
         console.error('[CommandPalette] Could not save the diff comment before leaving:', e);
       } finally {
-        // Unless the palette was reopened meanwhile: `leaving` is that
+        // Unless the palette was reopened meanwhile: `openingId` is that
         // open's now.
-        if (session === openSession) leaving = false;
+        if (session === openSession) openingId = null;
       }
       // Dismissed while the save ran: the user called it off.
       if (!commandPalette.open || session !== openSession) return;
@@ -397,6 +408,7 @@
             current={row.project.id === navigation.selectedProjectId}
             filteredOut={filteredOutIds.has(row.project.id)}
             removing={projectsDataStore.isProjectDeleting(row.project.id)}
+            busy={row.project.id === openingId}
             onhighlight={() => highlight(i, true)}
             onopen={() => void openRow(i)}
           />

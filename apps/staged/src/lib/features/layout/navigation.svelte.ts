@@ -532,12 +532,19 @@ export function leaveBoard(groupId: string): void {
  *
  * The project takes the place of whatever the workspace was showing: from the
  * grid it is pushed, and from a project or the repos list it replaces that
- * route, so Back goes home either way. Settings and the diff view sit over
- * the workspace rather than in it, so from either one the project replaces
- * the workspace route underneath and the routes over it go: with Settings
- * open over project A (`[home, A, settings]`), opening B leaves `[home, B]`
- * as a sidebar switch from A would, not `[home, A, B]`, and opening A itself
- * leaves `[home, A]`. The ⌘K palette is how a project gets opened from there.
+ * route, so Back goes to whatever was under the replaced route. That is home,
+ * except for a repos list opened from a project: from `[home, A, repos]`,
+ * opening B leaves `[home, A, B]`, and Back goes to A.
+ *
+ * Settings and the diff view sit over the workspace rather than in it, so
+ * from either one the project replaces the workspace route underneath and the
+ * routes over it go: with Settings open over project A
+ * (`[home, A, settings]`), opening B leaves `[home, B]` as a sidebar switch
+ * from A would, not `[home, A, B]`, and opening A itself leaves `[home, A]`.
+ * Over the repos list the same rule gives what a pick from that list gives:
+ * with a diff over `[home, A, repos]`, opening B leaves `[home, A, B]`, and
+ * Back goes to A, not home. The ⌘K palette is how a project gets opened from
+ * there.
  *
  * A diff route dropped this way announces itself (`staged:diff-route-replaced`)
  * like a popped one does. Callers leaving the diff view from outside it await

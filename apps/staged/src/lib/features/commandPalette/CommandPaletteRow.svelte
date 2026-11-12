@@ -12,9 +12,12 @@
   what the palette can't otherwise show about a project it lists regardless
   of the window's filters: that it is the one on screen, that the window's
   filters hide it, or that it is being removed (and so can't be opened).
+  While the palette waits to open the row (the diff view is saving a comment
+  first) a spinner takes their place.
 -->
 <script lang="ts">
   import { Badge } from '$lib/components/ui/badge';
+  import Spinner from '../../shared/Spinner.svelte';
   import type { HighlightSegment } from '../../shared/textSearch';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import ProjectMatchReason from '../projects/ProjectMatchReason.svelte';
@@ -35,6 +38,9 @@
     filteredOut?: boolean;
     /** A remove is in flight: listed, but not openable. */
     removing?: boolean;
+    /** The palette is waiting to open this project: the diff view is saving
+     *  a comment first. */
+    busy?: boolean;
     /** The pointer moved over the row. */
     onhighlight: () => void;
     onopen: () => void;
@@ -48,6 +54,7 @@
     current = false,
     filteredOut = false,
     removing = false,
+    busy = false,
     onhighlight,
     onopen,
   }: Props = $props();
@@ -72,6 +79,7 @@
   tabindex="-1"
   aria-selected={selected}
   aria-disabled={removing || undefined}
+  aria-busy={busy || undefined}
   data-project-id={project.id}
   onpointermove={onhighlight}
   onclick={onopen}
@@ -111,7 +119,12 @@
       </span>
     {/if}
   </span>
-  {#if removing || current || filteredOut}
+  {#if busy}
+    <span class="row-busy">
+      <Spinner size={12} />
+      Saving comment…
+    </span>
+  {:else if removing || current || filteredOut}
     <span class="row-badges">
       {#if removing}
         <Badge variant="outline" class="palette-badge">Removing…</Badge>
@@ -252,6 +265,29 @@
     color: var(--text-muted);
     font-size: calc(var(--size-xs) - 1px);
     font-weight: 500;
+  }
+
+  /* Fades in after a beat, like the sidebar's busy spinner, so a save that
+     returns at once doesn't flash it. */
+  .row-busy {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    white-space: nowrap;
+    animation: row-busy-in 300ms 150ms both;
+  }
+
+  .row-busy :global(.spinner) {
+    color: var(--ui-accent);
+  }
+
+  @keyframes row-busy-in {
+    from {
+      opacity: 0;
+    }
   }
 
   /* The selection fill sits close to the standard border in dark themes, so

@@ -213,6 +213,10 @@ const selectedIds = () =>
   options()
     .filter((el) => el.getAttribute('aria-selected') === 'true')
     .map((el) => el.dataset.projectId);
+const busyIds = () =>
+  options()
+    .filter((el) => el.getAttribute('aria-busy') === 'true')
+    .map((el) => el.dataset.projectId);
 const badges = () =>
   Object.fromEntries(
     options().map((el) => [
@@ -977,8 +981,31 @@ describe('CommandPalette when the projects change while it is open', () => {
     expect(spies.selectProject).toHaveBeenCalledWith('beta');
   });
 
-  it('keeps the first row’s project highlighted when another moves above it', async () => {
+  it('leaves a highlight that was never moved on the top row when another moves above it', async () => {
     await openPalette();
+    expect(selectedIds()).toEqual(['alpha']);
+    spies.revealWithin.mockClear();
+
+    // Nothing was pressed: the highlight is the default, not a choice of
+    // Alpha, so it is the most recent project's, whichever that turns out
+    // to be.
+    await change(() => (world.branches = new Map([['gamma', [branch('gamma', 99)]]])));
+
+    expect(optionIds()).toEqual(['gamma', 'alpha', 'beta']);
+    expect(selectedIds()).toEqual(['gamma']);
+    expect(input().getAttribute('aria-activedescendant')).toBe(optionFor('gamma').id);
+    // And the list isn't scrolled after the row that used to be on top.
+    expect(spies.revealWithin).not.toHaveBeenCalled();
+
+    await press('Enter');
+    expect(spies.selectProject).toHaveBeenCalledTimes(1);
+    expect(spies.selectProject).toHaveBeenCalledWith('gamma');
+  });
+
+  it('keeps the first row’s project highlighted when another moves above it, once the arrows chose it', async () => {
+    await openPalette();
+    await press('ArrowDown');
+    await press('ArrowUp');
     expect(selectedIds()).toEqual(['alpha']);
 
     await change(() => (world.branches = new Map([['gamma', [branch('gamma', 99)]]])));
@@ -988,6 +1015,18 @@ describe('CommandPalette when the projects change while it is open', () => {
 
     await press('Enter');
     expect(spies.selectProject).toHaveBeenCalledWith('alpha');
+  });
+
+  it('keeps the highlight on the project the pointer chose when the list reorders', async () => {
+    await openPalette();
+    options()[1].dispatchEvent(new MouseEvent('pointermove', { bubbles: true }));
+    await settle();
+    expect(selectedIds()).toEqual(['beta']);
+
+    await change(() => (world.branches = new Map([['gamma', [branch('gamma', 99)]]])));
+
+    expect(optionIds()).toEqual(['gamma', 'alpha', 'beta']);
+    expect(selectedIds()).toEqual(['beta']);
   });
 
   it('keeps the highlight through a reorder under a typed query', async () => {
@@ -1121,12 +1160,15 @@ describe('CommandPalette when the projects change while it is open', () => {
     expect(spies.selectProject).toHaveBeenCalledWith('beta');
   });
 
-  it('follows a rename that moves the project within the results of a query', async () => {
+  it('highlights a better match that arrives above the first result of a query', async () => {
     await openPalette();
     await type('tools');
     expect(optionIds()).toEqual(['beta']);
+    expect(selectedIds()).toEqual(['beta']);
+    spies.revealWithin.mockClear();
 
-    // Gamma is renamed into the results, and outranks Beta on recency.
+    // Gamma is renamed into the results, and outranks Beta on recency. The
+    // highlight was never moved, so it is still the top result's.
     await change(
       () =>
         (world.projects = world.projects.map((p) =>
@@ -1135,7 +1177,11 @@ describe('CommandPalette when the projects change while it is open', () => {
     );
 
     expect(optionIds()).toEqual(['gamma', 'beta']);
-    expect(selectedIds()).toEqual(['beta']);
+    expect(selectedIds()).toEqual(['gamma']);
+    expect(spies.revealWithin).not.toHaveBeenCalled();
+
+    await press('Enter');
+    expect(spies.selectProject).toHaveBeenCalledWith('gamma');
   });
 
   it('drops a project renamed out of the query, and Enter opens what is highlighted', async () => {
@@ -1268,6 +1314,58 @@ describe('CommandPalette over Settings and the diff view', () => {
     expect(commandPalette.open).toBe(false);
   });
 
+  it('shows the wait on the row being opened while the diff view saves', async () => {
+    world.showOverProject('diff', 'alpha');
+    let finishSave!: (saved: boolean) => void;
+    world.diffLeaveCheck = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+    await openPalette();
+    expect(busyIds()).toEqual([]);
+    expect(dialog()!.querySelector('.row-busy')).toBeNull();
+
+    await press('Enter');
+
+    expect(busyIds()).toEqual(['beta']);
+    const wait = optionFor('beta').querySelector('.row-busy');
+    expect(wait?.textContent?.trim()).toBe('Saving comment…');
+    expect(wait?.querySelector('.spinner')).not.toBeNull();
+    expect(liveRegion()?.textContent).toBe('Saving comment…');
+
+    // It is the project being opened that waits, wherever the highlight goes.
+    await press('ArrowDown');
+    expect(selectedIds()).toEqual(['gamma']);
+    expect(busyIds()).toEqual(['beta']);
+
+    finishSave(true);
+    await settle();
+
+    expect(spies.selectProject).toHaveBeenCalledWith('beta');
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('closes on Escape while the save runs, and the next open shows no wait', async () => {
+    world.showOverProject('diff', 'alpha');
+    let finishSave!: (saved: boolean) => void;
+    world.diffLeaveCheck = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+    await openPalette();
+    await press('Enter');
+    expect(busyIds()).toEqual(['beta']);
+
+    await press('Escape');
+
+    expect(commandPalette.open).toBe(false);
+    await dialogGone();
+
+    await openPalette();
+    expect(busyIds()).toEqual([]);
+    expect(liveRegion()?.textContent).toBe('3 projects');
+
+    // The abandoned save landing changes nothing for this open.
+    finishSave(true);
+    await settle();
+    expect(spies.selectProject).not.toHaveBeenCalled();
+    expect(busyIds()).toEqual([]);
+  });
+
   it('stays on the diff and says so when the comment did not save', async () => {
     world.showOverProject('diff', 'alpha');
     world.diffLeaveCheck = vi.fn(async () => false);
@@ -1363,6 +1461,7 @@ describe('CommandPalette over Settings and the diff view', () => {
 
     expect(spies.selectProject).not.toHaveBeenCalled();
     expect(commandPalette.open).toBe(true);
+    expect(busyIds()).toEqual([]);
   });
 
   it('opens straight away from the diff view when nothing is registered to wait for', async () => {

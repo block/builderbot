@@ -8,10 +8,11 @@
 
   A listbox option: it takes no focus (the palette's input keeps it and points
   at the highlighted row through aria-activedescendant), so the row is a plain
-  element with the pointer handlers the palette passes in. Trailing badges say
-  what the palette can't otherwise show about a project it lists regardless
-  of the window's filters: that it is the one on screen, that the window's
-  filters hide it, or that it is being removed (and so can't be opened).
+  element with the palette's click handler; the palette's list follows the
+  pointer over its rows. Trailing badges say what the palette can't otherwise
+  show about a project it lists regardless of the window's filters: that it
+  is the one on screen, that the window's filters hide it, or that it is
+  being removed (and so can't be opened).
   While the palette waits to open the row (the diff view is saving a comment
   first) a spinner takes their place.
 -->
@@ -41,8 +42,6 @@
     /** The palette is waiting to open this project: the diff view is saving
      *  a comment first. */
     busy?: boolean;
-    /** The pointer moved over the row. */
-    onhighlight: () => void;
     onopen: () => void;
   }
 
@@ -55,7 +54,6 @@
     filteredOut = false,
     removing = false,
     busy = false,
-    onhighlight,
     onopen,
   }: Props = $props();
 
@@ -81,7 +79,6 @@
   aria-disabled={removing || undefined}
   aria-busy={busy || undefined}
   data-project-id={project.id}
-  onpointermove={onhighlight}
   onclick={onopen}
 >
   <span class="row-icon">

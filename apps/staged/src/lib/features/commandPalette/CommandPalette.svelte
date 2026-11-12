@@ -17,7 +17,11 @@
   It opens over Settings and the diff view too. A project opened from there
   replaces the workspace route underneath (selectProject), and the diff view
   first saves what was typed into it (diffLeaveCheck) while the row being
-  opened shows the wait.
+  opened shows the wait and the palette takes nothing but a dismissal.
+
+  What the panel shows is one value, `view`, which stops changing when the
+  palette closes: the dialog stays mounted for its exit animation, and it
+  fades out showing what it last showed.
 
   Matching and ranking live in paletteSearch.ts. The dialog is the design
   system's (focus trap, Escape, backdrop dismiss, focus restore, the
@@ -54,8 +58,24 @@
   const uid = $props.id();
   const listboxId = `command-palette-${uid}-results`;
 
-  const NO_RESULTS: PaletteResults = { rows: [], total: 0, terms: [] };
+  /** What the panel shows of the stores: the results, and what the rows'
+   *  badges and the wait come from. */
+  interface PaletteView {
+    results: PaletteResults;
+    filteredOutIds: ReadonlySet<string>;
+    /** The project the window is showing. */
+    currentId: string | null;
+    /** The project the palette is waiting to open. */
+    busyId: string | null;
+  }
+
   const NO_IDS: ReadonlySet<string> = new Set();
+  const NO_VIEW: PaletteView = {
+    results: { rows: [], total: 0, terms: [] },
+    filteredOutIds: NO_IDS,
+    currentId: null,
+    busyId: null,
+  };
 
   let inputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
@@ -76,6 +96,8 @@
   let openingId = $state<string | null>(null);
   // The highlight was last moved by the pointer (see the reveal effect).
   let movedByPointer = false;
+  // Where the pointer was last seen over the list (see handleListPointerMove).
+  let pointerAt: { x: number; y: number } | null = null;
 
   let query = $derived(commandPalette.query);
   let searching = $derived(query.trim().length > 0);
@@ -83,27 +105,23 @@
 
   // Prepared search data for every project (branches, PRs, repo labels,
   // note and review titles). Built only while something reads it: the
-  // palette is open and a query — its own, or the window's search field's
-  // for the "Filtered out" badge — is active.
+  // palette is open (`view`, below, is the one reader of these three) and a
+  // query — its own, or the window's search field's for the "Filtered out"
+  // badge — is active.
   const searchSnapshot = projectSearchSnapshots();
-  let snapshot = $derived(
-    commandPalette.open && (searching || listQuery.trim().length > 0) ? searchSnapshot() : null
-  );
+  let snapshot = $derived(searching || listQuery.trim().length > 0 ? searchSnapshot() : null);
 
-  let results = $derived(
-    commandPalette.open
-      ? paletteResults({
-          projects: projectsDataStore.projects,
-          query,
-          snapshot,
-          reposByProject: projectsDataStore.reposByProject,
-          branchesByProject: projectsDataStore.branchesByProject,
-          repoShortName: repoBadgeShortName,
-          currentProjectId: navigation.selectedProjectId,
-        })
-      : NO_RESULTS
+  let liveResults = $derived(
+    paletteResults({
+      projects: projectsDataStore.projects,
+      query,
+      snapshot,
+      reposByProject: projectsDataStore.reposByProject,
+      branchesByProject: projectsDataStore.branchesByProject,
+      repoShortName: repoBadgeShortName,
+      currentProjectId: navigation.selectedProjectId,
+    })
   );
-  let rows = $derived(results.rows);
 
   // The projects this window's own list is hiding, for the badge only: the
   // palette lists and opens them all the same. "Own list" is the surface the
@@ -119,8 +137,7 @@
         ? navigation.projectLayer.projectId
         : null
   );
-  let filteredOutIds = $derived.by(() => {
-    if (!commandPalette.open) return NO_IDS;
+  let liveFilteredOutIds = $derived.by(() => {
     if (!projectFiltersStore.hasActiveFilters && !listQuery.trim()) return NO_IDS;
     return hiddenProjectIds({
       projects: projectsDataStore.projects,
@@ -130,6 +147,27 @@
       snapshot,
     });
   });
+
+  // What the panel shows. It follows the stores while the palette is open
+  // and holds what it last showed once it is closed: the dialog stays
+  // mounted while its exit animation plays, and closing changes what the
+  // stores say (opening a project makes it the current one, which reorders
+  // the recents and moves the badges). A panel that kept following would
+  // fade out showing something else, and one that emptied would show "No
+  // projects" and announce it. The next open computes it afresh.
+  let heldView = NO_VIEW;
+  let view = $derived.by(() => {
+    if (!commandPalette.open) return heldView;
+    heldView = {
+      results: liveResults,
+      filteredOutIds: liveFilteredOutIds,
+      currentId: navigation.selectedProjectId,
+      busyId: openingId,
+    };
+    return heldView;
+  });
+  let results = $derived(view.results);
+  let rows = $derived(results.rows);
 
   // Each open starts from the top, with what a query will search on its way:
   // every project's branches and repos (the idle drip may not have reached
@@ -143,6 +181,7 @@
       navigated = false;
       openingId = null;
       movedByPointer = false;
+      pointerAt = null;
       projectSearchIndex.ensureLoaded();
       void projectsDataStore.ensureProjectsHydrated();
     });
@@ -209,7 +248,7 @@
   // One line for screen readers, in a live region that stays mounted (below):
   // how many projects are listed, or why none are.
   let status = $derived.by(() => {
-    if (openingId !== null) return 'Saving comment…';
+    if (view.busyId !== null) return 'Saving comment…';
     if (rows.length > 0) {
       if (results.total > rows.length) return `Top ${rows.length} of ${results.total} projects`;
       return `${results.total} ${results.total === 1 ? 'project' : 'projects'}`;
@@ -226,13 +265,35 @@
     projectSearchIndex.ensureLoaded();
   }
 
-  /** Highlight the project at a row, from the keyboard or the pointer. */
+  /** Highlight the project at a row, from the keyboard or the pointer. Not
+   *  while a project is waiting to open (see openRow), nor once closed. */
   function highlight(index: number, fromPointer: boolean) {
+    if (!commandPalette.open || openingId !== null) return;
     const id = rows[index]?.project.id;
     if (!id || index === activeIndex) return;
     movedByPointer = fromPointer;
     selectedId = id;
     selectedIndex = index;
+  }
+
+  // The pointer highlights the row it moves over, and only when it moves.
+  // WebKit sends a pointermove, at the pointer's unchanged position, to
+  // whatever slides under a resting pointer when the list scrolls, which is
+  // what the arrow keys do to keep the highlight in view: taken as a hover,
+  // each one would snap the highlight back to the pointer's row. So an event
+  // counts when its position differs from the last one seen over the list,
+  // gaps and padding included (a row can slide under a pointer resting
+  // there). The first one after an open only says where the pointer is: it
+  // may be that same resting pointer, and a real movement sends another
+  // straight after.
+  function handleListPointerMove(e: PointerEvent) {
+    const last = pointerAt;
+    pointerAt = { x: e.clientX, y: e.clientY };
+    if (last === null || (last.x === pointerAt.x && last.y === pointerAt.y)) return;
+    const option = e.target instanceof Element ? e.target.closest('[role="option"]') : null;
+    if (!(option instanceof HTMLElement)) return;
+    const index = rows.findIndex((row) => row.project.id === option.dataset.projectId);
+    if (index >= 0) highlight(index, true);
   }
 
   /** Whether the project can be opened: listed, and not being removed (such
@@ -245,6 +306,8 @@
   }
 
   async function openRow(index: number) {
+    // Not from a panel that is only fading out: its rows are still there.
+    if (!commandPalette.open) return;
     const project = rows[index]?.project;
     if (!project || openingId !== null || !openable(project.id)) return;
 
@@ -252,7 +315,12 @@
     // save as they are written; like the diff view's own close, wait for the
     // last save and stay when it failed, so the text is still there to retry.
     // The row says it is waiting, so a slow save doesn't read as a palette
-    // that ignored the key; Escape still closes, which calls the open off.
+    // that ignored the key. Until the save lands the palette holds still:
+    // the field is read-only (typing, pasting, an IME) and the keys and the
+    // pointer leave the highlight where it is, as Enter and clicks already
+    // did nothing. Otherwise a query typed meanwhile could filter the
+    // waiting row out, or the arrows scroll it away, with the open it stands
+    // for still on its way. Escape still closes, which calls the open off.
     const diffSaved = diffLeaveCheck();
     if (diffSaved) {
       const session = openSession;
@@ -298,6 +366,18 @@
     // focus trap) goes back to the field, where this key's text belongs.
     if (document.activeElement !== inputEl && e.key !== 'Tab' && e.key !== 'Escape') {
       inputEl?.focus();
+    }
+    // Waiting to open a project (openRow): the palette holds still, and
+    // only the keys that leave it get through. The field is read-only
+    // meanwhile, and a key a read-only field has no use for falls to the
+    // browser (WebKit takes Backspace there as "back" in the page history),
+    // so the rest are taken here.
+    if (openingId !== null) {
+      if (e.key !== 'Escape' && e.key !== 'Tab') {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      return;
     }
     const delta = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
     if (delta === 0 && e.key !== 'Enter') return;
@@ -386,6 +466,7 @@
         autocorrect="off"
         autocapitalize="off"
         spellcheck="false"
+        readonly={openingId !== null}
         oninput={handleInput}
       />
     </div>
@@ -398,6 +479,7 @@
         aria-label="Projects"
         tabindex="-1"
         bind:this={listEl}
+        onpointermove={handleListPointerMove}
       >
         {#each rows as row, i (row.project.id)}
           <CommandPaletteRow
@@ -405,11 +487,10 @@
             {row}
             terms={results.terms}
             selected={i === activeIndex}
-            current={row.project.id === navigation.selectedProjectId}
-            filteredOut={filteredOutIds.has(row.project.id)}
+            current={row.project.id === view.currentId}
+            filteredOut={view.filteredOutIds.has(row.project.id)}
             removing={projectsDataStore.isProjectDeleting(row.project.id)}
-            busy={row.project.id === openingId}
-            onhighlight={() => highlight(i, true)}
+            busy={row.project.id === view.busyId}
             onopen={() => void openRow(i)}
           />
         {/each}

@@ -227,6 +227,59 @@ const badges = () =>
 const liveRegion = () =>
   document.querySelector<HTMLElement>('[data-command-palette] [role="status"]');
 
+/** What the panel is showing. */
+const panelFrame = () => ({
+  names: optionNames(),
+  selected: selectedIds(),
+  badges: badges(),
+  busy: busyIds(),
+  empty: dialog()!.querySelector('.palette-empty')?.textContent?.trim() ?? null,
+  count: dialog()!.querySelector('.count')?.textContent?.replace(/\s+/g, ' ').trim() ?? null,
+  status: liveRegion()?.textContent ?? null,
+});
+
+/** Records what the panel shows at every change of the page from here on,
+ *  for as long as the dialog is in it. */
+function watchPanel() {
+  const frames: ReturnType<typeof panelFrame>[] = [];
+  const observer = new MutationObserver(() => {
+    if (dialog()) frames.push(panelFrame());
+  });
+  observer.observe(document.body, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+  });
+  return { frames, stop: () => observer.disconnect() };
+}
+
+/**
+ * A key that closes the palette, stopped at the moment after: the palette is
+ * closed and the dialog is still mounted, as it is for the length of its exit
+ * animation in the app (here, until the next animation frame).
+ */
+function pressAndHoldFrame(key: string) {
+  (document.activeElement ?? document.body).dispatchEvent(
+    new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+  );
+  flushSync();
+}
+
+/** The pointer reported at a point of the page, over `el`. jsdom lays
+ *  nothing out, so the point is the test's to choose. */
+async function pointerAt(el: Element, clientX: number, clientY: number) {
+  el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX, clientY }));
+  await settle();
+}
+
+let hoverY = 0;
+/** The pointer moving onto `el`: a run of events, each at a new point. */
+async function hover(el: Element) {
+  el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 9, clientY: ++hoverY }));
+  await pointerAt(el, 9, ++hoverY);
+}
+
 /** A key pressed wherever focus is, as the keyboard delivers it. */
 async function press(key: string, init: KeyboardEventInit = {}) {
   const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
@@ -921,17 +974,220 @@ describe('CommandPalette announcements', () => {
   });
 });
 
+// The dialog stays mounted while its exit animation plays. Through it the
+// panel shows what it showed when it closed: not an empty state (the results
+// used to be dropped with `open`), and not what the stores say now that a
+// project was opened (it becomes the current one).
+describe('CommandPalette while it closes', () => {
+  /** Close with `key`, and check the panel against `before` at the moment
+   *  after and at every change until the dialog has left the page. */
+  async function closesShowing(key: string, before: ReturnType<typeof panelFrame>) {
+    const watch = watchPanel();
+
+    pressAndHoldFrame(key);
+
+    expect(commandPalette.open).toBe(false);
+    expect(dialog()?.dataset.state).toBe('closed');
+    expect(panelFrame()).toEqual(before);
+
+    await dialogGone();
+    watch.stop();
+    expect(watch.frames.length).toBeGreaterThan(0);
+    for (const frame of watch.frames) expect(frame).toEqual(before);
+  }
+
+  it('keeps its results and its announcement on Escape, with a typed query', async () => {
+    await openPalette();
+    await type('gam');
+    const before = panelFrame();
+    expect(before).toMatchObject({
+      names: ['Gamma web'],
+      selected: ['gamma'],
+      empty: null,
+      count: '1 project',
+      status: '1 project',
+    });
+
+    await closesShowing('Escape', before);
+
+    expect(input()).toBeNull();
+    expect(spies.selectProject).not.toHaveBeenCalled();
+  });
+
+  it('keeps its results, badges and announcement on Return, with a typed query', async () => {
+    // Beside Alpha, with chips that leave only Beta: the sidebar keeps Alpha
+    // all the same, so it is Gamma the window hides.
+    world.showProject('alpha');
+    world.filtered = [beta];
+    await openPalette();
+    await type('a');
+    await press('ArrowDown');
+    const before = panelFrame();
+    expect(before.names).toHaveLength(3);
+    expect(before.badges).toEqual({ alpha: ['Current'], beta: [], gamma: ['Filtered out'] });
+    expect(before.status).toBe('3 projects');
+    const opened = before.selected[0];
+    expect(opened).not.toBe('alpha');
+
+    await closesShowing('Enter', before);
+
+    // The stores have moved on: the opened project is the current one now.
+    expect(spies.selectProject).toHaveBeenCalledWith(opened);
+    expect(world.selectedProjectId).toBe(opened);
+  });
+
+  it('keeps the recents in the order shown on Return, with no query', async () => {
+    world.showProject('gamma');
+    await openPalette();
+    const before = panelFrame();
+    // The project on screen is listed last; opening Alpha would put it there.
+    expect(before.names).toEqual(['Alpha service', 'Beta tools', 'Gamma web']);
+    expect(before.badges).toEqual({ alpha: [], beta: [], gamma: ['Current'] });
+
+    await closesShowing('Enter', before);
+
+    expect(spies.selectProject).toHaveBeenCalledWith('alpha');
+  });
+
+  it('keeps the wait on its row when Escape calls the open off', async () => {
+    world.showOverProject('diff', 'alpha');
+    world.diffLeaveCheck = vi.fn(() => new Promise<boolean>(() => {}));
+    await openPalette();
+    await press('Enter');
+    const before = panelFrame();
+    expect(before.busy).toEqual(['beta']);
+    expect(before.status).toBe('Saving comment…');
+
+    await closesShowing('Escape', before);
+  });
+
+  it('opens nothing from a row pressed while the panel fades out', async () => {
+    await openPalette();
+    pressAndHoldFrame('Escape');
+    expect(dialog()?.dataset.state).toBe('closed');
+
+    options()[1].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    flushSync();
+
+    expect(spies.selectProject).not.toHaveBeenCalled();
+    await dialogGone();
+  });
+
+  it('shows the stores as they are again on the next open', async () => {
+    await openPalette();
+    await press('Enter');
+    await dialogGone();
+    expect(world.selectedProjectId).toBe('alpha');
+
+    await openPalette();
+
+    expect(optionIds()).toEqual(['beta', 'gamma', 'alpha']);
+    expect(badges()).toEqual({ beta: [], gamma: [], alpha: ['Current'] });
+    expect(selectedIds()).toEqual(['beta']);
+  });
+});
+
 describe('CommandPalette pointer', () => {
   it('moves the highlight to the row under the pointer', async () => {
     await openPalette();
     spies.revealWithin.mockClear();
 
-    options()[2].dispatchEvent(new MouseEvent('pointermove', { bubbles: true }));
-    await settle();
+    await hover(options()[2]);
 
     expect(selectedIds()).toEqual(['gamma']);
     // Hovering doesn't scroll the list out from under the pointer.
     expect(spies.revealWithin).not.toHaveBeenCalled();
+  });
+
+  // WebKit sends a pointermove, at the pointer's unchanged position, to the
+  // row that slides under a resting pointer when the list scrolls; the arrow
+  // keys scroll it to keep the highlight in view. Taken as a hover, each one
+  // snapped the highlight back to the pointer's row.
+  it('leaves the highlight where the arrow keys put it when a pointermove did not move the pointer', async () => {
+    // The pointer has been resting over the list since before it opened.
+    await openPalette();
+
+    await press('ArrowDown');
+    await pointerAt(options()[2], 300, 180);
+    expect(selectedIds()).toEqual(['beta']);
+
+    await press('ArrowDown');
+    await pointerAt(options()[0], 300, 180);
+    expect(selectedIds()).toEqual(['gamma']);
+
+    // Wrapping, both ways, scrolls the furthest.
+    await press('ArrowDown');
+    await pointerAt(options()[1], 300, 180);
+    expect(selectedIds()).toEqual(['alpha']);
+
+    await press('ArrowUp');
+    await pointerAt(options()[1], 300, 180);
+    expect(selectedIds()).toEqual(['gamma']);
+
+    await press('Enter');
+    expect(spies.selectProject).toHaveBeenCalledWith('gamma');
+  });
+
+  it('does the same once the pointer has chosen a row and come to rest on it', async () => {
+    await openPalette();
+    await pointerAt(options()[2], 300, 179);
+    await pointerAt(options()[2], 300, 180);
+    expect(selectedIds()).toEqual(['gamma']);
+
+    await press('ArrowUp');
+    await pointerAt(options()[2], 300, 180);
+    expect(selectedIds()).toEqual(['beta']);
+
+    await press('ArrowUp');
+    await pointerAt(options()[2], 300, 180);
+    expect(selectedIds()).toEqual(['alpha']);
+  });
+
+  it('does the same for a pointer resting between two rows', async () => {
+    await openPalette();
+    await hover(options()[2]);
+    // On into the gap under the row: over the list, over no row.
+    await pointerAt(dialog()!.querySelector('[role="listbox"]')!, 300, 180);
+    expect(selectedIds()).toEqual(['gamma']);
+
+    await press('ArrowUp');
+    await pointerAt(options()[2], 300, 180);
+    expect(selectedIds()).toEqual(['beta']);
+  });
+
+  it('still follows the pointer when it really moves, after the arrow keys', async () => {
+    await openPalette();
+    await press('ArrowDown');
+    await pointerAt(options()[2], 300, 180);
+    expect(selectedIds()).toEqual(['beta']);
+    spies.revealWithin.mockClear();
+
+    // One pixel down, then one across.
+    await pointerAt(options()[2], 300, 181);
+    expect(selectedIds()).toEqual(['gamma']);
+    await pointerAt(options()[0], 301, 181);
+    expect(selectedIds()).toEqual(['alpha']);
+    expect(spies.revealWithin).not.toHaveBeenCalled();
+
+    // And the arrow keys carry on from the row the pointer chose.
+    await press('ArrowDown');
+    expect(selectedIds()).toEqual(['beta']);
+  });
+
+  it('takes a resting pointer afresh on every open', async () => {
+    await openPalette();
+    await pointerAt(options()[1], 300, 180);
+    await pointerAt(options()[1], 300, 181);
+    expect(selectedIds()).toEqual(['beta']);
+    await press('Escape');
+    await dialogGone();
+
+    // Moved while the palette was closed, and resting again by the time it
+    // reopens: the first event it causes is still not a hover.
+    await openPalette();
+    await press('ArrowDown');
+    await pointerAt(options()[2], 420, 260);
+    expect(selectedIds()).toEqual(['beta']);
   });
 
   it('opens the clicked project and closes', async () => {
@@ -1019,8 +1275,7 @@ describe('CommandPalette when the projects change while it is open', () => {
 
   it('keeps the highlight on the project the pointer chose when the list reorders', async () => {
     await openPalette();
-    options()[1].dispatchEvent(new MouseEvent('pointermove', { bubbles: true }));
-    await settle();
+    await hover(options()[1]);
     expect(selectedIds()).toEqual(['beta']);
 
     await change(() => (world.branches = new Map([['gamma', [branch('gamma', 99)]]])));
@@ -1330,10 +1585,46 @@ describe('CommandPalette over Settings and the diff view', () => {
     expect(wait?.querySelector('.spinner')).not.toBeNull();
     expect(liveRegion()?.textContent).toBe('Saving comment…');
 
-    // It is the project being opened that waits, wherever the highlight goes.
+    finishSave(true);
+    await settle();
+
+    expect(spies.selectProject).toHaveBeenCalledWith('beta');
+    expect(commandPalette.open).toBe(false);
+  });
+
+  // Enter and clicks do nothing during the wait; neither do the keys that
+  // could take its row out of sight, by filtering it out or scrolling it
+  // away, while the open it stands for is still coming.
+  it('holds still while it waits: no typing, and the highlight stays', async () => {
+    world.showOverProject('diff', 'alpha');
+    let finishSave!: (saved: boolean) => void;
+    world.diffLeaveCheck = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+    await openPalette();
+    expect(input().readOnly).toBe(false);
+
+    await press('Enter');
+
+    expect(input().readOnly).toBe(true);
+    expect(document.activeElement).toBe(input());
     await press('ArrowDown');
-    expect(selectedIds()).toEqual(['gamma']);
+    expect(selectedIds()).toEqual(['beta']);
+    await press('ArrowUp');
+    expect(selectedIds()).toEqual(['beta']);
+    // Keys a read-only field leaves to the browser (WebKit goes back in the
+    // page history on Backspace) and to the views under the dialog.
+    const underDialog = vi.fn();
+    window.addEventListener('keydown', underDialog);
+    for (const key of ['Backspace', 'x', ' ']) {
+      const stray = await press(key);
+      expect(stray.defaultPrevented).toBe(true);
+    }
+    window.removeEventListener('keydown', underDialog);
+    expect(underDialog).not.toHaveBeenCalled();
+    expect(commandPalette.open).toBe(true);
+    await hover(optionFor('gamma'));
+    expect(selectedIds()).toEqual(['beta']);
     expect(busyIds()).toEqual(['beta']);
+    expect(liveRegion()?.textContent).toBe('Saving comment…');
 
     finishSave(true);
     await settle();
@@ -1357,6 +1648,7 @@ describe('CommandPalette over Settings and the diff view', () => {
 
     await openPalette();
     expect(busyIds()).toEqual([]);
+    expect(input().readOnly).toBe(false);
     expect(liveRegion()?.textContent).toBe('3 projects');
 
     // The abandoned save landing changes nothing for this open.
@@ -1462,6 +1754,11 @@ describe('CommandPalette over Settings and the diff view', () => {
     expect(spies.selectProject).not.toHaveBeenCalled();
     expect(commandPalette.open).toBe(true);
     expect(busyIds()).toEqual([]);
+    // The wait is over with the palette still open: it takes the keys again.
+    expect(input().readOnly).toBe(false);
+    expect((await press('x')).defaultPrevented).toBe(false);
+    await press('ArrowDown');
+    expect(selectedIds()).toEqual(['gamma']);
   });
 
   it('opens straight away from the diff view when nothing is registered to wait for', async () => {

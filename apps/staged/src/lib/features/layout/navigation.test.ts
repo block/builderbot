@@ -513,6 +513,171 @@ describe('parked workspace', () => {
   });
 });
 
+// A project opened from over the workspace (the ⌘K palette is how) replaces
+// what the workspace was showing, as a sidebar switch would: Back goes home.
+describe('selectProject from Settings and the diff view', () => {
+  const home = { kind: 'projects' };
+  const projectRoute = (projectId: string) => ({ kind: 'project', projectId });
+
+  it('replaces the project under Settings instead of stacking on it', async () => {
+    const { selectProject, openSettings, popDetailRoute, navigation } = await importNavigation();
+    selectProject('a');
+    openSettings('general');
+
+    selectProject('b');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.activeView).toBe('workspace');
+    expect(navigation.workspaceParked).toBe(false);
+    expect(navigation.selectedProjectId).toBe('b');
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'b');
+
+    popDetailRoute();
+    expect(navigation.currentRoute).toEqual(home);
+  });
+
+  it('closes Settings onto the project underneath when that project is picked', async () => {
+    const { selectProject, openSettings, popDetailRoute, navigation } = await importNavigation();
+    selectProject('a');
+    openSettings('keyboard');
+
+    selectProject('a');
+
+    // Not [home, a, a], where the first Back would appear to do nothing.
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+
+    popDetailRoute();
+    expect(navigation.currentRoute).toEqual(home);
+  });
+
+  it('opens a project from Settings over home', async () => {
+    const { selectProject, openSettings, navigation } = await importNavigation();
+    openSettings('general');
+
+    selectProject('a');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('replaces the repos list under Settings, as a pick from that list does', async () => {
+    const { selectProject, openSettings, showAllRepos, navigation } = await importNavigation();
+    showAllRepos();
+    openSettings('general');
+
+    selectProject('b');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.showReposList).toBe(false);
+  });
+
+  it('replaces the project under a diff, and under Settings over a diff', async () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent });
+    const { selectProject, openDiffRoute, openSettings, navigation } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+
+    selectProject('b');
+    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.workspaceParked).toBe(false);
+
+    openDiffRoute({ branchId: 'b2', projectId: 'b' });
+    openSettings('doctor');
+    selectProject('c');
+    expect(navigation.detailStack).toEqual([home, projectRoute('c')]);
+    expect(navigation.activeView).toBe('workspace');
+  });
+
+  it('announces the diff route it replaced, once, and not as a pop', async () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent });
+    const { selectProject, openDiffRoute, navigation } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const diffRoute = navigation.currentRoute;
+
+    selectProject('b');
+
+    expect(dispatchEvent).toHaveBeenCalledTimes(1);
+    const event = dispatchEvent.mock.calls[0][0] as CustomEvent;
+    expect(event.type).toBe('staged:diff-route-replaced');
+    expect(event.detail.route).toBe(diffRoute);
+
+    // An ordinary switch announces nothing.
+    selectProject('c');
+    expect(dispatchEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('still pushes from home and replaces from a project or the repos list', async () => {
+    const { selectProject, showAllRepos, navigation } = await importNavigation();
+
+    selectProject('a');
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    selectProject('b');
+    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    showAllRepos();
+    selectProject('c');
+    expect(navigation.detailStack).toEqual([home, projectRoute('b'), projectRoute('c')]);
+  });
+});
+
+describe('diffLeaveCheck', () => {
+  it('is the check the diff view registered, only while the diff is on screen', async () => {
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const {
+      selectProject,
+      openDiffRoute,
+      openSettings,
+      popDetailRoute,
+      registerDiffLeaveCheck,
+      diffLeaveCheck,
+    } = await importNavigation();
+    const check = vi.fn().mockResolvedValue(true);
+    selectProject('a');
+    registerDiffLeaveCheck(check);
+    // Nothing to wait for on a project: the caller navigates in the same tick.
+    expect(diffLeaveCheck()).toBeNull();
+
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    expect(diffLeaveCheck()).toBe(check);
+    await expect(diffLeaveCheck()!()).resolves.toBe(true);
+
+    // Settings over the diff: the diff view is not what would be left.
+    openSettings('general');
+    expect(diffLeaveCheck()).toBeNull();
+    popDetailRoute();
+    expect(diffLeaveCheck()).toBe(check);
+  });
+
+  it('has nothing to check once the diff view withdraws it', async () => {
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const { selectProject, openDiffRoute, registerDiffLeaveCheck, diffLeaveCheck } =
+      await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const unregister = registerDiffLeaveCheck(async () => false);
+
+    unregister();
+
+    expect(diffLeaveCheck()).toBeNull();
+  });
+
+  it("keeps a newer diff view's check when an older one withdraws late", async () => {
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const { selectProject, openDiffRoute, registerDiffLeaveCheck, diffLeaveCheck } =
+      await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const unregisterOld = registerDiffLeaveCheck(async () => true);
+    const newer = async () => true;
+    registerDiffLeaveCheck(newer);
+
+    unregisterOld();
+
+    expect(diffLeaveCheck()).toBe(newer);
+  });
+});
+
 describe('workspace layers', () => {
   // The workspace is two stacked layers (App.svelte): the home grid, mounted
   // once `homeLayerRetained` and active while `homeActive`, and the project

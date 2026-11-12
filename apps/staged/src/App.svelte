@@ -30,6 +30,8 @@
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
+  import CommandPalette from './lib/features/commandPalette/CommandPalette.svelte';
+  import { commandPaletteShortcut } from './lib/features/commandPalette/paletteState.svelte';
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
   import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
   import { tabDirection } from './lib/shared/tabDirection';
@@ -538,6 +540,11 @@
         keys: ['t'],
         handler: requestOpenTagPicker,
       },
+      // ⌘K: the project palette. The definition (key, input and key-repeat
+      // rules, and why the key is swallowed even when a press does nothing)
+      // is the palette's. Here: the store-reset and error screens have no
+      // workspace to search or open a project in.
+      commandPaletteShortcut(() => !storeIncompat && !storeError),
       {
         id: 'search-find',
         description: 'Find in open note/session',
@@ -872,6 +879,9 @@
   <ControlAuthorizationDialog />
 
   <ReferenceModalHost />
+  <!-- ⌘K project palette — opened by the `search-projects` shortcut from any
+       view; searches every project, whatever this window is filtered to. -->
+  <CommandPalette />
   <!-- Toasts stack at the bottom right, clear of the content, except on a
        phone, where the bottom of the screen is the chat composer's Send
        button (and its on-screen keyboard): a toast there — the Undo offered

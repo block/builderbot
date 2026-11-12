@@ -45,6 +45,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::serve::Listener;
 use axum::Router;
+use rand::RngExt;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::Value;
@@ -157,6 +158,16 @@ fn broadcast_web_event<S: serde::Serialize>(
 // =============================================================================
 // Server startup
 // =============================================================================
+
+/// Generate a cryptographically random hex-encoded token (256-bit).
+///
+/// The web server itself is unauthenticated and no longer uses this, but the
+/// control server (`control_server::{grants, enrol, consent}`) mints its
+/// grant tokens, enrolment nonces and reconnect secrets through it.
+pub fn generate_token() -> String {
+    let bytes: [u8; 32] = rand::rng().random();
+    hex::encode(bytes)
+}
 
 const CERT_PATH_ENV: &str = "STAGED_WEB_CERT_PATH";
 const KEY_PATH_ENV: &str = "STAGED_WEB_KEY_PATH";

@@ -290,7 +290,12 @@
       --settings-panel-inset-bottom: env(safe-area-inset-bottom);
     }
 
-    .panel-pad > :global(*) {
+    /* Each panel's root sets its own border and radius at (0,2,0) specificity
+       (`.general-settings-panel.svelte-x`), the same as a bare
+       `.panel-pad > :global(*)` here. That tie is decided by bundle order,
+       which only happens to favour this file; the extra ancestor makes this
+       rule win on specificity so lazy-loading a panel cannot regress it. */
+    .settings-body .panel-pad > :global(*) {
       border: 0;
       border-radius: 0;
     }

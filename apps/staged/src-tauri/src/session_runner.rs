@@ -38,6 +38,7 @@
 
 pub(crate) mod attachments;
 mod disconnect;
+mod late_stop;
 pub(crate) mod reconcile;
 
 pub(crate) use disconnect::may_still_run_on_workstation;
@@ -555,8 +556,9 @@ impl SessionRegistry {
     /// entry and takes `cancel_session_impl`'s own path for the row.
     ///
     /// For an owner whose final write leaves the row non-terminal: a Stop
-    /// trusts the entry's owner to record it, and a `disconnected` write
-    /// records none, so the owner has to hand it on.
+    /// trusts the entry's owner to record it, and a `disconnected` or
+    /// rate-limited `paused` write records none, so the owner has to hand it
+    /// on (to reconcile) or act on it (see [`late_stop::deregister_paused_run`]).
     fn deregister_reporting_cancellation_of(
         &self,
         session_id: &str,
@@ -2660,17 +2662,27 @@ fn finish_session_run(
     // Only a Stop *newer* than the match above counts — one it already
     // saw may have been folded into `completed` deliberately, see
     // `completed_turn_survives_late_cancel`.
-    let (new_status, error_msg, completion_reason) = if !cancel_requested
-        && cancel_token.is_cancelled()
-    {
+    //
+    // It replaces the whole decision, the rate-limit recovery included: the
+    // write below pauses the row exactly when the recovery is still set, so
+    // a Stop that kept it would be announced as `cancelled` and stored as
+    // `paused`, for the scheduler to restart.
+    let late_stop_reason = (!cancel_requested && cancel_token.is_cancelled()).then(|| {
         log::info!("Session {session_id_for_status} cancelled during its post-completion hooks");
-        let reason = registry
+        registry
             .cancellation_completion_reason(&session_id_for_status)
-            .unwrap_or(CompletionReason::Interrupted);
-        ("cancelled", None, reason)
-    } else {
-        (new_status, error_msg, completion_reason)
-    };
+            .unwrap_or(CompletionReason::Interrupted)
+    });
+    let (new_status, error_msg, completion_reason, rate_limit_recovery) =
+        late_stop::terminal_decision_after_late_stop(
+            (
+                new_status,
+                error_msg,
+                completion_reason,
+                rate_limit_recovery,
+            ),
+            late_stop_reason,
+        );
 
     // Decided: from here the entry is a finished turn's, and a Resume that
     // wins the row between the write below and the deregister must not
@@ -2710,7 +2722,25 @@ fn finish_session_run(
     // time in `running`. Epoch-guarded, because a Resume that wins the row
     // between the write above and this line has registered a successor
     // under the same id (see `RegistrationEpoch`).
-    registry.deregister(&session_id_for_status, registration);
+    //
+    // A row this run just paused for rate-limit recovery is not terminal,
+    // so a Stop its entry accepted after the late-Stop check above cannot
+    // be dropped the way one on a finished turn is: the deregister reads it
+    // out and ends the row as `cancelled`, announcing that and moving the
+    // branch queue along in place of the `paused` event and drain below.
+    if transitioned && rate_limit_recovery.is_some() {
+        if late_stop::deregister_paused_run(
+            &store_for_status,
+            &registry,
+            &app_handle,
+            &session_id_for_status,
+            registration,
+        ) {
+            return;
+        }
+    } else {
+        registry.deregister(&session_id_for_status, registration);
+    }
 
     // Parse and persist pr/push outcomes and emit the pr-created /
     // push-completed domain events. Gated on winning the transition so
@@ -2758,7 +2788,9 @@ fn finish_session_run(
         // write was recorded by the late-Stop check and is already
         // `cancelled` in the row; one that landed between the write and
         // the deregister changed no row — the turn was over — but still
-        // says the user does not want the queued follow-up to run.
+        // says the user does not want the queued follow-up to run. (The
+        // exception is a row that write paused for a rate limit, which
+        // such a Stop does end: that case returned at the deregister.)
         //
         // Naming the shared body rather than a command is the point: the
         // Tauri command and the web dispatcher's `cancel_session` arm both

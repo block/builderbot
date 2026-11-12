@@ -3222,9 +3222,11 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
 /// it, and move the branch's queue along.
 ///
 /// The store-write half of a Stop, shared by every entry point that can meet
-/// a row with no live token: [`cancel_session_impl`]'s fallback and the
-/// project MCP `cancel_repo_session` tool's `paused` arm. The caller decides
-/// the row is one this applies to — the write is not guarded on the status.
+/// a row with no live token: [`cancel_session_impl`]'s fallback, the project
+/// MCP `cancel_repo_session` tool's `paused` arm, and the session runner for
+/// a Stop that reached a run just as it paused its row for a rate limit
+/// (`session_runner::late_stop`). The caller decides the row is one this
+/// applies to — the write is not guarded on the status.
 ///
 /// For a rate-limited `paused` session this is the whole cancel. Writing
 /// `cancelled` replaces `completion_reason = rate_limited` with

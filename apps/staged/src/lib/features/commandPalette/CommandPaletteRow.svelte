@@ -1,0 +1,246 @@
+<!--
+  CommandPaletteRow.svelte — one project in the ⌘K palette's result list: its
+  status icon (ProjectStatusIcon, as in the sidebar and the grid), its name
+  with the query's matches highlighted, and a second line with its repo path
+  and, when the query found it through a branch, PR, note or review, that
+  reason (ProjectMatchReason, as the sidebar shows it).
+
+  A listbox option: it takes no focus (the palette's input keeps it and points
+  at the highlighted row through aria-activedescendant), so the row is a plain
+  element with the pointer handlers the palette passes in. Trailing badges say
+  what the palette can't otherwise show about a project it lists regardless
+  of the window's filters: that it is the one on screen, that the window's
+  filters hide it, or that it is being removed (and so can't be opened).
+-->
+<script lang="ts">
+  import { Badge } from '$lib/components/ui/badge';
+  import type { HighlightSegment } from '../../shared/textSearch';
+  import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import ProjectMatchReason from '../projects/ProjectMatchReason.svelte';
+  import ProjectStatusIcon from '../projects/ProjectStatusIcon.svelte';
+  import RemoteProjectIcon from '../projects/RemoteProjectIcon.svelte';
+  import type { PaletteRow } from './paletteSearch';
+
+  interface Props {
+    id: string;
+    row: PaletteRow;
+    /** The query's terms, highlighted in the match reason. */
+    terms: readonly string[];
+    selected: boolean;
+    /** The project the window is showing. */
+    current?: boolean;
+    /** The window's filters or sidebar search hide this project. */
+    filteredOut?: boolean;
+    /** A remove is in flight: listed, but not openable. */
+    removing?: boolean;
+    /** The pointer moved over the row. */
+    onhighlight: () => void;
+    onopen: () => void;
+  }
+
+  let {
+    id,
+    row,
+    terms,
+    selected,
+    current = false,
+    filteredOut = false,
+    removing = false,
+    onhighlight,
+    onopen,
+  }: Props = $props();
+
+  let project = $derived(row.project);
+  let branches = $derived(projectsDataStore.branchesByProject.get(project.id) ?? []);
+</script>
+
+{#snippet highlighted(segments: readonly HighlightSegment[])}
+  {#each segments as segment}{#if segment.match}<mark>{segment.text}</mark
+      >{:else}{segment.text}{/if}{/each}
+{/snippet}
+
+<!-- Not focusable on purpose (see above): the input owns the keyboard, and
+     the click is the pointer's equivalent of its Enter. -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<div
+  {id}
+  class="palette-row"
+  class:removing
+  role="option"
+  tabindex="-1"
+  aria-selected={selected}
+  aria-disabled={removing || undefined}
+  data-project-id={project.id}
+  onpointermove={onhighlight}
+  onclick={onopen}
+>
+  <span class="row-icon">
+    <ProjectStatusIcon
+      {project}
+      {branches}
+      hydrated={projectsDataStore.isProjectHydrated(project.id)}
+      size={14}
+    />
+  </span>
+  <span class="row-text">
+    <span class="row-title">
+      <span class="row-name">{@render highlighted(row.name)}</span>
+      {#if project.location === 'remote'}
+        <RemoteProjectIcon size={12} />
+      {/if}
+    </span>
+    {#if row.repo || row.reason}
+      <span class="row-meta">
+        {#if row.repo}
+          <span class="row-repo">{@render highlighted(row.repo)}</span>
+          {#if row.moreRepos > 0}
+            <span class="row-more">+{row.moreRepos}</span>
+          {/if}
+        {/if}
+        {#if row.reason}
+          {#if row.repo}<span class="row-separator" aria-hidden="true">&middot;</span>{/if}
+          <span class="row-reason">
+            <ProjectMatchReason reason={row.reason} {terms} iconSize={11} />
+          </span>
+        {/if}
+      </span>
+    {/if}
+  </span>
+  {#if removing || current || filteredOut}
+    <span class="row-badges">
+      {#if removing}
+        <Badge variant="outline" class="palette-badge">Removing…</Badge>
+      {:else}
+        {#if current}
+          <Badge variant="outline" class="palette-badge">Current</Badge>
+        {/if}
+        {#if filteredOut}
+          <Badge
+            variant="outline"
+            class="palette-badge"
+            title="Hidden by this window's filters or sidebar search"
+          >
+            Filtered out
+          </Badge>
+        {/if}
+      {/if}
+    </span>
+  {/if}
+</div>
+
+<style>
+  .palette-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    /* Keeps a row revealed by the arrow keys clear of the list's padding. */
+    scroll-margin: 6px;
+  }
+
+  .palette-row[aria-selected='true'] {
+    background-color: var(--ui-selection);
+  }
+
+  .palette-row.removing {
+    cursor: default;
+    opacity: 0.55;
+  }
+
+  .row-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+  }
+
+  .row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .row-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .row-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--size-sm);
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .row-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: var(--size-xs);
+    line-height: 1.35;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .row-repo {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* The path's end (the subpath) is what tells two repos apart, and it is
+       what the name line doesn't already say; let the reason give way first. */
+    flex-shrink: 1;
+  }
+
+  .row-more,
+  .row-separator {
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+
+  .row-reason {
+    display: flex;
+    flex: 1 2 0;
+    min-width: 0;
+  }
+
+  .row-name mark,
+  .row-repo mark {
+    background-color: var(--search-match-bg);
+    border-radius: 2px;
+    color: inherit;
+  }
+
+  .row-badges {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .row-badges :global(.palette-badge) {
+    height: 18px;
+    padding: 0 6px;
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 500;
+  }
+
+  /* The selection fill sits close to the standard border in dark themes, so
+     the selected row's badges take the stronger border to keep their outline. */
+  .palette-row[aria-selected='true'] .row-badges :global(.palette-badge) {
+    border-color: var(--border-emphasis);
+  }
+</style>

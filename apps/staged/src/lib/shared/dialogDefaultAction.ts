@@ -56,9 +56,57 @@ export function isDefaultActionKeydown(e: KeyboardEvent): boolean {
  */
 export function findEnabledButton(container: ParentNode, selector: string): HTMLElement | null {
   const button = container.querySelector<HTMLElement>(selector);
-  if (!button) return null;
-  if ((button as HTMLButtonElement).disabled || button.getAttribute('aria-disabled') === 'true') {
-    return null;
+  return button && isPressable(button) ? button : null;
+}
+
+function isPressable(button: HTMLElement): boolean {
+  return !(button as HTMLButtonElement).disabled && button.getAttribute('aria-disabled') !== 'true';
+}
+
+/**
+ * The form's default button, as the browser picks it for a Return typed in
+ * one of its fields: the first submit button that belongs to the form,
+ * inside it or tied to it by a `form` attribute. A button with no `type`
+ * submits, so it counts.
+ */
+function defaultSubmitButton(form: HTMLFormElement): HTMLElement | null {
+  for (const control of Array.from(form.elements)) {
+    const type = (control as HTMLButtonElement | HTMLInputElement).type;
+    if (type === 'submit' && control.matches('button, input')) return control as HTMLElement;
   }
-  return button;
+  return null;
+}
+
+/**
+ * Editors where Return breaks a line. A disabled one (`contenteditable`
+ * turned "false" while the form is busy) still marks its form as multiline.
+ */
+const MULTILINE_EDITOR_SELECTOR = 'textarea, [contenteditable]';
+
+/**
+ * The form a plain Return submits in a dialog: its first form with a submit
+ * button, whether or not that button can be pressed right now. Null when
+ * there is none (a viewer has nothing to submit), and, unless
+ * `allowMultiline`, when the form holds a multiline editor: there Return
+ * breaks a line and Cmd+Return submits, so plain Return submits from nowhere
+ * in the dialog.
+ */
+export function findReturnSubmitForm(
+  container: ParentNode,
+  allowMultiline = false
+): HTMLFormElement | null {
+  const form = container.querySelector('form');
+  if (!form || !defaultSubmitButton(form)) return null;
+  if (!allowMultiline && form.querySelector(MULTILINE_EDITOR_SELECTOR)) return null;
+  return form;
+}
+
+/**
+ * The button a Return in one of `form`'s fields would press, its default
+ * button, or null when that is disabled: the browser submits nothing then
+ * either.
+ */
+export function findEnabledSubmitButton(form: HTMLFormElement): HTMLElement | null {
+  const button = defaultSubmitButton(form);
+  return button && isPressable(button) ? button : null;
 }

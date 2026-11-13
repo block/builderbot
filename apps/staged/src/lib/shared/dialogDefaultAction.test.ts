@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { findEnabledButton, isDefaultActionKeydown } from './dialogDefaultAction';
+import {
+  findEnabledButton,
+  findEnabledSubmitButton,
+  findReturnSubmitForm,
+  isDefaultActionKeydown,
+} from './dialogDefaultAction';
 
 let dialog: HTMLElement;
 
@@ -111,5 +116,94 @@ describe('findEnabledButton', () => {
   it('is null when the button is aria-disabled', () => {
     dialog.innerHTML = '<a data-slot="action" role="link" aria-disabled="true">Yes</a>';
     expect(findEnabledButton(dialog, '[data-slot="action"]')).toBeNull();
+  });
+});
+
+describe('findReturnSubmitForm', () => {
+  it('finds a form with a submit button', () => {
+    dialog.innerHTML = '<form><input /><button type="submit">Move</button></form>';
+    expect(findReturnSubmitForm(dialog)).toBe(dialog.querySelector('form'));
+  });
+
+  it('finds it while the submit button is disabled', () => {
+    dialog.innerHTML = '<form><button type="submit" disabled>Move</button></form>';
+    expect(findReturnSubmitForm(dialog)).toBe(dialog.querySelector('form'));
+  });
+
+  it('counts a button with no type, which submits too', () => {
+    dialog.innerHTML = '<form><button>Move</button></form>';
+    expect(findReturnSubmitForm(dialog)).not.toBeNull();
+  });
+
+  it('is null when the dialog has no form', () => {
+    dialog.innerHTML = '<p>Something to read.</p><button type="button">Close</button>';
+    expect(findReturnSubmitForm(dialog)).toBeNull();
+  });
+
+  it('is null when the form has nothing that submits it', () => {
+    dialog.innerHTML = '<form><input /><button type="button">Cancel</button></form>';
+    expect(findReturnSubmitForm(dialog)).toBeNull();
+  });
+
+  it.each([
+    ['a textarea', '<textarea></textarea>'],
+    ['editable content', '<div contenteditable="true"></div>'],
+    ['editable content turned off while busy', '<div contenteditable="false"></div>'],
+  ])('is null when the form holds %s', (_name, editor) => {
+    dialog.innerHTML = `<form>${editor}<button type="submit">Start</button></form>`;
+    expect(findReturnSubmitForm(dialog)).toBeNull();
+  });
+
+  it('finds a multiline form when asked to allow one', () => {
+    dialog.innerHTML = '<form><textarea></textarea><button type="submit">Start</button></form>';
+    expect(findReturnSubmitForm(dialog, true)).toBe(dialog.querySelector('form'));
+  });
+
+  it('ignores a multiline editor outside the form', () => {
+    dialog.innerHTML =
+      '<textarea></textarea><form><input /><button type="submit">Move</button></form>';
+    expect(findReturnSubmitForm(dialog)).not.toBeNull();
+  });
+});
+
+describe('findEnabledSubmitButton', () => {
+  function form(html: string): HTMLFormElement {
+    dialog.innerHTML = `<form>${html}</form>`;
+    return dialog.querySelector('form')!;
+  }
+
+  it('finds the submit button, past the other buttons', () => {
+    const found = findEnabledSubmitButton(
+      form('<button type="button">Cancel</button><button type="submit">Move</button>')
+    );
+    expect(found?.textContent).toBe('Move');
+  });
+
+  it('is null when the submit button is disabled', () => {
+    expect(
+      findEnabledSubmitButton(form('<button type="submit" disabled>Move</button>'))
+    ).toBeNull();
+  });
+
+  it('finds a submit button outside the form that is tied to it by a form attribute', () => {
+    dialog.innerHTML =
+      '<form id="f"><input /></form><button>Chip</button><button type="submit" form="f">Create</button>';
+    const form = dialog.querySelector('form')!;
+    expect(findReturnSubmitForm(dialog)).toBe(form);
+    expect(findEnabledSubmitButton(form)?.textContent).toBe('Create');
+  });
+
+  it('takes a button with no type inside the form, as the browser does', () => {
+    const found = findEnabledSubmitButton(
+      form('<button>Chip</button><button type="submit">Add</button>')
+    );
+    expect(found?.textContent).toBe('Chip');
+  });
+
+  it('is null when the first submit button is disabled, as for the browser', () => {
+    const found = findEnabledSubmitButton(
+      form('<button type="submit" disabled>Move</button><button type="submit">Copy</button>')
+    );
+    expect(found).toBeNull();
   });
 });

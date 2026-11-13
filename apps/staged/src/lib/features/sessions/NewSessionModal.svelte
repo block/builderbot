@@ -700,8 +700,12 @@
 <svelte:window onkeydown={handleKeydown} onclick={handleDocumentClick} />
 
 <Dialog.Root {open} onOpenChange={(v) => !v && handleClose()}>
+  <!-- defaultAction is none: the prompt is multiline, so Cmd/Ctrl+Return
+       submits (handleKeydown) and a plain Return never does, wherever the
+       focus is. -->
   <Dialog.Content
     bind:ref={modalElement}
+    defaultAction="none"
     class={`max-h-[calc(100dvh-16dvh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
     style={dialogWidth.style}
     showCloseButton={false}

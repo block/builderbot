@@ -22,6 +22,10 @@
   import { parseGitHubUrl } from '../../shared/githubUrl';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import {
+    findEnabledSubmitButton,
+    isDefaultActionKeydown,
+  } from '../../shared/dialogDefaultAction';
   import type { PullRequest } from '../../types';
   import { bloxAvailable, sqState } from '../settings/sq.svelte';
   import { preferences, setNewProjectLocation } from '../settings/preferences.svelte';
@@ -150,17 +154,34 @@
     }
   }
 
+  // Return creates the project through a form that owns just the Name field
+  // and Create (tied to it by its `form` attribute). In the Name field the
+  // browser submits it. The repo, subpath and branch fields are outside it:
+  // Return there picks from their dropdowns and never creates the project
+  // half filled in. The repo chips are outside it too, or the first of them,
+  // a button with no `type`, would be the button a Return presses.
+  const formId = $props.id();
+  let formEl = $state<HTMLFormElement | null>(null);
+
+  function handleSubmit(e: SubmitEvent) {
+    e.preventDefault();
+    void handleCreate();
+  }
+
+  // A Return on the fields' container presses Create, as one on a dialog
+  // submits its form (see dialog-content). WebKit gives a clicked button no
+  // focus; it goes to the nearest focusable ancestor, which `tabindex="-1"`
+  // makes this container. So a Return after a click on a repo chip or a
+  // location tile still creates the project, on the splash screen too, where
+  // there is no dialog around the form to hear it. A focused Cancel or
+  // location tile takes its own Return.
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      const target = e.target as HTMLElement;
-      if (target.closest('.repo-search-wrapper')) return;
-      // Don't submit if a suggestion is highlighted in the subpath dropdown
-      if (target.closest('.subpath-input-wrapper')) return;
-      // Don't submit if a suggestion is highlighted in the branch picker dropdown
-      if (target.closest('.branch-picker-wrapper')) return;
-      e.preventDefault();
-      handleCreate();
-    }
+    if (!formEl || !isDefaultActionKeydown(e)) return;
+    const create = findEnabledSubmitButton(formEl);
+    if (!create) return;
+    e.preventDefault();
+    e.stopPropagation();
+    create.click();
   }
 
   /** Derive a human-friendly project name from a branch name like "feat/dark-mode". */
@@ -196,10 +217,9 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-<div class="new-project-form">
-  <div class="form-group">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="new-project-form" tabindex="-1" onkeydown={handleKeydown}>
+  <form class="form-group" id={formId} bind:this={formEl} onsubmit={handleSubmit}>
     <Label for="project-name" class="text-muted-foreground text-xs">Name</Label>
     <Input
       bind:value={name}
@@ -214,7 +234,7 @@
       class="min-h-[42px] rounded-[10px] bg-background px-3.5 py-2.5"
       bind:ref={nameInputRef}
     />
-  </div>
+  </form>
 
   {#if remoteProjectsAvailable}
     <div class="form-group">
@@ -245,9 +265,10 @@
       <Button variant="ghost" onclick={onCancel} disabled={saving}>Cancel</Button>
     {/if}
     <Button
+      type="submit"
+      form={formId}
       variant="outline"
       class={!onCancel ? 'w-full' : ''}
-      onclick={handleCreate}
       disabled={!canCreate}
     >
       {#if saving}
@@ -267,6 +288,8 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+    /* Focusable only to hear Return (see handleKeydown); it shows no ring. */
+    outline: none;
   }
 
   /* In a full-screen dialog (NewProjectModal on a phone) the form is the

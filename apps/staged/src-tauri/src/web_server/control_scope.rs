@@ -6,24 +6,48 @@
 //! has a row in [`CONTROL_SCOPE`] saying how to find the project a call
 //! addresses — a `projectId` argument, a branch id, a session id, or the
 //! `create_image` pair — and whether the command changes the app. The check
-//! runs before any arm, so a credential scoped to one project cannot read
-//! or touch another project's rows however it spells the request, and a
+//! runs before any arm, so a confined credential cannot read or touch the
+//! rows of a project outside its reach however it spells the request, and a
 //! read-only credential never reaches a writing arm. The two commands that
 //! take no identifier (`list_projects`, `get_active_sessions`) are filtered
-//! inside their arms instead, through [`project_filter`].
+//! inside their arms instead, through [`reach`].
+//!
+//! # Reach
+//!
+//! A confined credential reaches its own project and the projects its actor
+//! created. A project records its creator in `projects.created_by`, as the
+//! string [`Actor::started_by`](crate::control_server::Actor::started_by)
+//! gives: `session:<session-id>` or `app:<grant-id>`. The rule exists
+//! because a session's credential lasts one run. A resume or a follow-up
+//! message mints a fresh one under the same session id, scoped to the
+//! session's own project again. The session id is all that survives, so the
+//! projects a session created are looked up from it on every check, and
+//! they stay within reach across runs and app restarts. Reach grows only by
+//! creating a project. Projects the user made in the app have no creator,
+//! so no credential reaches one this way. No control command creates a
+//! project yet, so until one does the rule admits nothing new.
+//!
+//! The check applies the rule in [`require_in_scope`], with one single-row
+//! read of the addressed project, and only when that project is not the
+//! credential's own. The result filters apply it through [`reach`], which
+//! lists the actor's created projects and so runs in the arm, not here.
+//!
+//! # Tags
 //!
 //! The tag catalog (groups and tags) is shared by every project, so it has
 //! its own rules. Any grant may read it (`get_tag_state`; the arm confines
-//! the `assignments` to the scope project through [`project_filter`], so a
-//! session learns no other project's tags), and any writing grant may set
-//! its own project's assignments (`set_project_group_tag`,
+//! the `assignments` to the projects within [`reach`], so a session learns
+//! no other project's tags), and any writing grant may set the assignments
+//! of a project it reaches (`set_project_group_tag`,
 //! `set_project_tag_assigned`, by `projectId`). Editing the catalog itself
 //! (`update_tag`, `move_tag` and the group commands) takes an unconfined
 //! writing grant, since a rename from one project's session would show on
-//! every project. `create_tag` is the one exception: a project-scoped grant
-//! may create a tag if the call assigns it to the grant's own project in the
-//! same request (`assignProjectId`), which is what the tag picker's "Create
-//! tag" row does. The two deletes are not allowlisted at all.
+//! every project. `create_tag` is the one exception: a confined grant may
+//! create a tag if the call assigns it to a project it reaches in the same
+//! request (`assignProjectId`), which is what the tag picker's "Create tag"
+//! row does. The two deletes are not allowlisted at all.
+//!
+//! # Table shape
 //!
 //! `open_project` is the one command decided by who holds the grant as well
 //! as by its scope. It raises a window and switches the project it shows,
@@ -35,6 +59,7 @@
 //! `command` and each arm by its `"<name>" =>` spelling, so neither may
 //! appear here (pinned in the tests below).
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -51,7 +76,7 @@ pub(crate) const SCOPE_DENIED_PREFIX: &str = "scope_denied: ";
 /// How a command names the project it addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopeKey {
-    /// No identifier: the arm filters its results by [`project_filter`].
+    /// No identifier: the arm filters its results by [`reach`].
     ResultFilter,
     /// A `projectId` argument.
     ProjectArg,
@@ -63,10 +88,10 @@ pub(crate) enum ScopeKey {
     /// `create_image`'s `branchId` + `projectId`, which must agree.
     CreateImage,
     /// A read of the shared tag catalog: no identifier, any grant. The arm
-    /// confines the per-project assignments by [`project_filter`].
+    /// confines the per-project assignments by [`reach`].
     Catalog,
-    /// `create_tag`: unconfined grants may create anything; a project-scoped
-    /// grant must assign the new tag to its own project (`assignProjectId`).
+    /// `create_tag`: unconfined grants may create anything; a confined grant
+    /// must assign the new tag to a project it reaches (`assignProjectId`).
     CreateTag,
     /// An edit to the shared tag catalog: only an unconfined grant.
     Unconfined,
@@ -147,13 +172,54 @@ pub(crate) const CONTROL_SCOPE: &[(&str, ScopeKey, Access)] = &[
     ),
 ];
 
-/// The project a control caller's results must be confined to, or `None`
-/// when the caller is unconfined (a web caller, or an all-projects grant).
-pub(super) fn project_filter(caller: &DispatchCaller) -> Option<&str> {
-    match caller {
-        DispatchCaller::Control(grant) => grant.project_scope(),
-        DispatchCaller::Web => None,
+/// The projects a caller's results are confined to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// Every project: a web caller, or an all-projects grant.
+    All,
+    /// A confined credential: its own project and the projects its actor
+    /// created.
+    Projects(HashSet<String>),
+}
+
+impl Reach {
+    /// Whether a row of this project may be shown to the caller.
+    pub(super) fn contains(&self, project_id: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Projects(projects) => projects.contains(project_id),
+        }
     }
+
+    /// [`Reach::contains`] for a row that may belong to no project. An
+    /// unconfined caller sees such a row and a confined one does not.
+    pub(super) fn contains_optional(&self, project_id: Option<&str>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Projects(projects) => project_id.is_some_and(|id| projects.contains(id)),
+        }
+    }
+}
+
+/// What a caller's results must be confined to: everything for an
+/// unconfined caller (a web caller, or an all-projects grant), else the
+/// grant's own project and the projects its actor created. Lists the
+/// actor's created projects, so it is for the arms. The check ahead of them
+/// does single-row reads only (see [`require_in_scope`]).
+pub(super) fn reach(caller: &DispatchCaller, store: &Store) -> Result<Reach, String> {
+    let DispatchCaller::Control(grant) = caller else {
+        return Ok(Reach::All);
+    };
+    let Some(own) = grant.project_scope() else {
+        return Ok(Reach::All);
+    };
+    let mut projects: HashSet<String> = store
+        .list_project_ids_created_by(&grant.actor.started_by())
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    projects.insert(own.to_string());
+    Ok(Reach::Projects(projects))
 }
 
 /// Refuse `cmd` for `grant` unless it stays within the grant's scope and
@@ -192,22 +258,22 @@ pub(crate) fn check_with_store(
         ScopeKey::ResultFilter => Ok(()),
         ScopeKey::ProjectArg => {
             let project_id: String = arg(args, "projectId")?;
-            require_in_scope(scope, &project_id, "project")?;
-            require_images_in_scope(store, args, scope)
+            require_in_scope(store, grant, &project_id, "project")?;
+            require_images_in_scope(store, args, grant)
         }
         ScopeKey::BranchArg => {
             let branch_id: String = arg(args, "branchId")?;
             if scope.is_some() {
                 let project_id = branch_project(store, &branch_id)?;
-                require_in_scope(scope, &project_id, "branch")?;
+                require_in_scope(store, grant, &project_id, "branch")?;
             }
-            require_images_in_scope(store, args, scope)
+            require_images_in_scope(store, args, grant)
         }
         ScopeKey::SessionArg => {
             let session_id: String = arg(args, "sessionId")?;
             if scope.is_some() {
                 let project_id = session_project(store, &session_id)?;
-                require_in_scope(scope, &project_id, "session")?;
+                require_in_scope(store, grant, &project_id, "session")?;
             }
             Ok(())
         }
@@ -223,7 +289,7 @@ pub(crate) fn check_with_store(
                      {project_id}"
                 )));
             }
-            require_in_scope(scope, &project_id, "project")
+            require_in_scope(store, grant, &project_id, "project")
         }
         ScopeKey::Catalog => Ok(()),
         ScopeKey::CreateTag => {
@@ -243,7 +309,7 @@ pub(crate) fn check_with_store(
             }
             let assign_project_id: Option<String> = opt_arg(args, "assignProjectId")?;
             match assign_project_id {
-                Some(project_id) => require_in_scope(scope, &project_id, "project"),
+                Some(project_id) => require_in_scope(store, grant, &project_id, "project"),
                 None => Err(denied(format!(
                     "{cmd} edits the shared tag catalog; this credential is confined to project \
                      {allowed} and may only create a tag it assigns to that project \
@@ -268,7 +334,7 @@ pub(crate) fn check_with_store(
                 )));
             }
             let project_id: String = arg(args, "projectId")?;
-            require_in_scope(scope, &project_id, "project")
+            require_in_scope(store, grant, &project_id, "project")
         }
     }
 }
@@ -277,21 +343,54 @@ fn denied(message: String) -> String {
     format!("{SCOPE_DENIED_PREFIX}{message}")
 }
 
-/// `Ok` when the caller is unconfined or `project_id` is its project.
-fn require_in_scope(scope: Option<&str>, project_id: &str, what: &str) -> Result<(), String> {
-    match scope {
-        Some(allowed) if allowed != project_id => Err(denied(format!(
-            "the {what} belongs to another project; this credential is confined to project \
-             {allowed}"
-        ))),
-        _ => Ok(()),
+/// `Ok` when the grant is unconfined, `project_id` is its own project, or
+/// its actor created `project_id` (see the module docs).
+fn require_in_scope(
+    store: &Store,
+    grant: &ControlGrant,
+    project_id: &str,
+    what: &str,
+) -> Result<(), String> {
+    let Some(allowed) = grant.project_scope() else {
+        return Ok(());
+    };
+    if within_reach(store, grant, allowed, project_id)? {
+        return Ok(());
     }
+    Err(denied(format!(
+        "the {what} belongs to another project; this credential is confined to project {allowed}"
+    )))
+}
+
+/// Whether a grant confined to `allowed` reaches `project_id`: it is that
+/// project, or one whose `created_by` is the grant's actor. The read is one
+/// row, and only for a project other than the grant's own. A project that
+/// does not exist is outside every reach.
+fn within_reach(
+    store: &Store,
+    grant: &ControlGrant,
+    allowed: &str,
+    project_id: &str,
+) -> Result<bool, String> {
+    if allowed == project_id {
+        return Ok(true);
+    }
+    let creator = store
+        .get_project(project_id)
+        .map_err(|e| e.to_string())?
+        .and_then(|project| project.created_by);
+    Ok(creator.is_some_and(|creator| creator == grant.actor.started_by()))
 }
 
 /// The project of each `imageIds` entry, for the two start commands: an
-/// image from another project cannot be attached to a prompt here.
-fn require_images_in_scope(store: &Store, args: &Value, scope: Option<&str>) -> Result<(), String> {
-    let Some(allowed) = scope else {
+/// image from a project outside the grant's reach cannot be attached to a
+/// prompt.
+fn require_images_in_scope(
+    store: &Store,
+    args: &Value,
+    grant: &ControlGrant,
+) -> Result<(), String> {
+    let Some(allowed) = grant.project_scope() else {
         return Ok(());
     };
     let image_ids: Option<Vec<String>> = opt_arg(args, "imageIds")?;
@@ -300,7 +399,7 @@ fn require_images_in_scope(store: &Store, args: &Value, scope: Option<&str>) -> 
             .get_image(&image_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| denied(format!("image {image_id} not found")))?;
-        if image.project_id != allowed {
+        if !within_reach(store, grant, allowed, &image.project_id)? {
             return Err(denied(format!(
                 "image {image_id} belongs to another project; this credential is confined to \
                  project {allowed}"
@@ -638,14 +737,445 @@ mod tests {
             check_with_store(cmd, &json!({}), &g, &f.store).unwrap();
         }
         assert_eq!(
-            project_filter(&DispatchCaller::Control(g.clone())),
-            Some(f.project_a.as_str())
+            reach(&DispatchCaller::Control(g.clone()), &f.store).unwrap(),
+            Reach::Projects(HashSet::from([f.project_a.clone()]))
         );
         assert_eq!(
-            project_filter(&DispatchCaller::Control(ControlGrant::test_all_projects())),
-            None
+            reach(
+                &DispatchCaller::Control(ControlGrant::test_all_projects()),
+                &f.store
+            )
+            .unwrap(),
+            Reach::All
         );
-        assert_eq!(project_filter(&DispatchCaller::Web), None);
+        assert_eq!(reach(&DispatchCaller::Web, &f.store).unwrap(), Reach::All);
+    }
+
+    // -------------------------------------------------------------------
+    // Projects the caller created
+    // -------------------------------------------------------------------
+
+    /// A project recorded as created by `creator`, with a branch, a running
+    /// branch session, a diagram child of that session and an image.
+    struct Created {
+        project: String,
+        branch: String,
+        session: String,
+        child: String,
+        image: String,
+    }
+
+    fn create_project_by(f: &Fixture, name: &str, creator: &str) -> Created {
+        let project = Project::named(name).with_created_by(creator);
+        f.store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, &format!("feat/{name}"), "main");
+        f.store.create_branch(&branch).unwrap();
+        let dir = std::env::temp_dir();
+        let session = Session::new_running(name, &dir).with_branch(&branch.id);
+        let child = Session::new_running("diagram", &dir).with_parent_session(&session.id);
+        f.store.create_session(&session).unwrap();
+        f.store.create_session(&child).unwrap();
+        let image = Image::new(
+            Some(&branch.id),
+            &project.id,
+            "c.png",
+            "image/png",
+            1,
+            false,
+        );
+        f.store.create_image(&image).unwrap();
+        Created {
+            project: project.id,
+            branch: branch.id,
+            session: session.id,
+            child: child.id,
+            image: image.id,
+        }
+    }
+
+    /// The string `grant` and `scoped` callers record as a creator.
+    const CALLER: &str = "session:caller";
+
+    fn session_grant(session_id: &str, epoch: u64, project_id: &str) -> ControlGrant {
+        ControlGrant {
+            actor: Actor::Session {
+                session_id: session_id.to_string(),
+                epoch,
+            },
+            scope: Scope::Project(project_id.to_string()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        }
+    }
+
+    fn app_grant(grant_id: &str, project_id: &str) -> ControlGrant {
+        ControlGrant {
+            actor: Actor::App {
+                grant_id: grant_id.to_string(),
+                client: "test".to_string(),
+            },
+            scope: Scope::Project(project_id.to_string()),
+            branch_id: None,
+            access: Access::ReadWrite,
+        }
+    }
+
+    /// One call per way a command can address `created`: by project, by
+    /// branch, by session (a diagram child included), by attached image and
+    /// by the `create_image` pair.
+    fn calls_addressing(created: &Created, own_project: &str) -> Vec<(&'static str, Value)> {
+        let mut calls = Vec::new();
+        for cmd in [
+            "list_project_repos",
+            "list_branches_for_project",
+            "get_project_timeline",
+            "list_project_notes",
+            "start_project_session",
+        ] {
+            calls.push((cmd, json!({ "projectId": created.project })));
+        }
+        for cmd in ["get_branch_timeline", "start_branch_session"] {
+            calls.push((cmd, json!({ "branchId": created.branch })));
+        }
+        for cmd in ["get_session", "cancel_session"] {
+            calls.push((cmd, json!({ "sessionId": created.session })));
+            calls.push((cmd, json!({ "sessionId": created.child })));
+        }
+        // An image of the created project, attached to a prompt in the
+        // caller's own project.
+        calls.push((
+            "start_project_session",
+            json!({ "projectId": own_project, "imageIds": [created.image] }),
+        ));
+        calls.push((
+            "create_image",
+            json!({
+                "branchId": created.branch, "projectId": created.project, "filePath": "/tmp/x.png"
+            }),
+        ));
+        calls.push((
+            "set_project_group_tag",
+            json!({ "projectId": created.project, "groupId": "g", "tagId": null }),
+        ));
+        calls.push((
+            "set_project_tag_assigned",
+            json!({ "projectId": created.project, "tagId": "t", "assigned": true }),
+        ));
+        calls
+    }
+
+    #[test]
+    fn a_session_grant_reaches_a_project_it_created_by_every_identifier() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        for (cmd, args) in calls_addressing(&created, &f.project_a) {
+            check_with_store(cmd, &args, &g, &f.store)
+                .unwrap_or_else(|e| panic!("{cmd} {args} on a created project: {e}"));
+        }
+        // Images of the own and the created project attach together, in
+        // either project.
+        check_with_store(
+            "start_branch_session",
+            &json!({ "branchId": created.branch, "imageIds": [f.image_a, created.image] }),
+            &g,
+            &f.store,
+        )
+        .unwrap();
+        // Creating a project widens the reach by that project only.
+        assert_denied(
+            check_with_store(
+                "list_project_repos",
+                &json!({ "projectId": f.project_b }),
+                &g,
+                &f.store,
+            ),
+            "another project",
+        );
+        assert_denied(
+            check_with_store(
+                "get_branch_timeline",
+                &json!({ "branchId": f.branch_b }),
+                &g,
+                &f.store,
+            ),
+            "another project",
+        );
+        assert_denied(
+            check_with_store(
+                "get_session",
+                &json!({ "sessionId": f.session_b }),
+                &g,
+                &f.store,
+            ),
+            "another project",
+        );
+        assert_denied(
+            check_with_store(
+                "start_branch_session",
+                &json!({ "branchId": created.branch, "imageIds": [f.image_b] }),
+                &g,
+                &f.store,
+            ),
+            "image",
+        );
+        // The pair must still agree: a created project's branch is not
+        // filed under the own project.
+        assert_denied(
+            check_with_store(
+                "create_image",
+                &json!({
+                    "branchId": created.branch, "projectId": f.project_a, "filePath": "/tmp/x.png"
+                }),
+                &g,
+                &f.store,
+            ),
+            "belongs to project",
+        );
+    }
+
+    #[test]
+    fn a_created_project_is_refused_to_every_other_actor() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let strangers = [
+            ("another session", session_grant("other", 1, &f.project_a)),
+            // The creator is compared whole: neither a longer nor a shorter
+            // session id matches.
+            ("a longer id", session_grant("caller2", 1, &f.project_a)),
+            ("a shorter id", session_grant("calle", 1, &f.project_a)),
+            ("an app grant", app_grant("g1", &f.project_a)),
+            // Nor does an app grant whose id happens to be the session's.
+            ("an app named alike", app_grant("caller", &f.project_a)),
+        ];
+        for (who, g) in &strangers {
+            for (cmd, args) in calls_addressing(&created, &f.project_a) {
+                let err = check_with_store(cmd, &args, g, &f.store)
+                    .expect_err(&format!("{cmd} {args} should be refused to {who}"));
+                assert!(
+                    err.starts_with(SCOPE_DENIED_PREFIX),
+                    "{cmd} for {who} must be a scope refusal: {err}"
+                );
+            }
+            assert_denied(
+                check_with_store(
+                    "create_tag",
+                    &json!({ "name": "q4", "assignProjectId": created.project }),
+                    g,
+                    &f.store,
+                ),
+                "another project",
+            );
+            assert_eq!(
+                reach(&DispatchCaller::Control(g.clone()), &f.store).unwrap(),
+                Reach::Projects(HashSet::from([f.project_a.clone()])),
+                "{who}"
+            );
+        }
+        // A project the user made has no creator, so it stays out of every
+        // confined credential's reach, the creating session's included.
+        assert_denied(
+            check_with_store(
+                "list_project_repos",
+                &json!({ "projectId": f.project_b }),
+                &scoped(&f.project_a),
+                &f.store,
+            ),
+            "another project",
+        );
+    }
+
+    #[test]
+    fn the_creator_rule_follows_the_actor_string_for_app_grants_too() {
+        let f = fixture();
+        let by_app = create_project_by(&f, "delta", "app:g1");
+        let g = app_grant("g1", &f.project_a);
+        for (cmd, args) in calls_addressing(&by_app, &f.project_a) {
+            check_with_store(cmd, &args, &g, &f.store)
+                .unwrap_or_else(|e| panic!("{cmd} {args} for the creating app grant: {e}"));
+        }
+        // A session is a different actor, whatever its id.
+        assert_denied(
+            check_with_store(
+                "list_project_repos",
+                &json!({ "projectId": by_app.project }),
+                &session_grant("g1", 1, &f.project_a),
+                &f.store,
+            ),
+            "another project",
+        );
+    }
+
+    #[test]
+    fn a_new_run_of_the_same_session_still_reaches_what_it_created() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        // A resume or follow-up registers again: a new epoch, the same
+        // session id, and the session's own project as the scope.
+        let resumed = session_grant("caller", 7, &f.project_a);
+        assert_ne!(resumed, scoped(&f.project_a));
+        for (cmd, args) in calls_addressing(&created, &f.project_a) {
+            check_with_store(cmd, &args, &resumed, &f.store)
+                .unwrap_or_else(|e| panic!("{cmd} {args} after a resume: {e}"));
+        }
+        assert_eq!(
+            reach(&DispatchCaller::Control(resumed), &f.store).unwrap(),
+            Reach::Projects(HashSet::from([
+                f.project_a.clone(),
+                created.project.clone()
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_read_only_grant_reads_what_its_actor_created_and_writes_nothing() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = grant(Scope::Project(f.project_a.clone()), Access::ReadOnly);
+        for (cmd, args) in calls_addressing(&created, &f.project_a) {
+            let writes = CONTROL_SCOPE
+                .iter()
+                .any(|(name, _, access)| *name == cmd && *access == Access::ReadWrite);
+            let result = check_with_store(cmd, &args, &g, &f.store);
+            if writes {
+                assert_denied(result, "read-only");
+            } else {
+                result.unwrap_or_else(|e| panic!("{cmd} {args} is a read: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn create_tag_may_assign_to_a_created_project() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        check_with_store(
+            "create_tag",
+            &json!({ "name": "q4", "assignProjectId": created.project }),
+            &g,
+            &f.store,
+        )
+        .unwrap();
+        // The other rules for a confined grant are unchanged: no grouped
+        // tag, no unassigned tag, no other project.
+        assert_denied(
+            check_with_store(
+                "create_tag",
+                &json!({ "name": "q4", "groupId": "g", "assignProjectId": created.project }),
+                &g,
+                &f.store,
+            ),
+            "groupId",
+        );
+        assert_denied(
+            check_with_store("create_tag", &json!({ "name": "q4" }), &g, &f.store),
+            "assignProjectId",
+        );
+        assert_denied(
+            check_with_store(
+                "create_tag",
+                &json!({ "name": "q4", "assignProjectId": f.project_b }),
+                &g,
+                &f.store,
+            ),
+            "another project",
+        );
+        // Creating a project does not make a credential unconfined.
+        for (cmd, args) in catalog_writes() {
+            assert_denied(
+                check_with_store(cmd, &args, &g, &f.store),
+                "confined to project",
+            );
+        }
+    }
+
+    /// What the three result-filtered arms return for `grant`, as the
+    /// project ids of the rows each keeps: `list_projects`,
+    /// `get_active_sessions` and the assignments of `get_tag_state`.
+    fn filtered_results(f: &Fixture, grant: &ControlGrant) -> [HashSet<String>; 3] {
+        let reach = reach(&DispatchCaller::Control(grant.clone()), &f.store).unwrap();
+        let projects = super::super::confine_projects(f.store.list_projects().unwrap(), &reach);
+        let sessions = super::super::confine_active_sessions(
+            crate::session_commands::get_active_sessions_impl(
+                &f.store,
+                &crate::session_runner::SessionRegistry::new(),
+            )
+            .unwrap(),
+            &reach,
+        );
+        let tag_state = super::super::confine_tag_state(f.store.get_tag_state().unwrap(), &reach);
+        [
+            projects.into_iter().map(|project| project.id).collect(),
+            sessions
+                .into_iter()
+                .map(|session| session.project_id.unwrap_or_else(|| "none".to_string()))
+                .collect(),
+            tag_state
+                .assignments
+                .into_iter()
+                .map(|assignment| assignment.project_id)
+                .collect(),
+        ]
+    }
+
+    #[test]
+    fn result_filters_include_the_created_project_and_nothing_else_new() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        // Projects other actors created, which must stay hidden.
+        let by_other = create_project_by(&f, "delta", "session:other");
+        let by_app = create_project_by(&f, "epsilon", "app:g1");
+        let every_project = [
+            &f.project_a,
+            &f.project_b,
+            &created.project,
+            &by_other.project,
+            &by_app.project,
+        ];
+        // One tag assignment per project, so each has a row in all three
+        // results. Each already has a running branch session.
+        for (index, project_id) in every_project.iter().enumerate() {
+            f.store
+                .create_tag(
+                    &crate::store::NewTag {
+                        name: format!("tag-{index}"),
+                        color: None,
+                        icon: None,
+                    },
+                    None,
+                    Some(project_id.as_str()),
+                )
+                .unwrap();
+        }
+        let ids = |projects: &[&String]| -> HashSet<String> {
+            projects.iter().map(|id| id.to_string()).collect()
+        };
+
+        // The creating session: its own project and the one it created.
+        let own_and_created = ids(&[&f.project_a, &created.project]);
+        for results in filtered_results(&f, &scoped(&f.project_a)) {
+            assert_eq!(results, own_and_created);
+        }
+        // A later run of that session sees the same.
+        for results in filtered_results(&f, &session_grant("caller", 2, &f.project_a)) {
+            assert_eq!(results, own_and_created);
+        }
+        // A session that created nothing sees its own project only, as
+        // before the creator rule.
+        for results in filtered_results(&f, &session_grant("idle", 1, &f.project_a)) {
+            assert_eq!(results, ids(&[&f.project_a]));
+        }
+        // An unconfined grant sees every project. Its session list also
+        // carries the sessions that belong to no project.
+        let [projects, sessions, assignments] =
+            filtered_results(&f, &ControlGrant::test_all_projects());
+        let everything = ids(&every_project);
+        assert_eq!(projects, everything);
+        assert_eq!(assignments, everything);
+        let mut with_unowned = everything.clone();
+        with_unowned.insert("none".to_string());
+        assert_eq!(sessions, with_unowned);
     }
 
     // -------------------------------------------------------------------
@@ -818,7 +1348,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// A connected app's grant, as `stagedctl connect` leaves the user with.
-    fn app_grant(scope: Scope, access: Access) -> ControlGrant {
+    fn connected_app_grant(scope: Scope, access: Access) -> ControlGrant {
         ControlGrant {
             actor: Actor::App {
                 grant_id: "g1".to_string(),
@@ -833,7 +1363,7 @@ mod tests {
     #[test]
     fn open_project_follows_a_connected_apps_project_scope() {
         let f = fixture();
-        let confined = app_grant(Scope::Project(f.project_a.clone()), Access::ReadWrite);
+        let confined = connected_app_grant(Scope::Project(f.project_a.clone()), Access::ReadWrite);
         check_with_store(
             "open_project",
             &json!({ "projectId": f.project_a }),
@@ -850,7 +1380,7 @@ mod tests {
             ),
             "another project",
         );
-        let all = app_grant(Scope::AllProjects, Access::ReadWrite);
+        let all = connected_app_grant(Scope::AllProjects, Access::ReadWrite);
         for project_id in [&f.project_a, &f.project_b] {
             check_with_store(
                 "open_project",
@@ -877,7 +1407,7 @@ mod tests {
                 check_with_store(
                     "open_project",
                     &json!({ "projectId": f.project_a }),
-                    &app_grant(scope, Access::ReadOnly),
+                    &connected_app_grant(scope, Access::ReadOnly),
                     &f.store,
                 ),
                 "read-only",

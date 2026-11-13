@@ -77,6 +77,88 @@ fn test_get_project_by_name_matches_the_stored_name_exactly() {
 }
 
 #[test]
+fn test_project_created_by_round_trips_and_lists_by_creator() {
+    let store = Store::in_memory().unwrap();
+    // Created from the app's own UI: no creator.
+    let by_user = Project::named("By the user");
+    assert_eq!(by_user.created_by, None);
+    let mut first = Project::named("First").with_created_by("session:s1");
+    first.created_at = 1_000;
+    let mut second = Project::named("Second").with_created_by("session:s1");
+    second.created_at = 2_000;
+    let by_app = Project::named("By an app").with_created_by("app:g1");
+    for project in [&by_user, &first, &second, &by_app] {
+        store.create_project(project).unwrap();
+    }
+
+    // Every read of a project row carries the creator.
+    let fetched = store.get_project(&first.id).unwrap().unwrap();
+    assert_eq!(fetched.created_by.as_deref(), Some("session:s1"));
+    let by_name = store.get_project_by_name("By an app").unwrap().unwrap();
+    assert_eq!(by_name.created_by.as_deref(), Some("app:g1"));
+    let listed = store.list_projects().unwrap();
+    let creator_of = |id: &str| {
+        listed
+            .iter()
+            .find(|project| project.id == id)
+            .unwrap()
+            .created_by
+            .clone()
+    };
+    assert_eq!(creator_of(&by_user.id), None);
+    assert_eq!(creator_of(&second.id).as_deref(), Some("session:s1"));
+
+    // Listing by creator matches the whole actor string, newest first.
+    assert_eq!(
+        store.list_project_ids_created_by("session:s1").unwrap(),
+        vec![second.id.clone(), first.id.clone()]
+    );
+    assert_eq!(
+        store.list_project_ids_created_by("app:g1").unwrap(),
+        vec![by_app.id.clone()]
+    );
+    for stranger in ["session:s", "session:s11", "s1", "SESSION:S1", ""] {
+        assert!(
+            store
+                .list_project_ids_created_by(stranger)
+                .unwrap()
+                .is_empty(),
+            "{stranger:?} created nothing"
+        );
+    }
+
+    // Editing a project leaves its creator alone.
+    store
+        .update_project(&first.id, "Renamed", None, &ProjectLocation::Local, None)
+        .unwrap();
+    let renamed = store.get_project(&first.id).unwrap().unwrap();
+    assert_eq!(renamed.name, "Renamed");
+    assert_eq!(renamed.created_by.as_deref(), Some("session:s1"));
+
+    // A deleted project no longer counts against its creator.
+    store.delete_project(&second.id).unwrap();
+    assert_eq!(
+        store.list_project_ids_created_by("session:s1").unwrap(),
+        vec![first.id.clone()]
+    );
+}
+
+#[test]
+fn test_project_created_by_is_left_off_the_wire_when_unset() {
+    let by_user = serde_json::to_value(Project::named("By the user")).unwrap();
+    assert!(
+        by_user.get("createdBy").is_none(),
+        "a UI-created project serializes as it did before the column: {by_user}"
+    );
+    let by_session =
+        serde_json::to_value(Project::named("Made").with_created_by("session:s1")).unwrap();
+    assert_eq!(by_session["createdBy"], "session:s1");
+    // And a payload without the field still reads.
+    let read: Project = serde_json::from_value(by_user).unwrap();
+    assert_eq!(read.created_by, None);
+}
+
+#[test]
 fn test_list_projects() {
     let store = Store::in_memory().unwrap();
     store

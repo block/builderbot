@@ -1,0 +1,17 @@
+-- Record who created a project, when it was not the user in the app.
+--
+-- `created_by` names the control-server actor behind a project created
+-- through `stagedctl`: `session:<session-id>` for a session Staged spawned
+-- and `app:<grant-id>` for an outside client the user approved by name. These
+-- are the values `sessions.started_by` (0042) holds for session starts. NULL
+-- for every project created from the app's own UI, and for every row that
+-- predates this column.
+--
+-- Unlike `started_by`, this value is read for authorization. A session's
+-- control credential covers one project and lasts one run. A resume or a
+-- follow-up message gets a fresh credential under the same session id, with
+-- the same one-project scope. The session id is all that survives, so the
+-- projects a session created are found from this column at check time
+-- (`web_server/control_scope.rs`). The column is written once, when the
+-- project is inserted, and never updated.
+ALTER TABLE projects ADD COLUMN created_by TEXT DEFAULT NULL;

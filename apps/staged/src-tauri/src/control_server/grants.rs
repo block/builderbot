@@ -35,10 +35,16 @@ use sha2::{Digest, Sha256};
 use super::enrol::Enrolment;
 use super::files::{self, ControlTransport};
 
-/// Who a grant was issued to. Recorded so mutations can name their actor.
-/// The authorization decision is the scope and access alone, with one
-/// exception: `open_project` moves the user's window, so the scope table
-/// refuses it to a [`Session`](Self::Session) whatever its scope.
+/// Who a grant was issued to. Recorded so mutations can name their actor:
+/// the sessions it starts (`sessions.started_by`) and the projects it
+/// creates (`projects.created_by`).
+///
+/// The actor is consulted for two authorization decisions. A grant confined
+/// to one project also reaches the projects its actor created, which are
+/// found by comparing [`Actor::started_by`] with `projects.created_by` (see
+/// `web_server/control_scope.rs`). And `open_project` moves the user's
+/// window, so the scope table refuses it to a [`Session`](Self::Session)
+/// whatever its scope. Every other decision is the scope and access alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Actor {
     /// A session this instance spawned. `epoch` is the registry
@@ -53,8 +59,12 @@ pub(crate) enum Actor {
 
 impl Actor {
     /// The value recorded in `sessions.started_by` for a session this actor
-    /// starts: `session:<session-id>` or `app:<grant-id>`. Stable identifiers
-    /// only — never the client's display name, which the grant row keeps.
+    /// starts, and in `projects.created_by` for a project it creates:
+    /// `session:<session-id>` or `app:<grant-id>`. Stable identifiers only —
+    /// never the client's display name, which the grant row keeps. A
+    /// session's `epoch` is left out on purpose, so every run of one session
+    /// is the same creator and a resumed session still reaches the projects
+    /// an earlier run created.
     pub fn started_by(&self) -> String {
         match self {
             Self::Session { session_id, .. } => format!("session:{session_id}"),
@@ -77,9 +87,10 @@ pub(crate) struct SpawnedSession {
 /// Which projects a grant reaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Scope {
-    /// Exactly one project: commands addressing another project's ids are
-    /// refused ahead of the dispatch arm, and listing commands return only
-    /// this project's rows.
+    /// One project, plus the projects the grant's [`Actor`] created:
+    /// commands addressing any other project's ids are refused ahead of the
+    /// dispatch arm, and listing commands return only the rows of the
+    /// projects within that reach.
     Project(String),
     /// Every project (an approved class B grant without `--project`).
     AllProjects,

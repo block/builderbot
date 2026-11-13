@@ -80,6 +80,13 @@ fn add_message_image_ids(conn: &Connection) {
     }
 }
 
+/// Give a minimal old schema the `projects` table that migration 0050 adds
+/// `created_by` to, when the test did not build one.
+fn add_projects_table(conn: &Connection) {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY);")
+        .unwrap();
+}
+
 #[test]
 fn test_migration_registry_is_valid() {
     migrations::validate().unwrap();
@@ -188,7 +195,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -349,7 +356,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -449,7 +456,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "sessions", "provider_metadata"));
     assert!(column_exists(&conn, "sessions", "rate_limit_resets_at"));
     assert!(column_exists(&conn, "sessions", "rate_limit_kind"));
@@ -545,7 +552,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -629,7 +636,7 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(!column_exists(&conn, "reviews", "is_auto"));
 
     // Reviews the removed auto-review feature created in the background are
@@ -711,7 +718,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set
@@ -797,7 +804,7 @@ fn test_note_migrations_backfill_subtype_and_completion_for_session_less_notes()
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "notes", "subtype"));
 
     let subtype = |id: &str| -> Option<String> {
@@ -904,7 +911,7 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "repo_actions", "pinned"));
     assert!(column_exists(&conn, "repo_actions", "icon"));
 
@@ -983,7 +990,7 @@ fn test_auto_commit_removal_migration_drops_flag_and_keeps_actions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
 
     // Only the flag goes: an action that had auto-commit enabled keeps running
@@ -1039,6 +1046,7 @@ fn test_session_branch_id_backfill_links_artifact_backed_sessions() {
     .unwrap();
     add_trigger_tables(&conn);
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1048,7 +1056,7 @@ fn test_session_branch_id_backfill_links_artifact_backed_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
 
     let branch_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -1096,6 +1104,7 @@ fn test_session_chat_read_at_migration_marks_existing_chats_read() {
     .unwrap();
     add_trigger_tables(&conn);
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let migrated_from = super::now_timestamp() / 1000 * 1000;
@@ -1107,7 +1116,7 @@ fn test_session_chat_read_at_migration_marks_existing_chats_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "sessions", "chat_read_at"));
 
     let read_at = |id: &str| -> Option<i64> {
@@ -1158,6 +1167,7 @@ fn test_pr_title_migration_adds_an_empty_title_to_existing_branches() {
     .unwrap();
     add_trigger_tables(&conn);
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1167,7 +1177,7 @@ fn test_pr_title_migration_adds_an_empty_title_to_existing_branches() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "branches", "pr_title"));
 
     // No backfill: a linked PR's title arrives with the next status poll.
@@ -1209,6 +1219,7 @@ fn test_note_read_at_migration_marks_landed_notes_read() {
     .unwrap();
     add_trigger_tables(&conn);
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1218,7 +1229,7 @@ fn test_note_read_at_migration_marks_landed_notes_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
 
     for (table, landed_at) in [("notes", 1000), ("project_notes", 2000)] {
         assert!(column_exists(&conn, table, "read_at"));
@@ -1275,6 +1286,7 @@ fn test_child_note_repair_detaches_only_cross_project_parents() {
     .unwrap();
     add_trigger_tables(&conn);
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1284,7 +1296,7 @@ fn test_child_note_repair_detaches_only_cross_project_parents() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
 
     let parent_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -1331,6 +1343,7 @@ fn test_session_pre_head_and_blox_command_migration_leaves_existing_rows_null() 
     .unwrap();
     add_trigger_tables(&conn);
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1340,7 +1353,7 @@ fn test_session_pre_head_and_blox_command_migration_leaves_existing_rows_null() 
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     let (pre_head, command): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT pre_head_sha, blox_command_id FROM sessions WHERE id = 'old'",
@@ -1374,6 +1387,7 @@ fn test_session_started_by_migration_leaves_existing_rows_null() {
     )
     .unwrap();
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1383,7 +1397,7 @@ fn test_session_started_by_migration_leaves_existing_rows_null() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     let started_by: Option<String> = conn
         .query_row(
             "SELECT started_by FROM sessions WHERE id = 'old'",
@@ -1435,6 +1449,7 @@ fn test_artifact_delete_cleanup_migration_spares_disconnected_sessions() {
     )
     .unwrap();
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1444,7 +1459,7 @@ fn test_artifact_delete_cleanup_migration_spares_disconnected_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     for (table, prefix) in [
         ("commits", "c"),
         ("notes", "n"),
@@ -1509,7 +1524,7 @@ fn test_control_grants_migration_creates_the_table_and_cascades_on_project() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(table_exists(&conn, "control_grants"));
     for column in [
         "id",
@@ -1573,6 +1588,7 @@ fn test_branch_deferred_push_migration_leaves_existing_branches_unarmed() {
     )
     .unwrap();
     add_message_image_ids(&conn);
+    add_projects_table(&conn);
     drop(conn);
 
     let store = Store::new(&path).unwrap();
@@ -1582,7 +1598,7 @@ fn test_branch_deferred_push_migration_leaves_existing_branches_unarmed() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "branches", "deferred_push"));
     assert!(column_exists(
         &conn,
@@ -1700,7 +1716,7 @@ fn test_project_tags_migration_then_import_moves_status_overrides_into_tags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(!table_exists(&conn, "legacy_project_status_import"));
 
     let group: (String, String, i64, i64) = conn
@@ -1881,7 +1897,7 @@ fn test_tag_group_sidebar_migration_adds_the_column_off_for_existing_groups() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(column_exists(&conn, "tag_groups", "show_in_sidebar"));
     let shown: i64 = conn
         .query_row(
@@ -1936,6 +1952,7 @@ fn test_message_image_ids_index_migration_indexes_existing_attachments() {
         ",
     )
     .unwrap();
+    add_projects_table(&conn);
     drop(conn);
 
     // The messages written before the upgrade answer the check afterwards.
@@ -1967,7 +1984,7 @@ fn test_message_image_ids_index_migration_indexes_existing_attachments() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert!(index_exists(&conn, "idx_session_messages_image_ids"));
 
     // Partial: messages without attachments stay out of the index.
@@ -2000,6 +2017,78 @@ fn test_message_image_ids_index_migration_indexes_existing_attachments() {
     assert_eq!(messages, 3);
 
     super::images_tests::assert_chat_reference_check_reads_the_index(&conn);
+    drop(conn);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_project_created_by_migration_leaves_existing_projects_without_a_creator() {
+    let path = temp_db_path("project-created-by");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 49;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- Only the table 0050 adds its column to, with its baseline columns.
+        CREATE TABLE projects (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            github_repo TEXT,
+            location    TEXT NOT NULL DEFAULT 'local',
+            subpath     TEXT,
+            created_at  INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL
+        );
+        INSERT INTO projects (id, name, created_at, updated_at) VALUES ('old', 'Old', 1, 1);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    // A project that predates the column has no creator, so no control
+    // actor reaches it through one.
+    let old = store.get_project("old").unwrap().unwrap();
+    assert_eq!(old.name, "Old");
+    assert_eq!(old.created_by, None);
+    assert!(store
+        .list_project_ids_created_by("session:s1")
+        .unwrap()
+        .is_empty());
+    // A project created after the upgrade keeps the creator it was given.
+    let made = super::Project::named("Made").with_created_by("session:s1");
+    store.create_project(&made).unwrap();
+    assert_eq!(
+        store.list_project_ids_created_by("session:s1").unwrap(),
+        vec![made.id.clone()]
+    );
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 50);
+    assert!(column_exists(&conn, "projects", "created_by"));
+    let stored: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT id, created_by FROM projects ORDER BY created_at")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        stored,
+        vec![
+            ("old".to_string(), None),
+            (made.id, Some("session:s1".to_string())),
+        ]
+    );
     drop(conn);
 
     cleanup_db(&path);

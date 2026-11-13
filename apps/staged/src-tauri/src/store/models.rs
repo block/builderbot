@@ -63,6 +63,15 @@ pub struct Project {
     pub subpath: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The control-server actor that created this project through
+    /// `stagedctl`, when one did: `session:<session-id>` for a session
+    /// Staged spawned, `app:<grant-id>` for an outside client the user
+    /// approved. `None` for projects created from the app's own UI. Set at
+    /// creation and never changed: a control credential confined to one
+    /// project also reaches the projects its actor created (see
+    /// `web_server/control_scope.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
 
 impl Project {
@@ -86,11 +95,19 @@ impl Project {
             subpath: None,
             created_at: now,
             updated_at: now,
+            created_by: None,
         }
     }
 
     pub fn with_primary_repo(mut self, github_repo: &str) -> Self {
         self.github_repo = Some(github_repo.to_string());
+        self
+    }
+
+    /// Record the control-server actor that created this project (see
+    /// [`Project::created_by`]). UI creations never call this.
+    pub fn with_created_by(mut self, created_by: &str) -> Self {
+        self.created_by = Some(created_by.to_string());
         self
     }
 

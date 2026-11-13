@@ -962,17 +962,37 @@ fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static s
     }
 }
 
+/// The project list as a control caller may see it: the projects within its
+/// reach, in the order the store listed them. Unconfined callers get the
+/// list unchanged.
+fn confine_projects(
+    mut projects: Vec<store::Project>,
+    reach: &control_scope::Reach,
+) -> Vec<store::Project> {
+    projects.retain(|project| reach.contains(&project.id));
+    projects
+}
+
+/// The active sessions as a control caller may see them: those of the
+/// projects within its reach. A session that belongs to no project is shown
+/// to unconfined callers only.
+fn confine_active_sessions(
+    mut sessions: Vec<crate::session_commands::ActiveSessionInfo>,
+    reach: &control_scope::Reach,
+) -> Vec<crate::session_commands::ActiveSessionInfo> {
+    sessions.retain(|session| reach.contains_optional(session.project_id.as_deref()));
+    sessions
+}
+
 /// The tag catalog as a control caller may see it: the shared groups and
-/// tags whole, and the per-project `assignments` confined to the caller's
-/// project when its credential is scoped to one, so a session learns which
-/// tags exist but not which other projects carry them. Unconfined callers
-/// get the state unchanged.
-fn confine_tag_state(mut state: store::TagState, caller: &DispatchCaller) -> store::TagState {
-    if let Some(project_id) = control_scope::project_filter(caller) {
-        state
-            .assignments
-            .retain(|assignment| assignment.project_id == project_id);
-    }
+/// tags whole, and the per-project `assignments` confined to the projects
+/// within the caller's reach, so a session learns which tags exist but not
+/// which other projects carry them. Unconfined callers get the state
+/// unchanged.
+fn confine_tag_state(mut state: store::TagState, reach: &control_scope::Reach) -> store::TagState {
+    state
+        .assignments
+        .retain(|assignment| reach.contains(&assignment.project_id));
     state
 }
 
@@ -1145,14 +1165,13 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "list_projects" => {
             let store = get_store(store_mutex)?;
-            // A project-scoped control credential sees only its own project.
-            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
-            blocking_store_json(move || {
-                let mut projects = store.list_projects()?;
-                if let Some(project_id) = only_project {
-                    projects.retain(|project| project.id == project_id);
-                }
-                Ok(projects)
+            // A project-scoped control credential sees only its own project
+            // and the ones it created.
+            let caller = caller.clone();
+            blocking_json(move || -> Result<_, String> {
+                let projects = store.list_projects().map_err(|e| e.to_string())?;
+                let reach = control_scope::reach(&caller, &store)?;
+                Ok(confine_projects(projects, &reach))
             })
             .await
         }
@@ -1341,7 +1360,8 @@ pub(crate) async fn dispatch(
             let caller = caller.clone();
             blocking_json(move || -> Result<_, String> {
                 let state = store.get_tag_state().map_err(|e| e.to_string())?;
-                let state = confine_tag_state(state, &caller);
+                let reach = control_scope::reach(&caller, &store)?;
+                let state = confine_tag_state(state, &reach);
                 Ok(state)
             })
             .await
@@ -3612,16 +3632,14 @@ pub(crate) async fn dispatch(
         "get_active_sessions" => {
             let store = get_store(store_mutex)?;
             let registry = Arc::clone(session_registry);
-            // A project-scoped control credential sees only its own
-            // project's sessions.
-            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
-            blocking_json(move || {
-                let mut sessions =
+            // A project-scoped control credential sees only the sessions of
+            // its own project and of the ones it created.
+            let caller = caller.clone();
+            blocking_json(move || -> Result<_, String> {
+                let sessions =
                     crate::session_commands::get_active_sessions_impl(&store, &registry)?;
-                if let Some(project_id) = only_project.as_deref() {
-                    sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
-                }
-                Ok::<_, String>(sessions)
+                let reach = control_scope::reach(&caller, &store)?;
+                Ok(confine_active_sessions(sessions, &reach))
             })
             .await
         }
@@ -4663,6 +4681,7 @@ mod tests {
     #[test]
     fn get_tag_state_filters_assignments_for_a_scoped_caller() {
         use super::confine_tag_state;
+        use super::control_scope::reach;
         use crate::control_server::{Access, Actor, ControlGrant, Scope};
         use crate::store::{self, Store};
 
@@ -4711,7 +4730,7 @@ mod tests {
             branch_id: None,
             access: Access::ReadWrite,
         });
-        let confined = confine_tag_state(state.clone(), &scoped);
+        let confined = confine_tag_state(state.clone(), &reach(&scoped, &store).unwrap());
         assert_eq!(confined.groups.len(), 1);
         assert!(
             confined.tags.iter().any(|tag| tag.id == q4.id),
@@ -4727,19 +4746,41 @@ mod tests {
         );
 
         let all = DispatchCaller::Control(ControlGrant::test_all_projects());
-        assert_eq!(confine_tag_state(state.clone(), &all).assignments.len(), 3);
-        assert_eq!(
-            confine_tag_state(state.clone(), &DispatchCaller::Web)
-                .assignments
-                .len(),
-            3
-        );
+        for unconfined in [all, DispatchCaller::Web] {
+            let reach = reach(&unconfined, &store).unwrap();
+            assert_eq!(
+                confine_tag_state(state.clone(), &reach).assignments.len(),
+                3
+            );
+        }
 
         let arm = dispatch_arm_body(include_str!("web_server.rs"), "get_tag_state");
         assert!(
-            arm.contains("confine_tag_state(state, &caller)"),
+            arm.contains("control_scope::reach(&caller, &store)")
+                && arm.contains("confine_tag_state(state, &reach)"),
             "the get_tag_state arm must confine assignments for control callers: {arm}"
         );
+    }
+
+    /// The two listing arms have no identifier for the scope check to
+    /// compare, so each must filter its rows by the caller's reach. What the
+    /// helpers keep is tested in `control_scope.rs`.
+    #[test]
+    fn listing_arms_filter_their_rows_by_the_callers_reach() {
+        let source = include_str!("web_server.rs");
+        for (command, helper) in [
+            ("list_projects", "confine_projects(projects, &reach)"),
+            (
+                "get_active_sessions",
+                "confine_active_sessions(sessions, &reach)",
+            ),
+        ] {
+            let arm = dispatch_arm_body(source, command);
+            assert!(
+                arm.contains("control_scope::reach(&caller, &store)") && arm.contains(helper),
+                "the {command} arm must filter by the caller's reach: {arm}"
+            );
+        }
     }
 
     // -------------------------------------------------------------------

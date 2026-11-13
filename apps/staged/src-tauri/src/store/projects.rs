@@ -7,7 +7,8 @@ use super::{now_timestamp, Store, StoreChange, StoreError};
 
 // `projects.status_override` (0032) is frozen: tags replaced it, and only the
 // one-shot legacy import (`tag_import.rs`) still reads it.
-const PROJECT_COLUMNS: &str = "id, name, github_repo, location, subpath, created_at, updated_at";
+const PROJECT_COLUMNS: &str =
+    "id, name, github_repo, location, subpath, created_at, updated_at, created_by";
 
 fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let location_str: String = row.get(3)?;
@@ -19,6 +20,7 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         subpath: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
+        created_by: row.get(7)?,
     })
 }
 
@@ -27,7 +29,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             &format!(
-                "INSERT INTO projects ({PROJECT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                "INSERT INTO projects ({PROJECT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ),
             params![
                 project.id,
@@ -37,6 +39,7 @@ impl Store {
                 project.subpath,
                 project.created_at,
                 project.updated_at,
+                project.created_by,
             ],
         )?;
         self.publish(StoreChange::Project {
@@ -110,6 +113,20 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// The ids of the projects this control-server actor created, newest
+    /// first. `actor` is a [`Project::created_by`] value, such as
+    /// `session:<session-id>`. Projects created from the app's own UI have
+    /// no creator and are never returned.
+    pub fn list_project_ids_created_by(&self, actor: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM projects WHERE created_by = ?1 ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let rows = stmt.query_map(params![actor], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Update a project's editable fields. `created_by` is not one of them.
     pub fn update_project(
         &self,
         id: &str,

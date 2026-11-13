@@ -12,6 +12,13 @@ export interface Project {
   subpath: string | null;
   createdAt: number;
   updatedAt: number;
+  /**
+   * The control-server actor that created this project through stagedctl,
+   * when one did: `session:<session-id>` for a session Staged spawned,
+   * `app:<grant-id>` for an outside client the user approved. Absent for
+   * projects created from the app's own UI.
+   */
+  createdBy?: string | null;
 }
 
 export type ProjectLocation = 'local' | 'remote';

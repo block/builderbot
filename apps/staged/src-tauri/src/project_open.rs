@@ -4,8 +4,9 @@
 //! `stagedctl project open` asks a running app to put a project on screen.
 //! The backend cannot do that on its own: every window has its own selection,
 //! and only the window knows whether a dialog is open or a diff comment still
-//! needs saving. So the caller parks a [`ProjectOpenRequest`] here for the
-//! window it picked, and that window reports what it did through
+//! needs saving. So the caller ([`control::open_project`], the control
+//! server's `open_project` command) parks a [`ProjectOpenRequest`] here for
+//! the window it picked, and that window reports what it did through
 //! [`answer_project_open`](commands::answer_project_open).
 //!
 //! **Not lost before the window loads.** A request can arrive before the
@@ -34,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 pub mod commands;
+pub(crate) mod control;
 
 /// How long a caller waits for the window's answer. A window that is already
 /// up answers at once; this covers one that is still loading because the app

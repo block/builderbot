@@ -35,9 +35,10 @@ use sha2::{Digest, Sha256};
 use super::enrol::Enrolment;
 use super::files::{self, ControlTransport};
 
-/// Who a grant was issued to. Recorded so mutations can name their actor;
-/// never consulted for the authorization decision, which is the scope and
-/// access alone.
+/// Who a grant was issued to. Recorded so mutations can name their actor.
+/// The authorization decision is the scope and access alone, with one
+/// exception: `open_project` moves the user's window, so the scope table
+/// refuses it to a [`Session`](Self::Session) whatever its scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Actor {
     /// A session this instance spawned. `epoch` is the registry

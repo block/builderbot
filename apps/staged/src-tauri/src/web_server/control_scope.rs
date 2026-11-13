@@ -25,6 +25,11 @@
 //! same request (`assignProjectId`), which is what the tag picker's "Create
 //! tag" row does. The two deletes are not allowlisted at all.
 //!
+//! `open_project` is the one command decided by who holds the grant as well
+//! as by its scope. It raises a window and switches the project it shows,
+//! which is the user's to ask for: a connected app's grant covering the
+//! project may, a session's credential may not, even for its own project.
+//!
 //! This is a table iterated with `find`, not a `match`, on purpose: the
 //! dispatch parity tests locate `dispatch`'s arm table by its `match` over
 //! `command` and each arm by its `"<name>" =>` spelling, so neither may
@@ -35,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use super::{arg, control_create_image_args, get_store, opt_arg, DispatchCaller};
-use crate::control_server::{Access, ControlGrant};
+use crate::control_server::{Access, Actor, ControlGrant};
 use crate::store::Store;
 
 /// Prefix on a `dispatch` error that denotes a scope refusal, so the control
@@ -65,6 +70,10 @@ pub(crate) enum ScopeKey {
     CreateTag,
     /// An edit to the shared tag catalog: only an unconfined grant.
     Unconfined,
+    /// `open_project`'s `projectId`, from a connected app only: a session's
+    /// credential is refused, so an agent cannot pull the user's window to
+    /// its project.
+    OpenProject,
 }
 
 /// One row per allowlisted control command: how to resolve its project,
@@ -84,6 +93,9 @@ pub(crate) const CONTROL_SCOPE: &[(&str, ScopeKey, Access)] = &[
         Access::ReadOnly,
     ),
     ("list_project_notes", ScopeKey::ProjectArg, Access::ReadOnly),
+    // A write: the window marks the project read and persists it as the
+    // last one shown.
+    ("open_project", ScopeKey::OpenProject, Access::ReadWrite),
     (
         "start_branch_session",
         ScopeKey::BranchArg,
@@ -246,6 +258,18 @@ pub(crate) fn check_with_store(
             ))),
             None => Ok(()),
         },
+        ScopeKey::OpenProject => {
+            if let Actor::Session { session_id, .. } = &grant.actor {
+                return Err(denied(format!(
+                    "{cmd} raises a Staged window and switches the project it shows, which a \
+                     spawned session may not do: this credential belongs to Staged session \
+                     {session_id}; `stagedctl project open` is for clients the user runs \
+                     outside a session"
+                )));
+            }
+            let project_id: String = arg(args, "projectId")?;
+            require_in_scope(scope, &project_id, "project")
+        }
     }
 }
 
@@ -323,7 +347,7 @@ fn session_project(store: &Store, session_id: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_server::{Actor, Scope};
+    use crate::control_server::Scope;
     use crate::store::{Branch, Image, Project, Session};
     use serde_json::json;
 
@@ -790,6 +814,115 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // open_project
+    // -------------------------------------------------------------------
+
+    /// A connected app's grant, as `stagedctl connect` leaves the user with.
+    fn app_grant(scope: Scope, access: Access) -> ControlGrant {
+        ControlGrant {
+            actor: Actor::App {
+                grant_id: "g1".to_string(),
+                client: "terminal".to_string(),
+            },
+            scope,
+            branch_id: None,
+            access,
+        }
+    }
+
+    #[test]
+    fn open_project_follows_a_connected_apps_project_scope() {
+        let f = fixture();
+        let confined = app_grant(Scope::Project(f.project_a.clone()), Access::ReadWrite);
+        check_with_store(
+            "open_project",
+            &json!({ "projectId": f.project_a }),
+            &confined,
+            &f.store,
+        )
+        .unwrap();
+        assert_denied(
+            check_with_store(
+                "open_project",
+                &json!({ "projectId": f.project_b }),
+                &confined,
+                &f.store,
+            ),
+            "another project",
+        );
+        let all = app_grant(Scope::AllProjects, Access::ReadWrite);
+        for project_id in [&f.project_a, &f.project_b] {
+            check_with_store(
+                "open_project",
+                &json!({ "projectId": project_id }),
+                &all,
+                &f.store,
+            )
+            .unwrap();
+        }
+        let err = check_with_store("open_project", &json!({}), &all, &f.store).unwrap_err();
+        assert!(
+            err.contains("missing argument: projectId") && !err.starts_with(SCOPE_DENIED_PREFIX),
+            "a missing argument is a plain command error: {err}"
+        );
+    }
+
+    /// Navigation marks the project read and persists it as the last shown,
+    /// so a read-only grant cannot open even a project it may read.
+    #[test]
+    fn open_project_is_refused_to_a_read_only_grant() {
+        let f = fixture();
+        for scope in [Scope::Project(f.project_a.clone()), Scope::AllProjects] {
+            assert_denied(
+                check_with_store(
+                    "open_project",
+                    &json!({ "projectId": f.project_a }),
+                    &app_grant(scope, Access::ReadOnly),
+                    &f.store,
+                ),
+                "read-only",
+            );
+        }
+    }
+
+    /// An agent must not pull the user's window to its project, so a
+    /// session's credential is refused for its own project too, and before
+    /// the argument is looked at.
+    #[test]
+    fn open_project_is_refused_to_a_session_credential() {
+        let f = fixture();
+        let session = scoped(&f.project_a);
+        for args in [
+            json!({ "projectId": f.project_a }),
+            json!({ "projectId": f.project_b }),
+            json!({}),
+        ] {
+            assert_denied(
+                check_with_store("open_project", &args, &session, &f.store),
+                "spawned session may not",
+            );
+        }
+        // Whatever its scope: no session grant is unconfined today, and one
+        // that was would still be an agent's.
+        assert_denied(
+            check_with_store(
+                "open_project",
+                &json!({ "projectId": f.project_a }),
+                &grant(Scope::AllProjects, Access::ReadWrite),
+                &f.store,
+            ),
+            "spawned session may not",
+        );
+        // No other command is decided by the actor.
+        let actor_keyed: Vec<&str> = CONTROL_SCOPE
+            .iter()
+            .filter(|(_, key, _)| *key == ScopeKey::OpenProject)
+            .map(|(name, ..)| *name)
+            .collect();
+        assert_eq!(actor_keyed, ["open_project"]);
+    }
+
+    // -------------------------------------------------------------------
     // Access and scope breadth
     // -------------------------------------------------------------------
 
@@ -798,6 +931,7 @@ mod tests {
         let f = fixture();
         let g = grant(Scope::Project(f.project_a.clone()), Access::ReadOnly);
         let mut writes = vec![
+            ("open_project", json!({ "projectId": f.project_a })),
             ("start_branch_session", json!({ "branchId": f.branch_a })),
             ("start_project_session", json!({ "projectId": f.project_a })),
             ("cancel_session", json!({ "sessionId": f.session_a })),

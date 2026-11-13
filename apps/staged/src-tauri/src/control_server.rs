@@ -70,6 +70,13 @@
 //! destructive verb reopens the auth design and must come with a
 //! [`PROTOCOL_VERSION`] bump.
 //!
+//! One verb reaches past the data into the user's view: `open_project`
+//! raises a window and asks it to show a project (see
+//! [`project_open`](crate::project_open)). It is the user's own gesture from
+//! a terminal, so only a connected app's grant may make it — a session's
+//! credential is refused in the scope table, and an agent cannot pull the
+//! window away from what the user is looking at.
+//!
 //! **Discovery.** Once the listener is bound — synchronously at app setup,
 //! before anything can start a session (see [`start`]) — the server
 //! atomically writes `~/.staged/control/<pid>/discovery.json` (0600)
@@ -160,6 +167,8 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "list_projects",
     "list_project_repos",
     "list_branches_for_project",
+    // project open
+    "open_project",
     // timeline show
     "get_branch_timeline",
     "get_project_timeline",
@@ -1628,6 +1637,7 @@ mod tests {
             "list_project_repos",
             "list_projects",
             "move_tag",
+            "open_project",
             "rename_tag_group",
             "reorder_tag_groups",
             "set_icon_tag_group",

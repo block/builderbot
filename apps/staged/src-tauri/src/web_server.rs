@@ -933,10 +933,11 @@ impl DispatchCaller {
 
 /// Why a web (remote-browser) caller may not run `command`, or `None` if it
 /// may. From a remote browser, `create_image` would mean "read any file on
-/// the app's machine into a viewable timeline" and `open_in_app` would mean
-/// "open an arbitrary path in an arbitrary local app" — so both are rejected
-/// before any dispatch arm runs, and restoring the web listener cannot
-/// silently inherit them.
+/// the app's machine into a viewable timeline", `open_in_app` would mean
+/// "open an arbitrary path in an arbitrary local app" and `open_project`
+/// would mean "pull a window on the user's desk to the front and change what
+/// it shows" — so all three are rejected before any dispatch arm runs, and
+/// restoring the web listener cannot silently inherit them.
 fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static str> {
     if !matches!(caller, DispatchCaller::Web) {
         return None;
@@ -952,6 +953,10 @@ fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static s
         "open_in_app" => Some(
             "open_in_app is not available in web mode: it launches an app on \
              the app's machine",
+        ),
+        "open_project" => Some(
+            "open_project is not available in web mode: it raises a Staged \
+             window on the app's machine and switches the project it shows",
         ),
         _ => None,
     }
@@ -1113,6 +1118,14 @@ pub(crate) async fn dispatch(
         // is not that window: it must neither read nor answer the request.
         "list_pending_project_opens" => Err(format!("{command} is not available in web mode")),
         "answer_project_open" => Err(format!("{command} is not available in web mode")),
+        // The request itself: control callers only (`web_caller_rejection`
+        // turns a browser away before this arm), and only a connected app's
+        // read-write grant covering the project (`control_scope`).
+        "open_project" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            crate::project_open::control::open_project(app_handle, &store, &project_id).await
+        }
 
         // =====================================================================
         // Projects
@@ -4572,11 +4585,11 @@ mod tests {
     fn web_callers_cannot_reach_same_host_only_commands() {
         let control =
             DispatchCaller::Control(crate::control_server::ControlGrant::test_all_projects());
-        for command in ["create_image", "open_in_app"] {
+        for command in ["create_image", "open_in_app", "open_project"] {
             assert!(
                 web_caller_rejection(command, &DispatchCaller::Web).is_some(),
-                "{command} takes local paths / launches local apps and must be \
-                 rejected for web callers"
+                "{command} takes local paths, launches local apps or raises a \
+                 native window and must be rejected for web callers"
             );
             assert!(
                 web_caller_rejection(command, &control).is_none(),

@@ -495,9 +495,16 @@ fn list_projects(
         .map_err(|e| e.to_string())
 }
 
+/// Runs [`create_project_blocking`] on the blocking pool. As a synchronous
+/// command it held the main thread, and so the window, through its store
+/// writes and through the `gh` and `sq` lookups it can make.
+///
+/// Nothing but the store handle lookup may run inline here: an `async fn`
+/// command runs on a runtime worker, where a store lock wait or a child
+/// process would stall timers and event sockets instead.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
-fn create_project(
+async fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     name: String,
@@ -510,6 +517,41 @@ fn create_project(
     head_repo: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        create_project_blocking(
+            store,
+            app_handle,
+            name,
+            github_repo,
+            location,
+            subpath,
+            branch_name,
+            pr_number,
+            default_branch,
+            head_repo,
+        )
+    })
+    .await
+    .map_err(|e| format!("create_project task failed: {e}"))?
+}
+
+/// The body of [`create_project`]. Blocking: it writes to the store, creates
+/// the project directory, asks `gh` for the default branch when none was
+/// prefetched, and on the first remote create of the process looks `sq` up
+/// through a login shell.
+#[allow(clippy::too_many_arguments)]
+fn create_project_blocking(
+    store: Arc<Store>,
+    app_handle: tauri::AppHandle,
+    name: String,
+    github_repo: Option<String>,
+    location: Option<String>,
+    subpath: Option<String>,
+    branch_name: Option<String>,
+    pr_number: Option<u64>,
+    default_branch: Option<String>,
+    head_repo: Option<String>,
+) -> Result<store::Project, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Project name is required".to_string());
@@ -542,6 +584,17 @@ fn create_project(
     if let Some(sub) = subpath.clone() {
         project = project.with_subpath(sub);
     }
+
+    // Resolve the first branch's base before the first write. The frontend
+    // prefetches the default branch; without it this asks `gh`, which can
+    // take up to its 60 s timeout. Off the main thread, the refetches each
+    // write's change event triggers are served while this command is still
+    // running, so a lookup between the writes would show the project without
+    // its branch for as long as `gh` took.
+    let effective_base = github_repo
+        .as_deref()
+        .map(|repo| git::resolve_default_branch(default_branch, repo));
+
     store.create_project(&project).map_err(|e| e.to_string())?;
 
     // Create the project-scoped worktree root so project sessions always
@@ -563,7 +616,7 @@ fn create_project(
             .map_err(|e| e.to_string())?;
     }
 
-    if let Some(repo) = github_repo {
+    if let (Some(repo), Some(effective_base)) = (github_repo, effective_base) {
         let mut project_repo =
             store::ProjectRepo::new(&project.id, &repo, &inferred_branch_name, subpath).primary();
         project_repo.head_repo = head_repo;
@@ -573,10 +626,6 @@ fn create_project(
 
         // Create the initial branch record for the first repo so each new
         // project starts with exactly one branch tracked for that repository.
-        // Use the frontend-prefetched default branch when available to avoid
-        // a ~500ms-2s GitHub API round-trip during project creation.
-        let effective_base = git::resolve_default_branch(default_branch, &repo);
-
         let (branch_id, is_local) = match project.location {
             store::ProjectLocation::Local => {
                 let mut branch =
@@ -942,21 +991,38 @@ fn update_repo_badge(
         })
 }
 
+/// Runs [`pin_repo_impl`] on the blocking pool. As a synchronous command it
+/// held the main thread, and so the window, through the pin write and the
+/// default-branch backfill. Like [`create_project`], nothing but the store
+/// handle lookup may run inline here.
 #[tauri::command(rename_all = "camelCase")]
-fn pin_repo(
+async fn pin_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || pin_repo_impl(&store, &github_repo, &subpath))
+        .await
+        .map_err(|e| format!("pin_repo task failed: {e}"))?
+}
+
+/// The body of [`pin_repo`], shared with the web arm. Blocking: after the pin
+/// write, a badge with no default branch has it backfilled, which asks git or
+/// `gh`.
+pub(crate) fn pin_repo_impl(
+    store: &Arc<Store>,
+    github_repo: &str,
+    subpath: &str,
+) -> Result<(), String> {
     store
-        .pin_repo(&github_repo, &subpath)
+        .pin_repo(github_repo, subpath)
         .map_err(|e| e.to_string())?;
 
     // Backfill default_branch if not yet detected
-    if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
+    if let Ok(Some(badge)) = store.get_repo_badge(github_repo, subpath) {
         if badge.default_branch.is_none() {
-            if let Err(e) = detect_and_store_default_branch(&store, &github_repo, &subpath) {
+            if let Err(e) = detect_and_store_default_branch(store, github_repo, subpath) {
                 log::warn!("[pin_repo] failed to backfill default_branch: {e}");
             }
         }
@@ -2625,8 +2691,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch_menu_event, open_store, read_legacy_preferences, reset_store, DbState,
-        MenuDispatch, StoreIncompatibility,
+        dispatch_menu_event, open_store, pin_repo_impl, read_legacy_preferences, reset_store,
+        DbState, MenuDispatch, StoreIncompatibility,
     };
     use crate::store::{LegacyImportOutcome, LegacyStatusOptions};
     use std::sync::{Arc, Barrier, Mutex};
@@ -2852,5 +2918,52 @@ mod tests {
                 MenuDispatch::ShowWindow
             );
         }
+    }
+
+    fn store_with_badge(default_branch: Option<&str>) -> Arc<crate::store::Store> {
+        let store = Arc::new(crate::store::Store::in_memory().unwrap());
+        store
+            .create_repo_badge(&crate::store::RepoBadge {
+                github_repo: "acme/widgets".to_string(),
+                subpath: String::new(),
+                short_name: "wid".to_string(),
+                hue: 120.0,
+                created_at: crate::store::now_timestamp(),
+                pinned: false,
+                pin_sort_order: None,
+                default_branch: None,
+            })
+            .unwrap();
+        if let Some(branch) = default_branch {
+            store
+                .set_default_branch("acme/widgets", "", branch)
+                .unwrap();
+        }
+        store
+    }
+
+    /// The badge already knows its default branch, so the backfill has
+    /// nothing to ask git or `gh` for and the test spawns no process.
+    #[test]
+    fn pin_repo_impl_pins_a_badge_and_keeps_its_default_branch() {
+        let store = store_with_badge(Some("trunk"));
+
+        pin_repo_impl(&store, "acme/widgets", "").unwrap();
+
+        let badge = store.get_repo_badge("acme/widgets", "").unwrap().unwrap();
+        assert!(badge.pinned);
+        assert_eq!(badge.pin_sort_order, Some(0));
+        assert_eq!(badge.default_branch.as_deref(), Some("trunk"));
+    }
+
+    /// The pin write fails first, so no backfill is attempted for a repo
+    /// that has no badge.
+    #[test]
+    fn pin_repo_impl_reports_a_missing_badge() {
+        let store = store_with_badge(Some("trunk"));
+
+        let error = pin_repo_impl(&store, "acme/unknown", "").unwrap_err();
+
+        assert!(error.contains("No badge found"), "{error}");
     }
 }

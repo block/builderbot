@@ -165,6 +165,55 @@ fn async_commands_and_arms_keep_blocking_calls_off_the_runtime() {
     );
 }
 
+/// Commands that were synchronous and froze the window: on the main thread
+/// they waited on the store, on `gh` or on a login shell. Each is now an
+/// `async fn` whose whole body runs under `spawn_blocking`, as (file, name).
+const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
+    ("util_commands.rs", "is_sq_available"),
+    ("lib.rs", "create_project"),
+    ("lib.rs", "pin_repo"),
+];
+
+/// What an [`OFFLOADED_COMMANDS`] body may call on the runtime: the store
+/// handle lookup, and the mapping of the join error.
+const OFFLOADED_COMMAND_INLINE: &[&str] = &["get_store", "map_err"];
+
+/// The walk above only looks for child-process waits, and only in commands
+/// that are already async. It passes a command that goes back to a plain
+/// `fn`, which runs on the main thread again, and one that calls the store
+/// inline, where a lock wait parks a runtime worker.
+#[test]
+fn offloaded_commands_run_only_the_handoff_on_the_runtime() {
+    let src = Crate::load();
+    for (path, command) in OFFLOADED_COMMANDS {
+        let code = &src.files[src.file(path)].1;
+        let (_, is_async, body) = command_fns(code)
+            .into_iter()
+            .find(|(name, ..)| name == command)
+            .unwrap_or_else(|| panic!("{path} no longer defines the `{command}` command"));
+        assert!(
+            is_async,
+            "`{command}` must stay an `async fn`: a plain `fn` command runs on the main \
+             thread and freezes the window while it waits"
+        );
+        let inline = cut_offloaded(&body, &["spawn_blocking("]);
+        assert_ne!(
+            inline, body,
+            "`{command}` must run its body through `spawn_blocking`"
+        );
+        let stray: Vec<String> = calls(&inline)
+            .into_iter()
+            .map(|call| call.path)
+            .filter(|path| !OFFLOADED_COMMAND_INLINE.contains(&path.as_str()))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "`{command}` runs these on a runtime worker; move them into its \
+             `spawn_blocking` closure: {stray:?}"
+        );
+    }
+}
+
 /// The crate's source, test code removed, and every fn in it.
 struct Crate {
     /// Each file's path under `src/`, and its code (see `code_only`).

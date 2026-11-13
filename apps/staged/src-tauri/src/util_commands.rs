@@ -61,9 +61,15 @@ pub fn open_url(app_handle: tauri::AppHandle, url: String) -> Result<(), String>
 ///
 /// The frontend uses this to decide whether to show the Remote branch option
 /// in the new-branch modal.
+///
+/// The first call per process looks `sq` up through a login shell, with no
+/// timeout. It runs on the blocking pool: as a synchronous command it held
+/// the main thread, and so the window, for that whole lookup at every launch.
 #[tauri::command]
-pub fn is_sq_available() -> bool {
-    blox::is_sq_available()
+pub async fn is_sq_available() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(blox::is_sq_available)
+        .await
+        .map_err(|e| format!("Failed to check sq availability: {e}"))
 }
 
 /// Read a text file from an absolute path.

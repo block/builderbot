@@ -1643,23 +1643,7 @@ pub(crate) async fn dispatch(
             let subpath: String = arg(&args, "subpath")?;
             // The backfill may ask `gh` or git for the default branch, so the
             // whole arm runs on the blocking pool.
-            blocking_json(move || {
-                store
-                    .pin_repo(&github_repo, &subpath)
-                    .map_err(|e| e.to_string())?;
-                // Backfill default_branch if not yet detected
-                if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
-                    if badge.default_branch.is_none() {
-                        if let Err(e) =
-                            crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
-                        {
-                            log::warn!("[pin_repo] failed to backfill default_branch: {e}");
-                        }
-                    }
-                }
-                Ok::<_, String>(())
-            })
-            .await
+            blocking_json(move || crate::pin_repo_impl(&store, &github_repo, &subpath)).await
         }
         "unpin_repo" => {
             let store = get_store(store_mutex)?;

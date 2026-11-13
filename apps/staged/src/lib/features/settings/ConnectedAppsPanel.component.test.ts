@@ -108,6 +108,11 @@ function buttonsNamed(label: string): HTMLButtonElement[] {
   return Array.from(host.querySelectorAll('button')).filter((b) => b.textContent?.trim() === label);
 }
 
+/** Whether Refresh is disabled, which it is while a load is out. */
+function refreshDisabled(): boolean {
+  return buttonsNamed('Refresh')[0].dataset.disabled !== undefined;
+}
+
 describe('ConnectedAppsPanel', () => {
   it('lists each grant with client, access, scope, last use and expiry', async () => {
     commands.listControlGrants.mockResolvedValue([
@@ -239,6 +244,91 @@ describe('ConnectedAppsPanel', () => {
     expect(commands.revokeControlGrant).toHaveBeenCalledWith('g-1');
     expect(rows().map((r) => r.dataset.grantId)).toEqual(['g-2']);
     expect(host.textContent).not.toContain('Revoke access for');
+  });
+
+  /** Revoke the first listed grant through the confirm. */
+  async function revokeFirst() {
+    buttonsNamed('Revoke')[0].click();
+    flushSync();
+    const confirm = buttonsNamed('Revoke');
+    confirm[confirm.length - 1].click();
+    await flushPromises();
+  }
+
+  it('does not put a revoked row back when a load sent before the revoke answers after it', async () => {
+    const pending: Array<{
+      resolve: (list: ControlGrantSummary[]) => void;
+      reject: (reason: Error) => void;
+    }> = [];
+    const other = grant({ id: 'g-2', client: 'other' });
+    commands.listControlGrants.mockResolvedValueOnce([grant(), other]);
+    commands.listControlGrants.mockImplementation(
+      () => new Promise((resolve, reject) => pending.push({ resolve, reject }))
+    );
+    await render();
+    expect(rows()).toHaveLength(2);
+
+    // Another change sends a load, which reads the store before the revoke.
+    transport.listeners.get('control-grants-changed')?.(undefined);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await revokeFirst();
+    expect(rows().map((r) => r.dataset.grantId)).toEqual(['g-2']);
+
+    // That load answers with the grant still in it. It is read again, not
+    // applied and not dropped: the change that sent it is still to show.
+    pending[0].resolve([grant(), other]);
+    await flushPromises();
+    expect(rows().map((r) => r.dataset.grantId)).toEqual(['g-2']);
+    expect(pending).toHaveLength(2);
+    // The re-read is the newest load, so Refresh waits for it.
+    expect(refreshDisabled()).toBe(true);
+
+    pending[1].resolve([other, grant({ id: 'g-3', client: 'approved-meanwhile' })]);
+    await flushPromises();
+    expect(rows().map((r) => r.dataset.grantId)).toEqual(['g-2', 'g-3']);
+    expect(refreshDisabled()).toBe(false);
+  });
+
+  it('reads again, without an error, when a load sent before the revoke fails after it', async () => {
+    const pending: Array<{
+      resolve: (list: ControlGrantSummary[]) => void;
+      reject: (reason: Error) => void;
+    }> = [];
+    commands.listControlGrants.mockResolvedValueOnce([grant()]);
+    commands.listControlGrants.mockImplementation(
+      () => new Promise((resolve, reject) => pending.push({ resolve, reject }))
+    );
+    await render();
+
+    transport.listeners.get('control-grants-changed')?.(undefined);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await revokeFirst();
+    pending[0].reject(new Error('Database not initialized'));
+    await flushPromises();
+    expect(pending).toHaveLength(2);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+
+    pending[1].resolve([]);
+    await flushPromises();
+    expect(host.querySelector('[data-testid="connected-apps-empty"]')).not.toBeNull();
+    expect(refreshDisabled()).toBe(false);
+  });
+
+  it('applies a load sent after the revoke landed without reading again', async () => {
+    commands.listControlGrants.mockResolvedValue([grant({ id: 'g-2', client: 'other' })]);
+    commands.listControlGrants.mockResolvedValueOnce([
+      grant(),
+      grant({ id: 'g-2', client: 'other' }),
+    ]);
+    await render();
+    await revokeFirst();
+
+    // The revoke's own change event: one load, applied as it answers.
+    transport.listeners.get('control-grants-changed')?.(undefined);
+    await flushPromises();
+    expect(commands.listControlGrants).toHaveBeenCalledTimes(2);
+    expect(rows().map((r) => r.dataset.grantId)).toEqual(['g-2']);
+    expect(refreshDisabled()).toBe(false);
   });
 
   it('cancelling or dismissing the confirm revokes nothing', async () => {

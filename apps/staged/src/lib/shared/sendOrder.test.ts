@@ -152,21 +152,102 @@ describe('SendOrder with a wait bound', () => {
     expect(log).toEqual(['hung sent', 'next sent', 'after sent']);
   });
 
-  it('counts each request’s wait from its own call, so a hung chain still drains', async () => {
+  it('keeps the requests queued behind one hung request in order among themselves', async () => {
     const order = new SendOrder({ maxWaitMs: 1000 });
     const log: string[] = [];
+    const second = request(log, 'second');
+    const third = request(log, 'third');
+
+    // All four in one tick, as the creates of a multi-file drop are.
+    void order.run('tags', request(log, 'hung').send);
+    void order.run('tags', second.send);
+    void order.run('tags', third.send);
+    void order.run('tags', request(log, 'fourth').send);
+
+    // Only the request directly behind the hung one gives up on it.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(log).toEqual(['hung sent', 'second sent']);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // The others still wait for the one sent before them, well inside a
+    // bound that restarted when it was sent.
+    await vi.advanceTimersByTimeAsync(900);
+    expect(log).toEqual(['hung sent', 'second sent']);
+    second.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(log).toEqual(['hung sent', 'second sent', 'third sent']);
+    await vi.advanceTimersByTimeAsync(900);
+    expect(log).toEqual(['hung sent', 'second sent', 'third sent']);
+    third.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(log).toEqual(['hung sent', 'second sent', 'third sent', 'fourth sent']);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('drains a chain of hung requests, one bound for each', async () => {
+    const order = new SendOrder({ maxWaitMs: 1000 });
+    const log: string[] = [];
+    const last = request<string>(log, 'fourth');
 
     void order.run('tags', request(log, 'first').send);
     void order.run('tags', request(log, 'second').send);
-    await vi.advanceTimersByTimeAsync(600);
     void order.run('tags', request(log, 'third').send);
+    const result = order.run('tags', last.send);
 
-    // `second` goes at 1000 ms and hangs too; `third` goes 1000 ms after its
-    // own call, not 1000 ms after `second` was sent.
-    await vi.advanceTimersByTimeAsync(400);
+    // Every request hangs. Each one behind is sent a bound after the one
+    // ahead of it was, not all of them a bound after their own call.
+    await vi.advanceTimersByTimeAsync(1000);
     expect(log).toEqual(['first sent', 'second sent']);
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(log).toEqual(['first sent', 'second sent']);
+    await vi.advanceTimersByTimeAsync(1);
     expect(log).toEqual(['first sent', 'second sent', 'third sent']);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(log).toEqual(['first sent', 'second sent', 'third sent', 'fourth sent']);
+    expect(warn).toHaveBeenCalledTimes(3);
+
+    // Nothing is left ticking for the three that never answer.
+    expect(vi.getTimerCount()).toBe(0);
+    last.resolve('done');
+    await expect(result).resolves.toBe('done');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order.pendingKeys).toBe(0);
+  });
+
+  it('counts the wait from the request’s own call when the one ahead is already out', async () => {
+    const order = new SendOrder({ maxWaitMs: 1000 });
+    const log: string[] = [];
+
+    void order.run('tags', request(log, 'hung').send);
+    await vi.advanceTimersByTimeAsync(600);
+    void order.run('tags', request(log, 'next').send);
+
+    // 1000 ms after `next` was called, not 1000 ms after `hung` was sent.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(log).toEqual(['hung sent']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(log).toEqual(['hung sent', 'next sent']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('starts no timer for a request whose predecessor has not been sent yet', async () => {
+    const order = new SendOrder({ maxWaitMs: 1000 });
+    const log: string[] = [];
+    const first = request(log, 'first');
+
+    void order.run('tags', first.send);
+    void order.run('tags', request(log, 'second').send);
+    void order.run('tags', request(log, 'third').send);
+    // One clock: `second` waiting on `first`. `third` waits on a request
+    // that is not out yet.
+    expect(vi.getTimerCount()).toBe(1);
+
+    first.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(log).toEqual(['first sent', 'second sent']);
+    expect(vi.getTimerCount()).toBe(1);
   });
 
   it('leaves the request it stopped waiting for to finish', async () => {

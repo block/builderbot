@@ -60,12 +60,33 @@ describe('LatestWins', () => {
   it('lets a local write mark the reads sent before it landed', () => {
     const order = new LatestWins<'list' | 'written'>();
     const before = order.issue();
-    order.admit('written', order.issue());
+    order.wrote('written');
     const after = order.issue();
 
     expect(order.overtaken('written', before)).toBe(true);
     expect(order.overtaken('written', after)).toBe(false);
     // The read is still the newest list response to land.
     expect(order.admit('list', before)).toBe(true);
+  });
+
+  it('does not count a local write as a request newer than the one still out', () => {
+    const order = new LatestWins<'list' | 'written'>();
+    const read = order.issue();
+    order.wrote('written');
+
+    // The read is still the newest request, so it may clear a spinner.
+    expect(order.isNewest(read)).toBe(true);
+    expect(order.overtaken('written', read)).toBe(true);
+    expect(order.isNewest(order.issue())).toBe(true);
+    expect(order.isNewest(read)).toBe(false);
+  });
+
+  it('lets a later local write outrank a response already landed for the same key', () => {
+    const order = new LatestWins();
+    const read = order.issue();
+    order.wrote('actions');
+
+    expect(order.admit('actions', read)).toBe(false);
+    expect(order.admit('actions', order.issue())).toBe(true);
   });
 });

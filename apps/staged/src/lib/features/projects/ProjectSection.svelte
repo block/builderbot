@@ -643,7 +643,7 @@
         // A list load still in flight was sent before the delete landed and
         // may have read the note. Counting the removal as a row landing makes
         // that load read the list again instead of putting the row back.
-        noteFetchOrder.admit('row', noteFetchOrder.issue());
+        noteFetchOrder.wrote('row');
         projectNotes = projectNotes.filter((n) => n.id !== noteId);
         hashtagVersion++;
       } catch (e) {

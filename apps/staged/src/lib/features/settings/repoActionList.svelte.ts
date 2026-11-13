@@ -43,8 +43,11 @@ export class RepoActionList {
     const scope = this.selected();
     if (!scope) {
       // Nothing to read, but a read still in flight must not fill the list.
+      // This is the newest load and nothing of it is out, so that read must
+      // not leave the spinner up either: it will not clear it (see below).
       this.order.admit('read', ticket);
       this.actions = [];
+      this.loading = false;
       return;
     }
     this.loading = true;
@@ -65,13 +68,16 @@ export class RepoActionList {
       if (this.order.overtaken('written', ticket)) return await this.load();
       this.actions = loaded;
     } finally {
-      this.loading = false;
+      // `loading` is about the newest load. An older read settling while
+      // that one is still out leaves the spinner up. A read that went on to
+      // read again is not the newest either: the re-read clears it.
+      if (this.order.isNewest(ticket)) this.loading = false;
     }
   }
 
   /** Replace the list with the result of a write that has landed. */
   write(actions: ProjectAction[]): void {
-    this.order.admit('written', this.order.issue());
+    this.order.wrote('written');
     this.actions = actions;
   }
 }

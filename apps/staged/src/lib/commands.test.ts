@@ -1353,6 +1353,22 @@ describe('writes sent without awaiting keep their send order', () => {
       await expect(hung).resolves.toEqual({ id: 'note-1' });
     });
 
+    it('over HTTP, keeps the writes queued behind a hung one in the order they were sent', async () => {
+      const { commands, sent } = await loadFor('web');
+
+      void commands.updateNote('note-1', 'Plan', 'hung');
+      void commands.updateNote('note-1', 'Plan', 'second');
+      void commands.updateNote('note-1', 'Plan', 'third');
+      await vi.advanceTimersByTimeAsync(commands.WEB_WRITE_ORDER_MAX_WAIT_MS);
+      // The bound ran out for both at the same moment, but only the write
+      // directly behind the hung one is sent beside it.
+      expect(sent.map((call) => call.args.content)).toEqual(['hung', 'second']);
+
+      sent[1].settle({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sent.map((call) => call.args.content)).toEqual(['hung', 'second', 'third']);
+    });
+
     it('under Tauri, keeps the next write back for as long as the one ahead is out', async () => {
       const { commands, sent } = await loadFor('tauri');
 

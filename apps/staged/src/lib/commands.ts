@@ -87,7 +87,9 @@ export type DiffScope = 'branch' | 'commit' | 'worktree';
  * the same key. The ordered writes are single store writes that take
  * milliseconds, and `delete_note`, which can take a few seconds. Well past
  * those, so only a request that has hung is given up on, and it is only
- * given up waiting for: the request itself is left to finish.
+ * given up waiting for: the request itself is left to finish. The writes
+ * queued behind it are then sent one after another as before, not all at
+ * once.
  */
 export const WEB_WRITE_ORDER_MAX_WAIT_MS = 30_000;
 

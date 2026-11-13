@@ -254,7 +254,7 @@ export class ActionRunner {
    */
   setActions(actions: ProjectAction[]): void {
     // Newer than any read still in flight, which must not replace it.
-    this.loadOrder.admit('actions', this.loadOrder.issue());
+    this.loadOrder.wrote('actions');
     this.actions = actions;
   }
 

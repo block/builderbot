@@ -141,8 +141,52 @@ describe('RepoActionList', () => {
     await list.load();
     expect(list.actions).toEqual([]);
     // The read still out must not fill a list with no repo selected.
+    // Nor is anything loading: no read is out for the cleared selection.
+    expect(list.loading).toBe(false);
     reads[1].answer([action('build')]);
     await inFlight;
     expect(list.actions).toEqual([]);
+    expect(list.loading).toBe(false);
+  });
+
+  it('keeps loading set while the newest read is out, though an older one has settled', async () => {
+    const list = await newList();
+    const first = list.load();
+    selected = { githubRepo: 'acme/web' };
+    const second = list.load();
+
+    // The older read answers while the one for the repo now selected is
+    // still out: that repo's rows are not there to show yet.
+    reads[0].answer([action('app-dev')]);
+    await first;
+    expect(list.loading).toBe(true);
+
+    reads[1].answer([action('web-dev')]);
+    await second;
+    expect(ids(list.actions)).toEqual(['web-dev']);
+    expect(list.loading).toBe(false);
+  });
+
+  it('clears loading for the newest read when a local write landed while it was out', async () => {
+    const list = await newList();
+    const initial = list.load();
+    reads[0].answer([action('build'), action('test')]);
+    await initial;
+
+    const older = list.load();
+    const newest = list.load();
+    list.write([action('build')]);
+    // The newest read answers first and reads again; the older one is then
+    // refused. Neither may leave the spinner up once the re-read is back.
+    reads[2].answer([action('build'), action('test')]);
+    await vi.waitFor(() => expect(reads).toHaveLength(4));
+    reads[1].answer([action('build'), action('test')]);
+    await older;
+    expect(list.loading).toBe(true);
+
+    reads[3].answer([action('build')]);
+    await newest;
+    expect(ids(list.actions)).toEqual(['build']);
+    expect(list.loading).toBe(false);
   });
 });

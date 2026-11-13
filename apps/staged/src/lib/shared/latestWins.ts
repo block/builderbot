@@ -18,18 +18,32 @@
  * from the result of a write, needs one more step: a read sent before that
  * write landed may predate it, and nothing above refuses it, since no later
  * read has landed. Record the local write as a landing under a key of its
- * own (`admit(writeKey, issue())`), and have a read that finds itself
+ * own (`wrote(writeKey)`), and have a read that finds itself
  * `overtaken(writeKey, ticket)` read again. Reading again, where dropping
  * would be simpler, keeps whatever else the dropped response carried. Only
  * drop when the local write replaced the whole of the state.
  */
 export class LatestWins<K = string> {
+  /** The last place handed out in the order, to a request or a local write. */
   private sent = 0;
+  /** The ticket of the last request sent. */
+  private newestRequest = 0;
   private landed = new Map<K, number>();
 
   /** A ticket for a request about to be sent. */
   issue(): number {
-    return ++this.sent;
+    this.newestRequest = ++this.sent;
+    return this.newestRequest;
+  }
+
+  /**
+   * Record a local write as a landing for `key`, placed after every request
+   * sent so far and before every one sent from now on. It is not a request:
+   * `isNewest` still answers for the last request sent, which this write may
+   * be about to send back for another read.
+   */
+  wrote(key: K): void {
+    this.landed.set(key, ++this.sent);
   }
 
   /**
@@ -49,11 +63,13 @@ export class LatestWins<K = string> {
   }
 
   /**
-   * Whether no ticket has been issued since `ticket`: the request it stands
-   * for is the newest one sent. For state that describes the requests still
-   * out, such as a spinner, which an older request settling must not clear.
+   * Whether no request has been sent since the one `ticket` stands for. For
+   * state that describes the requests still out, such as a spinner, which an
+   * older request settling must not clear. Local writes (`wrote`) do not
+   * count: nothing of theirs is out, so a write landing while the newest
+   * request is still out must not leave that state set for good.
    */
   isNewest(ticket: number): boolean {
-    return ticket === this.sent;
+    return ticket === this.newestRequest;
   }
 }

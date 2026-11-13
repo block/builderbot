@@ -65,6 +65,12 @@ import type {
 const BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS = 3000;
 
 /**
+ * What offering a fetched branch list resolves to when a local write landed
+ * after the read was sent: neither applied nor refused, to be read again.
+ */
+const BRANCH_READ_SET_ASIDE = 'set-aside';
+
+/**
  * Merge incoming branches with existing ones, preserving worktreePath when
  * a stale async response would overwrite an already-populated value with null.
  * Only for a branch that is local on both sides: a remote branch has no
@@ -439,6 +445,14 @@ class ProjectsDataStore {
    * `replaceBranches` applies the branch list as fetched, without carrying
    * worktree paths over from the old one. Resolves whether the result was
    * applied: false when a newer load overtook it, or the fetch failed.
+   *
+   * Callers await this to know the store shows what their mutation left
+   * (the branch delete clears its "Deleting…" state on it). So when the
+   * branch list is set aside because a local write landed while it was out
+   * (see offerProjectBranches), this reads the list again itself and resolves
+   * only once a list read after that write has been offered. Any local write
+   * to the project sets the read aside, related to the refresh or not, such
+   * as a workspace status change on another branch.
    */
   async refreshProject(
     projectId: string,
@@ -456,18 +470,22 @@ class ProjectsDataStore {
       if (this.readOrder.admit('projects', ticket)) {
         this._projects = projectsResult.data;
       }
-      const mergedBranches = this.applyProjectBranches(
-        projectId,
-        branchesResult.data,
-        generation,
-        ticket,
-        { replace: replaceBranches }
-      );
-      if (mergedBranches) {
-        commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
-      }
+      let offered = this.offerProjectBranches(projectId, branchesResult.data, generation, ticket, {
+        replace: replaceBranches,
+      });
       this.applyProjectRepos(projectId, reposResult.data, generation, ticket);
       this.markProjectHydrated(projectId, generation);
+      // Each further round needs another local write to land during a read,
+      // so this ends as soon as one read comes back with none.
+      while (offered === BRANCH_READ_SET_ASIDE) {
+        const again = this.readOrder.issue();
+        const { data } = await commands.listBranchesForProject(projectId, { force: true });
+        if (generation !== this.loadGeneration) return false;
+        offered = this.offerProjectBranches(projectId, data, generation, again);
+      }
+      if (offered) {
+        commands.invalidateProjectBranchTimelines(offered.map((b) => b.id));
+      }
       return true;
     } catch (e) {
       console.error(`[projectsData] Failed to refresh project '${projectId}':`, e);
@@ -531,12 +549,12 @@ class ProjectsDataStore {
   setBranchesByProject(next: Map<string, Branch[]>): void {
     // A read of a project's branches still in flight was sent before this
     // write and may have read the store before it. Mark the write so that
-    // read is not applied over it (see applyProjectBranches). Only lists that
+    // read is not applied over it (see offerProjectBranches). Only lists that
     // really differ count: callers rebuild the array even when no branch in
     // it matched, and such a call must not turn a first hydration away.
     for (const [projectId, branches] of next) {
       if (!sameBranchList(this._branchesByProject.get(projectId), branches)) {
-        this.readOrder.admit(`branch-writes:${projectId}`, this.readOrder.issue());
+        this.readOrder.wrote(`branch-writes:${projectId}`);
       }
     }
     this._branchesByProject = next;
@@ -757,30 +775,30 @@ class ProjectsDataStore {
   }
 
   /**
-   * Apply a fetched branch list, unless a newer load or a read sent after
-   * this one (`ticket`, see readOrder) has already landed. A `replace` list
-   * is applied even then: it is read after the transfer that asked for it,
-   * and it alone drops the worktree paths the transfer removed.
+   * Offer a fetched branch list to the store. Resolves to the list applied,
+   * or to null when it was refused: a newer load or a read sent after this
+   * one (`ticket`, see readOrder) has already landed. A `replace` list is
+   * applied even then: it is read after the transfer that asked for it, and
+   * it alone drops the worktree paths the transfer removed.
    *
    * A list sent before a local write landed (setBranchesByProject) is not
    * applied either: it may predate the rename, delete or status change the
    * view has already painted, and would put the old row back until the
-   * write's change event refetched. It is not just dropped, since it may be
-   * the only read carrying some other change: the list is read again, and
-   * the list in place is returned so the caller treats it as the result.
+   * write's change event refetched. That is BRANCH_READ_SET_ASIDE, not a
+   * refusal, since the list may be the only read carrying some other change:
+   * the caller must have the list read again.
    */
-  private applyProjectBranches(
+  private offerProjectBranches(
     projectId: string,
     branches: Branch[],
     generation: number,
     ticket: number,
     { replace = false }: { replace?: boolean } = {}
-  ): Branch[] | null {
+  ): Branch[] | typeof BRANCH_READ_SET_ASIDE | null {
     if (generation !== this.loadGeneration || !this.hasProject(projectId)) return null;
     if (!this.readOrder.admit(`branches:${projectId}`, ticket) && !replace) return null;
     if (!replace && this.readOrder.overtaken(`branch-writes:${projectId}`, ticket)) {
-      void this.refetchProjectBranches(projectId);
-      return this._branchesByProject.get(projectId) ?? null;
+      return BRANCH_READ_SET_ASIDE;
     }
 
     const mergedBranches = replace
@@ -788,6 +806,22 @@ class ProjectsDataStore {
       : mergeBranchesPreservingWorktree(this._branchesByProject.get(projectId) || [], branches);
     this._branchesByProject = new Map(this._branchesByProject).set(projectId, mergedBranches);
     return mergedBranches;
+  }
+
+  /**
+   * Offer a fetched branch list (see offerProjectBranches), and have the
+   * list read again in the background when it is set aside. For the reads
+   * nothing awaits: hydration and the event-driven refetch. refreshProject,
+   * which callers do await, reads again itself.
+   */
+  private applyProjectBranches(
+    projectId: string,
+    branches: Branch[],
+    generation: number,
+    ticket: number
+  ): void {
+    const offered = this.offerProjectBranches(projectId, branches, generation, ticket);
+    if (offered === BRANCH_READ_SET_ASIDE) void this.refetchProjectBranches(projectId);
   }
 
   private applyProjectRepos(

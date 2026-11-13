@@ -9290,6 +9290,121 @@ mod tests {
         );
     }
 
+    /// The attachments a queued start hands the runner are read with one pass
+    /// over the note bodies however many were queued with the session, where
+    /// each attachment used to cost a scan of both note tables. The start
+    /// needs a concrete app runtime to drive, so this queues the session as
+    /// the commands do and makes the read the start makes; the source test
+    /// below pins that the start makes it once.
+    #[test]
+    fn queued_start_reads_its_attachments_in_one_note_pass() {
+        use crate::store::images::{take_reference_passes, ReferencePasses};
+
+        let queue = |attached: usize| {
+            let (store, branch) = setup_branch_store();
+            let image_ids: Vec<String> = (0..attached)
+                .map(|n| {
+                    let image = store::Image::new(
+                        Some(&branch.id),
+                        &branch.project_id,
+                        &format!("shot-{n}.png"),
+                        "image/png",
+                        1,
+                        true,
+                    );
+                    store.create_image(&image).unwrap();
+                    image.id
+                })
+                .collect();
+            // Several notes for the pass to read. With more than one
+            // attachment, a project note embeds the last, which makes it
+            // note media and no longer something to send with the prompt.
+            let embedded = image_ids.last().filter(|_| attached > 1);
+            for n in 0..3 {
+                let content = format!("![other](staged-media://unrelated-{n}.png)");
+                store
+                    .create_note(&store::Note::new_standalone(&branch.id, "Other", &content))
+                    .unwrap();
+            }
+            if let Some(id) = embedded {
+                let content = format!("![shot](staged-media://{id}.png)");
+                store
+                    .create_project_note(&store::ProjectNote::new(
+                        &branch.project_id,
+                        "Plan",
+                        &content,
+                    ))
+                    .unwrap();
+            }
+            let queued = insert_queued_branch_session(
+                &store,
+                None,
+                &branch.id,
+                "look at these",
+                &BranchSessionType::Note,
+                None,
+                &image_ids,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let sent: Vec<String> = image_ids
+                .iter()
+                .filter(|id| Some(*id) != embedded)
+                .cloned()
+                .collect();
+            (store, queued.session_id, sent)
+        };
+
+        for attached in [1, 2, 8, 32] {
+            let (store, session_id, sent) = queue(attached);
+            take_reference_passes();
+            assert_eq!(
+                store.get_image_ids_for_session(&session_id).unwrap(),
+                sent,
+                "{attached} attached"
+            );
+            assert_eq!(
+                take_reference_passes(),
+                ReferencePasses { notes: 1, chat: 0 },
+                "{attached} attached"
+            );
+        }
+
+        // Nothing attached: nothing to ask the notes about.
+        let (store, session_id, _) = queue(0);
+        take_reference_passes();
+        assert!(store
+            .get_image_ids_for_session(&session_id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(take_reference_passes(), ReferencePasses::default());
+    }
+
+    /// The queued start reads its attachments once, through the lookup the
+    /// test above holds to one note pass, and asks nothing else about media
+    /// references. Pinned by source text, like the claim invariants below,
+    /// because the start needs a concrete app runtime to drive.
+    #[test]
+    fn queued_start_reads_its_attachments_once() {
+        let source = include_str!("session_commands.rs");
+        let start = "async fn start_queued_session_for_branch(";
+        let body = &source[source.find(start).expect(start)..];
+        let body = &body[..body.find("\n}\n").expect("fn end")];
+
+        assert_eq!(
+            body.matches(".get_image_ids_for_session(&session_id)")
+                .count(),
+            1,
+            "`{start}` reads the session's attachments once"
+        );
+        assert_eq!(body.matches("get_image_ids_for_session").count(), 1);
+        for other in ["media_references(", "media_embedded_in_notes("] {
+            assert!(!body.contains(other), "`{start}` calls `{other}`");
+        }
+    }
+
     /// The actor a control caller hands the shared start bodies lands on the
     /// row for both insert shapes; the desktop's `None` leaves it unset.
     #[test]

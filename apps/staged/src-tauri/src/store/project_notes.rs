@@ -221,7 +221,7 @@ impl Store {
     /// children fires `trg_cleanup_session_after_note_delete`, which cleans up
     /// their sessions — but that trigger deliberately skips sessions that are
     /// still `running`, so the child session ids are returned for the caller to
-    /// cancel and remove (see `note_commands::delete_project_note`).
+    /// cancel and remove (see `note_commands::delete_project_note_impl`).
     pub fn delete_project_note(&self, id: &str) -> Result<DeletedProjectNoteSessions, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::images::{take_reference_passes, ReferencePasses};
 use crate::store::{Branch, Note, Project, Session};
 
 pub(crate) const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
@@ -1114,4 +1115,200 @@ fn indented_list_images_are_ingested_without_changing_indentation() {
         format!("1. Step\n\n    ![Screenshot](staged-media://{id}.png)")
     );
     assert!(media_ids(&outcome.markdown).contains(id));
+}
+
+/// `count` attachments stored on the fixture's branch under its session, each
+/// with its own bytes so ingest never folds one into another.
+fn stored_media(f: &Fixture, count: usize) -> Vec<Image> {
+    (0..count)
+        .map(|n| {
+            files::store_media_file(
+                &f.store,
+                Some(&f.branch.id),
+                &f.project.id,
+                Some(&f.session.id),
+                &format!("shot-{n}.png"),
+                &[PNG, &[n as u8][..]].concat(),
+                true,
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn embedding(images: &[Image]) -> String {
+    images
+        .iter()
+        .map(|image| format!("![a](staged-media://{}.png)", image.id))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn has_file(image: &Image) -> bool {
+    crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+        .unwrap()
+        .exists()
+}
+
+/// A deleted note's media is checked in one pass over the note bodies and
+/// one over the chat attachments, however many it embedded, and what goes is
+/// exactly what the per-image checks would have let go.
+#[test]
+fn cleanup_checks_every_id_in_one_pass_and_collects_what_the_per_image_checks_would() {
+    let f = Fixture::new();
+    let mut images = stored_media(&f, 8);
+    // A branch-timeline attachment: no session, so never note media to collect.
+    images.push(
+        files::store_media_file(
+            &f.store,
+            Some(&f.branch.id),
+            &f.project.id,
+            None,
+            "timeline.png",
+            PNG,
+            true,
+        )
+        .unwrap(),
+    );
+    let note = Note::new(&f.branch.id, "Shots", &embedding(&images));
+    let other = Note::new(&f.branch.id, "Other", &embedding(&images[..1]));
+    f.store.create_note(&note).unwrap();
+    f.store.create_note(&other).unwrap();
+    f.store
+        .add_session_message_with_images(
+            &f.session.id,
+            crate::store::MessageRole::User,
+            "look",
+            std::slice::from_ref(&images[1].id),
+        )
+        .unwrap();
+    f.store.delete_note(&note.id).unwrap();
+
+    // The rule, one id at a time, as the cleanup applied it before.
+    let kept: HashSet<String> = images
+        .iter()
+        .filter(|image| {
+            f.store.media_is_referenced(&image.id).unwrap()
+                || image.session_id.is_none()
+                || f.store.image_has_chat_references(&image.id).unwrap()
+        })
+        .map(|image| image.id.clone())
+        .collect();
+    assert_eq!(
+        kept,
+        HashSet::from([
+            images[0].id.clone(),
+            images[1].id.clone(),
+            images[8].id.clone()
+        ])
+    );
+
+    take_reference_passes();
+    cleanup_unreferenced(&f.store, media_ids(&note.content));
+    assert_eq!(
+        take_reference_passes(),
+        ReferencePasses { notes: 1, chat: 1 }
+    );
+
+    for image in &images {
+        let expected = kept.contains(&image.id);
+        assert_eq!(
+            f.store.get_image(&image.id).unwrap().is_some(),
+            expected,
+            "{} row",
+            image.filename
+        );
+        assert_eq!(has_file(image), expected, "{} file", image.filename);
+    }
+
+    // Nothing to check: no pass at all.
+    cleanup_unreferenced(&f.store, HashSet::new());
+    assert_eq!(take_reference_passes(), ReferencePasses::default());
+}
+
+/// A project note's media and its children's are collected together.
+#[test]
+fn project_note_deletion_checks_the_whole_family_in_one_pass() {
+    let f = Fixture::new();
+    let images = stored_media(&f, 4);
+    let parent = crate::store::ProjectNote::new(&f.project.id, "Parent", &embedding(&images[..2]));
+    f.store.create_project_note(&parent).unwrap();
+    for (n, image) in images[2..].iter().enumerate() {
+        let mut child = Note::new(
+            &f.branch.id,
+            &format!("Child {n}"),
+            &embedding(std::slice::from_ref(image)),
+        );
+        child.parent_project_note_id = Some(parent.id.clone());
+        f.store.create_note(&child).unwrap();
+    }
+    let ids = project_note_media_ids(&f.store, &parent.id).unwrap();
+    assert_eq!(ids.len(), 4);
+    f.store.delete_project_note(&parent.id).unwrap();
+
+    take_reference_passes();
+    cleanup_unreferenced(&f.store, ids);
+    assert_eq!(
+        take_reference_passes(),
+        ReferencePasses { notes: 1, chat: 1 }
+    );
+    for image in &images {
+        assert!(f.store.get_image(&image.id).unwrap().is_none());
+        assert!(!has_file(image));
+    }
+}
+
+/// A body repeating stored references it did not carry before asks whether a
+/// note embeds each: once for all of them, with the per-image answers.
+#[test]
+fn ingest_checks_stored_references_in_one_pass_and_keeps_what_the_per_image_check_would() {
+    let f = Fixture::new();
+    let images = stored_media(&f, 6);
+    let other = Note::new(&f.branch.id, "Other", &embedding(&images[..3]));
+    f.store.create_note(&other).unwrap();
+    let referenced: Vec<bool> = images
+        .iter()
+        .map(|image| f.store.media_is_referenced(&image.id).unwrap())
+        .collect();
+    assert_eq!(referenced, [true, true, true, false, false, false]);
+
+    take_reference_passes();
+    let outcome = f.ingest("", &embedding(&images));
+    assert_eq!(
+        take_reference_passes(),
+        ReferencePasses { notes: 1, chat: 0 }
+    );
+
+    // Media a note embeds is referenced as it is; the rest is copied.
+    for (image, referenced) in images.iter().zip(referenced) {
+        assert_eq!(
+            outcome.kept_ids.contains(&image.id),
+            referenced,
+            "{}",
+            image.filename
+        );
+        assert_eq!(
+            outcome.markdown.contains(&image.id),
+            referenced,
+            "{}",
+            image.filename
+        );
+    }
+    assert_eq!(outcome.kept_ids.len(), 6);
+}
+
+/// New files are not stored yet and references the note already carried are
+/// kept without looking, so the usual ingest makes no pass at all.
+#[test]
+fn ingest_of_new_files_and_repeated_references_makes_no_reference_pass() {
+    let f = Fixture::new();
+    std::fs::write(f.dir.path().join("shot.png"), PNG).unwrap();
+    take_reference_passes();
+
+    let first = f.ingest("", "![a](shot.png)");
+    assert_eq!(first.kept_ids.len(), 1);
+    let again = f.ingest(&first.markdown, &first.markdown);
+    assert_eq!(again.kept_ids, first.kept_ids);
+
+    assert_eq!(take_reference_passes(), ReferencePasses::default());
 }

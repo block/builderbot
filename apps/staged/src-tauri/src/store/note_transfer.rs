@@ -446,7 +446,12 @@ impl Store {
     ///
     /// A row some other note or a chat message has started using since the
     /// caller checked, or one deleted meanwhile, refuses the move rather than
-    /// being taken from under that user.
+    /// being taken from under that user. What uses the rows is read once, for
+    /// all of them, before the first is written: the transaction is the
+    /// snapshot, and nothing below adds a reference. Collecting a displaced
+    /// session can only remove one, with that session's messages; a row those
+    /// messages attached still refuses the move, as it did whenever the row
+    /// came before the session's in `rows`.
     ///
     /// The row takes the moved note's session, as a copy would. Ingest already
     /// stores a note's media under its session, so that rarely changes
@@ -459,6 +464,11 @@ impl Store {
         title: &str,
         rows: &[Image],
     ) -> Result<(), StoreError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let references =
+            Self::media_references_on(tx, rows.iter().map(|row| row.id.as_str()), Some(note_id))?;
         for row in rows {
             let displaced: Option<Option<String>> = tx
                 .query_row(
@@ -470,7 +480,7 @@ impl Store {
             let Some(displaced) = displaced else {
                 return Err(media_changed_during_transfer(title));
             };
-            if !Self::media_exclusive_to(tx, &row.id, note_id)? {
+            if !references.unused(&row.id) {
                 return Err(media_changed_during_transfer(title));
             }
             tx.execute(
@@ -1529,6 +1539,136 @@ mod tests {
             let row = f.store.get_image(&image.id).unwrap().unwrap();
             assert_eq!(row.project_id, f.source.id, "{other_user}");
             assert_eq!(row.branch_id.as_ref(), Some(&f.source_branch.id));
+            assert_eq!(
+                f.store.get_note(&note.id).unwrap().unwrap().branch_id,
+                f.source_branch.id
+            );
+        }
+    }
+
+    /// The check under the transaction reads what uses the rows once, for
+    /// all of them, and a move with nothing to re-home reads nothing.
+    #[test]
+    fn move_confirms_every_rehomed_row_in_one_pass() {
+        use crate::store::images::{take_reference_passes, ReferencePasses};
+
+        let f = fixture();
+        let session = completed_session(&f);
+        let images: Vec<Image> = (0..3).map(|_| source_media(&f, &session.id)).collect();
+        let content = images
+            .iter()
+            .map(|image| format!("![a](staged-media://{}.png)", image.id))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let note =
+            Note::new_standalone(&f.source_branch.id, "Shots", &content).with_session(&session.id);
+        f.store.create_note(&note).unwrap();
+        let rehomed: Vec<Image> = images
+            .iter()
+            .enumerate()
+            .map(|(n, image)| rehomed_onto(&f, image, &format!("shot {n}.png"), &session.id))
+            .collect();
+
+        take_reference_passes();
+        f.store
+            .move_note_to_branch(
+                &note.id,
+                &f.source_branch.id,
+                &f.target_branch.id,
+                &content,
+                &[],
+                &rehomed,
+            )
+            .unwrap();
+        assert_eq!(
+            take_reference_passes(),
+            ReferencePasses { notes: 1, chat: 1 }
+        );
+        for image in &images {
+            let row = f.store.get_image(&image.id).unwrap().unwrap();
+            assert_eq!(row.project_id, f.target.id);
+        }
+
+        f.store
+            .move_note_to_branch(
+                &note.id,
+                &f.target_branch.id,
+                &f.source_branch.id,
+                &content,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(take_reference_passes(), ReferencePasses::default());
+    }
+
+    /// The one read covers every row: whichever of several gained another
+    /// user, the move is refused and none of them is written.
+    #[test]
+    fn move_is_refused_when_any_of_several_rehomed_rows_gained_another_user() {
+        for (taken, other_user) in [(0, "note"), (2, "note"), (0, "chat"), (2, "chat")] {
+            let f = fixture();
+            let session = completed_session(&f);
+            let images: Vec<Image> = (0..3).map(|_| source_media(&f, &session.id)).collect();
+            let embed = |image: &Image| format!("![a](staged-media://{}.png)", image.id);
+            let content = images.iter().map(embed).collect::<Vec<_>>().join("\n");
+            let note = Note::new_standalone(&f.source_branch.id, "Shots", &content)
+                .with_session(&session.id);
+            f.store.create_note(&note).unwrap();
+            match other_user {
+                "note" => f
+                    .store
+                    .create_note(&Note::new_standalone(
+                        &f.source_branch.id,
+                        "Other",
+                        &embed(&images[taken]),
+                    ))
+                    .unwrap(),
+                _ => {
+                    f.store
+                        .add_session_message_with_images(
+                            &session.id,
+                            crate::store::models::MessageRole::User,
+                            "look",
+                            std::slice::from_ref(&images[taken].id),
+                        )
+                        .unwrap();
+                }
+            }
+            // What the per-image check says about each row decides the move.
+            for (n, image) in images.iter().enumerate() {
+                assert_eq!(
+                    f.store.media_is_exclusive_to(&image.id, &note.id).unwrap(),
+                    n != taken,
+                    "{other_user} {taken}: row {n}"
+                );
+            }
+            let rehomed: Vec<Image> = images
+                .iter()
+                .enumerate()
+                .map(|(n, image)| rehomed_onto(&f, image, &format!("shot {n}.png"), &session.id))
+                .collect();
+
+            let err = f
+                .store
+                .move_note_to_branch(
+                    &note.id,
+                    &f.source_branch.id,
+                    &f.target_branch.id,
+                    &content,
+                    &[],
+                    &rehomed,
+                )
+                .unwrap_err();
+
+            assert!(
+                err.to_string().contains("changed during the transfer"),
+                "{other_user} {taken}: {err}"
+            );
+            for image in &images {
+                let row = f.store.get_image(&image.id).unwrap().unwrap();
+                assert_eq!(row.project_id, f.source.id, "{other_user} {taken}");
+            }
             assert_eq!(
                 f.store.get_note(&note.id).unwrap().unwrap().branch_id,
                 f.source_branch.id

@@ -193,6 +193,7 @@ pub(crate) fn ingest_note_media_with(
         previous_files_hashed: 0,
     };
     let mut previous = PreviousAttachments::load(store, &scope);
+    let mut embedded = EmbeddedInNotes::new(markdown);
     // Process in document order for filename suffixes/deduplication; apply edits
     // backwards so offsets continue to refer to the original source.
     let mut edits = Vec::new();
@@ -214,17 +215,7 @@ pub(crate) fn ingest_note_media_with(
                 return Ok(image.clone());
             }
             let local_target = files::local_target(target)?;
-            let existing = stored_ref(target).or_else(|| {
-                // Local materialization uses the OS temp directory (on macOS
-                // it is not /tmp). Only our exact temp roots get this shortcut.
-                let path = Path::new(&local_target);
-                let parent = path.parent()?;
-                if parent != Path::new("/tmp") && parent != std::env::temp_dir() {
-                    return None;
-                }
-                refs::parse_media_file(path.file_name()?.to_str()?.strip_prefix("staged-image-")?)
-            });
-            if let Some((id, ext)) = existing {
+            if let Some((id, ext)) = stored_media(target, &local_target) {
                 let image = store
                     .get_image(id)
                     .map_err(|e| e.to_string())?
@@ -236,8 +227,7 @@ pub(crate) fn ingest_note_media_with(
                 // notes. Copy cross-scope refs so subsequent moves are safe.
                 if image.project_id == scope.project_id
                     && image.branch_id.as_deref() == scope.branch_id
-                    && (previous.contains(id)
-                        || store.media_is_referenced(id).map_err(|e| e.to_string())?)
+                    && (previous.contains(id) || embedded.contains(store, id)?)
                 {
                     return Ok(image);
                 }
@@ -323,6 +313,60 @@ pub(crate) fn ingest_note_media_with(
     outcome
 }
 
+/// The stored media a reference names: a `staged-media://` target, or the
+/// temp file an attachment was materialized to (`local_target` is `target`
+/// as a local path).
+fn stored_media<'a>(target: &'a str, local_target: &'a str) -> Option<(&'a str, &'a str)> {
+    stored_ref(target).or_else(|| {
+        // Local materialization uses the OS temp directory (on macOS
+        // it is not /tmp). Only our exact temp roots get this shortcut.
+        let path = Path::new(local_target);
+        let parent = path.parent()?;
+        if parent != Path::new("/tmp") && parent != std::env::temp_dir() {
+            return None;
+        }
+        refs::parse_media_file(path.file_name()?.to_str()?.strip_prefix("staged-image-")?)
+    })
+}
+
+/// Which of the stored media a note body names some note already embeds.
+///
+/// Most bodies never ask: a new file is not stored yet, and a reference the
+/// note already carried is kept without looking. The first one that does ask
+/// reads the answer for every stored reference in the body, so an ingest
+/// passes over the note bodies once at most, however many it embeds.
+struct EmbeddedInNotes<'a> {
+    markdown: &'a str,
+    ids: Option<HashSet<String>>,
+}
+
+impl<'a> EmbeddedInNotes<'a> {
+    fn new(markdown: &'a str) -> Self {
+        Self {
+            markdown,
+            ids: None,
+        }
+    }
+
+    fn contains(&mut self, store: &Store, id: &str) -> Result<bool, String> {
+        if self.ids.is_none() {
+            let named: HashSet<String> = extract_media_refs(self.markdown)
+                .iter()
+                .filter_map(|reference| {
+                    let local_target = files::local_target(&reference.target).ok()?;
+                    stored_media(&reference.target, &local_target).map(|(id, _)| id.to_owned())
+                })
+                .collect();
+            self.ids = Some(
+                store
+                    .media_embedded_in_notes(named.iter().map(String::as_str))
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(self.ids.as_ref().is_some_and(|ids| ids.contains(id)))
+    }
+}
+
 fn save_candidate(
     store: &Store,
     scope: &NoteScope<'_>,
@@ -354,20 +398,27 @@ fn save_candidate(
 
 /// The note has already been removed/updated when this runs. Protect shared
 /// refs and ordinary timeline/chat attachments from destructive cleanup.
+///
+/// What still uses the ids is read once for the whole set, so the cost is one
+/// pass over the note bodies and the chat attachments however many there are;
+/// only an id nothing uses costs a row read and a delete after that.
 pub(crate) fn cleanup_unreferenced(store: &Store, ids: HashSet<String>) {
+    let references = match store.media_references(ids.iter().map(String::as_str), None) {
+        Ok(references) => references,
+        Err(e) => {
+            log::warn!("Cannot clean up note media: {e}");
+            return;
+        }
+    };
     for id in ids {
+        if !references.unused(&id) {
+            continue;
+        }
         let result = (|| {
-            if store.media_is_referenced(&id).map_err(|e| e.to_string())? {
-                return Ok(());
-            }
             let Some(image) = store.get_image(&id).map_err(|e| e.to_string())? else {
                 return Ok(());
             };
-            if image.session_id.is_none()
-                || store
-                    .image_has_chat_references(&id)
-                    .map_err(|e| e.to_string())?
-            {
+            if image.session_id.is_none() {
                 return Ok(());
             }
             files::delete_media_file(store, &image)

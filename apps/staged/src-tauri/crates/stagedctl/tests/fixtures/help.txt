@@ -172,6 +172,27 @@ records it as the last one shown, so a read-only grant is refused (exit
 session's credential the same way, for the session's own project too, so
 an agent cannot pull the user's window away.
 
+When Staged is not running, the command starts it, waits for it to come
+up, and then asks as above; the app holds the request until its window
+has loaded. What it starts is the Staged.app this stagedctl is bundled
+in, and nothing else. A line on stderr says so; stdout is unchanged.
+
+Staged is never started:
+  - with --no-launch: the command exits 3 instead;
+  - when --lock-path or $STAGEDCTL_LOCK names a control file. That
+    points at one instance, and when it is gone the command exits 3, so
+    a spawned session never starts an app;
+  - when this machine holds no unexpired connected-app grant (exit 4,
+    `authorization_required`). Start Staged and run `stagedctl connect`
+    once; the consent dialog is not raised for you;
+  - from a development build, whose app needs its dev server (exit 3).
+    Run `just dev`;
+  - beside a Staged that is running but cannot be used, such as one
+    that was updated underneath this CLI (exit 3).
+A <project> name is looked up only once the app is up, so a name that
+matches nothing still exits 1 (`not_found`) after Staged has started. A
+directory outside every project workspace never starts it.
+
 Usage: stagedctl project open [OPTIONS] [PROJECT]
 
 Arguments:
@@ -181,6 +202,9 @@ Arguments:
 Options:
       --lock-path <PATH>
           Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --no-launch
+          Exit 3 instead of starting Staged when it is not running
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text

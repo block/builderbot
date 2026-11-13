@@ -21,6 +21,7 @@ use crate::client::{
     Client, CtlError, STAGEDCTL_LOCK_ENV,
 };
 use crate::grants::{self, GrantFile};
+use crate::launch;
 use crate::open;
 use crate::tags;
 
@@ -92,22 +93,19 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
         _ => {}
     }
 
-    // `project open` with no argument takes its project from the current
-    // directory. Like the flag rules in `validate`, that needs no app, so it
-    // is settled before discovery: a directory outside every workspace fails
-    // the same way (exit 1) whether or not a Staged app is running.
-    if let Noun::Project(ProjectVerb::Open { project }) = &cli.command {
-        let target = open::target(
+    // `project open` finds its own app: it is the one verb that starts
+    // Staged when none is running (see `launch`), and it settles what it was
+    // pointed at before looking for one.
+    if let Noun::Project(ProjectVerb::Open { project, no_launch }) = &cli.command {
+        return open::run(
             project.as_deref(),
-            std::env::current_dir,
-            data_dir.as_deref(),
-        )?;
-        let client = discover_and_connect(
+            *no_launch,
             cli.lock_path.as_deref(),
             std::env::var_os(STAGEDCTL_LOCK_ENV),
+            std::env::current_dir,
             data_dir.as_deref(),
-        )?;
-        return open::project_open(&client, &target);
+            &launch::LaunchEnv::real(),
+        );
     }
 
     let client = discover_and_connect(

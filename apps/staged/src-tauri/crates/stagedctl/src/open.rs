@@ -19,7 +19,13 @@
 //! The older worktree layout, `workspaces/local/<repo>/<branch>/`, names no
 //! project in its path and is not resolved; a directory there reads
 //! `not_in_workspace`.
+//!
+//! [`run`] is the verb from the top. What it was pointed at is settled
+//! first and needs no app, so a directory that names no project fails
+//! before Staged is looked for, and so before it could be started: this is
+//! the one verb that starts Staged when none is running ([`crate::launch`]).
 
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -27,6 +33,7 @@ use serde_json::{json, Value};
 
 use crate::client::{Client, CtlError};
 use crate::commands::{find_project, list_projects, parse, CmdOutput, Project};
+use crate::launch::{connect_or_launch, LaunchEnv};
 
 /// The dispatch command behind the verb. A Staged from before it answers
 /// 404, as for any unknown command, and the transport appends an "update
@@ -192,8 +199,31 @@ fn project_for_directory<'a>(
     })
 }
 
-/// `project open [<project>]`: find the project in the app's list, then ask
-/// the app to show it.
+/// `project open [<project>] [--no-launch]` from the top: decide the
+/// [`Target`], find a Staged to ask (starting one when none is running,
+/// unless `no_launch`), then [`project_open`].
+///
+/// The order is the point. [`target`] runs first and needs no app, so
+/// `not_in_workspace` reads the same whether or not Staged is running, and a
+/// directory that names no project never starts it. `lock_flag` and
+/// `lock_env` are `--lock-path` and `$STAGEDCTL_LOCK`; `data_dir` is
+/// `~/.staged`; `launch_env` is what a launch would use.
+pub fn run(
+    project: Option<&str>,
+    no_launch: bool,
+    lock_flag: Option<&Path>,
+    lock_env: Option<OsString>,
+    current_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+    data_dir: Option<&Path>,
+    launch_env: &LaunchEnv<'_>,
+) -> Result<CmdOutput, CtlError> {
+    let target = target(project, current_dir, data_dir)?;
+    let client = connect_or_launch(lock_flag, lock_env, data_dir, no_launch, launch_env)?;
+    project_open(&client, &target)
+}
+
+/// `project open [<project>]` against a connected app: find the project in
+/// the app's list, then ask the app to show it.
 pub fn project_open(client: &Client, target: &Target) -> Result<CmdOutput, CtlError> {
     open_target(
         target,
@@ -896,5 +926,235 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert_eq!(err.code(), "app_error");
+    }
+
+    // -------------------------------------------------------------------
+    // The verb from the top: target first, then find or start Staged
+    //
+    // Nothing here starts a process. The launchers are fakes, and the
+    // "app" is a fake control server plus the discovery file a real one
+    // would write.
+    // -------------------------------------------------------------------
+
+    use crate::client::tests::{
+        fake_server_with_body, header_value, ping_body, private_tempdir, write_tcp_discovery,
+    };
+    use crate::client::PROTOCOL_VERSION;
+    use crate::launch::tests::{
+        store_grant, test_env, FakeLauncher, NeverLaunch, BUNDLE, BUNDLED_EXECUTABLE,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// The `invoke` calls a fake app received: the command and its body.
+    type Invoked = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// A fake Staged holding one project, `Widgets` (`p1`). It accepts any
+    /// grant's reconnect and then answers `list_projects` and
+    /// `open_project`, each only with the bearer the reconnect issued.
+    /// Listening, but not discoverable until a discovery file names its
+    /// port.
+    fn fake_app(invoked: Invoked) -> u16 {
+        let pid = std::process::id();
+        let renew_to = crate::grants::now_ms() + crate::grants::GRANT_LIFETIME_MS - 1000;
+        let (port, _handle) = fake_server_with_body(move |head, body| {
+            let route = head.split_whitespace().nth(1).unwrap_or("");
+            if route == "/api/ping" {
+                return (200, ping_body(pid, 1, PROTOCOL_VERSION));
+            }
+            if route == "/api/reconnect/challenge" {
+                return (200, json!({ "nonce": "n1", "expiresAt": 0 }).to_string());
+            }
+            if route == "/api/reconnect" {
+                return (
+                    200,
+                    json!({ "token": "live", "expiresAt": renew_to }).to_string(),
+                );
+            }
+            let Some(command) = route.strip_prefix("/api/invoke/") else {
+                return (404, json!({ "error": "unexpected route" }).to_string());
+            };
+            if header_value(head, "authorization") != Some("Bearer live") {
+                return (
+                    401,
+                    json!({ "error": "no credential", "code": "authorization_required" })
+                        .to_string(),
+                );
+            }
+            let args = serde_json::from_str(body).unwrap_or(Value::Null);
+            invoked.lock().unwrap().push((command.to_string(), args));
+            match command {
+                "list_projects" => (200, json!([{ "id": "p1", "name": "Widgets" }]).to_string()),
+                "open_project" => (
+                    200,
+                    json!({ "outcome": "opened", "window": "main" }).to_string(),
+                ),
+                _ => (404, json!({ "error": "not allowlisted" }).to_string()),
+            }
+        });
+        port
+    }
+
+    /// What [`run_starting_staged`] saw.
+    struct Started {
+        result: Result<CmdOutput, CtlError>,
+        /// The bundles the launcher was asked to start.
+        launched: Vec<PathBuf>,
+        /// What the app was asked once it was up.
+        invoked: Vec<(String, Value)>,
+    }
+
+    /// Run the verb on a machine with a grant, an installed `stagedctl`
+    /// and no Staged running, where starting Staged brings the fake app
+    /// up.
+    fn run_starting_staged(project: Option<&str>, dir_in_data_dir: &str) -> Started {
+        let dir = private_tempdir();
+        store_grant(dir.path());
+        let invoked: Invoked = Arc::default();
+        let port = fake_app(Arc::clone(&invoked));
+        let data_dir = dir.path().to_path_buf();
+        let launcher = FakeLauncher::new(move || {
+            write_tcp_discovery(&data_dir, std::process::id(), port, 1);
+            Ok(())
+        });
+        let cwd = dir.path().join(dir_in_data_dir);
+
+        let result = run(
+            project,
+            false,
+            None,
+            None,
+            || Ok(cwd),
+            Some(dir.path()),
+            &test_env(Some(BUNDLED_EXECUTABLE), &launcher),
+        );
+        let invoked = invoked.lock().unwrap().clone();
+        Started {
+            result,
+            launched: launcher.launched(),
+            invoked,
+        }
+    }
+
+    #[test]
+    fn with_no_staged_running_it_is_started_and_then_asked_for_the_project() {
+        let Started {
+            result,
+            launched,
+            invoked,
+        } = run_starting_staged(Some("widgets"), "elsewhere");
+
+        let out = result.unwrap();
+        let pid = std::process::id();
+        assert_eq!(out.human, format!("opened Widgets  id:p1  pid:{pid}"));
+        assert_eq!(out.json["pid"], pid, "the instance that was started");
+        assert_eq!(launched, vec![PathBuf::from(BUNDLE)]);
+        assert_eq!(
+            invoked,
+            vec![
+                ("list_projects".to_string(), json!({})),
+                ("open_project".to_string(), json!({ "projectId": "p1" })),
+            ],
+            "the same two calls, with the grant's bearer, as against a running app"
+        );
+    }
+
+    #[test]
+    fn with_no_staged_running_a_workspace_directory_starts_it_too() {
+        let Started {
+            result,
+            launched,
+            invoked,
+        } = run_starting_staged(
+            None,
+            "workspaces/local/projects/p1/block-builderbot--wt/apps",
+        );
+
+        assert_eq!(result.unwrap().json["project"]["id"], "p1");
+        assert_eq!(launched, vec![PathBuf::from(BUNDLE)]);
+        assert_eq!(
+            invoked.last().unwrap(),
+            &("open_project".to_string(), json!({ "projectId": "p1" }))
+        );
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_is_only_known_once_staged_is_up() {
+        // Names live in the app, so this one costs a start. No window is
+        // asked for anything, as against a running app.
+        let Started {
+            result,
+            launched,
+            invoked,
+        } = run_starting_staged(Some("Gadgets"), "elsewhere");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.code(), "not_found");
+        assert_eq!(launched.len(), 1);
+        assert_eq!(invoked, vec![("list_projects".to_string(), json!({}))]);
+    }
+
+    #[test]
+    fn a_directory_outside_every_workspace_never_starts_staged() {
+        // Everything a launch needs is to hand: a grant, an installed
+        // `stagedctl`, and no Staged running. The directory names no
+        // project, so the verb fails before any of it is looked at.
+        let dir = private_tempdir();
+        store_grant(dir.path());
+        let env = test_env(Some(BUNDLED_EXECUTABLE), &NeverLaunch);
+        let old_layout = dir.path().join("workspaces/local/builderbot/my-branch");
+
+        for cwd in [PathBuf::from("/Users/me/code"), old_layout] {
+            for no_launch in [false, true] {
+                let err = run(
+                    None,
+                    no_launch,
+                    None,
+                    None,
+                    || Ok(cwd.clone()),
+                    Some(dir.path()),
+                    &env,
+                )
+                .unwrap_err();
+                assert_eq!(err.exit_code(), 1, "{err}");
+                assert_eq!(err.code(), "not_in_workspace", "{err}");
+            }
+        }
+
+        // Nor does a current directory that cannot be read.
+        let err = run(
+            None,
+            false,
+            None,
+            None,
+            || Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            Some(dir.path()),
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "not_in_workspace", "{err}");
+    }
+
+    #[test]
+    fn no_launch_with_no_staged_running_is_exit_3_for_a_name_or_a_directory() {
+        let dir = private_tempdir();
+        store_grant(dir.path());
+        let env = test_env(Some(BUNDLED_EXECUTABLE), &NeverLaunch);
+        let workspace = dir.path().join("workspaces/local/projects/p1/wt");
+
+        for project in [Some("Widgets"), None] {
+            let err = run(
+                project,
+                true,
+                None,
+                None,
+                || Ok(workspace.clone()),
+                Some(dir.path()),
+                &env,
+            )
+            .unwrap_err();
+            assert_eq!(err.exit_code(), 3, "{err}");
+            assert!(err.to_string().contains("--no-launch"), "got: {err}");
+        }
     }
 }

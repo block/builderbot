@@ -6,7 +6,7 @@
  * that can be run in branch worktrees with real-time output streaming.
  */
 
-import { invokeCommand, listenToEvent, type UnlistenFn } from '../../transport';
+import { invokeCommand, listenToEvent, type ListenOptions, type UnlistenFn } from '../../transport';
 
 /** Action types available for project actions, in the order shown in the UI. */
 export const ACTION_TYPES = [
@@ -70,11 +70,30 @@ export interface OutputChunk {
   timestamp: number;
 }
 
+/**
+ * The output an execution has buffered: the most recent of it, and where it
+ * ends in the execution's whole output, in bytes of UTF-8.
+ */
+export interface BufferedOutput {
+  /**
+   * Oldest first. Once the backend has dropped earlier output, the first
+   * chunk is its notice saying how much.
+   */
+  chunks: OutputChunk[];
+  /**
+   * Compared with `ActionOutputEvent.offset`: an event that starts before
+   * this is already in `chunks`, and the next one starts exactly here.
+   */
+  endOffset: number;
+}
+
 /** Event payload for action output. */
 export interface ActionOutputEvent {
   executionId: string;
   chunk: string;
   stream: 'stdout' | 'stderr';
+  /** Where `chunk` starts in the execution's output, in bytes of UTF-8. */
+  offset: number;
 }
 
 /** Event payload for action status changes. */
@@ -199,11 +218,15 @@ export function getRunningBranchActions(branchId: string): Promise<RunningAction
 }
 
 /**
- * Get buffered output for an action execution.
- * Useful for retrieving output history when joining an already-running action.
+ * Get buffered output for an action execution, and the offset it ends at.
+ * Useful for retrieving output history when joining an already-running
+ * action; `outputFollower` joins it to the live `action_output` events.
+ *
+ * Resolves to null for an execution the backend does not know, and for a
+ * finished one whose output has been cleared or evicted.
  */
-export function getActionOutputBuffer(executionId: string): Promise<OutputChunk[] | null> {
-  return invokeCommand<OutputChunk[] | null>('get_action_output_buffer', { executionId });
+export function getActionOutputBuffer(executionId: string): Promise<BufferedOutput | null> {
+  return invokeCommand<BufferedOutput | null>('get_action_output_buffer', { executionId });
 }
 
 /**
@@ -225,9 +248,16 @@ export function runPrerunActions(branchId: string, provider?: string): Promise<s
 /**
  * Listen for real-time action output events.
  * Returns an unlisten function to stop listening.
+ *
+ * `opts.onEstablished` says when the listener is live, and again whenever
+ * events may have been lost: that is when to take, or retake, the buffer
+ * snapshot these events continue.
  */
-export function listenToActionOutput(callback: (event: ActionOutputEvent) => void): UnlistenFn {
-  return listenToEvent<ActionOutputEvent>('action_output', callback);
+export function listenToActionOutput(
+  callback: (event: ActionOutputEvent) => void,
+  opts?: ListenOptions
+): UnlistenFn {
+  return listenToEvent<ActionOutputEvent>('action_output', callback, opts);
 }
 
 /**

@@ -53,10 +53,16 @@
 pub mod acp_provider;
 pub mod detector;
 pub mod executor;
+mod finished_outputs;
 pub mod models;
+mod output_buffer;
+mod output_emitter;
+mod utf8_stream;
 
 // Re-export main types for convenience
 pub use acp_provider::AcpAiProvider;
 pub use detector::{ActionDetector, AiProvider, FileExplorationMode, SuggestedAction};
 pub use executor::{ActionExecutor, ExecutionListener, StopOptions};
-pub use models::{ActionStatus, ActionType, ExecutionEvent, OutputChunk, RunDetectionMode};
+pub use models::{
+    ActionStatus, ActionType, BufferedOutput, ExecutionEvent, OutputChunk, RunDetectionMode,
+};

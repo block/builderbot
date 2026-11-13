@@ -752,8 +752,10 @@ fn wire_run_detection(
     working_dir: String,
     provider_id: Option<String>,
 ) {
-    // Ensure the output buffer for this execution_id exists so the
-    // regex matcher can obtain a reference to it.
+    // A Run action has had its output buffer since it started, so that no
+    // output is missed before this point. Make sure of it for whatever else
+    // is wired up here. Nothing below is stored if the action has already
+    // ended: the registry only holds state for running executions.
     registry.register_output_buffer(&execution_id);
 
     match action.run_detection_mode.clone() {
@@ -1202,8 +1204,33 @@ pub fn stop_actions_for_branches(
     registry: &ActionRegistry,
     branch_ids: &[&str],
 ) {
+    stop_branch_actions(executor, registry, branch_ids, false);
+}
+
+/// Stop all running actions for branches that are being deleted
+/// (best-effort), and give up their output: once the branch is gone nothing
+/// can show it, so it should not be retained when the actions exit.
+pub fn stop_and_discard_actions_for_branches(
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+    branch_ids: &[&str],
+) {
+    stop_branch_actions(executor, registry, branch_ids, true);
+}
+
+fn stop_branch_actions(
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+    branch_ids: &[&str],
+    discard_output: bool,
+) {
     for branch_id in branch_ids {
         for info in registry.get_running_for_branch(branch_id) {
+            if discard_output {
+                // Covers an action that exits before the stop below reaches
+                // it, too: its retained output is freed here.
+                executor.discard_output(&info.execution_id);
+            }
             if executor.is_running(&info.execution_id) {
                 if let Err(e) = executor.stop(&info.execution_id) {
                     log::warn!("Failed to stop action {}: {e}", info.execution_id);
@@ -1316,16 +1343,24 @@ pub fn get_all_running_actions(
 pub(crate) fn get_action_output_buffer_impl(
     execution_id: String,
     executor: &ActionExecutor,
-) -> Result<Option<Vec<builderbot_actions::OutputChunk>>, String> {
+) -> Result<Option<builderbot_actions::BufferedOutput>, String> {
     Ok(executor.get_buffered_output(&execution_id))
 }
 
-/// Get buffered output for an action execution
+/// Get the buffered output of an action execution: the most recent output the
+/// executor retains, and the offset it ends at.
+///
+/// A viewer that is already listening for `action_output` uses that offset to
+/// join the two without a gap or a repeat: events whose `offset` is below it
+/// are in the returned chunks, and the next one starts exactly at it.
+///
+/// Asynchronous so that copying and serializing the buffer, which can be
+/// several megabytes, happens off the main thread.
 #[tauri::command]
-pub fn get_action_output_buffer(
+pub async fn get_action_output_buffer(
     execution_id: String,
     executor: State<'_, Arc<ActionExecutor>>,
-) -> Result<Option<Vec<builderbot_actions::OutputChunk>>, String> {
+) -> Result<Option<builderbot_actions::BufferedOutput>, String> {
     get_action_output_buffer_impl(execution_id, &executor)
 }
 
@@ -1512,6 +1547,192 @@ mod tests {
             action_type.to_string(),
             0,
         );
+    }
+
+    #[cfg(unix)]
+    struct IgnoreEvents;
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl builderbot_actions::ExecutionListener for IgnoreEvents {
+        async fn on_event(&self, _event: builderbot_actions::ExecutionEvent) {}
+    }
+
+    /// Start an action that prints and then waits to be stopped, registered
+    /// as running on `branch_id`.
+    #[cfg(unix)]
+    async fn start_branch_action(
+        executor: &ActionExecutor,
+        registry: &ActionRegistry,
+        branch_id: &str,
+    ) -> String {
+        let execution_id = executor
+            .execute_remote(
+                std::path::PathBuf::from("/bin/sh"),
+                vec!["-c".to_string(), "printf out; sleep 600".to_string()],
+                Arc::new(IgnoreEvents),
+            )
+            .await
+            .unwrap();
+        register(registry, &execution_id, branch_id, "run");
+        execution_id
+    }
+
+    /// Collects the `action_output` payload each output event becomes, and
+    /// passes on the terminal status and exit code the execution reports.
+    #[cfg(unix)]
+    struct RecordOutput {
+        output: std::sync::Mutex<Vec<crate::actions::events::ActionOutputEvent>>,
+        finished: std::sync::Mutex<
+            std::sync::mpsc::Sender<(builderbot_actions::ActionStatus, Option<i32>)>,
+        >,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl builderbot_actions::ExecutionListener for RecordOutput {
+        async fn on_event(&self, event: builderbot_actions::ExecutionEvent) {
+            match event {
+                builderbot_actions::ExecutionEvent::Output {
+                    execution_id,
+                    chunk,
+                    stream,
+                    offset,
+                    ..
+                } => self
+                    .output
+                    .lock()
+                    .unwrap()
+                    .push(crate::actions::events::ActionOutputEvent {
+                        execution_id,
+                        chunk,
+                        stream,
+                        offset,
+                    }),
+                builderbot_actions::ExecutionEvent::StatusChanged {
+                    status, exit_code, ..
+                } => {
+                    let _ = self.finished.lock().unwrap().send((status, exit_code));
+                }
+                builderbot_actions::ExecutionEvent::Started { .. } => {}
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_output_buffer_ends_where_the_output_events_do() {
+        let executor = ActionExecutor::new();
+
+        // A freshly spawned child is occasionally killed before it runs (see
+        // the executor's tests): it fails without an exit code, having
+        // written nothing. Start again on exactly that. A script that ran and
+        // whose output is missing is what this test is here to catch, so it
+        // must not be retried away.
+        let mut attempt = None;
+        for _ in 0..5 {
+            let (finished_tx, finished) = std::sync::mpsc::channel();
+            let listener = Arc::new(RecordOutput {
+                output: Default::default(),
+                finished: std::sync::Mutex::new(finished_tx),
+            });
+            let execution_id = executor
+                .execute_remote(
+                    std::path::PathBuf::from("/bin/sh"),
+                    vec![
+                        "-c".to_string(),
+                        "printf 'héllo\\n'; printf 'err\\n' >&2".to_string(),
+                    ],
+                    listener.clone(),
+                )
+                .await
+                .unwrap();
+            // The terminal status follows all of the output.
+            let (status, exit_code) = finished
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the execution did not finish");
+            let output = get_action_output_buffer_impl(execution_id.clone(), &executor)
+                .unwrap()
+                .expect("a finished execution keeps its output");
+            let killed_at_birth = status == builderbot_actions::ActionStatus::Failed
+                && exit_code.is_none()
+                && output.end_offset == 0
+                && listener.output.lock().unwrap().is_empty();
+            if !killed_at_birth {
+                attempt = Some((execution_id, listener, output, status, exit_code));
+                break;
+            }
+        }
+        let (execution_id, listener, output, status, exit_code) =
+            attempt.expect("the child was killed before running 5 times in a row");
+        assert_eq!(
+            (status, exit_code),
+            (builderbot_actions::ActionStatus::Completed, Some(0)),
+            "the script did not exit cleanly"
+        );
+
+        let text: String = output.chunks.iter().map(|c| c.chunk.as_str()).collect();
+        assert_eq!(text.len(), "héllo\nerr\n".len());
+        assert_eq!(output.end_offset, text.len() as u64);
+
+        // The payload a viewer gets: the chunks, and the offset they end at.
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(json["endOffset"], serde_json::json!(text.len()));
+        assert_eq!(
+            json["chunks"].as_array().unwrap().len(),
+            output.chunks.len()
+        );
+        assert!(json["chunks"][0]["chunk"].is_string());
+        assert!(json["chunks"][0]["stream"].is_string());
+
+        // Each event says where its chunk starts, in the same bytes, and the
+        // last one ends where the buffer does.
+        let events = listener.output.lock().unwrap().clone();
+        let mut expected = 0;
+        for event in &events {
+            assert_eq!(event.execution_id, execution_id);
+            assert_eq!(event.offset, expected);
+            expected += event.chunk.len() as u64;
+            assert_eq!(
+                serde_json::to_value(event).unwrap()["offset"],
+                serde_json::json!(event.offset)
+            );
+        }
+        assert_eq!(expected, output.end_offset);
+
+        // An execution that is unknown, or whose output is gone, has none.
+        assert!(clear_action_execution_impl(execution_id.clone(), &executor).unwrap());
+        assert!(get_action_output_buffer_impl(execution_id, &executor)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            serde_json::to_value(
+                get_action_output_buffer_impl("unknown".to_string(), &executor).unwrap()
+            )
+            .unwrap(),
+            serde_json::Value::Null
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_a_branch_for_deletion_discards_its_action_output() {
+        let executor = ActionExecutor::new();
+        let registry = ActionRegistry::new();
+        let deleted = start_branch_action(&executor, &registry, "deleted-branch").await;
+        let moved = start_branch_action(&executor, &registry, "moved-branch").await;
+
+        stop_and_discard_actions_for_branches(&executor, &registry, &["deleted-branch"]);
+        stop_actions_for_branches(&executor, &registry, &["moved-branch"]);
+        assert!(executor.wait_for_executions(
+            &[deleted.clone(), moved.clone()],
+            std::time::Duration::from_secs(60)
+        ));
+
+        // A deleted branch's output is gone the moment its action exits. A
+        // branch that lives on keeps it, so its card can still show it.
+        assert!(executor.get_buffered_output(&deleted).is_none());
+        assert!(executor.get_buffered_output(&moved).is_some());
     }
 
     #[test]

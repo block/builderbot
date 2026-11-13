@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 describe('ActionRunner', () => {
   let getRunningBranchActions: ReturnType<typeof vi.fn>;
   let getRunPhase: ReturnType<typeof vi.fn>;
+  let clearActionExecution: ReturnType<typeof vi.fn>;
+  /** The runner's action_status handler, once it has subscribed. */
+  let emitStatus: (payload: Record<string, unknown>) => void;
 
   beforeEach(() => {
     vi.resetModules();
@@ -13,21 +16,29 @@ describe('ActionRunner', () => {
 
     getRunningBranchActions = vi.fn();
     getRunPhase = vi.fn();
+    clearActionExecution = vi.fn().mockResolvedValue(true);
+    emitStatus = () => {
+      throw new Error('the runner has not subscribed');
+    };
     vi.doMock('./actions', () => ({
       ACTION_TYPES: ['run', 'prerun', 'build', 'test', 'format', 'check', 'cleanUp'],
       getRunningBranchActions,
       getRunPhase,
       stopBranchAction: vi.fn(),
-      clearActionExecution: vi.fn(),
+      clearActionExecution,
     }));
     vi.doMock('../../services/branchEventService', () => ({
-      onBranchActionStatus: vi.fn(() => () => {}),
+      onBranchActionStatus: vi.fn((_scopeId: string, handler: typeof emitStatus) => {
+        emitStatus = handler;
+        return () => {};
+      }),
       onBranchRunPhaseChanged: vi.fn(() => () => {}),
     }));
     vi.doMock('svelte-sonner', () => ({ toast: { error: vi.fn() } }));
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.doUnmock('./actions');
     vi.doUnmock('../../services/branchEventService');
@@ -195,6 +206,201 @@ describe('ActionRunner', () => {
       actionId: 'action-1',
       actionName: 'Dev',
       isStopping: false,
+    });
+  });
+
+  describe('buffered output of finished executions', () => {
+    /** How long a finished pill stays, fade included. */
+    const COMPLETED_PILL_MS = 2000 + 300;
+    const FAILED_PILL_MS = 3000 + 300;
+
+    function status(executionId: string, value: string, actionId = `action-${executionId}`) {
+      return {
+        executionId,
+        branchId: 'repo:block/goose',
+        actionId,
+        actionName: executionId,
+        actionType: 'test',
+        status: value,
+        exitCode: value === 'completed' ? 0 : value === 'failed' ? 1 : undefined,
+        startedAt: 1,
+        completedAt: value === 'running' ? undefined : 2,
+      };
+    }
+
+    /** A subscribed runner that has seen `executionId` start. */
+    async function runnerWithRunning(executionId: string, opts: Record<string, unknown> = {}) {
+      vi.useFakeTimers();
+      const runner = await newRunner(opts);
+      runner.subscribe();
+      emitStatus(status(executionId, 'running'));
+      return runner;
+    }
+
+    it('frees the output when the pill is dropped, and not before', async () => {
+      const runner = await runnerWithRunning('execution-1');
+
+      emitStatus(status('execution-1', 'completed'));
+      vi.advanceTimersByTime(COMPLETED_PILL_MS - 1);
+      // The pill is still there to be clicked, so the output must be too.
+      expect(runner.runningActions).toHaveLength(1);
+      expect(clearActionExecution).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(runner.runningActions).toHaveLength(0);
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+      expect(clearActionExecution).toHaveBeenCalledWith('execution-1');
+    });
+
+    it('frees the output of failed and stopped executions on their longer schedule', async () => {
+      const runner = await runnerWithRunning('execution-failed');
+      emitStatus(status('execution-stopped', 'running'));
+
+      emitStatus(status('execution-failed', 'failed'));
+      emitStatus(status('execution-stopped', 'stopped'));
+      vi.advanceTimersByTime(FAILED_PILL_MS - 1);
+      expect(clearActionExecution).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(runner.runningActions).toHaveLength(0);
+      expect(clearActionExecution.mock.calls.map(([id]) => id).sort()).toEqual([
+        'execution-failed',
+        'execution-stopped',
+      ]);
+    });
+
+    it('leaves the output of a running execution alone', async () => {
+      const runner = await runnerWithRunning('execution-1');
+      runner.showOutput(runner.runningActions[0]);
+      runner.closeOutputModal();
+      vi.advanceTimersByTime(60_000);
+
+      expect(runner.runningActions).toHaveLength(1);
+      expect(clearActionExecution).not.toHaveBeenCalled();
+    });
+
+    it('ignores the end of an execution it never listed', async () => {
+      await runnerWithRunning('execution-1');
+      emitStatus(status('execution-unknown', 'completed'));
+      vi.advanceTimersByTime(60_000);
+
+      expect(clearActionExecution).not.toHaveBeenCalled();
+    });
+
+    it('keeps the output while the modal is showing it, and frees it on close', async () => {
+      const runner = await runnerWithRunning('execution-1');
+      runner.showOutput(runner.runningActions[0]);
+
+      emitStatus(status('execution-1', 'completed'));
+      vi.advanceTimersByTime(COMPLETED_PILL_MS + 60_000);
+      // The pill has gone, but the modal is still on this execution.
+      expect(runner.runningActions).toHaveLength(0);
+      expect(clearActionExecution).not.toHaveBeenCalled();
+
+      runner.closeOutputModal();
+      expect(runner.outputModal).toBeNull();
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+      expect(clearActionExecution).toHaveBeenCalledWith('execution-1');
+    });
+
+    it("keeps the output when the modal opens in the pill's last moments", async () => {
+      const runner = await runnerWithRunning('execution-1');
+
+      emitStatus(status('execution-1', 'completed'));
+      vi.advanceTimersByTime(COMPLETED_PILL_MS - 1);
+      runner.showOutput(runner.runningActions[0]);
+      vi.advanceTimersByTime(1);
+
+      expect(runner.runningActions).toHaveLength(0);
+      expect(clearActionExecution).not.toHaveBeenCalled();
+      runner.closeOutputModal();
+      expect(clearActionExecution).toHaveBeenCalledWith('execution-1');
+    });
+
+    it('frees the output when the modal moves on to another execution', async () => {
+      const runner = await runnerWithRunning('execution-1');
+      emitStatus(status('execution-2', 'running'));
+      runner.showOutput(runner.runningActions[0]);
+
+      emitStatus(status('execution-1', 'completed'));
+      vi.advanceTimersByTime(COMPLETED_PILL_MS);
+      expect(clearActionExecution).not.toHaveBeenCalled();
+
+      runner.showOutput(runner.runningActions[0]);
+      expect(runner.outputModal?.executionId).toBe('execution-2');
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+      expect(clearActionExecution).toHaveBeenCalledWith('execution-1');
+
+      // Closing the modal on the other, running, execution frees nothing more.
+      runner.closeOutputModal();
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not free the output again when the modal is closed a second time', async () => {
+      const runner = await runnerWithRunning('execution-1');
+      runner.showOutput(runner.runningActions[0]);
+      emitStatus(status('execution-1', 'completed'));
+      vi.advanceTimersByTime(COMPLETED_PILL_MS);
+
+      runner.closeOutputModal();
+      runner.closeOutputModal();
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('frees a finished run once when its action is run again before the pill goes', async () => {
+      const action = { id: 'action-1', name: 'Test' };
+      const run = vi.fn().mockResolvedValue('execution-2');
+      const runner = await runnerWithRunning('execution-1', { run });
+      emitStatus(status('execution-1', 'completed', 'action-1'));
+      // The first run started under its own action id; give it this one.
+      runner.runningActions[0].actionId = 'action-1';
+
+      await runner.runAction(action as never);
+      expect(runner.runningActions).toHaveLength(0);
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+      expect(clearActionExecution).toHaveBeenCalledWith('execution-1');
+
+      // The first run's pill timers still fire, with nothing left to do.
+      vi.advanceTimersByTime(FAILED_PILL_MS);
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a finished run the modal is showing until Run Again has replaced it', async () => {
+      const action = { id: 'action-1', name: 'Test' };
+      let started: (executionId: string) => void = () => {};
+      const run = vi.fn(() => new Promise<string>((resolve) => void (started = resolve)));
+      const runner = await runnerWithRunning('execution-1', {
+        loadActions: async () => [action],
+        run,
+      });
+      await runner.loadActions();
+      runner.runningActions[0].actionId = 'action-1';
+      runner.showOutput(runner.runningActions[0]);
+      emitStatus(status('execution-1', 'failed', 'action-1'));
+
+      // Run Again drops the finished run from the list while the modal is
+      // still showing its output, which is kept until the new run is up.
+      const rerun = runner.runAgain();
+      expect(runner.runningActions).toHaveLength(0);
+      expect(clearActionExecution).not.toHaveBeenCalled();
+
+      started('execution-2');
+      await rerun;
+      expect(runner.outputModal?.executionId).toBe('execution-2');
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
+      expect(clearActionExecution).toHaveBeenCalledWith('execution-1');
+    });
+
+    it('survives a clear that fails', async () => {
+      clearActionExecution.mockRejectedValue(new Error('IPC unavailable'));
+      const runner = await runnerWithRunning('execution-1');
+
+      emitStatus(status('execution-1', 'completed'));
+      vi.advanceTimersByTime(COMPLETED_PILL_MS);
+      await vi.runAllTimersAsync();
+
+      expect(runner.runningActions).toHaveLength(0);
+      expect(clearActionExecution).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -101,6 +101,8 @@ export function createOutputFollower(opts: OutputFollowerOptions): OutputFollowe
    */
   let shownEnd: number | null = null;
   let fetching = false;
+  /** The last snapshot asked for could not be taken, and none has been since. */
+  let lastSnapshotFailed = false;
   /** Another snapshot is wanted once the one in flight has landed. */
   let fetchAgain = false;
   /** Events that arrived while a snapshot was in flight, in order. */
@@ -135,6 +137,7 @@ export function createOutputFollower(opts: OutputFollowerOptions): OutputFollowe
       return;
     }
     fetching = true;
+    lastSnapshotFailed = false;
     void takeSnapshot();
   }
 
@@ -159,8 +162,10 @@ export function createOutputFollower(opts: OutputFollowerOptions): OutputFollowe
 
     if (failure) {
       // Without a snapshot the held events have nothing to continue. The
-      // next sync, or the next event that does not fit, tries again.
+      // next sync tries again, and so does the next event that has nothing
+      // to continue or does not fit what is shown.
       dropHeld();
+      lastSnapshotFailed = true;
       opts.onError(failure.error);
       return;
     }
@@ -190,9 +195,16 @@ export function createOutputFollower(opts: OutputFollowerOptions): OutputFollowe
       hold(event);
       return;
     }
-    // Nothing shown and no snapshot on its way: the event has nothing to
-    // continue, and the snapshot that is eventually taken will hold it.
-    if (shownEnd === null) return;
+    if (shownEnd === null) {
+      // Nothing shown and no snapshot on its way: the event has nothing to
+      // continue, and the snapshot that is eventually taken will hold it.
+      //
+      // If a snapshot was asked for and failed, nobody else is going to ask
+      // again while the connection stays up, so the event is the cue to. It
+      // is in the buffer already, so the snapshot holds it.
+      if (lastSnapshotFailed) sync();
+      return;
+    }
 
     const end = event.offset + utf8Length(event.chunk);
     if (end <= shownEnd) return;

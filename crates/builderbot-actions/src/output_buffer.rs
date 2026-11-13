@@ -38,8 +38,11 @@ pub(crate) struct OutputBuffer {
     dropped_bytes: u64,
     /// Bytes of output text pushed so far, retained or not.
     pushed_bytes: u64,
-    /// Whether the oldest retained block starts part-way through a line,
-    /// because the block evicted before it did not end on a line break.
+    /// Whether the oldest retained block starts part-way through a line:
+    /// the block evicted before it was output of the same stream and did not
+    /// end on a line break. A block of another stream is the start of a
+    /// separate write, so where the evicted one stopped says nothing about
+    /// it.
     head_is_partial_line: bool,
     max_bytes: usize,
     block_bytes: usize,
@@ -115,7 +118,11 @@ impl OutputBuffer {
             };
             self.retained_bytes -= block_cost(&evicted);
             self.dropped_bytes += evicted.chunk.len() as u64;
-            self.head_is_partial_line = !evicted.chunk.ends_with(['\n', '\r']);
+            self.head_is_partial_line = !evicted.chunk.ends_with(['\n', '\r'])
+                && self
+                    .blocks
+                    .front()
+                    .is_some_and(|head| head.stream == evicted.stream);
         }
     }
 
@@ -424,6 +431,31 @@ mod tests {
         // Nothing beyond the evicted blocks is skipped.
         assert_eq!(dropped, buffer.dropped_bytes);
         assert!(retained.starts_with("line "));
+    }
+
+    #[test]
+    fn a_line_of_another_stream_at_the_cut_is_kept_whole() {
+        // Separate pipes, as a remote action has: stdout is cut off mid-line
+        // by a full pipe, and stderr then writes whole lines of its own.
+        let max_bytes = 2 * 1024;
+        let mut buffer = OutputBuffer::new(max_bytes);
+        let block_bytes = buffer.block_bytes;
+        buffer.push("stdout", &"o".repeat(block_bytes), 0);
+        let mut written = String::new();
+        for line in 0..5 {
+            let text = format!("error {line} {}\n", "e".repeat(block_bytes / 2));
+            buffer.push("stderr", &text, 0);
+            written.push_str(&text);
+        }
+        // Only the stdout block has gone, and it did not end on a line break.
+        assert_eq!(buffer.dropped_bytes, block_bytes as u64);
+
+        let chunks = buffer.snapshot();
+        // The stderr line that now comes first was written whole, so all of
+        // it is shown, and the notice counts the stdout block alone.
+        assert_eq!(chunks[0].chunk, truncation_notice(block_bytes as u64));
+        assert_eq!(text_of(&chunks[1..]), written);
+        assert!(chunks[1..].iter().all(|c| c.stream == "stderr"));
     }
 
     #[test]

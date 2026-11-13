@@ -1579,11 +1579,13 @@ mod tests {
     }
 
     /// Collects the `action_output` payload each output event becomes, and
-    /// says when the execution has reported its terminal status.
+    /// passes on the terminal status and exit code the execution reports.
     #[cfg(unix)]
     struct RecordOutput {
         output: std::sync::Mutex<Vec<crate::actions::events::ActionOutputEvent>>,
-        finished: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+        finished: std::sync::Mutex<
+            std::sync::mpsc::Sender<(builderbot_actions::ActionStatus, Option<i32>)>,
+        >,
     }
 
     #[cfg(unix)]
@@ -1607,8 +1609,10 @@ mod tests {
                         stream,
                         offset,
                     }),
-                builderbot_actions::ExecutionEvent::StatusChanged { .. } => {
-                    let _ = self.finished.lock().unwrap().send(());
+                builderbot_actions::ExecutionEvent::StatusChanged {
+                    status, exit_code, ..
+                } => {
+                    let _ = self.finished.lock().unwrap().send((status, exit_code));
                 }
                 builderbot_actions::ExecutionEvent::Started { .. } => {}
             }
@@ -1621,7 +1625,10 @@ mod tests {
         let executor = ActionExecutor::new();
 
         // A freshly spawned child is occasionally killed before it runs (see
-        // the executor's tests), so start again if nothing was written.
+        // the executor's tests): it fails without an exit code, having
+        // written nothing. Start again on exactly that. A script that ran and
+        // whose output is missing is what this test is here to catch, so it
+        // must not be retried away.
         let mut attempt = None;
         for _ in 0..5 {
             let (finished_tx, finished) = std::sync::mpsc::channel();
@@ -1641,18 +1648,28 @@ mod tests {
                 .await
                 .unwrap();
             // The terminal status follows all of the output.
-            finished
+            let (status, exit_code) = finished
                 .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("the execution did not finish");
             let output = get_action_output_buffer_impl(execution_id.clone(), &executor)
                 .unwrap()
                 .expect("a finished execution keeps its output");
-            if output.end_offset > 0 {
-                attempt = Some((execution_id, listener, output));
+            let killed_at_birth = status == builderbot_actions::ActionStatus::Failed
+                && exit_code.is_none()
+                && output.end_offset == 0
+                && listener.output.lock().unwrap().is_empty();
+            if !killed_at_birth {
+                attempt = Some((execution_id, listener, output, status, exit_code));
                 break;
             }
         }
-        let (execution_id, listener, output) = attempt.expect("the script never ran");
+        let (execution_id, listener, output, status, exit_code) =
+            attempt.expect("the child was killed before running 5 times in a row");
+        assert_eq!(
+            (status, exit_code),
+            (builderbot_actions::ActionStatus::Completed, Some(0)),
+            "the script did not exit cleanly"
+        );
 
         let text: String = output.chunks.iter().map(|c| c.chunk.as_str()).collect();
         assert_eq!(text.len(), "héllo\nerr\n".len());

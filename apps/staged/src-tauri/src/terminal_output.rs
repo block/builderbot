@@ -51,6 +51,10 @@ impl TerminalOutputProcessor {
     /// A processor that retains only its most recent lines: at most
     /// `max_lines` finalized lines holding at most `max_bytes` of text. The
     /// in-progress line stops growing at `max_bytes` too, until it ends.
+    ///
+    /// The newest finalized line always stays, so neither bound is ever
+    /// below one line. A line can end a few bytes over `max_bytes`, when the
+    /// character that took it there is wider than a byte.
     pub(crate) fn keeping_recent(max_lines: usize, max_bytes: usize) -> Self {
         Self {
             recent: Some(RecentLines {
@@ -199,8 +203,12 @@ impl TerminalOutputProcessor {
         let Some(recent) = self.recent else {
             return;
         };
-        while self.finalized_lines.len() > recent.max_lines
-            || self.finalized_bytes > recent.max_bytes
+        // The line just finalized stays whatever its size. It can be over
+        // the byte bound by itself, by part of a multi-byte character, and
+        // would otherwise evict itself before anything had read it.
+        while self.finalized_lines.len() > 1
+            && (self.finalized_lines.len() > recent.max_lines
+                || self.finalized_bytes > recent.max_bytes)
         {
             let Some(dropped) = self.finalized_lines.pop_front() else {
                 break;
@@ -407,6 +415,30 @@ mod tests {
         processor.process_chunk("\nnext\n");
         assert_eq!(processor.lines_from(0), vec!["next"]);
         assert_eq!(processor.line_count(), 1_002);
+    }
+
+    #[test]
+    fn a_line_a_wide_character_took_past_the_byte_bound_is_kept() {
+        let max_bytes = 100;
+        let mut processor = TerminalOutputProcessor::keeping_recent(usize::MAX, max_bytes);
+        processor.process_chunk("first\n");
+        // One byte short of the bound, then a three-byte character: the line
+        // stops growing two bytes over it.
+        let long = format!("{}€", "x".repeat(max_bytes - 1));
+        processor.process_chunk(&long);
+        processor.process_chunk("more of the same line\n");
+        assert_eq!(long.len(), max_bytes + 2);
+
+        // It is over the bound by itself, and is still there, under its own
+        // number, for whoever reads the lines next.
+        assert_eq!(processor.lines_from(0), vec![long.clone()]);
+        assert_eq!(processor.line_count(), 2);
+        assert_eq!(processor.lines_from(1), vec![long]);
+
+        // It makes way for the next line, as a line of exactly the bound does.
+        processor.process_chunk("next\n");
+        assert_eq!(processor.lines_from(0), vec!["next"]);
+        assert_eq!(processor.line_count(), 3);
     }
 
     #[test]

@@ -160,8 +160,11 @@ impl Default for Limits {
     }
 }
 
-/// Internal state for a running action
+/// Internal state for an execution that has not reported its terminal status
 struct RunningActionState {
+    /// The process to signal. `None` once it has exited: its pid can be
+    /// reused from then on, and there is nothing left to stop. The execution
+    /// stays listed until its last output has been delivered.
     child_pid: Option<u32>,
     output_buffer: SharedOutputBuffer,
     /// Set by `discard_output`: free the output at exit instead of retaining it.
@@ -176,6 +179,10 @@ pub struct ActionExecutor {
     finished: Arc<Mutex<FinishedOutputs>>,
     /// Tracks execution IDs that have been explicitly stopped by the user.
     /// The completion thread checks this to emit `Stopped` instead of `Failed`.
+    ///
+    /// An id is added only while its process is alive, and is taken out when
+    /// that process exits, so nothing stays here. Both happen under `running`,
+    /// which is locked first wherever both are held.
     stopped: Arc<Mutex<HashSet<String>>>,
     limits: Limits,
 }
@@ -340,24 +347,22 @@ impl ActionExecutor {
             let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
             let completed_at = now_timestamp();
 
-            // Check whether this execution was explicitly stopped by the user
+            // Record that the process is gone, and check whether the user
+            // stopped it. Both under `running`, the lock a stop holds while
+            // it decides whether there is a process to stop: a stop that
+            // comes later finds none, and so leaves no mark that nothing
+            // would ever clear.
+            //
+            // The execution stays in `running` until its terminal status is
+            // due. Until then it is still running to anything that asks, as
+            // it is to every viewer that has not been told otherwise.
             let was_stopped = {
-                let mut stopped = stopped_clone.lock().unwrap();
-                stopped.remove(&exec_id)
-            };
-
-            // Remove from running and hand the output buffer to the finished
-            // set. The buffer itself moves: nothing is copied, and the emitter
-            // keeps appending to the same one.
-            {
                 let mut running = running_clone.lock().unwrap();
-                if let Some(state) = running.remove(&exec_id) {
-                    if !state.discard_output {
-                        let mut finished = finished_clone.lock().unwrap();
-                        finished.insert(exec_id.clone(), state.output_buffer);
-                    }
+                if let Some(state) = running.get_mut(&exec_id) {
+                    state.child_pid = None;
                 }
-            }
+                stopped_clone.lock().unwrap().remove(&exec_id)
+            };
 
             // The process has exited, but the last of its output may still be
             // unread, or read and waiting in a batch. Wait for the readers,
@@ -375,6 +380,19 @@ impl ActionExecutor {
             output.flush_by(Instant::now() + reader_drain_timeout);
             // The readers keep the emitter alive for as long as they run.
             drop(output);
+
+            // Remove from running and hand the output buffer to the finished
+            // set. The buffer itself moves: nothing is copied, and the emitter
+            // keeps appending to the same one.
+            {
+                let mut running = running_clone.lock().unwrap();
+                if let Some(state) = running.remove(&exec_id) {
+                    if !state.discard_output {
+                        let mut finished = finished_clone.lock().unwrap();
+                        finished.insert(exec_id.clone(), state.output_buffer);
+                    }
+                }
+            }
 
             let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
 
@@ -617,28 +635,37 @@ impl ActionExecutor {
 
     /// Stop a running action by execution ID.
     ///
-    /// Marks the execution as stopped and sends SIGTERM to the entire process
-    /// group. The completion thread will see the stopped flag and emit a
-    /// `Stopped` status event once the process actually exits.
+    /// Marks the execution as stopped and hangs up its process group. The
+    /// completion thread will see the stopped flag and emit a `Stopped` status
+    /// event once the process actually exits.
+    ///
+    /// Does nothing for an execution whose process has already exited, or
+    /// that is unknown: it ends, or ended, with the status it earned.
     pub fn stop(&self, execution_id: &str) -> Result<()> {
         self.stop_with_options(execution_id, StopOptions::default())
     }
 
     /// Stop a running action with configurable shutdown timing.
     pub fn stop_with_options(&self, execution_id: &str, options: StopOptions) -> Result<()> {
-        // Mark as stopped BEFORE sending the signal so the completion thread
-        // knows this was an intentional stop (not a crash/failure).
-        {
-            let mut stopped = self.stopped.lock().unwrap();
-            stopped.insert(execution_id.to_string());
-        }
-
         // Read the PID but do NOT remove from the running map. The completion
         // thread needs the entry to move the output buffer to the finished set
         // and to emit the proper StatusChanged event.
+        //
+        // Mark as stopped BEFORE sending the signal so the completion thread
+        // knows this was an intentional stop (not a crash/failure), and only
+        // when there is a process to signal. The completion thread clears the
+        // mark when the process exits, under this same lock, so a mark made
+        // any later would never be cleared: not for an execution that is
+        // waiting to deliver the last of its output, and not for one that has
+        // finished.
         let pid = {
             let running = self.running.lock().unwrap();
-            running.get(execution_id).and_then(|state| state.child_pid)
+            let pid = running.get(execution_id).and_then(|state| state.child_pid);
+            if pid.is_some() {
+                let mut stopped = self.stopped.lock().unwrap();
+                stopped.insert(execution_id.to_string());
+            }
+            pid
         };
 
         if let Some(pid) = pid {
@@ -696,6 +723,9 @@ impl ActionExecutor {
 
     /// Wait until all listed executions are no longer running, or until the timeout elapses.
     ///
+    /// An execution is running until its terminal status is due, which is
+    /// once its process has exited and its last output has been delivered.
+    ///
     /// Returns `true` if every execution completed before the timeout.
     pub fn wait_for_executions(&self, execution_ids: &[String], timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
@@ -750,13 +780,15 @@ impl ActionExecutor {
         })
     }
 
-    /// Check if an action is currently running
+    /// Check if an action is currently running: started, and its terminal
+    /// status not yet due. That covers the moment after its process exits in
+    /// which the last of its output is still being delivered.
     pub fn is_running(&self, execution_id: &str) -> bool {
         let running = self.running.lock().unwrap();
         running.contains_key(execution_id)
     }
 
-    /// Get all running execution IDs
+    /// Get all running execution IDs, as [`Self::is_running`] counts them
     pub fn get_running_ids(&self) -> Vec<String> {
         let running = self.running.lock().unwrap();
         running.keys().cloned().collect()

@@ -312,14 +312,58 @@ describe('createOutputFollower', () => {
     expect(h.view.errors).toHaveLength(1);
     expect(h.view.text).toBe('');
 
-    // Events have nothing to continue until a snapshot is shown.
-    h.follower.handleEvent(be.write('three\n'));
-    expect(h.view.text).toBe('');
+    // Nothing else asks for one in the meantime.
     expect(h.inFlight).toBe(0);
+    be.write('three\n');
 
     h.follower.sync();
     await h.land(be.snapshot());
     expect(h.view.text).toBe('one\ntwo\nthree\n');
+  });
+
+  it('retries a failed first snapshot on the next event', async () => {
+    const be = backend();
+    const h = harness();
+    be.write('one\n');
+
+    h.follower.sync();
+    await h.fail(new Error('IPC unavailable'));
+    expect(h.view.errors).toHaveLength(1);
+    expect(h.inFlight).toBe(0);
+
+    // Nothing is shown for the event to continue, and nobody is going to
+    // call sync again: the event itself asks for the snapshot.
+    h.follower.handleEvent(be.write('two\n'));
+    expect(h.inFlight).toBe(1);
+    // While that one is in flight, later events are held, not more requests.
+    h.follower.handleEvent(be.write('three\n'));
+    expect(h.inFlight).toBe(1);
+
+    await h.land(be.snapshot());
+    expect(h.view).toMatchObject({ text: 'one\ntwo\nthree\n', snapshots: 1, appended: 0 });
+    expect(h.view.errors).toHaveLength(1);
+
+    // From here on it follows as if the first snapshot had worked.
+    h.follower.handleEvent(be.write('four\n'));
+    expect(h.view).toMatchObject({ text: 'one\ntwo\nthree\nfour\n', appended: 1 });
+    expect(h.inFlight).toBe(0);
+  });
+
+  it('keeps retrying on events for as long as the first snapshot fails', async () => {
+    const be = backend();
+    const h = harness();
+    h.follower.sync();
+    await h.fail(new Error('IPC unavailable'));
+
+    h.follower.handleEvent(be.write('one\n'));
+    await h.fail(new Error('IPC still unavailable'));
+    expect(h.view.errors).toHaveLength(2);
+    expect(h.inFlight).toBe(0);
+
+    h.follower.handleEvent(be.write('two\n'));
+    expect(h.inFlight).toBe(1);
+    await h.land(be.snapshot());
+    expect(h.view.text).toBe('one\ntwo\n');
   });
 
   it('retries after a failed resync when the next event does not fit', async () => {

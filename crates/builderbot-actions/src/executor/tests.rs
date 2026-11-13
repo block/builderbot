@@ -707,9 +707,14 @@ async fn a_batch_still_pending_at_exit_is_delivered_before_the_status() {
     // The interval never elapses, so "first" is still waiting in its batch
     // when the shell exits. The readers then time out, because the background
     // job holds the pipes open.
+    //
+    // This test has to meet the timeout, not just outlast it: "first" must be
+    // read before the wait for the readers gives up, and delivered before the
+    // flush does. The wait always runs its full length here, so the timeout
+    // is test time; it is long enough that a starved machine still makes it.
     let executor = ActionExecutor::with_limits(Limits {
         emit_interval: WAIT,
-        reader_drain_timeout: Duration::from_secs(2),
+        reader_drain_timeout: Duration::from_secs(10),
         ..Limits::default()
     });
     let gate = Gate::closed();
@@ -736,4 +741,121 @@ async fn a_batch_still_pending_at_exit_is_delivered_before_the_status() {
         other => panic!("unexpected event {other:?}"),
     }
     assert_eq!(buffered_text(&executor, &id).as_deref(), Some("firstlate"));
+}
+
+// =============================================================================
+// Between the process exiting and its terminal status
+// =============================================================================
+
+/// Start a script whose shell prints "first" and exits at once, leaving a
+/// background job that holds the output open until `gate` opens and then
+/// prints "late".
+///
+/// Returns once the executor has noticed the shell's exit. The execution is
+/// then waiting for the rest of its output, and cannot report its terminal
+/// status before the gate opens: the executor must be one whose wait for the
+/// readers does not run out.
+async fn run_sh_until_exited_with_output_open(
+    executor: &ActionExecutor,
+    gate: &Gate,
+) -> (String, Receiver<ExecutionEvent>) {
+    let script = format!("printf first; ({}; printf late) &", gate.wait());
+    let (id, events) = run_sh_until_output(executor, &script, "first").await;
+    wait_until("the shell's exit to be noticed", || {
+        let running = executor.running.lock().unwrap();
+        running
+            .get(&id)
+            .is_none_or(|state| state.child_pid.is_none())
+    });
+    (id, events)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_execution_is_running_until_its_terminal_status_is_due() {
+    let executor = ActionExecutor::with_limits(patient_limits());
+    let gate = Gate::closed();
+    let (id, events) = run_sh_until_exited_with_output_open(&executor, &gate).await;
+
+    // The shell has exited, but nobody has been told so. Whoever asks now is
+    // still shown the execution, and will get its terminal status.
+    assert!(executor.is_running(&id));
+    assert_eq!(executor.get_running_ids(), vec![id.clone()]);
+    assert!(!executor.wait_for_executions(std::slice::from_ref(&id), Duration::from_millis(50)));
+    // Its output is read as a running execution's is, and is not yet
+    // retained as a finished one's.
+    assert_eq!(buffered_text(&executor, &id).as_deref(), Some("first"));
+    assert!(executor.finished.lock().unwrap().get(&id).is_none());
+    assert!(!executor.clear_execution(&id));
+
+    gate.open();
+    let outcome = wait_for_finish(&events);
+
+    // The status follows the last of the output, and by the time it is
+    // reported the execution is finished to everything that asks.
+    outcome.assert_completed();
+    assert_eq!(outcome.streamed_text(), "firstlate");
+    assert!(!executor.is_running(&id));
+    assert!(executor.get_running_ids().is_empty());
+    assert!(executor.wait_for_executions(std::slice::from_ref(&id), Duration::ZERO));
+    assert_eq!(buffered_text(&executor, &id).as_deref(), Some("firstlate"));
+    assert!(executor.finished.lock().unwrap().get(&id).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_after_the_process_has_exited_leaves_nothing_behind() {
+    let executor = ActionExecutor::with_limits(patient_limits());
+    let gate = Gate::closed();
+    let (id, events) = run_sh_until_exited_with_output_open(&executor, &gate).await;
+
+    // The execution still shows as running, so it can still be stopped, but
+    // there is no process left to stop. The mark a stop leaves is cleared
+    // when the process exits, which has already happened, so none is left.
+    assert!(executor.is_running(&id));
+    executor.stop(&id).unwrap();
+    assert!(executor.stopped.lock().unwrap().is_empty());
+
+    gate.open();
+    let outcome = wait_for_finish(&events);
+
+    // It reports how it really ended. The job that outlived the shell was not
+    // signalled either: it ran on and wrote its line.
+    outcome.assert_completed();
+    assert_eq!(outcome.streamed_text(), "firstlate");
+    assert!(executor.stopped.lock().unwrap().is_empty());
+
+    // Nor does stopping a finished execution, or one that never was, leave a
+    // mark.
+    executor.stop(&id).unwrap();
+    executor.stop("no-such-execution").unwrap();
+    assert!(executor.stopped.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_execution_reports_stopped_and_clears_its_mark() {
+    let executor = ActionExecutor::with_limits(patient_limits());
+    let gate = Gate::closed();
+    let (id, events) = run_sh_until_output(
+        &executor,
+        &format!("printf start; {}; printf end", gate.wait()),
+        "start",
+    )
+    .await;
+
+    // No escalation to SIGKILL: the hangup ends a plain `sh`, and a timer
+    // must not outlive the test holding a pid that may be reused.
+    executor
+        .stop_with_options(
+            &id,
+            StopOptions {
+                force_kill_after: None,
+            },
+        )
+        .unwrap();
+    let outcome = wait_for_finish(&events);
+
+    assert_eq!(outcome.status, ActionStatus::Stopped);
+    assert_eq!(outcome.exit_code, None);
+    assert_eq!(outcome.streamed_text(), "start");
+    assert!(executor.stopped.lock().unwrap().is_empty());
+    assert!(!executor.is_running(&id));
 }

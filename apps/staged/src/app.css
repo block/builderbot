@@ -269,13 +269,33 @@ svg.lucide:not(.animate-spin),
   transform: translateZ(0);
 }
 
-/* ── In-content search highlights ── */
-mark.search-match {
+/* ── Search match highlights ── */
+/* Longhands on purpose: WebKit before Safari 26.2 rejects a thickness inside
+   the `text-decoration` shorthand, and a rejected `var()` declaration drops
+   the whole underline, not just its thickness. */
+mark.search-match,
+mark.label-match {
   background-color: transparent;
-  color: inherit;
-  text-decoration: underline 2px var(--search-match-accent);
-  text-underline-offset: 3px;
+  text-decoration-line: underline;
+  text-decoration-color: var(--search-match-accent);
   text-decoration-skip-ink: none;
+}
+
+/* In-content find: notes and session chat. */
+mark.search-match {
+  color: inherit;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+/* A match inside a one-line label: project search rows and the command
+   palette. No fill, the match in the primary text colour over a warm line,
+   which lifts it out of muted text. The offset keeps the line inside the
+   label's line box, which clips. */
+mark.label-match {
+  color: var(--text-primary);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 1.5px;
 }
 
 mark.search-match-current {

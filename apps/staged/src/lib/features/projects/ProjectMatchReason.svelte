@@ -57,7 +57,7 @@
   <Icon size={iconSize} />
   <span class="sr-only">{KIND_NAMES[reason.kind]}:</span>
   <span class="match-label"
-    >{#each segments as segment}{#if segment.match}<mark>{segment.text}</mark
+    >{#each segments as segment}{#if segment.match}<mark class="label-match">{segment.text}</mark
         >{:else}{segment.text}{/if}{/each}</span
   >
   {#if reason.more > 0}
@@ -82,16 +82,6 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  /* No fill: the match reads in the primary text colour over a warm line.
-     The offset keeps the line inside the label's 14px line box, which clips. */
-  .match-label mark {
-    background-color: transparent;
-    color: var(--text-primary);
-    text-decoration: underline 1.5px var(--search-match-accent);
-    text-underline-offset: 1.5px;
-    text-decoration-skip-ink: none;
   }
 
   .match-more {

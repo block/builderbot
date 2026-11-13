@@ -3352,10 +3352,15 @@
   }
 
   /* Search result highlighting */
+  /* Longhands on purpose: WebKit before Safari 26.2 rejects a thickness inside
+     the shorthand and would drop the whole underline. The `em` offset keeps
+     the line inside the row at any `--code-font-size`. */
   .search-match,
   .search-current {
-    text-decoration: underline 2px var(--search-match-accent, #f2c744);
-    text-underline-offset: 3px;
+    text-decoration-line: underline;
+    text-decoration-thickness: 2px;
+    text-decoration-color: var(--search-match-accent, #f2c744);
+    text-underline-offset: 0.2em;
     text-decoration-skip-ink: none;
   }
 

@@ -91,11 +91,12 @@
 
   /**
    * Backspace with nothing left in a gap removes the quote below it: the gap
-   * is that quote's leading text. Only an unanswered quote goes, though, as
-   * there is no undo: one with a reply stays, and the caret moves to the end
-   * of the reply, the way Backspace at the start of a block joins the one
-   * above. A held key's repeats do neither, so holding Backspace to clear
-   * the gap stops once it's empty.
+   * is that quote's leading text. Only an unanswered quote goes, though: a
+   * key meant to rub out text shouldn't take a written reply with it, so one
+   * with a reply stays, and the caret moves to the end of the reply, the way
+   * Backspace at the start of a block joins the one above. A held key's
+   * repeats do neither, so holding Backspace to clear the gap stops once
+   * it's empty.
    */
   function handleGapKeydown(event: KeyboardEvent, quote: DraftQuote) {
     if (

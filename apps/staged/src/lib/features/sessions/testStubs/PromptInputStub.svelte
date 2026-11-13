@@ -9,9 +9,13 @@
   count it shows as `data-quote-count`, and offers a remove button per quote
   (`data-testid="remove-quote-<id>"`) that calls `onRemoveQuote` as the
   composer's X would, a Send button (`data-testid="composer-send"`) that
-  calls `onSend`, a `focusQuoteReply` that places no caret but records the
-  ids asked for on the input (`data-focused-quotes`), and a `revealQuote`
-  that scrolls nothing but records likewise (`data-revealed-quotes`).
+  calls `onSend`, and a `focusQuoteReply` that places no caret.
+
+  The composer's undo history is stood in for by a stack of the restores
+  `onRemoveQuote` returned: an undo button (`data-testid="undo-remove-quote"`)
+  runs the newest, as the browser's undo would, records on the input whether
+  the pane took it (`data-undo-results`), and the ids of the quotes the pane
+  then reported back in the composer (`data-restored-quotes`).
 -->
 <script lang="ts">
   let {
@@ -32,20 +36,29 @@
     sendControl?: { split: boolean };
     onStartNewSession?: (kind: 'note' | 'commit') => void;
     newSessionDisabled?: boolean;
-    onRemoveQuote?: (id: string) => void;
+    onRemoveQuote?: (id: string) => ((then: () => void) => boolean) | null | void;
     onSend?: () => void;
   } = $props();
 
-  /** The composer's caret placement, which the stub lays nothing out for; the asks are recorded. */
-  let focusedQuotes = $state<string[]>([]);
-  export function focusQuoteReply(id: string): boolean {
-    focusedQuotes = [...focusedQuotes, id];
-    return false;
+  /** The removals still to undo, newest last, as the composer's undo history holds them. */
+  let removals: Array<{ id: string; restore: (then: () => void) => boolean }> = [];
+  let undoResults = $state<boolean[]>([]);
+  let restoredQuotes = $state<string[]>([]);
+
+  function removeQuote(id: string) {
+    const restore = onRemoveQuote?.(id);
+    if (restore) removals.push({ id, restore });
   }
-  /** The composer's scroll to a block, likewise recorded. */
-  let revealedQuotes = $state<string[]>([]);
-  export function revealQuote(id: string): boolean {
-    revealedQuotes = [...revealedQuotes, id];
+
+  function undoRemoval() {
+    const removal = removals.pop();
+    if (!removal) return;
+    const restored = removal.restore(() => (restoredQuotes = [...restoredQuotes, removal.id]));
+    undoResults = [...undoResults, restored];
+  }
+
+  /** The composer's caret placement, which the stub lays nothing out for. */
+  export function focusQuoteReply(_id: string): boolean {
     return false;
   }
 </script>
@@ -60,8 +73,8 @@
   data-value={value}
   data-send-split={sendControl?.split}
   data-quote-count={quotes.length}
-  data-focused-quotes={focusedQuotes.join(' ')}
-  data-revealed-quotes={revealedQuotes.join(' ')}
+  data-undo-results={undoResults.join(' ')}
+  data-restored-quotes={restoredQuotes.join(' ')}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
 {#each quotes as quote (quote.id)}
@@ -69,9 +82,10 @@
     type="button"
     aria-label="Remove quote"
     data-testid="remove-quote-{quote.id}"
-    onclick={() => onRemoveQuote?.(quote.id)}
+    onclick={() => removeQuote(quote.id)}
   ></button>
 {/each}
+<button type="button" data-testid="undo-remove-quote" onclick={undoRemoval}>Undo</button>
 <button type="button" data-testid="composer-send" onclick={() => onSend?.()}>Send</button>
 
 {#if sendError}

@@ -1,17 +1,23 @@
-import { flushSync, mount, unmount } from 'svelte';
+import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ChatComposer from './ChatComposer.svelte';
-import type { DraftQuote } from './composerDraft';
+import type { ComposerDraft, DraftQuote } from './composerDraft';
 import { composerSendControl } from './composerSendControl';
+import ComposerDraftHost from './testStubs/ComposerDraftHost.svelte';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
+import {
+  installNativeUndoStack,
+  type NativeUndoStack,
+} from '../../shared/testStubs/nativeUndoStack';
 
 // The composer's field: one box holding the quote blocks, the text between
 // them and the main input, which the user works as one editor. Covered here
 // are the ways the field ties its inputs together — the arrows walking from
 // one into the next, a press on its surface landing the caret in an input,
-// the single placeholder, the keyboard cap on the whole field and the
-// focused input kept in view by the field's own scroll — while the inputs'
-// own behaviour is under ComposerDraftQuotes.component.test.ts.
+// the single placeholder, the keyboard cap on the whole field, the focused
+// input kept in view by the field's own scroll, and a quote's removal taking
+// its place in the browser's undo history with the typing around it — while
+// the inputs' own behaviour is under ComposerDraftQuotes.component.test.ts.
 
 // The on-screen-keyboard cap reads the visible viewport; stand it in with a
 // keyboard up, so the cap is a share of the 400px left.
@@ -210,25 +216,6 @@ describe('ChatComposer field', () => {
       else delete (Range.prototype as Partial<Range>).getClientRects;
     }
   });
-
-  it('scrolls the field to a quote block on request without moving focus', () => {
-    render([quote('a'), quote('b')]);
-    const fieldEl = layOutField();
-    const block = target.querySelector<HTMLElement>('[data-quote-entry="b"] .composer-quote');
-    if (!block) throw new Error('no block');
-    block.getBoundingClientRect = () => rect(320, 380);
-    const ancestors = vi.spyOn(Element.prototype, 'scrollIntoView');
-    const focused = document.activeElement;
-
-    expect(component!.revealQuote('b')).toBe(true);
-    expect(fieldEl.scrollTop).toBe(79);
-    expect(document.activeElement).toBe(focused);
-    expect(ancestors).not.toHaveBeenCalled();
-    // A block that isn't shown is reported, not scrolled to.
-    expect(component!.revealQuote('missing')).toBe(false);
-    expect(fieldEl.scrollTop).toBe(79);
-    ancestors.mockRestore();
-  });
 });
 
 describe('ChatComposer placeholder', () => {
@@ -342,5 +329,219 @@ describe('ChatComposer arrows between inputs', () => {
     // jsdom gives the caret no rect, so the line is unknown and the key is left alone.
     expect(arrow(replyOf('a'), 'ArrowDown').defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(replyOf('a'));
+  });
+});
+
+// Removing a quote is a step on the browser's undo stack, in order with the
+// typing in the field's inputs. jsdom has no such stack; the stand-in walks
+// edits the way a browser does (testStubs/nativeUndoStack.ts), and the host
+// keeps the draft as the pane would.
+describe('ChatComposer quote removal', () => {
+  let stack: NativeUndoStack;
+  let host: ReturnType<typeof mountHost>;
+
+  function mountHost() {
+    return mount(ComposerDraftHost, { target });
+  }
+
+  function renderDraft(draft: ComposerDraft) {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    host = mountHost();
+    component = host;
+    host.setDraft(draft);
+    flushSync();
+  }
+
+  /** Let the composer's own follow-up to a change (the caret, the field's scroll) run. */
+  async function settle() {
+    flushSync();
+    await tick();
+    flushSync();
+  }
+
+  async function pressRemove(id: string) {
+    const button = target.querySelector<HTMLElement>(
+      `[data-quote-entry="${id}"] .composer-quote-remove`
+    );
+    if (!button) throw new Error(`no remove button for ${id}`);
+    button.click();
+    await settle();
+  }
+
+  async function undo() {
+    expect(stack.undo()).toBe(true);
+    await settle();
+  }
+
+  async function redo() {
+    expect(stack.redo()).toBe(true);
+    await settle();
+  }
+
+  function quoteIds(): string[] {
+    return host.draft().quotes.map((q) => q.id);
+  }
+
+  beforeEach(() => {
+    stack = installNativeUndoStack();
+  });
+
+  afterEach(() => {
+    stack.uninstall();
+  });
+
+  it('puts the quote back where it was on undo, and takes it out again on redo', async () => {
+    const draft = {
+      quotes: [quote('a', '', 'first reply'), quote('b', 'lead-in', 'second reply'), quote('c')],
+      text: 'after',
+    };
+    renderDraft(draft);
+
+    await pressRemove('b');
+    // The text before the removed quote joins what follows it.
+    expect(host.draft()).toEqual({
+      quotes: [quote('a', '', 'first reply'), quote('c', 'lead-in')],
+      text: 'after',
+    });
+
+    await undo();
+    expect(host.draft()).toEqual(draft);
+
+    await redo();
+    expect(quoteIds()).toEqual(['a', 'c']);
+    expect(host.removedIds()).toEqual(['b', 'b']);
+
+    await undo();
+    expect(host.draft()).toEqual(draft);
+  });
+
+  it('undoes an unanswered quote removed with Backspace too, with the caret back in its gap', async () => {
+    renderDraft({ quotes: [quote('a', '', 'a reply'), quote('b')], text: '' });
+    focusWithCaret(gapOf('b'));
+
+    gapOf('b').dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true })
+    );
+    await settle();
+    expect(quoteIds()).toEqual(['a']);
+    expect(document.activeElement).toBe(mainInput());
+
+    await undo();
+    expect(quoteIds()).toEqual(['a', 'b']);
+    expect(document.activeElement).toBe(gapOf('b'));
+
+    await redo();
+    expect(quoteIds()).toEqual(['a']);
+    expect(document.activeElement).toBe(mainInput());
+  });
+
+  it('undoes in order with the typing before and after the removal', async () => {
+    renderDraft({ quotes: [quote('a', '', 'a reply')], text: '' });
+
+    stack.type(mainInput(), 'abc');
+    await pressRemove('a');
+    stack.type(mainInput(), 'def');
+    await settle();
+    expect(host.draft()).toEqual({ quotes: [], text: 'abcdef' });
+
+    await undo();
+    expect(host.draft()).toEqual({ quotes: [], text: 'abc' });
+    await undo();
+    expect(host.draft()).toEqual({ quotes: [quote('a', '', 'a reply')], text: 'abc' });
+    await undo();
+    expect(host.draft()).toEqual({ quotes: [quote('a', '', 'a reply')], text: '' });
+
+    await redo();
+    expect(host.draft()).toEqual({ quotes: [quote('a', '', 'a reply')], text: 'abc' });
+    await redo();
+    expect(host.draft()).toEqual({ quotes: [], text: 'abc' });
+    await redo();
+    expect(host.draft()).toEqual({ quotes: [], text: 'abcdef' });
+    // Typing was the browser's own to undo and redo: the quote left once
+    // by hand and once by redo, and nothing else touched it.
+    expect(host.removedIds()).toEqual(['a', 'a']);
+  });
+
+  it('returns the caret to the reply it was taken from', async () => {
+    renderDraft({ quotes: [quote('a', '', 'a reply'), quote('b')], text: '' });
+    focusWithCaret(replyOf('a'));
+
+    await pressRemove('a');
+    // Focus in the removed block moved to the input its text joined.
+    expect(document.activeElement).toBe(gapOf('b'));
+
+    await undo();
+    expect(document.activeElement).toBe(replyOf('a'));
+
+    await redo();
+    expect(document.activeElement).toBe(gapOf('b'));
+  });
+
+  it('leaves a caret that was elsewhere where it is, and scrolls the field to the restored block', async () => {
+    renderDraft({ quotes: [quote('a'), quote('b', '', 'b reply')], text: 'typing here' });
+    const fieldEl = layOutField();
+    // The main input is in the field's view; the block will come back below it.
+    mainInput().getBoundingClientRect = () => rect(210, 240);
+    focusWithCaret(mainInput());
+    await pressRemove('b');
+    expect(document.activeElement).toBe(mainInput());
+
+    stack.undo();
+    flushSync();
+    const block = target.querySelector<HTMLElement>('[data-quote-entry="b"] .composer-quote');
+    if (!block) throw new Error('no block');
+    block.getBoundingClientRect = () => rect(320, 380);
+    await settle();
+
+    expect(document.activeElement).toBe(mainInput());
+    expect(fieldEl.scrollTop).toBe(79);
+  });
+
+  it('leaves the field scrolled where it was as the removal is recorded', async () => {
+    renderDraft({ quotes: [quote('a', '', 'a reply')], text: 'typing here' });
+    const fieldEl = layOutField();
+    mainInput().getBoundingClientRect = () => rect(320, 350);
+    focusWithCaret(mainInput());
+    expect(fieldEl.scrollTop).toBe(49);
+    // Scrolled back up to the quote, the caret still in the main input:
+    // recording borrows focus and hands it back, which is not a move to
+    // follow.
+    fieldEl.scrollTop = 0;
+
+    await pressRemove('a');
+
+    expect(document.activeElement).toBe(mainInput());
+    expect(fieldEl.scrollTop).toBe(0);
+  });
+
+  it('leaves the quote out when the parent refuses the undo, and restores it on a later one', async () => {
+    const draft = { quotes: [quote('a', '', 'a reply')], text: '' };
+    renderDraft(draft);
+    await pressRemove('a');
+
+    host.refuseUndo(true);
+    await undo();
+    expect(quoteIds()).toEqual([]);
+    // Nothing came back, so there is nothing for redo to take out again.
+    await redo();
+    expect(host.removedIds()).toEqual(['a']);
+
+    host.refuseUndo(false);
+    await undo();
+    expect(host.draft()).toEqual(draft);
+  });
+
+  it('records nothing for a removal the parent gives no way back from', async () => {
+    const props = render([quote('a')]);
+    const anchor = target.querySelector<HTMLElement>('.native-undo-anchor');
+    if (!anchor) throw new Error('no undo anchor');
+
+    target.querySelector<HTMLElement>('.composer-quote-remove')!.click();
+    await settle();
+
+    expect(props.onRemoveQuote).toHaveBeenCalledWith('a');
+    expect(anchor.textContent).toBe('');
+    expect(stack.undo()).toBe(false);
   });
 });

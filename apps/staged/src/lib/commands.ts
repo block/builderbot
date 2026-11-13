@@ -65,6 +65,8 @@ import type {
   SessionPoll,
   SessionPollRequest,
   SessionReconcileEvent,
+  StagedctlLinkOutcome,
+  StagedctlShownLink,
   StoreIncompatibility,
   SuggestedRepo,
   ToolCallBody,
@@ -187,6 +189,21 @@ export function listPendingProjectOpens(): Promise<ProjectOpenRequest[]> {
  */
 export function answerProjectOpen(requestId: string, outcome: ProjectOpenAnswer): Promise<void> {
   return invokeCommand('answer_project_open', { requestId, outcome });
+}
+
+/**
+ * Link the app's bundled `stagedctl` into `/usr/local/bin`, or into
+ * `~/.local/bin` when that cannot be written, so a terminal can run it.
+ * Desktop only.
+ *
+ * Nothing already at the path is overwritten: a `conflict` outcome says what
+ * is there. Pass that conflict's `link` and `target` back as `replace` once
+ * the user has seen them and asked for the link to be replaced. Rejects with
+ * a sentence for the user when nothing could be linked, for one when Staged
+ * is running from a location a link should not point at.
+ */
+export function linkStagedctlOnPath(replace?: StagedctlShownLink): Promise<StagedctlLinkOutcome> {
+  return invokeCommand('link_stagedctl_on_path', { replace: replace ?? null });
 }
 
 // =============================================================================

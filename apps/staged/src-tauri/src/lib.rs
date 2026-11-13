@@ -51,6 +51,7 @@ pub mod session_completion;
 pub mod session_queue;
 pub mod session_runner;
 pub mod shell_env;
+pub mod stagedctl_link;
 pub mod store;
 pub mod store_events;
 mod tag_commands;
@@ -2584,6 +2585,8 @@ pub fn run() {
             // stagedctl project open (the window's side of a request)
             project_open::commands::list_pending_project_opens,
             project_open::commands::answer_project_open,
+            // stagedctl on PATH (Settings action)
+            stagedctl_link::commands::link_stagedctl_on_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

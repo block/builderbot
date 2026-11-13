@@ -43,7 +43,8 @@ if ! STAGEDCTL="$(find_stagedctl)"; then
     cat >&2 <<'MESSAGE'
 staged: stagedctl was not found, so no project was opened and Staged was not started.
 It was looked for on PATH, then in /Applications/Staged.app and ~/Applications/Staged.app.
-stagedctl ships inside Staged.app. Install Staged, or link its stagedctl onto PATH:
+stagedctl ships inside Staged.app. Install Staged, then press "Add to PATH" under
+Settings > Connected apps > Command line. Or link it onto PATH by hand:
   ln -s /path/to/Staged.app/Contents/MacOS/stagedctl /usr/local/bin/stagedctl
 MESSAGE
     exit 127

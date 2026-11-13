@@ -19,6 +19,28 @@ without asking again. It lasts thirty days from its last use; the user can
 revoke it any time under Settings ▸ Connected apps, and
 `stagedctl disconnect` forgets and revokes it from this side.
 
+Outside a session, `stagedctl` is on `PATH` only where the user put it:
+
+- A source install (`install.sh`) links `/usr/local/bin/stagedctl` to the
+  copy inside `/Applications/Staged.app`.
+- A release install links nothing. The user presses **Add to PATH** under
+  Settings ▸ Connected apps ▸ Command line, and Staged links the copy
+  inside the running app into `/usr/local/bin`, or into `~/.local/bin`
+  when `/usr/local/bin` cannot be written. It reports anything already at
+  that path instead of overwriting it, tells the user when the directory
+  is not on their `PATH`, and refuses while macOS runs the app from a
+  temporary App Translocation path or from a development build.
+- The fallback is a link made by hand:
+  `ln -s /Applications/Staged.app/Contents/MacOS/stagedctl <a directory on PATH>/stagedctl`.
+  A link, never a copy: `stagedctl` finds the app to start from its own
+  location inside the bundle.
+
+Add to PATH is the user's action in the app's Settings. There is no
+stagedctl verb for it and a session cannot run it; a session does not
+need it, because its own `stagedctl` is already on `PATH`. If the user
+reports `stagedctl: command not found` in their own terminal, point them
+at that Settings action.
+
 ## The boundary for spawned sessions
 
 A spawned session is issued exactly one credential: its own, scoped to its

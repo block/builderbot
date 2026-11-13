@@ -7,6 +7,10 @@
   live credentials at once and refuses its next reconnect. The list follows
   the backend's `control-grants-changed` event (approvals, renewals,
   revocations from either side), so it needs no manual refresh.
+
+  Above the list sits the action that puts stagedctl on the user's PATH
+  (`StagedctlPathSetting`), since a client has to be able to run the CLI
+  before it can ask to connect.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -20,6 +24,7 @@
   import { formatRelativeTime } from '../../shared/relativeTime.svelte';
   import type { ControlGrantSummary } from '../../types';
   import { accessLabel, scopeLabel } from './controlAuthorization.svelte';
+  import StagedctlPathSetting from './StagedctlPathSetting.svelte';
 
   /** Mirrors `GRANTS_CHANGED_EVENT` in `control_server/consent.rs`. */
   const GRANTS_CHANGED_EVENT = 'control-grants-changed';
@@ -100,6 +105,7 @@
   </div>
 
   <div class="panel-body">
+    <StagedctlPathSetting />
     {#if error}
       <div role="alert" class="text-destructive text-sm">{error}</div>
     {/if}

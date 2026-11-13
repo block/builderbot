@@ -1128,6 +1128,15 @@ pub(crate) async fn dispatch(
         }
 
         // =====================================================================
+        // stagedctl on PATH (desktop only)
+        // =====================================================================
+        // Links the app's bundled CLI into a directory on the user's PATH. It
+        // is the user's own gesture in Settings: a browser client, which may
+        // be on another machine, must not change what their shell runs. It is
+        // outside `ALLOWED_COMMANDS` too, so no stagedctl caller reaches it.
+        "link_stagedctl_on_path" => Err(format!("{command} is not available in web mode")),
+
+        // =====================================================================
         // Projects
         // =====================================================================
         "list_projects" => {

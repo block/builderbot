@@ -104,14 +104,26 @@ It passes its arguments to `stagedctl project open` unchanged, so the output and
 #### Getting `stagedctl` on your PATH
 
 - **Development install from source.** The install script links `/usr/local/bin/stagedctl` to the copy inside `/Applications/Staged.app` and installs `staged` beside it.
-- **Release DMG.** Nothing is put on your PATH. Link the bundled CLI yourself, with `sudo` if `/usr/local/bin` is not writable:
+- **Release DMG.** Installing puts nothing on your PATH. In Staged, open **Settings -> Connected apps** and press **Add to PATH** under **Command line**.
+  - **Where the link goes.** Staged links `/usr/local/bin/stagedctl` to the copy inside the app you are running. When `/usr/local/bin` cannot be written without an administrator password, it links `~/.local/bin/stagedctl` instead. Staged never asks for a password.
+  - **If the directory is not on your PATH.** Staged says so after linking. For zsh, add this line to `~/.zshrc` and open a new terminal:
+
+    ```bash
+    export PATH="$HOME/.local/bin:$PATH"
+    ```
+
+  - **Nothing is overwritten unseen.** If a `stagedctl` is already at that path and points at another copy of Staged, the app shows where it points and replaces it only when you press **Replace link**. A file that is not a link is left alone: move or delete it, then press **Add to PATH** again.
+  - **When it is refused.** When a downloaded app is opened before it has been moved, macOS runs it from a temporary, read-only location (App Translocation). A link to that location would stop working, so Staged refuses. Move Staged to your Applications folder, open it from there, and try again. A development build is refused too, because it has no app bundle to link to.
+  - **Pressing it again is safe.** A link that is already right is reported and left as it is.
+
+- **By hand.** The Settings action is the supported route. To make the link yourself instead, for example to put it in `/usr/local/bin` on a Mac where that needs `sudo`:
 
   ```bash
-  mkdir -p /usr/local/bin
-  ln -sfn /Applications/Staged.app/Contents/MacOS/stagedctl /usr/local/bin/stagedctl
+  sudo mkdir -p /usr/local/bin
+  sudo ln -sfn /Applications/Staged.app/Contents/MacOS/stagedctl /usr/local/bin/stagedctl
   ```
 
-  Use a link, not a copy. `stagedctl` finds the app to start from its own location inside the bundle, and a link stays in step with app updates.
+  Drop `sudo` where `/usr/local/bin` is yours to write. `ln -sfn` replaces whatever link is already at that path without showing it. Use a link, not a copy. `stagedctl` finds the app to start from its own location inside the bundle, and a link stays in step with app updates.
 
 - **The `staged` script.** If you installed manually, copy `scripts/staged` from the repository root to a directory on your PATH.
 - **Agent sessions** spawned by Staged already have `stagedctl` on their PATH.

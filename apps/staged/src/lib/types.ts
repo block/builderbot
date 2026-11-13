@@ -1392,6 +1392,39 @@ export interface ProjectOpenRequest {
 }
 
 /**
+ * A `stagedctl` link the user was shown and asked to replace: the `link` and
+ * `target` of a `conflict` outcome, sent back unchanged. Mirrors `ShownLink`
+ * in `src-tauri/src/stagedctl_link.rs`.
+ */
+export interface StagedctlShownLink {
+  link: string;
+  target: string;
+}
+
+/**
+ * What the Settings action that puts `stagedctl` on PATH did. `link` is the
+ * full path of the `stagedctl` on PATH. Mirrors `LinkOutcome` in
+ * `src-tauri/src/stagedctl_link.rs`.
+ *
+ * - `linked`: the link was created, or replaced at the user's request.
+ * - `alreadyLinked`: it was already there.
+ * - `conflict`: something else is at `link` and nothing was changed. A link
+ *   elsewhere can be replaced by sending it back; a file or directory
+ *   (`other`) never is.
+ *
+ * `onPath` says whether the link's directory is on the user's PATH, and is
+ * `null` when their PATH could not be read.
+ */
+export type StagedctlLinkOutcome =
+  | { outcome: 'linked'; link: string; onPath: boolean | null }
+  | { outcome: 'alreadyLinked'; link: string; onPath: boolean | null }
+  | {
+      outcome: 'conflict';
+      link: string;
+      existing: { kind: 'link'; target: string } | { kind: 'other' };
+    };
+
+/**
  * An approved client as the Settings "Connected apps" panel lists it.
  * Mirrors `ControlGrantSummary` in `control_server/consent.rs`.
  */

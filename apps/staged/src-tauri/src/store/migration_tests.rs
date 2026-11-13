@@ -1923,6 +1923,9 @@ fn test_message_image_ids_index_migration_indexes_existing_attachments() {
             image_ids   TEXT DEFAULT NULL
         );
         CREATE TABLE queued_session_messages (id TEXT PRIMARY KEY, image_ids TEXT);
+        -- The batched check reads the note bodies in the same pass.
+        CREATE TABLE notes (id TEXT PRIMARY KEY, content TEXT NOT NULL);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, content TEXT NOT NULL);
         INSERT INTO session_messages (session_id, role, content, created_at, image_ids) VALUES
             ('s', 'user', 'no attachments', 1, NULL),
             ('s', 'user', 'two attachments', 2, '[\"img-sent-1\",\"img-sent-2\"]'),
@@ -1942,6 +1945,22 @@ fn test_message_image_ids_index_migration_indexes_existing_attachments() {
     assert!(store.image_has_chat_references("img-queued").unwrap());
     assert!(!store.image_has_chat_references("img-sent").unwrap());
     assert!(!store.image_has_chat_references("img-unused").unwrap());
+    // And the batched pass, which is what the app runs, answers the same.
+    let ids = [
+        "img-sent-1",
+        "img-sent-2",
+        "img-queued",
+        "img-sent",
+        "img-unused",
+    ];
+    let references = store.media_references(ids, None).unwrap();
+    for id in ids {
+        assert_eq!(
+            references.in_chat(id),
+            store.image_has_chat_references(id).unwrap(),
+            "{id}"
+        );
+    }
     drop(store);
 
     let conn = Connection::open(&path).unwrap();

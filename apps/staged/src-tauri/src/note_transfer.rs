@@ -808,9 +808,14 @@ fn finish_all<T>(
                 media.commit();
             }
             if mode == TransferMode::Move {
-                for content in previous_contents {
-                    cleanup_unreferenced(store, refs::media_ids(content));
-                }
+                // Every note's media at once: one pass for the whole move.
+                cleanup_unreferenced(
+                    store,
+                    previous_contents
+                        .iter()
+                        .flat_map(|content| refs::media_ids(content))
+                        .collect(),
+                );
             }
             Ok(value)
         }
@@ -902,14 +907,13 @@ struct MoveSource<'a> {
 }
 
 impl MoveSource<'_> {
-    /// Whether `image` moves with the note as it is; see the module docs.
-    fn takes(&self, store: &Store, image: &Image) -> Result<bool, String> {
-        Ok(image.project_id == self.project_id
+    /// Whether `image` is a row the note could take along as it is: one in
+    /// the scope the note is leaving, with a session. It goes when the note
+    /// is also the only thing using it; see the module docs.
+    fn holds(&self, image: &Image) -> bool {
+        image.project_id == self.project_id
             && image.branch_id.as_deref() == self.branch_id
             && image.session_id.is_some()
-            && store
-                .media_is_exclusive_to(&image.id, self.note_id)
-                .map_err(|e| e.to_string())?)
     }
 }
 
@@ -952,6 +956,9 @@ fn stage_media(
     // in place once however often the note embeds it.
     let mut landed = HashMap::<String, Option<String>>::new();
     let mut edits = Vec::new();
+    // What else uses the note's media, read for all of it the first time a
+    // row could move as it is: one pass per note, not one per attachment.
+    let mut references = None;
     let result = (|| -> Result<(), String> {
         for reference in refs::extract_media_refs(content) {
             let Some((id, _)) = refs::stored_ref(&reference.target) else {
@@ -974,8 +981,22 @@ fn stage_media(
                         )
                         .map_err(|e| e.to_string())?;
                     let rehomes = match &rehome {
-                        Some(from) => from.takes(store, &source)?,
-                        None => false,
+                        Some(from) if from.holds(&source) => {
+                            if references.is_none() {
+                                references = Some(
+                                    store
+                                        .media_references(
+                                            refs::media_ids(content).iter().map(String::as_str),
+                                            Some(from.note_id),
+                                        )
+                                        .map_err(|e| e.to_string())?,
+                                );
+                            }
+                            references
+                                .as_ref()
+                                .is_some_and(|references| references.unused(&source.id))
+                        }
+                        _ => false,
                     };
                     let replacement = if rehomes {
                         if !rehome_file(&source_path, project_id, &source, &mut staged)? {
@@ -1252,6 +1273,7 @@ mod tests {
 
     use super::*;
     use crate::note_media::tests::PNG;
+    use crate::store::images::{take_reference_passes, ReferencePasses};
     use crate::store::models::{Project, ProjectRepo, Session};
 
     struct Fixture {
@@ -2000,6 +2022,208 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// Staging a move reads what else uses the note's media once, and takes
+    /// along exactly the rows the per-image check calls the note's alone.
+    #[test]
+    fn staging_a_move_checks_its_media_in_one_pass_and_rehomes_what_the_per_image_check_would() {
+        let f = fixture();
+        let alone = [f.attachment("one.png"), f.attachment("two.png")];
+        let embedded = f.attachment("embedded.png");
+        f.note(
+            "Other",
+            &format!("![o](staged-media://{}.png)", embedded.id),
+        );
+        let chatted = f.attachment("chatted.png");
+        f.store
+            .add_session_message_with_images(
+                chatted.session_id.as_deref().unwrap(),
+                crate::store::models::MessageRole::User,
+                "look",
+                std::slice::from_ref(&chatted.id),
+            )
+            .unwrap();
+        let timeline = f.attachment_with_session("timeline.png", None);
+        let all = [&alone[0], &alone[1], &embedded, &chatted, &timeline];
+        let note = f.note(
+            "Shots",
+            &all.map(|image| format!("![a](staged-media://{}.png)", image.id))
+                .join(" "),
+        );
+        f.attach_repo(RepoKey {
+            github_repo: "acme/widgets".into(),
+            subpath: Some("apps/web".into()),
+        })
+        .unwrap();
+        let target_branch = f.target_branch().unwrap();
+        let source = || MoveSource {
+            note_id: &note.id,
+            project_id: &f.source.id,
+            branch_id: Some(&f.source_branch.id),
+        };
+        // The rule, one image at a time, as staging applied it before.
+        let expected: HashSet<String> = all
+            .iter()
+            .filter(|image| {
+                source().holds(image) && f.store.media_is_exclusive_to(&image.id, &note.id).unwrap()
+            })
+            .map(|image| image.id.clone())
+            .collect();
+        assert_eq!(
+            expected,
+            HashSet::from([alone[0].id.clone(), alone[1].id.clone()])
+        );
+
+        take_reference_passes();
+        let media = stage_media(
+            &f.store,
+            &note.content,
+            Some(&target_branch.id),
+            &f.target.id,
+            None,
+            Some(source()),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            take_reference_passes(),
+            ReferencePasses { notes: 1, chat: 1 }
+        );
+
+        let rehomed: HashSet<String> = media.rehomed.iter().map(|row| row.id.clone()).collect();
+        assert_eq!(rehomed, expected);
+        assert_eq!(media.images.len(), 3);
+        media.discard(&f.store);
+
+        // A copy takes nothing along, so it has nothing to ask.
+        let copy = stage_media(
+            &f.store,
+            &note.content,
+            Some(&target_branch.id),
+            &f.target.id,
+            None,
+            None,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(take_reference_passes(), ReferencePasses::default());
+        assert!(copy.rehomed.is_empty());
+        assert_eq!(copy.images.len(), 5);
+        copy.discard(&f.store);
+    }
+
+    /// A move passes over the note bodies and the chat attachments three
+    /// times (staging, the check under the transaction, the collection after
+    /// the commit), whether the note embeds one image or eight.
+    #[tokio::test]
+    async fn a_move_makes_three_reference_passes_however_many_images_the_note_embeds() {
+        for count in [1, 8] {
+            let f = fixture();
+            let images: Vec<Image> = (0..count)
+                .map(|n| f.attachment(&format!("shot-{n}.png")))
+                .collect();
+            let note = f.note(
+                "Shots",
+                &images
+                    .iter()
+                    .map(|image| format!("![a](staged-media://{}.png)", image.id))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            );
+            take_reference_passes();
+
+            transfer_branch_note(
+                &f.store,
+                &note.id,
+                &f.target.id,
+                TransferMode::Move,
+                |key| std::future::ready(f.attach_repo(key)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                take_reference_passes(),
+                ReferencePasses { notes: 3, chat: 3 },
+                "{count} images"
+            );
+            // Every image went along as it is and survived the collection.
+            for image in &images {
+                let row = f.store.get_image(&image.id).unwrap().unwrap();
+                assert_eq!(row.project_id, f.target.id);
+                assert!(image_file_path(&f.target.id, &row.id, &row.filename)
+                    .unwrap()
+                    .exists());
+            }
+        }
+    }
+
+    /// A copy takes no media from the source, so it never asks what uses it.
+    #[tokio::test]
+    async fn a_copy_makes_no_reference_pass() {
+        let f = fixture();
+        let (note, _) = f.media_note();
+        take_reference_passes();
+
+        transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(take_reference_passes(), ReferencePasses::default());
+    }
+
+    /// A project-note move stages and re-checks each note against its own
+    /// body, so those two passes are per note that has media to take along;
+    /// the collection after the commit is one pass for the whole family.
+    #[tokio::test]
+    async fn a_project_note_move_passes_once_per_note_to_stage_and_recheck_and_once_to_collect() {
+        let f = fixture();
+        let parent_image = f.project_attachment();
+        let parent = ProjectNote::new(
+            &f.source.id,
+            "Plan",
+            &format!("![a](staged-media://{}.png)", parent_image.id),
+        );
+        f.store.create_project_note(&parent).unwrap();
+        let child_images = [f.attachment("one.png"), f.attachment("two.png")];
+        let (child, _) = f.child_of(&parent, &f.source_branch.id, "Findings");
+        f.store
+            .update_note_content(
+                &child.id,
+                &child_images
+                    .each_ref()
+                    .map(|image| format!("![a](staged-media://{}.png)", image.id))
+                    .join(" "),
+            )
+            .unwrap();
+        take_reference_passes();
+
+        transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        // Two notes staged, two re-checked, one collection.
+        assert_eq!(
+            take_reference_passes(),
+            ReferencePasses { notes: 5, chat: 5 }
+        );
+        for image in [&parent_image, &child_images[0], &child_images[1]] {
+            let row = f.store.get_image(&image.id).unwrap().unwrap();
+            assert_eq!(row.project_id, f.target.id);
+        }
     }
 
     /// The files are linked into the destination before the transaction that

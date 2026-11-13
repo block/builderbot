@@ -419,6 +419,57 @@ mod tests {
         assert_kept(&f, &image);
     }
 
+    /// Deleting a note checks all the media it embedded in one pass over the
+    /// note bodies and one over the chat attachments, not one per image.
+    #[test]
+    fn deleting_a_note_checks_its_media_in_one_pass() {
+        use crate::store::images::{take_reference_passes, ReferencePasses};
+
+        let f = Fixture::new();
+        let images: Vec<Image> = (0..8)
+            .map(|n| {
+                store_media_file(
+                    &f.store,
+                    Some(&f.branch.id),
+                    &f.project.id,
+                    Some(NOTE_MEDIA_SESSION_ID),
+                    &format!("shot-{n}.png"),
+                    PNG,
+                    true,
+                )
+                .unwrap()
+            })
+            .collect();
+        let body = images.iter().map(embed).collect::<Vec<_>>().join("\n\n");
+        let mut note =
+            Note::new_standalone(&f.branch.id, "Shots", &body).with_subtype(Note::SUBTYPE_WRITTEN);
+        f.store.create_note_with_unique_title(&mut note).unwrap();
+        // Another note still embeds the first image.
+        let mut other = Note::new_standalone(&f.branch.id, "Other", &embed(&images[0]))
+            .with_subtype(Note::SUBTYPE_WRITTEN);
+        f.store.create_note_with_unique_title(&mut other).unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+
+        take_reference_passes();
+        delete_note_impl(&f.store, app.handle(), &note.id, false).unwrap();
+        assert_eq!(
+            take_reference_passes(),
+            ReferencePasses { notes: 1, chat: 1 }
+        );
+
+        assert_kept(&f, &images[0]);
+        for image in &images[1..] {
+            assert!(f.store.get_image(&image.id).unwrap().is_none());
+            assert!(
+                !image_file_path(&image.project_id, &image.id, &image.filename)
+                    .unwrap()
+                    .exists()
+            );
+        }
+    }
+
     #[test]
     fn standalone_notes_start_read_only_when_the_user_wrote_them() {
         let store = Store::in_memory().unwrap();

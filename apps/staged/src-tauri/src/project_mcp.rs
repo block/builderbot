@@ -1037,7 +1037,7 @@ impl ProjectToolsHandler {
             .await;
 
             match monorepo_result {
-                Ok(Ok(module_count)) if module_count >= 20 => {
+                Ok(Ok(module_count)) if crate::project_commands::is_monorepo(module_count) => {
                     return format!(
                         "Error: '{}' appears to be a monorepo ({} modules in MODULES.yaml). \
                          You must provide a `subpath` pointing to the root of the specific \
@@ -1055,7 +1055,7 @@ impl ProjectToolsHandler {
                 Err(e) => {
                     log::warn!("[project_mcp] monorepo check task panicked: {e}");
                 }
-                Ok(Ok(_)) => {} // fewer than 20 modules, not a monorepo
+                Ok(Ok(_)) => {} // too few modules to be a monorepo
             }
         }
 

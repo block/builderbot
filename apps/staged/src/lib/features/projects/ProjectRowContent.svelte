@@ -19,7 +19,7 @@
   import type { Project } from '../../types';
   import { projectDisplayName, projectSubtitle, projectActivity } from '../../shared/utils';
   import RepoBadge from '../../shared/RepoBadge.svelte';
-  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { repoShortLabel, type RepoShortLabel } from '../../shared/repoShortLabel';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { disconnectedSessionsStore } from '../../stores/disconnectedSessions.svelte';
@@ -57,8 +57,8 @@
   );
   let badges = $derived(
     (projectsDataStore.reposByProject.get(project.id) ?? [])
-      .map((r) => repoBadgeStore.lookup(r.githubRepo, r.subpath))
-      .filter((b): b is NonNullable<typeof b> => Boolean(b))
+      .map((r) => repoShortLabel(r))
+      .filter((b): b is RepoShortLabel => Boolean(b))
       .sort((a, b) => a.shortName.localeCompare(b.shortName))
   );
   let sessionTypes = $derived(projectStateStore.getRunningSessionTypes(project.id));

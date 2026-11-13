@@ -1,17 +1,20 @@
 <!--
   ProjectCardLabels.svelte — what a project card is labelled with, as one
-  wrapping cluster: its repos, sorted, each as its badge (the repo's hue) or a
-  plain label, then its tags as chips (see ProjectTagChips). A project whose
-  repos haven't loaded falls back to its own repo, and one with none says so.
+  wrapping cluster: its repos, sorted, each as its badge (the repo's short
+  name in its hue, as the sidebar's rows show it; see repoShortLabel) with the
+  full path as its tooltip, then its tags as chips (see ProjectTagChips). A
+  repo with no badge yet has no short name and shows its full path instead. A
+  project whose repos haven't loaded falls back to its own repo, and one with
+  none says so.
   Shared by the home grid's cards and the board's; a board card leaves out
   the board's group (`excludeTagGroupId`), whose tag its column stands for.
 -->
 <script lang="ts">
   import type { Project, ProjectRepo } from '../../types';
   import { darkMode } from '../../stores/isDark.svelte';
-  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { repoFullName, repoShortLabel } from '../../shared/repoShortLabel';
   import ProjectTagChips from './ProjectTagChips.svelte';
 
   interface Props {
@@ -23,14 +26,12 @@
 
   let { project, repos, excludeTagGroupId = null }: Props = $props();
 
-  function repoKey(repo: Pick<ProjectRepo, 'githubRepo' | 'subpath'>): string {
-    return repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo;
-  }
-
+  // Sorted by full path, as before the labels were shortened: the order of a
+  // card's repos doesn't move with their badges' names.
   let labels = $derived(
     repos.length > 0
       ? [...repos]
-          .sort((a, b) => repoKey(a).localeCompare(repoKey(b)))
+          .sort((a, b) => repoFullName(a).localeCompare(repoFullName(b)))
           .map((repo) => ({
             githubRepo: repo.githubRepo,
             shownRepo: repo.headRepo ?? repo.githubRepo,
@@ -50,16 +51,17 @@
 
 <div class="card-labels">
   {#each labels as label, i (i)}
-    {@const badge = repoBadgeStore.lookup(label.githubRepo, label.subpath)}
+    {@const badge = repoShortLabel(label)}
     {#if badge}
       <span
         class="repo-badge-label"
+        title={repoFullName({ githubRepo: label.shownRepo, subpath: label.subpath })}
         style="background: {badgeBg(badge.hue, darkMode.value)}; color: {badgeFg(
           badge.hue,
           darkMode.value
         )};"
       >
-        <RepoLabel githubRepo={label.shownRepo} subpath={label.subpath} />
+        {badge.shortName}
       </span>
     {:else}
       <span class="repo-line">
@@ -105,14 +107,5 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .repo-badge-label :global(.repo-label-prefix) {
-    color: inherit;
-    opacity: 0.6;
-  }
-
-  .repo-badge-label :global(.repo-label-emphasis) {
-    color: inherit;
   }
 </style>

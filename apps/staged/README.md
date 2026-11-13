@@ -46,22 +46,96 @@ The installer will:
 - Install dependencies
 - Build the application
 - Install to `/Applications/Staged.app`
-- Install the `staged` CLI to `/usr/local/bin`
+- Link the `stagedctl` control CLI and install the `staged` launcher in `/usr/local/bin`
 
 **Note**: This builds from source, which takes a few minutes. It is meant for development and does not use the signed auto-updating release channel.
 
 ### Command Line Usage
 
-After installation, launch Staged from the terminal:
+Staged ships a control CLI, `stagedctl`, inside the app bundle. Its `project open` verb shows a project in the app from a terminal:
 
 ```bash
-staged                # Open in current directory
-staged /path/to/repo  # Open in specified directory
+stagedctl project open "My Project"   # by name or id (see `stagedctl project list`)
+stagedctl project open                # the project whose workspace the current directory is in
+stagedctl project open --no-launch    # fail instead of starting Staged when it is not running
 ```
 
-Each invocation opens a new window, so you can have multiple repos open simultaneously.
+The window a click on Staged's Dock icon would raise comes to the front and switches to the project. On success the command prints the project's name and id and the pid of the Staged instance that showed it. A project that is already on screen is a success too. No new window is opened, and a Staged that is already running is never joined by a second instance.
 
-If you installed manually (not via the install script), copy `scripts/staged` to somewhere in your PATH (e.g., `/usr/local/bin`).
+- **By name or id.** `<project>` is matched as an exact id, then an exact name, then a name that matches one project when case is ignored. A name that matches nothing, or several projects, fails before any window is touched.
+- **From a project workspace.** With no argument, the project is the one whose workspace the current directory is in: any directory under `~/.staged/workspaces/<local|remote>/projects/<project-id>/`, where Staged keeps a project's worktrees. From any other directory the command fails with `not_in_workspace` without looking for the app, so pass a project there. It does not open arbitrary directories or repositories.
+- **A busy window.** The window is raised whether or not it could switch, so you can see what is in the way. A dialog that is open, or a diff comment that could not be saved, is left alone and reported as `ui_busy`: close or finish it and run the command again.
+- **When Staged is not running.** The command starts the `Staged.app` that `stagedctl` is bundled in, waits up to thirty seconds for it to come up, and then opens the project. A line on stderr says Staged is being started. This is macOS only.
+- **`--no-launch`.** The command exits 3 instead of starting Staged.
+
+Staged is also never started when you are not yet authorized (see below), when the directory names no project, when `--lock-path` or `$STAGEDCTL_LOCK` points at one particular instance, or from a development build, whose app needs its dev server (run `just dev` instead).
+
+#### First run: `stagedctl connect`
+
+Outside a Staged-spawned agent session, `stagedctl` needs your approval once per machine. With Staged running:
+
+```bash
+stagedctl connect --client "my terminal"
+```
+
+Staged shows a consent dialog naming the client. Approving it stores a grant under `~/.staged/control/grants/` that later commands use without asking again. It lasts thirty days from its last use and can be revoked under **Settings -> Connected apps** or with `stagedctl disconnect`.
+
+Until then `stagedctl project open` exits 4 with `authorization_required`. It does not raise the consent dialog for you, and it does not start Staged to ask.
+
+Two kinds of credential are refused with `scope_denied` (exit 4):
+
+- **Read-only grants** (`stagedctl connect --read-only`). Showing a project marks it read and records it as the last one shown, which is a write.
+- **Agent session credentials.** A session spawned by Staged cannot open a project, not even its own, so an agent cannot pull your window away. Run the command from your own terminal.
+
+A grant confined to one project (`stagedctl connect --project`) opens that project only. Any other project reads `not_found`, because that grant does not list it.
+
+#### The `staged` shorthand
+
+`staged` is a small wrapper script around the same command:
+
+```bash
+staged "My Project"   # stagedctl project open "My Project"
+staged                # stagedctl project open
+staged --no-launch    # stagedctl project open --no-launch
+```
+
+It passes its arguments to `stagedctl project open` unchanged, so the output and exit codes are the ones described here. It does not take a directory to open: a path is read as a project name. The script never starts the app itself. If it cannot find `stagedctl` on your PATH, in `/Applications/Staged.app` or in `~/Applications/Staged.app`, it says so and exits 127 without starting anything.
+
+#### Getting `stagedctl` on your PATH
+
+- **Development install from source.** The install script links `/usr/local/bin/stagedctl` to the copy inside `/Applications/Staged.app` and installs `staged` beside it.
+- **Release DMG.** Nothing is put on your PATH. Link the bundled CLI yourself, with `sudo` if `/usr/local/bin` is not writable:
+
+  ```bash
+  mkdir -p /usr/local/bin
+  ln -sfn /Applications/Staged.app/Contents/MacOS/stagedctl /usr/local/bin/stagedctl
+  ```
+
+  Use a link, not a copy. `stagedctl` finds the app to start from its own location inside the bundle, and a link stays in step with app updates.
+
+- **The `staged` script.** If you installed manually, copy `scripts/staged` from the repository root to a directory on your PATH.
+- **Agent sessions** spawned by Staged already have `stagedctl` on their PATH.
+
+#### Exit codes
+
+On failure, stderr carries one `code: message` line.
+
+| Exit | Code                     | Meaning                                                                                                                                   |
+| ---- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    |                          | The project is on screen.                                                                                                                 |
+| 1    | `not_found`              | No project matches; the message lists the project names. Also a workspace whose project was deleted.                                      |
+| 1    | `ambiguous`              | The name matches several projects when case is ignored.                                                                                   |
+| 1    | `not_in_workspace`       | No argument, and the current directory is not inside a Staged project workspace.                                                          |
+| 1    | `ui_busy`                | A dialog is open, a diff comment could not be saved, or another `project open` replaced this one. The window was raised but not switched. |
+| 1    | `ui_timeout`             | The window was raised but did not answer in time.                                                                                         |
+| 1    | `app_error`              | The app could not make the request, for example a running Staged from before this command existed (update it).                            |
+| 2    | `transport`              | A fault talking to the app.                                                                                                               |
+| 3    | message only             | Staged is not running and was not started, a started Staged did not come up in time, or the running Staged cannot be used.                |
+| 4    | `authorization_required` | No grant yet. Run `stagedctl connect`.                                                                                                    |
+| 4    | `scope_denied`           | A read-only grant, or an agent session's credential.                                                                                      |
+| 127  |                          | `staged` only: `stagedctl` was not found.                                                                                                 |
+
+`stagedctl project open --help` is the full reference, and `stagedctl --help` lists everything else the CLI can do.
 
 ### AI Agent Setup (ACP)
 

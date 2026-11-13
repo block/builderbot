@@ -168,5 +168,6 @@ log "linking control CLI to $STAGEDCTL_DEST"
 link_cli "$APP_DEST/Contents/MacOS/stagedctl" "$STAGEDCTL_DEST"
 
 log "installation complete"
-printf 'Run `%s` to launch Staged from your current directory.\n' "$(basename "$CLI_DEST")"
-printf 'Run `%s --help` to control the running app from the command line.\n' "$(basename "$STAGEDCTL_DEST")"
+printf 'Run `%s connect --client <name>` once with Staged running, to approve command-line access.\n' "$(basename "$STAGEDCTL_DEST")"
+printf 'Run `%s <project>` to show a project in Staged, or `%s` from inside a project workspace.\n' "$(basename "$CLI_DEST")" "$(basename "$CLI_DEST")"
+printf 'Run `%s --help` to control the app from the command line.\n' "$(basename "$STAGEDCTL_DEST")"

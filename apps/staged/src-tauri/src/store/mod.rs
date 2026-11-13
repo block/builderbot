@@ -45,6 +45,8 @@ mod tool_images;
 mod workdirs;
 
 #[cfg(test)]
+mod images_tests;
+#[cfg(test)]
 mod migration_tests;
 #[cfg(test)]
 mod tags_tests;

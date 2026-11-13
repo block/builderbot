@@ -22,6 +22,21 @@ const UNREADABLE_DIMENSIONS: ImageDimensions = ImageDimensions {
     density: 0,
 };
 
+/// Whether any sent or queued chat message attaches the image whose quoted id
+/// is `?1`.
+///
+/// `image_ids IS NOT NULL` changes no result, since `instr` of NULL is NULL,
+/// but it is what lets SQLite read `idx_session_messages_image_ids` (migration
+/// 0049, a partial index over the messages that attach something) instead of
+/// every row of `session_messages`: the planner does not infer the index's
+/// `WHERE` from `instr(...) > 0`. `images_tests.rs` pins the plan.
+pub(super) const CHAT_REFERENCE_SQL: &str = "SELECT EXISTS(
+       SELECT 1 FROM session_messages
+        WHERE image_ids IS NOT NULL AND instr(image_ids, ?1) > 0
+       UNION ALL
+       SELECT 1 FROM queued_session_messages
+        WHERE image_ids IS NOT NULL AND instr(image_ids, ?1) > 0)";
+
 impl Store {
     /// Conservative reference check: even a reference inside an example keeps
     /// its file. No note ownership columns or reconciliation state are needed.
@@ -79,13 +94,8 @@ impl Store {
     fn referenced_by_chat(conn: &rusqlite::Connection, id: &str) -> Result<bool, StoreError> {
         // Image IDs are UUIDs; quote the exact JSON string to avoid substrings.
         let needle = format!("\"{id}\"");
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_messages WHERE instr(image_ids, ?1) > 0
-             UNION ALL SELECT 1 FROM queued_session_messages WHERE instr(image_ids, ?1) > 0)",
-            params![needle],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
+        conn.query_row(CHAT_REFERENCE_SQL, params![needle], |row| row.get(0))
+            .map_err(Into::into)
     }
 
     pub fn create_image(&self, image: &Image) -> Result<(), StoreError> {

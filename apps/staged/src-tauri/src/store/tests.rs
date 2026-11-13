@@ -5032,6 +5032,51 @@ fn test_delete_project_note_reports_running_child_sessions() {
 // Repo Actions
 // =============================================================================
 
+/// The action lists reach this from the blocking pool, several at once for
+/// one repo. The lookup and insert are one lock hold, so every caller gets
+/// the same row; with the lock released in between, a late caller's insert
+/// failed on the unique index.
+///
+/// One round seldom lands in that gap, so the callers race for a fresh
+/// context many times over, lined up again before each.
+#[test]
+fn concurrent_get_or_create_action_context_calls_share_one_row() {
+    const CALLERS: usize = 8;
+    const ROUNDS: usize = 400;
+    let store = std::sync::Arc::new(Store::in_memory().unwrap());
+    let start = std::sync::Arc::new(std::sync::Barrier::new(CALLERS));
+    let callers: Vec<_> = (0..CALLERS)
+        .map(|_| {
+            let store = std::sync::Arc::clone(&store);
+            let start = std::sync::Arc::clone(&start);
+            std::thread::spawn(move || {
+                (0..ROUNDS)
+                    .map(|round| {
+                        let subpath = format!("apps/round-{round}");
+                        start.wait();
+                        store
+                            .get_or_create_action_context("test-owner/test-repo", Some(&subpath))
+                            .map(|context| context.id)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let ids: Vec<Vec<Result<String, String>>> = callers
+        .into_iter()
+        .map(|caller| caller.join().unwrap())
+        .collect();
+
+    for round in 0..ROUNDS {
+        let first = ids[0][round].as_ref().unwrap();
+        for caller in &ids {
+            assert_eq!(caller[round].as_ref(), Ok(first), "round {round}");
+        }
+    }
+    assert_eq!(store.list_action_contexts().unwrap().len(), ROUNDS);
+}
+
 #[test]
 fn test_repo_actions() {
     let store = Store::in_memory().unwrap();

@@ -4,14 +4,12 @@
 //! and they stay out of `ALLOWED_COMMANDS` so no stagedctl caller can
 //! approve itself.
 
-use std::sync::{Arc, Mutex};
-
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use super::consent::{self, ControlGrantSummary};
 use super::enrol::ControlAuthorizationRequest;
 use super::ControlGrants;
-use crate::store::{now_timestamp, Store};
+use crate::store::now_timestamp;
 
 /// The connection requests awaiting an answer, oldest first. The frontend
 /// takes this snapshot once its event listener is live, so a request that
@@ -28,9 +26,10 @@ pub fn list_pending_control_authorizations(
         .collect()
 }
 
-/// Answer connection request `request_id`. Approving writes the durable
-/// grant and mints this run's bearer; denying tells the waiting CLI
-/// `authorization_denied`. Dismissing the dialog denies.
+/// Answer connection request `request_id`. Approving records the answer in
+/// memory only: the durable grant is written when the waiting CLI collects
+/// it (`consent::mint_collected_approval`), off this thread. Denying tells
+/// the CLI `authorization_denied`. Dismissing the dialog denies.
 #[tauri::command]
 pub fn answer_control_authorization(
     grants: State<'_, ControlGrants>,
@@ -45,26 +44,34 @@ pub fn answer_control_authorization(
 }
 
 /// Every approved client that has not been revoked, newest first.
+///
+/// A store read per grant, run on the blocking pool so a wait on the store
+/// lock does not hold the main thread. The store and the grants are looked
+/// up from the handle inside the closure.
 #[tauri::command]
-pub fn list_control_grants(
-    store: State<'_, Mutex<Option<Arc<Store>>>>,
-    grants: State<'_, ControlGrants>,
+pub async fn list_control_grants(
+    app_handle: AppHandle,
 ) -> Result<Vec<ControlGrantSummary>, String> {
-    let store = store
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "Database not initialized".to_string())?;
-    consent::grant_summaries(&store, &grants)
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = consent::store_of(&app_handle)?;
+        let grants = app_handle.state::<ControlGrants>();
+        consent::grant_summaries(&store, &grants)
+    })
+    .await
+    .map_err(|e| format!("list_control_grants task failed: {e}"))?
 }
 
 /// Revoke grant `grant_id`: its live bearers are dropped at once and its
 /// next reconnect reads `authorization_revoked`.
+///
+/// Stamps the row in the store, so it runs on the blocking pool like
+/// [`list_control_grants`].
 #[tauri::command]
-pub fn revoke_control_grant(
-    app_handle: AppHandle,
-    grants: State<'_, ControlGrants>,
-    grant_id: String,
-) -> Result<(), String> {
-    consent::revoke_grant(&app_handle, &grants, &grant_id).map(|_| ())
+pub async fn revoke_control_grant(app_handle: AppHandle, grant_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let grants = app_handle.state::<ControlGrants>();
+        consent::revoke_grant(&app_handle, &grants, &grant_id).map(|_| ())
+    })
+    .await
+    .map_err(|e| format!("revoke_control_grant task failed: {e}"))?
 }

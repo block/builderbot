@@ -427,9 +427,18 @@ fn quit_confirmed(result: &MessageDialogResult) -> bool {
 ///
 /// Deliberately absent from the web-mode `dispatch` table — a browser client
 /// must not be able to terminate the desktop host.
+///
+/// Runs [`request_quit`] on the blocking pool: with a store open it reads
+/// the sessions a quit would stop, and as a synchronous command a wait on
+/// the store lock there held the main thread. The gate is safe off it: the
+/// prompt flags are atomics, the alert hops to the main thread itself, and
+/// the cleanup runs at most once however many quits race. The menu and
+/// `Cmd+Q` paths still call [`request_quit`] on the main thread.
 #[tauri::command]
-pub fn quit_app(app_handle: AppHandle) {
-    request_quit(&app_handle, QuitTrigger::Explicit);
+pub async fn quit_app(app_handle: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || request_quit(&app_handle, QuitTrigger::Explicit))
+        .await
+        .map_err(|e| format!("quit_app task failed: {e}"))
 }
 
 /// Run the quit sequence off the main thread so the bounded waits never freeze

@@ -261,7 +261,7 @@ fn answer_error_message(error: AnswerError) -> String {
 }
 
 /// Revoke grant `grant_id` from the Settings panel: stamp the row (inline;
-/// a Tauri command runs off the async runtime already), then retire it.
+/// the Tauri command calls this on the blocking pool), then retire it.
 /// Returns whether the row was live.
 pub(crate) fn revoke_grant(
     app: &AppHandle,

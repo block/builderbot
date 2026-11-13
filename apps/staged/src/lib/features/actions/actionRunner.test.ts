@@ -138,6 +138,39 @@ describe('ActionRunner', () => {
     }
   });
 
+  it('keeps the list from the reload sent last when an earlier read answers after it', async () => {
+    const pending: Array<(actions: unknown[]) => void> = [];
+    const runner = await newRunner({
+      loadActions: () => new Promise((resolve) => pending.push(resolve)),
+    });
+    const stale = { id: 'action-old', name: 'old', actionType: 'run' };
+    const fresh = { id: 'action-new', name: 'new', actionType: 'run' };
+
+    const mountRead = runner.loadActions();
+    const reload = runner.loadActions();
+    pending[1]([fresh]);
+    await reload;
+    pending[0]([stale]);
+    await mountRead;
+
+    expect(runner.actions).toEqual([fresh]);
+  });
+
+  it('keeps an adopted list when a read sent before it answers afterwards', async () => {
+    const pending: Array<(actions: unknown[]) => void> = [];
+    const runner = await newRunner({
+      loadActions: () => new Promise((resolve) => pending.push(resolve)),
+    });
+    const detected = { id: 'action-detected', name: 'detected', actionType: 'run' };
+
+    const mountRead = runner.loadActions();
+    runner.setActions([detected] as never);
+    pending[0]([]);
+    await mountRead;
+
+    expect(runner.actions).toEqual([detected]);
+  });
+
   it('hands each pinned button its own execution, and none to an idle one', async () => {
     const runner = await newRunner({});
     runner.runningActions.push(

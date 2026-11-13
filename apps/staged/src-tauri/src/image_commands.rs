@@ -94,18 +94,22 @@ pub(crate) fn create_image_impl(
 
 /// Return the filesystem path for an image (the frontend uses convertFileSrc).
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_image_path(
+pub async fn get_image_path(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     image_id: String,
 ) -> Result<String, String> {
     let store = crate::get_store(&store)?;
-    let image = store
-        .get_image(&image_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Image not found: {image_id}"))?;
-    let path =
-        crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)?;
-    Ok(path.to_string_lossy().to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let image = store
+            .get_image(&image_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Image not found: {image_id}"))?;
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("get_image_path task failed: {e}"))?
 }
 
 /// Delete an image record and its file on disk.
@@ -159,13 +163,18 @@ pub async fn get_attachment_thumbnail(
 
 /// List all images for a branch.
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_branch_images(
+pub async fn list_branch_images(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<Vec<crate::store::Image>, String> {
-    crate::get_store(&store)?
-        .list_images_for_branch(&branch_id)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_images_for_branch(&branch_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_branch_images task failed: {e}"))?
 }
 
 /// Size and density of the raster images a note embeds, keyed by id, for
@@ -228,21 +237,26 @@ pub(crate) fn media_dimensions_impl(
 
 /// Read an image file and return its data as a base64-encoded data URL.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_image_data(
+pub async fn get_image_data(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     image_id: String,
 ) -> Result<String, String> {
     let store = crate::get_store(&store)?;
-    let image = store
-        .get_image(&image_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Image not found: {image_id}"))?;
-    let path = crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
-        .map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{};base64,{}", image.mime_type, encoded))
+    tauri::async_runtime::spawn_blocking(move || {
+        let image = store
+            .get_image(&image_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Image not found: {image_id}"))?;
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+                .map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(format!("data:{};base64,{}", image.mime_type, encoded))
+    })
+    .await
+    .map_err(|e| format!("get_image_data task failed: {e}"))?
 }
 
 /// Create an image from base64-encoded data (for browser file input / clipboard paste).

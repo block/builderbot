@@ -93,6 +93,12 @@ export type DiffScope = 'branch' | 'commit' | 'worktree';
  * note, branch or session and for nothing else. `delete_note` shares its
  * note's key, so it cannot overtake a write sent before it.
  *
+ * The rest of the synchronous writes followed them onto the pool. The ones a
+ * call site can have two of in flight, or sends without awaiting, are ordered
+ * the same way: a repo badge's saves and its delete (`repo-badge:`), pinned
+ * repo reorders (`pinned-repos`), a project note's read marks and its delete
+ * (`project-note:`), and every tag write (`tags`).
+ *
  * Only these wrappers are ordered. A command sent through another wrapper
  * while one of these is in flight is not held back for it.
  */
@@ -531,8 +537,14 @@ export function getProjectNoteBySession(
   return invokeCommand('get_project_note_by_session', { sessionId });
 }
 
+/**
+ * Sent behind the note's read marks (see {@link writeOrder}), so a mark still
+ * in flight cannot land after the delete and fail on the missing note.
+ */
 export function deleteProjectNote(noteId: string): Promise<void> {
-  return invokeCommand('delete_project_note', { noteId });
+  return writeOrder.run(`project-note:${noteId}`, () =>
+    invokeCommand('delete_project_note', { noteId })
+  );
 }
 
 /**
@@ -559,12 +571,18 @@ export function setNoteRead(noteId: string, read: boolean): Promise<BranchNote> 
   );
 }
 
-/** The project-note counterpart of {@link setNoteRead}. */
+/**
+ * The project-note counterpart of {@link setNoteRead}, ordered the same way
+ * (see {@link writeOrder}): "Mark as unread" from the row menu is not awaited,
+ * and the viewer's own read mark can be sent right behind it.
+ */
 export function setProjectNoteRead(
   projectNoteId: string,
   read: boolean
 ): Promise<import('./types').ProjectNote> {
-  return invokeCommand('set_project_note_read', { projectNoteId, read });
+  return writeOrder.run(`project-note:${projectNoteId}`, () =>
+    invokeCommand('set_project_note_read', { projectNoteId, read })
+  );
 }
 
 /**
@@ -2709,18 +2727,37 @@ export function ensureRepoBadges(
   return invokeCommand('ensure_repo_badges', { repos, provider: provider ?? null });
 }
 
-/** Update the short name and hue of an existing repo badge. */
+/** A repo badge's saves and its delete share one order. */
+function repoBadgeWriteKey(githubRepo: string, subpath: string): string {
+  return `repo-badge:${githubRepo}\u0000${subpath}`;
+}
+
+/**
+ * Update the short name and hue of an existing repo badge.
+ *
+ * A badge's saves are sent in order (see {@link writeOrder}): the settings
+ * panel saves on every keystroke without awaiting, each save carries the
+ * whole name and hue, and the last one to land stays.
+ */
 export function updateRepoBadge(
   githubRepo: string,
   subpath: string,
   shortName: string,
   hue: number
 ): Promise<import('./types').RepoBadge> {
-  return invokeCommand('update_repo_badge', { githubRepo, subpath, shortName, hue });
+  return writeOrder.run(repoBadgeWriteKey(githubRepo, subpath), () =>
+    invokeCommand('update_repo_badge', { githubRepo, subpath, shortName, hue })
+  );
 }
 
+/**
+ * Sent behind the badge's saves (see {@link writeOrder}), so a save still in
+ * flight cannot land after the delete and fail on the missing badge.
+ */
 export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<void> {
-  return invokeCommand('delete_repo_badge', { githubRepo, subpath });
+  return writeOrder.run(repoBadgeWriteKey(githubRepo, subpath), () =>
+    invokeCommand('delete_repo_badge', { githubRepo, subpath })
+  );
 }
 
 // =============================================================================
@@ -2730,6 +2767,18 @@ export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<vo
 // Every write publishes `tags-changed` (never `project-changed`), and drops
 // the one argless `get_tag_state` cache key before returning, so a read
 // issued after the write resolves never sees a pre-write snapshot.
+
+/**
+ * Send a tag write behind every tag write sent before it (see
+ * {@link writeOrder}). `tagActions` queues catalog edits and each project's
+ * assignments separately, and nothing there orders one queue against the
+ * other: an assignment still in flight when its tag is moved into a group, or
+ * deleted, depends on which lands first. As synchronous commands they landed
+ * in the order sent, and one key for all twelve keeps that.
+ */
+function tagWrite<T = void>(command: string, args: Record<string, unknown>): Promise<T> {
+  return writeOrder.run('tags', () => invokeCommand<T>(command, args));
+}
 
 /** The tag catalog and every project's tags. */
 export function getTagState(options: ForceRefreshOptions = {}): Promise<SwrResult<TagState>> {
@@ -2741,36 +2790,36 @@ export function getTagState(options: ForceRefreshOptions = {}): Promise<SwrResul
 
 /** Append a group, with its initial tags in the order given. */
 export async function createTagGroup(name: string, tags: NewTag[] = []): Promise<TagGroup> {
-  const group = await invokeCommand<TagGroup>('create_tag_group', { name, tags });
+  const group = await tagWrite<TagGroup>('create_tag_group', { name, tags });
   await invalidateCache('get_tag_state');
   return group;
 }
 
 export async function renameTagGroup(groupId: string, name: string): Promise<void> {
-  await invokeCommand('rename_tag_group', { groupId, name });
+  await tagWrite('rename_tag_group', { groupId, name });
   await invalidateCache('get_tag_state');
 }
 
 /** Make a group the icon group, or turn the icon group off with null. */
 export async function setIconTagGroup(groupId: string | null): Promise<void> {
-  await invokeCommand('set_icon_tag_group', { groupId });
+  await tagWrite('set_icon_tag_group', { groupId });
   await invalidateCache('get_tag_state');
 }
 
 /** Pin a group's board to the projects sidebar, or unpin it. */
 export async function setTagGroupSidebar(groupId: string, shown: boolean): Promise<void> {
-  await invokeCommand('set_tag_group_sidebar', { groupId, shown });
+  await tagWrite('set_tag_group_sidebar', { groupId, shown });
   await invalidateCache('get_tag_state');
 }
 
 /** Reorder groups; `groupIds` must name every group exactly once. */
 export async function reorderTagGroups(groupIds: string[]): Promise<void> {
-  await invokeCommand('reorder_tag_groups', { groupIds });
+  await tagWrite('reorder_tag_groups', { groupIds });
   await invalidateCache('get_tag_state');
 }
 
 export async function deleteTagGroup(groupId: string, mode: DeleteTagGroupMode): Promise<void> {
-  await invokeCommand('delete_tag_group', { groupId, mode });
+  await tagWrite('delete_tag_group', { groupId, mode });
   await invalidateCache('get_tag_state');
 }
 
@@ -2786,7 +2835,7 @@ export async function createTag(input: {
   icon?: string | null;
   assignProjectId?: string | null;
 }): Promise<Tag> {
-  const tag = await invokeCommand<Tag>('create_tag', {
+  const tag = await tagWrite<Tag>('create_tag', {
     name: input.name,
     groupId: input.groupId ?? null,
     color: input.color ?? null,
@@ -2802,18 +2851,18 @@ export async function updateTag(
   tagId: string,
   value: { name: string; color: TagColor; icon: string | null }
 ): Promise<void> {
-  await invokeCommand('update_tag', { tagId, ...value });
+  await tagWrite('update_tag', { tagId, ...value });
   await invalidateCache('get_tag_state');
 }
 
 /** Move a tag to `index` within a group (or ungrouped, with null). */
 export async function moveTag(tagId: string, groupId: string | null, index: number): Promise<void> {
-  await invokeCommand('move_tag', { tagId, groupId, index });
+  await tagWrite('move_tag', { tagId, groupId, index });
   await invalidateCache('get_tag_state');
 }
 
 export async function deleteTag(tagId: string): Promise<void> {
-  await invokeCommand('delete_tag', { tagId });
+  await tagWrite('delete_tag', { tagId });
   await invalidateCache('get_tag_state');
 }
 
@@ -2823,7 +2872,7 @@ export async function setProjectGroupTag(
   groupId: string,
   tagId: string | null
 ): Promise<void> {
-  await invokeCommand('set_project_group_tag', { projectId, groupId, tagId });
+  await tagWrite('set_project_group_tag', { projectId, groupId, tagId });
   await invalidateCache('get_tag_state');
 }
 
@@ -2833,7 +2882,7 @@ export async function setProjectTagAssigned(
   tagId: string,
   assigned: boolean
 ): Promise<void> {
-  await invokeCommand('set_project_tag_assigned', { projectId, tagId, assigned });
+  await tagWrite('set_project_tag_assigned', { projectId, tagId, assigned });
   await invalidateCache('get_tag_state');
 }
 
@@ -2851,9 +2900,16 @@ export function unpinRepo(githubRepo: string, subpath: string): Promise<void> {
   return invokeCommand('unpin_repo', { githubRepo, subpath });
 }
 
-/** Bulk-update pin sort order from an ordered list of [githubRepo, subpath] keys. */
+/**
+ * Bulk-update pin sort order from an ordered list of [githubRepo, subpath] keys.
+ *
+ * Reorders are sent one at a time (see {@link writeOrder}): each carries the
+ * whole order, so of two drops in a row the first must not land last.
+ */
 export function reorderPinnedRepos(orderedKeys: [string, string][]): Promise<void> {
-  return invokeCommand('reorder_pinned_repos', { orderedKeys });
+  return writeOrder.run('pinned-repos', () =>
+    invokeCommand('reorder_pinned_repos', { orderedKeys })
+  );
 }
 
 /** List all repo badges ordered: pinned first by sort order, then unpinned by project count. */

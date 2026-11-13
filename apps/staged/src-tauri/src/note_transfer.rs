@@ -1152,12 +1152,14 @@ fn copy_file(
 /// the picker can create a remote destination from the repo the transfer will
 /// look for. `None` when the branch is bound to none.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_note_repo(
+pub async fn get_note_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
 ) -> Result<Option<ProjectRepo>, String> {
     let store = crate::get_store(&store)?;
-    branch_note_repo(&store, &note_id)
+    tauri::async_runtime::spawn_blocking(move || branch_note_repo(&store, &note_id))
+        .await
+        .map_err(|e| format!("get_note_repo task failed: {e}"))?
 }
 
 /// Move a branch note into another project, adding the note's repo + subpath

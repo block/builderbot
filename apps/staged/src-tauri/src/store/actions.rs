@@ -6,17 +6,22 @@ use super::models::{ActionContext, ActionType, RepoAction, RepoContextActions, R
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
+    /// The lookup and the insert share one lock hold. The action lists call
+    /// this on first use from the blocking pool, several at once when a
+    /// repo's branch cards mount together; with the lock released in between,
+    /// two callers could both miss the row and the second insert would fail
+    /// on the unique (repo, subpath) index.
     pub fn get_or_create_action_context(
         &self,
         github_repo: &str,
         subpath: Option<&str>,
     ) -> Result<ActionContext, StoreError> {
-        if let Some(existing) = self.get_action_context_by_repo_and_subpath(github_repo, subpath)? {
+        let conn = self.conn.lock().unwrap();
+        if let Some(existing) = Self::find_action_context(&conn, github_repo, subpath)? {
             return Ok(existing);
         }
 
         let context = ActionContext::new(github_repo.to_string(), subpath.map(str::to_string));
-        let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO action_contexts (id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -72,6 +77,14 @@ impl Store {
         subpath: Option<&str>,
     ) -> Result<Option<ActionContext>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::find_action_context(&conn, github_repo, subpath)
+    }
+
+    fn find_action_context(
+        conn: &rusqlite::Connection,
+        github_repo: &str,
+        subpath: Option<&str>,
+    ) -> Result<Option<ActionContext>, StoreError> {
         conn.query_row(
             "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at
              FROM action_contexts

@@ -1440,25 +1440,29 @@ fn truncate_workspace_name(name: &str, max: usize) -> String {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_branch(
+pub async fn get_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<Option<BranchWithWorkdir>, String> {
     let store = crate::get_store(&store)?;
-    let branch = store.get_branch(&branch_id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let branch = store.get_branch(&branch_id).map_err(|e| e.to_string())?;
 
-    match branch {
-        Some(branch) => {
-            let workdir = store
-                .get_workdir_for_branch(&branch.id)
-                .map_err(|e| e.to_string())?;
-            Ok(Some(to_branch_with_workdir(
-                branch,
-                workdir.map(|w| w.path),
-            )))
+        match branch {
+            Some(branch) => {
+                let workdir = store
+                    .get_workdir_for_branch(&branch.id)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(to_branch_with_workdir(
+                    branch,
+                    workdir.map(|w| w.path),
+                )))
+            }
+            None => Ok(None),
         }
-        None => Ok(None),
-    }
+    })
+    .await
+    .map_err(|e| format!("get_branch task failed: {e}"))?
 }
 
 /// Runs [`list_branches_for_project_impl`] on the blocking pool. The
@@ -1525,7 +1529,7 @@ fn list_branches_for_project_impl(
 /// Returns immediately with `worktree_path = None`. Call `setup_worktree`
 /// separately to create the git worktree in the background.
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_branch(
+pub async fn create_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     branch_name: String,
@@ -1533,39 +1537,43 @@ pub fn create_branch(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
-    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::project_transfer::ensure_project_not_transferring(&project_id)?;
 
-    // Detect default branch if none specified (via GitHub API, no local clone needed)
-    let target_repo = match project_repo_id {
-        Some(repo_id) => store
-            .get_project_repo(&repo_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
-        None => store
-            .get_primary_project_repo(&project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
-    };
-    let effective_base = match base_branch {
-        Some(b) => b,
-        None => git::detect_default_branch_for_repo(&target_repo.github_repo)
-            .map_err(|e| e.to_string())?,
-    };
+        // Detect default branch if none specified (via GitHub API, no local clone needed)
+        let target_repo = match project_repo_id {
+            Some(repo_id) => store
+                .get_project_repo(&repo_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
+            None => store
+                .get_primary_project_repo(&project_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
+        };
+        let effective_base = match base_branch {
+            Some(b) => b,
+            None => git::detect_default_branch_for_repo(&target_repo.github_repo)
+                .map_err(|e| e.to_string())?,
+        };
 
-    // Normalise to "origin/<branch>" so diffs and worktree creation always
-    // use the remote-tracking ref rather than a stale local branch.
-    let effective_base = if effective_base.starts_with("origin/") {
-        effective_base
-    } else {
-        format!("origin/{effective_base}")
-    };
+        // Normalise to "origin/<branch>" so diffs and worktree creation always
+        // use the remote-tracking ref rather than a stale local branch.
+        let effective_base = if effective_base.starts_with("origin/") {
+            effective_base
+        } else {
+            format!("origin/{effective_base}")
+        };
 
-    // Create branch record only — no git worktree yet
-    let branch = store::Branch::new(&project_id, &branch_name, &effective_base)
-        .with_project_repo(&target_repo.id);
-    store.create_branch(&branch).map_err(|e| e.to_string())?;
+        // Create branch record only — no git worktree yet
+        let branch = store::Branch::new(&project_id, &branch_name, &effective_base)
+            .with_project_repo(&target_repo.id);
+        store.create_branch(&branch).map_err(|e| e.to_string())?;
 
-    Ok(to_branch_with_workdir(branch, None))
+        Ok(to_branch_with_workdir(branch, None))
+    })
+    .await
+    .map_err(|e| format!("create_branch task failed: {e}"))?
 }
 
 /// Core worktree creation + DB linkage logic behind [`setup_worktree_sync`].

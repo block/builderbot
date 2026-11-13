@@ -607,6 +607,8 @@
       if (!superseded) latestNoteRefreshes.delete(sessionId);
     }
     if (superseded) return;
+    // A list load sent after this refetch has landed, and read the row later.
+    if (noteFetchOrder.overtaken('list', seq)) return;
     noteFetchOrder.admit('row', seq);
 
     if (updatedNote) {

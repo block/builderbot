@@ -5,15 +5,19 @@
  * Assignment writes target a slot (see TagSlot): a group's single choice, or
  * one ungrouped tag. Every surface repaints as soon as a pick is made, from
  * the intent tagsStore layers over its snapshot. Writes to different slots
- * commute in the database, so they run concurrently; writes to one slot are
- * chained per project, so the backend sees them in click order. A failed
- * write drops its intent, if no newer pick in the slot has replaced it, and
- * the view falls back to server truth.
+ * commute in the database, so nothing here holds one back for another;
+ * writes to one slot are chained per project, so the backend sees them in
+ * click order. A failed write drops its intent, if no newer pick in the slot
+ * has replaced it, and the view falls back to server truth.
  *
  * Catalog writes are rare, so they await the backend and then patch the
  * snapshot with the result; a failure toasts and refetches. They run one at
  * a time, in call order, so two quick edits reach the backend in the order
  * they were made and each sees the snapshot the one before it left.
+ *
+ * The two queues are not ordered against each other here. The command
+ * wrappers send every tag write in call order, which is what keeps an
+ * assignment still in flight ahead of a catalog edit to its tag or group.
  */
 
 import { toast } from 'svelte-sonner';

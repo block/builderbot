@@ -1228,13 +1228,18 @@ pub async fn get_active_sessions(
 /// every queued or running child, each with the title the branch timeline
 /// would give it.
 #[tauri::command]
-pub fn list_child_sessions(
+pub async fn list_child_sessions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     parent_session_id: String,
 ) -> Result<Vec<store::ChildSessionInfo>, String> {
-    get_store(&store)?
-        .list_active_child_sessions(&parent_session_id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_active_child_sessions(&parent_session_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_child_sessions task failed: {e}"))?
 }
 
 /// A store read, run on the blocking pool like [`get_active_sessions`]: the
@@ -1294,25 +1299,35 @@ pub async fn get_session_messages_since(
 }
 
 #[tauri::command]
-pub fn get_session_acp_metadata_messages(
+pub async fn get_session_acp_metadata_messages(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<Vec<store::SessionMessage>, String> {
-    get_store(&store)?
-        .get_session_acp_metadata_messages(&session_id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_session_acp_metadata_messages(&session_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_session_acp_metadata_messages task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn get_session_acp_metadata_messages_since(
+pub async fn get_session_acp_metadata_messages_since(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
     since_id: i64,
     refetch_ids: Vec<i64>,
 ) -> Result<Vec<store::SessionMessage>, String> {
-    get_store(&store)?
-        .get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_session_acp_metadata_messages_since task failed: {e}"))?
 }
 
 /// One tick of the session pane's poll: status, follow-up queue and both
@@ -1341,14 +1356,18 @@ pub async fn poll_session(
 /// projected into the transcript by the store) to a data URL. The web client
 /// fetches `/api/tool-images/…` directly; this is the Tauri IPC equivalent.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_tool_image(
+pub async fn get_tool_image(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     message_id: i64,
     field: String,
     index: usize,
 ) -> Result<String, String> {
     let store = get_store(&store)?;
-    tool_image_data_url(&store, message_id, &field, index)
+    tauri::async_runtime::spawn_blocking(move || {
+        tool_image_data_url(&store, message_id, &field, index)
+    })
+    .await
+    .map_err(|e| format!("get_tool_image task failed: {e}"))?
 }
 
 pub(crate) fn tool_image_data_url(
@@ -1372,12 +1391,16 @@ pub(crate) fn tool_image_data_url(
 /// The web client fetches `/api/tool-bodies/{message_id}` directly; this is
 /// the Tauri IPC equivalent.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_tool_call_body(
+pub async fn get_tool_call_body(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     message_id: i64,
 ) -> Result<store::ToolCallBody, String> {
     let store = get_store(&store)?;
-    tool_call_body(&store, message_id).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        tool_call_body(&store, message_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_tool_call_body task failed: {e}"))?
 }
 
 pub(crate) fn tool_call_body(
@@ -1390,24 +1413,34 @@ pub(crate) fn tool_call_body(
 }
 
 #[tauri::command]
-pub fn get_session_acp_initialization(
+pub async fn get_session_acp_initialization(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<Option<store::AcpMessageMetadata>, String> {
-    get_store(&store)?
-        .get_session_acp_initialization(&session_id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_session_acp_initialization(&session_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_session_acp_initialization task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn count_assistant_messages_after(
+pub async fn count_assistant_messages_after(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
     after_timestamp: i64,
 ) -> Result<i64, String> {
-    get_store(&store)?
-        .count_assistant_messages_after(&session_id, after_timestamp)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .count_assistant_messages_after(&session_id, after_timestamp)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("count_assistant_messages_after task failed: {e}"))?
 }
 
 /// Record that the user has read the session's chat, clearing the unread dot
@@ -2891,23 +2924,33 @@ pub async fn queue_session_message(
 }
 
 #[tauri::command]
-pub fn list_queued_session_messages(
+pub async fn list_queued_session_messages(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<Vec<store::QueuedSessionMessage>, String> {
-    get_store(&store)?
-        .list_queued_session_messages(&session_id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_queued_session_messages(&session_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_queued_session_messages task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn delete_queued_session_message(
+pub async fn delete_queued_session_message(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     id: String,
 ) -> Result<bool, String> {
-    get_store(&store)?
-        .delete_queued_session_message(&id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .delete_queued_session_message(&id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("delete_queued_session_message task failed: {e}"))?
 }
 
 /// Whether a message typed for `session_id` can reach its agent *now* (the
@@ -2989,13 +3032,18 @@ pub(crate) fn live_delivery_for_session(
 }
 
 #[tauri::command]
-pub fn get_session_live_delivery(
+pub async fn get_session_live_delivery(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     session_id: String,
 ) -> Result<SessionLiveDelivery, String> {
     let store = get_store(&store)?;
-    live_delivery_for_session(&store, &registry, &session_id)
+    let registry = Arc::clone(&registry);
+    tauri::async_runtime::spawn_blocking(move || {
+        live_delivery_for_session(&store, &registry, &session_id)
+    })
+    .await
+    .map_err(|e| format!("get_session_live_delivery task failed: {e}"))?
 }
 
 /// The `send_session_message_now` reply: how the message reached (or failed
@@ -5960,7 +6008,7 @@ pub async fn start_or_queue_branch_session(
 /// take it.
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
-pub fn queue_branch_session(
+pub async fn queue_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     branch_id: String,
@@ -5972,17 +6020,21 @@ pub fn queue_branch_session(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
-    queue_branch_session_for_store(
-        store,
-        Some(&app_handle),
-        branch_id,
-        prompt,
-        session_type,
-        provider,
-        image_ids,
-        launch_context,
-        acp_config_selection,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        queue_branch_session_for_store(
+            store,
+            Some(&app_handle),
+            branch_id,
+            prompt,
+            session_type,
+            provider,
+            image_ids,
+            launch_context,
+            acp_config_selection,
+        )
+    })
+    .await
+    .map_err(|e| format!("queue_branch_session task failed: {e}"))?
 }
 
 /// What a queued row's dependency gate lets a start path do with it.

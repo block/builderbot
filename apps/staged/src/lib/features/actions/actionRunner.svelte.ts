@@ -31,6 +31,7 @@ import {
 } from './actions';
 import { onBranchActionStatus, onBranchRunPhaseChanged } from '../../services/branchEventService';
 import { getPinnedActions, getSecondaryRunningActions, groupActionsByType } from './actionGroups';
+import { LatestWins } from '../../shared/latestWins';
 
 export type RunningAction = {
   executionId: string;
@@ -83,6 +84,12 @@ export class ActionRunner {
   private load: () => Promise<ProjectAction[]> = undefined!;
   private run: (actionId: string) => Promise<string> = undefined!;
   private loadRunning: (() => Promise<RunningActionSnapshot[]>) | undefined;
+  /**
+   * Action lists are read concurrently on the backend, so a reload sent after
+   * a change can answer before the read sent ahead of it. The later-sent
+   * answer stays.
+   */
+  private loadOrder = new LatestWins<'actions'>();
 
   actions = $state<ProjectAction[]>([]);
   runningActions = $state<RunningAction[]>([]);
@@ -228,12 +235,14 @@ export class ActionRunner {
    * affordance would otherwise show it after a transient IPC error.
    */
   async loadActions(): Promise<boolean> {
+    const ticket = this.loadOrder.issue();
     try {
-      this.actions = await this.load();
+      const actions = await this.load();
+      if (this.loadOrder.admit('actions', ticket)) this.actions = actions;
       return true;
     } catch (e) {
       console.error('Failed to load actions:', e);
-      this.actions = [];
+      if (this.loadOrder.admit('actions', ticket)) this.actions = [];
       return false;
     }
   }
@@ -244,6 +253,8 @@ export class ActionRunner {
    * them, so the Detect Actions flow needs no second read.
    */
   setActions(actions: ProjectAction[]): void {
+    // Newer than any read still in flight, which must not replace it.
+    this.loadOrder.admit('actions', this.loadOrder.issue());
     this.actions = actions;
   }
 

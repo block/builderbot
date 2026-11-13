@@ -1173,6 +1173,105 @@ describe('writes sent without awaiting keep their send order', () => {
     expect(sent).toHaveLength(2);
   });
 
+  it('sends a repo badge’s second save only once the first has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.updateRepoBadge('acme/app', '', 'AP', 10);
+    void commands.updateRepoBadge('acme/app', '', 'APP', 10);
+    await flush();
+    expect(sent.map((call) => call.args.shortName)).toEqual(['AP']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.shortName)).toEqual(['AP', 'APP']);
+  });
+
+  it('sends a repo badge’s delete only once the save before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.updateRepoBadge('acme/app', 'web', 'AP', 10);
+    void commands.deleteRepoBadge('acme/app', 'web');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['update_repo_badge']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['update_repo_badge', 'delete_repo_badge']);
+  });
+
+  it('sends pinned repo reorders one at a time, in drop order', async () => {
+    const { commands, sent } = await load();
+
+    void commands.reorderPinnedRepos([
+      ['acme/a', ''],
+      ['acme/b', ''],
+    ]);
+    void commands.reorderPinnedRepos([
+      ['acme/b', ''],
+      ['acme/a', ''],
+    ]);
+    await flush();
+    expect(sent).toHaveLength(1);
+
+    sent[0].settle();
+    await flush();
+    expect(sent.map((call) => (call.args.orderedKeys as [string, string][])[0][0])).toEqual([
+      'acme/a',
+      'acme/b',
+    ]);
+  });
+
+  it('sends a project note’s read mark only once the unread mark before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setProjectNoteRead('pnote-1', false);
+    void commands.setProjectNoteRead('pnote-1', true);
+    await flush();
+    expect(sent.map((call) => call.args.read)).toEqual([false]);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.read)).toEqual([false, true]);
+  });
+
+  it('sends a project note’s delete only once the unread mark before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setProjectNoteRead('pnote-1', false);
+    void commands.deleteProjectNote('pnote-1');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_project_note_read']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual([
+      'set_project_note_read',
+      'delete_project_note',
+    ]);
+  });
+
+  it('sends a tag’s catalog edit only once the assignment before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setProjectTagAssigned('project-1', 'tag-1', true);
+    void commands.moveTag('tag-1', 'group-1', 0);
+    void commands.setProjectGroupTag('project-2', 'group-1', 'tag-2');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_project_tag_assigned']);
+
+    sent[0].settle();
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_project_tag_assigned', 'move_tag']);
+
+    sent[1].settle();
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual([
+      'set_project_tag_assigned',
+      'move_tag',
+      'set_project_group_tag',
+    ]);
+  });
+
   it('sends the next write after one that failed', async () => {
     vi.resetModules();
     const invokeCommand = vi
@@ -1200,8 +1299,14 @@ describe('writes sent without awaiting keep their send order', () => {
     void commands.queueSessionMessage('session-1', 'first');
     void commands.queueSessionMessage('session-2', 'first');
     void commands.markSessionChatRead('session-1');
+    void commands.updateRepoBadge('acme/app', '', 'AP', 10);
+    void commands.updateRepoBadge('acme/app', 'web', 'WB', 10);
+    void commands.setProjectNoteRead('pnote-1', true);
+    void commands.setProjectNoteRead('pnote-2', true);
+    void commands.reorderPinnedRepos([]);
+    void commands.setProjectTagAssigned('project-1', 'tag-1', true);
     await flush();
 
-    expect(sent).toHaveLength(8);
+    expect(sent).toHaveLength(14);
   });
 });

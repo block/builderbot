@@ -21,6 +21,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as commands from '../../api/commands';
   import { listenToEvent } from '../../transport';
+  import { LatestWins } from '../../shared/latestWins';
   import { formatRelativeTime } from '../../shared/relativeTime.svelte';
   import type { ControlGrantSummary } from '../../types';
   import { accessLabel, scopeLabel } from './controlAuthorization.svelte';
@@ -36,11 +37,19 @@
   let revoking = $state(false);
   let mounted = true;
 
+  /**
+   * Each `control-grants-changed` sends a load, and the backend reads them
+   * concurrently: the load sent for the latest change stays, whichever
+   * answers last.
+   */
+  const loadOrder = new LatestWins<'grants'>();
+
   async function load() {
+    const ticket = loadOrder.issue();
     loading = true;
     try {
       const list = await commands.listControlGrants();
-      if (!mounted) return;
+      if (!mounted || !loadOrder.admit('grants', ticket)) return;
       grants = list;
       error = null;
     } catch (e) {

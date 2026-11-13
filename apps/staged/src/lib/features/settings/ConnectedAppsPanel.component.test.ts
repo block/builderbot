@@ -150,6 +150,27 @@ describe('ConnectedAppsPanel', () => {
     expect(rows()).toHaveLength(1);
   });
 
+  it('keeps the list from the load sent last when an earlier load answers after it', async () => {
+    const pending: Array<(list: ControlGrantSummary[]) => void> = [];
+    commands.listControlGrants.mockImplementation(
+      () => new Promise((resolve) => pending.push(resolve))
+    );
+    panel = mount(ConnectedAppsPanel, { target: host });
+    flushSync();
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+
+    // An approval lands while the mount's load is still in flight.
+    transport.listeners.get('control-grants-changed')?.(undefined);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]([grant()]);
+    await flushPromises();
+    expect(rows()).toHaveLength(1);
+
+    pending[0]([]);
+    await flushPromises();
+    expect(rows()).toHaveLength(1);
+  });
+
   it('revokes behind a confirm and drops the row', async () => {
     commands.listControlGrants.mockResolvedValue([grant(), grant({ id: 'g-2', client: 'other' })]);
     await render();

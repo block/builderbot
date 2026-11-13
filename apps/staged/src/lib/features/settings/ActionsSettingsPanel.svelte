@@ -33,6 +33,7 @@
   import { navigation } from '../layout/navigation.svelte';
   import { consumeRepoSettingsTarget } from './repoSettingsTarget';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
+  import { LatestWins } from '../../shared/latestWins';
 
   type RepoAttachment = {
     projectId: string;
@@ -254,11 +255,16 @@
     const requestedKey = requested ? repoKey(requested.githubRepo, requested.subpath) : null;
     let revealRequested = false;
 
+    const ticket = loadOrder.issue();
     loadingContexts = true;
     try {
       const nextContexts = await commands.listActionContexts();
-      contexts = nextContexts;
-      await loadRepoAttachments(nextContexts);
+      // A load sent after this one has already landed with a fresher list.
+      // Keep that, and still honor this load's parked target against it.
+      if (loadOrder.admit('contexts', ticket)) {
+        contexts = nextContexts;
+        await loadRepoAttachments(nextContexts);
+      }
       // Honor the parked target now that the entry list is resolved.
       if (requestedKey && mergedEntries.some((e) => e.key === requestedKey)) {
         openEntry(requestedKey);
@@ -285,20 +291,32 @@
     sidebarEl?.querySelector('.context-item.selected')?.scrollIntoView({ block: 'nearest' });
   }
 
+  /**
+   * The context and action reads run concurrently on the backend, so two sent
+   * in a row can answer in either order. Without this, picking repo A and then
+   * B could leave A's actions listed under B, where Edit and Delete act on
+   * A's action ids.
+   */
+  const loadOrder = new LatestWins<'contexts' | 'actions'>();
+
   async function loadActions() {
+    const ticket = loadOrder.issue();
     if (!selectedContext) {
+      // Nothing to read, but a read still in flight must not fill the list.
+      loadOrder.admit('actions', ticket);
       actions = [];
       return;
     }
     loadingActions = true;
     try {
-      actions = await commands.listRepoActions(
+      const loaded = await commands.listRepoActions(
         selectedContext.githubRepo,
         selectedContext.subpath ?? undefined
       );
+      if (loadOrder.admit('actions', ticket)) actions = loaded;
     } catch (e) {
       console.error('Failed to load actions:', e);
-      actions = [];
+      if (loadOrder.admit('actions', ticket)) actions = [];
     } finally {
       loadingActions = false;
     }

@@ -61,6 +61,22 @@ fn test_project_unique_repo_with_no_subpath() {
 }
 
 #[test]
+fn test_get_project_by_name_matches_the_stored_name_exactly() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::named("Fix login");
+    store.create_project(&project).unwrap();
+    store.create_project(&Project::named("Other")).unwrap();
+
+    let found = store.get_project_by_name("Fix login").unwrap().unwrap();
+    assert_eq!(found.id, project.id);
+
+    // The unique index compares names byte for byte, and so does the lookup.
+    assert!(store.get_project_by_name("fix login").unwrap().is_none());
+    assert!(store.get_project_by_name("Fix login ").unwrap().is_none());
+    assert!(store.get_project_by_name("Fix").unwrap().is_none());
+}
+
+#[test]
 fn test_list_projects() {
     let store = Store::in_memory().unwrap();
     store

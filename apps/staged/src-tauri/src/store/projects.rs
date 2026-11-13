@@ -56,6 +56,20 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The project with exactly this name, if any. Names are unique
+    /// (`idx_projects_name`) and compared as stored: case-sensitively, with
+    /// no trimming.
+    pub fn get_project_by_name(&self, name: &str) -> Result<Option<Project>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE name = ?1"),
+            params![name],
+            project_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn get_project_by_repo(&self, github_repo: &str) -> Result<Option<Project>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(

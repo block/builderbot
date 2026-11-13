@@ -1,11 +1,10 @@
-//! Shared project command implementations used by Tauri commands, the web
-//! transport and MCP tools.
+//! Adding a repository to an existing project: the store writes, then the
+//! background setup.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use tauri::Manager;
-
+use super::setup::spawn_project_repo_setup;
 use crate::store::repo_affinities::repo_affinity_key;
 use crate::store::{self, Store};
 use crate::{blox, branches, git};
@@ -18,35 +17,62 @@ pub(crate) struct AddedProjectRepo {
     pub provisions_workspace: bool,
 }
 
-/// Rename a project, shared by the `rename_project` Tauri command and the
-/// web transport.
+/// Add a GitHub repository to a project and start its background setup.
 ///
-/// A metadata-only write: the `projects.name` column changes and the store
-/// publishes `project-changed`. Branch names, worktrees, Blox workspaces and
-/// repo branch names keep whatever was inferred from the old name when they
-/// were created, so nothing on disk moves. It is not gated on an in-flight
-/// transfer: a transfer rewrites `location`, which this write never carries.
-pub(crate) fn rename_project_impl(
-    store: &Store,
-    project_id: &str,
-    name: &str,
-) -> Result<store::Project, String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err("Project name is required".to_string());
-    }
-    store
-        .rename_project(project_id, trimmed)
-        .map_err(|e| e.to_string())?;
-    store
-        .get_project(project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))
+/// The one body behind the `add_project_repo` Tauri command, the web/control
+/// `dispatch` arm and the note move that adds a repo on the way, so none of
+/// them can write the rows and skip the setup: a local branch without its
+/// worktree and prerun actions, or a repo never cloned into the project's
+/// running workspace. See [`spawn_project_repo_setup`] for what the setup is.
+///
+/// The arguments are [`add_project_repo_impl`]'s. Every await is inside it
+/// and ahead of its first write, and the setup is spawned in the same
+/// synchronous stretch as the last write, so a request future dropped
+/// part-way (see the `web_server` module docs) has either written nothing or
+/// written every row and started the setup.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn add_project_repo_and_setup(
+    app_handle: tauri::AppHandle,
+    store: Arc<Store>,
+    project_id: String,
+    github_repo: String,
+    branch_name: Option<String>,
+    subpath: Option<String>,
+    set_as_primary: Option<bool>,
+    reason: Option<String>,
+    pr_number: Option<u64>,
+    default_branch: Option<String>,
+    head_repo: Option<String>,
+) -> Result<store::ProjectRepo, String> {
+    let added = add_project_repo_impl(
+        Arc::clone(&store),
+        project_id.clone(),
+        github_repo,
+        branch_name,
+        subpath,
+        set_as_primary,
+        reason,
+        pr_number,
+        default_branch,
+        head_repo,
+    )
+    .await?;
+    spawn_project_repo_setup(
+        app_handle,
+        store,
+        project_id,
+        added.repo.id.clone(),
+        added.provisions_workspace,
+        "add_project_repo",
+    );
+    Ok(added.repo)
 }
 
-/// Core logic for adding a GitHub repository to a project.
+/// The store writes for adding a GitHub repository to a project, without the
+/// background setup.
 ///
-/// Called by both the `add_project_repo` Tauri command and the MCP tool.
+/// Called by [`add_project_repo_and_setup`], and directly by the MCP tool,
+/// which runs the setup inline so it can report the outcome to the agent.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn add_project_repo_impl(
     store: Arc<Store>,
@@ -309,125 +335,6 @@ async fn ensure_workspace_running(ws_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Background worktree + prerun-actions setup for a repo that was just added
-/// to a project — fire and forget. Shared by the `add_project_repo` command and
-/// the note move that adds a repo on the way. `provisions_workspace` is
-/// [`AddedProjectRepo::provisions_workspace`].
-pub(crate) fn spawn_project_repo_setup(
-    app_handle: tauri::AppHandle,
-    store: Arc<Store>,
-    project_id: String,
-    repo_id: String,
-    provisions_workspace: bool,
-) {
-    log::info!(
-        "[add_project_repo] spawning background setup for repo {repo_id} in project {project_id}"
-    );
-    tauri::async_runtime::spawn(async move {
-        crate::web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
-
-        let branch = match store.list_branches_for_project(&project_id) {
-            Ok(branches) => branches
-                .into_iter()
-                .find(|b| b.project_repo_id.as_deref() == Some(repo_id.as_str())),
-            Err(e) => {
-                log::warn!("[add_project_repo] failed to list branches: {e}");
-                return;
-            }
-        };
-        let branch = match branch {
-            Some(b) => b,
-            None => {
-                log::warn!("[add_project_repo] no branch found for repo {repo_id}");
-                return;
-            }
-        };
-
-        if branch.workspace_name.is_none() {
-            // Local branch: set up git worktree and run prerun actions.
-            let branch_id = branch.id.clone();
-            let store_clone = Arc::clone(&store);
-            let app_handle_clone = app_handle.clone();
-            let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                branches::setup_worktree_sync(&store_clone, &branch_id, &app_handle_clone)
-            })
-            .await;
-
-            match worktree_result {
-                Ok(Ok(path)) => {
-                    log::info!("[add_project_repo] worktree ready at {path}");
-                    crate::web_server::emit_to_all(
-                        &app_handle,
-                        "project-setup-progress",
-                        project_id.clone(),
-                    );
-                }
-                Ok(Err(e)) => {
-                    log::warn!("[add_project_repo] worktree setup failed: {e}");
-                    return;
-                }
-                Err(e) => {
-                    log::warn!("[add_project_repo] worktree task panicked: {e}");
-                    return;
-                }
-            }
-
-            let executor = app_handle.state::<Arc<crate::actions::ActionExecutor>>();
-            let act_registry = app_handle.state::<Arc<crate::actions::ActionRegistry>>();
-            if let branches::PrerunOutcome::Ran(_) = branches::claim_and_run_prerun_actions(
-                &store,
-                &app_handle,
-                &branch.id,
-                &executor,
-                &act_registry,
-                None,
-                "add_project_repo",
-            )
-            .await
-            {
-                crate::web_server::emit_to_all(
-                    &app_handle,
-                    "project-setup-progress",
-                    project_id.clone(),
-                );
-            }
-        } else if provisions_workspace {
-            // Nothing is running to clone into yet. As with a project created
-            // with a repo, the workspace lifecycle runs `start_workspace` for
-            // the `Starting` branch, which starts the workspace from this repo.
-            log::info!(
-                "[add_project_repo] branch '{}' provisions workspace '{}'; leaving the clone to start_workspace",
-                branch.branch_name,
-                branch.workspace_name.as_deref().unwrap_or_default()
-            );
-        } else {
-            // Remote branch: clone the repo into the running workspace,
-            // fetch the base branch, and create the feature branch.
-            match branches::setup_remote_repo_clone(&store, &app_handle, &branch.id).await {
-                Ok(()) => {
-                    log::info!(
-                        "[add_project_repo] remote repo cloned for branch '{}'",
-                        branch.branch_name
-                    );
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[add_project_repo] remote repo clone failed for branch '{}': {e}",
-                        branch.branch_name
-                    );
-                    crate::web_server::emit_to_all(
-                        &app_handle,
-                        "project-setup-progress",
-                        project_id,
-                    );
-                    return;
-                }
-            }
-            crate::web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,45 +444,5 @@ mod tests {
             claim_remote_workspace(&store, &project).unwrap(),
             RemoteWorkspace::Provision(_)
         ));
-    }
-
-    #[test]
-    fn rename_project_impl_trims_and_stores_the_name() {
-        let store = Store::in_memory().unwrap();
-        let project = store::Project::new("test-owner/test-repo");
-        store.create_project(&project).unwrap();
-
-        let renamed = rename_project_impl(&store, &project.id, "  Renamed  ").unwrap();
-
-        assert_eq!(renamed.name, "Renamed");
-        assert_eq!(renamed.id, project.id);
-        assert_eq!(
-            store.get_project(&project.id).unwrap().unwrap().name,
-            "Renamed"
-        );
-    }
-
-    #[test]
-    fn rename_project_impl_rejects_a_blank_name_without_writing() {
-        let store = Store::in_memory().unwrap();
-        let project = store::Project::new("test-owner/test-repo");
-        store.create_project(&project).unwrap();
-
-        let err = rename_project_impl(&store, &project.id, "   \t\n").unwrap_err();
-
-        assert_eq!(err, "Project name is required");
-        assert_eq!(
-            store.get_project(&project.id).unwrap().unwrap().name,
-            project.name
-        );
-    }
-
-    #[test]
-    fn rename_project_impl_surfaces_a_missing_project() {
-        let store = Store::in_memory().unwrap();
-
-        let err = rename_project_impl(&store, "missing", "Renamed").unwrap_err();
-
-        assert!(err.contains("Project not found"), "{err}");
     }
 }

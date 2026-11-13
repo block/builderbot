@@ -516,13 +516,11 @@ async fn list_projects(
         .map_err(|e| format!("list_projects task failed: {e}"))?
 }
 
-/// Runs [`create_project_blocking`] on the blocking pool. As a synchronous
+/// Creates a project through [`project_commands::create_project_and_setup`],
+/// the body shared with the web/control `dispatch` arm. As a synchronous
 /// command it held the main thread, and so the window, through its store
-/// writes and through the `gh` and `sq` lookups it can make.
-///
-/// Nothing but the store handle lookup may run inline here: an `async fn`
-/// command runs on a runtime worker, where a store lock wait or a child
-/// process would stall timers and event sockets instead.
+/// writes and through the `gh` lookup it can make; the shared body runs
+/// that lookup on the blocking pool ahead of the first write.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 async fn create_project(
@@ -538,10 +536,10 @@ async fn create_project(
     head_repo: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        create_project_blocking(
-            store,
-            app_handle,
+    project_commands::create_project_and_setup(
+        app_handle,
+        store,
+        project_commands::CreateProjectRequest {
             name,
             github_repo,
             location,
@@ -550,197 +548,9 @@ async fn create_project(
             pr_number,
             default_branch,
             head_repo,
-        )
-    })
+        },
+    )
     .await
-    .map_err(|e| format!("create_project task failed: {e}"))?
-}
-
-/// The body of [`create_project`]. Blocking: it writes to the store, creates
-/// the project directory, asks `gh` for the default branch when none was
-/// prefetched, and on the first remote create of the process looks `sq` up
-/// through a login shell.
-#[allow(clippy::too_many_arguments)]
-fn create_project_blocking(
-    store: Arc<Store>,
-    app_handle: tauri::AppHandle,
-    name: String,
-    github_repo: Option<String>,
-    location: Option<String>,
-    subpath: Option<String>,
-    branch_name: Option<String>,
-    pr_number: Option<u64>,
-    default_branch: Option<String>,
-    head_repo: Option<String>,
-) -> Result<store::Project, String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err("Project name is required".to_string());
-    }
-    // Subpath validation is handled by the frontend before submission
-    // (SubpathInput.waitForValidation). Skipping the redundant backend
-    // re-validation here removes a ~500ms-2s GitHub API round-trip.
-
-    let project_location = match location.as_deref() {
-        Some("remote") if blox::is_sq_available() => store::ProjectLocation::Remote,
-        Some("remote") => {
-            log::warn!(
-                "[create_project] remote project requested but sq CLI is unavailable; creating a local project instead"
-            );
-            store::ProjectLocation::Local
-        }
-        _ => store::ProjectLocation::Local,
-    };
-    let inferred_branch_name = branch_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| branches::infer_prefixed_branch_name(trimmed));
-    let mut project = store::Project::named(trimmed);
-    project.location = project_location;
-    if let Some(repo) = github_repo.clone() {
-        project = project.with_primary_repo(&repo);
-    }
-    if let Some(sub) = subpath.clone() {
-        project = project.with_subpath(sub);
-    }
-
-    // Resolve the first branch's base before the first write. The frontend
-    // prefetches the default branch; without it this asks `gh`, which can
-    // take up to its 60 s timeout. Off the main thread, the refetches each
-    // write's change event triggers are served while this command is still
-    // running, so a lookup between the writes would show the project without
-    // its branch for as long as `gh` took.
-    let effective_base = github_repo
-        .as_deref()
-        .map(|repo| git::resolve_default_branch(default_branch, repo));
-
-    store.create_project(&project).map_err(|e| e.to_string())?;
-
-    // Create the project-scoped worktree root so project sessions always
-    // have a real directory to run in, even before any repos are attached.
-    if let Ok(project_dir) = git::project_worktree_root_for(&project.id) {
-        let _ = std::fs::create_dir_all(&project_dir);
-    }
-
-    if let Some(repo) = project.primary_repo() {
-        store
-            .get_or_create_action_context(repo, project.subpath.as_deref())
-            .map_err(|e| e.to_string())?;
-    }
-
-    if let Some(repo) = github_repo.clone() {
-        // Record this repo as recently used
-        store
-            .record_recent_repo(&repo, subpath.clone())
-            .map_err(|e| e.to_string())?;
-    }
-
-    if let (Some(repo), Some(effective_base)) = (github_repo, effective_base) {
-        let mut project_repo =
-            store::ProjectRepo::new(&project.id, &repo, &inferred_branch_name, subpath).primary();
-        project_repo.head_repo = head_repo;
-        store
-            .create_project_repo(&project_repo)
-            .map_err(|e| e.to_string())?;
-
-        // Create the initial branch record for the first repo so each new
-        // project starts with exactly one branch tracked for that repository.
-        let (branch_id, is_local) = match project.location {
-            store::ProjectLocation::Local => {
-                let mut branch =
-                    store::Branch::new(&project.id, &inferred_branch_name, &effective_base)
-                        .with_project_repo(&project_repo.id);
-                if let Some(pr) = pr_number {
-                    branch = branch.with_pr(pr);
-                }
-                store.create_branch(&branch).map_err(|e| e.to_string())?;
-                (branch.id, true)
-            }
-            store::ProjectLocation::Remote => {
-                let workspace_name =
-                    branches::infer_workspace_name(&project.id, &inferred_branch_name);
-                let mut branch = store::Branch::new_remote(
-                    &project.id,
-                    &inferred_branch_name,
-                    &effective_base,
-                    &workspace_name,
-                )
-                .with_project_repo(&project_repo.id);
-                if let Some(pr) = pr_number {
-                    branch = branch.with_pr(pr);
-                }
-                store.create_branch(&branch).map_err(|e| e.to_string())?;
-                log::info!(
-                    "[create_project] created remote branch={} workspace={} status=starting project={}",
-                    branch.id,
-                    workspace_name,
-                    project.id
-                );
-                (branch.id, false)
-            }
-        };
-
-        if is_local {
-            let project_id = project.id.clone();
-            let store_bg = Arc::clone(&store);
-            tauri::async_runtime::spawn(async move {
-                web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
-
-                let store_clone = Arc::clone(&store_bg);
-                let branch_id_clone = branch_id.clone();
-                let app_handle_clone = app_handle.clone();
-                let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                    branches::setup_worktree_sync(&store_clone, &branch_id_clone, &app_handle_clone)
-                })
-                .await;
-
-                match worktree_result {
-                    Ok(Ok(path)) => {
-                        log::info!("[create_project] worktree ready at {path}");
-                        web_server::emit_to_all(
-                            &app_handle,
-                            "project-setup-progress",
-                            project_id.clone(),
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("[create_project] worktree setup failed: {e}");
-                        return;
-                    }
-                    Err(e) => {
-                        log::warn!("[create_project] worktree task panicked: {e}");
-                        return;
-                    }
-                }
-
-                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
-                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-
-                if let branches::PrerunOutcome::Ran(_) = branches::claim_and_run_prerun_actions(
-                    &store_bg,
-                    &app_handle,
-                    &branch_id,
-                    &executor,
-                    &act_registry,
-                    None,
-                    "create_project",
-                )
-                .await
-                {
-                    web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
-                }
-            });
-        }
-    } else if project.location == store::ProjectLocation::Remote {
-        log::info!(
-            "[create_project] remote project '{}' created without a repo; workspace start will be deferred until a repo is added",
-            project.id
-        );
-    }
-
-    Ok(project)
 }
 
 /// Rename a project in place. Only the stored name changes; see
@@ -826,9 +636,10 @@ async fn add_project_repo(
     head_repo: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
-    let added = project_commands::add_project_repo_impl(
-        Arc::clone(&store),
-        project_id.clone(),
+    project_commands::add_project_repo_and_setup(
+        app_handle,
+        store,
+        project_id,
         github_repo,
         branch_name,
         subpath,
@@ -838,17 +649,7 @@ async fn add_project_repo(
         default_branch,
         head_repo,
     )
-    .await?;
-
-    project_commands::spawn_project_repo_setup(
-        app_handle,
-        store,
-        project_id,
-        added.repo.id.clone(),
-        added.provisions_workspace,
-    );
-
-    Ok(added.repo)
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]

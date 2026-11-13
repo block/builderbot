@@ -654,9 +654,10 @@ pub(crate) async fn add_repo_to_project(
     project_id: String,
     key: RepoKey,
 ) -> Result<(), String> {
-    let added = crate::project_commands::add_project_repo_impl(
-        Arc::clone(&store),
-        project_id.clone(),
+    crate::project_commands::add_project_repo_and_setup(
+        app_handle,
+        store,
+        project_id,
         key.github_repo,
         None,
         key.subpath,
@@ -666,15 +667,8 @@ pub(crate) async fn add_repo_to_project(
         None,
         None,
     )
-    .await?;
-    crate::project_commands::spawn_project_repo_setup(
-        app_handle,
-        store,
-        project_id,
-        added.repo.id,
-        added.provisions_workspace,
-    );
-    Ok(())
+    .await
+    .map(|_| ())
 }
 
 /// A note whose session is still producing it has no settled content to carry,

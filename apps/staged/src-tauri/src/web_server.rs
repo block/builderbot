@@ -1158,148 +1158,24 @@ pub(crate) async fn dispatch(
         }
         "create_project" => {
             let store = get_store(store_mutex)?;
-            let name: String = arg(&args, "name")?;
-            let github_repo: Option<String> = opt_arg(&args, "githubRepo")?;
-            let location: Option<String> = opt_arg(&args, "location")?;
-            let subpath: Option<String> = opt_arg(&args, "subpath")?;
-            let branch_name: Option<String> = opt_arg(&args, "branchName")?;
-            let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
-            let default_branch: Option<String> = opt_arg(&args, "defaultBranch")?;
-            let head_repo: Option<String> = opt_arg(&args, "headRepo")?;
-
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return Err("Project name is required".to_string());
-            }
-
-            let project_location = match location.as_deref() {
-                Some("remote") => crate::store::ProjectLocation::Remote,
-                _ => crate::store::ProjectLocation::Local,
+            let request = crate::project_commands::CreateProjectRequest {
+                name: arg(&args, "name")?,
+                github_repo: opt_arg(&args, "githubRepo")?,
+                location: opt_arg(&args, "location")?,
+                subpath: opt_arg(&args, "subpath")?,
+                branch_name: opt_arg(&args, "branchName")?,
+                pr_number: opt_arg(&args, "prNumber")?,
+                default_branch: opt_arg(&args, "defaultBranch")?,
+                head_repo: opt_arg(&args, "headRepo")?,
             };
-            let inferred_branch_name = branch_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| crate::branches::infer_prefixed_branch_name(trimmed));
-
-            let mut project = crate::store::Project::named(trimmed);
-            project.location = project_location;
-            if let Some(ref repo) = github_repo {
-                project = project.with_primary_repo(repo);
-            }
-            if let Some(ref sub) = subpath {
-                project = project.with_subpath(sub.clone());
-            }
-
-            // Without a prefetched default branch this asks `gh`, so it runs on
-            // the blocking pool, and before the first write so no await falls
-            // between the writes below (see the module docs).
-            let effective_base = match github_repo.clone() {
-                Some(repo) => Some(
-                    tauri::async_runtime::spawn_blocking(move || {
-                        crate::git::resolve_default_branch(default_branch, &repo)
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?,
-                ),
-                None => None,
-            };
-
-            store.create_project(&project).map_err(|e| e.to_string())?;
-
-            if let Ok(project_dir) = crate::git::project_worktree_root_for(&project.id) {
-                let _ = std::fs::create_dir_all(&project_dir);
-            }
-
-            if let Some(repo) = project.primary_repo() {
-                store
-                    .get_or_create_action_context(repo, project.subpath.as_deref())
-                    .map_err(|e| e.to_string())?;
-            }
-
-            if let Some(ref repo) = github_repo {
-                store
-                    .record_recent_repo(repo, subpath.clone())
-                    .map_err(|e| e.to_string())?;
-            }
-
-            if let (Some(repo), Some(effective_base)) = (github_repo, effective_base) {
-                let mut project_repo = crate::store::ProjectRepo::new(
-                    &project.id,
-                    &repo,
-                    &inferred_branch_name,
-                    subpath,
-                )
-                .primary();
-                project_repo.head_repo = head_repo;
-                store
-                    .create_project_repo(&project_repo)
-                    .map_err(|e| e.to_string())?;
-
-                match project.location {
-                    crate::store::ProjectLocation::Local => {
-                        let mut branch = crate::store::Branch::new(
-                            &project.id,
-                            &inferred_branch_name,
-                            &effective_base,
-                        )
-                        .with_project_repo(&project_repo.id);
-                        if let Some(pr) = pr_number {
-                            branch = branch.with_pr(pr);
-                        }
-                        store.create_branch(&branch).map_err(|e| e.to_string())?;
-
-                        // Fire-and-forget background setup
-                        let store_bg = Arc::clone(&store);
-                        let app_handle = app_handle.clone();
-                        let branch_id = branch.id.clone();
-                        let project_id = project.id.clone();
-                        tauri::async_runtime::spawn(async move {
-                            emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
-
-                            let store_clone = Arc::clone(&store_bg);
-                            let branch_id_clone = branch_id.clone();
-                            let app_handle_clone = app_handle.clone();
-                            let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                                crate::branches::setup_worktree_sync(
-                                    &store_clone,
-                                    &branch_id_clone,
-                                    &app_handle_clone,
-                                )
-                            })
-                            .await;
-
-                            match worktree_result {
-                                Ok(Ok(path)) => {
-                                    log::info!("[web_server] worktree ready at {path}");
-                                    emit_to_all(&app_handle, "project-setup-progress", project_id);
-                                }
-                                Ok(Err(e)) => log::warn!("[web_server] worktree setup failed: {e}"),
-                                Err(e) => log::warn!("[web_server] worktree task panicked: {e}"),
-                            }
-                        });
-                    }
-                    crate::store::ProjectLocation::Remote => {
-                        let workspace_name = crate::branches::infer_workspace_name(
-                            &project.id,
-                            &inferred_branch_name,
-                        );
-                        let mut branch = crate::store::Branch::new_remote(
-                            &project.id,
-                            &inferred_branch_name,
-                            &effective_base,
-                            &workspace_name,
-                        )
-                        .with_project_repo(&project_repo.id);
-                        if let Some(pr) = pr_number {
-                            branch = branch.with_pr(pr);
-                        }
-                        store.create_branch(&branch).map_err(|e| e.to_string())?;
-                    }
-                };
-            }
-
+            // The desktop command's body: the rows, then the worktree and the
+            // repo's setup actions in the background.
+            let project = crate::project_commands::create_project_and_setup(
+                app_handle.clone(),
+                store,
+                request,
+            )
+            .await?;
             Ok(serde_json::to_value(project).unwrap())
         }
         "list_project_repos" => {
@@ -1341,8 +1217,12 @@ pub(crate) async fn dispatch(
             let default_branch: Option<String> = opt_arg(&args, "defaultBranch")?;
             let head_repo: Option<String> = opt_arg(&args, "headRepo")?;
 
-            let repo = crate::project_commands::add_project_repo_impl(
-                Arc::clone(&store),
+            // The desktop command's body: the rows, then the worktree and
+            // setup actions, or the clone into the project's workspace, in
+            // the background.
+            let repo = crate::project_commands::add_project_repo_and_setup(
+                app_handle.clone(),
+                store,
                 project_id,
                 github_repo,
                 branch_name,
@@ -1353,8 +1233,7 @@ pub(crate) async fn dispatch(
                 default_branch,
                 head_repo,
             )
-            .await?
-            .repo;
+            .await?;
             Ok(serde_json::to_value(repo).unwrap())
         }
         "update_project_repo_branch_name" => {
@@ -5217,6 +5096,82 @@ mod tests {
                 "the web `delete_project_note` arm must not delete around the shared \
                  body (`{inline}`): {arm}"
             );
+        }
+    }
+
+    /// The text of the Tauri command `name` in `lib.rs`: from its `fn` to the
+    /// next command's attribute.
+    fn tauri_command_source(name: &str) -> &'static str {
+        let lib = include_str!("lib.rs");
+        let marker = format!("fn {name}(");
+        let start = lib
+            .find(&marker)
+            .unwrap_or_else(|| panic!("lib.rs should define the `{name}` command"));
+        let rest = &lib[start..];
+        let end = rest.find("#[tauri::command").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Creating a project goes through one body from the desktop window, the
+    /// browser and the control server. The arm used to carry its own copy,
+    /// which had drifted: no duplicate-name check, no `sq` check before a
+    /// remote project, and a worktree with no setup actions after it.
+    #[test]
+    fn web_create_project_shares_the_tauri_body() {
+        let body = "project_commands::create_project_and_setup(";
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "create_project");
+        let command = tauri_command_source("create_project");
+        for (what, source) in [
+            ("web `create_project` arm", arm.as_str()),
+            ("`create_project` Tauri command", command),
+        ] {
+            assert!(
+                source.contains(body),
+                "the {what} must call the shared body: {source}"
+            );
+            for inline in [
+                ".create_project(",
+                ".create_project_repo(",
+                ".create_branch(",
+                "create_project_impl(",
+                "setup_worktree_sync(",
+                "claim_and_run_prerun_actions(",
+            ] {
+                assert!(
+                    !source.contains(inline),
+                    "the {what} must not create around the shared body (`{inline}`): {source}"
+                );
+            }
+        }
+    }
+
+    /// Adding a repo goes through one body too, setup included. The arm used
+    /// to stop at the rows, which left a local branch without a worktree or
+    /// its setup actions unless a window happened to be open, and a repo
+    /// joining a running workspace never cloned into it.
+    #[test]
+    fn web_add_project_repo_shares_the_tauri_body() {
+        let body = "project_commands::add_project_repo_and_setup(";
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "add_project_repo");
+        let command = tauri_command_source("add_project_repo");
+        for (what, source) in [
+            ("web `add_project_repo` arm", arm.as_str()),
+            ("`add_project_repo` Tauri command", command),
+        ] {
+            assert!(
+                source.contains(body),
+                "the {what} must call the shared body: {source}"
+            );
+            for inline in [
+                "add_project_repo_impl(",
+                "spawn_project_repo_setup(",
+                ".create_project_repo(",
+            ] {
+                assert!(
+                    !source.contains(inline),
+                    "the {what} must not add around the shared body (`{inline}`): {source}"
+                );
+            }
         }
     }
 

@@ -1309,4 +1309,61 @@ describe('writes sent without awaiting keep their send order', () => {
 
     expect(sent).toHaveLength(14);
   });
+
+  describe('when the write ahead never settles', () => {
+    beforeEach(() => {
+      // Only the timers the wait bound uses, so module loading is untouched.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    async function loadFor(transport: 'tauri' | 'web') {
+      vi.resetModules();
+      const sent: Sent[] = [];
+      const invokeCommand = vi.fn(
+        (command: string, args: Record<string, unknown>) =>
+          new Promise((resolve) => {
+            sent.push({ command, args, settle: resolve });
+          })
+      );
+      vi.doMock('./transport', () => ({ invokeCommand, isTauri: transport === 'tauri' }));
+      const commands = await import('./commands');
+      return { commands, sent };
+    }
+
+    it('over HTTP, sends the next write for the key once the wait bound runs out', async () => {
+      const { commands, sent } = await loadFor('web');
+
+      // A request on a dropped connection: `fetch` has no timeout.
+      const hung = commands.updateNote('note-1', 'Plan', 'older');
+      void commands.updateNote('note-1', 'Plan', 'newer');
+      await vi.advanceTimersByTimeAsync(commands.WEB_WRITE_ORDER_MAX_WAIT_MS - 1);
+      expect(sent.map((call) => call.args.content)).toEqual(['older']);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sent.map((call) => call.args.content)).toEqual(['older', 'newer']);
+
+      // The hung request was not failed or cancelled: it can still answer.
+      sent[0].settle({ id: 'note-1' });
+      await expect(hung).resolves.toEqual({ id: 'note-1' });
+    });
+
+    it('under Tauri, keeps the next write back for as long as the one ahead is out', async () => {
+      const { commands, sent } = await loadFor('tauri');
+
+      void commands.updateNote('note-1', 'Plan', 'older');
+      void commands.updateNote('note-1', 'Plan', 'newer');
+      await vi.advanceTimersByTimeAsync(100 * commands.WEB_WRITE_ORDER_MAX_WAIT_MS);
+      expect(sent.map((call) => call.args.content)).toEqual(['older']);
+
+      sent[0].settle({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sent.map((call) => call.args.content)).toEqual(['older', 'newer']);
+    });
+  });
 });

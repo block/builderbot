@@ -21,6 +21,19 @@
 //! wait freezes the window. `synchronous_commands_touch_only_in_process_state`
 //! holds them to in-process state: each is listed by name, and the same walk
 //! looks for the store, a child process or the filesystem in what it runs.
+//!
+//! What these tests do not cover: a store call made inline on the runtime by
+//! an `async fn` command or a `dispatch` arm that is not in
+//! `OFFLOADED_COMMANDS`. The walk looks for child-process waits only, and the
+//! handoff-only rule is applied by name to the commands that used to be
+//! synchronous. So the guards keep the store off the main thread; they do not
+//! keep it off the runtime workers. Commands that were `async` before those
+//! conversions still call the store inline (`ensure_review`, `find_review`
+//! and `add_comment` in `review_commands.rs` are three, and the
+//! `ensure_repo_badges`, `list_repos_for_home` and `list_all_repo_actions`
+//! arms do the same), where a slow holder of the store lock parks a worker.
+//! A new `async fn` command that does so passes every test here unless it is
+//! added to `OFFLOADED_COMMANDS`.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -173,6 +186,9 @@ fn async_commands_and_arms_keep_blocking_calls_off_the_runtime() {
 /// Commands that were synchronous and froze the window: on the main thread
 /// they waited on the store, on `gh` or on a login shell. Each is now an
 /// `async fn` whose whole body runs under `spawn_blocking`, as (file, name).
+///
+/// Not every async command that reaches the store: the ones that were
+/// already `async` are not listed, and some of them call the store inline.
 const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     ("util_commands.rs", "is_sq_available"),
     ("lib.rs", "create_project"),
@@ -343,6 +359,10 @@ const ARMS_WITH_NOTHING_TO_OFFLOAD: &[&str] = &[
 /// that are already async. It passes a command that goes back to a plain
 /// `fn`, which runs on the main thread again, and one that calls the store
 /// inline, where a lock wait parks a runtime worker.
+///
+/// This holds the [`OFFLOADED_COMMANDS`] entries to the handoff, and only
+/// them. An async command outside the list is not checked for inline store
+/// calls by any test (see the module docs).
 #[test]
 fn offloaded_commands_run_only_the_handoff_on_the_runtime() {
     let src = Crate::load();

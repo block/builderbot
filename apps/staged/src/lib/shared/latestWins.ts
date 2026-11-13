@@ -13,6 +13,15 @@
  * `admit(key, ticket)` allows it. Responses that land in the order they were
  * sent are all admitted. Tickets come from one counter that never resets, so
  * tickets issued for different keys can be compared with `overtaken`.
+ *
+ * This orders reads against reads only. State that is also written locally,
+ * from the result of a write, needs one more step: a read sent before that
+ * write landed may predate it, and nothing above refuses it, since no later
+ * read has landed. Record the local write as a landing under a key of its
+ * own (`admit(writeKey, issue())`), and have a read that finds itself
+ * `overtaken(writeKey, ticket)` read again. Reading again, where dropping
+ * would be simpler, keeps whatever else the dropped response carried. Only
+ * drop when the local write replaced the whole of the state.
  */
 export class LatestWins<K = string> {
   private sent = 0;
@@ -37,5 +46,14 @@ export class LatestWins<K = string> {
   /** Whether a response sent after `ticket` has already landed for `key`. */
   overtaken(key: K, ticket: number): boolean {
     return (this.landed.get(key) ?? 0) > ticket;
+  }
+
+  /**
+   * Whether no ticket has been issued since `ticket`: the request it stands
+   * for is the newest one sent. For state that describes the requests still
+   * out, such as a spinner, which an older request settling must not clear.
+   */
+  isNewest(ticket: number): boolean {
+    return ticket === this.sent;
   }
 }

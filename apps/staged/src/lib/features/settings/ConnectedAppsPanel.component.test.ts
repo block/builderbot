@@ -171,6 +171,59 @@ describe('ConnectedAppsPanel', () => {
     expect(rows()).toHaveLength(1);
   });
 
+  it('ignores the failure of an earlier load once a later load has answered', async () => {
+    const pending: Array<{
+      resolve: (list: ControlGrantSummary[]) => void;
+      reject: (reason: Error) => void;
+    }> = [];
+    commands.listControlGrants.mockImplementation(
+      () => new Promise((resolve, reject) => pending.push({ resolve, reject }))
+    );
+    panel = mount(ConnectedAppsPanel, { target: host });
+    flushSync();
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+
+    transport.listeners.get('control-grants-changed')?.(undefined);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1].resolve([grant()]);
+    await flushPromises();
+    expect(rows()).toHaveLength(1);
+
+    pending[0].reject(new Error('Database not initialized'));
+    await flushPromises();
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(rows()).toHaveLength(1);
+  });
+
+  it('stays loading while the newest load is out, though an older one has failed', async () => {
+    const pending: Array<{
+      resolve: (list: ControlGrantSummary[]) => void;
+      reject: (reason: Error) => void;
+    }> = [];
+    commands.listControlGrants.mockImplementation(
+      () => new Promise((resolve, reject) => pending.push({ resolve, reject }))
+    );
+    panel = mount(ConnectedAppsPanel, { target: host });
+    flushSync();
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    transport.listeners.get('control-grants-changed')?.(undefined);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    expect(host.querySelector('.loading-state')).not.toBeNull();
+
+    // Nothing later has answered, so this failure is the newest response and
+    // is shown; but the load sent after it is still out.
+    pending[0].reject(new Error('Database not initialized'));
+    await flushPromises();
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('Database not initialized');
+    expect(host.querySelector('.loading-state')).not.toBeNull();
+
+    pending[1].resolve([grant()]);
+    await flushPromises();
+    expect(host.querySelector('.loading-state')).toBeNull();
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(rows()).toHaveLength(1);
+  });
+
   it('revokes behind a confirm and drops the row', async () => {
     commands.listControlGrants.mockResolvedValue([grant(), grant({ id: 'g-2', client: 'other' })]);
     await render();

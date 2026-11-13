@@ -34,6 +34,7 @@
   import { consumeRepoSettingsTarget } from './repoSettingsTarget';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import { LatestWins } from '../../shared/latestWins';
+  import { RepoActionList } from './repoActionList.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -64,8 +65,13 @@
   let repoSearch = $state('');
   let sidebarEl: HTMLElement | null = null;
 
-  let actions = $state<ProjectAction[]>([]);
-  let loadingActions = $state(false);
+  /** The selected repo's actions, ordered against reads and local writes. */
+  const actionList = new RepoActionList(
+    () => selectedContext,
+    (githubRepo, subpath) => commands.listRepoActions(githubRepo, subpath)
+  );
+  const actions = $derived(actionList.actions);
+  const loadingActions = $derived(actionList.loading);
   let detecting = $state(false);
   let deletingRepo = $state(false);
   let showDeleteAllConfirm = $state(false);
@@ -292,34 +298,14 @@
   }
 
   /**
-   * The context and action reads run concurrently on the backend, so two sent
-   * in a row can answer in either order. Without this, picking repo A and then
-   * B could leave A's actions listed under B, where Edit and Delete act on
-   * A's action ids.
+   * The context reads run concurrently on the backend, so two sent in a row
+   * can answer in either order: the list sent last stays. The action list
+   * keeps its own order (see RepoActionList).
    */
-  const loadOrder = new LatestWins<'contexts' | 'actions'>();
+  const loadOrder = new LatestWins<'contexts'>();
 
-  async function loadActions() {
-    const ticket = loadOrder.issue();
-    if (!selectedContext) {
-      // Nothing to read, but a read still in flight must not fill the list.
-      loadOrder.admit('actions', ticket);
-      actions = [];
-      return;
-    }
-    loadingActions = true;
-    try {
-      const loaded = await commands.listRepoActions(
-        selectedContext.githubRepo,
-        selectedContext.subpath ?? undefined
-      );
-      if (loadOrder.admit('actions', ticket)) actions = loaded;
-    } catch (e) {
-      console.error('Failed to load actions:', e);
-      if (loadOrder.admit('actions', ticket)) actions = [];
-    } finally {
-      loadingActions = false;
-    }
+  function loadActions(): Promise<void> {
+    return actionList.load();
   }
 
   $effect(() => {
@@ -353,7 +339,7 @@
       // only adopt the list while we're still viewing the one we detected for;
       // the backend writes were scoped to the captured values regardless.
       if (selectedRepoKey === entryKey) {
-        actions = detected;
+        actionList.write(detected);
       }
 
       await loadContexts();
@@ -402,7 +388,7 @@
         values.icon
       );
       if (selectedRepoKey === entryKey) {
-        actions = [...actions, newAction];
+        actionList.write([...actions, newAction]);
       }
     } else {
       const actionId = actionToEdit.id;
@@ -417,17 +403,19 @@
         values.icon
       );
       if (selectedRepoKey === entryKey) {
-        actions = actions.map((a) =>
-          a.id === actionId
-            ? {
-                ...a,
-                name: values.name,
-                command: values.command,
-                actionType: values.actionType,
-                pinned: values.pinned,
-                icon: values.icon,
-              }
-            : a
+        actionList.write(
+          actions.map((a) =>
+            a.id === actionId
+              ? {
+                  ...a,
+                  name: values.name,
+                  command: values.command,
+                  actionType: values.actionType,
+                  pinned: values.pinned,
+                  icon: values.icon,
+                }
+              : a
+          )
         );
       }
     }
@@ -438,7 +426,7 @@
   async function deleteAction(actionId: string) {
     try {
       await commands.deleteProjectAction(actionId);
-      actions = actions.filter((a) => a.id !== actionId);
+      actionList.write(actions.filter((a) => a.id !== actionId));
       window.dispatchEvent(new CustomEvent('project-actions-changed'));
     } catch (e) {
       console.error('Failed to delete action:', e);
@@ -456,7 +444,7 @@
     try {
       await commands.deleteAllRepoActions(repoContextId);
       if (selectedRepoKey === entryKey) {
-        actions = [];
+        actionList.write([]);
       }
       showDeleteAllConfirm = false;
       window.dispatchEvent(new CustomEvent('project-actions-changed'));
@@ -487,7 +475,7 @@
       await commands.deleteRepoBadge(entry.githubRepo, entry.subpath);
       repoBadgeStore.remove(entry.githubRepo, entry.subpath);
       if (selectedRepoKey === entryKey) {
-        actions = [];
+        actionList.write([]);
       }
       showDeleteRepoConfirm = false;
       window.dispatchEvent(new CustomEvent('project-actions-changed'));

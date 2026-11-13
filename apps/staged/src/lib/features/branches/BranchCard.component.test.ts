@@ -266,6 +266,27 @@ describe('BranchCard file drops', () => {
     expect(cmd.createNote).toHaveBeenCalledWith('branch-1', 'Dropped', 'body');
     expect(cmd.createImage).toHaveBeenCalledWith('branch-1', 'project-1', '/tmp/b.png');
   });
+
+  it('creates the notes in drop order when the files are read out of order', async () => {
+    // The backend reads the files concurrently: the big one dropped first
+    // answers last.
+    const reads = new Map<string, (content: string) => void>();
+    cmd.readTextFile.mockImplementation(
+      (filePath) => new Promise<string>((resolve) => reads.set(filePath, resolve))
+    );
+    mountCard(remoteBranch('stopped'));
+
+    drop(['/tmp/big.md', '/tmp/small.md', '/tmp/tiny.md']);
+    await vi.waitFor(() => expect(reads.size).toBe(3));
+    reads.get('/tmp/tiny.md')!('tiny body');
+    reads.get('/tmp/small.md')!('small body');
+    // Give a note created as soon as its own read answered the time to be.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    reads.get('/tmp/big.md')!('big body');
+    await settle(() => expect(cmd.createNote).toHaveResolvedTimes(3));
+
+    expect(cmd.createNote.mock.calls.map(([, title]) => title)).toEqual(['big', 'small', 'tiny']);
+  });
 });
 
 describe('BranchCard while it is being deleted', () => {

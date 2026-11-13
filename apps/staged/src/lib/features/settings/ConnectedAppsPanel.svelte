@@ -53,10 +53,14 @@
       grants = list;
       error = null;
     } catch (e) {
-      if (!mounted) return;
+      // A failure is a response too: one from a load that a later load has
+      // already answered must not put its error above that load's list.
+      if (!mounted || !loadOrder.admit('grants', ticket)) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      if (mounted) loading = false;
+      // `loading` is about the newest load. An older one settling while that
+      // is still out leaves the Refresh button disabled.
+      if (mounted && loadOrder.isNewest(ticket)) loading = false;
     }
   }
 

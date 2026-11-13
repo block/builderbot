@@ -561,7 +561,8 @@
   /**
    * Orders the note fetches by when they were sent. The list load and the
    * per-session row refetch run concurrently in the backend, so either can
-   * land after a fetch sent later than it.
+   * land after a fetch sent later than it. A row removed locally once its
+   * delete has landed is recorded under `row` too.
    */
   const noteFetchOrder = new LatestWins<'list' | 'row'>();
   /**
@@ -639,6 +640,10 @@
         forgetDeletedNote('project', noteId);
         // Optimistic removal; the delete's notes-changed event re-fetches every
         // window's project-note surfaces (including this one) to confirm.
+        // A list load still in flight was sent before the delete landed and
+        // may have read the note. Counting the removal as a row landing makes
+        // that load read the list again instead of putting the row back.
+        noteFetchOrder.admit('row', noteFetchOrder.issue());
         projectNotes = projectNotes.filter((n) => n.id !== noteId);
         hashtagVersion++;
       } catch (e) {

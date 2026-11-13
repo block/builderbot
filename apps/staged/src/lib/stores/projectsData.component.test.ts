@@ -991,6 +991,69 @@ describe('setBranchesByProject', () => {
 
     expect(store.branchesByProject.get('p1')).toEqual([renamed]);
   });
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('reads the branches again when a read sent before a local write lands after it', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+
+    // A read is in flight, and read the store before the rename.
+    const stale = deferred<SwrResult<Branch[]>>();
+    listBranchesForProject.mockReturnValueOnce(stale.promise);
+    const refresh = store.refreshProject('p1');
+
+    // The rename lands and the view paints it.
+    const renamed = { ...store.branchesByProject.get('p1')![0], branchName: 'renamed' };
+    store.setBranchesByProject(new Map(store.branchesByProject).set('p1', [renamed]));
+
+    listBranchesForProject.mockResolvedValue(
+      swr([branch({ branchName: 'renamed' }), branch({ id: 'b2', branchName: 'other' })])
+    );
+    invalidateProjectBranchTimelines.mockClear();
+    stale.resolve(swr([branch({ branchName: 'before-rename' })]));
+    expect(await refresh).toBe(true);
+
+    // The older read does not put the old name back.
+    expect(store.branchesByProject.get('p1')!.map((b) => b.branchName)).toEqual(['renamed']);
+    // The refresh still invalidates the timelines of the branches in place.
+    expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1']);
+    // And what else that read carried is not lost: the list is read again.
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')!.map((b) => b.branchName)).toEqual([
+        'renamed',
+        'other',
+      ]);
+    });
+  });
+
+  it('lets a read in flight apply after a call that changed no branch', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+
+    const inFlight = deferred<SwrResult<Branch[]>>();
+    listBranchesForProject.mockReturnValueOnce(inFlight.promise);
+    const refresh = store.refreshProject('p1');
+    const reads = listBranchesForProject.mock.calls.length;
+
+    // A status event for a branch this project does not have: the caller
+    // still rebuilds the array.
+    const unchanged = store.branchesByProject.get('p1')!.map((b) => b);
+    store.setBranchesByProject(new Map(store.branchesByProject).set('p1', unchanged));
+
+    inFlight.resolve(swr([branch({ branchName: 'fetched' })]));
+    await refresh;
+    expect(store.branchesByProject.get('p1')![0].branchName).toBe('fetched');
+    expect(listBranchesForProject).toHaveBeenCalledTimes(reads);
+  });
 });
 
 describe('refresh', () => {

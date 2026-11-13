@@ -83,6 +83,15 @@ import type {
 export type DiffScope = 'branch' | 'commit' | 'worktree';
 
 /**
+ * How long an ordered write waits, over HTTP, for the one sent before it for
+ * the same key. The ordered writes are single store writes that take
+ * milliseconds, and `delete_note`, which can take a few seconds. Well past
+ * those, so only a request that has hung is given up on, and it is only
+ * given up waiting for: the request itself is left to finish.
+ */
+export const WEB_WRITE_ORDER_MAX_WAIT_MS = 30_000;
+
+/**
  * Keeps the writes the frontend sends without awaiting in the order it sent
  * them. `update_note`, `create_note`, `set_note_read`,
  * `mark_session_chat_read` and `queue_session_message` were synchronous
@@ -101,8 +110,14 @@ export type DiffScope = 'branch' | 'commit' | 'worktree';
  *
  * Only these wrappers are ordered. A command sent through another wrapper
  * while one of these is in flight is not held back for it.
+ *
+ * Under Tauri a write waits for the one ahead of it however long that takes.
+ * Over HTTP it waits at most {@link WEB_WRITE_ORDER_MAX_WAIT_MS}: a request
+ * on a dropped connection can stay pending until the page is reloaded, and
+ * would otherwise stop every later write for its key (every tag write, for
+ * `tags`). See {@link SendOrder}.
  */
-const writeOrder = new SendOrder();
+const writeOrder = new SendOrder(isTauri ? {} : { maxWaitMs: WEB_WRITE_ORDER_MAX_WAIT_MS });
 
 /** A branch note's saves and read marks share one order. */
 function noteWriteKey(noteId: string): string {
@@ -1817,10 +1832,13 @@ export function startQueuedSessionNow(branchId: string, sessionId: string): Prom
  * `subtype` is `'written'` when the user authored the note in the editor
  * dialog; the drag-drop and save-action-output paths leave it unset.
  *
- * A branch's creates are sent one at a time (see {@link writeOrder}). A drop
- * of several files creates its notes without awaiting each, and the order
- * they land in is the order the timeline lists them in and the order
- * same-titled ones get their ` (2)`, ` (3)` suffixes in.
+ * A branch's creates are sent one at a time (see {@link writeOrder}), in the
+ * order this is called in. A drop of several files creates its notes without
+ * awaiting each, and the order they land in is the order the timeline lists
+ * them in and the order same-titled ones get their ` (2)`, ` (3)` suffixes
+ * in. Keeping the call order is all this does: a caller that reads each file
+ * before creating its note has to finish the reads first, or the reads
+ * decide the order (see `addTextFileNotes` in BranchCard).
  */
 export function createNote(
   branchId: string,

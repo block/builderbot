@@ -86,6 +86,13 @@ export function mergeBranchesPreservingWorktree(existing: Branch[], incoming: Br
   });
 }
 
+/** Whether two branch lists hold the same branch objects in the same order. */
+function sameBranchList(existing: Branch[] | undefined, next: Branch[]): boolean {
+  const current = existing ?? [];
+  if (current === next) return true;
+  return current.length === next.length && current.every((branch, i) => branch === next[i]);
+}
+
 /**
  * Where a project transfer is: its latest `project-transfer-progress`, or the
  * confirm that started it (no transfer id yet) until the first event lands.
@@ -176,7 +183,9 @@ class ProjectsDataStore {
    * refresh, hydrate and branch-refetch paths can each have a read of the
    * same project in flight, and the backend serves them concurrently, so an
    * older response can land last. Keyed per list: `projects`,
-   * `branches:<project>` and `repos:<project>`.
+   * `branches:<project>` and `repos:<project>`. `branch-writes:<project>`
+   * records the view's own writes to a branch list (setBranchesByProject),
+   * which a branch read sent before them must not be applied over.
    */
   private readOrder = new LatestWins();
   private initialLoad: Promise<void> | null = null;
@@ -520,6 +529,16 @@ class ProjectsDataStore {
    * through the generation-guarded paths instead.
    */
   setBranchesByProject(next: Map<string, Branch[]>): void {
+    // A read of a project's branches still in flight was sent before this
+    // write and may have read the store before it. Mark the write so that
+    // read is not applied over it (see applyProjectBranches). Only lists that
+    // really differ count: callers rebuild the array even when no branch in
+    // it matched, and such a call must not turn a first hydration away.
+    for (const [projectId, branches] of next) {
+      if (!sameBranchList(this._branchesByProject.get(projectId), branches)) {
+        this.readOrder.admit(`branch-writes:${projectId}`, this.readOrder.issue());
+      }
+    }
     this._branchesByProject = next;
   }
 
@@ -742,6 +761,13 @@ class ProjectsDataStore {
    * this one (`ticket`, see readOrder) has already landed. A `replace` list
    * is applied even then: it is read after the transfer that asked for it,
    * and it alone drops the worktree paths the transfer removed.
+   *
+   * A list sent before a local write landed (setBranchesByProject) is not
+   * applied either: it may predate the rename, delete or status change the
+   * view has already painted, and would put the old row back until the
+   * write's change event refetched. It is not just dropped, since it may be
+   * the only read carrying some other change: the list is read again, and
+   * the list in place is returned so the caller treats it as the result.
    */
   private applyProjectBranches(
     projectId: string,
@@ -752,6 +778,10 @@ class ProjectsDataStore {
   ): Branch[] | null {
     if (generation !== this.loadGeneration || !this.hasProject(projectId)) return null;
     if (!this.readOrder.admit(`branches:${projectId}`, ticket) && !replace) return null;
+    if (!replace && this.readOrder.overtaken(`branch-writes:${projectId}`, ticket)) {
+      void this.refetchProjectBranches(projectId);
+      return this._branchesByProject.get(projectId) ?? null;
+    }
 
     const mergedBranches = replace
       ? branches

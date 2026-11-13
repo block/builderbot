@@ -6,9 +6,11 @@
 --
 -- Messages without attachments store NULL (`image_ids_json` in
 -- store/messages.rs), so a partial index over the non-NULL values holds only
--- the messages that attach something. The app asks once per operation, for
--- all of the operation's images together: `Store::attached_in_chat` in
--- store/images.rs runs `CHAT_ATTACHMENTS_SQL`,
+-- the messages that attach something. The app asks once per reference pass,
+-- for all of that pass's images together, not once per image. A delete makes
+-- one pass and a move can make several. Each pass is one call of
+-- `Store::attached_in_chat` in store/images.rs, which runs
+-- `CHAT_ATTACHMENTS_SQL`,
 -- `SELECT image_ids FROM session_messages WHERE image_ids IS NOT NULL`, and
 -- matches the ids itself. That WHERE is this index's, so the statement reads
 -- the index as a covering index and no row of the table.

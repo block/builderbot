@@ -65,7 +65,7 @@ The Staged window you were last in comes to the front and switches to the projec
 - **By name or id.** `<project>` is matched as an exact id, then an exact name, then a name that matches one project when case is ignored. A name that matches nothing, or several projects, fails before any window is touched.
 - **From a project workspace.** With no argument, the project is the one whose workspace the current directory is in: any directory under `~/.staged/workspaces/<local|remote>/projects/<project-id>/`, where Staged keeps a project's worktrees. From any other directory the command fails with `not_in_workspace` without looking for the app, so pass a project there. It does not open arbitrary directories or repositories.
 - **A busy window.** The window is raised whether or not it could switch, so you can see what is in the way. A dialog that is open, or a diff comment that could not be saved, is left alone and reported as `ui_busy`: close or finish it and run the command again.
-- **When Staged is not running.** The command starts the `Staged.app` that `stagedctl` is bundled in, waits up to thirty seconds for it to come up, and then opens the project. The new window is not shown early: it comes to the front once it has finished loading, which can be shortly after the command has exited. A line on stderr says Staged is being started. This is macOS only.
+- **When Staged is not running.** The command starts the `Staged.app` that `stagedctl` is bundled in, waits up to thirty seconds for it to come up, and then opens the project. The new window is not shown early: it comes to the front once it has finished loading, which can be shortly after the command has exited. A line on stderr says the app is being opened. A Staged that is running but too busy to answer is treated the same way: opening the app only brings it forward, and the command uses it as soon as it answers. This is macOS only.
 - **`--no-launch`.** The command exits 3 instead of starting Staged.
 
 Staged is also never started when you are not yet authorized (see below), when the directory names no project, when `--lock-path` or `$STAGEDCTL_LOCK` points at one particular instance, or from a development build, whose app needs its dev server (run `just dev` instead).
@@ -87,19 +87,27 @@ Two kinds of credential are refused with `scope_denied` (exit 4):
 - **Read-only grants** (`stagedctl connect --read-only`). Showing a project marks it read and records it as the last one shown, which is a write.
 - **Agent session credentials.** A session spawned by Staged cannot open a project, not even its own, so an agent cannot pull your window away. Run the command from your own terminal.
 
-A grant confined to one project (`stagedctl connect --project`) opens that project only. Any other project reads `not_found`, because that grant does not list it.
+A grant confined to one project (`stagedctl connect --project`) opens that project only. Any other project reads `not_found`, because that grant does not list it. From another project's workspace the message says the credential does not reach that project, not that it was deleted.
 
 #### The `staged` shorthand
 
 `staged` is a small wrapper script around the same command:
 
 ```bash
-staged "My Project"   # stagedctl project open "My Project"
-staged                # stagedctl project open
-staged --no-launch    # stagedctl project open --no-launch
+staged "My Project"     # stagedctl project open "My Project"
+staged                  # stagedctl project open
+staged --no-launch      # stagedctl project open --no-launch
+staged .                # stagedctl project open, from this directory
+staged /path/to/dir     # cd /path/to/dir && stagedctl project open
 ```
 
-It passes its arguments to `stagedctl project open` unchanged, so the output and exit codes are the ones described here. It does not take a directory to open: a path is read as a project name. The script never starts the app itself. If it cannot find `stagedctl` on your PATH, in `/Applications/Staged.app` or in `~/Applications/Staged.app`, it says so and exits 127 without starting anything.
+The output and exit codes are the ones described here. The script never starts the app itself. If it cannot find `stagedctl` on your PATH, in `/Applications/Staged.app` or in `~/Applications/Staged.app`, it says so and exits 127 without starting anything.
+
+- **A project.** A name or id goes to `stagedctl project open` unchanged, as do the flags.
+- **A directory.** When the one argument is an existing directory, `staged` runs `stagedctl project open` from that directory with no project, so the project is the one whose workspace the directory is in. `--no-launch` and `--json` may sit beside it.
+- **Only a project workspace opens.** `staged` does not open arbitrary directories or repositories. A directory outside every project workspace fails with `not_in_workspace`, and Staged is not started.
+- **A name that is also a directory.** An existing directory always wins. To open a project whose name matches a directory in the current directory, use `stagedctl project open <name>`.
+- **A directory that cannot be entered.** `staged` says so and exits 1.
 
 #### Getting `stagedctl` on your PATH
 
@@ -135,14 +143,14 @@ On failure, stderr carries one `code: message` line.
 | Exit | Code                     | Meaning                                                                                                                                   |
 | ---- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    |                          | The project is on screen.                                                                                                                 |
-| 1    | `not_found`              | No project matches; the message lists the project names. Also a workspace whose project was deleted.                                      |
+| 1    | `not_found`              | No project matches; the message lists the project names. Also a workspace whose project was deleted, or is outside a one-project grant.   |
 | 1    | `ambiguous`              | The name matches several projects when case is ignored.                                                                                   |
 | 1    | `not_in_workspace`       | No argument, and the current directory is not inside a Staged project workspace.                                                          |
 | 1    | `ui_busy`                | The window was raised but did not switch: a dialog is open, or a diff comment was not saved. Or another `project open` replaced this one. |
 | 1    | `ui_timeout`             | The window was raised but did not answer in time.                                                                                         |
 | 1    | `app_error`              | The app could not make the request, for example a running Staged from before this command existed (update it).                            |
 | 2    | `transport`              | A fault talking to the app.                                                                                                               |
-| 3    | message only             | Staged is not running and was not started, a started Staged did not come up in time, or the running Staged cannot be used.                |
+| 3    | message only             | Staged is not running and was not started, no Staged answered in time after the app was opened, or the running Staged cannot be used.     |
 | 4    | `authorization_required` | No grant yet. Run `stagedctl connect`.                                                                                                    |
 | 4    | `scope_denied`           | A read-only grant, or an agent session's credential.                                                                                      |
 | 127  |                          | `staged` only: `stagedctl` was not found.                                                                                                 |

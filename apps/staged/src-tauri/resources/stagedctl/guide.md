@@ -147,13 +147,16 @@ Outside a session:
   `~/.staged/workspaces/<local|remote>/projects/<project-id>/`, where
   Staged keeps a project's worktrees. From any other directory it exits 1
   (`not_in_workspace`) without looking for the app, and never starts it.
-  A workspace whose project was deleted exits 1 (`not_found`).
+  A workspace whose project was deleted exits 1 (`not_found`), as does
+  one whose project a grant confined to another project does not reach.
 - `--no-launch` exits 3 instead of starting Staged when it is not
   running.
-- `staged [<project>] [--no-launch]` is the same command, where the
-  `staged` launcher script is installed. It hands its arguments to
-  `stagedctl project open` unchanged and exits 127, starting nothing,
-  when it cannot find `stagedctl`.
+- `staged [<project> | <directory>] [--no-launch]` is the same command,
+  where the `staged` launcher script is installed. It hands its arguments
+  to `stagedctl project open` unchanged, except that a single argument
+  that is an existing directory (`staged .`) runs the command from that
+  directory with no project. It exits 127, starting nothing, when it
+  cannot find `stagedctl`.
 
 On success it prints `opened <name>  id:<id>  pid:<pid>`, the pid being
 the Staged instance that showed the project (`--json`: `{ outcome,
@@ -189,9 +192,11 @@ request until its window has loaded. A window that is still loading is
 not shown early: it comes to the front once it is ready, which can be
 after the command has exited. What it starts is the `Staged.app`
 this `stagedctl` is bundled in and nothing else, on macOS only. A line on
-stderr says so; stdout is unchanged. A project name is looked up only
-once the app is up, so a name that matches nothing still exits 1
-(`not_found`) after Staged has started.
+stderr says so; stdout is unchanged. A Staged that is running but too
+busy to answer is treated the same way: opening the app only brings it
+forward, and the command uses it as soon as it answers. A project name is
+looked up only once the app is up, so a name that matches nothing still
+exits 1 (`not_found`) after Staged has started.
 
 Staged is never started:
 

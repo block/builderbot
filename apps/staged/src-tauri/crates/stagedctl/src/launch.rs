@@ -30,6 +30,15 @@
 //!   was. Only [`CtlError::NotRunning`] from every candidate counts as "not
 //!   running".
 //!
+//! "Not running" is a judgement from one ping, and a ping that timed out
+//! reads the same as an endpoint nothing listens on. So a Staged that is
+//! alive but too busy to answer is taken for absent, and asking macOS to
+//! open the bundle only brings that app forward. Two things follow. The
+//! wait looks again, now and then, at the instances that were on disk
+//! before the launch, so such an app is used as soon as it answers
+//! ([`wait_for_instance`]). And nothing printed says Staged "was started":
+//! all this module knows is that it asked for the bundle to be opened.
+//!
 //! The pieces are kept apart so the tests never start the real app: the
 //! decision ([`launch_target`]), the bundle path ([`bundle_for_executable`])
 //! and the wait ([`wait_for_instance`]) take what they need as arguments,
@@ -51,6 +60,12 @@ pub const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The pause between looks for the new instance's discovery file.
 const LAUNCH_POLL_PAUSE: Duration = Duration::from_millis(200);
+
+/// How many polls go by between looks at the instances that were already on
+/// disk before the launch: with the default pause, about every two seconds.
+/// Seldom, because the usual one is a crashed instance's leftover that will
+/// never answer, and each probe of it costs a connect and a retry.
+const KNOWN_PROBE_EVERY: u32 = 10;
 
 /// The step that starts a process. Everything else in this module is
 /// reachable without one.
@@ -240,15 +255,30 @@ fn find_running(
     }
 }
 
-/// Wait for a started Staged: poll `candidates` until one that is not in
-/// `stale` passes the handshake, or `timeout` runs out (exit 3).
+/// Wait for Staged after asking for it to be opened: poll `candidates`
+/// until one passes the handshake, or `timeout` runs out (exit 3).
 ///
 /// `stale` is what was on disk before the launch, every entry already found
-/// dead. Those are skipped, so a leftover directory costs nothing per poll;
-/// a file the app has rewritten since (same path, new mtime) is new again.
-/// A new candidate that is not answering yet is tried again next round. One
-/// that fails any other way will not get better by waiting, so its error is
-/// returned at once.
+/// not answering. A candidate that is not in it is new: the instance that
+/// was just started, or a file the app has rewritten since (same path, new
+/// mtime). New candidates are tried on every poll. One that is not
+/// answering yet is tried again next round; one that fails any other way
+/// will not get better by waiting, so its error is returned at once.
+///
+/// The `stale` entries that are still listed are tried too, but only on
+/// every [`KNOWN_PROBE_EVERY`]th poll and after the new ones. Most are
+/// leftovers that never answer, so they must not slow the wait for the new
+/// instance. But one can be a Staged that was alive all along and too slow
+/// to answer its ping: opening the bundle starts nothing beside it, so the
+/// only way the wait can end well is for that instance to be asked again.
+///
+/// A `stale` entry that now answers but cannot be used does not end the
+/// wait, because a new instance may still be on its way. Its error is the
+/// one reported if nothing else answers in time, in place of the timeout
+/// message.
+///
+/// The deadline is checked between polls, so the wait can run over by one
+/// probe of an instance that accepts a connection and then says nothing.
 fn wait_for_instance(
     stale: &[DiscoveryCandidate],
     timeout: Duration,
@@ -257,31 +287,45 @@ fn wait_for_instance(
     mut connect: impl FnMut(&Path) -> Result<Client, CtlError>,
 ) -> Result<Client, CtlError> {
     let deadline = Instant::now() + timeout;
+    let mut unusable: Option<CtlError> = None;
+    let mut poll: u32 = 0;
     loop {
-        for candidate in candidates() {
-            if stale.contains(&candidate) {
-                continue;
-            }
+        poll = poll.wrapping_add(1);
+        let (known, new): (Vec<_>, Vec<_>) = candidates()
+            .into_iter()
+            .partition(|candidate| stale.contains(candidate));
+        for candidate in &new {
             match connect(&candidate.path) {
                 Ok(client) => return Ok(client),
                 Err(CtlError::NotRunning(_)) => {}
                 Err(e) => return Err(e),
             }
         }
+        if poll % KNOWN_PROBE_EVERY == 0 {
+            for candidate in &known {
+                match connect(&candidate.path) {
+                    Ok(client) => return Ok(client),
+                    Err(CtlError::NotRunning(_)) => {}
+                    Err(e) => unusable = Some(e),
+                }
+            }
+        }
         if Instant::now() >= deadline {
-            return Err(launch_timed_out(timeout));
+            return Err(unusable.unwrap_or_else(|| launch_timed_out(timeout)));
         }
         std::thread::sleep(poll_pause);
     }
 }
 
-/// The error for a started Staged whose control server never answered. Not
-/// [`CtlError::NotRunning`]: the app was started, so starting it again is
-/// not the remedy.
+/// The error for a wait that no Staged answered. It says what was done and
+/// what was seen, not that Staged "was started": the bundle was opened, and
+/// whether that started an app or only brought forward one that is too busy
+/// to answer cannot be told from here. Not [`CtlError::NotRunning`]: the
+/// open has been asked for, so asking again is not the remedy.
 fn launch_timed_out(timeout: Duration) -> CtlError {
     CtlError::Environment(format!(
-        "Staged was started but its control server did not answer within {} seconds; run the \
-         command again once its window is up",
+        "stagedctl asked macOS to open Staged, but no Staged control server answered within \
+         {} seconds; run the command again once its window is up",
         timeout.as_secs()
     ))
 }
@@ -320,8 +364,10 @@ pub fn connect_or_launch(
                 grants::now_ms(),
                 env.executable.as_deref(),
             )?;
+            // "No running Staged answered", not "Staged is not running":
+            // an instance too busy to answer its ping reads the same here.
             eprintln!(
-                "stagedctl: Staged is not running; starting {}",
+                "stagedctl: no running Staged answered; opening {}",
                 bundle.display()
             );
             env.launcher.launch(&bundle).map_err(|reason| {
@@ -350,7 +396,7 @@ pub fn connect_or_launch(
 pub(crate) mod tests {
     use super::*;
     use crate::client::tests::{
-        fake_server, grant_aware_server, grant_file, ping_body, private_tempdir, set_mtime,
+        fake_server, grant_aware_server_on, grant_file, ping_body, private_tempdir, set_mtime,
         write_tcp_discovery,
     };
     use crate::client::PROTOCOL_VERSION;
@@ -439,14 +485,23 @@ pub(crate) mod tests {
     /// A fake Staged that knows [`GRANT_ID`], listening but not yet
     /// discoverable: its port, for the discovery file to name.
     fn grant_aware_app() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        grant_aware_app_on(listener);
+        port
+    }
+
+    /// [`grant_aware_app`] on a listener that is already bound, for an app
+    /// that starts answering at the port its discovery file names.
+    fn grant_aware_app_on(listener: TcpListener) {
         let renew_to = grants::now_ms() + grants::GRANT_LIFETIME_MS - 1000;
-        let (port, _handle) = grant_aware_server(
+        let _handle = grant_aware_server_on(
+            listener,
             std::process::id(),
             vec![(GRANT_ID.to_string(), GRANT_SECRET.to_string())],
             renew_to,
             Arc::new(Mutex::new(Vec::new())),
         );
-        port
     }
 
     /// A port nothing listens on.
@@ -810,29 +865,43 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_wait_never_probes_what_was_already_there_and_times_out_as_exit_3() {
-        let dir = private_tempdir();
-        let zombie = write_zombie(dir.path());
-        let stale = live_discovery_candidates(dir.path());
-        assert_eq!(stale.len(), 1);
+    fn the_wait_looks_at_a_leftover_only_now_and_then_and_times_out_as_exit_3() {
+        // A crashed instance's directory never answers. It is asked again,
+        // in case it is a live app that was only slow, but seldom enough
+        // not to hold up the wait for the new instance.
+        let stale = [candidate("/zombie")];
+        let polls = AtomicUsize::new(0);
+        let probes = AtomicUsize::new(0);
 
         let started = Instant::now();
         let err = wait_for_instance(
             &stale,
             Duration::from_millis(200),
-            Duration::from_millis(20),
-            || live_discovery_candidates(dir.path()),
+            Duration::from_millis(1),
+            || {
+                polls.fetch_add(1, Ordering::SeqCst);
+                stale.to_vec()
+            },
             |path| -> Result<Client, CtlError> {
-                panic!("probed the stale {} (zombie is {zombie:?})", path.display())
+                assert_eq!(path, Path::new("/zombie"));
+                probes.fetch_add(1, Ordering::SeqCst);
+                Err(not_running())
             },
         )
         .unwrap_err();
 
         assert!(started.elapsed() >= Duration::from_millis(200));
+        let (polls, probes) = (polls.load(Ordering::SeqCst), probes.load(Ordering::SeqCst));
+        assert!(probes >= 1, "never looked again in {polls} polls");
+        assert_eq!(
+            probes,
+            polls / KNOWN_PROBE_EVERY as usize,
+            "probed on every {KNOWN_PROBE_EVERY}th poll and no other ({polls} polls)"
+        );
         assert_eq!(err.exit_code(), 3);
         assert!(
             matches!(err, CtlError::Environment(_)),
-            "a started app that never answered is not `NotRunning`: {err:?}"
+            "the bundle was opened, so this is not `NotRunning`: {err:?}"
         );
         assert_eq!(
             err.to_string(),
@@ -841,12 +910,156 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_timeout_message_names_the_wait_and_the_remedy() {
+    fn the_timeout_message_says_what_was_done_and_seen_and_the_remedy() {
+        let message = launch_timed_out(LAUNCH_TIMEOUT).to_string();
         assert_eq!(
-            launch_timed_out(LAUNCH_TIMEOUT).to_string(),
-            "Staged was started but its control server did not answer within 30 seconds; run \
-             the command again once its window is up"
+            message,
+            "stagedctl asked macOS to open Staged, but no Staged control server answered within \
+             30 seconds; run the command again once its window is up"
         );
+        // Opening the bundle may only have brought a busy app forward, so
+        // the message must not claim an app was started.
+        assert!(!message.contains("started"), "got: {message}");
+    }
+
+    #[test]
+    fn the_wait_uses_an_instance_that_was_there_all_along_once_it_answers() {
+        // A Staged too busy to answer its ping was taken for absent.
+        // Opening the bundle starts nothing beside it, so no new discovery
+        // file appears: the one to use has the path and mtime it had before.
+        let pid = std::process::id();
+        let (port, _handle) = fake_server(move |_| (200, ping_body(pid, 3, PROTOCOL_VERSION)));
+        let dir = private_tempdir();
+        let path = write_tcp_discovery(dir.path(), pid, port, 3);
+        let stale = live_discovery_candidates(dir.path());
+        assert_eq!(stale.len(), 1);
+        let probes = AtomicUsize::new(0);
+
+        let client = wait_for_instance(
+            &stale,
+            Duration::from_secs(20),
+            Duration::from_millis(2),
+            || live_discovery_candidates(dir.path()),
+            |probed| {
+                assert_eq!(probed, path);
+                // Still too slow the first time it is asked again.
+                if probes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(not_running());
+                }
+                Client::connect(probed)
+            },
+        )
+        .unwrap();
+
+        assert_eq!((client.pid, client.generation), (pid, 3));
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            live_discovery_candidates(dir.path()),
+            stale,
+            "the file was never rewritten, so it was found as a known instance"
+        );
+    }
+
+    #[test]
+    fn the_wait_tries_a_new_instance_first_and_on_every_poll() {
+        let stale = [candidate("/known")];
+        let listed = vec![candidate("/known"), candidate("/new")];
+        let probed = Mutex::new(Vec::new());
+
+        wait_for_instance(
+            &stale,
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+            || listed.clone(),
+            |path| -> Result<Client, CtlError> {
+                probed
+                    .lock()
+                    .unwrap()
+                    .push(path.to_string_lossy().into_owned());
+                Err(not_running())
+            },
+        )
+        .unwrap_err();
+
+        let probed = probed.into_inner().unwrap();
+        let every = KNOWN_PROBE_EVERY as usize;
+        assert!(probed.len() > every, "too few polls: {probed:?}");
+        // One probe of the new instance per poll; on the poll the known one
+        // is due, it comes after.
+        assert!(
+            probed[..every].iter().all(|path| path == "/new"),
+            "{probed:?}"
+        );
+        assert_eq!(probed[every], "/known", "{probed:?}");
+    }
+
+    #[test]
+    fn a_known_instance_that_answers_but_cannot_be_used_does_not_end_the_wait() {
+        // The instance from before answers after all, but speaks another
+        // protocol version. A new instance may still be coming, so that is
+        // not yet the answer.
+        let pid = std::process::id();
+        let (port, _handle) = fake_server(move |_| (200, ping_body(pid, 5, PROTOCOL_VERSION)));
+        let dir = private_tempdir();
+        let stale = [candidate("/known")];
+        let polls = AtomicUsize::new(0);
+        let known_probes = AtomicUsize::new(0);
+
+        let client = wait_for_instance(
+            &stale,
+            Duration::from_secs(20),
+            Duration::from_millis(1),
+            || {
+                // The new instance turns up after the known one has been
+                // asked twice.
+                if polls.fetch_add(1, Ordering::SeqCst) == 2 * KNOWN_PROBE_EVERY as usize {
+                    write_tcp_discovery(dir.path(), pid, port, 5);
+                }
+                let mut listed = stale.to_vec();
+                listed.extend(live_discovery_candidates(dir.path()));
+                listed
+            },
+            |path| {
+                if path == Path::new("/known") {
+                    known_probes.fetch_add(1, Ordering::SeqCst);
+                    return Err(CtlError::Environment("app updated".to_string()));
+                }
+                Client::connect(path)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(client.generation, 5);
+        assert_eq!(
+            known_probes.load(Ordering::SeqCst),
+            2,
+            "its error did not end the wait"
+        );
+    }
+
+    #[test]
+    fn a_known_instance_that_cannot_be_used_is_the_error_when_nothing_else_answers() {
+        let stale = [candidate("/known")];
+        let started = Instant::now();
+
+        let err = wait_for_instance(
+            &stale,
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+            || stale.to_vec(),
+            |_| -> Result<Client, CtlError> {
+                Err(CtlError::Environment("app updated".to_string()))
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the wait ran its course first"
+        );
+        // What the instance said, not "no control server answered".
+        assert_eq!(err.to_string(), "app updated");
+        assert_eq!(err.exit_code(), 3);
     }
 
     #[test]
@@ -1009,6 +1222,46 @@ pub(crate) mod tests {
         assert_eq!(client.pid, std::process::id());
     }
 
+    #[test]
+    fn a_staged_that_was_too_slow_to_answer_is_used_once_it_does() {
+        // A live instance whose ping failed is taken for "not running", so
+        // the bundle is opened. For a running app that starts nothing: no
+        // new discovery file is written. The instance on disk has to be
+        // asked again.
+        let dir = private_tempdir();
+        store_grant(dir.path());
+        let port = closed_port();
+        let path = write_tcp_discovery(dir.path(), std::process::id(), port, 1);
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        // The app gets round to answering a little after the open, at the
+        // endpoint its file has named all along.
+        let launcher = FakeLauncher::new(move || {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                grant_aware_app_on(TcpListener::bind(("127.0.0.1", port)).unwrap());
+            });
+            Ok(())
+        });
+
+        let client = connect_or_launch(
+            None,
+            None,
+            Some(dir.path()),
+            false,
+            &test_env(Some(BUNDLED_EXECUTABLE), &launcher),
+        )
+        .unwrap();
+
+        assert_eq!(launcher.launched(), vec![PathBuf::from(BUNDLE)]);
+        assert_eq!(client.pid, std::process::id());
+        assert_eq!(client.bearer(), Some(format!("live-{GRANT_ID}").as_str()));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            written,
+            "found through the file that was there before the open"
+        );
+    }
+
     /// `connect_or_launch` with nothing running and a launcher that must
     /// not be reached.
     fn refused(data_dir: &Path, no_launch: bool, executable: Option<&str>) -> CtlError {
@@ -1155,7 +1408,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_started_staged_that_never_answers_is_exit_3_and_is_started_only_once() {
+    fn a_staged_that_never_answers_after_the_open_is_exit_3_and_is_opened_only_once() {
         let dir = private_tempdir();
         store_grant(dir.path());
         let launcher = FakeLauncher::new(|| Ok(()));
@@ -1165,9 +1418,9 @@ pub(crate) mod tests {
         let err = connect_or_launch(None, None, Some(dir.path()), false, &env).unwrap_err();
         assert_eq!(launcher.launched().len(), 1, "no second attempt");
         assert_eq!(err.exit_code(), 3);
-        assert!(
-            err.to_string().contains("did not answer within"),
-            "got: {err}"
+        assert_eq!(
+            err.to_string(),
+            launch_timed_out(Duration::from_millis(200)).to_string()
         );
     }
 }

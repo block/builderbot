@@ -1676,19 +1676,30 @@ pub(crate) mod tests {
 
     /// Loopback-TCP fake whose handler also sees the request body (the
     /// credential routes carry their arguments there).
-    pub(crate) fn fake_server_with_body<F>(mut handler: F) -> (u16, std::thread::JoinHandle<()>)
+    pub(crate) fn fake_server_with_body<F>(handler: F) -> (u16, std::thread::JoinHandle<()>)
     where
         F: FnMut(&str, &str) -> (u16, String) + Send + 'static,
     {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || {
+        (port, fake_server_with_body_on(listener, handler))
+    }
+
+    /// [`fake_server_with_body`] on a listener the caller bound, for a fake
+    /// that has to come up at a port already written to a discovery file.
+    fn fake_server_with_body_on<F>(
+        listener: TcpListener,
+        mut handler: F,
+    ) -> std::thread::JoinHandle<()>
+    where
+        F: FnMut(&str, &str) -> (u16, String) + Send + 'static,
+    {
+        std::thread::spawn(move || {
             run_fake(listener.incoming(), move |head, body| {
                 let (status, body) = handler(head, body);
                 (status, body, Vec::new())
             })
-        });
-        (port, handle)
+        })
     }
 
     /// Unix-socket fake (the app's primary transport), bound at `socket`.
@@ -1741,7 +1752,21 @@ pub(crate) mod tests {
         renew_to: i64,
         seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> (u16, std::thread::JoinHandle<()>) {
-        fake_server_with_body(move |head, body| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = grant_aware_server_on(listener, pid, known, renew_to, seen);
+        (port, handle)
+    }
+
+    /// [`grant_aware_server`] on a listener the caller bound.
+    pub(crate) fn grant_aware_server_on(
+        listener: TcpListener,
+        pid: u32,
+        known: Vec<(String, String)>,
+        renew_to: i64,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::thread::JoinHandle<()> {
+        fake_server_with_body_on(listener, move |head, body| {
             seen.lock().unwrap().push(
                 header_value(head, "authorization")
                     .unwrap_or("")

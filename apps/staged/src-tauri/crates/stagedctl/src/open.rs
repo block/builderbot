@@ -31,7 +31,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::client::{Client, CtlError};
+use crate::client::{Client, CredentialScope, CtlError};
 use crate::commands::{find_project, list_projects, parse, CmdOutput, Project};
 use crate::launch::{connect_or_launch, LaunchEnv};
 
@@ -173,30 +173,46 @@ pub fn target(
 /// The project whose workspace `dir` is in, from the app's list. Matched on
 /// the id alone: the segment is an id by construction, so a project that
 /// merely has it as a name is not the one.
+///
+/// Why a project is missing from the list depends on `scope`, the reach of
+/// the credential the list was read with. An unconfined credential sees
+/// every project, so the app does not have this one. A credential confined
+/// to one project is listed that project and no other, so all that is known
+/// is that it does not reach this one; the project may well exist.
 fn project_for_directory<'a>(
     projects: &'a [Project],
     project_id: &str,
     dir: &Path,
+    scope: CredentialScope,
 ) -> Result<&'a Project, CtlError> {
     projects.iter().find(|p| p.id == project_id).ok_or_else(|| {
         let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
         let dir = dir.display();
-        CtlError::command(
-            "not_found",
-            if names.is_empty() {
-                format!(
-                    "{dir} is in the workspace of project id {project_id}, which Staged \
-                         does not have; the project was probably deleted, and the app lists no \
-                         projects"
-                )
-            } else {
-                format!(
-                    "{dir} is in the workspace of project id {project_id}, which Staged \
-                         does not have; the project was probably deleted. Projects: {}",
-                    names.join(", ")
-                )
-            },
-        )
+        let message = match (scope, names.is_empty()) {
+            (CredentialScope::AllProjects, true) => format!(
+                "{dir} is in the workspace of project id {project_id}, which Staged does not \
+                 have; the project was probably deleted, and the app lists no projects"
+            ),
+            (CredentialScope::AllProjects, false) => format!(
+                "{dir} is in the workspace of project id {project_id}, which Staged does not \
+                 have; the project was probably deleted. Projects: {}",
+                names.join(", ")
+            ),
+            (CredentialScope::Project, true) => format!(
+                "{dir} is in the workspace of project id {project_id}, which this credential \
+                 does not reach: it is confined to one project, and Staged lists it none. The \
+                 project may still exist; run the command with a grant that covers it (see \
+                 `stagedctl connect --help`)"
+            ),
+            (CredentialScope::Project, false) => format!(
+                "{dir} is in the workspace of project id {project_id}, which this credential \
+                 does not reach: it is confined to one project, and Staged lists it only that \
+                 one ({}). The project may still exist; run the command with a grant that \
+                 covers it (see `stagedctl connect --help`)",
+                names.join(", ")
+            ),
+        };
+        CtlError::command("not_found", message)
     })
 }
 
@@ -229,6 +245,7 @@ pub fn project_open(client: &Client, target: &Target) -> Result<CmdOutput, CtlEr
     open_target(
         target,
         client.pid,
+        client.scope,
         || list_projects(client),
         |args| client.invoke(OPEN_PROJECT_COMMAND, args),
     )
@@ -238,17 +255,21 @@ pub fn project_open(client: &Client, target: &Target) -> Result<CmdOutput, CtlEr
 /// `list` is the `list_projects` call and `invoke` the `open_project` one,
 /// both passed in so the order is testable without an app: a target that
 /// matches no project fails after `list` and never reaches `invoke`, which
-/// is what raises a window.
+/// is what raises a window. `scope` is how far the credential behind `list`
+/// reaches, for wording a directory's project that the list lacks.
 fn open_target(
     target: &Target,
     pid: u32,
+    scope: CredentialScope,
     list: impl FnOnce() -> Result<Vec<Project>, CtlError>,
     invoke: impl FnOnce(Value) -> Result<Value, CtlError>,
 ) -> Result<CmdOutput, CtlError> {
     let projects = list()?;
     let project = match target {
         Target::Named(needle) => find_project(&projects, needle)?,
-        Target::Directory { project_id, dir } => project_for_directory(&projects, project_id, dir)?,
+        Target::Directory { project_id, dir } => {
+            project_for_directory(&projects, project_id, dir, scope)?
+        }
     };
     open_resolved(project, pid, invoke)
 }
@@ -662,6 +683,9 @@ mod tests {
     // Confirming the target with the app
     // -------------------------------------------------------------------
 
+    /// The reach of an unconfined grant, which lists every project.
+    const ALL: CredentialScope = CredentialScope::AllProjects;
+
     fn directory(project_id: &str) -> Target {
         Target::Directory {
             project_id: project_id.to_string(),
@@ -679,6 +703,7 @@ mod tests {
         let output = open_target(
             &directory("p1"),
             4242,
+            ALL,
             || Ok(projects),
             |args| {
                 sent = Some(args);
@@ -694,7 +719,7 @@ mod tests {
     #[test]
     fn a_directory_whose_project_the_app_does_not_have_is_not_found_and_raises_nothing() {
         let projects = vec![project("p0", "Gadgets"), widgets()];
-        let err = open_target(&directory("gone"), 4242, || Ok(projects), no_open).unwrap_err();
+        let err = open_target(&directory("gone"), 4242, ALL, || Ok(projects), no_open).unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert_eq!(
             err.to_string(),
@@ -703,7 +728,7 @@ mod tests {
              Projects: Gadgets, Widgets"
         );
 
-        let err = open_target(&directory("gone"), 4242, || Ok(vec![]), no_open).unwrap_err();
+        let err = open_target(&directory("gone"), 4242, ALL, || Ok(vec![]), no_open).unwrap_err();
         assert_eq!(err.code(), "not_found");
         assert!(
             err.to_string().ends_with("and the app lists no projects"),
@@ -712,12 +737,80 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_outside_a_confined_credentials_project_is_not_called_deleted() {
+        // A grant approved for one project (or a session's lease) is listed
+        // that project alone. A worktree of any other project is then
+        // missing from the list whether or not the project exists, so the
+        // message must not say Staged lacks it or that it was deleted.
+        let err = open_target(
+            &directory("p7"),
+            4242,
+            CredentialScope::Project,
+            || Ok(vec![widgets()]),
+            no_open,
+        )
+        .unwrap_err();
+        assert_eq!((err.exit_code(), err.code()), (1, "not_found"));
+        assert_eq!(
+            err.to_string(),
+            "not_found: /Users/me/.staged/workspaces/local/projects/p7/wt is in the workspace of \
+             project id p7, which this credential does not reach: it is confined to one \
+             project, and Staged lists it only that one (Widgets). The project may still \
+             exist; run the command with a grant that covers it (see `stagedctl connect \
+             --help`)"
+        );
+
+        // The credential's own project is gone too, so it is listed none.
+        let err = open_target(
+            &directory("p7"),
+            4242,
+            CredentialScope::Project,
+            || Ok(vec![]),
+            no_open,
+        )
+        .unwrap_err();
+        assert_eq!((err.exit_code(), err.code()), (1, "not_found"));
+        for wrong in ["does not have", "deleted"] {
+            assert!(!err.to_string().contains(wrong), "{err}");
+        }
+        assert!(
+            err.to_string()
+                .contains("this credential does not reach: it is confined to one project, and Staged lists it none"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_confined_credential_still_opens_its_own_projects_directory() {
+        let mut sent = None;
+        let output = open_target(
+            &directory("p1"),
+            4242,
+            CredentialScope::Project,
+            || Ok(vec![widgets()]),
+            |args| {
+                sent = Some(args);
+                opened(Value::Null)
+            },
+        )
+        .unwrap();
+        assert_eq!(sent, Some(json!({ "projectId": "p1" })));
+        assert_eq!(output.human, "opened Widgets  id:p1  pid:4242");
+    }
+
+    #[test]
     fn a_directory_id_is_never_matched_against_project_names() {
         // A directory called `Widgets` under `projects/` is not project p1,
         // whatever case it is written in.
         for segment in ["Widgets", "widgets"] {
-            let err = open_target(&directory(segment), 4242, || Ok(vec![widgets()]), no_open)
-                .unwrap_err();
+            let err = open_target(
+                &directory(segment),
+                4242,
+                ALL,
+                || Ok(vec![widgets()]),
+                no_open,
+            )
+            .unwrap_err();
             assert_eq!(err.code(), "not_found", "{segment}");
         }
     }
@@ -733,19 +826,32 @@ mod tests {
         };
         for needle in ["p3", "Gears", "gears"] {
             let mut sent = None;
-            open_target(&Target::Named(needle.to_string()), 4242, projects, |args| {
-                sent = Some(args);
-                opened(Value::Null)
-            })
+            open_target(
+                &Target::Named(needle.to_string()),
+                4242,
+                ALL,
+                projects,
+                |args| {
+                    sent = Some(args);
+                    opened(Value::Null)
+                },
+            )
             .unwrap();
             assert_eq!(sent, Some(json!({ "projectId": "p3" })), "{needle}");
         }
-        let err =
-            open_target(&Target::Named("nope".to_string()), 4242, projects, no_open).unwrap_err();
+        let err = open_target(
+            &Target::Named("nope".to_string()),
+            4242,
+            ALL,
+            projects,
+            no_open,
+        )
+        .unwrap_err();
         assert_eq!((err.exit_code(), err.code()), (1, "not_found"));
         let err = open_target(
             &Target::Named("WIDGETS".to_string()),
             4242,
+            ALL,
             projects,
             no_open,
         )
@@ -759,6 +865,7 @@ mod tests {
             let err = open_target(
                 &target,
                 4242,
+                ALL,
                 || {
                     Err(CtlError::Authorization {
                         code: "authorization_required".to_string(),

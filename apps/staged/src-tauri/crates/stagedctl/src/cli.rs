@@ -207,8 +207,9 @@ keeps a project's worktrees. From any other directory the command exits 1
 
 A <project> that matches nothing (`not_found`), or several projects when
 case is ignored (`ambiguous`), exits 1 before any window is touched. So
-does a directory whose project the app does not have (`not_found`), such
-as the worktree of a project that was deleted.
+does a directory whose project the app does not list (`not_found`): the
+worktree of a project that was deleted, or of one that a grant confined
+to another project does not reach.
 
 Otherwise the window is raised whether or not it could switch, so the
 user sees what is in the way. When it could not, the command exits 1:
@@ -231,7 +232,10 @@ up, and then asks as above; the app holds the request until its window
 has loaded. A window that is still loading is not shown early: it comes
 to the front once it is ready, which can be after the command has
 exited. What it starts is the Staged.app this stagedctl is bundled in,
-and nothing else. A line on stderr says so; stdout is unchanged.
+and nothing else. A line on stderr says so; stdout is unchanged. A
+Staged that is running but too busy to answer is treated the same way:
+opening the app only brings it forward, and the command uses it as soon
+as it answers.
 
 Staged is never started:
   - with --no-launch: the command exits 3 instead;

@@ -1,15 +1,21 @@
 #!/bin/bash
 # `staged`: show a project in the Staged app.
 #
-# Usage: staged [<project>] [--no-launch]
+# Usage: staged [<project> | <directory>] [--no-launch]
 #   <project>    Project name or id. Omit it inside a project's workspace
 #                (~/.staged/workspaces/<local|remote>/projects/<id>/...) to
 #                open that project.
+#   <directory>  An existing directory, such as `.`: open the project whose
+#                workspace that directory is in, as if run from there.
 #   --no-launch  Fail instead of starting Staged when it is not running.
 #
-# A thin wrapper: every argument goes unchanged to `stagedctl project open`,
-# which also decides the output and the exit code. See
-# `stagedctl project open --help`.
+# A thin wrapper around `stagedctl project open`, which decides the output
+# and the exit code. See `stagedctl project open --help`. The arguments go
+# to it unchanged, with one exception: a single argument that is an existing
+# directory is not passed on. stagedctl is run from that directory with no
+# project instead, so the project is resolved from the directory, as
+# `cd <directory> && staged` would. An argument that is not an existing
+# directory is a project name or id, as it always was.
 #
 # This script never starts the app itself. stagedctl asks a running Staged
 # to show the project, and starts one only when none is running, the caller
@@ -48,6 +54,46 @@ Settings > Connected apps > Command line. Or link it onto PATH by hand:
   ln -s /path/to/Staged.app/Contents/MacOS/stagedctl /usr/local/bin/stagedctl
 MESSAGE
     exit 127
+fi
+
+# `staged .` and `staged /path/to/repo`: one argument that is an existing
+# directory, alone or beside flags that take no value. Anything else, a flag
+# this script does not know included, is left for stagedctl to read.
+dir=""
+positionals=0
+known=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-launch | --json) ;;
+        -*) known=0 ;;
+        *)
+            positionals=$((positionals + 1))
+            dir="$arg"
+            ;;
+    esac
+done
+
+if [ "$known" -eq 1 ] && [ "$positionals" -eq 1 ] && [ -d "$dir" ]; then
+    # Drop the directory from the arguments and keep the flags in order.
+    for arg in "$@"; do
+        shift
+        [ "$arg" = "$dir" ] || set -- "$@" "$arg"
+    done
+    # A stagedctl found through a relative PATH entry must still be the one
+    # that runs after the directory change.
+    case "$STAGEDCTL" in
+        /*) ;;
+        *) STAGEDCTL="$PWD/$STAGEDCTL" ;;
+    esac
+    # `./` keeps `cd` from searching $CDPATH for a relative name.
+    case "$dir" in
+        /*) ;;
+        *) dir="./$dir" ;;
+    esac
+    if ! cd -- "$dir" 2>/dev/null; then
+        printf 'staged: cannot change to the directory %s, so no project was opened.\n' "$dir" >&2
+        exit 1
+    fi
 fi
 
 exec "$STAGEDCTL" project open "$@"

@@ -60,12 +60,12 @@ stagedctl project open                # the project whose workspace the current 
 stagedctl project open --no-launch    # fail instead of starting Staged when it is not running
 ```
 
-The window a click on Staged's Dock icon would raise comes to the front and switches to the project. On success the command prints the project's name and id and the pid of the Staged instance that showed it. A project that is already on screen is a success too. No new window is opened, and a Staged that is already running is never joined by a second instance.
+The Staged window you were last in comes to the front and switches to the project: the window that holds focus, or else the one that held it most recently and is still open. On success the command prints the project's name and id and the pid of the Staged instance that showed it. A project that is already on screen is a success too. No new window is opened, and a Staged that is already running is never joined by a second instance.
 
 - **By name or id.** `<project>` is matched as an exact id, then an exact name, then a name that matches one project when case is ignored. A name that matches nothing, or several projects, fails before any window is touched.
 - **From a project workspace.** With no argument, the project is the one whose workspace the current directory is in: any directory under `~/.staged/workspaces/<local|remote>/projects/<project-id>/`, where Staged keeps a project's worktrees. From any other directory the command fails with `not_in_workspace` without looking for the app, so pass a project there. It does not open arbitrary directories or repositories.
 - **A busy window.** The window is raised whether or not it could switch, so you can see what is in the way. A dialog that is open, or a diff comment that could not be saved, is left alone and reported as `ui_busy`: close or finish it and run the command again.
-- **When Staged is not running.** The command starts the `Staged.app` that `stagedctl` is bundled in, waits up to thirty seconds for it to come up, and then opens the project. A line on stderr says Staged is being started. This is macOS only.
+- **When Staged is not running.** The command starts the `Staged.app` that `stagedctl` is bundled in, waits up to thirty seconds for it to come up, and then opens the project. The new window is not shown early: it comes to the front once it has finished loading, which can be shortly after the command has exited. A line on stderr says Staged is being started. This is macOS only.
 - **`--no-launch`.** The command exits 3 instead of starting Staged.
 
 Staged is also never started when you are not yet authorized (see below), when the directory names no project, when `--lock-path` or `$STAGEDCTL_LOCK` points at one particular instance, or from a development build, whose app needs its dev server (run `just dev` instead).

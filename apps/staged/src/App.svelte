@@ -442,7 +442,7 @@
     }
 
     // `stagedctl project open` requests for this window: every desktop
-    // window, since the backend picks whichever one a Dock click would raise.
+    // window, since the backend picks whichever one the user was last in.
     // Started only now, unlike the listeners above, so a request never
     // navigates underneath the route restore, which would then put the
     // restored or seeded project back over it. Nothing is missed by waiting:

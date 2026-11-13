@@ -2149,6 +2149,7 @@ pub fn run() {
             app.manage(action_executor);
             app.manage(action_registry);
             app.manage(app_lifecycle::QuitState::default());
+            app.manage(app_lifecycle::UsedWindows::default());
             app.manage(launch_resume::LaunchResumeState::default());
             app.manage(DbState {
                 db_path,

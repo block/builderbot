@@ -193,8 +193,9 @@ the --repo flag of `timeline show`, `session start`, `session list`, and
 
     /// Show a project in the Staged window and bring that window to the front
     #[command(long_about = "\
-Show a project in the Staged app. The window a click on Staged's Dock
-icon would raise is brought to the front and switched to the project.
+Show a project in the Staged app. The Staged window you were last in is
+brought to the front and switched to the project: the window that holds
+focus, or else the one that held it most recently and is still open.
 Prints the project's name and id and the pid of the Staged instance that
 showed it. A project that is already on screen is a success too.
 
@@ -227,8 +228,10 @@ an agent cannot pull the user's window away.
 
 When Staged is not running, the command starts it, waits for it to come
 up, and then asks as above; the app holds the request until its window
-has loaded. What it starts is the Staged.app this stagedctl is bundled
-in, and nothing else. A line on stderr says so; stdout is unchanged.
+has loaded. A window that is still loading is not shown early: it comes
+to the front once it is ready, which can be after the command has
+exited. What it starts is the Staged.app this stagedctl is bundled in,
+and nothing else. A line on stderr says so; stdout is unchanged.
 
 Staged is never started:
   - with --no-launch: the command exits 3 instead;

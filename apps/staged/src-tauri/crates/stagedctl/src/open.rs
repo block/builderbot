@@ -2,8 +2,8 @@
 //! word what the window did.
 //!
 //! The app's `open_project` command (`src-tauri/src/project_open/control.rs`)
-//! picks the window a Dock click would raise, raises it, asks it to switch,
-//! and answers `{ "outcome", "window" }` whatever the window did. A window
+//! picks the window the user was last in, raises it, asks it to switch, and
+//! answers `{ "outcome", "window" }` whatever the window did. A window
 //! that refused is a result on the wire, not an error, because the control
 //! server's plain errors carry no code. This module is where each outcome
 //! becomes an exit code and a `code: message` line.
@@ -62,7 +62,8 @@ enum Outcome {
 #[serde(rename_all = "camelCase")]
 struct OpenAnswer {
     outcome: Outcome,
-    /// The label of the window that was asked and raised.
+    /// The label of the window that was asked, and raised unless it was
+    /// still loading: that one is raised once its frontend has shown it.
     window: String,
 }
 

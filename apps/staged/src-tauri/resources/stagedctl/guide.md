@@ -160,9 +160,10 @@ the Staged instance that showed the project (`--json`: `{ outcome,
 project: { id, name }, window, pid }`). A project that is already on
 screen is a success too.
 
-The window raised is the one a click on Staged's Dock icon would raise,
-and it is raised whether or not it could switch, so the user sees what is
-in the way. When it could not switch, the command exits 1:
+The window raised is the one the user was last in: the window that holds
+focus, or else the one that held it most recently and is still open. It
+is raised whether or not it could switch, so the user sees what is in the
+way. When it could not switch, the command exits 1:
 
 - `ui_busy`: a dialog is open in the window, or the diff comment being
   written could not be saved. Close or finish it and run the command
@@ -184,7 +185,9 @@ that grant does not list it.
 
 **When Staged is not running**, the command starts it, waits up to thirty
 seconds for it to come up, and then asks as above; the app holds the
-request until its window has loaded. What it starts is the `Staged.app`
+request until its window has loaded. A window that is still loading is
+not shown early: it comes to the front once it is ready, which can be
+after the command has exited. What it starts is the `Staged.app`
 this `stagedctl` is bundled in and nothing else, on macOS only. A line on
 stderr says so; stdout is unchanged. A project name is looked up only
 once the app is up, so a name that matches nothing still exits 1

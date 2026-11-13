@@ -2,20 +2,37 @@
 //!
 //! Manages spawning shell commands with real-time output streaming,
 //! tracking running processes, and handling termination.
+//!
+//! Output is also buffered so a viewer can catch up on it. That buffer is
+//! bounded: each execution keeps only its most recent output, and only the
+//! last few finished executions keep theirs.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
+use crate::finished_outputs::{FinishedOutputs, MAX_FINISHED_EXECUTIONS};
 use crate::models::{ActionStatus, ExecutionEvent, OutputChunk};
+use crate::output_buffer::{OutputBuffer, SharedOutputBuffer, MAX_OUTPUT_BYTES};
+use crate::utf8_stream::Utf8StreamDecoder;
+
+#[cfg(all(test, unix))]
+mod tests;
+
+/// How long completion waits, once the process has exited, for the reader
+/// threads to reach the end of its output. Only what the kernel still holds
+/// is left to read by then, so this elapses only when something that outlived
+/// the process keeps the output open.
+const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // =============================================================================
 // PTY support (unix only)
@@ -110,19 +127,45 @@ impl Default for StopOptions {
     }
 }
 
+/// Bounds on what the executor retains and how long it waits. Fixed in
+/// production; the tests shrink them.
+#[derive(Clone, Copy)]
+struct Limits {
+    /// Most recent output kept per execution, in bytes.
+    max_output_bytes: usize,
+    /// How many finished executions keep their output.
+    max_finished: usize,
+    reader_drain_timeout: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: MAX_OUTPUT_BYTES,
+            max_finished: MAX_FINISHED_EXECUTIONS,
+            reader_drain_timeout: READER_DRAIN_TIMEOUT,
+        }
+    }
+}
+
 /// Internal state for a running action
 struct RunningActionState {
     child_pid: Option<u32>,
-    output_buffer: Arc<Mutex<Vec<OutputChunk>>>,
+    output_buffer: SharedOutputBuffer,
+    /// Set by `discard_output`: free the output at exit instead of retaining it.
+    discard_output: bool,
 }
 
 /// Manages action execution with real-time output streaming
 pub struct ActionExecutor {
     running: Arc<Mutex<HashMap<String, RunningActionState>>>,
-    completed: Arc<Mutex<HashMap<String, Vec<OutputChunk>>>>,
+    /// Output of the most recently finished executions. Locked after
+    /// `running` wherever both are held.
+    finished: Arc<Mutex<FinishedOutputs>>,
     /// Tracks execution IDs that have been explicitly stopped by the user.
     /// The completion thread checks this to emit `Stopped` instead of `Failed`.
     stopped: Arc<Mutex<HashSet<String>>>,
+    limits: Limits,
 }
 
 impl Default for ActionExecutor {
@@ -133,64 +176,81 @@ impl Default for ActionExecutor {
 
 /// Spawn a thread that reads from `stream` and emits output events via `listener`.
 ///
-/// Each chunk is also appended to `buffer` for later retrieval.
+/// Each chunk is also appended to `buffer` for later retrieval. `done` is
+/// dropped when the thread reaches the end of the stream, which is how the
+/// completion thread learns that all of the output has been delivered.
 fn spawn_stream_reader(
     mut stream: impl Read + Send + 'static,
     stream_name: &'static str,
     exec_id: String,
     listener: Arc<dyn ExecutionListener>,
-    buffer: Arc<Mutex<Vec<OutputChunk>>>,
+    buffer: SharedOutputBuffer,
     handle: Handle,
+    done: mpsc::Sender<Infallible>,
 ) {
     thread::spawn(move || {
+        let _done = done;
+
+        let deliver = |chunk: String| {
+            if chunk.is_empty() {
+                return;
+            }
+            let timestamp = now_timestamp();
+
+            // Store in buffer
+            buffer.lock().unwrap().push(stream_name, &chunk, timestamp);
+
+            // Emit event
+            handle.block_on(listener.on_event(ExecutionEvent::Output {
+                execution_id: exec_id.clone(),
+                chunk,
+                stream: stream_name.to_string(),
+                timestamp,
+            }));
+        };
+
+        // A read can end part-way through a multi-byte character, so the
+        // decoder carries the unfinished bytes over to the next read.
+        let mut decoder = Utf8StreamDecoder::default();
         let mut buf = [0u8; 1024];
         loop {
             match stream.read(&mut buf) {
                 Ok(0) => break, // EOF
-                Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let timestamp = now_timestamp();
-
-                    // Store in buffer
-                    {
-                        let mut b = buffer.lock().unwrap();
-                        b.push(OutputChunk {
-                            chunk: chunk.clone(),
-                            stream: stream_name.to_string(),
-                            timestamp,
-                        });
-                    }
-
-                    // Emit event
-                    let listener = listener.clone();
-                    let exec_id = exec_id.clone();
-                    handle.block_on(async move {
-                        listener
-                            .on_event(ExecutionEvent::Output {
-                                execution_id: exec_id,
-                                chunk,
-                                stream: stream_name.to_string(),
-                                timestamp,
-                            })
-                            .await;
-                    });
-                }
+                Ok(n) => deliver(decoder.decode(&buf[..n])),
                 // PTY master returns EIO (not EOF) when the slave side is
                 // closed, which is the normal shutdown path. Treat all read
                 // errors as end-of-stream.
                 Err(_) => break,
             }
         }
+        deliver(decoder.finish());
     });
+}
+
+/// Wait up to `timeout` for every reader thread to reach the end of its
+/// stream. Returns whether they all did.
+///
+/// Nothing is ever sent on the channel. Each reader holds a sender and drops
+/// it when it ends, so the channel disconnects once the last one is done.
+fn wait_for_readers(readers_done: &mpsc::Receiver<Infallible>, timeout: Duration) -> bool {
+    matches!(
+        readers_done.recv_timeout(timeout),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    )
 }
 
 impl ActionExecutor {
     /// Create a new action executor
     pub fn new() -> Self {
+        Self::with_limits(Limits::default())
+    }
+
+    fn with_limits(limits: Limits) -> Self {
         Self {
             running: Arc::new(Mutex::new(HashMap::new())),
-            completed: Arc::new(Mutex::new(HashMap::new())),
+            finished: Arc::new(Mutex::new(FinishedOutputs::new(limits.max_finished))),
             stopped: Arc::new(Mutex::new(HashSet::new())),
+            limits,
         }
     }
 
@@ -213,7 +273,7 @@ impl ActionExecutor {
         let child_pid = child.id();
 
         // Create output buffer
-        let output_buffer = Arc::new(Mutex::new(Vec::new()));
+        let output_buffer = OutputBuffer::shared(self.limits.max_output_bytes);
         let started_at = now_timestamp();
 
         // Record the running action
@@ -224,6 +284,7 @@ impl ActionExecutor {
                 RunningActionState {
                     child_pid: Some(child_pid),
                     output_buffer: output_buffer.clone(),
+                    discard_output: false,
                 },
             );
         }
@@ -247,6 +308,7 @@ impl ActionExecutor {
         // single output stream — the PTY merges stdout and stderr, matching
         // real terminal behavior. Otherwise (remote execution), we read from
         // the child's piped stdout and stderr separately.
+        let (reader_done, readers_done) = mpsc::channel::<Infallible>();
         if let Some(pty_master) = pty_reader {
             spawn_stream_reader(
                 pty_master,
@@ -255,6 +317,7 @@ impl ActionExecutor {
                 listener.clone(),
                 output_buffer.clone(),
                 handle.clone(),
+                reader_done.clone(),
             );
         } else {
             if let Some(stdout) = child.stdout.take() {
@@ -265,6 +328,7 @@ impl ActionExecutor {
                     listener.clone(),
                     output_buffer.clone(),
                     handle.clone(),
+                    reader_done.clone(),
                 );
             }
 
@@ -276,16 +340,21 @@ impl ActionExecutor {
                     listener.clone(),
                     output_buffer.clone(),
                     handle.clone(),
+                    reader_done.clone(),
                 );
             }
         }
 
+        // Only the readers hold a sender from here on.
+        drop(reader_done);
+
         // Spawn thread to wait for completion
         let exec_id = execution_id.clone();
         let running_clone = self.running.clone();
-        let completed_clone = self.completed.clone();
+        let finished_clone = self.finished.clone();
         let stopped_clone = self.stopped.clone();
         let action_started_at = started_at;
+        let reader_drain_timeout = self.limits.reader_drain_timeout;
 
         thread::spawn(move || {
             let exit_status = child.wait();
@@ -298,15 +367,26 @@ impl ActionExecutor {
                 stopped.remove(&exec_id)
             };
 
-            // Move output buffer to completed actions map and remove from running
+            // Remove from running and hand the output buffer to the finished
+            // set. The buffer itself moves: nothing is copied, and the readers
+            // keep appending to the same one.
             {
                 let mut running = running_clone.lock().unwrap();
                 if let Some(state) = running.remove(&exec_id) {
-                    let output = state.output_buffer.lock().unwrap().clone();
-                    let mut completed = completed_clone.lock().unwrap();
-                    completed.insert(exec_id.clone(), output);
+                    if !state.discard_output {
+                        let mut finished = finished_clone.lock().unwrap();
+                        finished.insert(exec_id.clone(), state.output_buffer);
+                    }
                 }
             }
+
+            // The process has exited, but the readers may not have delivered
+            // the last of its output yet. Wait for them, so that the terminal
+            // status follows all of the output and the finished log is whole.
+            // The wait is bounded because a process that outlives the action
+            // can hold the output open indefinitely; whatever it writes later
+            // still lands in the same buffer.
+            wait_for_readers(&readers_done, reader_drain_timeout);
 
             let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
 
@@ -566,7 +646,7 @@ impl ActionExecutor {
         }
 
         // Read the PID but do NOT remove from the running map. The completion
-        // thread needs the entry to move the output buffer to the completed map
+        // thread needs the entry to move the output buffer to the finished set
         // and to emit the proper StatusChanged event.
         let pid = {
             let running = self.running.lock().unwrap();
@@ -652,19 +732,24 @@ impl ActionExecutor {
         }
     }
 
-    /// Get buffered output for an execution
+    /// Get buffered output for an execution.
+    ///
+    /// Only the most recent output is kept. Once earlier output has been
+    /// dropped, the first chunk is a notice saying how much. Returns `None`
+    /// for an unknown execution, and for a finished one whose output has been
+    /// cleared or evicted.
     pub fn get_buffered_output(&self, execution_id: &str) -> Option<Vec<OutputChunk>> {
-        // First check running actions
-        let running = self.running.lock().unwrap();
-        if let Some(state) = running.get(execution_id) {
-            let buffer = state.output_buffer.lock().unwrap();
-            return Some(buffer.clone());
-        }
-        drop(running);
+        // First check running actions, then finished ones
+        let buffer = {
+            let running = self.running.lock().unwrap();
+            match running.get(execution_id) {
+                Some(state) => Some(state.output_buffer.clone()),
+                None => self.finished.lock().unwrap().get(execution_id),
+            }
+        };
 
-        // If not running, check completed actions
-        let completed = self.completed.lock().unwrap();
-        completed.get(execution_id).cloned()
+        // Copy the output with only the buffer itself locked.
+        buffer.map(|buffer| buffer.lock().unwrap().snapshot())
     }
 
     /// Check if an action is currently running
@@ -679,11 +764,27 @@ impl ActionExecutor {
         running.keys().cloned().collect()
     }
 
-    /// Clear buffered output for a completed execution
-    /// This removes the output from the completed actions map
+    /// Clear buffered output for a finished execution. Returns whether any
+    /// was retained. A running execution is left alone.
     pub fn clear_execution(&self, execution_id: &str) -> bool {
-        let mut completed = self.completed.lock().unwrap();
-        completed.remove(execution_id).is_some()
+        self.finished.lock().unwrap().remove(execution_id)
+    }
+
+    /// Give up an execution's output, whether or not it has finished.
+    ///
+    /// A finished execution's output is freed now. A running execution keeps
+    /// buffering for whoever is watching it, and its output is freed when it
+    /// exits instead of being retained. Returns whether the execution was
+    /// running or retained.
+    pub fn discard_output(&self, execution_id: &str) -> bool {
+        // Hold `running` across both checks so that an execution cannot
+        // finish, and be retained, in between them.
+        let mut running = self.running.lock().unwrap();
+        if let Some(state) = running.get_mut(execution_id) {
+            state.discard_output = true;
+            return true;
+        }
+        self.finished.lock().unwrap().remove(execution_id)
     }
 }
 

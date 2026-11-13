@@ -38,10 +38,11 @@ pub(crate) struct TeardownServices<R: tauri::Runtime> {
 }
 
 impl<R: tauri::Runtime> TeardownServices<R> {
-    /// Stop the actions and sessions running on `branches`.
+    /// Stop the actions and sessions running on `branches`. The branches are
+    /// about to be deleted, so the actions' output is given up as well.
     async fn stop_work(&self, branches: &[store::Branch]) -> Result<(), String> {
         let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-        crate::actions::commands::stop_actions_for_branches(
+        crate::actions::commands::stop_and_discard_actions_for_branches(
             &self.action_executor,
             &self.action_registry,
             &branch_ids,

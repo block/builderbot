@@ -53,7 +53,10 @@
 pub mod acp_provider;
 pub mod detector;
 pub mod executor;
+mod finished_outputs;
 pub mod models;
+mod output_buffer;
+mod utf8_stream;
 
 // Re-export main types for convenience
 pub use acp_provider::AcpAiProvider;

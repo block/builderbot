@@ -1202,8 +1202,33 @@ pub fn stop_actions_for_branches(
     registry: &ActionRegistry,
     branch_ids: &[&str],
 ) {
+    stop_branch_actions(executor, registry, branch_ids, false);
+}
+
+/// Stop all running actions for branches that are being deleted
+/// (best-effort), and give up their output: once the branch is gone nothing
+/// can show it, so it should not be retained when the actions exit.
+pub fn stop_and_discard_actions_for_branches(
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+    branch_ids: &[&str],
+) {
+    stop_branch_actions(executor, registry, branch_ids, true);
+}
+
+fn stop_branch_actions(
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+    branch_ids: &[&str],
+    discard_output: bool,
+) {
     for branch_id in branch_ids {
         for info in registry.get_running_for_branch(branch_id) {
+            if discard_output {
+                // Covers an action that exits before the stop below reaches
+                // it, too: its retained output is freed here.
+                executor.discard_output(&info.execution_id);
+            }
             if executor.is_running(&info.execution_id) {
                 if let Err(e) = executor.stop(&info.execution_id) {
                     log::warn!("Failed to stop action {}: {e}", info.execution_id);
@@ -1512,6 +1537,56 @@ mod tests {
             action_type.to_string(),
             0,
         );
+    }
+
+    #[cfg(unix)]
+    struct IgnoreEvents;
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl builderbot_actions::ExecutionListener for IgnoreEvents {
+        async fn on_event(&self, _event: builderbot_actions::ExecutionEvent) {}
+    }
+
+    /// Start an action that prints and then waits to be stopped, registered
+    /// as running on `branch_id`.
+    #[cfg(unix)]
+    async fn start_branch_action(
+        executor: &ActionExecutor,
+        registry: &ActionRegistry,
+        branch_id: &str,
+    ) -> String {
+        let execution_id = executor
+            .execute_remote(
+                std::path::PathBuf::from("/bin/sh"),
+                vec!["-c".to_string(), "printf out; sleep 600".to_string()],
+                Arc::new(IgnoreEvents),
+            )
+            .await
+            .unwrap();
+        register(registry, &execution_id, branch_id, "run");
+        execution_id
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_a_branch_for_deletion_discards_its_action_output() {
+        let executor = ActionExecutor::new();
+        let registry = ActionRegistry::new();
+        let deleted = start_branch_action(&executor, &registry, "deleted-branch").await;
+        let moved = start_branch_action(&executor, &registry, "moved-branch").await;
+
+        stop_and_discard_actions_for_branches(&executor, &registry, &["deleted-branch"]);
+        stop_actions_for_branches(&executor, &registry, &["moved-branch"]);
+        assert!(executor.wait_for_executions(
+            &[deleted.clone(), moved.clone()],
+            std::time::Duration::from_secs(60)
+        ));
+
+        // A deleted branch's output is gone the moment its action exits. A
+        // branch that lives on keeps it, so its card can still show it.
+        assert!(executor.get_buffered_output(&deleted).is_none());
+        assert!(executor.get_buffered_output(&moved).is_some());
     }
 
     #[test]

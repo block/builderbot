@@ -30,8 +30,8 @@
   --diff-range-border: #524d58;
   --diff-comment-highlight: rgba(88, 166, 255, 0.5);
 
-  --search-match-bg: rgba(250, 200, 50, 0.35);
-  --search-current-match-bg: rgba(255, 150, 50, 0.5);
+  --search-match-accent: #f2c744;
+  --search-current-match-bg: rgba(242, 199, 68, 0.3);
 
   --annotation-overlay-bg: rgba(0, 0, 0, 0.5);
   --annotation-border: rgba(255, 255, 255, 0.1);

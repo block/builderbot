@@ -92,8 +92,8 @@
   --diff-comment-border: rgba(167, 139, 250, 0.56);
   --diff-comment-accent: #a78bfa;
 
-  --search-match-bg: rgba(250, 200, 50, 0.35);
-  --search-current-match-bg: rgba(255, 150, 50, 0.5);
+  --search-match-accent: #f2c744;
+  --search-current-match-bg: rgba(242, 199, 68, 0.3);
 
   --annotation-overlay-bg: rgba(0, 0, 0, 0.5);
   --annotation-border: rgba(255, 255, 255, 0.1);
@@ -269,15 +269,41 @@ svg.lucide:not(.animate-spin),
   transform: translateZ(0);
 }
 
-/* ── In-content search highlights ── */
-mark.search-match {
-  background-color: rgba(255, 235, 59, 0.4);
-  border-radius: 2px;
-  color: inherit;
+/* ── Search match highlights ── */
+/* Longhands on purpose: WebKit before Safari 26.2 rejects a thickness inside
+   the `text-decoration` shorthand, and a rejected `var()` declaration drops
+   the whole underline, not just its thickness. */
+mark.search-match,
+mark.label-match {
+  background-color: transparent;
+  text-decoration-line: underline;
+  text-decoration-color: var(--search-match-accent);
+  text-decoration-skip-ink: none;
 }
 
+/* In-content find: notes and session chat. */
+mark.search-match {
+  color: inherit;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+/* A match inside a one-line label: project search rows and the command
+   palette. No fill, the match in the primary text colour over a warm line,
+   which lifts it out of muted text. The offset keeps the line inside the
+   label's line box, which clips. */
+mark.label-match {
+  color: var(--text-primary);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 1.5px;
+}
+
+/* The wash alone is faint in the light theme; the ring keeps the current
+   match obvious on every surface. */
 mark.search-match-current {
-  background-color: rgba(255, 152, 0, 0.6);
+  background-color: var(--search-current-match-bg);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--search-match-accent);
 }
 
 /* ── Hashtag badges (shared across all badge contexts) ── */

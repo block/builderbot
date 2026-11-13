@@ -62,7 +62,7 @@
 </script>
 
 {#snippet highlighted(segments: readonly HighlightSegment[])}
-  {#each segments as segment}{#if segment.match}<mark>{segment.text}</mark
+  {#each segments as segment}{#if segment.match}<mark class="label-match">{segment.text}</mark
       >{:else}{segment.text}{/if}{/each}
 {/snippet}
 
@@ -240,12 +240,11 @@
     min-width: 0;
   }
 
-  .row-name mark,
-  .row-alias mark,
-  .row-repo mark {
-    background-color: var(--search-match-bg);
-    border-radius: 2px;
-    color: inherit;
+  /* Matches use the global `label-match` rule, shared with ProjectMatchReason,
+     which draws the reason beside these. The pill's border sits right under
+     the text; pull the line up off it. */
+  .row-alias mark {
+    text-underline-offset: 0.5px;
   }
 
   .row-badges {

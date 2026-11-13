@@ -872,7 +872,7 @@ describe('CommandPalette filtering', () => {
     await type('beta');
 
     expect(optionNames()).toEqual(['Beta tools']);
-    expect(options()[0].querySelector('.row-name mark')?.textContent).toBe('Beta');
+    expect(options()[0].querySelector('.row-name mark.label-match')?.textContent).toBe('Beta');
   });
 
   it('returns the highlight to the first result when the query changes', async () => {
@@ -934,11 +934,15 @@ describe('CommandPalette filtering', () => {
     await type('payments');
     expect(optionIds()).toEqual(['beta']);
     expect(optionFor('beta').querySelector('.row-repo')?.textContent).toBe('org/payments');
-    expect(optionFor('beta').querySelector('.row-repo mark')?.textContent).toBe('payments');
+    expect(optionFor('beta').querySelector('.row-repo mark.label-match')?.textContent).toBe(
+      'payments'
+    );
 
     await type('storefront');
     expect(optionIds()).toEqual(['gamma']);
-    expect(optionFor('gamma').querySelector('.row-alias mark')?.textContent).toBe('storefront');
+    expect(optionFor('gamma').querySelector('.row-alias mark.label-match')?.textContent).toBe(
+      'storefront'
+    );
     expect(optionFor('gamma').querySelector('.row-repo')?.textContent).toBe('org/web/apps/site');
   });
 });

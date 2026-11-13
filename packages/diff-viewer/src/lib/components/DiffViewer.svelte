@@ -3352,23 +3352,24 @@
   }
 
   /* Search result highlighting */
-  .search-match {
-    background-color: rgba(250, 200, 50, 0.35);
-    border-radius: 2px;
-  }
-
+  /* Longhands on purpose: WebKit before Safari 26.2 rejects a thickness inside
+     the shorthand and would drop the whole underline. The `em` offset keeps
+     the line inside the row at any `--code-font-size`. */
+  .search-match,
   .search-current {
-    background-color: rgba(255, 150, 50, 0.5);
-    border-radius: 2px;
+    text-decoration-line: underline;
+    text-decoration-thickness: 2px;
+    text-decoration-color: var(--search-match-accent, #f2c744);
+    text-underline-offset: 0.2em;
+    text-decoration-skip-ink: none;
   }
 
-  @media (prefers-color-scheme: light) {
-    .search-match {
-      background-color: rgba(250, 200, 50, 0.5);
-    }
-
-    .search-current {
-      background-color: rgba(255, 150, 50, 0.6);
-    }
+  /* On a modified line the wash is nearly the same colour as the
+     changed-character tint it replaces; the ring is what keeps the current
+     match visible there. */
+  .search-current {
+    background-color: var(--search-current-match-bg, rgba(242, 199, 68, 0.3));
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px var(--search-match-accent, #f2c744);
   }
 </style>

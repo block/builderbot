@@ -70,7 +70,7 @@ export interface Theme {
 
   // Search highlight colors
   search: {
-    matchBg: string; // Background for search matches
+    matchAccent: string; // Line under a search match
     currentMatchBg: string; // Background for current/focused match
   };
 
@@ -510,13 +510,11 @@ export function createAdaptiveTheme(
     },
 
     search: {
-      // Search yellow derived from foreground warmth — mix fg toward warm tone
-      matchBg: overlay(mix(syntaxFg, isDark ? '#fac832' : '#e8b000', 0.7), isDark ? 0.35 : 0.5),
-      // Current match: warmer/more saturated variant of above
-      currentMatchBg: overlay(
-        mix(syntaxFg, isDark ? '#ff9632' : '#d07000', 0.7),
-        isDark ? 0.5 : 0.6
-      ),
+      // A match keeps its surface and gains a warm line beneath it. Solid, so
+      // it reads the same on plain, hovered and selected rows.
+      matchAccent: isDark ? '#f2c744' : '#a87400',
+      // Only the current match is filled, in a wash of the same amber.
+      currentMatchBg: overlay(isDark ? '#f2c744' : '#f2b600', isDark ? 0.3 : 0.35),
     },
 
     annotation: {
@@ -632,7 +630,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--diff-comment-border': t.diff.commentBorder,
     '--diff-comment-accent': t.diff.commentAccent,
 
-    '--search-match-bg': t.search.matchBg,
+    '--search-match-accent': t.search.matchAccent,
     '--search-current-match-bg': t.search.currentMatchBg,
 
     '--annotation-overlay-bg': t.annotation.overlayBg,

@@ -57,7 +57,7 @@
   <Icon size={iconSize} />
   <span class="sr-only">{KIND_NAMES[reason.kind]}:</span>
   <span class="match-label"
-    >{#each segments as segment}{#if segment.match}<mark>{segment.text}</mark
+    >{#each segments as segment}{#if segment.match}<mark class="label-match">{segment.text}</mark
         >{:else}{segment.text}{/if}{/each}</span
   >
   {#if reason.more > 0}
@@ -82,12 +82,6 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .match-label mark {
-    background-color: var(--search-match-bg);
-    border-radius: 2px;
-    color: inherit;
   }
 
   .match-more {

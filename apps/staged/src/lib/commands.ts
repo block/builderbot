@@ -17,6 +17,7 @@ import {
   readCachedEntries,
 } from './cache';
 import { readSnapshot, writeSnapshot, clearSnapshot, SNAPSHOT_KEYS } from './shared/webSnapshot';
+import { SendOrder } from './shared/sendOrder';
 import type {
   AcpConfigSelection,
   ActiveSessionInfo,
@@ -80,6 +81,27 @@ import type {
 } from './types';
 
 export type DiffScope = 'branch' | 'commit' | 'worktree';
+
+/**
+ * Keeps the writes the frontend sends without awaiting in the order it sent
+ * them. `update_note`, `create_note`, `set_note_read`,
+ * `mark_session_chat_read` and `queue_session_message` were synchronous
+ * commands, which ran one at a time in arrival order; they now run on the
+ * backend's thread pool, like every command over HTTP, where two in flight
+ * land in either order. Each wrapper sends through here under the key of
+ * what it writes to, so a write waits for the one sent before it for the same
+ * note, branch or session and for nothing else. `delete_note` shares its
+ * note's key, so it cannot overtake a write sent before it.
+ *
+ * Only these wrappers are ordered. A command sent through another wrapper
+ * while one of these is in flight is not held back for it.
+ */
+const writeOrder = new SendOrder();
+
+/** A branch note's saves and read marks share one order. */
+function noteWriteKey(noteId: string): string {
+  return `note:${noteId}`;
+}
 
 export interface WorktreeChangesPreview {
   revertPaths: string[];
@@ -526,9 +548,15 @@ export function getNote(noteId: string): Promise<import('./types').NoteTimelineI
  * Mark a branch note read or unread, returning the row as it now reads. A
  * write that changes the read state publishes `notes-changed`; marking a read
  * note read, or a note still being written, writes nothing.
+ *
+ * Sent in order with the note's other writes (see {@link writeOrder}): the
+ * timeline's "Mark as unread" is not awaited, and opening the note straight
+ * after sends the read mark that must land second.
  */
 export function setNoteRead(noteId: string, read: boolean): Promise<BranchNote> {
-  return invokeCommand('set_note_read', { noteId, read });
+  return writeOrder.run(noteWriteKey(noteId), () =>
+    invokeCommand('set_note_read', { noteId, read })
+  );
 }
 
 /** The project-note counterpart of {@link setNoteRead}. */
@@ -1509,9 +1537,16 @@ export function countAssistantMessagesAfter(
   return invokeCommand('count_assistant_messages_after', { sessionId, afterTimestamp });
 }
 
-/** Record that the user has read the session's chat, clearing its note row's unread dot. */
+/**
+ * Record that the user has read the session's chat, clearing its note row's
+ * unread dot. The note viewer sends one when the chat opens and one when it
+ * closes, awaiting neither; they are sent in that order (see
+ * {@link writeOrder}).
+ */
 export function markSessionChatRead(sessionId: string): Promise<void> {
-  return invokeCommand('mark_session_chat_read', { sessionId });
+  return writeOrder.run(`chat-read:${sessionId}`, () =>
+    invokeCommand('mark_session_chat_read', { sessionId })
+  );
 }
 
 /** Create a session and immediately start the agent. */
@@ -1555,18 +1590,27 @@ export function resumeSession(
   });
 }
 
+/**
+ * Queue a follow-up behind a running session's turn. The queue drains in the
+ * order its rows were stamped, and the composer accepts the next message
+ * while this one is still being queued, so a session's messages are sent one
+ * at a time (see {@link writeOrder}): the agent gets them in the order they
+ * were typed.
+ */
 export function queueSessionMessage(
   sessionId: string,
   content: string,
   imageIds?: string[],
   branchId?: string | null
 ): Promise<QueuedSessionMessage> {
-  return invokeCommand('queue_session_message', {
-    sessionId,
-    content,
-    imageIds: imageIds ?? null,
-    branchId: branchId ?? null,
-  });
+  return writeOrder.run(`queue:${sessionId}`, () =>
+    invokeCommand('queue_session_message', {
+      sessionId,
+      content,
+      imageIds: imageIds ?? null,
+      branchId: branchId ?? null,
+    })
+  );
 }
 
 export function listQueuedSessionMessages(sessionId: string): Promise<QueuedSessionMessage[]> {
@@ -1754,6 +1798,11 @@ export function startQueuedSessionNow(branchId: string, sessionId: string): Prom
  *
  * `subtype` is `'written'` when the user authored the note in the editor
  * dialog; the drag-drop and save-action-output paths leave it unset.
+ *
+ * A branch's creates are sent one at a time (see {@link writeOrder}). A drop
+ * of several files creates its notes without awaiting each, and the order
+ * they land in is the order the timeline lists them in and the order
+ * same-titled ones get their ` (2)`, ` (3)` suffixes in.
  */
 export function createNote(
   branchId: string,
@@ -1761,7 +1810,9 @@ export function createNote(
   content: string,
   subtype: import('./types').NoteSubtype = null
 ): Promise<import('./types').NoteTimelineItem> {
-  return invokeCommand('create_note', { branchId, title, content, subtype });
+  return writeOrder.run(`branch-notes:${branchId}`, () =>
+    invokeCommand('create_note', { branchId, title, content, subtype })
+  );
 }
 
 /**
@@ -1771,18 +1822,33 @@ export function createNote(
  * Like the other note mutations this publishes `notes-changed`, so other views
  * refresh on their own; the calling card still invalidates locally so its own
  * timeline updates without waiting for the round trip.
+ *
+ * A note's saves are sent in order (see {@link writeOrder}): the editor's
+ * save before a transfer does not hold its Save button, so a second save can
+ * be sent while the first is in flight, and the older one must not land last.
  */
 export function updateNote(
   noteId: string,
   title: string,
   content: string
 ): Promise<import('./types').NoteTimelineItem> {
-  return invokeCommand('update_note', { noteId, title, content });
+  return writeOrder.run(noteWriteKey(noteId), () =>
+    invokeCommand('update_note', { noteId, title, content })
+  );
 }
 
-/** Delete a note and optionally its linked session. */
+/**
+ * Delete a note and optionally its linked session.
+ *
+ * Sent after the note's saves and read marks still in flight (see
+ * {@link writeOrder}). The timeline's "Mark as unread" is not awaited, and
+ * landing after a delete sent behind it would fail on the missing note and
+ * toast an error for a note the user had just deleted.
+ */
 export function deleteNote(noteId: string, deleteSession = true): Promise<void> {
-  return invokeCommand('delete_note', { noteId, deleteSession });
+  return writeOrder.run(noteWriteKey(noteId), () =>
+    invokeCommand('delete_note', { noteId, deleteSession })
+  );
 }
 
 /**

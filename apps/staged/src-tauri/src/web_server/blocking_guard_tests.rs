@@ -193,6 +193,14 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     ("session_commands.rs", "get_active_sessions"),
     ("note_commands.rs", "list_project_notes"),
     ("project_search.rs", "get_project_search_index"),
+    // The writes sent on every note save, note open, chat open or close and
+    // queued follow-up. The frontend keeps the order of the ones it does not
+    // await (the `writeOrder` queue in `commands.ts`).
+    ("note_commands.rs", "create_note"),
+    ("note_commands.rs", "update_note"),
+    ("note_commands.rs", "set_note_read"),
+    ("session_commands.rs", "mark_session_chat_read"),
+    ("session_commands.rs", "queue_session_message"),
 ];
 
 /// What an [`OFFLOADED_COMMANDS`] body may call on the runtime: the store

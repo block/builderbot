@@ -70,8 +70,24 @@ pub(crate) fn standalone_note_to_timeline_item(note: Note) -> NoteTimelineItem {
 ///
 /// `subtype` is `"written"` when the user authored the note in the editor
 /// dialog; the drag-drop and save-action-output paths leave it unset.
+///
+/// Runs [`create_standalone_note`] on the blocking pool. As a synchronous
+/// command the write held the main thread, and so the window, for its own
+/// time and for any wait on the store lock.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
+///
+/// On the pool two creates in flight land in either order, where the main
+/// thread ran them in the order they arrived. The store call is one lock
+/// hold, so they cannot pick the same title suffix; the order itself is kept
+/// by the frontend, which sends a branch's creates one at a time (the
+/// `writeOrder` queue in `commands.ts`). The same holds for the other four
+/// writes that left the main thread with this one: [`update_note`],
+/// [`set_note_read`], `mark_session_chat_read` and `queue_session_message`.
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_note(
+pub async fn create_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
     title: String,
@@ -79,7 +95,11 @@ pub fn create_note(
     subtype: Option<String>,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
-    create_standalone_note(&store, &branch_id, &title, &content, subtype)
+    tauri::async_runtime::spawn_blocking(move || {
+        create_standalone_note(&store, &branch_id, &title, &content, subtype)
+    })
+    .await
+    .map_err(|e| format!("create_note task failed: {e}"))?
 }
 
 /// The body of [`create_note`], shared with the web dispatcher's arm.
@@ -106,15 +126,24 @@ pub(crate) fn create_standalone_note(
 ///
 /// Rejects notes an agent session produced — their content is owned by that
 /// session and would be overwritten on its next turn.
+///
+/// Runs [`update_note_impl`] on the blocking pool, like [`create_note`]; only
+/// the store handle lookup runs inline. Two saves of one note in flight
+/// would land in either order here, so the frontend sends a note's saves and
+/// read marks one at a time (see [`create_note`]).
 #[tauri::command(rename_all = "camelCase")]
-pub fn update_note(
+pub async fn update_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
     title: String,
     content: String,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
-    update_note_impl(&store, &note_id, &title, &content)
+    tauri::async_runtime::spawn_blocking(move || {
+        update_note_impl(&store, &note_id, &title, &content)
+    })
+    .await
+    .map_err(|e| format!("update_note task failed: {e}"))?
 }
 
 /// The body of [`update_note`], shared with the web dispatcher's arm.
@@ -234,15 +263,26 @@ pub fn get_branch_note_by_session(
 ///
 /// The note viewer marks a note read when it opens one; the viewer's toggle
 /// and the timeline context menu set either state.
+///
+/// A store write, run on the blocking pool like [`create_note`]: the viewer
+/// sends it every time it shows a note. The context menu's write is not
+/// awaited, so "Mark as unread" and the read mark of opening the note next
+/// can be in flight together; the frontend sends a note's read marks and
+/// saves one at a time to keep them in order (see [`create_note`]).
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_note_read(
+pub async fn set_note_read(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
     read: bool,
 ) -> Result<Note, String> {
-    crate::get_store(&store)?
-        .set_note_read(&note_id, read)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .set_note_read(&note_id, read)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("set_note_read task failed: {e}"))?
 }
 
 /// Fetch a single note by id (no branch filter), with resolved session status.

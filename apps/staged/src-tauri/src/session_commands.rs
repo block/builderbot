@@ -1412,14 +1412,26 @@ pub fn count_assistant_messages_after(
 
 /// Record that the user has read the session's chat, clearing the unread dot
 /// on its note row.
+///
+/// A store write, run on the blocking pool like [`get_active_sessions`]: the
+/// note viewer sends it each time a chat opens or closes, so as a
+/// synchronous command it parked the main thread behind whatever held the
+/// store. The frontend sends a session's marks one at a time (the
+/// `writeOrder` queue in `commands.ts`), since on the pool two in flight
+/// land in either order.
 #[tauri::command]
-pub fn mark_session_chat_read(
+pub async fn mark_session_chat_read(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<(), String> {
-    get_store(&store)?
-        .mark_session_chat_read(&session_id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .mark_session_chat_read(&session_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("mark_session_chat_read task failed: {e}"))?
 }
 
 // =============================================================================
@@ -2847,8 +2859,16 @@ fn continue_branch_and_type(
     Ok((lookup(branch_id)?, None))
 }
 
+/// Queue a follow-up behind a running session's turn.
+///
+/// A store write, run on the blocking pool like [`get_active_sessions`];
+/// only the store handle lookup runs inline. The queue drains in the order
+/// its rows were stamped, and that stamp is taken when this body starts. On
+/// the pool two messages in flight can start in either order, where the main
+/// thread ran them as they arrived, so the frontend sends a session's
+/// messages one at a time (the `writeOrder` queue in `commands.ts`).
 #[tauri::command]
-pub fn queue_session_message(
+pub async fn queue_session_message(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
     content: String,
@@ -2856,14 +2876,18 @@ pub fn queue_session_message(
     branch_id: Option<String>,
 ) -> Result<store::QueuedSessionMessage, String> {
     let store = get_store(&store)?;
-    store
-        .add_queued_session_message(
-            &session_id,
-            &content,
-            &image_ids.unwrap_or_default(),
-            branch_id.as_deref(),
-        )
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .add_queued_session_message(
+                &session_id,
+                &content,
+                &image_ids.unwrap_or_default(),
+                branch_id.as_deref(),
+            )
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("queue_session_message task failed: {e}"))?
 }
 
 #[tauri::command]

@@ -3033,18 +3033,22 @@ pub(crate) async fn dispatch(
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
             let subtype: Option<String> = opt_arg(&args, "subtype")?;
-            let item = crate::note_commands::create_standalone_note(
-                &store, &branch_id, &title, &content, subtype,
-            )?;
-            Ok(serde_json::to_value(item).unwrap())
+            blocking_json(move || {
+                crate::note_commands::create_standalone_note(
+                    &store, &branch_id, &title, &content, subtype,
+                )
+            })
+            .await
         }
         "update_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
-            let item = crate::note_commands::update_note_impl(&store, &note_id, &title, &content)?;
-            Ok(serde_json::to_value(item).unwrap())
+            blocking_json(move || {
+                crate::note_commands::update_note_impl(&store, &note_id, &title, &content)
+            })
+            .await
         }
         "delete_note" => {
             let store = get_store(store_mutex)?;
@@ -3073,10 +3077,7 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let read: bool = arg(&args, "read")?;
-            let note = store
-                .set_note_read(&note_id, read)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(note).unwrap())
+            blocking_store_json(move || store.set_note_read(&note_id, read)).await
         }
         "list_child_notes" => {
             let store = get_store(store_mutex)?;
@@ -3658,10 +3659,8 @@ pub(crate) async fn dispatch(
         "mark_session_chat_read" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            store
-                .mark_session_chat_read(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            // `()` serializes to `null`, the response the arm always gave.
+            blocking_store_json(move || store.mark_session_chat_read(&session_id)).await
         }
         "get_session_acp_metadata_messages" => {
             let store = get_store(store_mutex)?;
@@ -3807,15 +3806,15 @@ pub(crate) async fn dispatch(
             let content: String = arg(&args, "content")?;
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
-            let message = store
-                .add_queued_session_message(
+            blocking_store_json(move || {
+                store.add_queued_session_message(
                     &session_id,
                     &content,
                     &image_ids.unwrap_or_default(),
                     branch_id.as_deref(),
                 )
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(message).unwrap())
+            })
+            .await
         }
         "list_queued_session_messages" => {
             let store = get_store(store_mutex)?;

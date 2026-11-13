@@ -39,6 +39,7 @@ pub mod pr_poll_scheduler;
 mod preference_events;
 pub mod project_commands;
 pub mod project_mcp;
+pub mod project_open;
 pub mod project_search;
 pub mod project_transfer;
 pub mod prs;
@@ -2142,6 +2143,7 @@ pub fn run() {
             app.manage(pr_scheduler);
             app.manage(window_commands::NewWindowState::new());
             app.manage(window_commands::UpdaterWindowState::default());
+            app.manage(project_open::ProjectOpenState::default());
             app.manage(rate_limit_scheduler);
             app.manage(action_executor);
             app.manage(action_registry);
@@ -2579,6 +2581,9 @@ pub fn run() {
             control_server::commands::answer_control_authorization,
             control_server::commands::list_control_grants,
             control_server::commands::revoke_control_grant,
+            // stagedctl project open (the window's side of a request)
+            project_open::commands::list_pending_project_opens,
+            project_open::commands::answer_project_open,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

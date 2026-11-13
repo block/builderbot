@@ -1106,6 +1106,15 @@ pub(crate) async fn dispatch(
         "revoke_control_grant" => Err(format!("{command} is not available in web mode")),
 
         // =====================================================================
+        // stagedctl project open (desktop only)
+        // =====================================================================
+        // A request is addressed to one native window, which the backend
+        // raises and which answers for its own navigation. A browser client
+        // is not that window: it must neither read nor answer the request.
+        "list_pending_project_opens" => Err(format!("{command} is not available in web mode")),
+        "answer_project_open" => Err(format!("{command} is not available in web mode")),
+
+        // =====================================================================
         // Projects
         // =====================================================================
         "list_projects" => {

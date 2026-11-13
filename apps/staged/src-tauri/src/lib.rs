@@ -486,13 +486,20 @@ fn confirm_reset_store(
 // Project commands
 // =============================================================================
 
+/// A store read, run on the blocking pool. The projects store refetches this
+/// on every project and branch change, so as a synchronous command it parked
+/// the main thread, and so the window, behind whatever held the store.
+///
+/// As for [`create_project`], nothing but the store handle lookup may run
+/// inline: the same goes for every command in `OFFLOADED_COMMANDS`.
 #[tauri::command]
-fn list_projects(
+async fn list_projects(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<store::Project>, String> {
-    get_store(&store)?
-        .list_projects()
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || store.list_projects().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("list_projects task failed: {e}"))?
 }
 
 /// Runs [`create_project_blocking`] on the blocking pool. As a synchronous
@@ -734,15 +741,22 @@ fn rename_project(
     project_commands::rename_project_impl(&store, &project_id, &name)
 }
 
+/// A store read, run on the blocking pool like [`list_projects`]: the
+/// frontend asks for it once per project at launch and again on every
+/// project change.
 #[tauri::command(rename_all = "camelCase")]
-fn list_project_repos(
+async fn list_project_repos(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
 ) -> Result<Vec<store::ProjectRepo>, String> {
     let store = get_store(&store)?;
-    store
-        .list_project_repos(&project_id)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_project_repos(&project_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_project_repos task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -909,13 +923,17 @@ async fn delete_project(
 // Repo badge commands
 // =============================================================================
 
+/// A store read, run on the blocking pool like [`list_projects`].
 #[tauri::command]
-fn get_all_repo_badges(
+async fn get_all_repo_badges(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<store::RepoBadge>, String> {
-    get_store(&store)?
-        .list_repo_badges()
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store.list_repo_badges().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_all_repo_badges task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -172,11 +172,59 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     ("util_commands.rs", "is_sq_available"),
     ("lib.rs", "create_project"),
     ("lib.rs", "pin_repo"),
+    // The deletes: a media scan per image, or a cascade over every message
+    // of a session.
+    ("note_commands.rs", "delete_note"),
+    ("note_commands.rs", "delete_project_note"),
+    ("session_commands.rs", "delete_session"),
+    ("timeline.rs", "delete_review"),
+    ("timeline.rs", "delete_pending_commit"),
+    ("image_commands.rs", "delete_image"),
+    // The reads the frontend sends at launch, on timers and on every store
+    // event, which waited behind whatever held the store.
+    ("lib.rs", "list_projects"),
+    ("lib.rs", "list_project_repos"),
+    ("lib.rs", "get_all_repo_badges"),
+    ("branches.rs", "list_branches_for_project"),
+    ("session_commands.rs", "poll_session"),
+    ("session_commands.rs", "get_session"),
+    ("session_commands.rs", "get_session_messages"),
+    ("session_commands.rs", "get_session_messages_since"),
+    ("session_commands.rs", "get_active_sessions"),
+    ("note_commands.rs", "list_project_notes"),
+    ("project_search.rs", "get_project_search_index"),
 ];
 
 /// What an [`OFFLOADED_COMMANDS`] body may call on the runtime: the store
-/// handle lookup, and the mapping of the join error.
-const OFFLOADED_COMMAND_INLINE: &[&str] = &["get_store", "map_err"];
+/// and registry handle lookups, and the mapping of the join error.
+const OFFLOADED_COMMAND_INLINE: &[&str] =
+    &["get_store", "crate::get_store", "Arc::clone", "map_err"];
+
+/// What the `dispatch` arm of an [`OFFLOADED_COMMANDS`] entry may call on
+/// the runtime: the handle lookups, argument parsing, the caller's project
+/// scope, and the handling of a bare `spawn_blocking`'s result.
+const OFFLOADED_ARM_INLINE: &[&str] = &[
+    "get_store",
+    "arg",
+    "opt_arg",
+    "unwrap_or_default",
+    "Arc::clone",
+    "clone",
+    "control_scope::project_filter",
+    "map",
+    "map_err",
+    "to_string",
+    "serde_json::to_value",
+    "unwrap",
+];
+
+/// [`OFFLOADED_COMMANDS`] entries whose `dispatch` arm still calls the store
+/// on the runtime, each with why.
+const ARMS_NOT_OFFLOADED: &[&str] = &[
+    // Not the Tauri command's body: no `sq` check and no prerun actions. It
+    // offloads its default-branch lookup and makes its store writes inline.
+    "create_project",
+];
 
 /// The walk above only looks for child-process waits, and only in commands
 /// that are already async. It passes a command that goes back to a plain
@@ -196,22 +244,71 @@ fn offloaded_commands_run_only_the_handoff_on_the_runtime() {
             "`{command}` must stay an `async fn`: a plain `fn` command runs on the main \
              thread and freezes the window while it waits"
         );
-        let inline = cut_offloaded(&body, &["spawn_blocking("]);
-        assert_ne!(
-            inline, body,
+        let (offloads, stray) =
+            left_on_runtime(&body, &["spawn_blocking("], OFFLOADED_COMMAND_INLINE);
+        assert!(
+            offloads,
             "`{command}` must run its body through `spawn_blocking`"
         );
-        let stray: Vec<String> = calls(&inline)
-            .into_iter()
-            .map(|call| call.path)
-            .filter(|path| !OFFLOADED_COMMAND_INLINE.contains(&path.as_str()))
-            .collect();
         assert!(
             stray.is_empty(),
             "`{command}` runs these on a runtime worker; move them into its \
              `spawn_blocking` closure: {stray:?}"
         );
     }
+}
+
+/// `dispatch` runs on the same runtime as the async commands, so the arm of
+/// a command that had to leave the main thread has the same rule: the store
+/// call goes through `blocking_json`, `blocking_store_json` or
+/// `spawn_blocking`, and only the handoff stays inline.
+#[test]
+fn offloaded_commands_dispatch_arms_run_only_the_handoff_on_the_runtime() {
+    let arms = dispatch_arms(include_str!("../web_server.rs"));
+    for (_, command) in OFFLOADED_COMMANDS {
+        let (_, body) = arms
+            .iter()
+            .find(|(commands, _)| commands.iter().any(|name| name == command))
+            .unwrap_or_else(|| panic!("`dispatch` no longer has a `{command}` arm"));
+        let (offloads, stray) = left_on_runtime(&code_only(body), OFFLOADED, OFFLOADED_ARM_INLINE);
+        if ARMS_NOT_OFFLOADED.contains(command) {
+            assert!(
+                !stray.is_empty(),
+                "the `{command}` dispatch arm now runs only the handoff on the runtime; \
+                 remove it from ARMS_NOT_OFFLOADED"
+            );
+            continue;
+        }
+        assert!(
+            offloads,
+            "the `{command}` dispatch arm must run its body through `blocking_json`, \
+             `blocking_store_json` or `spawn_blocking`"
+        );
+        assert!(
+            stray.is_empty(),
+            "the `{command}` dispatch arm runs these on a runtime worker; move them into \
+             its blocking closure: {stray:?}"
+        );
+    }
+    for command in ARMS_NOT_OFFLOADED {
+        assert!(
+            OFFLOADED_COMMANDS.iter().any(|(_, name)| name == command),
+            "`{command}` in ARMS_NOT_OFFLOADED is not an OFFLOADED_COMMANDS entry; remove it"
+        );
+    }
+}
+
+/// What `body` runs on the runtime once the argument list of every
+/// `offloaders` call is cut out: whether there was such a call at all, and
+/// the calls left over that `inline` does not allow.
+fn left_on_runtime(body: &str, offloaders: &[&str], inline: &[&str]) -> (bool, Vec<String>) {
+    let kept = cut_offloaded(body, offloaders);
+    let stray = calls(&kept)
+        .into_iter()
+        .map(|call| call.path)
+        .filter(|path| !inline.contains(&path.as_str()))
+        .collect();
+    (kept != body, stray)
 }
 
 /// The crate's source, test code removed, and every fn in it.

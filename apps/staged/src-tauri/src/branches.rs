@@ -1461,19 +1461,40 @@ pub fn get_branch(
     }
 }
 
+/// Runs [`list_branches_for_project_impl`] on the blocking pool. The
+/// frontend asks for it once per project at launch and again on every branch
+/// change and window focus, so as a synchronous command it parked the main
+/// thread, and so the window, behind whatever held the store.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
 #[tauri::command]
-pub fn list_branches_for_project(
+pub async fn list_branches_for_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
 ) -> Result<Vec<BranchWithWorkdir>, String> {
     let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        list_branches_for_project_impl(&store, &project_id)
+    })
+    .await
+    .map_err(|e| format!("list_branches_for_project task failed: {e}"))?
+}
+
+/// The body of [`list_branches_for_project`]: store reads only, each taking
+/// and releasing the store lock on its own.
+fn list_branches_for_project_impl(
+    store: &Store,
+    project_id: &str,
+) -> Result<Vec<BranchWithWorkdir>, String> {
     let _project = store
-        .get_project(&project_id)
+        .get_project(project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     let branches = store
-        .list_branches_for_project(&project_id)
+        .list_branches_for_project(project_id)
         .map_err(|e| e.to_string())?;
 
     // NOTE: workstation IDs for remote branches are populated lazily by
@@ -1482,7 +1503,7 @@ pub fn list_branches_for_project(
     // each took ~1s, causing multi-second UI freezes on project load.
 
     let commit_counts = store
-        .count_finalized_commits_by_branch_for_project(&project_id)
+        .count_finalized_commits_by_branch_for_project(project_id)
         .map_err(|e| e.to_string())?;
 
     let mut result = Vec::with_capacity(branches.len());
@@ -3756,6 +3777,30 @@ mod tests {
         assert!(!clone.status.success());
     }
     use crate::test_utils::TempGitRepo;
+
+    #[test]
+    fn listing_a_projects_branches_counts_their_commits() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        let listed = list_branches_for_project_impl(&store, &project.id).unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, branch.id);
+        assert_eq!(listed[0].commit_count, Some(0));
+    }
+
+    #[test]
+    fn listing_the_branches_of_an_unknown_project_is_an_error() {
+        let store = Store::in_memory().unwrap();
+
+        let error = list_branches_for_project_impl(&store, "no-such-project").unwrap_err();
+
+        assert_eq!(error, "Project not found: no-such-project");
+    }
 
     /// A shared workstation outlives a teardown that leaves another branch
     /// on it, and goes when every branch using it does.

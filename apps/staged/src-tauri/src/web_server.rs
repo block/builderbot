@@ -1145,12 +1145,16 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "list_projects" => {
             let store = get_store(store_mutex)?;
-            let mut projects = store.list_projects().map_err(|e| e.to_string())?;
             // A project-scoped control credential sees only its own project.
-            if let Some(project_id) = control_scope::project_filter(&caller) {
-                projects.retain(|project| project.id == project_id);
-            }
-            Ok(serde_json::to_value(projects).unwrap())
+            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
+            blocking_store_json(move || {
+                let mut projects = store.list_projects()?;
+                if let Some(project_id) = only_project {
+                    projects.retain(|project| project.id == project_id);
+                }
+                Ok(projects)
+            })
+            .await
         }
         "create_project" => {
             let store = get_store(store_mutex)?;
@@ -1301,10 +1305,7 @@ pub(crate) async fn dispatch(
         "list_project_repos" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
-            let repos = store
-                .list_project_repos(&project_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_store_json(move || store.list_project_repos(&project_id)).await
         }
         "list_recent_repos" => {
             let store = get_store(store_mutex)?;
@@ -1564,8 +1565,7 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "get_all_repo_badges" => {
             let store = get_store(store_mutex)?;
-            let badges = store.list_repo_badges().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(badges).unwrap())
+            blocking_store_json(move || store.list_repo_badges()).await
         }
         "ensure_repo_badges" => {
             // Simplified version — just returns existing badges without AI generation
@@ -1963,17 +1963,18 @@ pub(crate) async fn dispatch(
         "list_branches_for_project" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
-            let branches = store
-                .list_branches_for_project(&project_id)
-                .map_err(|e| e.to_string())?;
-            let enriched: Vec<crate::BranchWithWorkdir> = branches
-                .into_iter()
-                .map(|b| {
-                    let workdir = store.get_workdir_for_branch(&b.id).ok().flatten();
-                    crate::branches::to_branch_with_workdir_public(b, workdir.map(|w| w.path))
-                })
-                .collect();
-            Ok(serde_json::to_value(enriched).unwrap())
+            blocking_store_json(move || {
+                let branches = store.list_branches_for_project(&project_id)?;
+                let enriched: Vec<crate::BranchWithWorkdir> = branches
+                    .into_iter()
+                    .map(|b| {
+                        let workdir = store.get_workdir_for_branch(&b.id).ok().flatten();
+                        crate::branches::to_branch_with_workdir_public(b, workdir.map(|w| w.path))
+                    })
+                    .collect();
+                Ok(enriched)
+            })
+            .await
         }
         "create_branch" => {
             let store = get_store(store_mutex)?;
@@ -3049,18 +3050,17 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let app = app_handle.clone();
-            tauri::async_runtime::spawn_blocking(move || {
+            let app_handle = app_handle.clone();
+            // The media cleanup scans the note and message tables per image.
+            blocking_json(move || {
                 crate::note_commands::delete_note_impl(
                     &store,
-                    &app,
+                    &app_handle,
                     &note_id,
                     delete_session_flag.unwrap_or(false),
                 )
             })
             .await
-            .map_err(|e| format!("Note delete task failed: {e}"))??;
-            Ok(Value::Null)
         }
         "get_note" => {
             let store = get_store(store_mutex)?;
@@ -3104,17 +3104,11 @@ pub(crate) async fn dispatch(
         "list_project_notes" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
-            let notes = store
-                .list_project_notes_with_status(&project_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(notes).unwrap())
+            blocking_store_json(move || store.list_project_notes_with_status(&project_id)).await
         }
         "get_project_search_index" => {
             let store = get_store(store_mutex)?;
-            let items = store
-                .list_project_search_items()
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(items).unwrap())
+            blocking_store_json(move || store.list_project_search_items()).await
         }
         "get_project_note" => {
             let store = get_store(store_mutex)?;
@@ -3153,12 +3147,10 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let registry = Arc::clone(session_registry);
-            tauri::async_runtime::spawn_blocking(move || {
+            blocking_json(move || {
                 crate::note_commands::delete_project_note_impl(&store, &registry, &note_id)
             })
             .await
-            .map_err(|e| format!("Project note delete task failed: {e}"))??;
-            Ok(Value::Null)
         }
 
         "get_note_repo" => {
@@ -3314,13 +3306,7 @@ pub(crate) async fn dispatch(
         "delete_image" => {
             let store = get_store(store_mutex)?;
             let image_id: String = arg(&args, "imageId")?;
-            let image = store
-                .get_image(&image_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Image not found: {image_id}"))?;
-            store.delete_image(&image_id).map_err(|e| e.to_string())?;
-            crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
-            Ok(Value::Null)
+            blocking_json(move || crate::image_commands::delete_image_impl(&store, &image_id)).await
         }
         "get_attachment_thumbnail" => {
             let store = get_store(store_mutex)?;
@@ -3358,26 +3344,33 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let review_id: String = arg(&args, "reviewId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            crate::timeline::delete_review_impl(
-                &store,
-                app_handle,
-                &review_id,
-                delete_session_flag.unwrap_or(false),
-            )?;
-            Ok(Value::Null)
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                crate::timeline::delete_review_impl(
+                    &store,
+                    &app_handle,
+                    &review_id,
+                    delete_session_flag.unwrap_or(false),
+                )
+            })
+            .await
         }
         "delete_pending_commit" => {
             let store = get_store(store_mutex)?;
             let commit_id: String = arg(&args, "commitId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            crate::timeline::delete_pending_commit_impl(
-                &store,
-                session_registry,
-                app_handle,
-                &commit_id,
-                delete_session_flag.unwrap_or(false),
-            )?;
-            Ok(Value::Null)
+            let registry = Arc::clone(session_registry);
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                crate::timeline::delete_pending_commit_impl(
+                    &store,
+                    &registry,
+                    &app_handle,
+                    &commit_id,
+                    delete_session_flag.unwrap_or(false),
+                )
+            })
+            .await
         }
         "delete_commit" => {
             let store = get_store(store_mutex)?;
@@ -3602,14 +3595,19 @@ pub(crate) async fn dispatch(
         }
         "get_active_sessions" => {
             let store = get_store(store_mutex)?;
-            let mut sessions =
-                crate::session_commands::get_active_sessions_impl(&store, session_registry)?;
+            let registry = Arc::clone(session_registry);
             // A project-scoped control credential sees only its own
             // project's sessions.
-            if let Some(project_id) = control_scope::project_filter(&caller) {
-                sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
-            }
-            Ok(serde_json::to_value(sessions).unwrap())
+            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
+            blocking_json(move || {
+                let mut sessions =
+                    crate::session_commands::get_active_sessions_impl(&store, &registry)?;
+                if let Some(project_id) = only_project.as_deref() {
+                    sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
+                }
+                Ok::<_, String>(sessions)
+            })
+            .await
         }
         "list_child_sessions" => {
             let store = get_store(store_mutex)?;
@@ -4047,13 +4045,12 @@ pub(crate) async fn dispatch(
         "delete_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            session_commands::delete_session_impl(
-                session_registry,
-                &store,
-                app_handle,
-                &session_id,
-            )?;
-            Ok(Value::Null)
+            let registry = Arc::clone(session_registry);
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                session_commands::delete_session_impl(&registry, &store, &app_handle, &session_id)
+            })
+            .await
         }
         // =====================================================================
         // PRs

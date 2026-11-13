@@ -144,6 +144,10 @@ pub(crate) fn update_note_impl(
 /// chat attachment list, and deleting the session cascades its messages, all
 /// on the one store connection. Tauri runs a synchronous command on the main
 /// thread, where this froze the window for as long as it took.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -152,7 +156,6 @@ pub async fn delete_note(
     delete_session: Option<bool>,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
-
     tauri::async_runtime::spawn_blocking(move || {
         delete_note_impl(
             &store,
@@ -162,7 +165,7 @@ pub async fn delete_note(
         )
     })
     .await
-    .map_err(|e| format!("Note delete task failed: {e}"))?
+    .map_err(|e| format!("delete_note task failed: {e}"))?
 }
 
 /// The body of [`delete_note`], shared with the web dispatcher's arm. Callers
@@ -295,14 +298,21 @@ pub fn create_project_note(
     Ok(note)
 }
 
+/// A store read, run on the blocking pool like [`delete_note`]: every
+/// mounted branch card and project section refetches it on a notes change.
 #[tauri::command]
-pub fn list_project_notes(
+pub async fn list_project_notes(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
 ) -> Result<Vec<crate::store::ProjectNote>, String> {
-    crate::get_store(&store)?
-        .list_project_notes_with_status(&project_id)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_project_notes_with_status(&project_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_project_notes task failed: {e}"))?
 }
 
 /// Fetch a single project note by id (no project filter), with resolved
@@ -350,7 +360,8 @@ pub fn set_project_note_read(
 ///
 /// Async, with the body on the blocking pool, for the reason given on
 /// [`delete_note`]; here the media check covers the parent and every child,
-/// and there is a session cascade per note that had one.
+/// and there is a session cascade per note that had one. Only the handle
+/// lookups run inline.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_project_note(
     registry: tauri::State<'_, Arc<crate::session_runner::SessionRegistry>>,
@@ -359,12 +370,11 @@ pub async fn delete_project_note(
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
     let registry = Arc::clone(&registry);
-
     tauri::async_runtime::spawn_blocking(move || {
         delete_project_note_impl(&store, &registry, &note_id)
     })
     .await
-    .map_err(|e| format!("Project note delete task failed: {e}"))?
+    .map_err(|e| format!("delete_project_note task failed: {e}"))?
 }
 
 /// The body of [`delete_project_note`], shared with the web dispatcher's arm.
@@ -655,6 +665,23 @@ mod tests {
                 "`{command}` must call `{body}` inside `spawn_blocking`: {declaration}"
             );
         }
+    }
+
+    /// The delete reports the sessions it orphaned, and the body removes
+    /// their rows: a session that outlived its note would have nowhere to
+    /// write its result.
+    #[test]
+    fn deleting_a_project_note_deletes_the_session_it_owned() {
+        let f = Fixture::new();
+        let note = crate::store::ProjectNote::new(&f.project.id, "Plan", "body")
+            .with_session(&f.session.id);
+        f.store.create_project_note(&note).unwrap();
+        let registry = crate::session_runner::SessionRegistry::new();
+
+        delete_project_note_impl(&f.store, &registry, &note.id).unwrap();
+
+        assert!(f.store.get_project_note(&note.id).unwrap().is_none());
+        assert!(f.store.get_session(&f.session.id).unwrap().is_none());
     }
 
     #[test]

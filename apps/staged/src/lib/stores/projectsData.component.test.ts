@@ -812,6 +812,111 @@ describe('refreshProject', () => {
   });
 });
 
+// The backend serves these reads concurrently, so within one generation a
+// response can land after one that was sent later. Sent later means sent after
+// whatever change prompted it, so the later-sent response is the one to keep.
+describe('reads landing out of order', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('drops a refresh whose branches land after a branch refetch sent later', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+
+    const stale = deferred<SwrResult<Branch[]>>();
+    listBranchesForProject.mockReturnValueOnce(stale.promise);
+    const refresh = store.refreshProject('p1');
+
+    listBranchesForProject.mockResolvedValue(swr([branch({ branchName: 'fresh' })]));
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')![0].branchName).toBe('fresh');
+    });
+
+    invalidateProjectBranchTimelines.mockClear();
+    stale.resolve(swr([branch({ branchName: 'stale' })]));
+    expect(await refresh).toBe(true);
+    expect(store.branchesByProject.get('p1')![0].branchName).toBe('fresh');
+    // The dropped list names no branches to invalidate.
+    expect(invalidateProjectBranchTimelines).not.toHaveBeenCalled();
+  });
+
+  it('drops a hydration that lands after a refresh sent later', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+
+    const staleBranches = deferred<SwrResult<Branch[]>>();
+    const staleRepos = deferred<SwrResult<ProjectRepo[]>>();
+    listBranchesForProject.mockReturnValueOnce(staleBranches.promise);
+    listProjectRepos.mockReturnValueOnce(staleRepos.promise);
+    const hydration = store.hydrateProject('p1');
+
+    // Unlike refresh(), this keeps the generation, so only the send order
+    // tells the two responses apart.
+    listBranchesForProject.mockResolvedValue(swr([branch({ branchName: 'fresh' })]));
+    listProjectRepos.mockResolvedValue(swr([projectRepo({ branchName: 'fresh' })]));
+    await store.refreshProject('p1');
+
+    staleBranches.resolve(swr([branch({ branchName: 'stale' })]));
+    staleRepos.resolve(swr([projectRepo({ branchName: 'stale' })]));
+    await hydration;
+    expect(store.branchesByProject.get('p1')![0].branchName).toBe('fresh');
+    expect(store.reposByProject.get('p1')![0].branchName).toBe('fresh');
+  });
+
+  it('keeps the project list of a refresh over a revalidation sent before it', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const stale = deferred<SwrResult<Project[]>>();
+    listProjects.mockReturnValueOnce(stale.promise);
+    // Loaded already, so this soft-revalidates in the background.
+    await store.ensureLoaded();
+    await vi.waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
+
+    listProjects.mockResolvedValue(swr([project({ name: 'Renamed' })]));
+    await store.refreshProject('p1');
+    expect(store.projects[0].name).toBe('Renamed');
+
+    stale.resolve(swr([project({ name: 'Alpha' })]));
+    await tick();
+    expect(store.projects[0].name).toBe('Renamed');
+    expect(store.branchesByProject.get('p1')).toHaveLength(1);
+  });
+
+  it('applies a transferred project’s branch list even when a later refetch landed first', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    expect(store.branchesByProject.get('p1')![0].worktreePath).toBe('/wt/b1');
+
+    const replace = deferred<SwrResult<Branch[]>>();
+    listBranchesForProject.mockReturnValueOnce(replace.promise);
+    const refresh = store.refreshTransferredProject('p1');
+
+    // The refetch merges over the old list, which carries the old path on.
+    listBranchesForProject.mockResolvedValue(swr([branch({ worktreePath: null })]));
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(3));
+    await tick();
+    expect(store.branchesByProject.get('p1')![0].worktreePath).toBe('/wt/b1');
+
+    // Only the replace list drops the path the transfer removed.
+    replace.resolve(swr([branch({ worktreePath: null })]));
+    await refresh;
+    expect(store.branchesByProject.get('p1')![0].worktreePath).toBeNull();
+  });
+});
+
 describe('projectCreated', () => {
   it('registers the project immediately and hydrates it in the background', async () => {
     const store = await importStore();

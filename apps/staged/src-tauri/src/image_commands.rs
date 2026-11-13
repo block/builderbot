@@ -109,19 +109,34 @@ pub fn get_image_path(
 }
 
 /// Delete an image record and its file on disk.
+///
+/// Runs [`delete_image_impl`] on the blocking pool. The delete can take the
+/// image's session and all its messages with it, so as a synchronous command
+/// it held the main thread, and so the window, for that delete.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_image(
+pub async fn delete_image(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     image_id: String,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || delete_image_impl(&store, &image_id))
+        .await
+        .map_err(|e| format!("delete_image task failed: {e}"))?
+}
+
+/// The body of [`delete_image`], shared with the web dispatcher's arm.
+pub(crate) fn delete_image_impl(store: &Store, image_id: &str) -> Result<(), String> {
     let image = store
-        .get_image(&image_id)
+        .get_image(image_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Image not found: {image_id}"))?;
 
     // Delete the DB record first (triggers session cleanup).
-    store.delete_image(&image_id).map_err(|e| e.to_string())?;
+    store.delete_image(image_id).map_err(|e| e.to_string())?;
 
     // Best-effort removal of the file and any cached PDF thumbnail.
     crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
@@ -319,6 +334,30 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(bytes),
             Some(true),
         )
+    }
+
+    #[test]
+    fn delete_image_impl_removes_the_row_and_its_file() {
+        let f = Fixture::new();
+        let image = attach(&f, "shot.png", "image/png", PNG).unwrap();
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+                .unwrap();
+        assert!(path.exists());
+
+        delete_image_impl(&f.store, &image.id).unwrap();
+
+        assert!(f.store.get_image(&image.id).unwrap().is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn delete_image_impl_reports_a_missing_image() {
+        let f = Fixture::new();
+
+        let error = delete_image_impl(&f.store, "no-such-image").unwrap_err();
+
+        assert_eq!(error, "Image not found: no-such-image");
     }
 
     #[test]

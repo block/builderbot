@@ -38,6 +38,7 @@
 import { listenToEvent, type UnlistenFn } from '../transport';
 import * as commands from '../commands';
 import { repoBadgeStore } from './repoBadges.svelte';
+import { LatestWins } from '../shared/latestWins';
 import type {
   Branch,
   BranchChangedEvent,
@@ -170,6 +171,14 @@ class ProjectsDataStore {
    * fresher state. Same role as ProjectHome's loadGeneration.
    */
   private loadGeneration = 0;
+  /**
+   * Orders the reads within one generation by when they were sent. The
+   * refresh, hydrate and branch-refetch paths can each have a read of the
+   * same project in flight, and the backend serves them concurrently, so an
+   * older response can land last. Keyed per list: `projects`,
+   * `branches:<project>` and `repos:<project>`.
+   */
+  private readOrder = new LatestWins();
   private initialLoad: Promise<void> | null = null;
   private revalidatePending = false;
   private revalidateQueued = false;
@@ -427,6 +436,7 @@ class ProjectsDataStore {
     { replaceBranches = false }: { replaceBranches?: boolean } = {}
   ): Promise<boolean> {
     const generation = this.loadGeneration;
+    const ticket = this.readOrder.issue();
     try {
       const [projectsResult, branchesResult, reposResult] = await Promise.all([
         commands.listProjects({ force: true }),
@@ -434,14 +444,20 @@ class ProjectsDataStore {
         commands.listProjectRepos(projectId, { force: true }),
       ]);
       if (generation !== this.loadGeneration) return false;
-      this._projects = projectsResult.data;
-      const mergedBranches = this.applyProjectBranches(projectId, branchesResult.data, generation, {
-        replace: replaceBranches,
-      });
+      if (this.readOrder.admit('projects', ticket)) {
+        this._projects = projectsResult.data;
+      }
+      const mergedBranches = this.applyProjectBranches(
+        projectId,
+        branchesResult.data,
+        generation,
+        ticket,
+        { replace: replaceBranches }
+      );
       if (mergedBranches) {
         commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
       }
-      this.applyProjectRepos(projectId, reposResult.data, generation);
+      this.applyProjectRepos(projectId, reposResult.data, generation, ticket);
       this.markProjectHydrated(projectId, generation);
       return true;
     } catch (e) {
@@ -556,20 +572,23 @@ class ProjectsDataStore {
       this._loading = true;
     }
     this._error = null;
+    const ticket = this.readOrder.issue();
     try {
       const [{ data, revalidating }] = await Promise.all([
         commands.listProjects({ force }),
         repoBadgeStore.loadAll({ force }),
       ]);
       if (generation !== this.loadGeneration) return;
-      this.applyProjectList(data, generation, { scheduleHydration: !soft });
+      this.applyProjectList(data, generation, ticket, { scheduleHydration: !soft });
       this._loaded = true;
 
       if (revalidating) {
         // Applied outside the awaited chain so callers aren't blocked on the
         // SWR refresh — they already have renderable data.
         revalidating
-          .then((fresh) => this.applyProjectList(fresh, generation, { scheduleHydration: !soft }))
+          .then((fresh) =>
+            this.applyProjectList(fresh, generation, ticket, { scheduleHydration: !soft })
+          )
           .catch((e) => {
             console.error('[projectsData] Failed to revalidate project list:', e);
           });
@@ -595,9 +614,13 @@ class ProjectsDataStore {
   private applyProjectList(
     projectList: Project[],
     generation: number,
+    ticket: number,
     { scheduleHydration = true }: { scheduleHydration?: boolean } = {}
   ): void {
     if (generation !== this.loadGeneration) return;
+    // A list a refresh sent after this one has already landed (see
+    // readOrder): keep that list, and seed, prune and hydrate against it.
+    if (!this.readOrder.admit('projects', ticket)) projectList = this._projects;
     const previousProjectIds = new Set(this._projects.map((project) => project.id));
     const newlySeenProjectIds = projectList
       .map((project) => project.id)
@@ -672,6 +695,7 @@ class ProjectsDataStore {
   }
 
   private async hydrateProjectInternal(projectId: string, generation: number): Promise<void> {
+    const ticket = this.readOrder.issue();
     try {
       const [branchesResult, reposResult] = await Promise.all([
         commands.listBranchesForProject(projectId),
@@ -679,13 +703,13 @@ class ProjectsDataStore {
       ]);
       if (generation !== this.loadGeneration) return;
 
-      this.applyProjectBranches(projectId, branchesResult.data, generation);
-      this.applyProjectRepos(projectId, reposResult.data, generation);
+      this.applyProjectBranches(projectId, branchesResult.data, generation, ticket);
+      this.applyProjectRepos(projectId, reposResult.data, generation, ticket);
 
       if (branchesResult.revalidating) {
         branchesResult.revalidating
           .then((fresh) => {
-            this.applyProjectBranches(projectId, fresh, generation);
+            this.applyProjectBranches(projectId, fresh, generation, ticket);
           })
           .catch((e) => {
             console.error(`[projectsData] Failed to revalidate branches for '${projectId}':`, e);
@@ -694,7 +718,7 @@ class ProjectsDataStore {
 
       if (reposResult.revalidating) {
         reposResult.revalidating
-          .then((fresh) => this.applyProjectRepos(projectId, fresh, generation))
+          .then((fresh) => this.applyProjectRepos(projectId, fresh, generation, ticket))
           .catch((e) => {
             console.error(`[projectsData] Failed to revalidate repos for '${projectId}':`, e);
           });
@@ -713,13 +737,21 @@ class ProjectsDataStore {
     this._hydratedProjects = new Map(this._hydratedProjects).set(projectId, generation);
   }
 
+  /**
+   * Apply a fetched branch list, unless a newer load or a read sent after
+   * this one (`ticket`, see readOrder) has already landed. A `replace` list
+   * is applied even then: it is read after the transfer that asked for it,
+   * and it alone drops the worktree paths the transfer removed.
+   */
   private applyProjectBranches(
     projectId: string,
     branches: Branch[],
     generation: number,
+    ticket: number,
     { replace = false }: { replace?: boolean } = {}
   ): Branch[] | null {
     if (generation !== this.loadGeneration || !this.hasProject(projectId)) return null;
+    if (!this.readOrder.admit(`branches:${projectId}`, ticket) && !replace) return null;
 
     const mergedBranches = replace
       ? branches
@@ -728,8 +760,14 @@ class ProjectsDataStore {
     return mergedBranches;
   }
 
-  private applyProjectRepos(projectId: string, repos: ProjectRepo[], generation: number): void {
+  private applyProjectRepos(
+    projectId: string,
+    repos: ProjectRepo[],
+    generation: number,
+    ticket: number
+  ): void {
     if (generation !== this.loadGeneration || !this.hasProject(projectId)) return;
+    if (!this.readOrder.admit(`repos:${projectId}`, ticket)) return;
     this._reposByProject = new Map(this._reposByProject).set(projectId, repos);
     void repoBadgeStore.ensureForRepos(
       repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
@@ -1230,15 +1268,16 @@ class ProjectsDataStore {
     }
     this.branchRefetchInFlight.add(projectId);
     const generation = this.loadGeneration;
+    const ticket = this.readOrder.issue();
     try {
       const { data: branches, revalidating } = await commands.listBranchesForProject(projectId, {
         force: true,
       });
-      this.applyProjectBranches(projectId, branches, generation);
+      this.applyProjectBranches(projectId, branches, generation, ticket);
       if (revalidating) {
         revalidating
           .then((fresh) => {
-            this.applyProjectBranches(projectId, fresh, generation);
+            this.applyProjectBranches(projectId, fresh, generation, ticket);
           })
           .catch((e) => {
             console.error(

@@ -1202,13 +1202,24 @@ pub(crate) fn get_active_sessions_impl(
         .collect())
 }
 
+/// Runs [`get_active_sessions_impl`] on the blocking pool. The session
+/// status listener asks at launch, on every return to the window and on a
+/// timer, so as a synchronous command it parked the main thread, and so the
+/// window, behind whatever held the store.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the handle lookups may
+/// run inline: an `async fn` command runs on a runtime worker, where a store
+/// lock wait would stall timers and event sockets instead.
 #[tauri::command]
-pub fn get_active_sessions(
+pub async fn get_active_sessions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
 ) -> Result<Vec<ActiveSessionInfo>, String> {
     let store = get_store(&store)?;
-    get_active_sessions_impl(&store, &registry)
+    let registry = Arc::clone(&registry);
+    tauri::async_runtime::spawn_blocking(move || get_active_sessions_impl(&store, &registry))
+        .await
+        .map_err(|e| format!("get_active_sessions task failed: {e}"))?
 }
 
 /// The in-flight repo sessions a project session spawned, in start order.
@@ -1226,41 +1237,60 @@ pub fn list_child_sessions(
         .map_err(|e| e.to_string())
 }
 
+/// A store read, run on the blocking pool like [`get_active_sessions`]: the
+/// timeline's live hints and the PR, push and pull buttons poll it.
 #[tauri::command]
-pub fn get_session(
+pub async fn get_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<Option<store::Session>, String> {
-    get_store(&store)?
-        .get_session(&session_id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store.get_session(&session_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_session task failed: {e}"))?
 }
 
 /// The visible transcript, or with `limit` its newest rows and with
 /// `before_id` the rows older than one already loaded — see
 /// [`store::TranscriptWindow`]. Neither set returns the whole transcript.
+///
+/// A store read, run on the blocking pool like [`get_active_sessions`].
 #[tauri::command]
-pub fn get_session_messages(
+pub async fn get_session_messages(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
     limit: Option<u32>,
     before_id: Option<i64>,
 ) -> Result<Vec<store::SessionMessage>, String> {
-    get_store(&store)?
-        .get_session_messages_window(&session_id, store::TranscriptWindow { limit, before_id })
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_session_messages_window(&session_id, store::TranscriptWindow { limit, before_id })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_session_messages task failed: {e}"))?
 }
 
+/// A store read, run on the blocking pool like [`get_active_sessions`]: the
+/// timeline's live hints poll it for every running session in a visible list.
 #[tauri::command]
-pub fn get_session_messages_since(
+pub async fn get_session_messages_since(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
     since_id: i64,
     refetch_ids: Vec<i64>,
 ) -> Result<Vec<store::SessionMessage>, String> {
-    get_store(&store)?
-        .get_session_messages_since(&session_id, since_id, &refetch_ids)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_session_messages_since(&session_id, since_id, &refetch_ids)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_session_messages_since task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1287,15 +1317,24 @@ pub fn get_session_acp_metadata_messages_since(
 
 /// One tick of the session pane's poll: status, follow-up queue and both
 /// transcript increments from a single snapshot (see `store/session_poll.rs`).
+///
+/// Runs on the blocking pool like [`get_active_sessions`]: an open running
+/// chat sends this twice a second, so as a synchronous command it kept a
+/// store read on the main thread whenever a session was running.
 #[tauri::command(rename_all = "camelCase")]
-pub fn poll_session(
+pub async fn poll_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
     request: store::SessionPollRequest,
 ) -> Result<store::SessionPoll, String> {
-    get_store(&store)?
-        .poll_session(&session_id, &request)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .poll_session(&session_id, &request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("poll_session task failed: {e}"))?
 }
 
 /// Resolve a tool-result image reference (`<message_id>/<field>/<index>`, as
@@ -3417,14 +3456,24 @@ pub fn get_session_background_hold(
     registry.background_hold(&session_id).into()
 }
 
+/// Runs [`delete_session_impl`] on the blocking pool. The delete cascades to
+/// every message of the session in one statement, so as a synchronous command
+/// it held the main thread, and so the window, for a long session's delete.
+/// Like [`get_active_sessions`], only the handle lookups run inline.
 #[tauri::command]
-pub fn delete_session(
+pub async fn delete_session(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     session_id: String,
 ) -> Result<(), String> {
-    delete_session_impl(&registry, &get_store(&store)?, &app_handle, &session_id)
+    let store = get_store(&store)?;
+    let registry = Arc::clone(&registry);
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_session_impl(&registry, &store, &app_handle, &session_id)
+    })
+    .await
+    .map_err(|e| format!("delete_session task failed: {e}"))?
 }
 
 /// Delete a session row, for both transports.

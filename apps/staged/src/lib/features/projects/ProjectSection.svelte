@@ -28,6 +28,7 @@
   import BranchCard from '../branches/BranchCard.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
+  import { LatestWins } from '../../shared/latestWins';
   import ConfirmDeleteDialog, {
     type ConfirmDeleteRequest,
   } from '../../shared/ConfirmDeleteDialog.svelte';
@@ -558,16 +559,30 @@
   let resumingNoteIds = $state<Set<string>>(new Set());
   let confirmDelete = $state<ConfirmDeleteRequest | null>(null);
   /**
-   * Per-session latest note refetch, numbered from one counter that never
-   * resets: an older fetch landing late is dropped, and clearing a landed
-   * fetch's entry can't let a later fetch inherit its number.
+   * Orders the note fetches by when they were sent. The list load and the
+   * per-session row refetch run concurrently in the backend, so either can
+   * land after a fetch sent later than it.
    */
-  let noteRefreshSeq = 0;
+  const noteFetchOrder = new LatestWins<'list' | 'row'>();
+  /**
+   * Per-session latest note refetch, numbered by `noteFetchOrder`, whose
+   * counter never resets: an older fetch landing late is dropped, and
+   * clearing a landed fetch's entry can't let a later fetch inherit its
+   * number.
+   */
   const latestNoteRefreshes = new Map<string, number>();
 
-  async function loadProjectNotes() {
+  async function loadProjectNotes(): Promise<void> {
+    const ticket = noteFetchOrder.issue();
     try {
-      projectNotes = await commands.listProjectNotes(project.id);
+      const notes = await commands.listProjectNotes(project.id);
+      // A list sent after this one has already landed: this one is older.
+      if (!noteFetchOrder.admit('list', ticket)) return;
+      // A row refetch sent after this list landed first, so the list may
+      // predate what that refetch read. Applying it would put the old row
+      // back, and dropping it would lose its other rows: read the list again.
+      if (noteFetchOrder.overtaken('row', ticket)) return loadProjectNotes();
+      projectNotes = notes;
     } catch (e) {
       console.error('[ProjectSection] Failed to load project notes:', e);
     }
@@ -575,7 +590,7 @@
 
   /** Surgically refetch the note a session writes instead of reloading them all. */
   async function refreshNoteForSession(sessionId: string) {
-    const seq = ++noteRefreshSeq;
+    const seq = noteFetchOrder.issue();
     latestNoteRefreshes.set(sessionId, seq);
     let updatedNote: ProjectNote | null;
     let superseded = false;
@@ -592,6 +607,7 @@
       if (!superseded) latestNoteRefreshes.delete(sessionId);
     }
     if (superseded) return;
+    noteFetchOrder.admit('row', seq);
 
     if (updatedNote) {
       projectNotes = projectNotes.map((n) => (n.id === updatedNote.id ? updatedNote : n));

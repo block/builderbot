@@ -41,6 +41,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
+  import { LatestWins } from '../../shared/latestWins';
   import { subscribeDragDrop } from './dragDrop';
   import { rebaseInFlight } from './rebaseInFlight';
   import type {
@@ -230,6 +231,9 @@
       : []
   );
   let projectNoteHashtagItems = $state<HashtagItem[]>([]);
+  // The two project-note fetches below run concurrently in the backend, so an
+  // older list can land after a newer one; only the latest sent is applied.
+  const projectNoteFetchOrder = new LatestWins();
   $effect(() => {
     const projectId = branch.projectId;
     if (!projectId) {
@@ -237,8 +241,9 @@
       return;
     }
     let stale = false;
+    const ticket = projectNoteFetchOrder.issue();
     commands.listProjectNotes(projectId).then((notes) => {
-      if (stale) return;
+      if (stale || !projectNoteFetchOrder.admit(projectId, ticket)) return;
       projectNoteHashtagItems = projectNotesToHashtagItems(notes);
     });
     return () => {
@@ -947,7 +952,9 @@
     const projectId = branch.projectId;
     if (!projectId) return;
     const handler = () => {
+      const ticket = projectNoteFetchOrder.issue();
       commands.listProjectNotes(projectId).then((notes) => {
+        if (!projectNoteFetchOrder.admit(projectId, ticket)) return;
         projectNoteHashtagItems = projectNotesToHashtagItems(notes);
       });
     };

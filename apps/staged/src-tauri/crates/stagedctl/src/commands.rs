@@ -92,6 +92,24 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
         _ => {}
     }
 
+    // `project open` with no argument takes its project from the current
+    // directory. Like the flag rules in `validate`, that needs no app, so it
+    // is settled before discovery: a directory outside every workspace fails
+    // the same way (exit 1) whether or not a Staged app is running.
+    if let Noun::Project(ProjectVerb::Open { project }) = &cli.command {
+        let target = open::target(
+            project.as_deref(),
+            std::env::current_dir,
+            data_dir.as_deref(),
+        )?;
+        let client = discover_and_connect(
+            cli.lock_path.as_deref(),
+            std::env::var_os(STAGEDCTL_LOCK_ENV),
+            data_dir.as_deref(),
+        )?;
+        return open::project_open(&client, &target);
+    }
+
     let client = discover_and_connect(
         cli.lock_path.as_deref(),
         std::env::var_os(STAGEDCTL_LOCK_ENV),
@@ -101,7 +119,6 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
     match cli.command {
         Noun::Project(ProjectVerb::List { tag }) => project_list(&client, &tag),
         Noun::Project(ProjectVerb::Get { project }) => project_get(&client, &project),
-        Noun::Project(ProjectVerb::Open { project }) => open::project_open(&client, &project),
         Noun::Project(ProjectVerb::Tags { project }) => tags::project_tags(&client, &project),
         Noun::Project(ProjectVerb::Tag {
             project,
@@ -192,7 +209,11 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
             branch,
             file,
         }) => image_add(&client, &project, &repo, branch.as_deref(), &file),
-        Noun::Connect { .. } | Noun::Disconnect { .. } => unreachable!("handled above"),
+        Noun::Project(ProjectVerb::Open { .. })
+        | Noun::Connect { .. }
+        | Noun::Disconnect { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -748,10 +769,14 @@ pub(crate) fn find_project<'a>(
     }
 }
 
-pub(crate) fn resolve_project(client: &Client, needle: &str) -> Result<Project, CtlError> {
+/// Every project the caller's credential can see.
+pub(crate) fn list_projects(client: &Client) -> Result<Vec<Project>, CtlError> {
     let raw = client.invoke("list_projects", json!({}))?;
-    let projects: Vec<Project> = parse(&raw, "project list")?;
-    find_project(&projects, needle).cloned()
+    parse(&raw, "project list")
+}
+
+pub(crate) fn resolve_project(client: &Client, needle: &str) -> Result<Project, CtlError> {
+    find_project(&list_projects(client)?, needle).cloned()
 }
 
 struct ResolvedBranch {

@@ -145,8 +145,16 @@ icon would raise is brought to the front and switched to the project.
 Prints the project's name and id and the pid of the Staged instance that
 showed it. A project that is already on screen is a success too.
 
+With no <project>, the project is the one whose workspace the current
+directory is in: any directory under
+~/.staged/workspaces/<local|remote>/projects/<project-id>/, where Staged
+keeps a project's worktrees. From any other directory the command exits 1
+(`not_in_workspace`) without looking for the app; pass a <project> there.
+
 A <project> that matches nothing (`not_found`), or several projects when
-case is ignored (`ambiguous`), exits 1 before any window is touched.
+case is ignored (`ambiguous`), exits 1 before any window is touched. So
+does a directory whose project the app does not have (`not_found`), such
+as the worktree of a project that was deleted.
 
 Otherwise the window is raised whether or not it could switch, so the
 user sees what is in the way. When it could not, the command exits 1:
@@ -164,11 +172,11 @@ records it as the last one shown, so a read-only grant is refused (exit
 session's credential the same way, for the session's own project too, so
 an agent cannot pull the user's window away.
 
-Usage: stagedctl project open [OPTIONS] <PROJECT>
+Usage: stagedctl project open [OPTIONS] [PROJECT]
 
 Arguments:
-  <PROJECT>
-          Project name or id (see `stagedctl project list`)
+  [PROJECT]
+          Project name or id (see `stagedctl project list`); omit it to open the project the current directory belongs to
 
 Options:
       --lock-path <PATH>

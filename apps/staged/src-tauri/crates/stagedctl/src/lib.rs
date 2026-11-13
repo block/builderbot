@@ -4,8 +4,8 @@
 //! - [`cli`]: the clap tree and all help prose (byte-pinned by tests)
 //! - [`client`]: discovery file, ping handshake, HTTP transport, exit codes
 //! - [`commands`]: verb implementations and output rendering
-//! - [`open`]: `project open`: asks a window to show a project and words
-//!   what the window did
+//! - [`open`]: `project open`: finds the project, by name, id or the current
+//!   directory, asks a window to show it and words what the window did
 //! - [`tags`]: the `tag` noun and `project tags`: tag wire shapes, `<tag>`
 //!   and `<group>` resolution, and their renderers
 //!

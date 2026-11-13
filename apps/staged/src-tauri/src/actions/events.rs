@@ -17,6 +17,10 @@ pub struct ActionOutputEvent {
     pub execution_id: String,
     pub chunk: String,
     pub stream: String, // "stdout" or "stderr"
+    /// Where `chunk` starts in the execution's output, in bytes. A viewer
+    /// compares it with the `endOffset` of `get_action_output_buffer` to tell
+    /// output it already has from output that follows it.
+    pub offset: u64,
 }
 
 /// Event emitted when action status changes
@@ -104,6 +108,7 @@ impl ExecutionListener for TauriExecutionListener {
                 execution_id,
                 chunk,
                 stream,
+                offset,
                 ..
             } => {
                 // Feed normalized terminal output into the shared buffer for
@@ -120,6 +125,7 @@ impl ExecutionListener for TauriExecutionListener {
                         execution_id,
                         chunk,
                         stream,
+                        offset,
                     },
                 );
             }

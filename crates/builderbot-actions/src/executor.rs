@@ -22,7 +22,7 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use crate::finished_outputs::{FinishedOutputs, MAX_FINISHED_EXECUTIONS};
-use crate::models::{ActionStatus, ExecutionEvent, OutputChunk};
+use crate::models::{ActionStatus, BufferedOutput, ExecutionEvent};
 use crate::output_buffer::{OutputBuffer, SharedOutputBuffer, MAX_OUTPUT_BYTES};
 use crate::output_emitter::{self, OutputSender, EMIT_INTERVAL, EMIT_MAX_BYTES};
 use crate::utf8_stream::Utf8StreamDecoder;
@@ -720,13 +720,16 @@ impl ActionExecutor {
         }
     }
 
-    /// Get buffered output for an execution.
+    /// Get buffered output for an execution, and the offset it ends at.
     ///
     /// Only the most recent output is kept. Once earlier output has been
     /// dropped, the first chunk is a notice saying how much. Returns `None`
     /// for an unknown execution, and for a finished one whose output has been
     /// cleared or evicted.
-    pub fn get_buffered_output(&self, execution_id: &str) -> Option<Vec<OutputChunk>> {
+    ///
+    /// The end offset lines the snapshot up with the `Output` events: every
+    /// event that starts before it is in the snapshot, and no other is.
+    pub fn get_buffered_output(&self, execution_id: &str) -> Option<BufferedOutput> {
         // First check running actions, then finished ones
         let buffer = {
             let running = self.running.lock().unwrap();
@@ -736,8 +739,15 @@ impl ActionExecutor {
             }
         };
 
-        // Copy the output with only the buffer itself locked.
-        buffer.map(|buffer| buffer.lock().unwrap().snapshot())
+        // Copy the output with only the buffer itself locked. The offset is
+        // read under the same lock, so it is the end of exactly this copy.
+        buffer.map(|buffer| {
+            let buffer = buffer.lock().unwrap();
+            BufferedOutput {
+                chunks: buffer.snapshot(),
+                end_offset: buffer.end_offset(),
+            }
+        })
     }
 
     /// Check if an action is currently running

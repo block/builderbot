@@ -36,6 +36,8 @@ pub(crate) struct OutputBuffer {
     retained_bytes: usize,
     /// Bytes of output text evicted from the front so far.
     dropped_bytes: u64,
+    /// Bytes of output text pushed so far, retained or not.
+    pushed_bytes: u64,
     /// Whether the oldest retained block starts part-way through a line,
     /// because the block evicted before it did not end on a line break.
     head_is_partial_line: bool,
@@ -51,6 +53,7 @@ impl OutputBuffer {
             blocks: VecDeque::new(),
             retained_bytes: 0,
             dropped_bytes: 0,
+            pushed_bytes: 0,
             head_is_partial_line: false,
             max_bytes,
             block_bytes: MAX_BLOCK_BYTES.min(max_bytes / 4).max(1),
@@ -69,6 +72,7 @@ impl OutputBuffer {
     /// batch is stored as several blocks, so that the bound holds whatever
     /// size the buffer is fed in.
     pub(crate) fn push(&mut self, stream: &str, text: &str, timestamp: i64) {
+        self.pushed_bytes += text.len() as u64;
         let mut rest = text;
         while !rest.is_empty() {
             let (piece, after) = rest.split_at(piece_len(rest, self.block_bytes));
@@ -113,6 +117,12 @@ impl OutputBuffer {
             self.dropped_bytes += evicted.chunk.len() as u64;
             self.head_is_partial_line = !evicted.chunk.ends_with(['\n', '\r']);
         }
+    }
+
+    /// Where the output pushed so far ends: its length in bytes, counting
+    /// what has been evicted. The next push starts here.
+    pub(crate) fn end_offset(&self) -> u64 {
+        self.pushed_bytes
     }
 
     /// The retained output, oldest first.
@@ -293,6 +303,36 @@ mod tests {
         let blocks: Vec<&str> = buffer.blocks.iter().map(|b| b.chunk.as_str()).collect();
         assert_eq!(blocks, vec!["b"]);
         assert_eq!(buffer.dropped_bytes, 4);
+    }
+
+    #[test]
+    fn the_end_offset_counts_everything_pushed() {
+        let mut buffer = OutputBuffer::new(MAX_OUTPUT_BYTES);
+        assert_eq!(buffer.end_offset(), 0);
+
+        buffer.push("stdout", "one", 0);
+        assert_eq!(buffer.end_offset(), 3);
+        // Bytes, not characters, and whichever stream they were written to.
+        buffer.push("stderr", "café €", 0);
+        assert_eq!(buffer.end_offset(), 3 + 9);
+        buffer.push("stdout", "", 0);
+        assert_eq!(buffer.end_offset(), 12);
+    }
+
+    #[test]
+    fn the_end_offset_keeps_counting_evicted_output() {
+        let max_bytes = 4 * 1024;
+        let mut buffer = OutputBuffer::new(max_bytes);
+        let line = format!("{}\n", "z".repeat(99));
+        for _ in 0..1_000 {
+            buffer.push("stdout", &line, 0);
+        }
+
+        assert!(buffer.dropped_bytes > 0);
+        assert_eq!(buffer.end_offset(), 1_000 * line.len() as u64);
+        // What is retained is the output just before the end offset.
+        let retained: usize = buffer.blocks.iter().map(|b| b.chunk.len()).sum();
+        assert_eq!(buffer.end_offset(), buffer.dropped_bytes + retained as u64);
     }
 
     #[test]

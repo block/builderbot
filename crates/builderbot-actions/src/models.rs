@@ -61,6 +61,22 @@ pub struct OutputChunk {
     pub timestamp: i64,
 }
 
+/// The output an execution has buffered, and where it ends.
+///
+/// Output is also delivered live, as [`ExecutionEvent::Output`]. `end_offset`
+/// is what joins the two: an event whose `offset` is below it is already in
+/// `chunks`, and the first one that is not starts exactly at it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BufferedOutput {
+    /// The retained output, oldest first. Once earlier output has been
+    /// dropped, the first chunk is a notice saying how much.
+    pub chunks: Vec<OutputChunk>,
+    /// Bytes of output the execution had produced when `chunks` was taken,
+    /// counting what is no longer retained.
+    pub end_offset: u64,
+}
+
 /// How a "run" action detects whether the process is running and/or its endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -85,6 +101,10 @@ pub enum ExecutionEvent {
         chunk: String,
         stream: String, // "stdout" or "stderr"
         timestamp: i64,
+        /// Where `chunk` starts in the execution's output: the number of
+        /// bytes of output delivered before it. Each event starts where the
+        /// one before it ended.
+        offset: u64,
     },
     /// Action status changed
     StatusChanged {

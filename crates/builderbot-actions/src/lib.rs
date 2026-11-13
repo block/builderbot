@@ -63,4 +63,6 @@ mod utf8_stream;
 pub use acp_provider::AcpAiProvider;
 pub use detector::{ActionDetector, AiProvider, FileExplorationMode, SuggestedAction};
 pub use executor::{ActionExecutor, ExecutionListener, StopOptions};
-pub use models::{ActionStatus, ActionType, ExecutionEvent, OutputChunk, RunDetectionMode};
+pub use models::{
+    ActionStatus, ActionType, BufferedOutput, ExecutionEvent, OutputChunk, RunDetectionMode,
+};

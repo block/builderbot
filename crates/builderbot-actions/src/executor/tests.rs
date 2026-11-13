@@ -63,6 +63,8 @@ fn slow_recorder(output_delay: Duration) -> (Arc<dyn ExecutionListener>, Receive
 struct Outcome {
     /// The text of every output event, in order.
     streamed: Vec<String>,
+    /// The offset each of those events said its text starts at.
+    offsets: Vec<u64>,
     status: ActionStatus,
     exit_code: Option<i32>,
 }
@@ -97,18 +99,23 @@ impl Outcome {
 
 fn wait_for_finish(events: &Receiver<ExecutionEvent>) -> Outcome {
     let mut streamed = Vec::new();
+    let mut offsets = Vec::new();
     loop {
         match events
             .recv_timeout(WAIT)
             .expect("the execution did not finish")
         {
             ExecutionEvent::Started { .. } => {}
-            ExecutionEvent::Output { chunk, .. } => streamed.push(chunk),
+            ExecutionEvent::Output { chunk, offset, .. } => {
+                streamed.push(chunk);
+                offsets.push(offset);
+            }
             ExecutionEvent::StatusChanged {
                 status, exit_code, ..
             } => {
                 return Outcome {
                     streamed,
+                    offsets,
                     status,
                     exit_code,
                 }
@@ -226,7 +233,7 @@ async fn run_sh_until_output(
 fn buffered_text(executor: &ActionExecutor, execution_id: &str) -> Option<String> {
     executor
         .get_buffered_output(execution_id)
-        .map(|chunks| chunks.iter().map(|c| c.chunk.as_str()).collect())
+        .map(|output| output.chunks.iter().map(|c| c.chunk.as_str()).collect())
 }
 
 /// A file a script waits on, so a test can hold an action open and release
@@ -398,7 +405,7 @@ async fn buffered_output_is_capped_to_the_most_recent_bytes() {
     let written: String = (1..=20_000).map(|n| format!("{n}\n")).collect();
     assert_eq!(outcome.streamed_text(), written);
 
-    let chunks = executor.get_buffered_output(&id).unwrap();
+    let chunks = executor.get_buffered_output(&id).unwrap().chunks;
     let (notice, retained) = chunks.split_first().unwrap();
     let retained: String = retained.iter().map(|c| c.chunk.as_str()).collect();
     // The buffer holds the end of the output, on a line boundary, within the
@@ -419,6 +426,37 @@ async fn buffered_output_is_capped_to_the_most_recent_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_and_the_snapshot_share_one_set_of_offsets() {
+    // A small cap, so most of the output is gone from the buffer by the end,
+    // and small batches, so there are many events.
+    let executor = ActionExecutor::with_limits(Limits {
+        max_output_bytes: 16 * 1024,
+        emit_max_bytes: 1024,
+        ..patient_limits()
+    });
+    let Finished { id, outcome, .. } = run_sh_to_finish(&executor, "seq 1 20000").await;
+    assert!(outcome.streamed.len() > 10);
+
+    // Each event starts where the one before it ended, counting from the
+    // start of the output.
+    let mut expected = 0;
+    for (chunk, offset) in outcome.streamed.iter().zip(&outcome.offsets) {
+        assert_eq!(*offset, expected);
+        expected += chunk.len() as u64;
+    }
+
+    // The snapshot ends where the last event did, although it no longer holds
+    // the start of the output. A viewer that takes it now has nothing left to
+    // apply; one that took it earlier would apply the events from its end on.
+    let output = executor.get_buffered_output(&id).unwrap();
+    assert!(output.chunks[0]
+        .chunk
+        .starts_with("[earlier output truncated: "));
+    assert_eq!(output.end_offset, expected);
+    assert_eq!(output.end_offset, outcome.streamed_text().len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reads_of_one_stream_are_coalesced() {
     let executor = ActionExecutor::with_limits(patient_limits());
     let written: String = (1..=3_000).map(|n| format!("{n}\n")).collect();
@@ -428,7 +466,7 @@ async fn reads_of_one_stream_are_coalesced() {
 
         // Many reads were streamed, and they are buffered as a single block.
         assert_eq!(outcome.streamed_text(), written);
-        let chunks = executor.get_buffered_output(&id).unwrap();
+        let chunks = executor.get_buffered_output(&id).unwrap().chunks;
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].stream, stream);
         assert_eq!(chunks[0].chunk, written);

@@ -1343,16 +1343,24 @@ pub fn get_all_running_actions(
 pub(crate) fn get_action_output_buffer_impl(
     execution_id: String,
     executor: &ActionExecutor,
-) -> Result<Option<Vec<builderbot_actions::OutputChunk>>, String> {
+) -> Result<Option<builderbot_actions::BufferedOutput>, String> {
     Ok(executor.get_buffered_output(&execution_id))
 }
 
-/// Get buffered output for an action execution
+/// Get the buffered output of an action execution: the most recent output the
+/// executor retains, and the offset it ends at.
+///
+/// A viewer that is already listening for `action_output` uses that offset to
+/// join the two without a gap or a repeat: events whose `offset` is below it
+/// are in the returned chunks, and the next one starts exactly at it.
+///
+/// Asynchronous so that copying and serializing the buffer, which can be
+/// several megabytes, happens off the main thread.
 #[tauri::command]
-pub fn get_action_output_buffer(
+pub async fn get_action_output_buffer(
     execution_id: String,
     executor: State<'_, Arc<ActionExecutor>>,
-) -> Result<Option<Vec<builderbot_actions::OutputChunk>>, String> {
+) -> Result<Option<builderbot_actions::BufferedOutput>, String> {
     get_action_output_buffer_impl(execution_id, &executor)
 }
 
@@ -1568,6 +1576,125 @@ mod tests {
             .unwrap();
         register(registry, &execution_id, branch_id, "run");
         execution_id
+    }
+
+    /// Collects the `action_output` payload each output event becomes, and
+    /// says when the execution has reported its terminal status.
+    #[cfg(unix)]
+    struct RecordOutput {
+        output: std::sync::Mutex<Vec<crate::actions::events::ActionOutputEvent>>,
+        finished: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl builderbot_actions::ExecutionListener for RecordOutput {
+        async fn on_event(&self, event: builderbot_actions::ExecutionEvent) {
+            match event {
+                builderbot_actions::ExecutionEvent::Output {
+                    execution_id,
+                    chunk,
+                    stream,
+                    offset,
+                    ..
+                } => self
+                    .output
+                    .lock()
+                    .unwrap()
+                    .push(crate::actions::events::ActionOutputEvent {
+                        execution_id,
+                        chunk,
+                        stream,
+                        offset,
+                    }),
+                builderbot_actions::ExecutionEvent::StatusChanged { .. } => {
+                    let _ = self.finished.lock().unwrap().send(());
+                }
+                builderbot_actions::ExecutionEvent::Started { .. } => {}
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_output_buffer_ends_where_the_output_events_do() {
+        let executor = ActionExecutor::new();
+
+        // A freshly spawned child is occasionally killed before it runs (see
+        // the executor's tests), so start again if nothing was written.
+        let mut attempt = None;
+        for _ in 0..5 {
+            let (finished_tx, finished) = std::sync::mpsc::channel();
+            let listener = Arc::new(RecordOutput {
+                output: Default::default(),
+                finished: std::sync::Mutex::new(finished_tx),
+            });
+            let execution_id = executor
+                .execute_remote(
+                    std::path::PathBuf::from("/bin/sh"),
+                    vec![
+                        "-c".to_string(),
+                        "printf 'héllo\\n'; printf 'err\\n' >&2".to_string(),
+                    ],
+                    listener.clone(),
+                )
+                .await
+                .unwrap();
+            // The terminal status follows all of the output.
+            finished
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the execution did not finish");
+            let output = get_action_output_buffer_impl(execution_id.clone(), &executor)
+                .unwrap()
+                .expect("a finished execution keeps its output");
+            if output.end_offset > 0 {
+                attempt = Some((execution_id, listener, output));
+                break;
+            }
+        }
+        let (execution_id, listener, output) = attempt.expect("the script never ran");
+
+        let text: String = output.chunks.iter().map(|c| c.chunk.as_str()).collect();
+        assert_eq!(text.len(), "héllo\nerr\n".len());
+        assert_eq!(output.end_offset, text.len() as u64);
+
+        // The payload a viewer gets: the chunks, and the offset they end at.
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(json["endOffset"], serde_json::json!(text.len()));
+        assert_eq!(
+            json["chunks"].as_array().unwrap().len(),
+            output.chunks.len()
+        );
+        assert!(json["chunks"][0]["chunk"].is_string());
+        assert!(json["chunks"][0]["stream"].is_string());
+
+        // Each event says where its chunk starts, in the same bytes, and the
+        // last one ends where the buffer does.
+        let events = listener.output.lock().unwrap().clone();
+        let mut expected = 0;
+        for event in &events {
+            assert_eq!(event.execution_id, execution_id);
+            assert_eq!(event.offset, expected);
+            expected += event.chunk.len() as u64;
+            assert_eq!(
+                serde_json::to_value(event).unwrap()["offset"],
+                serde_json::json!(event.offset)
+            );
+        }
+        assert_eq!(expected, output.end_offset);
+
+        // An execution that is unknown, or whose output is gone, has none.
+        assert!(clear_action_execution_impl(execution_id.clone(), &executor).unwrap());
+        assert!(get_action_output_buffer_impl(execution_id, &executor)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            serde_json::to_value(
+                get_action_output_buffer_impl("unknown".to_string(), &executor).unwrap()
+            )
+            .unwrap(),
+            serde_json::Value::Null
+        );
     }
 
     #[cfg(unix)]

@@ -9,9 +9,15 @@
   - Real-time output streaming with ANSI color rendering
   - Status badge (Running/Completed/Failed/Stopped)
   - Stop button when running
-  - Automatically fetches buffered output on mount
+  - Shows the output buffered so far, then follows the live output from
+    exactly where that ends (see outputFollower)
   - Auto-scrolls to follow new output
   - Distinguishes stdout (normal) from stderr (dimmed)
+
+  What it holds is bounded: the most recent lines only (see
+  OUTPUT_LINE_LIMITS), with a count of the earlier ones. It holds nothing
+  while closed, so the instance a branch card keeps mounted costs nothing
+  between uses.
 
   Props:
     executionId — the execution to display output for
@@ -21,7 +27,7 @@
     onClose     — callback to close this modal
 -->
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import CircleStop from '@lucide/svelte/icons/circle-stop';
@@ -36,7 +42,7 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { createNote } from '../../commands';
-  import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
+  import type { ActionStatusEvent, ActionOutputEvent, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
     stopBranchAction,
@@ -44,7 +50,8 @@
     listenToActionOutput,
     listenToActionStatus,
   } from './actions';
-  import { createIncrementalProcessor, type TerminalLine } from './processOutput';
+  import { createIncrementalProcessor, type OutputLine } from './processOutput';
+  import { createOutputFollower, type OutputFollower } from './outputFollower';
   import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
@@ -75,33 +82,69 @@
   // State
   // =========================================================================
 
+  /** The lines on show, and how many earlier ones have been dropped. */
+  interface OutputView {
+    lines: OutputLine[];
+    droppedLines: number;
+  }
+
+  const EMPTY_VIEW: OutputView = { lines: [], droppedLines: 0 };
+
   let status = $state<ActionStatus>('running');
   let exitCode = $state<number | null>(null);
-  let displayLines = $state<TerminalLine[]>([]);
+  // Turns output into lines, and holds them. Output is fed to it as it
+  // arrives, so what waits for the next frame is bounded by its limits.
   let lineProcessor = createIncrementalProcessor();
+  // What the output area renders. `lines` is the processor's own array, which
+  // it updates in place: publishing means handing Svelte a new wrapper around
+  // the same array, so no line is copied, and the keyed {#each} touches only
+  // the rows whose line object changed.
+  let view = $state.raw<OutputView>(EMPTY_VIEW);
   let loading = $state(true);
+  // The execution has no buffered output: it is unknown, or its output was
+  // cleared or evicted.
+  let unavailable = $state(false);
   let error = $state<string | null>(null);
   let saveError = $state<string | null>(null);
   let stoppingExecutions = $state<Set<string>>(new Set());
   let outputEl: HTMLDivElement;
+  let follower: OutputFollower | null = null;
   let unlistenOutput: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
   let shouldAutoScroll = $state(true);
 
-  // rAF batching for incoming output chunks
-  let pendingChunks: OutputChunk[] = [];
-  let flushRaf: number | null = null;
+  // Live output is published at most once per frame.
+  let publishRaf: number | null = null;
 
-  function flushPendingChunks() {
-    flushRaf = null;
-    if (pendingChunks.length > 0) {
-      const chunks = pendingChunks;
-      pendingChunks = [];
-      displayLines = lineProcessor.process(chunks);
-      if (shouldAutoScroll) {
-        tick().then(() => scrollToBottom());
-      }
+  /** Show the processor's lines as they now stand. */
+  function publishLines() {
+    if (publishRaf !== null) {
+      cancelAnimationFrame(publishRaf);
+      publishRaf = null;
     }
+    view = { lines: lineProcessor.lines, droppedLines: lineProcessor.droppedLines };
+    if (shouldAutoScroll) {
+      tick().then(() => scrollToBottom());
+    }
+  }
+
+  function schedulePublish() {
+    if (publishRaf === null) {
+      publishRaf = requestAnimationFrame(() => {
+        publishRaf = null;
+        publishLines();
+      });
+    }
+  }
+
+  /** Let go of every line. */
+  function releaseLines() {
+    if (publishRaf !== null) {
+      cancelAnimationFrame(publishRaf);
+      publishRaf = null;
+    }
+    lineProcessor = createIncrementalProcessor();
+    view = EMPTY_VIEW;
   }
 
   // ANSI to HTML converter
@@ -136,9 +179,9 @@
     capturedSelection = selectedText;
   }
 
-  /** Get plain text from all output lines. */
+  /** Get plain text from all the output lines held. */
   function getFullOutputText(): string {
-    return displayLines.map((l) => l.text).join('\n');
+    return lineProcessor.lines.map((l) => l.text).join('\n');
   }
 
   async function handleSaveAsNote() {
@@ -168,9 +211,6 @@
     }
   }
 
-  // Render cache — avoids re-running ANSI conversion + sanitization for unchanged lines
-  let renderLineCache = new Map<string, string>();
-
   // =========================================================================
   // Lifecycle
   // =========================================================================
@@ -190,7 +230,7 @@
 
   onDestroy(() => {
     if (saveTimeout) clearTimeout(saveTimeout);
-    cleanup();
+    stopFollowing();
   });
 
   // React to executionId changes (e.g. when "Run again" switches to a new execution)
@@ -200,72 +240,95 @@
     // every closed instance would still fetch getActionOutputBuffer('') and
     // install output/status listeners — wasteful on pages with many cards,
     // and it surfaces a spurious "not found" load error.
-    if (!open || !executionId) {
-      cleanup();
-      return;
-    }
-    void executionId; // subscribe to executionId changes
-    // Reset state for the new execution
-    status = 'running';
-    exitCode = null;
-    displayLines = [];
-    lineProcessor = createIncrementalProcessor();
-    renderLineCache = new Map();
-    pendingChunks = [];
-    if (flushRaf !== null) {
-      cancelAnimationFrame(flushRaf);
-      flushRaf = null;
-    }
-    loading = true;
-    error = null;
-    shouldAutoScroll = true;
-    cleanup();
+    const following = open ? executionId : '';
+    untrack(() => {
+      stopFollowing();
+      // A closing modal keeps its lines until it has gone from the screen;
+      // see handleOpenChangeComplete.
+      if (!following) return;
 
-    (async () => {
-      await loadBufferedOutput();
-      setupListeners();
-      tick().then(() => scrollToBottom());
-    })();
+      // Reset state for the new execution
+      status = 'running';
+      exitCode = null;
+      releaseLines();
+      loading = true;
+      unavailable = false;
+      error = null;
+      shouldAutoScroll = true;
+      startFollowing(following);
+    });
   });
+
+  // The lines stay while the dialog animates out, so its last frames still
+  // show them, and are released once it is gone. A branch card keeps this
+  // component mounted while closed; without this the last output it showed
+  // would stay in memory until the next one was opened.
+  function handleOpenChangeComplete(isOpen: boolean) {
+    if (!isOpen) releaseLines();
+  }
 
   // =========================================================================
   // Data loading
   // =========================================================================
 
-  async function loadBufferedOutput() {
-    try {
-      loading = true;
-      error = null;
-      const buffer = await getActionOutputBuffer(executionId);
-      if (buffer) {
-        displayLines = lineProcessor.process(buffer);
-      }
-    } catch (e: any) {
-      error = e?.message || 'Failed to load action output';
-      console.error('Failed to load buffered output:', e);
-    } finally {
-      loading = false;
-    }
-  }
-
-  function setupListeners() {
-    // Listen for output events — batched via requestAnimationFrame
-    unlistenOutput = listenToActionOutput((event: ActionOutputEvent) => {
-      if (event.executionId === executionId) {
-        pendingChunks.push({
-          chunk: event.chunk,
-          stream: event.stream,
-          timestamp: Date.now(),
-        });
-        if (flushRaf === null) {
-          flushRaf = requestAnimationFrame(flushPendingChunks);
+  /**
+   * Show `id`'s output: what is buffered, then what is written from there on.
+   *
+   * The listener is registered first and the buffer is read once it is live.
+   * Output written before that is then in the buffer, and output written
+   * after it arrives as an event; the follower uses the offsets both carry to
+   * show each chunk exactly once. Reading the buffer first, as this used to,
+   * lost whatever was written before the listener went live.
+   */
+  function startFollowing(id: string) {
+    const current = createOutputFollower({
+      fetchSnapshot: () => getActionOutputBuffer(id),
+      onSnapshot: (chunks) => {
+        // A snapshot replaces whatever was shown. After the first it is the
+        // recovery from lost events, which starts the lines over.
+        lineProcessor = createIncrementalProcessor();
+        lineProcessor.process(chunks);
+        loading = false;
+        unavailable = false;
+        error = null;
+        publishLines();
+      },
+      onOutput: (output) => {
+        lineProcessor.process([output]);
+        schedulePublish();
+      },
+      onUnavailable: () => {
+        loading = false;
+        unavailable = true;
+      },
+      onError: (e: any) => {
+        console.error('Failed to load buffered output:', e);
+        // Only the first load has nothing to fall back on. A later one keeps
+        // what is on show, and the follower tries again.
+        if (loading) {
+          loading = false;
+          error = e?.message || 'Failed to load action output';
         }
-      }
+      },
     });
+    follower = current;
+
+    unlistenOutput = listenToActionOutput(
+      (event: ActionOutputEvent) => {
+        if (event.executionId === id) current.handleEvent(event);
+      },
+      {
+        // Fires when the listener is live, and again after a reconnect or an
+        // event gap, when events may have been lost.
+        onEstablished: () => current.sync(),
+        // No live output will arrive. Show what is buffered all the same.
+        onRegistrationFailed: () => current.sync(),
+      }
+    );
 
     // Listen for status changes
     unlistenStatus = listenToActionStatus((event: ActionStatusEvent) => {
-      if (event.executionId === executionId) {
+      if (event.executionId === id) {
         status = event.status;
         if (event.exitCode !== undefined) {
           exitCode = event.exitCode;
@@ -273,19 +336,21 @@
         // Clean up stopping state when action reaches terminal state
         if (status !== 'running') {
           const updated = new Set(stoppingExecutions);
-          updated.delete(executionId);
+          updated.delete(id);
           stoppingExecutions = updated;
         }
       }
     });
   }
 
-  function cleanup() {
-    if (flushRaf !== null) {
-      cancelAnimationFrame(flushRaf);
-      flushRaf = null;
+  /** Stop listening and fetching. The lines on show are left as they are. */
+  function stopFollowing() {
+    if (publishRaf !== null) {
+      cancelAnimationFrame(publishRaf);
+      publishRaf = null;
     }
-    pendingChunks = [];
+    follower?.stop();
+    follower = null;
     if (unlistenOutput) {
       unlistenOutput();
       unlistenOutput = null;
@@ -354,15 +419,17 @@
   // Rendering helpers
   // =========================================================================
 
-  function renderLine(line: TerminalLine): string {
-    const text = line.text;
-    let cached = renderLineCache.get(text);
-    if (cached !== undefined) return cached;
+  // Nothing rendered is cached. The keyed {#each} calls this once for a line
+  // object and not again while that object stays in the list, and a line whose
+  // text changes is a new object (see processOutput), so there is nothing a
+  // cache would save: the only copy of a line's HTML is its row.
+  function renderLine(line: OutputLine): string {
     // Convert ANSI codes to HTML, then sanitize to prevent XSS
-    const html = ansiConverter.toHtml(text);
-    cached = sanitize(html);
-    renderLineCache.set(text, cached);
-    return cached;
+    return sanitize(ansiConverter.toHtml(line.text));
+  }
+
+  function droppedLinesLabel(count: number): string {
+    return `${count.toLocaleString()} earlier ${count === 1 ? 'line' : 'lines'} not shown`;
   }
 
   function getStatusIcon(s: ActionStatus) {
@@ -408,7 +475,11 @@
   }
 </script>
 
-<Dialog.Root {open} onOpenChange={(v) => !v && onClose()}>
+<Dialog.Root
+  {open}
+  onOpenChange={(v) => !v && onClose()}
+  onOpenChangeComplete={handleOpenChangeComplete}
+>
   <Dialog.Content
     class="sm:max-w-[1000px] w-[90vw] h-[80vh] max-h-[800px] bg-background p-0 gap-0 overflow-hidden flex flex-col border border-[var(--border-primary)]"
     showCloseButton={false}
@@ -533,13 +604,22 @@
           <AlertCircle size={24} />
           <span>{error}</span>
         </div>
-      {:else if displayLines.length === 0}
+      {:else if unavailable}
+        <div class="center-state">
+          <span>Output is no longer available.</span>
+        </div>
+      {:else if view.lines.length === 0}
         <div class="center-state">
           <span>No output yet…</span>
         </div>
       {:else}
         <div class="output">
-          {#each displayLines as line}
+          {#if view.droppedLines > 0}
+            <div class="output-line stderr dropped-lines">
+              {droppedLinesLabel(view.droppedLines)}
+            </div>
+          {/if}
+          {#each view.lines as line (line.id)}
             <div class="output-line {line.stream === 'stderr' ? 'stderr' : 'stdout'}">
               {@html renderLine(line)}
             </div>
@@ -657,6 +737,10 @@
 
   .output-line.stderr {
     color: #9ca3af;
+  }
+
+  .output-line.dropped-lines {
+    font-style: italic;
   }
 
   /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). Rows span

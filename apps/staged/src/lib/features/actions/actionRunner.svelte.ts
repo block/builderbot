@@ -6,11 +6,14 @@
  * Owns the configured action list, the live running-execution set (hydrated
  * via get_running_branch_actions or an injected bulk loader, updated by
  * action_status and action:run-phase-changed events), stop/fade-out
- * bookkeeping, and the output modal state. The execution pipeline treats its
- * routing id as an opaque string, so the runner is parameterized by a scope id
- * — a branch id, or the synthetic repo scope id from repoActionScopeId() —
- * plus loadActions/run callbacks, letting branch cards and repo cards share
- * one implementation.
+ * bookkeeping, and the output modal state. It also frees a finished
+ * execution's buffered output in the backend once nothing here can show it
+ * any more: when its pill or pinned-button state goes, or, if the output
+ * modal is showing it then, when the modal moves on. The execution pipeline
+ * treats its routing id as an opaque string, so the runner is parameterized
+ * by a scope id — a branch id, or the synthetic repo scope id from
+ * repoActionScopeId() — plus loadActions/run callbacks, letting branch cards
+ * and repo cards share one implementation.
  */
 
 import { toast } from 'svelte-sonner';
@@ -89,6 +92,12 @@ export class ActionRunner {
   runPhases = $state(new Map<string, RunPhase>());
 
   outputModal = $state<ActionOutputModalState | null>(null);
+
+  /**
+   * Finished executions that have left `runningActions` while the output
+   * modal was showing them. Their output is freed when the modal lets go.
+   */
+  private outputHeldForModal = new Set<string>();
 
   groupedActions = $derived(groupActionsByType(this.actions));
   pinnedActions = $derived(getPinnedActions(this.actions));
@@ -195,9 +204,15 @@ export class ActionRunner {
           // Remove after animation completes (or immediately for pinned)
           setTimeout(
             () => {
+              const tracked = this.runningActions.some(
+                (a) => a.executionId === payload.executionId
+              );
               this.runningActions = this.runningActions.filter(
                 (a) => a.executionId !== payload.executionId
               );
+              // The pill was the way to this execution's output. A re-run
+              // may already have dropped it, and freed the output with it.
+              if (tracked) this.releaseOutput(payload.executionId);
             },
             isPinnedAction ? 0 : 300
           ); // Match CSS transition duration for secondary
@@ -278,17 +293,48 @@ export class ActionRunner {
     }
   }
 
+  /**
+   * Free the output the backend has buffered for a finished execution that
+   * this runner no longer lists. The backend keeps it until told otherwise
+   * (or until enough later executions have finished), and once the execution
+   * is off the list nothing here can open it again.
+   *
+   * The one exception is the output modal: while it is showing the
+   * execution it may still need the buffer, to recover from lost events, so
+   * the output is freed when the modal closes or moves to another execution.
+   */
+  private releaseOutput(executionId: string): void {
+    if (this.outputModal?.executionId === executionId) {
+      this.outputHeldForModal.add(executionId);
+      return;
+    }
+    clearActionExecution(executionId).catch(() => {});
+  }
+
+  /**
+   * Point the output modal at an execution, or close it, and free the output
+   * that was being kept only because the modal was showing it.
+   */
+  private setOutputModal(next: ActionOutputModalState | null): void {
+    this.outputModal = next;
+    for (const held of [...this.outputHeldForModal]) {
+      if (held === next?.executionId) continue;
+      this.outputHeldForModal.delete(held);
+      clearActionExecution(held).catch(() => {});
+    }
+  }
+
   /** Drop terminal executions of an action and clear their output buffers. */
   private clearStaleExecutions(actionId: string): void {
     const staleExecutions = this.runningActions.filter(
       (a) => a.actionId === actionId && a.status !== 'running'
     );
-    for (const stale of staleExecutions) {
-      clearActionExecution(stale.executionId).catch(() => {});
-    }
     this.runningActions = this.runningActions.filter(
       (a) => !(a.actionId === actionId && a.status !== 'running')
     );
+    for (const stale of staleExecutions) {
+      this.releaseOutput(stale.executionId);
+    }
   }
 
   /**
@@ -308,24 +354,24 @@ export class ActionRunner {
     );
 
     if (existingExecution) {
-      this.outputModal = {
+      this.setOutputModal({
         executionId: existingExecution.executionId,
         actionId: action.id,
         actionName: action.name,
         isStopping: this.stoppingExecutions.has(existingExecution.executionId),
-      };
+      });
       return;
     }
 
     try {
       const executionId = await this.run(action.id);
       if (keepModal) {
-        this.outputModal = {
+        this.setOutputModal({
           executionId,
           actionId: action.id,
           actionName: action.name,
           isStopping: false,
-        };
+        });
       }
     } catch (e) {
       console.error('Failed to run action:', e);
@@ -357,12 +403,12 @@ export class ActionRunner {
   }
 
   showOutput(execution: RunningAction): void {
-    this.outputModal = {
+    this.setOutputModal({
       executionId: execution.executionId,
       actionId: execution.actionId,
       actionName: execution.actionName,
       isStopping: this.stoppingExecutions.has(execution.executionId),
-    };
+    });
   }
 
   /** Re-run the output modal's action, keeping the modal open on the new execution. */
@@ -373,6 +419,6 @@ export class ActionRunner {
   }
 
   closeOutputModal(): void {
-    this.outputModal = null;
+    this.setOutputModal(null);
   }
 }

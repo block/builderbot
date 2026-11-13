@@ -7,9 +7,12 @@
 //! once it is [`EMIT_INTERVAL`] old or [`EMIT_MAX_BYTES`] large.
 //!
 //! A batch reaches the execution's buffer and then its listener, in that
-//! order, so the buffer never holds output the listener has yet to be told
-//! about. A viewer that reads the buffer and then follows the events sees no
-//! batch twice.
+//! order, so the listener is never told about output the buffer does not
+//! hold yet. Each event carries the offset its output starts at in the
+//! buffer, and a batch is appended whole, so a snapshot of the buffer always
+//! ends where one event ends and the next begins. A viewer that starts
+//! following the events and then takes a snapshot can tell exactly which
+//! events the snapshot already holds: those that start before its end.
 
 use std::convert::Infallible;
 use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
@@ -170,18 +173,23 @@ pub(crate) fn spawn(
                 pending_bytes = 0;
                 let batch = std::mem::take(&mut pending);
                 if !batch.is_empty() {
+                    // Where each segment starts in the buffer, read under the
+                    // lock that appends it.
+                    let mut offsets = Vec::with_capacity(batch.len());
                     {
                         let mut buffer = buffer.lock().unwrap();
                         for segment in &batch {
+                            offsets.push(buffer.end_offset());
                             buffer.push(segment.stream, &segment.text, segment.timestamp);
                         }
                     }
-                    for segment in batch {
+                    for (segment, offset) in batch.into_iter().zip(offsets) {
                         handle.block_on(listener.on_event(ExecutionEvent::Output {
                             execution_id: execution_id.clone(),
                             chunk: segment.text,
                             stream: segment.stream.to_string(),
                             timestamp: segment.timestamp,
+                            offset,
                         }));
                     }
                 }
@@ -348,6 +356,71 @@ mod tests {
         flush(&output);
         assert_eq!(buffered(&buffer), owned(&[("stdout", "firstsecond")]));
         assert_eq!(events.try_iter().count(), 1);
+    }
+
+    /// Forwards, for every output event, where it starts, its text, and where
+    /// the buffer ended when the listener was handed it.
+    struct OffsetRecorder {
+        events: mpsc::Sender<(u64, String, u64)>,
+        buffer: SharedOutputBuffer,
+    }
+
+    #[async_trait]
+    impl ExecutionListener for OffsetRecorder {
+        async fn on_event(&self, event: ExecutionEvent) {
+            if let ExecutionEvent::Output { chunk, offset, .. } = event {
+                let buffer_end = self.buffer.lock().unwrap().end_offset();
+                let _ = self.events.send((offset, chunk, buffer_end));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn each_event_starts_where_the_one_before_it_ended() {
+        let (events_tx, events) = mpsc::channel();
+        // A buffer far smaller than the output: what it has evicted still
+        // counts towards the offsets.
+        let buffer = OutputBuffer::shared(8);
+        let output = spawn(
+            "exec".to_string(),
+            Arc::new(OffsetRecorder {
+                events: events_tx,
+                buffer: buffer.clone(),
+            }),
+            buffer.clone(),
+            Handle::current(),
+            WAIT,
+            usize::MAX,
+        );
+
+        output.send("stdout", "one".to_string(), 0);
+        flush(&output);
+        // One batch, two events.
+        output.send("stdout", "twö".to_string(), 0);
+        output.send("stderr", "three".to_string(), 0);
+        flush(&output);
+        output.send("stdout", "four".to_string(), 0);
+        flush(&output);
+
+        let seen: Vec<(u64, String, u64)> = events.try_iter().collect();
+        let starts: Vec<(u64, &str)> = seen
+            .iter()
+            .map(|(offset, text, _)| (*offset, text.as_str()))
+            .collect();
+        // Offsets are in bytes: "twö" is four of them.
+        assert_eq!(
+            starts,
+            vec![(0, "one"), (3, "twö"), (7, "three"), (12, "four")]
+        );
+
+        // A batch is in the buffer, whole, before any of it is delivered. So
+        // the buffer always ends on the boundary between two events, at or
+        // after the end of the one being delivered: a snapshot taken at any
+        // point holds whole events, and exactly those that start before its
+        // end.
+        let buffer_ends: Vec<u64> = seen.iter().map(|(_, _, end)| *end).collect();
+        assert_eq!(buffer_ends, vec![3, 12, 12, 16]);
+        assert_eq!(buffer.lock().unwrap().end_offset(), 16);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

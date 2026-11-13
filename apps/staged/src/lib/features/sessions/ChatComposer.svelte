@@ -38,7 +38,9 @@
   the neighbouring input (composerCaretNav.ts), a click on the field's own
   surface puts the caret in the nearest input, and only the last input shows
   a placeholder, while nothing has been typed anywhere. Removing a quote
-  moves focus that was in it to the input its text joined.
+  moves focus that was in it to the input its text joined, and is a step on
+  the browser's undo stack like the typing around it: Cmd+Z puts the quote
+  back where it was, and redo takes it out again.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -52,6 +54,24 @@
       fixed-height size variant) so the control row can stretch it to match
       the tallest control. */
   const attachButtonClass = `${composerControlClass} h-auto [&_svg]:!size-4`;
+
+  /** A quote `onRemoveQuote` took out, as the parent's way back from that. */
+  export type RemovedQuote = {
+    /**
+     * Puts the quote back where it was, reply and lead-in text included, and
+     * answers whether it did: false once the draft it was taken from is no
+     * longer the one in the composer. `then` runs when the quote is in the
+     * composer again, which may be later than the call.
+     */
+    restore: (then: () => void) => boolean;
+    /**
+     * Takes back a `restore` the parent accepted but has not carried out yet
+     * (its `then` has not run), so the quote stays out and `then` never
+     * runs. Answers whether there was one to take back: false when the
+     * quote is back in the composer, or was never on its way.
+     */
+    withdraw: () => boolean;
+  };
 </script>
 
 <script lang="ts">
@@ -85,6 +105,7 @@
   import type { DraftQuote } from './composerDraft';
   import { focusAtEndSync, focusAtStartSync } from '../../shared/focusAtEnd';
   import { isImeKeydown } from '../../shared/imeKeydown';
+  import NativeUndoAnchor from '../../shared/NativeUndoAnchor.svelte';
   import { visibleViewport, watchVisualViewport } from '../../shared/visualViewport.svelte';
   import { adjacentEditor, caretLineEdges, isPlainVerticalArrow } from './composerCaretNav';
   import { revealElementInField, revealInField } from './composerFieldReveal';
@@ -96,7 +117,11 @@
     value: string;
     /** The draft's quote blocks, in order, each with the free text before it. */
     quotes?: DraftQuote[];
-    onRemoveQuote?: (id: string) => void;
+    /**
+     * Take a quote out of the draft. Returns how to put it back, which makes
+     * the removal undoable; nothing when no quote was removed.
+     */
+    onRemoveQuote?: (id: string) => RemovedQuote | null | void;
     /** The contenteditable input element (for focus/resize from the parent). */
     textareaEl?: HTMLElement | null;
     /**
@@ -181,7 +206,10 @@
 
   let fileInputEl = $state<HTMLInputElement>();
   let draftQuotesView = $state<ReturnType<typeof ComposerDraftQuotes>>();
+  let undoAnchor = $state<ReturnType<typeof NativeUndoAnchor>>();
   let fieldEl = $state<HTMLDivElement>();
+  /** A removal is being recorded for undo, which borrows focus and hands it back. */
+  let recordingUndo = false;
 
   /** Of the screen left above the on-screen keyboard, how much the field may take. */
   const KEYBOARD_FIELD_SHARE = 0.4;
@@ -214,8 +242,12 @@
    * set the range after), so for an input taller than the field's view —
    * where only the caret's line can say where to scroll — the handlers
    * call this again once the range is in.
+   *
+   * Focus coming back from recording a removal for undo is not a move: the
+   * field stays scrolled where the user had it.
    */
   function revealFocused() {
+    if (recordingUndo) return;
     const active = document.activeElement;
     if (!fieldEl || !(active instanceof HTMLElement) || !fieldEl.contains(active)) return;
     revealInField(fieldEl, active);
@@ -296,25 +328,94 @@
     placeCaretIn(next, direction === 'up' ? 'end' : 'start');
   }
 
+  /** Which input of a quote's block held the caret when the quote was removed, if one did. */
+  type HeldCaret = 'gap' | 'reply' | null;
+
   /**
    * Take a quote out of the draft (the parent merges the text around it).
    * Focus in the removed block — its X, its reply, or the gap before it —
    * would fall to the page, so it moves to the input the gap's text joined:
    * the next quote's gap, or the main input after the last quote. The caret
    * goes where that text now ends, or to the start when there was none.
+   * Returns the parent's way back from the removal with where the caret was
+   * in its block, or null when nothing was removed or it can't be put back.
    */
-  async function removeQuote(id: string) {
+  function takeQuote(id: string): { removal: RemovedQuote; held: HeldCaret } | null {
     const index = quotes.findIndex((quote) => quote.id === id);
-    if (index === -1) return;
+    if (index === -1) return null;
     const hadText = quotes[index].before.trim().length > 0;
     const nextId = quotes[index + 1]?.id ?? null;
     const hadFocus = draftQuotesView?.holdsFocus(id) ?? false;
-    onRemoveQuote?.(id);
-    if (!hadFocus) return;
-    await tick();
-    const caret = hadText ? 'end' : 'start';
-    if (nextId !== null && draftQuotesView?.focusGap(nextId, caret)) revealFocused();
-    else placeCaretIn(textareaEl, caret);
+    const inGap = document.activeElement?.classList.contains('composer-gap-input') ?? false;
+    const held: HeldCaret = !hadFocus ? null : inGap ? 'gap' : 'reply';
+    const removal = onRemoveQuote?.(id);
+    if (hadFocus) {
+      void tick().then(() => {
+        const caret = hadText ? 'end' : 'start';
+        if (nextId !== null && draftQuotesView?.focusGap(nextId, caret)) revealFocused();
+        else placeCaretIn(textareaEl, caret);
+      });
+    }
+    return removal ? { removal, held } : null;
+  }
+
+  /**
+   * Remove a quote by hand — its X, or Backspace in the empty gap above it —
+   * as a step on the browser's undo stack (see NativeUndoAnchor.svelte), in
+   * order with the typing before and after it. Undo puts the quote back in
+   * its place and redo takes it out again; neither does anything once the
+   * draft the quote came from has been sent or switched away from.
+   */
+  function removeQuote(id: string) {
+    let taken = takeQuote(id);
+    if (!taken) return;
+    // The removal the last undo handed back to the parent, while redo may
+    // still find that restore waiting there rather than the quote in the box.
+    let restored: ReturnType<typeof takeQuote> = null;
+    recordingUndo = true;
+    try {
+      undoAnchor?.record({
+        undo() {
+          if (!taken) return;
+          const { removal, held } = taken;
+          const shown = () => void tick().then(() => showRestoredQuote(id, held));
+          if (!removal.restore(shown)) return;
+          restored = taken;
+          taken = null;
+        },
+        redo() {
+          // Only a quote undo put back: one a refused undo left out is still
+          // out, and still this step's to restore.
+          if (taken !== null) return;
+          // A restore the parent is still holding (its draft is loading) has
+          // put no quote in the box to take out: taking the restore back is
+          // the redo, and leaves the removal as it stood before the undo.
+          taken = restored?.removal.withdraw() ? restored : takeQuote(id);
+          restored = null;
+        },
+      });
+    } finally {
+      recordingUndo = false;
+    }
+  }
+
+  /**
+   * A quote undo put back, once it is rendered. The caret returns to the
+   * input of its block it was taken from, as an undo returns it to the text
+   * it restores; a quote removed with the caret elsewhere leaves it there,
+   * as does an undo made with focus outside the field, and the field is
+   * scrolled to show the block instead.
+   */
+  function showRestoredQuote(id: string, held: HeldCaret) {
+    if (held !== null && fieldEl?.contains(document.activeElement)) {
+      const placed =
+        held === 'gap' ? draftQuotesView?.focusGap(id, 'end') : draftQuotesView?.focusReply(id);
+      if (placed) {
+        revealFocused();
+        return;
+      }
+    }
+    revealQuote(id);
   }
 
   /** Put the caret at the end of a quote block's reply; false if the block isn't shown. */
@@ -324,12 +425,8 @@
     return focused;
   }
 
-  /**
-   * Scroll the field so a quote block shows, without touching focus — for a
-   * block Undo put back on a touch screen, where focusing its reply would
-   * raise the keyboard; false if the block isn't shown.
-   */
-  export function revealQuote(id: string): boolean {
+  /** Scroll the field so a quote block shows, without touching focus; false if the block isn't shown. */
+  function revealQuote(id: string): boolean {
     const block = draftQuotesView?.blockFor(id) ?? null;
     if (!block || !fieldEl) return false;
     revealElementInField(fieldEl, block);
@@ -424,6 +521,7 @@
 </script>
 
 <div class="chat-composer">
+  <NativeUndoAnchor bind:this={undoAnchor} />
   {#if canAttachImages && attachedImageIds.length > 0}
     <div class="reply-images">
       {#each attachedImageIds as imageId (imageId)}
@@ -471,7 +569,7 @@
         {hashtagItems}
         {onkeydown}
         {oninput}
-        onRemoveQuote={(id) => void removeQuote(id)}
+        onRemoveQuote={removeQuote}
       />
     {/if}
     <HashtagInput
@@ -608,6 +706,8 @@
      controls are inset (`--dialog-safe-bottom`, `--dialog-safe-left` /
      `--dialog-safe-right`, see dialog-content). */
   .chat-composer {
+    /* The undo anchor's containing block. */
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 8px;

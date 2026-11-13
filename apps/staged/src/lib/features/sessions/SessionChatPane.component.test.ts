@@ -218,22 +218,10 @@ describe('SessionChatPane quoted replies', () => {
     loadDraftMock.mockImplementation(async () => null);
   });
 
-  type UndoToast = { onClick: () => void };
-
-  /** The Undo action of the newest "Quote removed" toast, with the toast's id. */
-  function lastUndo(): { id: string; action: UndoToast } {
-    const call = toastMock.mock.calls[toastMock.mock.calls.length - 1] as unknown as [
-      string,
-      { action: UndoToast },
-    ];
-    const id = toastMock.mock.results[toastMock.mock.results.length - 1].value as string;
-    return { id, action: call[1].action };
-  }
-
   /**
    * Mount a pane whose draft holds three quotes, then remove the middle one
-   * (which has a reply, so Undo is offered). Returns the draft as saved
-   * before the removal, for Undo to be measured against.
+   * as the composer's X would. Returns the draft as saved before the
+   * removal, for undo to be measured against.
    */
   async function removeMiddleQuote(sessionId: string) {
     const { pane, props } = mountPane(sessionId);
@@ -245,27 +233,52 @@ describe('SessionChatPane quoted replies', () => {
     await settle();
     const before = composerDraftFromContent(lastSaved(replyKey(sessionId)));
     const [, second] = before.quotes;
-    document.querySelector<HTMLElement>(`[data-testid="remove-quote-${second.id}"]`)!.click();
-    await settle();
+    await removeQuote(second.id);
     expect(quoteCount()).toBe(2);
     return { pane, props, before, second };
+  }
+
+  async function removeQuote(id: string) {
+    document.querySelector<HTMLElement>(`[data-testid="remove-quote-${id}"]`)!.click();
+    await settle();
+  }
+
+  /**
+   * Undo the newest removal, as the browser's undo reaches the composer's
+   * step for it (the stub keeps the steps; see PromptInputStub.svelte).
+   */
+  async function undoRemoval() {
+    document.querySelector<HTMLElement>('[data-testid="undo-remove-quote"]')!.click();
+    await settle();
+  }
+
+  /**
+   * Redo the removal last undone, as the browser's redo reaches the
+   * composer's step for it.
+   */
+  async function redoRemoval() {
+    document.querySelector<HTMLElement>('[data-testid="redo-remove-quote"]')!.click();
+    await settle();
+  }
+
+  /** Whether the pane took each undo so far, oldest first. */
+  function undoResults(): boolean[] {
+    const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
+    return (input?.dataset.undoResults ?? '')
+      .split(' ')
+      .filter(Boolean)
+      .map((result) => result === 'true');
+  }
+
+  /** The quotes the pane reported back in the composer after an undo. */
+  function restoredQuotes(): string[] {
+    const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
+    return (input?.dataset.restoredQuotes ?? '').split(' ').filter(Boolean);
   }
 
   function quoteCount(): number {
     const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
     return Number(input?.dataset.quoteCount ?? NaN);
-  }
-
-  /** The quote replies the pane asked the composer to put the caret in. */
-  function focusedQuotes(): string[] {
-    const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
-    return (input?.dataset.focusedQuotes ?? '').split(' ').filter(Boolean);
-  }
-
-  /** The quote blocks the pane asked the composer to scroll to without focusing. */
-  function revealedQuotes(): string[] {
-    const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
-    return (input?.dataset.revealedQuotes ?? '').split(' ').filter(Boolean);
   }
 
   function lastSaved(key: string) {
@@ -293,88 +306,84 @@ describe('SessionChatPane quoted replies', () => {
     unmount(pane);
   });
 
-  it('offers to undo removing a quote with a reply, putting it back in its place', async () => {
-    toastMock.mockClear();
-    const { pane } = mountPane('session-undo');
-    flushSync();
-    await settle();
+  it('removes a quote without a toast, and undo puts it back in its place', async () => {
+    const { pane, before, second } = await removeMiddleQuote('session-undo');
+    const removed = composerDraftFromContent(lastSaved(replyKey('session-undo')));
+    expect(removed.quotes.map((q) => q.quote)).toEqual(['First.', 'Third.']);
+    expect(toastMock).not.toHaveBeenCalled();
 
-    await addQuoteToReplyDraft('session-undo', { ...quote, quote: 'First.' });
-    await addQuoteToReplyDraft('session-undo', { ...quote, quote: 'Second.' });
-    await addQuoteToReplyDraft('session-undo', { ...quote, quote: 'Third.', reply: '' });
-    await settle();
-    const before = composerDraftFromContent(lastSaved(replyKey('session-undo')));
-    const [, second] = before.quotes;
+    await undoRemoval();
 
-    document.querySelector<HTMLElement>(`[data-testid="remove-quote-${second.id}"]`)!.click();
-    await settle();
-
-    expect(quoteCount()).toBe(2);
-    expect(toastMock).toHaveBeenCalledTimes(1);
-    const [, options] = toastMock.mock.calls[0] as [string, { action: { onClick: () => void } }];
-    expect(options.action).toMatchObject({ label: 'Undo' });
-
-    options.action.onClick();
-    await settle();
-
+    expect(undoResults()).toEqual([true]);
     expect(quoteCount()).toBe(3);
     const restored = composerDraftFromContent(lastSaved(replyKey('session-undo')));
     expect(restored.quotes.map((q) => q.quote)).toEqual(['First.', 'Second.', 'Third.']);
     expect(restored.quotes[1]).toMatchObject({ id: second.id, reply: 'Which one?' });
     expect(restored).toEqual(before);
+    // The composer is told once the block is back in it, to place the caret.
+    expect(restoredQuotes()).toEqual([second.id]);
 
-    // An unanswered quote just goes.
-    const third = restored.quotes[2];
-    document.querySelector<HTMLElement>(`[data-testid="remove-quote-${third.id}"]`)!.click();
-    await settle();
-    expect(quoteCount()).toBe(2);
-    expect(toastMock).toHaveBeenCalledTimes(1);
+    // Redo is the composer removing the quote again, which undo reverses again.
+    await removeQuote(second.id);
+    expect(composerDraftFromContent(lastSaved(replyKey('session-undo')))).toEqual(removed);
+    await undoRemoval();
+    expect(composerDraftFromContent(lastSaved(replyKey('session-undo')))).toEqual(before);
+
+    expect(toastMock).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
 
     unmount(pane);
   });
 
-  it('puts the caret in the restored reply for a pointer, and only scrolls to the block on a touch screen', async () => {
-    const first = await removeMiddleQuote('session-caret');
-    lastUndo().action.onClick();
+  it('removes an unanswered quote the same way: no toast, and undo puts it back', async () => {
+    const { pane } = mountPane('session-unanswered');
+    flushSync();
     await settle();
-    expect(quoteCount()).toBe(3);
-    // The focus brings the block into the field's view itself.
-    expect(focusedQuotes()).toEqual([first.second.id]);
-    expect(revealedQuotes()).toEqual([]);
-    unmount(first.pane);
+    await addQuoteToReplyDraft('session-unanswered', { ...quote, reply: '' });
+    await settle();
+    const before = composerDraftFromContent(lastSaved(replyKey('session-unanswered')));
 
-    // A touch screen's keyboard would rise over the restored draft, so the
-    // field is scrolled to the block and nothing is focused.
-    viewportMock.hasCoarsePointer = true;
-    try {
-      const second = await removeMiddleQuote('session-caret-touch');
-      lastUndo().action.onClick();
-      await settle();
-      expect(quoteCount()).toBe(3);
-      expect(focusedQuotes()).toEqual([]);
-      expect(revealedQuotes()).toEqual([second.second.id]);
-      unmount(second.pane);
-    } finally {
-      viewportMock.hasCoarsePointer = false;
-    }
+    await removeQuote(before.quotes[0].id);
+    expect(quoteCount()).toBe(0);
+    expect(toastMock).not.toHaveBeenCalled();
+
+    await undoRemoval();
+    expect(quoteCount()).toBe(1);
+    expect(composerDraftFromContent(lastSaved(replyKey('session-unanswered')))).toEqual(before);
+
+    unmount(pane);
   });
 
-  it('takes the Undo toast down with a send, and a late Undo puts nothing back', async () => {
+  it('undoes removals newest first, each quote going back to its own place', async () => {
+    const { pane, before } = await removeMiddleQuote('session-two');
+    const [first] = before.quotes;
+    await removeQuote(first.id);
+    expect(quoteCount()).toBe(1);
+
+    await undoRemoval();
+    expect(
+      composerDraftFromContent(lastSaved(replyKey('session-two'))).quotes.map((q) => q.quote)
+    ).toEqual(['First.', 'Third.']);
+    await undoRemoval();
+    expect(composerDraftFromContent(lastSaved(replyKey('session-two')))).toEqual(before);
+
+    unmount(pane);
+  });
+
+  it('puts nothing back once the draft the quote came from has been sent', async () => {
     const { pane } = await removeMiddleQuote('session-sent');
-    const undo = lastUndo();
 
     document.querySelector<HTMLElement>('[data-testid="composer-send"]')!.click();
     await settle();
     expect(quoteCount()).toBe(0);
     expect(writer.clearNow).toHaveBeenCalledWith(replyKey('session-sent'));
-    expect(toastMock.dismiss).toHaveBeenCalledWith(undo.id);
 
-    // The toast's leaving animation can still take a click: the draft the
-    // block came from has gone with the message, so nothing is restored —
-    // neither into the empty composer nor into the cleared stored draft.
+    // The draft the block came from has gone with the message, so an undo
+    // that reaches the removal now restores nothing — neither into the empty
+    // composer nor into the cleared stored draft.
     writer.scheduleSave.mockClear();
-    undo.action.onClick();
-    await settle();
+    await undoRemoval();
+    expect(undoResults()).toEqual([false]);
     expect(quoteCount()).toBe(0);
     expect(lastSaved(replyKey('session-sent'))).toBeUndefined();
     expect(saveDraftMock).not.toHaveBeenCalled();
@@ -382,52 +391,47 @@ describe('SessionChatPane quoted replies', () => {
     unmount(pane);
   });
 
-  it('keeps the Undo toast through a failed send, whose draft is put back', async () => {
+  it('still undoes the removal after a failed send, whose draft is put back', async () => {
     const { pane, before } = await removeMiddleQuote('session-failed');
-    const undo = lastUndo();
     resumeSessionMock.mockRejectedValueOnce(new Error('agent gone'));
 
     document.querySelector<HTMLElement>('[data-testid="composer-send"]')!.click();
     await settle();
     // The draft is back in the box, the block it lost still restorable.
     expect(quoteCount()).toBe(2);
-    expect(toastMock.dismiss).not.toHaveBeenCalled();
 
-    undo.action.onClick();
-    await settle();
+    await undoRemoval();
+    expect(undoResults()).toEqual([true]);
     expect(quoteCount()).toBe(3);
     expect(composerDraftFromContent(lastSaved(replyKey('session-failed')))).toEqual(before);
-
-    // Pressed, the toast is gone with the press; the send that follows has
-    // nothing left to take down.
-    document.querySelector<HTMLElement>('[data-testid="composer-send"]')!.click();
-    await settle();
-    expect(quoteCount()).toBe(0);
-    expect(toastMock.dismiss).not.toHaveBeenCalled();
 
     unmount(pane);
   });
 
-  it('takes the Undo toast down when the pane turns to another session', async () => {
+  it('puts nothing back once the pane has turned to another session', async () => {
     const { pane, props } = await removeMiddleQuote('session-left');
-    const undo = lastUndo();
 
     props.sessionId = 'session-next';
     flushSync();
     await settle();
-    expect(toastMock.dismiss).toHaveBeenCalledWith(undo.id);
+    writer.scheduleSave.mockClear();
+
+    await undoRemoval();
+    expect(undoResults()).toEqual([false]);
+    expect(quoteCount()).toBe(0);
+    expect(lastSaved(replyKey('session-next'))).toBeUndefined();
+    expect(saveDraftMock).not.toHaveBeenCalled();
 
     unmount(pane);
   });
 
-  it('holds an Undo that lands while the draft is reloading until the draft has landed', async () => {
+  it('holds an undo that lands while the draft is reloading until the draft has landed', async () => {
     // The pane goes inactive (the note's chat closed) and comes back for the
-    // same session within the toast's lifetime. Its draft is loading again
-    // when Undo is pressed: the restore waits for the load, rather than
-    // being applied to the composer and then replaced by the stored draft.
+    // same session. Its draft is loading again when the removal is undone:
+    // the restore waits for the load, rather than being applied to the
+    // composer and then replaced by the stored draft.
     const { pane, props, before, second } = await removeMiddleQuote('session-reload');
     const stored = lastSaved(replyKey('session-reload'));
-    const undo = lastUndo();
 
     props.active = false;
     flushSync();
@@ -443,48 +447,107 @@ describe('SessionChatPane quoted replies', () => {
     props.active = true;
     flushSync();
     await settle();
-    expect(toastMock.dismiss).not.toHaveBeenCalled();
 
-    undo.action.onClick();
-    await settle();
+    await undoRemoval();
+    expect(undoResults()).toEqual([true]);
     expect(saveDraftMock).not.toHaveBeenCalled();
-    // The caret follows the block into the composer: not yet, while the
-    // block is still held with the restore, or it would be looked for
-    // before it is rendered and the ask dropped.
-    expect(focusedQuotes()).toEqual([]);
-    expect(revealedQuotes()).toEqual([]);
+    // The composer hears the block is back only once it is: not yet, while
+    // it is still held with the restore, or the caret would be sent to a
+    // block that isn't rendered.
+    expect(restoredQuotes()).toEqual([]);
 
     land(stored);
     await settle();
     expect(quoteCount()).toBe(3);
     expect(composerDraftFromContent(lastSaved(replyKey('session-reload')))).toEqual(before);
-    expect(focusedQuotes()).toEqual([second.id]);
-    expect(revealedQuotes()).toEqual([]);
+    expect(restoredQuotes()).toEqual([second.id]);
 
     unmount(pane);
   });
 
-  it('restores into the stored draft when the pane no longer shows the session', async () => {
-    const { pane, props, before } = await removeMiddleQuote('session-away');
+  it('leaves the quote out when the removal is redone while its undo is still held for the reloading draft', async () => {
+    // Undo, then redo, both inside the reload: the held restore has put no
+    // block in the box for the redo to take out, so the redo withdraws it.
+    // Left queued, it would bring the block back once the draft landed.
+    const { pane, props, before, second } = await removeMiddleQuote('session-reload-redo');
+    const stored = lastSaved(replyKey('session-reload-redo'));
+
+    props.active = false;
+    flushSync();
+    await settle();
+
+    let land!: (value: typeof stored) => void;
+    loadDraftMock.mockImplementation(
+      () =>
+        new Promise<typeof stored>((resolve) => {
+          land = resolve;
+        })
+    );
+    props.active = true;
+    flushSync();
+    await settle();
+
+    await undoRemoval();
+    expect(undoResults()).toEqual([true]);
+    await redoRemoval();
+
+    land(stored);
+    await settle();
+    expect(quoteCount()).toBe(2);
+    // The composer is never told of a block that did not come back.
+    expect(restoredQuotes()).toEqual([]);
+
+    // The removal is still there to undo, and puts the block back as it was.
+    await undoRemoval();
+    expect(undoResults()).toEqual([true, true]);
+    expect(quoteCount()).toBe(3);
+    expect(composerDraftFromContent(lastSaved(replyKey('session-reload-redo')))).toEqual(before);
+    expect(restoredQuotes()).toEqual([second.id]);
+
+    unmount(pane);
+  });
+
+  it('sends no held edit to the stored draft when the pane moves on after a withdrawn undo', async () => {
+    const { pane, props } = await removeMiddleQuote('session-reload-away');
+    const stored = lastSaved(replyKey('session-reload-away'));
+
+    props.active = false;
+    flushSync();
+    await settle();
+    loadDraftMock.mockImplementation(() => new Promise<typeof stored>(() => {}));
+    props.active = true;
+    flushSync();
+    await settle();
+
+    await undoRemoval();
+    await redoRemoval();
+    writer.run.mockClear();
+
+    props.active = false;
+    flushSync();
+    await settle();
+    expect(writer.run).not.toHaveBeenCalled();
+
+    unmount(pane);
+  });
+
+  it('puts nothing back, in the composer or the stored draft, while the pane shows no session', async () => {
+    const { pane, props } = await removeMiddleQuote('session-away');
     const stored = lastSaved(replyKey('session-away'));
-    const undo = lastUndo();
 
     props.active = false;
     flushSync();
     await settle();
     loadDraftMock.mockImplementation(async () => stored);
+    writer.scheduleSave.mockClear();
+    writer.run.mockClear();
 
-    undo.action.onClick();
-    await settle();
+    await undoRemoval();
 
-    // Through the shared writer, so it queues behind any pending save.
-    expect(writer.run).toHaveBeenCalledTimes(1);
-    expect(saveDraftMock).toHaveBeenCalledTimes(1);
-    const [key, content] = saveDraftMock.mock.calls[0];
-    expect(key).toBe(replyKey('session-away'));
-    expect(
-      composerDraftFromContent(content as Parameters<typeof composerDraftFromContent>[0])
-    ).toEqual(before);
+    expect(undoResults()).toEqual([false]);
+    expect(writer.run).not.toHaveBeenCalled();
+    expect(saveDraftMock).not.toHaveBeenCalled();
+    expect(lastSaved(replyKey('session-away'))).toBeUndefined();
 
     unmount(pane);
   });

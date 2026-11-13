@@ -107,7 +107,7 @@
     setAcpConfigPref,
     setComposerSendMode,
   } from '../settings/preferences.svelte';
-  import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
+  import ChatComposer, { composerControlClass, type RemovedQuote } from './ChatComposer.svelte';
   import ComposerError from './ComposerError.svelte';
   import {
     composerSendControl,
@@ -236,7 +236,6 @@
   import {
     loadReplyDraft as loadStoredReplyDraft,
     amendStoredReplyDraft,
-    restoreQuoteInReplyDraft,
     registerReplyComposer,
     replyDraftKey,
     replyDraftWriter,
@@ -256,7 +255,6 @@
     takeDraftQuote,
     type ComposerDraft,
     type DraftQuote,
-    type RemovedDraftQuote,
   } from './composerDraft';
   import QuoteExcerpt from './QuoteExcerpt.svelte';
   import NoteActivityCard from './NoteActivityCard.svelte';
@@ -455,26 +453,22 @@
   // exactly that run so inherited text isn't filed under this session's key.
   let suppressNextReplySave = false;
   /**
-   * Edits a note made to this session's draft (a quote added, its reply
-   * typed, a removed block put back) while the draft's load was still in
-   * flight: they are applied once the stored draft has landed, rather than
-   * being replaced by it, and what was to follow each in the composer (the
-   * caret into the block, or the field scrolled to it) runs then too, once
-   * the block is rendered. Keyed to the session they were made for.
+   * Edits made to this session's draft from outside the composer's inputs
+   * (a quote a note added, its reply typed there, a removed block put back
+   * by undo) while the draft's load was still in flight: they are applied
+   * once the stored draft has landed, rather than being replaced by it, and
+   * what was to follow each in the composer (the caret into the block, or
+   * the field scrolled to it) runs then too, once the block is rendered.
+   * Keyed to the session they were made for.
    */
-  let pendingDraftEdits: {
-    sessionId: string;
-    edits: Array<{ edit: (draft: ComposerDraft) => ComposerDraft; then?: () => void }>;
-  } | null = null;
+  type PendingDraftEdit = { edit: (draft: ComposerDraft) => ComposerDraft; then?: () => void };
+  let pendingDraftEdits: { sessionId: string; edits: PendingDraftEdit[] } | null = null;
   /**
-   * Undo toasts for removed quote blocks still on screen (svelte-sonner
-   * keeps one up for seconds). A send the backend accepts clears the draft
-   * they were taken from, and a switch shows another session's; either
-   * dismisses them, so Undo can't put a block into a draft it never belonged
-   * to. `draftEpoch` counts the sends, for a click that lands as the toast
-   * is leaving.
+   * Counts the drafts sent from this composer. A removed quote block can be
+   * put back by undo (see `removeQuote`) only into the draft it was taken
+   * from; a send the backend accepts clears that draft, and an undo made
+   * after it must not put the block into the next one.
    */
-  let quoteUndoToasts: Array<{ toastId: string | number; sessionId: string }> = [];
   let draftEpoch = 0;
 
   /** The composer's draft as one value (live `$state`; clone before keeping it). */
@@ -537,22 +531,40 @@
    * the held edits land — so a caret or scroll meant for a block the edit
    * adds finds it rendered rather than running against the loading draft.
    * It is dropped with the edits that go to the stored draft instead when
-   * the pane moves on, there being no composer to act in.
+   * the pane moves on, there being no composer to act in. Returns the edit
+   * as it is held (for `withdrawPendingDraftEdit`), or null once applied.
    */
   function receiveDraftEdit(
     id: string,
     edit: (draft: ComposerDraft) => ComposerDraft,
     then?: () => void
-  ) {
+  ): PendingDraftEdit | null {
     if (loadedDraftSessionId !== id) {
       if (pendingDraftEdits?.sessionId !== id) pendingDraftEdits = { sessionId: id, edits: [] };
-      pendingDraftEdits.edits.push({ edit, then });
-      return;
+      const held = { edit, then };
+      pendingDraftEdits.edits.push(held);
+      return held;
     }
     // Quoting is a draft edit: the last failure line has been read.
     sendError = null;
     setDraft(edit(currentDraft()));
     then?.();
+    return null;
+  }
+
+  /**
+   * Take a held edit back before the draft's load lands, so it is never
+   * applied and its `then` never runs. False when it is no longer held: it
+   * went into the composer with the loaded draft, or to the stored draft
+   * when the pane moved on.
+   */
+  function withdrawPendingDraftEdit(held: PendingDraftEdit): boolean {
+    const index = pendingDraftEdits?.edits.indexOf(held) ?? -1;
+    if (!pendingDraftEdits || index === -1) return false;
+    pendingDraftEdits.edits.splice(index, 1);
+    // Nothing left to hold: a pane moving on has no edit to send to the store.
+    if (pendingDraftEdits.edits.length === 0) pendingDraftEdits = null;
+    return true;
   }
 
   function applyPendingDraftEdits(id: string) {
@@ -584,96 +596,58 @@
     pendingDraftEdits.edits.push({ edit: (draft) => draft, then });
   }
 
-  /** Scroll the composer's field to a quote block, once it is rendered, leaving focus where it is. */
-  function revealDraftQuote(quoteId: string) {
-    tick().then(() => {
-      if (!closed && active) composerView?.revealQuote(quoteId);
-    });
-  }
-
   /**
-   * Take a quote block out of the draft. One with a reply typed under it is
-   * offered back in a toast (there is no other undo for a block): Undo puts
-   * it back where it was, reply and lead-in text included, and — with a
-   * pointer, not a touch screen — the caret in its reply; on a touch screen
-   * the field is scrolled to show it instead. An unanswered block just goes.
+   * Take a quote block out of the draft, with no notice: the composer makes
+   * the removal a step of its undo history, and what is returned is how
+   * that undo puts the block back where it was, reply and lead-in text
+   * included. The block goes back only into the draft it was taken from,
+   * while this pane shows it — after a send the backend accepted, or with
+   * another session in the box, the undo does nothing — and by the same way
+   * in as a quote a note adds, so one made while the draft is loading again
+   * is held until it has landed rather than being replaced by it. A redo
+   * that comes while it is still held finds no block in the box to take
+   * out: it withdraws the held undo instead, and the block stays out when
+   * the draft lands, still this removal's to put back.
    */
-  function removeQuote(id: string) {
+  function removeQuote(id: string): RemovedQuote | null {
     const taken = takeDraftQuote(currentDraft(), id);
-    if (!taken) return;
+    if (!taken) return null;
     sendError = null;
     setDraft(taken.draft);
-    if (taken.removed.quote.reply.trim() !== '') offerQuoteUndo(sessionId, taken.removed);
-  }
-
-  function offerQuoteUndo(sid: string | null, removed: RemovedDraftQuote) {
-    if (!sid) return;
+    // Quotes only come with a session's draft; without one there is no
+    // draft to tell the block's own from, so the removal just stands.
+    const sid = sessionId;
+    if (!sid) return null;
     const epoch = draftEpoch;
-    const forget = () => {
-      quoteUndoToasts = quoteUndoToasts.filter((entry) => entry.toastId !== toastId);
-    };
-    const toastId = toast('Quote removed from your reply', {
-      onDismiss: forget,
-      onAutoClose: forget,
-      action: {
-        label: 'Undo',
-        onClick: () => {
-          // The toast goes with the press (svelte-sonner deletes it without
-          // `onDismiss`), so it is forgotten here.
-          forget();
-          // The draft the block was taken from has been sent since.
-          if (epoch !== draftEpoch) return;
-          if (active && sessionId === sid) {
-            // The same way in as a quote a note adds: applied to the
-            // composer, or held until this session's draft has loaded, so a
-            // load in flight can't land over it.
-            // The caret goes back into the reply for a keyboard user; with
-            // a touch screen that would raise the on-screen keyboard over
-            // the restored draft, which the user hasn't asked to type in,
-            // so there the field is only scrolled to the block, which in a
-            // capped field that has scrolled on may otherwise come back
-            // out of view. Either follows the block into the composer, so
-            // a restore held for the load isn't looked for before it lands.
-            receiveDraftEdit(
-              sid,
-              (draft) => restoreDraftQuote(draft, removed),
-              () => {
-                if (!viewport.hasCoarsePointer) focusDraftQuoteReply(removed.quote.id);
-                else revealDraftQuote(removed.quote.id);
-              }
-            );
-            return;
-          }
-          // This pane has moved on: another pane showing the draft takes it,
-          // or else the stored draft.
-          restoreQuoteInReplyDraft(sid, removed).catch((err) => {
-            console.error('[SessionChatPane] Failed to restore the quote:', err);
-            toast.error('Could not restore the quote');
-          });
-        },
+    // The undo while it waits on the draft's load, for a redo to withdraw.
+    let heldRestore: PendingDraftEdit | null = null;
+    return {
+      restore(then) {
+        if (closed || !active || sessionId !== sid || epoch !== draftEpoch) return false;
+        heldRestore = receiveDraftEdit(
+          sid,
+          (draft) => restoreDraftQuote(draft, taken.removed),
+          then
+        );
+        return true;
       },
-    });
-    quoteUndoToasts = [...quoteUndoToasts, { toastId, sessionId: sid }];
-  }
-
-  /** Take down the Undo toasts whose draft is gone or off screen (all, by default). */
-  function dismissQuoteUndo(keep: (sessionId: string) => boolean = () => false) {
-    const going = quoteUndoToasts.filter((entry) => !keep(entry.sessionId));
-    if (going.length === 0) return;
-    quoteUndoToasts = quoteUndoToasts.filter((entry) => keep(entry.sessionId));
-    for (const entry of going) toast.dismiss(entry.toastId);
+      withdraw() {
+        const held = heldRestore;
+        heldRestore = null;
+        return held !== null && withdrawPendingDraftEdit(held);
+      },
+    };
   }
 
   /**
    * The draft has gone with a message the backend accepted: a block removed
    * from it has nothing to go back into. Not before — a send that fails puts
-   * the draft back in the box, and the block's Undo should still hold then.
-   * (Pressed while the send is in flight, Undo puts the block into the
+   * the draft back in the box, and undoing the block's removal should still
+   * hold then. (Undone while the send is in flight, the block goes into the
    * emptied box, where it is a new draft.)
    */
   function draftSent() {
     draftEpoch += 1;
-    dismissQuoteUndo();
   }
 
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
@@ -1212,9 +1186,6 @@
     const draftWhenLoadStarted = untrack(() => cloneComposerDraft(currentDraft()));
     suppressNextReplySave = false;
     loadedDraftSessionId = null;
-    // Another session's draft is coming up: an Undo for a block removed from
-    // the previous one would read as this one's.
-    dismissQuoteUndo((sid) => sid === id);
     replyDraftLoad = loadReplyDraft(id, generation, draftWhenLoadStarted);
   });
 
@@ -1258,7 +1229,6 @@
         receiveDraftEdit(id, (draft) => appendDraftQuote(draft, quote, quoteId)),
       setQuoteReply: (quoteId, reply) =>
         receiveDraftEdit(id, (draft) => setDraftQuoteReply(draft, quoteId, reply)),
-      restoreQuote: (removed) => receiveDraftEdit(id, (draft) => restoreDraftQuote(draft, removed)),
       focusQuoteReply: (quoteId) => whenDraftLoaded(id, () => focusDraftQuoteReply(quoteId)),
     });
     return () => {

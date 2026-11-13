@@ -9,11 +9,20 @@
   count it shows as `data-quote-count`, and offers a remove button per quote
   (`data-testid="remove-quote-<id>"`) that calls `onRemoveQuote` as the
   composer's X would, a Send button (`data-testid="composer-send"`) that
-  calls `onSend`, a `focusQuoteReply` that places no caret but records the
-  ids asked for on the input (`data-focused-quotes`), and a `revealQuote`
-  that scrolls nothing but records likewise (`data-revealed-quotes`).
+  calls `onSend`, and a `focusQuoteReply` that places no caret.
+
+  The composer's undo history is stood in for by a stack of the removals
+  `onRemoveQuote` returned: an undo button (`data-testid="undo-remove-quote"`)
+  restores the newest, as the browser's undo would, records on the input
+  whether the pane took it (`data-undo-results`), and the ids of the quotes
+  the pane then reported back in the composer (`data-restored-quotes`). A
+  redo button (`data-testid="redo-remove-quote"`) takes the quote last
+  undone out again as the composer's redo does: it withdraws an undo the
+  pane is still holding, and otherwise removes the quote from the box.
 -->
 <script lang="ts">
+  type Removal = { restore: (then: () => void) => boolean; withdraw: () => boolean };
+
   let {
     value = $bindable(''),
     quotes = $bindable([]),
@@ -32,20 +41,39 @@
     sendControl?: { split: boolean };
     onStartNewSession?: (kind: 'note' | 'commit') => void;
     newSessionDisabled?: boolean;
-    onRemoveQuote?: (id: string) => void;
+    onRemoveQuote?: (id: string) => Removal | null | void;
     onSend?: () => void;
   } = $props();
 
-  /** The composer's caret placement, which the stub lays nothing out for; the asks are recorded. */
-  let focusedQuotes = $state<string[]>([]);
-  export function focusQuoteReply(id: string): boolean {
-    focusedQuotes = [...focusedQuotes, id];
-    return false;
+  /** The removals still to undo, newest last, as the composer's undo history holds them. */
+  let removals: Array<{ id: string; removal: Removal }> = [];
+  /** The removals undone and still to redo, newest last. */
+  let undone: Array<{ id: string; removal: Removal }> = [];
+  let undoResults = $state<boolean[]>([]);
+  let restoredQuotes = $state<string[]>([]);
+
+  function removeQuote(id: string) {
+    const removal = onRemoveQuote?.(id);
+    if (removal) removals.push({ id, removal });
   }
-  /** The composer's scroll to a block, likewise recorded. */
-  let revealedQuotes = $state<string[]>([]);
-  export function revealQuote(id: string): boolean {
-    revealedQuotes = [...revealedQuotes, id];
+
+  function undoRemoval() {
+    const step = removals.pop();
+    if (!step) return;
+    const restored = step.removal.restore(() => (restoredQuotes = [...restoredQuotes, step.id]));
+    undoResults = [...undoResults, restored];
+    if (restored) undone.push(step);
+  }
+
+  function redoRemoval() {
+    const step = undone.pop();
+    if (!step) return;
+    if (step.removal.withdraw()) removals.push(step);
+    else removeQuote(step.id);
+  }
+
+  /** The composer's caret placement, which the stub lays nothing out for. */
+  export function focusQuoteReply(_id: string): boolean {
     return false;
   }
 </script>
@@ -60,8 +88,8 @@
   data-value={value}
   data-send-split={sendControl?.split}
   data-quote-count={quotes.length}
-  data-focused-quotes={focusedQuotes.join(' ')}
-  data-revealed-quotes={revealedQuotes.join(' ')}
+  data-undo-results={undoResults.join(' ')}
+  data-restored-quotes={restoredQuotes.join(' ')}
   oninput={(e) => (value = e.currentTarget.textContent ?? '')}
 ></div>
 {#each quotes as quote (quote.id)}
@@ -69,9 +97,11 @@
     type="button"
     aria-label="Remove quote"
     data-testid="remove-quote-{quote.id}"
-    onclick={() => onRemoveQuote?.(quote.id)}
+    onclick={() => removeQuote(quote.id)}
   ></button>
 {/each}
+<button type="button" data-testid="undo-remove-quote" onclick={undoRemoval}>Undo</button>
+<button type="button" data-testid="redo-remove-quote" onclick={redoRemoval}>Redo</button>
 <button type="button" data-testid="composer-send" onclick={() => onSend?.()}>Send</button>
 
 {#if sendError}

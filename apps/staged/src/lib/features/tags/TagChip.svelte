@@ -14,19 +14,20 @@
   interface Props {
     tag: Pick<Tag, 'name' | 'color' | 'icon'>;
     onRemove?: () => void;
-    /** `sm` for cards, `md` for the project header. */
-    size?: 'sm' | 'md';
+    /** `xs` for a row's meta line, `sm` for cards, `md` for the project header. */
+    size?: 'xs' | 'sm' | 'md';
     disabled?: boolean;
   }
 
   let { tag, onRemove, size = 'md', disabled = false }: Props = $props();
 
-  let iconSize = $derived(size === 'sm' ? 10 : 12);
+  let iconSize = $derived(size === 'xs' ? 8 : size === 'sm' ? 10 : 12);
 </script>
 
 <span
   class="tag-chip"
   class:sm={size === 'sm'}
+  class:xs={size === 'xs'}
   class:removable={!!onRemove}
   style:--tag-chip-color={TAG_COLOR_VARS[tag.color]}
   title={tag.name}
@@ -71,6 +72,19 @@
     padding: 0 6px;
     gap: 3px;
     font-size: calc(var(--size-xs) - 1px);
+  }
+
+  /* As small as the repo badge it sits beside in a row (RepoBadge `small`).
+     In a tight row a long name gives way first: a chip keeps room for two
+     letters rather than shrinking to an empty pill. */
+  .tag-chip.xs {
+    justify-content: center;
+    min-width: 24px;
+    max-width: 96px;
+    padding: 0 5px;
+    gap: 2px;
+    font-size: 9.5px;
+    line-height: 1.3;
   }
 
   .tag-chip.removable {

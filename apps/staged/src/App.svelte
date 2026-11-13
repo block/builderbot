@@ -6,13 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    getWindowLabel,
-    isTauri,
-    getWindowSync,
-    listenToEvent,
-    type UnlistenFn,
-  } from './lib/transport';
+  import { getWindowLabel, isTauri, listenToEvent, type UnlistenFn } from './lib/transport';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -89,6 +83,7 @@
   import { sweepCache } from './lib/cache';
   import { initUpdater, initUpdaterMirror } from './lib/services/updater.svelte';
   import { isUpdaterAvailable, logUpdaterMessage } from './lib/services/updater';
+  import { revealWindow } from './lib/services/windowReveal';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
@@ -673,8 +668,9 @@
     // Check for `sq` CLI in the background if preferences did not need it.
     ensureSqAvailabilityLoaded();
 
-    // Window was created hidden — show it now that the theme is applied
-    await getWindowSync().show();
+    // Window was created hidden — show it now that the theme is applied,
+    // and tell the backend it is revealed.
+    await revealWindow();
     // Start the updater service in whichever window wins the ownership claim
     // (gated: only official release builds check).
     requestUpdaterLoopStart();

@@ -2150,6 +2150,7 @@ pub fn run() {
             app.manage(action_registry);
             app.manage(app_lifecycle::QuitState::default());
             app.manage(app_lifecycle::UsedWindows::default());
+            app.manage(app_lifecycle::RevealedWindows::default());
             app.manage(launch_resume::LaunchResumeState::default());
             app.manage(DbState {
                 db_path,
@@ -2324,6 +2325,9 @@ pub fn run() {
             window_commands::new_window,
             window_commands::take_window_seed,
             window_commands::claim_updater_ownership,
+            // Window reveal — desktop only; refused in web-mode `dispatch`,
+            // where there is no native window to reveal.
+            app_lifecycle::window_reveal::note_window_revealed,
             // Lifecycle — desktop only; the web-mode `dispatch` table refuses
             // this so a browser client can't quit the host.
             app_lifecycle::quit_app,

@@ -129,9 +129,10 @@ the user runs themselves: a terminal, a script, an agent they started.
 
 **Not from a spawned session.** The app refuses a session's credential
 (exit 4, `scope_denied`), for the session's own project too, so an agent
-cannot pull the user's window away. Another project's name reads
-`not_found` (exit 1) instead, because a session's credential lists only
-its own project. Neither is a fault to retry or work around, and a
+cannot pull the user's window away. Another project's name, or its
+workspace as the current directory, reads `not_found` (exit 1) instead,
+because a session's credential lists only its own project. Neither is a
+fault to retry or work around, no other credential changes it, and a
 session never starts an app: with `$STAGEDCTL_LOCK` set, nothing is
 launched. If the user should look at a project, name it in your output
 and let them open it.
@@ -154,9 +155,11 @@ Outside a session:
 - `staged [<project> | <directory>] [--no-launch]` is the same command,
   where the `staged` launcher script is installed. It hands its arguments
   to `stagedctl project open` unchanged, except that a single argument
-  that is an existing directory (`staged .`) runs the command from that
-  directory with no project. It exits 127, starting nothing, when it
-  cannot find `stagedctl`.
+  written as a path (`.`, `..`, or anything with a slash, such as
+  `staged ./repo`) that is an existing directory runs the command from
+  that directory with no project. A bare word is always a project name,
+  even beside a directory of that name. It exits 127, starting nothing,
+  when it cannot find `stagedctl`.
 
 On success it prints `opened <name>  id:<id>  pid:<pid>`, the pid being
 the Staged instance that showed the project (`--json`: `{ outcome,

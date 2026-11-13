@@ -505,7 +505,7 @@ pub(crate) fn render_tag_show(
 pub fn usage_scope(scope: CredentialScope) -> &'static str {
     match scope {
         CredentialScope::AllProjects => "all",
-        CredentialScope::Project => "project",
+        CredentialScope::Project | CredentialScope::Session => "project",
     }
 }
 
@@ -517,7 +517,9 @@ pub const USAGE_SCOPE_NOTE: &str =
 fn with_usage_scope_note(human: String, scope: CredentialScope) -> String {
     match scope {
         CredentialScope::AllProjects => human,
-        CredentialScope::Project => format!("{human}\n{USAGE_SCOPE_NOTE}"),
+        CredentialScope::Project | CredentialScope::Session => {
+            format!("{human}\n{USAGE_SCOPE_NOTE}")
+        }
     }
 }
 
@@ -1700,10 +1702,14 @@ mod tests {
     fn usage_counts_say_when_they_cover_one_project_only() {
         assert_eq!(usage_scope(CredentialScope::AllProjects), "all");
         assert_eq!(usage_scope(CredentialScope::Project), "project");
+        // A session's lease reaches one project too, and reads the same.
+        assert_eq!(usage_scope(CredentialScope::Session), "project");
         let text = with_usage_scope_note("Tags\n  a".to_string(), CredentialScope::AllProjects);
         assert_eq!(text, "Tags\n  a");
-        let text = with_usage_scope_note("Tags\n  a".to_string(), CredentialScope::Project);
-        assert_eq!(text, format!("Tags\n  a\n{USAGE_SCOPE_NOTE}"));
+        for confined in [CredentialScope::Project, CredentialScope::Session] {
+            let text = with_usage_scope_note("Tags\n  a".to_string(), confined);
+            assert_eq!(text, format!("Tags\n  a\n{USAGE_SCOPE_NOTE}"));
+        }
         assert!(
             USAGE_SCOPE_NOTE.contains("only this credential's project"),
             "{USAGE_SCOPE_NOTE}"

@@ -68,9 +68,11 @@ use crate::session_runner::SessionRegistry;
 use crate::store::{CompletionReason, Session, SessionStatus, Store};
 
 pub(crate) mod window_raise;
+pub mod window_reveal;
 pub(crate) mod window_use;
 
 pub use window_raise::show_a_window;
+pub use window_reveal::RevealedWindows;
 pub use window_use::UsedWindows;
 
 /// Title of the quit confirmation alert.
@@ -225,14 +227,18 @@ fn should_prompt(blockers: &QuitBlockers) -> bool {
 ///
 /// Also keeps the record of used windows ([`UsedWindows`]) in step with focus,
 /// which is how a reveal finds the window the user was last in once Staged is
-/// no longer the frontmost app.
+/// no longer the frontmost app, and drops a destroyed window from it and from
+/// the record of revealed windows ([`RevealedWindows`]).
 pub fn on_window_event(window: &Window, event: &WindowEvent) {
     match event {
         WindowEvent::CloseRequested { api, .. } => on_close_requested(window, api),
         WindowEvent::Focused(true) => {
             window_use::note_window_used(window.app_handle(), window.label());
         }
-        WindowEvent::Destroyed => window_use::forget_window(window.app_handle(), window.label()),
+        WindowEvent::Destroyed => {
+            window_use::forget_window(window.app_handle(), window.label());
+            window_reveal::forget_window(window.app_handle(), window.label());
+        }
         _ => {}
     }
 }
@@ -284,12 +290,6 @@ fn hide_window(window: &Window) {
         return;
     }
     set_native_focus(window.app_handle(), window.label(), false);
-    // The user closed it, so it has been on screen. Normally it held focus
-    // first and is on the record already, but a window's close button works
-    // without the window taking focus. Without this, a window closed that way
-    // would read as one still loading, which nothing but its own frontend may
-    // show (`window_raise::raise_window_once_revealed`).
-    window_use::note_window_used(window.app_handle(), window.label());
 }
 
 /// Mirror a native window's visibility onto its PR-poll client's focus hint.

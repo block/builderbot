@@ -2504,6 +2504,15 @@ export function takeWindowSeed(): Promise<string | null> {
   return invokeCommand('take_window_seed');
 }
 
+/**
+ * Tell the backend this window's frontend has shown it. The backend records
+ * the window as revealed and, if a `stagedctl project open` arrived while it
+ * was still loading, brings it to the front now. Desktop only.
+ */
+export function noteWindowRevealed(): Promise<void> {
+  return invokeCommand('note_window_revealed');
+}
+
 /** Claim process-wide ownership of the updater loop for the current window. */
 export function claimUpdaterOwnership(): Promise<boolean> {
   return invokeCommand('claim_updater_ownership');

@@ -1,21 +1,18 @@
 //! Which windows the user has used, and in what order.
 //!
 //! Nothing in tauri reports "the window the user was last in" once Staged is
-//! not the frontmost app, and nothing reports a window going on screen. Both
-//! are read off this record instead:
+//! not the frontmost app. It is read off this record instead:
+//! [`pick_window_to_show`](super::window_raise::pick_window_to_show) lands on
+//! the most recently used window when none holds focus, which is the normal
+//! state for a request that comes from a terminal.
 //!
-//! - [`pick_window_to_show`](super::window_raise::pick_window_to_show) lands
-//!   on the most recently used window when none holds focus, which is the
-//!   normal state for a request that comes from a terminal.
-//! - [`raise_window_once_revealed`](super::window_raise::raise_window_once_revealed)
-//!   takes a window that is on the record as one its frontend has already
-//!   revealed. Every window is created hidden and shown by its own frontend.
-//!   It cannot be focused or closed before that, and one the backend raises
-//!   is on screen from then on.
+//! A window goes on the record when it gains focus and when the backend
+//! raises it. It comes off when it is destroyed.
 //!
-//! A window goes on the record when it gains focus, when the last window is
-//! closed to hide, and when the backend raises it. It comes off when it is
-//! destroyed.
+//! The record says where the user was, and nothing else. Whether a window's
+//! frontend has revealed it is a separate record,
+//! [`RevealedWindows`](super::window_reveal::RevealedWindows): a window can
+//! be revealed without ever having held focus.
 
 use std::sync::Mutex;
 
@@ -41,7 +38,8 @@ impl UsedWindows {
         self.order.lock().unwrap().retain(|known| known != label);
     }
 
-    /// Whether `label` has been used, and so has been on screen.
+    /// Whether `label` has been used.
+    #[cfg(test)]
     pub(crate) fn contains(&self, label: &str) -> bool {
         self.order
             .lock()

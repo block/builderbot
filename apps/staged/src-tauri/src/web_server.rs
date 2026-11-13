@@ -1074,6 +1074,10 @@ pub(crate) async fn dispatch(
         "claim_updater_ownership" => {
             Err("claim_updater_ownership is not supported in web mode".to_string())
         }
+        // A native window telling the backend its frontend has shown it,
+        // which makes the raise a `stagedctl project open` is owed. A browser
+        // client has no native window to reveal or raise.
+        "note_window_revealed" => Err(format!("{command} is not available in web mode")),
 
         // =====================================================================
         // App lifecycle

@@ -170,6 +170,14 @@ pub fn target(
     }
 }
 
+/// What an agent session is told when its lease does not reach a directory's
+/// project. There is no credential for it to switch to: the app refuses
+/// `open_project` to every session, whichever project is named.
+const SESSION_CANNOT_OPEN: &str =
+    "No credential lets an agent session open it: the app refuses `project open` to every \
+     session, for the session's own project too. Name the project for the user and let them \
+     open it";
+
 /// The project whose workspace `dir` is in, from the app's list. Matched on
 /// the id alone: the segment is an id by construction, so a project that
 /// merely has it as a name is not the one.
@@ -179,6 +187,12 @@ pub fn target(
 /// every project, so the app does not have this one. A credential confined
 /// to one project is listed that project and no other, so all that is known
 /// is that it does not reach this one; the project may well exist.
+///
+/// What to do about it depends on the kind of confined credential. A grant
+/// for one project can be swapped for one that covers this project. A
+/// session's lease cannot: the app refuses `open_project` to every session,
+/// for its own project too, so pointing a session at `stagedctl connect`
+/// would send it after a credential that does not exist.
 fn project_for_directory<'a>(
     projects: &'a [Project],
     project_id: &str,
@@ -209,6 +223,18 @@ fn project_for_directory<'a>(
                  does not reach: it is confined to one project, and Staged lists it only that \
                  one ({}). The project may still exist; run the command with a grant that \
                  covers it (see `stagedctl connect --help`)",
+                names.join(", ")
+            ),
+            (CredentialScope::Session, true) => format!(
+                "{dir} is in the workspace of project id {project_id}, which this agent \
+                 session's credential does not reach: it is confined to the session's own \
+                 project, and Staged lists it none. The project may still exist. \
+                 {SESSION_CANNOT_OPEN}"
+            ),
+            (CredentialScope::Session, false) => format!(
+                "{dir} is in the workspace of project id {project_id}, which this agent \
+                 session's credential does not reach: it is confined to the session's own \
+                 project ({}). The project may still exist. {SESSION_CANNOT_OPEN}",
                 names.join(", ")
             ),
         };
@@ -738,8 +764,7 @@ mod tests {
 
     #[test]
     fn a_directory_outside_a_confined_credentials_project_is_not_called_deleted() {
-        // A grant approved for one project (or a session's lease) is listed
-        // that project alone. A worktree of any other project is then
+        // A grant approved for one project is listed that project alone. A worktree of any other project is then
         // missing from the list whether or not the project exists, so the
         // message must not say Staged lacks it or that it was deleted.
         let err = open_target(
@@ -778,6 +803,83 @@ mod tests {
                 .contains("this credential does not reach: it is confined to one project, and Staged lists it none"),
             "{err}"
         );
+    }
+
+    /// A session's lease is confined like a one-project grant and lands on
+    /// the same branch, but a grant is no remedy for it: the app refuses
+    /// `open_project` to every session. The message must not send it after
+    /// one.
+    #[test]
+    fn a_session_outside_its_project_is_not_told_to_use_a_grant() {
+        let err = open_target(
+            &directory("p7"),
+            4242,
+            CredentialScope::Session,
+            || Ok(vec![widgets()]),
+            no_open,
+        )
+        .unwrap_err();
+        assert_eq!((err.exit_code(), err.code()), (1, "not_found"));
+        assert_eq!(
+            err.to_string(),
+            "not_found: /Users/me/.staged/workspaces/local/projects/p7/wt is in the workspace of \
+             project id p7, which this agent session's credential does not reach: it is \
+             confined to the session's own project (Widgets). The project may still exist. No \
+             credential lets an agent session open it: the app refuses `project open` to every \
+             session, for the session's own project too. Name the project for the user and \
+             let them open it"
+        );
+
+        // The session's own project is gone, so it is listed none.
+        let listed_none = open_target(
+            &directory("p7"),
+            4242,
+            CredentialScope::Session,
+            || Ok(vec![]),
+            no_open,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (listed_none.exit_code(), listed_none.code()),
+            (1, "not_found")
+        );
+        assert!(
+            listed_none.to_string().contains(
+                "confined to the session's own project, and Staged lists it none. The project \
+                 may still exist. No credential lets an agent session open it"
+            ),
+            "{listed_none}"
+        );
+
+        for err in [&err, &listed_none] {
+            let text = err.to_string();
+            for wrong in ["grant", "stagedctl connect", "does not have", "deleted"] {
+                assert!(!text.contains(wrong), "must not say {wrong:?}: {text}");
+            }
+        }
+    }
+
+    /// The grant's remedy is its own: a grant that covers the project.
+    #[test]
+    fn a_one_project_grant_is_still_pointed_at_a_grant_that_covers_the_project() {
+        for projects in [vec![widgets()], vec![]] {
+            let err = open_target(
+                &directory("p7"),
+                4242,
+                CredentialScope::Project,
+                || Ok(projects),
+                no_open,
+            )
+            .unwrap_err();
+            let text = err.to_string();
+            assert!(
+                text.contains(
+                    "run the command with a grant that covers it (see `stagedctl connect --help`)"
+                ),
+                "{text}"
+            );
+            assert!(!text.contains("session"), "{text}");
+        }
     }
 
     #[test]

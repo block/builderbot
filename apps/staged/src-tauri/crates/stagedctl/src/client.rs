@@ -288,7 +288,7 @@ pub fn discover_and_connect(
     } else {
         // A per-session control file carries a session lease, which the
         // app confines to the session's project.
-        client.scope = CredentialScope::Project;
+        client.scope = CredentialScope::Session;
     }
     Ok(client)
 }
@@ -615,10 +615,19 @@ struct PingResponse {
 /// grant approved for one project (`connect --project`); both are known at
 /// connect time. Anything else is either unconfined or refused by the app
 /// as `authorization_required` before any answer is read.
+///
+/// The two confined kinds are kept apart because their remedies differ. A
+/// grant can be swapped for one that reaches further. A session lease
+/// cannot, and the app refuses it some commands outright, `open_project`
+/// among them, whatever project they name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialScope {
+    /// A grant approved for every project.
     AllProjects,
+    /// A grant approved for one project.
     Project,
+    /// An agent session's lease, confined to the session's own project.
+    Session,
 }
 
 #[derive(Debug)]
@@ -2236,8 +2245,8 @@ pub(crate) mod tests {
         assert_eq!(client.bearer(), Some(token.as_str()));
         assert_eq!(seen.lock().unwrap().len(), 1, "ping only; no challenge");
         // A session lease is confined to its project; the client knows
-        // without asking.
-        assert_eq!(client.scope, CredentialScope::Project);
+        // without asking, and knows it is a lease and not a grant.
+        assert_eq!(client.scope, CredentialScope::Session);
     }
 
     #[test]

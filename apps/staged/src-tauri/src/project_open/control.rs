@@ -12,8 +12,8 @@
 //! **A window still loading is not shown early.** On a cold start the request
 //! arrives while the window is hidden, waiting for its frontend to apply the
 //! theme and show it. The request is parked for it all the same, but the
-//! raise waits for that reveal
-//! ([`raise_window_once_revealed`](crate::app_lifecycle::window_raise::raise_window_once_revealed)),
+//! raise waits for the window's frontend to report that reveal
+//! ([`raise_window_once_revealed`](crate::app_lifecycle::window_reveal::raise_window_once_revealed)),
 //! which may come after the window has answered.
 //!
 //! **A refusal is a result, not an error.** The answer goes back as
@@ -28,12 +28,11 @@
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use super::{ProjectOpenAnswer, ProjectOpenOutcome, ProjectOpenState, ANSWER_TIMEOUT};
-use crate::app_lifecycle::window_raise::{
-    is_on_screen, pick_window_to_show, raise_window_once_revealed,
-};
+use crate::app_lifecycle::window_raise::pick_window_to_show;
+use crate::app_lifecycle::window_reveal::raise_window_once_revealed;
 use crate::store::Store;
 
 /// Emitted to one window, by label, with the
@@ -47,18 +46,15 @@ pub(crate) async fn open_project<R: Runtime>(
     store: &Store,
     project_id: &str,
 ) -> Result<Value, String> {
-    open_project_within(app, store, project_id, ANSWER_TIMEOUT, is_on_screen).await
+    open_project_within(app, store, project_id, ANSWER_TIMEOUT).await
 }
 
-/// [`open_project`] with the wait passed in, and the probe that says whether
-/// a window is on screen: the mock runtime calls every window visible, so the
-/// tests pass their own to stand in for one that is still loading.
+/// [`open_project`] with the wait passed in.
 async fn open_project_within<R: Runtime>(
     app: &AppHandle<R>,
     store: &Store,
     project_id: &str,
     timeout: Duration,
-    is_on_screen: impl Fn(&WebviewWindow<R>) -> bool + Send + 'static,
 ) -> Result<Value, String> {
     // Before any window is touched: a typo must not pull Staged to the front.
     store
@@ -88,7 +84,7 @@ async fn open_project_within<R: Runtime>(
     // then showing the user the dialog or comment that is in the way. A
     // window its frontend has not revealed yet is raised when it has been,
     // not now, so this never shows an unpainted webview.
-    raise_window_once_revealed(&window, is_on_screen);
+    raise_window_once_revealed(&window);
 
     let outcome = pending.wait(timeout).await;
     Ok(json!({ "outcome": outcome_name(outcome), "window": label }))
@@ -110,23 +106,36 @@ fn outcome_name(outcome: ProjectOpenOutcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_lifecycle::UsedWindows;
+    use crate::app_lifecycle::window_reveal::note_window_revealed;
+    use crate::app_lifecycle::{RevealedWindows, UsedWindows};
     use crate::project_open::ProjectOpenRequest;
     use crate::store::Project;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
     use tauri::Listener;
 
     /// A mock app managing the state and an empty record of used windows,
     /// with one window per label, a store holding one project, and that
-    /// project's id.
+    /// project's id. Every window's frontend has revealed it, as in an app
+    /// that finished loading a while ago.
     fn fixture(labels: &[&str]) -> (tauri::App<MockRuntime>, Store, String) {
+        let (app, store, project_id) = loading_fixture(labels);
+        for label in labels {
+            reveal(&app, label);
+        }
+        (app, store, project_id)
+    }
+
+    /// [`fixture`] during a cold start: no window's frontend has revealed it
+    /// yet. The mock runtime calls these windows visible all the same, so a
+    /// raise held back here is held back by the record alone.
+    fn loading_fixture(labels: &[&str]) -> (tauri::App<MockRuntime>, Store, String) {
         let app = mock_builder()
             .build(mock_context(noop_assets()))
             .expect("failed to build mock app");
         app.manage(ProjectOpenState::default());
         app.manage(UsedWindows::default());
+        app.manage(RevealedWindows::default());
         for label in labels {
             tauri::WebviewWindowBuilder::new(&app, *label, Default::default())
                 .build()
@@ -136,6 +145,12 @@ mod tests {
         let project = Project::named("alpha");
         store.create_project(&project).unwrap();
         (app, store, project.id)
+    }
+
+    /// `label`'s frontend shows its window and says so, as it does at the end
+    /// of mount.
+    fn reveal(app: &tauri::App<MockRuntime>, label: &str) {
+        note_window_revealed(app.get_webview_window(label).expect("window should exist"));
     }
 
     /// The requests `label`'s window hears, in order.
@@ -276,9 +291,10 @@ mod tests {
 
     /// The window is raised as it is asked, and so becomes the last used.
     #[tokio::test]
-    async fn a_window_on_screen_is_raised_before_it_answers() {
+    async fn a_revealed_window_is_raised_before_it_answers() {
         let (app, store, project_id) = fixture(&["main"]);
         let used = app.state::<UsedWindows>();
+        assert!(!used.contains("main"), "a reveal alone raises nothing");
 
         let (result, ()) = tokio::join!(open_project(app.handle(), &store, &project_id), async {
             assert!(used.contains("main"), "raised before any answer");
@@ -291,24 +307,39 @@ mod tests {
         );
     }
 
+    /// The window was revealed while Staged was in the background, so it has
+    /// never held focus and is on no record of used windows. `opened` must
+    /// still mean Staged came forward: the raise is made at once, not left
+    /// waiting on a reveal that already happened.
+    #[tokio::test]
+    async fn a_revealed_window_that_never_held_focus_is_raised_at_once() {
+        let (app, store, project_id) = fixture(&["main", "win-2"]);
+        let used = app.state::<UsedWindows>();
+        assert!(used.most_recent_first().is_empty());
+
+        let (result, ()) = tokio::join!(open_project(app.handle(), &store, &project_id), async {
+            assert_eq!(used.most_recent_first(), ["main"], "raised as it is asked");
+            answer(&app, "main", ProjectOpenAnswer::Opened)
+        });
+
+        assert_eq!(
+            result.unwrap(),
+            json!({ "outcome": "opened", "window": "main" })
+        );
+    }
+
     /// The cold start. The window is hidden until its frontend shows it, so
     /// the request is parked and answered as usual, but nothing is raised
     /// until that reveal, which here comes after the answer.
     #[tokio::test(start_paused = true)]
     async fn a_window_still_loading_is_asked_at_once_and_raised_only_when_revealed() {
-        let (app, store, project_id) = fixture(&["main"]);
+        let (app, store, project_id) = loading_fixture(&["main"]);
         let heard = heard_by(&app, "main");
         let state = app.state::<ProjectOpenState>();
         let used = app.state::<UsedWindows>();
-        let shown = Arc::new(AtomicBool::new(false));
-        let is_shown = {
-            let shown = Arc::clone(&shown);
-            move |_: &WebviewWindow<MockRuntime>| shown.load(Ordering::SeqCst)
-        };
 
-        let (result, parked) = tokio::join!(
-            open_project_within(app.handle(), &store, &project_id, ANSWER_TIMEOUT, is_shown),
-            async {
+        let (result, parked) =
+            tokio::join!(open_project(app.handle(), &store, &project_id), async {
                 // What the loading window's snapshot will offer it.
                 let parked = state
                     .pending_for("main")
@@ -319,8 +350,7 @@ mod tests {
                 assert!(!used.contains("main"), "still not raised");
                 assert!(state.answer("main", &parked.request_id, ProjectOpenAnswer::Opened));
                 parked
-            }
-        );
+            });
 
         assert_eq!(
             result.unwrap(),
@@ -332,26 +362,40 @@ mod tests {
             "answering is not the reveal: the frontend has not shown the window"
         );
 
-        // The frontend shows its window; the raise that was owed follows.
-        shown.store(true, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // The frontend shows its window and says so; the raise that was owed
+        // is made there and then.
+        reveal(&app, "main");
         assert!(used.contains("main"), "raised once revealed");
+    }
+
+    /// A reveal that lands while the caller is still waiting raises the
+    /// window then, ahead of the answer.
+    #[tokio::test]
+    async fn a_window_revealed_while_its_caller_waits_is_raised_before_it_answers() {
+        let (app, store, project_id) = loading_fixture(&["main"]);
+        let used = app.state::<UsedWindows>();
+
+        let (result, ()) = tokio::join!(open_project(app.handle(), &store, &project_id), async {
+            assert!(!used.contains("main"), "not raised while it is loading");
+            reveal(&app, "main");
+            assert!(used.contains("main"), "raised as it was revealed");
+            answer(&app, "main", ProjectOpenAnswer::Opened)
+        });
+
+        assert_eq!(
+            result.unwrap(),
+            json!({ "outcome": "opened", "window": "main" })
+        );
     }
 
     /// A window that does not answer in time is still owed its raise: the caller reads
     /// the timeout, and the window comes to the front when it does appear.
     #[tokio::test(start_paused = true)]
     async fn a_loading_window_whose_caller_timed_out_is_still_raised_when_revealed() {
-        let (app, store, project_id) = fixture(&["main"]);
+        let (app, store, project_id) = loading_fixture(&["main"]);
         let used = app.state::<UsedWindows>();
-        let shown = Arc::new(AtomicBool::new(false));
-        let is_shown = {
-            let shown = Arc::clone(&shown);
-            move |_: &WebviewWindow<MockRuntime>| shown.load(Ordering::SeqCst)
-        };
 
-        let result =
-            open_project_within(app.handle(), &store, &project_id, ANSWER_TIMEOUT, is_shown).await;
+        let result = open_project(app.handle(), &store, &project_id).await;
 
         assert_eq!(
             result.unwrap(),
@@ -359,9 +403,28 @@ mod tests {
         );
         assert!(!used.contains("main"));
 
-        shown.store(true, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        reveal(&app, "main");
         assert!(used.contains("main"));
+    }
+
+    /// Only the window the request was parked for is owed the raise.
+    #[tokio::test]
+    async fn another_windows_reveal_does_not_raise_the_loading_one() {
+        let (app, store, project_id) = loading_fixture(&["main", "win-2"]);
+        let used = app.state::<UsedWindows>();
+
+        let (result, ()) = tokio::join!(open_project(app.handle(), &store, &project_id), async {
+            reveal(&app, "win-2");
+            assert!(used.most_recent_first().is_empty());
+            answer(&app, "main", ProjectOpenAnswer::Opened)
+        });
+
+        assert_eq!(
+            result.unwrap(),
+            json!({ "outcome": "opened", "window": "main" })
+        );
+        reveal(&app, "main");
+        assert_eq!(used.most_recent_first(), ["main"]);
     }
 
     #[tokio::test]

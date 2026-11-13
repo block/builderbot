@@ -99,14 +99,17 @@ staged                  # stagedctl project open
 staged --no-launch      # stagedctl project open --no-launch
 staged .                # stagedctl project open, from this directory
 staged /path/to/dir     # cd /path/to/dir && stagedctl project open
+staged ./builderbot     # cd builderbot && stagedctl project open
+staged builderbot       # stagedctl project open builderbot, a project name
 ```
 
 The output and exit codes are the ones described here. The script never starts the app itself. If it cannot find `stagedctl` on your PATH, in `/Applications/Staged.app` or in `~/Applications/Staged.app`, it says so and exits 127 without starting anything.
 
 - **A project.** A name or id goes to `stagedctl project open` unchanged, as do the flags.
-- **A directory.** When the one argument is an existing directory, `staged` runs `stagedctl project open` from that directory with no project, so the project is the one whose workspace the directory is in. `--no-launch` and `--json` may sit beside it.
+- **A directory.** The one argument is read as a directory when it is written as a path and that directory exists. A path is `.`, `..`, or anything with a slash in it, such as `./builderbot`, `builderbot/` or `/path/to/dir`. `staged` then runs `stagedctl project open` from that directory with no project, so the project is the one whose workspace the directory is in. `--no-launch` and `--json` may sit beside it.
+- **A bare word is always a project.** `staged builderbot` opens the project named `builderbot`, even when the current directory has a `builderbot` folder. To mean the folder, write `staged ./builderbot` or `staged builderbot/`.
 - **Only a project workspace opens.** `staged` does not open arbitrary directories or repositories. A directory outside every project workspace fails with `not_in_workspace`, and Staged is not started.
-- **A name that is also a directory.** An existing directory always wins. To open a project whose name matches a directory in the current directory, use `stagedctl project open <name>`.
+- **A project name with a slash in it.** It is read as a directory only if that directory exists. If it does, use `stagedctl project open <name>` to open the project.
 - **A directory that cannot be entered.** `staged` says so and exits 1.
 
 #### Getting `stagedctl` on your PATH

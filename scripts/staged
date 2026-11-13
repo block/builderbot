@@ -5,17 +5,23 @@
 #   <project>    Project name or id. Omit it inside a project's workspace
 #                (~/.staged/workspaces/<local|remote>/projects/<id>/...) to
 #                open that project.
-#   <directory>  An existing directory, such as `.`: open the project whose
-#                workspace that directory is in, as if run from there.
+#   <directory>  An existing directory written as a path: `.`, `..`, or
+#                anything with a slash in it, such as `./repo`, `repo/` or
+#                `/path/to/repo`. Opens the project whose workspace that
+#                directory is in, as if run from there.
 #   --no-launch  Fail instead of starting Staged when it is not running.
 #
 # A thin wrapper around `stagedctl project open`, which decides the output
 # and the exit code. See `stagedctl project open --help`. The arguments go
-# to it unchanged, with one exception: a single argument that is an existing
-# directory is not passed on. stagedctl is run from that directory with no
-# project instead, so the project is resolved from the directory, as
-# `cd <directory> && staged` would. An argument that is not an existing
-# directory is a project name or id, as it always was.
+# to it unchanged, with one exception: a single argument that is written as
+# a path and is an existing directory is not passed on. stagedctl is run
+# from that directory with no project instead, so the project is resolved
+# from the directory, as `cd <directory> && staged` would.
+#
+# A bare word is always a project name or id, whether or not a directory of
+# that name exists. Projects are usually named after their repository, so
+# `staged builderbot` beside a `builderbot/` folder means the project. Write
+# `staged ./builderbot` or `staged builderbot/` for the folder.
 #
 # This script never starts the app itself. stagedctl asks a running Staged
 # to show the project, and starts one only when none is running, the caller
@@ -56,9 +62,10 @@ MESSAGE
     exit 127
 fi
 
-# `staged .` and `staged /path/to/repo`: one argument that is an existing
-# directory, alone or beside flags that take no value. Anything else, a flag
-# this script does not know included, is left for stagedctl to read.
+# `staged .` and `staged /path/to/repo`: one argument that is written as a
+# path and is an existing directory, alone or beside flags that take no
+# value. Anything else, a flag this script does not know included, is left
+# for stagedctl to read.
 dir=""
 positionals=0
 known=1
@@ -73,7 +80,15 @@ for arg in "$@"; do
     esac
 done
 
-if [ "$known" -eq 1 ] && [ "$positionals" -eq 1 ] && [ -d "$dir" ]; then
+# Only what cannot be a bare project name is read as a path: `.`, `..`, or
+# an argument with a slash in it. A bare word stays a name even when a
+# directory of that name exists here.
+is_path=0
+case "$dir" in
+    . | .. | */*) is_path=1 ;;
+esac
+
+if [ "$known" -eq 1 ] && [ "$positionals" -eq 1 ] && [ "$is_path" -eq 1 ] && [ -d "$dir" ]; then
     # Drop the directory from the arguments and keep the flags in order.
     for arg in "$@"; do
         shift
@@ -86,12 +101,13 @@ if [ "$known" -eq 1 ] && [ "$positionals" -eq 1 ] && [ -d "$dir" ]; then
         *) STAGEDCTL="$PWD/$STAGEDCTL" ;;
     esac
     # `./` keeps `cd` from searching $CDPATH for a relative name.
+    asked="$dir"
     case "$dir" in
         /*) ;;
         *) dir="./$dir" ;;
     esac
     if ! cd -- "$dir" 2>/dev/null; then
-        printf 'staged: cannot change to the directory %s, so no project was opened.\n' "$dir" >&2
+        printf 'staged: cannot change to the directory %s, so no project was opened.\n' "$asked" >&2
         exit 1
     fi
 fi

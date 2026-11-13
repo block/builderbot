@@ -1,8 +1,9 @@
 <!--
   Test fixture: a dialog shaped like the app's form dialogs (a field, a
-  picker row, Cancel and a submit button), or a viewer with no form, and a
-  button on the page behind for focus to start on, for the Return key and
-  open-focus tests of dialog-content.
+  picker row, a suggestion list that can hold the focus, Cancel and a submit
+  button, with a reply panel docked beside the form), or a viewer with no
+  form, and a button on the page behind for focus to start on, for the
+  Return key and open-focus tests of dialog-content.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -61,9 +62,13 @@
           <div data-testid="editor" contenteditable="true"></div>
         {/if}
         <button type="button" role="radio" aria-checked="false" data-testid="row">Alpha</button>
+        <div role="listbox" tabindex="-1" aria-label="Suggestions" data-testid="listbox"></div>
         <button type="button" data-testid="cancel" onclick={onCancel}>Cancel</button>
         <button type="submit" data-testid="submit" disabled={submitDisabled}>Move</button>
       </form>
+      <div role="dialog" aria-label="Reply" data-testid="docked-panel">
+        <p tabindex="-1" data-testid="docked-text">Reply to the selection.</p>
+      </div>
     {/if}
   </Dialog.Content>
 </Dialog.Root>

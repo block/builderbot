@@ -357,6 +357,27 @@ describe('Dialog.Content Return key', () => {
     }
   );
 
+  it('leaves Return alone on a list holding the focus, and in a panel docked in the dialog', async () => {
+    const props = await openFromPage();
+
+    part('listbox').focus();
+    expect(document.activeElement).toBe(part('listbox'));
+    const onList = pressReturn(document.activeElement!);
+
+    part('docked-text').focus();
+    expect(document.activeElement).toBe(part('docked-text'));
+    const inPanel = pressReturn(document.activeElement!);
+
+    // A pick in the list, a send in the panel: not this dialog's submit.
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    expect([onList.defaultPrevented, inPanel.defaultPrevented]).toEqual([false, false]);
+    expect(windowKeydown).toHaveBeenCalledTimes(2);
+
+    // The dialog carries role="dialog" itself, and still submits.
+    pressReturn(dialogContent());
+    expect(props.onSubmit).toHaveBeenCalledTimes(1);
+  });
+
   it('leaves Return alone when the caller says none', async () => {
     const props = await openFromPage({ defaultAction: 'none' });
 

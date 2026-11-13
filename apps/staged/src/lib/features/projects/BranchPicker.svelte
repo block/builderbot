@@ -407,6 +407,7 @@
     <div class="suggestions-dropdown">
       {#each filteredItems as item, i}
         <button
+          type="button"
           class="suggestion-item"
           class:highlighted={i === highlightedIndex}
           onmousedown={(e) => {

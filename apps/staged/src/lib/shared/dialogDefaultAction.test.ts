@@ -94,6 +94,55 @@ describe('isDefaultActionKeydown', () => {
   it('accepts a Return on content marked not editable', () => {
     expect(decide(child('<div contenteditable="false" tabindex="0">Read only</div>'))).toBe(true);
   });
+
+  // Containers that hold the focus for their items, and panels with their
+  // own Return, docked inside the dialog.
+  it.each([
+    'listbox',
+    'menu',
+    'menubar',
+    'grid',
+    'treegrid',
+    'tree',
+    'radiogroup',
+    'tablist',
+    'dialog',
+    'alertdialog',
+  ])('rejects a Return on a focused %s container', (role) => {
+    expect(decide(child(`<div role="${role}" tabindex="-1"></div>`))).toBe(false);
+  });
+
+  it('rejects a Return on a plain element inside such a container', () => {
+    const listbox = child('<div role="listbox"><div tabindex="-1">Loading…</div></div>');
+    expect(decide(listbox.firstElementChild!)).toBe(false);
+
+    const panel = child('<div role="dialog"><section><p tabindex="-1">Reply</p></section></div>');
+    expect(decide(panel.querySelector('p')!)).toBe(false);
+  });
+
+  it('accepts a Return beside such a container, not inside it', () => {
+    dialog.innerHTML = '<div role="listbox" tabindex="-1"></div><p tabindex="-1">Pick one</p>';
+    expect(decide(dialog.querySelector('p')!)).toBe(true);
+  });
+
+  it('does not count the listening dialog itself, or what it sits in', () => {
+    // `dialog` has role="alertdialog"; put it inside a menu and a dialog too.
+    const outer = document.createElement('div');
+    outer.setAttribute('role', 'menu');
+    const outerDialog = document.createElement('div');
+    outerDialog.setAttribute('role', 'dialog');
+    outer.appendChild(outerDialog);
+    document.body.appendChild(outer);
+    outerDialog.appendChild(dialog);
+    try {
+      expect(decide(dialog)).toBe(true);
+      expect(decide(child('<p>Are you sure?</p>'))).toBe(true);
+      expect(decide(child('<button type="button">Cancel</button>'))).toBe(false);
+    } finally {
+      document.body.appendChild(dialog);
+      outer.remove();
+    }
+  });
 });
 
 describe('findEnabledButton', () => {
@@ -130,9 +179,22 @@ describe('findReturnSubmitForm', () => {
     expect(findReturnSubmitForm(dialog)).toBe(dialog.querySelector('form'));
   });
 
-  it('counts a button with no type, which submits too', () => {
-    dialog.innerHTML = '<form><button>Move</button></form>';
+  it('finds a form whose submit button is an input, or spells its type in capitals', () => {
+    dialog.innerHTML = '<form><input type="submit" value="Move" /></form>';
     expect(findReturnSubmitForm(dialog)).not.toBeNull();
+    dialog.innerHTML = '<form><button type="SUBMIT">Move</button></form>';
+    expect(findReturnSubmitForm(dialog)).not.toBeNull();
+  });
+
+  it('is null when the only button has no type: it submits, but was not written to', () => {
+    dialog.innerHTML = '<form><input /><button>Chip</button></form>';
+    expect(findReturnSubmitForm(dialog)).toBeNull();
+  });
+
+  it('is null when the type is misspelt, which the browser also takes for submit', () => {
+    dialog.innerHTML = '<form><input /><button type="sumbit">Move</button></form>';
+    expect((dialog.querySelector('button') as HTMLButtonElement).type).toBe('submit');
+    expect(findReturnSubmitForm(dialog)).toBeNull();
   });
 
   it('is null when the dialog has no form', () => {
@@ -193,11 +255,33 @@ describe('findEnabledSubmitButton', () => {
     expect(findEnabledSubmitButton(form)?.textContent).toBe('Create');
   });
 
-  it('takes a button with no type inside the form, as the browser does', () => {
-    const found = findEnabledSubmitButton(
-      form('<button>Chip</button><button type="submit">Add</button>')
+  it('passes over a button with no type, which the browser would press first', () => {
+    const chips = form('<button>Chip</button><button type="submit">Add</button>');
+    // What the browser picks for a Return in a field: the first button that submits.
+    const browserDefault = [...chips.elements].find(
+      (el) => (el as HTMLButtonElement).type === 'submit'
     );
-    expect(found?.textContent).toBe('Chip');
+    expect(browserDefault?.textContent).toBe('Chip');
+
+    expect(findEnabledSubmitButton(chips)?.textContent).toBe('Add');
+  });
+
+  it('is null, not an untyped button, while the explicit submit button is disabled', () => {
+    const found = findEnabledSubmitButton(
+      form('<button>Chip</button><button type="submit" disabled>Add</button>')
+    );
+    expect(found).toBeNull();
+  });
+
+  it('is null when no button in the form says type="submit"', () => {
+    expect(
+      findEnabledSubmitButton(form('<button>Chip</button><button type="button">Cancel</button>'))
+    ).toBeNull();
+  });
+
+  it('finds an input written as a submit button', () => {
+    const found = findEnabledSubmitButton(form('<input /><input type="submit" value="Move" />'));
+    expect((found as HTMLInputElement | null)?.value).toBe('Move');
   });
 
   it('is null when the first submit button is disabled, as for the browser', () => {

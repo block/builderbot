@@ -158,8 +158,7 @@
   // and Create (tied to it by its `form` attribute). In the Name field the
   // browser submits it. The repo, subpath and branch fields are outside it:
   // Return there picks from their dropdowns and never creates the project
-  // half filled in. The repo chips are outside it too, or the first of them,
-  // a button with no `type`, would be the button a Return presses.
+  // half filled in. The repo chips are outside it too.
   const formId = $props.id();
   let formEl = $state<HTMLFormElement | null>(null);
 

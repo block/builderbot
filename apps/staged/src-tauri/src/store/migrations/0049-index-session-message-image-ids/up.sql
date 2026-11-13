@@ -1,18 +1,35 @@
--- The image-reference check (`Store::referenced_by_chat` in store/images.rs)
--- asks whether any chat message attaches a given image by searching
--- `image_ids` for the quoted id. Nothing indexed that column, so every check
--- read all of `session_messages`, the largest table in the store, once per
--- image. Deleting or moving a note with images froze the window for seconds.
+-- Deleting or moving a note that embeds images asks whether any chat message
+-- attaches one of them. The answer is in `session_messages.image_ids`, and
+-- nothing indexed that column, so the question read all of `session_messages`,
+-- the largest table in the store, while holding the one store connection, and
+-- the window froze for seconds.
 --
 -- Messages without attachments store NULL (`image_ids_json` in
 -- store/messages.rs), so a partial index over the non-NULL values holds only
--- the messages that attach something, and the check reads that instead of the
--- table. The query has to spell out `image_ids IS NOT NULL` itself: SQLite
--- does not infer it from `instr(image_ids, ?) > 0`, and without it the
--- partial index is not considered.
+-- the messages that attach something. The app asks once per operation, for
+-- all of the operation's images together: `Store::attached_in_chat` in
+-- store/images.rs runs `CHAT_ATTACHMENTS_SQL`,
+-- `SELECT image_ids FROM session_messages WHERE image_ids IS NOT NULL`, and
+-- matches the ids itself. That WHERE is this index's, so the statement reads
+-- the index as a covering index and no row of the table.
+--
+-- A statement has to spell out `image_ids IS NOT NULL` to be given the index.
+-- SQLite does not infer it from a term such as `instr(image_ids, ?) > 0`,
+-- which is why the per-image form the tests keep (`CHAT_REFERENCE_SQL`,
+-- `Store::referenced_by_chat`) carries the term as well.
 --
 -- `queued_session_messages` is left alone: it holds one row per queued
 -- follow-up, not one per message.
+--
+-- Building the index reads every row of `session_messages` once, when the
+-- store is opened during launch, the first time a build with this migration
+-- runs. The build itself has not been timed. The code review of this change
+-- measured, read-only, one pass over `session_messages` reading `image_ids` on
+-- the 4.7 GB store the freeze was reported on: 2,201,194 rows, 9 of them with
+-- attachments, 12.4 s the first time and 0.66 s when repeated, at a load
+-- average of about 21. The build walks the same pages, so on a store that size
+-- expect a one-off wait of up to about 12 s at launch, longer with nothing
+-- cached, as after a reboot. The index is small: there it holds 9 entries.
 
 CREATE INDEX idx_session_messages_image_ids
     ON session_messages(image_ids) WHERE image_ids IS NOT NULL;

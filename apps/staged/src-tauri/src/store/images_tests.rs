@@ -453,15 +453,83 @@ fn test_media_references_take_one_pass_however_many_ids_are_asked_about() {
         ReferencePasses { notes: 1, chat: 0 }
     );
 
-    // Nothing to ask about: no pass.
+    // Nothing to ask about: no pass, and so nothing it can clear.
     let none = std::iter::empty::<&str>;
-    assert!(f
-        .store
-        .media_references(none(), None)
-        .unwrap()
-        .unused("any"));
+    let unasked = f.store.media_references(none(), None).unwrap();
+    assert!(!unasked.unused("any"));
+    assert!(!unasked.unused(&f.unused));
     assert!(f.store.media_embedded_in_notes(none()).unwrap().is_empty());
     assert_eq!(take_reference_passes(), ReferencePasses::default());
+}
+
+/// `unused` is what lets a caller delete a file or take a row along, so a
+/// pass clears only the ids it was asked about. One that was asked about a
+/// narrower set says nothing of the rest, whatever does or does not use them.
+#[test]
+fn test_media_references_clear_only_the_ids_they_were_asked_about() {
+    let f = references();
+    let ids = || f.candidates.iter().map(String::as_str);
+    let asked = [f.only_one.as_str(), f.unused.as_str()];
+    let passes = [
+        ("no note left out", None),
+        ("the owner left out", Some(f.owner.as_str())),
+    ];
+
+    for (label, except) in passes {
+        let whole = f.store.media_references(ids(), except).unwrap();
+        let narrow = f.store.media_references(asked, except).unwrap();
+        let conn = f.store.conn.lock().unwrap();
+        let on_connection = Store::media_references_on(&conn, asked, except).unwrap();
+        drop(conn);
+        // Both ways of running the pass keep what they were asked about.
+        assert_eq!(narrow, on_connection, "{label}");
+
+        let mut cleared = 0;
+        for id in ids() {
+            if asked.contains(&id) {
+                // Asked about: the narrower pass answers as the whole one.
+                assert_eq!(narrow.unused(id), whole.unused(id), "{label}: {id}");
+            } else {
+                // Not asked about: in use, even where the whole pass, which
+                // did look, found nothing using it.
+                assert!(!narrow.unused(id), "{label}: {id}");
+                cleared += usize::from(whole.unused(id));
+            }
+            // A pass finds uses only of what it was asked about.
+            if narrow.in_notes(id) || narrow.in_chat(id) {
+                assert!(asked.contains(&id), "{label}: {id}");
+            }
+        }
+        // The refusal was not for want of ids the whole pass does clear.
+        assert!(cleared > 0, "{label}");
+        // An id in no candidate set at all is in use to every pass.
+        for references in [&whole, &narrow] {
+            assert!(!references.unused("no-such-id"), "{label}");
+            assert!(!references.unused(""), "{label}");
+        }
+    }
+
+    // The image nothing uses is cleared exactly when it is asked about.
+    let asking = f.store.media_references([f.unused.as_str()], None).unwrap();
+    let not_asking = f.store.media_references([f.sent.as_str()], None).unwrap();
+    assert!(asking.unused(&f.unused));
+    assert!(!not_asking.unused(&f.unused));
+    // And the image only the owner embeds, with the owner left out.
+    let owner = Some(f.owner.as_str());
+    let asking = f
+        .store
+        .media_references([f.only_one.as_str()], owner)
+        .unwrap();
+    let not_asking = f
+        .store
+        .media_references([f.in_two.as_str()], owner)
+        .unwrap();
+    assert!(asking.unused(&f.only_one));
+    assert!(!not_asking.unused(&f.only_one));
+
+    // A set of references that was never read clears nothing.
+    let unread = super::images::MediaReferences::default();
+    assert!(ids().all(|id| !unread.unused(id)));
 }
 
 /// A store holding one of every kind of row the session attachment lookup

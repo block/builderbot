@@ -83,6 +83,8 @@ const SESSION_ATTACHMENTS_PER_IMAGE_SQL: &str = "SELECT id FROM images WHERE ses
 /// id ([`Store::media_references`]).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MediaReferences {
+    /// The ids the pass was asked about: the only ones it can clear.
+    asked: HashSet<String>,
     notes: HashSet<String>,
     chat: HashSet<String>,
 }
@@ -101,8 +103,13 @@ impl MediaReferences {
     /// Whether nothing the pass read uses `id`. With a note left out, that
     /// note is the only thing using it, so the row can follow the note to
     /// another scope without breaking anything else.
+    ///
+    /// This is the answer that lets a caller delete a file or take a row
+    /// along, so it is given only for an id the pass was asked about. The
+    /// pass looked for nothing else, and finding no use of an id it never
+    /// looked for says nothing: any other id is reported as in use.
     pub(crate) fn unused(&self, id: &str) -> bool {
-        !self.in_notes(id) && !self.in_chat(id)
+        self.asked.contains(id) && !self.in_notes(id) && !self.in_chat(id)
     }
 }
 
@@ -205,6 +212,7 @@ impl Store {
     ) -> Result<MediaReferences, StoreError> {
         let ids: Vec<&str> = ids.into_iter().collect();
         Ok(MediaReferences {
+            asked: ids.iter().map(|id| (*id).to_owned()).collect(),
             notes: Self::embedded_in_notes(conn, &ids, except_note_id)?,
             chat: Self::attached_in_chat(conn, &ids)?,
         })

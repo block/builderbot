@@ -1380,6 +1380,18 @@ export interface ControlAuthorizationRequest {
 }
 
 /**
+ * A request for this window to show a project, made from outside it by
+ * `stagedctl project open`. Mirrors `ProjectOpenRequest` in
+ * `src-tauri/src/project_open.rs`; carried by the `project-open-requested`
+ * event and `list_pending_project_opens`.
+ */
+export interface ProjectOpenRequest {
+  /** Names the request in `answer_project_open`. */
+  requestId: string;
+  projectId: string;
+}
+
+/**
  * An approved client as the Settings "Connected apps" panel lists it.
  * Mirrors `ControlGrantSummary` in `control_server/consent.rs`.
  */

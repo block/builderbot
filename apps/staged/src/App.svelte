@@ -82,6 +82,7 @@
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
   import { listenForControlAuthorizations } from './lib/listeners/controlAuthorizationListener';
   import { listenForMenuEvents } from './lib/listeners/menuListener';
+  import { listenForProjectOpens } from './lib/listeners/projectOpenListener';
   import { listenForReferenceCopy } from './lib/features/sessions/referenceClipboard';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
@@ -98,6 +99,7 @@
   let unlistenPageLifecycle: (() => void) | undefined;
   let unlistenAcpToolsReconciled: UnlistenFn | undefined;
   let unlistenControlAuthorizations: UnlistenFn | undefined;
+  let unlistenProjectOpens: UnlistenFn | undefined;
   let unlistenStoreReset: UnlistenFn | undefined;
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
@@ -439,6 +441,16 @@
       console.error('Failed to restore last viewed project:', e);
     }
 
+    // `stagedctl project open` requests for this window: every desktop
+    // window, since the backend picks whichever one a Dock click would raise.
+    // Started only now, unlike the listeners above, so a request never
+    // navigates underneath the route restore, which would then put the
+    // restored or seeded project back over it. Nothing is missed by waiting:
+    // the listener takes the backend's snapshot of a request parked earlier.
+    if (isTauri && !destroyed) {
+      unlistenProjectOpens = listenForProjectOpens();
+    }
+
     const sweep = () => void sweepCache();
     if (typeof requestIdleCallback === 'function') {
       requestIdleCallback(sweep, { timeout: 10_000 });
@@ -669,6 +681,7 @@
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
     unlistenControlAuthorizations?.();
+    unlistenProjectOpens?.();
     unlistenStoreReset?.();
     unlistenUpdaterOwnerAvailable?.();
     projectsDataStore.stopListeners();

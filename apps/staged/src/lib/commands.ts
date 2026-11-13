@@ -6,6 +6,7 @@
 
 import { invokeCommand, isTauri } from './transport';
 import type { ActionType, ProjectAction } from './features/actions/actions';
+import type { ProjectOpenAnswer } from './features/layout/navigation.svelte';
 import {
   cachedCommand,
   cachedInvoke,
@@ -45,6 +46,7 @@ import type {
   PollWorkspaceResult,
   PrDetectionResult,
   Project,
+  ProjectOpenRequest,
   ProjectRepo,
   ProjectTransferDirection,
   ProjectTransferPreflight,
@@ -167,6 +169,24 @@ export function listControlGrants(): Promise<ControlGrantSummary[]> {
  */
 export function revokeControlGrant(grantId: string): Promise<void> {
   return invokeCommand('revoke_control_grant', { grantId });
+}
+
+/**
+ * The request to show a project that this window has yet to answer: none, or
+ * one. Taken once the `project-open-requested` listener is live, so a request
+ * parked before the window loaded is still acted on. Desktop only.
+ */
+export function listPendingProjectOpens(): Promise<ProjectOpenRequest[]> {
+  return invokeCommand('list_pending_project_opens');
+}
+
+/**
+ * Tell the waiting `stagedctl project open` what this window did with request
+ * `requestId`. Rejects when the request is no longer this window's to answer:
+ * a newer one superseded it, or its caller stopped waiting.
+ */
+export function answerProjectOpen(requestId: string, outcome: ProjectOpenAnswer): Promise<void> {
+  return invokeCommand('answer_project_open', { requestId, outcome });
 }
 
 // =============================================================================

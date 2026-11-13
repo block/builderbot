@@ -209,10 +209,18 @@ export function listenToEvent<T>(
  * that must reach exactly one window need this window-scoped variant paired
  * with a backend `emit_to(label, ..)`. In web mode it falls back to the shared
  * WebSocket stream, where the page is the only "window".
+ *
+ * Registration is asynchronous here too, so `opts` carries the same hooks as
+ * `listenToEvent`, with the same guarantees: an event that must not be missed
+ * is paired with a snapshot taken in `onEstablished`.
  */
-export function listenToWindowEvent<T>(event: string, callback: (payload: T) => void): UnlistenFn {
+export function listenToWindowEvent<T>(
+  event: string,
+  callback: (payload: T) => void,
+  opts?: ListenOptions
+): UnlistenFn {
   if (!isTauri) {
-    return webSocketListen<T>(event, callback, undefined);
+    return webSocketListen<T>(event, callback, opts);
   }
 
   let cancelled = false;
@@ -221,10 +229,15 @@ export function listenToWindowEvent<T>(event: string, callback: (payload: T) => 
   void (async () => {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
     const u = await getCurrentWindow().listen<T>(event, (e) => callback(e.payload));
-    if (cancelled) u();
-    else unlisten = u;
+    if (cancelled) {
+      u();
+      return;
+    }
+    unlisten = u;
+    opts?.onEstablished?.();
   })().catch((e) => {
     console.error(`[transport] Failed to register window listener for event "${event}":`, e);
+    if (!cancelled) opts?.onRegistrationFailed?.(e);
   });
 
   return () => {

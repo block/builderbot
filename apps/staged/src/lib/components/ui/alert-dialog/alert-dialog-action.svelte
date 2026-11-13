@@ -22,6 +22,7 @@
 <AlertDialogPrimitive.Action
   bind:ref
   data-slot="alert-dialog-action"
+  data-variant={variant}
   class={cn(buttonVariants({ variant, size }), 'cn-alert-dialog-action', className)}
   {...restProps}
 />

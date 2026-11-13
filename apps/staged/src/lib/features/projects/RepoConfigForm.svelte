@@ -325,6 +325,7 @@
           {#each filteredRecentRepos.slice(0, 5) as recent, i}
             {@const hue = repoHue(recent)}
             <button
+              type="button"
               class="recent-chip"
               style="--chip-bg: {badge.badgeBg(hue, dark)}; --chip-bg-hover: {badge.badgeBgHover(
                 hue,

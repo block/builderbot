@@ -160,7 +160,9 @@
     if (!open && !revoking) confirming = null;
   }}
 >
-  <AlertDialog.Content>
+  <!-- Revoking is destructive though its button isn't styled so: Return
+       doesn't confirm it. -->
+  <AlertDialog.Content defaultAction="none">
     {#if confirming}
       <AlertDialog.Header>
         <AlertDialog.Title>Revoke access for “{confirming.client}”?</AlertDialog.Title>

@@ -29,6 +29,7 @@
   import type { Project } from '../../types';
   import { tagsStore } from '../../stores/tags.svelte';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import { isImeKeydown } from '../../shared/imeKeydown';
   import { viewport } from '../../shared/viewport.svelte';
   import { openSettings } from '../layout/navigation.svelte';
   import TagIcon from './TagIcon.svelte';
@@ -88,7 +89,9 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.isComposing) return;
+    // A key the IME is handling is the IME's: Safari's Return committing a
+    // composition has isComposing false, and toggled the highlighted tag.
+    if (isImeKeydown(event)) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       active = moveActiveIndex(activeIndex, event.key === 'ArrowDown' ? 1 : -1, model.rows.length);

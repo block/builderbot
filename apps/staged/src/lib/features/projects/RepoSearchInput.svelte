@@ -423,6 +423,7 @@
         {#each filteredRecentRepos as recent, i}
           {@const hue = recentHue(recent)}
           <button
+            type="button"
             id={listboxOptionId(listboxId, i)}
             role="option"
             aria-selected={i === selectedIndex}
@@ -493,6 +494,7 @@
             {@const repo = item.data as GitHubRepo}
             {@const itemIndex = filteredRecentRepos.length + i}
             <button
+              type="button"
               id={listboxOptionId(listboxId, itemIndex)}
               role="option"
               aria-selected={itemIndex === selectedIndex}

@@ -49,6 +49,7 @@
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
   import { derivePrPushAction } from './prButtonGitState';
+  import BranchPushErrorDialog from './BranchPushErrorDialog.svelte';
   import {
     buildPrMenu,
     deferredPushLabel,
@@ -1246,7 +1247,8 @@
     open={showPrDetectionDialog}
     onOpenChange={(open) => !open && linkingPrNumber === null && handlePrDetectionDialogClose()}
   >
-    <AlertDialog.Content>
+    <!-- Close is the only footer button, so Return presses it. -->
+    <AlertDialog.Content defaultAction="cancel">
       {#if prDetectionFailure.kind === 'notFound'}
         <AlertDialog.Header>
           <AlertDialog.Title>No pull request found</AlertDialog.Title>
@@ -1347,22 +1349,13 @@
 {/if}
 
 {#if showPushErrorDialog}
-  <AlertDialog.Root bind:open={showPushErrorDialog}>
-    <AlertDialog.Content>
-      <AlertDialog.Header>
-        <AlertDialog.Title>{pushForce ? 'Force Push Failed' : 'Push Failed'}</AlertDialog.Title>
-        <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
-          {pushError ?? 'An unknown error occurred while pushing.'}
-        </AlertDialog.Description>
-      </AlertDialog.Header>
-      <AlertDialog.Footer>
-        <AlertDialog.Cancel onclick={handlePushErrorClose}>Cancel</AlertDialog.Cancel>
-        <AlertDialog.Action variant="outline" onclick={handlePushErrorRetry}>
-          Retry
-        </AlertDialog.Action>
-      </AlertDialog.Footer>
-    </AlertDialog.Content>
-  </AlertDialog.Root>
+  <BranchPushErrorDialog
+    bind:open={showPushErrorDialog}
+    force={pushForce}
+    error={pushError}
+    onRetry={handlePushErrorRetry}
+    onCancel={handlePushErrorClose}
+  />
 {/if}
 
 {#if showForcePushDialog}

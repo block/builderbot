@@ -12,6 +12,11 @@
   import { visibleViewport, watchVisualViewport } from '$lib/shared/visualViewport.svelte';
   import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
   import { getWindowSync } from '$lib/transport';
+  import {
+    findEnabledSubmitButton,
+    findReturnSubmitForm,
+    isDefaultActionKeydown,
+  } from '$lib/shared/dialogDefaultAction';
 
   let {
     ref = $bindable(null),
@@ -21,7 +26,9 @@
     children,
     showCloseButton = true,
     fullScreenOnMobile = true,
+    defaultAction,
     onpointerdown: onPointerDown,
+    onkeydown: onKeydown,
     onOpenAutoFocus,
     onCloseAutoFocus,
     onInteractOutside,
@@ -31,6 +38,15 @@
     children: Snippet;
     showCloseButton?: boolean;
     fullScreenOnMobile?: boolean;
+    /**
+     * What a plain Return does while focus is on the dialog rather than on
+     * one of its controls: `submit` presses the submit button of the
+     * dialog's form, `none` does nothing. Left unset, it submits, unless the
+     * form holds a multiline editor: there Return breaks a line and
+     * Cmd+Return submits, so plain Return does nothing. A dialog with no
+     * form has nothing to submit either way.
+     */
+    defaultAction?: 'submit' | 'none';
   } = $props();
 
   // Keep `viewport.isMobile` live even when the host screen never subscribed.
@@ -139,11 +155,58 @@
   // keyboard, bits-ui's restore (which shows the trigger) is kept.
   const focusRestore = restoreFocusWithoutScroll(() => viewport.hasCoarsePointer);
 
+  /** The form a plain Return submits here, if any; see `defaultAction`. */
+  function returnSubmitForm(content: HTMLElement): HTMLFormElement | null {
+    if (defaultAction === 'none') return null;
+    return findReturnSubmitForm(content, defaultAction === 'submit');
+  }
+
   function handleOpenAutoFocus(event: Event) {
     focusRestore.capture();
-    // Nothing is focused on open unless the caller says otherwise.
-    if (onOpenAutoFocus) onOpenAutoFocus(event);
-    else event.preventDefault();
+    if (onOpenAutoFocus) {
+      onOpenAutoFocus(event);
+      return;
+    }
+    // No control is focused on open unless the caller says otherwise:
+    // bits-ui would pick the first one, usually Close or Cancel.
+    event.preventDefault();
+    focusContentForReturn();
+  }
+
+  // A dialog that submits on Return has to hold the focus to hear the key:
+  // left on the page behind, Return goes to whatever opened the dialog. The
+  // dialog itself takes it, as an alert dialog does, a frame after opening
+  // so that a field the dialog focuses on its own keeps it. A dialog with
+  // nothing for Return to submit (a viewer, a multiline editor) is left as
+  // it was, with focus where it started.
+  function focusContentForReturn() {
+    requestAnimationFrame(() => {
+      const content = ref;
+      if (!content?.isConnected || content.dataset.state !== 'open') return;
+      if (content.contains(content.ownerDocument.activeElement)) return;
+      if (!returnSubmitForm(content)) return;
+      content.focus({ preventScroll: true });
+    });
+  }
+
+  type DialogKeyboardEvent = KeyboardEvent & { currentTarget: EventTarget & HTMLDivElement };
+
+  // A plain Return on the dialog, or on text in it, submits its form. A
+  // field submits on its own and a focused button presses itself, so those
+  // are left alone (see isDefaultActionKeydown) and nothing fires twice. The
+  // submit button is clicked, not the handler called, so its disabled state
+  // and the form's validation apply as they do for the mouse.
+  function handleKeydown(event: DialogKeyboardEvent) {
+    onKeydown?.(event);
+    if (!isDefaultActionKeydown(event)) return;
+    const form = returnSubmitForm(event.currentTarget);
+    const button = form && findEnabledSubmitButton(form);
+    if (!button) return;
+    // Stopped as well as prevented: views under the dialog listen on the
+    // window.
+    event.preventDefault();
+    event.stopPropagation();
+    button.click();
   }
 
   function handleCloseAutoFocus(event: Event) {
@@ -254,6 +317,7 @@
     onCloseAutoFocus={handleCloseAutoFocus}
     onInteractOutside={handleInteractOutside}
     onpointerdown={handlePointerDown}
+    onkeydown={handleKeydown}
     preventOverflowTextSelection={false}
     preventScroll={false}
     {...restProps}

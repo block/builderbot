@@ -9,6 +9,7 @@ use tokio::io::AsyncBufReadExt;
 
 use crate::managed_node;
 
+use super::cache::npm_cache_dir;
 use super::probe::snapshot_var;
 use super::registry::{
     fallback_npm_registry, gateway_fallback_registry, gateway_retry_failed_message,
@@ -514,7 +515,7 @@ async fn run_floating_npm_install_capturing(
     }
     // Share the private prefix's download cache; `--prefix` on the command
     // line outranks any inherited prefix config.
-    let cache = packages_root.join("npm-prefix").join("cache");
+    let cache = npm_cache_dir(packages_root);
     command.env("NPM_CONFIG_CACHE", &cache);
     command.env("npm_config_cache", &cache);
     command

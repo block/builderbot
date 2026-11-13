@@ -355,15 +355,17 @@ pub async fn run_doctor_fix(
     // check definition, so the npm-backed gate below can't see it — ensure the
     // managed runtime here, since the fix shells out to npm.
     if check_id == DEPRECATED_CLAUDE_ACP_CHECK_ID {
-        ensure_managed_node_runtime_for_fix().await?;
+        let _npm_write_lock = prepare_npm_fix().await?;
         return run_deprecated_claude_acp_fix(fix_type, env_vars).await;
     }
     let npm_backed = doctor::agents::lookup_fix_command(&check_id, &fix_type)
         .as_deref()
         .is_some_and(crate::managed_acp_tools::is_npm_backed_command);
-    if npm_backed {
-        ensure_managed_node_runtime_for_fix().await?;
-    }
+    let _npm_write_lock = if npm_backed {
+        Some(prepare_npm_fix().await?)
+    } else {
+        None
+    };
     execute_fix_with_gateway_fallback(check_id, fix_type, None, npm_backed, env_vars).await
 }
 
@@ -436,6 +438,27 @@ async fn ensure_managed_node_runtime_for_fix() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Everything an npm-backed fix or update needs before its command runs:
+/// the managed Node.js runtime, then the lock that keeps the shared packages
+/// tree to one npm writer at a time (see
+/// [`crate::managed_acp_tools::lock_npm_writes`]). The fix's `npm install -g`
+/// writes the private prefix and its download cache, so without the lock it
+/// could overlap a bridge install or have the reconciler's cache prune land
+/// mid-install — in this or another Staged instance. The caller holds the
+/// returned guard until the command, gateway retry included, has finished.
+///
+/// The order is load-bearing: the runtime ensure takes the packages flock
+/// itself, so the lock is acquired only after it returns — nesting the two
+/// would deadlock. Fixes that go through the managed installer
+/// ([`install_managed_tool_logged`]) must not call this at all, since the
+/// installer takes the same locks.
+async fn prepare_npm_fix() -> Result<crate::managed_acp_tools::NpmWriteLock, String> {
+    ensure_managed_node_runtime_for_fix().await?;
+    crate::managed_acp_tools::lock_npm_writes()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Run a source-aware update for a single readout (main CLI or ACP bridge).
 ///
 /// Unlike [`run_doctor_fix`], update commands (`UpdateMain`/`UpdateBridge`) are
@@ -483,11 +506,14 @@ pub async fn run_doctor_update(
         ));
     }
     // npm-backed updates run the managed npm into the private prefix, so the
-    // managed runtime must exist before the command does.
+    // managed runtime must exist before the command does — and the command
+    // runs under the npm write lock.
     let npm_backed = crate::managed_acp_tools::is_npm_backed_command(&expected);
-    if npm_backed {
-        ensure_managed_node_runtime_for_fix().await?;
-    }
+    let _npm_write_lock = if npm_backed {
+        Some(prepare_npm_fix().await?)
+    } else {
+        None
+    };
     // Run the backend-derived `expected`, not the frontend-supplied `command`.
     // They are equal past the guard above, but executing `expected` makes the
     // command that runs provably the one the backend derived — no dependence on

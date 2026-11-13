@@ -15,6 +15,13 @@
 //! shim execs its Node by absolute versioned path, so an old runtime must
 //! outlive the last shim that references it.
 //!
+//! The same epilogue caps the private npm download cache
+//! (`~/.staged/packages/npm-prefix/cache/_cacache`), which npm itself never
+//! evicts from: once it holds more than 1 GiB it is wiped whole, under the
+//! install locks, on every pass — a failed one included, so a bridge that
+//! keeps failing cannot switch the cleanup off. The cost is one re-download
+//! of the bridges' tarballs on the following pass.
+//!
 //! Silent when there is nothing to manage: the `STAGED_ACP_TOOLS_DIR` dev
 //! override is active, the `no-managed-acp-tools` build feature is set, or
 //! the target is unsupported.

@@ -25,10 +25,13 @@
 //!
 //! - `npm-prefix/` — the private npm global prefix.
 //! - `npm-prefix/cache/` — the npm download cache every Staged-spawned npm
-//!   shares. npm never evicts from it, so the reconcile epilogue wipes its
-//!   `_cacache` whole once it outgrows 1 GiB (see `cache`); the next install
-//!   just re-downloads. Doctor's npm fixes hold the same locks
-//!   ([`lock_npm_writes`]) so a wipe never lands mid-install.
+//!   shares. npm never evicts from it, so its `_cacache` is wiped whole once
+//!   it outgrows 1 GiB (see `cache`); the next install just re-downloads.
+//!   The reconcile epilogue applies the cap on every pass, and Doctor's npm
+//!   fixes apply it as they finish — which is what covers a build that
+//!   manages no bridges and so never reconciles. Those fixes hold the same
+//!   locks as the installer ([`lock_npm_writes`]), so a wipe never lands
+//!   mid-install.
 //! - `node/<version>/<platform>/` — managed Node runtimes (`managed_node`).
 //! - `tools/<id>/` — per-bridge npm `--prefix` trees for the managed ACP
 //!   bridges (claude-acp, codex-acp).
@@ -64,6 +67,8 @@ pub(crate) mod test_support;
 mod tests;
 
 pub use install::{install_managed_tool, InstallLineFn, ManagedToolError};
+#[cfg(test)]
+pub(crate) use lock::lock_npm_writes_at;
 pub(crate) use lock::{lock_npm_writes, NpmWriteLock};
 pub(crate) use probe::configured_npm_registry;
 pub use probe::{installed_tool_version, latest_published_version};

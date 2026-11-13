@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::managed_node;
 
-use super::cache::{prune_npm_cache_at, NPM_CACHE_MAX_BYTES};
+use super::cache::{prune_npm_cache_on_blocking_pool, NPM_CACHE_MAX_BYTES};
 use super::install::tool_install_lock;
 use super::{read_state, shim_bin_dir, tools_root, write_state, ManagedTool, ReconcileRecord};
 
@@ -57,16 +57,9 @@ pub(super) async fn finish_reconcile_at(
         // that fails every day would otherwise switch cleanup off while the
         // cache keeps growing. It runs after the state write, so recording
         // the outcome never waits on a multi-gigabyte delete, and on the
-        // blocking pool, so a panic in cleanup surfaces here as a join error
-        // instead of unwinding through the pass.
-        let cache_root = packages_root.to_path_buf();
-        if let Err(error) = tokio::task::spawn_blocking(move || {
-            prune_npm_cache_at(&cache_root, npm_cache_max_bytes)
-        })
-        .await
-        {
-            log::warn!("npm cache prune task failed: {error}");
-        }
+        // blocking pool, so a panic in cleanup is logged instead of unwinding
+        // through the pass.
+        prune_npm_cache_on_blocking_pool(packages_root, npm_cache_max_bytes).await;
     }
     // Success-gated Node prune: `errors` empty means every managed bridge
     // reinstalled this run, so every shim now embeds the pinned runtime's

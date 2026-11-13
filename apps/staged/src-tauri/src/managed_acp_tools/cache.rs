@@ -7,8 +7,11 @@
 //! and each revalidated package document leaves its previous body behind
 //! unreferenced. The cache has no correctness role — a bridge at runtime
 //! never reads it, and an install against an empty cache only re-downloads —
-//! so the reconcile epilogue wipes it whole once it outgrows
-//! [`NPM_CACHE_MAX_BYTES`] (see [`prune_npm_cache_at`]).
+//! so it is wiped whole once it outgrows [`NPM_CACHE_MAX_BYTES`] (see
+//! [`prune_npm_cache_at`]). Two callers cap it, each under the install locks:
+//! the reconcile epilogue on every pass, and Doctor at the end of each
+//! npm-backed fix or update — the only writer left on a build that manages
+//! no bridges and so never reconciles.
 
 use std::path::{Path, PathBuf};
 
@@ -45,21 +48,27 @@ pub(super) fn npm_cache_dir(packages_root: &Path) -> PathBuf {
 /// Wipe the private npm cache's `_cacache` when it holds more than
 /// `max_bytes`. Best-effort: returns nothing and logs every failure at warn
 /// level, since a cache that could not be pruned costs disk, never
-/// correctness, and is retried on the next reconcile pass.
+/// correctness, and is retried on the next reconcile pass or Doctor npm fix.
 ///
-/// Three moves:
+/// Four moves:
 ///
-/// 1. Remove any `_cacache.trash-*` sibling an interrupted prune left behind.
-/// 2. Sum the file sizes under `_cacache` without following symlinks, and
+/// 1. Stop unless `npm-prefix` and `npm-prefix/cache` are real directories
+///    (see [`cache_dir_is_inside_packages_tree`]).
+/// 2. Remove any `_cacache.trash-*` sibling an interrupted prune left behind.
+/// 3. Sum the file sizes under `_cacache` without following symlinks, and
 ///    stop when the total is within the cap.
-/// 3. Rename `_cacache` to `_cacache.trash-<pid>` and delete that. The rename
+/// 4. Rename `_cacache` to `_cacache.trash-<pid>` and delete that. The rename
 ///    is atomic, so npm sees either the whole cache or none of it — never a
 ///    half-deleted one whose index points at missing content.
 ///
 /// The caller holds the tool-install mutex and the packages flock, so no
 /// Staged-spawned npm install is writing the cache meanwhile. Blocking
-/// filesystem work: call it from `spawn_blocking`.
+/// filesystem work: call it from `spawn_blocking` (or through
+/// [`prune_npm_cache_on_blocking_pool`]).
 pub(super) fn prune_npm_cache_at(packages_root: &Path, max_bytes: u64) {
+    if !cache_dir_is_inside_packages_tree(packages_root) {
+        return;
+    }
     let cache_dir = npm_cache_dir(packages_root);
     remove_leftover_trash(&cache_dir);
 
@@ -104,6 +113,57 @@ pub(super) fn prune_npm_cache_at(packages_root: &Path, max_bytes: u64) {
             trash.display()
         ),
     }
+}
+
+/// [`prune_npm_cache_at`] on the blocking pool, for async callers that hold
+/// the install locks. Also best-effort: a panic in the cleanup surfaces here
+/// as a join error and is logged instead of unwinding through the caller.
+pub(super) async fn prune_npm_cache_on_blocking_pool(packages_root: &Path, max_bytes: u64) {
+    let packages_root = packages_root.to_path_buf();
+    if let Err(error) =
+        tokio::task::spawn_blocking(move || prune_npm_cache_at(&packages_root, max_bytes)).await
+    {
+        log::warn!("npm cache prune task failed: {error}");
+    }
+}
+
+/// Whether `<packages>/npm-prefix` and `<packages>/npm-prefix/cache` are both
+/// real directories, so everything the prune sizes, renames and deletes is
+/// inside the packages tree the caller's locks cover.
+///
+/// The OS resolves a symlink in either component, which would send the
+/// leftover sweep and the wipe to the link's target — a `cache` linked to
+/// `~/.npm`, say, where the user's own npm processes write without holding
+/// any Staged lock. A cache redirected like that is somebody else's to size
+/// and evict, so the prune leaves it alone and says so. Missing components
+/// are the ordinary nothing-to-prune case and stay silent. The packages root
+/// itself may be a symlink: the whole tree, lock file included, moves with
+/// it.
+fn cache_dir_is_inside_packages_tree(packages_root: &Path) -> bool {
+    let npm_prefix = packages_root.join("npm-prefix");
+    let cache_dir = npm_cache_dir_in_prefix(&npm_prefix);
+    for dir in [npm_prefix, cache_dir] {
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                log::warn!(
+                    "skipping npm cache prune: {} is a symlink or a file, not a directory, so \
+                     the cache it leads to is not capped",
+                    dir.display()
+                );
+                return false;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(error) => {
+                log::warn!(
+                    "skipping npm cache prune: cannot inspect {}: {error}",
+                    dir.display()
+                );
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Remove every `_cacache.trash-*` entry in the cache dir — what a prune that

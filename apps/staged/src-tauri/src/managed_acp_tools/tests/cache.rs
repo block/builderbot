@@ -112,6 +112,14 @@ fn leftover_trash_is_removed_even_when_the_cache_is_within_the_cap() {
     std::fs::write(trash_dir.join("content-v2").join("half-deleted"), "x").unwrap();
     let trash_file = cache_dir.join("_cacache.trash-7");
     std::fs::write(&trash_file, "x").unwrap();
+    // A symlink named like a trash dir, pointing at a directory outside the
+    // cache: the link is unlinked, never traversed.
+    let outside_dir = dir.path().join("outside");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside_file = outside_dir.join("keep");
+    std::fs::write(&outside_file, "keep").unwrap();
+    let trash_link = cache_dir.join("_cacache.trash-99");
+    std::os::unix::fs::symlink(&outside_dir, &trash_link).unwrap();
     // A neighbour that only resembles the trash prefix stays.
     let lookalike = cache_dir.join("_cacache.trashed");
     std::fs::create_dir_all(&lookalike).unwrap();
@@ -120,6 +128,9 @@ fn leftover_trash_is_removed_even_when_the_cache_is_within_the_cap() {
 
     assert!(!trash_dir.exists());
     assert!(!trash_file.exists());
+    assert!(std::fs::symlink_metadata(&trash_link).is_err());
+    assert!(outside_dir.is_dir());
+    assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "keep");
     assert!(lookalike.is_dir());
     assert_eq!(std::fs::read(&tarball).unwrap().len(), 10);
 }
@@ -199,4 +210,95 @@ fn a_cacache_that_is_itself_a_symlink_is_left_alone() {
 
     assert!(cacache.is_symlink());
     assert_eq!(std::fs::read(&elsewhere_file).unwrap().len(), 50);
+}
+
+/// A cache laid out outside the packages tree, reached only through a symlink
+/// standing in for one of the cache dir's ancestors: an oversized `_cacache`
+/// and an interrupted prune's leftover. Returns `(tarball, trash_file)`.
+fn write_linked_cache(real_cache_dir: &Path) -> (PathBuf, PathBuf) {
+    let tarball = real_cache_dir
+        .join("_cacache")
+        .join("content-v2")
+        .join("tarball");
+    std::fs::create_dir_all(tarball.parent().unwrap()).unwrap();
+    std::fs::write(&tarball, vec![b'x'; 50]).unwrap();
+    let trash_file = real_cache_dir
+        .join("_cacache.trash-4242")
+        .join("half-deleted");
+    std::fs::create_dir_all(trash_file.parent().unwrap()).unwrap();
+    std::fs::write(&trash_file, "x").unwrap();
+    (tarball, trash_file)
+}
+
+#[test]
+fn a_cache_dir_that_is_a_symlink_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let packages_root = dir.path().join("packages");
+    // `npm-prefix/cache` -> a cache somebody else owns (think `~/.npm`).
+    let elsewhere = dir.path().join("elsewhere");
+    let (tarball, trash_file) = write_linked_cache(&elsewhere);
+    let cache_dir = npm_cache_dir(&packages_root);
+    std::fs::create_dir_all(cache_dir.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &cache_dir).unwrap();
+    // The fixture is reachable through the link, so only the guard keeps the
+    // prune out of it.
+    assert!(cacache_dir(&packages_root).is_dir());
+
+    prune_npm_cache_at(&packages_root, 0);
+
+    assert!(cache_dir.is_symlink());
+    // Neither the wipe nor the leftover sweep followed the link.
+    assert_eq!(std::fs::read(&tarball).unwrap().len(), 50);
+    assert!(trash_file.is_file());
+}
+
+#[test]
+fn an_npm_prefix_that_is_a_symlink_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let packages_root = dir.path().join("packages");
+    // `npm-prefix` -> a prefix outside the packages tree.
+    let elsewhere = dir.path().join("elsewhere");
+    let (tarball, trash_file) = write_linked_cache(&elsewhere.join("cache"));
+    std::fs::create_dir_all(&packages_root).unwrap();
+    let npm_prefix = packages_root.join("npm-prefix");
+    std::os::unix::fs::symlink(&elsewhere, &npm_prefix).unwrap();
+    assert!(cacache_dir(&packages_root).is_dir());
+
+    prune_npm_cache_at(&packages_root, 0);
+
+    assert!(npm_prefix.is_symlink());
+    assert_eq!(std::fs::read(&tarball).unwrap().len(), 50);
+    assert!(trash_file.is_file());
+}
+
+#[test]
+fn a_cache_dir_that_is_a_plain_file_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let packages_root = dir.path();
+    let cache_dir = npm_cache_dir(packages_root);
+    std::fs::create_dir_all(cache_dir.parent().unwrap()).unwrap();
+    std::fs::write(&cache_dir, "not a directory").unwrap();
+
+    prune_npm_cache_at(packages_root, 0);
+
+    assert_eq!(
+        std::fs::read_to_string(&cache_dir).unwrap(),
+        "not a directory"
+    );
+}
+
+/// A packages root that is itself a symlink is fine: the whole tree — lock
+/// file included — lives behind it, so the cap still applies.
+#[test]
+fn a_packages_root_that_is_a_symlink_is_still_capped() {
+    let dir = tempfile::tempdir().unwrap();
+    let real_root = dir.path().join("real-packages");
+    write_cacache_file(&real_root, "content-v2/tarball", 50);
+    let packages_root = dir.path().join("packages");
+    std::os::unix::fs::symlink(&real_root, &packages_root).unwrap();
+
+    prune_npm_cache_at(&packages_root, 10);
+
+    assert!(!cacache_dir(&real_root).exists());
+    assert!(npm_cache_dir(&real_root).is_dir());
 }

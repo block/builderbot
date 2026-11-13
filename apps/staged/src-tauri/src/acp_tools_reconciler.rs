@@ -24,7 +24,11 @@
 //!
 //! Silent when there is nothing to manage: the `STAGED_ACP_TOOLS_DIR` dev
 //! override is active, the `no-managed-acp-tools` build feature is set, or
-//! the target is unsupported.
+//! the target is unsupported. Silent there includes the cache cap — the loop
+//! returns before its first pass, so the epilogue never runs. Such a build
+//! still fills the same cache through Doctor's `npm install -g` fixes and
+//! updates, so those cap it themselves as each one finishes, under the same
+//! locks (`NpmWriteLock::prune_npm_cache`).
 //!
 //! Completion is broadcast to the renderer as [`ACP_TOOLS_RECONCILED_EVENT`]:
 //! on a fresh profile the frontend caches its doctor report and provider

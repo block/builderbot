@@ -158,3 +158,68 @@ fn doctor_options_route_npm_through_the_registry_override() {
     );
     assert_eq!(execute_fix_options(None, Vec::new()).npm_registry, expected);
 }
+
+/// `<packages>/npm-prefix/cache/_cacache` in a temporary packages root.
+fn fixture_cacache(packages_root: &std::path::Path) -> PathBuf {
+    packages_root
+        .join("npm-prefix")
+        .join("cache")
+        .join("_cacache")
+}
+
+/// Put one file of `len` bytes in the fixture `_cacache`. The file is sparse
+/// — `set_len` allocates nothing — so a cache "over" the real 1 GiB cap costs
+/// no disk and no time.
+fn write_sparse_cacache_file(packages_root: &std::path::Path, len: u64) -> PathBuf {
+    let path = fixture_cacache(packages_root)
+        .join("content-v2")
+        .join("tarball");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+    path
+}
+
+const ONE_GIB: u64 = 1024 * 1024 * 1024;
+
+/// The epilogue of an npm-backed fix caps the cache at the real cap — the
+/// only place a build that manages no bridges ever does — and hands the
+/// fix's own outcome back untouched, whether the fix worked or not.
+#[tokio::test]
+async fn finishing_an_npm_fix_prunes_an_oversized_cache_and_keeps_the_fix_result() {
+    for fix_result in [Ok(()), Err("npm install failed".to_string())] {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path().join("packages");
+        write_sparse_cacache_file(&packages_root, ONE_GIB + 1);
+        let lock = crate::managed_acp_tools::lock_npm_writes_at(&packages_root)
+            .await
+            .unwrap();
+
+        let result = finish_npm_fix(Some(lock), fix_result.clone()).await;
+
+        assert_eq!(result, fix_result);
+        assert!(!fixture_cacache(&packages_root).exists(), "{fix_result:?}");
+    }
+}
+
+#[tokio::test]
+async fn finishing_an_npm_fix_leaves_a_cache_at_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let packages_root = dir.path().join("packages");
+    let tarball = write_sparse_cacache_file(&packages_root, ONE_GIB);
+    let lock = crate::managed_acp_tools::lock_npm_writes_at(&packages_root)
+        .await
+        .unwrap();
+
+    assert_eq!(finish_npm_fix(Some(lock), Ok(())).await, Ok(()));
+
+    assert_eq!(tarball.metadata().unwrap().len(), ONE_GIB);
+}
+
+/// A fix that never touched npm holds no lock: its result passes straight
+/// through and there is nothing to cap.
+#[tokio::test]
+async fn finishing_a_fix_without_the_npm_lock_only_returns_its_result() {
+    assert_eq!(finish_npm_fix(None, Ok(())).await, Ok(()));
+    let failed = Err("not an npm fix".to_string());
+    assert_eq!(finish_npm_fix(None, failed.clone()).await, failed);
+}

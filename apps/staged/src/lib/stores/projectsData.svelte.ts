@@ -776,10 +776,10 @@ class ProjectsDataStore {
 
   /**
    * Offer a fetched branch list to the store. Resolves to the list applied,
-   * or to null when it was refused: a newer load or a read sent after this
-   * one (`ticket`, see readOrder) has already landed. A `replace` list is
-   * applied even then: it is read after the transfer that asked for it, and
-   * it alone drops the worktree paths the transfer removed.
+   * or to null when it was refused: a newer load has started, or a read sent
+   * after this one (`ticket`, see readOrder) has already been applied. A
+   * `replace` list is applied even then: it is read after the transfer that
+   * asked for it, and it alone drops the worktree paths the transfer removed.
    *
    * A list sent before a local write landed (setBranchesByProject) is not
    * applied either: it may predate the rename, delete or status change the
@@ -796,10 +796,18 @@ class ProjectsDataStore {
     { replace = false }: { replace?: boolean } = {}
   ): Branch[] | typeof BRANCH_READ_SET_ASIDE | null {
     if (generation !== this.loadGeneration || !this.hasProject(projectId)) return null;
-    if (!this.readOrder.admit(`branches:${projectId}`, ticket) && !replace) return null;
-    if (!replace && this.readOrder.overtaken(`branch-writes:${projectId}`, ticket)) {
-      return BRANCH_READ_SET_ASIDE;
+    const readKey = `branches:${projectId}`;
+    if (!replace) {
+      if (this.readOrder.overtaken(readKey, ticket)) return null;
+      if (this.readOrder.overtaken(`branch-writes:${projectId}`, ticket)) {
+        return BRANCH_READ_SET_ASIDE;
+      }
     }
+    // Only a list that is applied counts as landed, so a read is refused
+    // only for a later-sent list the store really shows. A list set aside
+    // above leaves no mark: an older read still out is then set aside too,
+    // not refused, and its caller reads again (refreshProject relies on it).
+    this.readOrder.admit(readKey, ticket);
 
     const mergedBranches = replace
       ? branches

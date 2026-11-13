@@ -1092,6 +1092,120 @@ describe('setBranchesByProject', () => {
     expect(store.branchesByProject.get('p1')!.map((b) => b.id)).toEqual(['b2']);
   });
 
+  it('does not report a refresh applied when a set-aside event refetch answers ahead of it', async () => {
+    const store = await importStore();
+    listBranchesForProject.mockResolvedValue(
+      swr([branch(), branch({ id: 'b2', branchName: 'other' })])
+    );
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    const ids = () => store.branchesByProject.get('p1')!.map((b) => b.id);
+
+    const refreshRead = deferred<SwrResult<Branch[]>>();
+    const eventRead = deferred<SwrResult<Branch[]>>();
+    const backgroundRead = deferred<SwrResult<Branch[]>>();
+    const again = deferred<SwrResult<Branch[]>>();
+    listBranchesForProject
+      .mockReturnValueOnce(refreshRead.promise)
+      .mockReturnValueOnce(eventRead.promise)
+      .mockReturnValueOnce(backgroundRead.promise)
+      .mockReturnValueOnce(again.promise);
+    const reads = listBranchesForProject.mock.calls.length;
+
+    // b1 has been deleted in the backend. The caller awaits the refresh, and
+    // the delete's own change event sends a refetch behind it.
+    const refresh = store.refreshProject('p1');
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(reads + 2));
+
+    // While both reads are out, a workspace status change lands on b2.
+    const [first, second] = store.branchesByProject.get('p1')!;
+    store.setBranchesByProject(
+      new Map(store.branchesByProject).set('p1', [
+        first,
+        { ...second, workspaceStatus: 'running' as const },
+      ])
+    );
+
+    // The event refetch, sent later, answers first. It is set aside for the
+    // status change and sends a read of its own in the background.
+    const afterDelete = [branch({ id: 'b2', branchName: 'other' })];
+    eventRead.resolve(swr(afterDelete));
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(reads + 3));
+    expect(ids()).toEqual(['b1', 'b2']);
+
+    // The refresh's own read lands next. No list sent after it has been
+    // applied, only set aside, so it is not refused: the deleted branch is
+    // still listed, and the refresh reads again without reporting a result.
+    refreshRead.resolve(swr(afterDelete));
+    expect(await settled(refresh)).toBe(false);
+    expect(ids()).toEqual(['b1', 'b2']);
+    expect(listBranchesForProject).toHaveBeenCalledTimes(reads + 4);
+
+    again.resolve(swr([branch({ id: 'b2', branchName: 'other', workspaceStatus: 'running' })]));
+    expect(await refresh).toBe(true);
+    expect(ids()).toEqual(['b2']);
+
+    // The background read was sent before the one just applied, so it is
+    // refused, and nothing further is read.
+    backgroundRead.resolve(swr([branch(), branch({ id: 'b2', branchName: 'other' })]));
+    await tick();
+    expect(ids()).toEqual(['b2']);
+    expect(listBranchesForProject).toHaveBeenCalledTimes(reads + 4);
+  });
+
+  it('reports a refresh applied, with no further read, once a list sent after it has been applied', async () => {
+    const store = await importStore();
+    listBranchesForProject.mockResolvedValue(
+      swr([branch(), branch({ id: 'b2', branchName: 'other' })])
+    );
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    const ids = () => store.branchesByProject.get('p1')!.map((b) => b.id);
+
+    const refreshRead = deferred<SwrResult<Branch[]>>();
+    const eventRead = deferred<SwrResult<Branch[]>>();
+    const backgroundRead = deferred<SwrResult<Branch[]>>();
+    listBranchesForProject
+      .mockReturnValueOnce(refreshRead.promise)
+      .mockReturnValueOnce(eventRead.promise)
+      .mockReturnValueOnce(backgroundRead.promise);
+    const reads = listBranchesForProject.mock.calls.length;
+
+    // The same start: a refresh, an event refetch behind it, then a local
+    // write, and the event refetch set aside.
+    const refresh = store.refreshProject('p1');
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(reads + 2));
+    const [first, second] = store.branchesByProject.get('p1')!;
+    store.setBranchesByProject(
+      new Map(store.branchesByProject).set('p1', [
+        first,
+        { ...second, workspaceStatus: 'running' as const },
+      ])
+    );
+    const afterDelete = [branch({ id: 'b2', branchName: 'other' })];
+    eventRead.resolve(swr(afterDelete));
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(reads + 3));
+
+    // This time the background read, sent after the write, lands and is
+    // applied while the refresh's read is still out.
+    backgroundRead.resolve(
+      swr([branch({ id: 'b2', branchName: 'other', workspaceStatus: 'running' })])
+    );
+    await vi.waitFor(() => expect(ids()).toEqual(['b2']));
+
+    // The refresh's read is refused, and here the refusal is true: a list
+    // sent after it is what the store shows. It resolves without another read.
+    refreshRead.resolve(swr(afterDelete));
+    expect(await refresh).toBe(true);
+    expect(ids()).toEqual(['b2']);
+    await tick();
+    expect(listBranchesForProject).toHaveBeenCalledTimes(reads + 3);
+  });
+
   it('keeps reading while local writes keep landing under the refresh’s reads', async () => {
     const store = await importStore();
     await store.ensureLoaded();

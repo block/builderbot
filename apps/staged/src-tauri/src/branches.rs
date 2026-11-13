@@ -1120,6 +1120,117 @@ fn create_worktree_with_fallback(
     }
 }
 
+/// What [`create_worktree_on_new_branch`] ended up with.
+struct NewBranchWorktree {
+    path: PathBuf,
+    /// The worktree is one another process made for this project while the
+    /// call was running: theirs to keep.
+    adopted_existing: bool,
+    /// The local branch was created by this call (or is the one its failed
+    /// `worktree add -b` left behind).
+    created_branch: bool,
+}
+
+/// How many times [`create_worktree_on_new_branch`] moves to another local
+/// name because another project took the one it was about to create.
+const NEW_BRANCH_NAME_ATTEMPTS: usize = 3;
+
+/// Create a worktree on a new local branch `local_branch_name`, started at
+/// `start_point`. The caller found the name free before calling.
+///
+/// The name can be taken between that lookup and the attempt: worktree setup
+/// is serialized per branch row, and two projects that ask for the same
+/// branch of one clone are two rows. When the other project's setup wins,
+/// its worktree holds the name, as a stale worktree found up front would,
+/// and the answer is the same: a unique local name. `local_branch_name` is
+/// updated to it, and `requested_branch` stays the branch on origin.
+fn create_worktree_on_new_branch(
+    repo_path: &Path,
+    requested_branch: &str,
+    local_branch_name: &mut String,
+    start_point: &str,
+    desired_worktree_path: &Path,
+    project_root: Option<&Path>,
+) -> Result<NewBranchWorktree, String> {
+    let mut attempt = 1;
+    loop {
+        let create_err = match create_worktree_with_fallback(
+            repo_path,
+            local_branch_name,
+            start_point,
+            desired_worktree_path,
+            project_root,
+        ) {
+            Ok(path) => {
+                return Ok(NewBranchWorktree {
+                    path,
+                    adopted_existing: false,
+                    created_branch: true,
+                })
+            }
+            Err(create_err) => create_err,
+        };
+
+        match find_existing_worktree_for_branch(repo_path, local_branch_name, project_root)? {
+            ExistingWorktree::Found(path) => {
+                log::warn!(
+                    "Reusing existing worktree '{}' for branch '{}' after create failure",
+                    path.display(),
+                    local_branch_name
+                );
+                // Another process created it between the lookup above
+                // and the attempt: theirs to keep.
+                return Ok(NewBranchWorktree {
+                    path,
+                    adopted_existing: true,
+                    created_branch: false,
+                });
+            }
+            ExistingWorktree::Stale if attempt < NEW_BRANCH_NAME_ATTEMPTS => {
+                // Another project's setup created the branch and checked it
+                // out while this call ran. Retrying with that branch can
+                // only fail: git checks a branch out in one worktree.
+                let unique = unique_branch_name(repo_path, requested_branch)?;
+                log::info!(
+                    "Branch '{local_branch_name}' was checked out by another project during \
+                     setup; using '{unique}' instead"
+                );
+                *local_branch_name = unique;
+                attempt += 1;
+            }
+            ExistingWorktree::Stale => return Err(create_err),
+            ExistingWorktree::None => {
+                if !git::branch_exists(repo_path, local_branch_name).map_err(|e| e.to_string())? {
+                    return Err(create_err);
+                }
+                log::warn!(
+                    "Branch '{}' already exists after create attempt; retrying with existing branch",
+                    local_branch_name
+                );
+                // This arm is only reached for a name that did not exist
+                // when the caller looked (its `branch_exists` check was
+                // false, or `unique_branch_name` had just found it free),
+                // so the branch is the one `worktree add -b` left behind
+                // when it failed after creating it. It is Staged's to point
+                // at origin/<requested> and to delete on a later failure,
+                // the same as when the first attempt succeeds.
+                let path = create_worktree_for_existing_branch_with_fallback(
+                    repo_path,
+                    local_branch_name,
+                    desired_worktree_path,
+                    project_root,
+                )
+                .map_err(|e| e.to_string())?;
+                return Ok(NewBranchWorktree {
+                    path,
+                    adopted_existing: false,
+                    created_branch: true,
+                });
+            }
+        }
+    }
+}
+
 fn local_base_ref_for_worktree(repo_path: &Path, base_branch: &str) -> Option<String> {
     let base_ref = git::origin_ref_for_branch(base_branch);
     git::resolve_ref(repo_path, &base_ref).ok()?;
@@ -1685,59 +1796,17 @@ pub(crate) fn create_and_link_worktree<R: tauri::Runtime>(
         } else {
             &branch.base_branch
         };
-        match create_worktree_with_fallback(
+        let created = create_worktree_on_new_branch(
             repo_path,
-            &local_branch_name,
+            requested_branch,
+            &mut local_branch_name,
             start_point,
             desired_worktree_path,
             project_root_ref,
-        ) {
-            Ok(path) => {
-                created_branch = true;
-                path
-            }
-            Err(create_err) => {
-                if let ExistingWorktree::Found(path) = find_existing_worktree_for_branch(
-                    repo_path,
-                    &local_branch_name,
-                    project_root_ref,
-                )? {
-                    log::warn!(
-                        "Reusing existing worktree '{}' for branch '{}' after create failure",
-                        path.display(),
-                        local_branch_name
-                    );
-                    // Another process created it between the lookup above
-                    // and the attempt: theirs to keep.
-                    adopted_existing = true;
-                    path
-                } else if git::branch_exists(repo_path, &local_branch_name)
-                    .map_err(|e| e.to_string())?
-                {
-                    log::warn!(
-                        "Branch '{}' already exists after create attempt; retrying with existing branch",
-                        local_branch_name
-                    );
-                    // This arm is only reached for a name that did not exist
-                    // when this call started (the `branch_exists` check above
-                    // was false, or `unique_branch_name` had just found it
-                    // free), so the branch is the one `worktree add -b` left
-                    // behind when it failed after creating it. It is Staged's
-                    // to point at origin/<requested> and to delete on a later
-                    // failure, the same as when the first attempt succeeds.
-                    created_branch = true;
-                    create_worktree_for_existing_branch_with_fallback(
-                        repo_path,
-                        &local_branch_name,
-                        desired_worktree_path,
-                        project_root_ref,
-                    )
-                    .map_err(|e| e.to_string())?
-                } else {
-                    return Err(create_err);
-                }
-            }
-        }
+        )?;
+        adopted_existing = created.adopted_existing;
+        created_branch = created.created_branch;
+        created.path
     };
 
     // Git's upstream tracking is what every push, pull, rebase and
@@ -4804,6 +4873,69 @@ mod upstream_tracking_tests {
             unique_branch_name(clone.path(), "feature-x").unwrap(),
             "feature-x-3"
         );
+    }
+
+    /// Found live: two projects created seconds apart on the same pull
+    /// request branch of one clone. Each setup looked the name up before the
+    /// other had created it, so the loser reached `worktree add -b` with a
+    /// name the winner's worktree now held, retried with "the existing
+    /// branch", and failed for good. This is the loser's state: the caller
+    /// saw the name free, and another project's worktree holds it.
+    #[test]
+    fn a_name_another_project_takes_during_setup_is_deduplicated() {
+        let (_origin, clone, _other_project) = clone_with_stale_feature_x();
+        let project_root = TempDir::new("project-root");
+        let mut local_branch_name = "feature-x".to_string();
+
+        let created = create_worktree_on_new_branch(
+            clone.path(),
+            "feature-x",
+            &mut local_branch_name,
+            "origin/feature-x",
+            &project_root.path().join("feature-x"),
+            Some(project_root.path()),
+        )
+        .unwrap();
+
+        assert_eq!(local_branch_name, "feature-x-2");
+        assert!(created.created_branch);
+        assert!(!created.adopted_existing);
+        assert_eq!(
+            git(&created.path, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-x-2"
+        );
+        assert_eq!(
+            git(&created.path, &["rev-parse", "HEAD"]),
+            git(clone.path(), &["rev-parse", "origin/feature-x"])
+        );
+        // The other project's checkout is untouched.
+        assert!(matches!(
+            find_existing_worktree_for_branch(clone.path(), "feature-x", Some(project_root.path())),
+            Ok(ExistingWorktree::Stale)
+        ));
+    }
+
+    /// The ordinary case is unchanged: a name nobody holds is created as
+    /// asked, on the first attempt.
+    #[test]
+    fn a_name_nobody_holds_is_created_as_asked() {
+        let (_origin, clone, _other_project) = clone_with_stale_feature_x();
+        let project_root = TempDir::new("project-root");
+        let mut local_branch_name = "feature-y".to_string();
+
+        let created = create_worktree_on_new_branch(
+            clone.path(),
+            "feature-y",
+            &mut local_branch_name,
+            "origin/main",
+            &project_root.path().join("feature-y"),
+            Some(project_root.path()),
+        )
+        .unwrap();
+
+        assert_eq!(local_branch_name, "feature-y");
+        assert!(created.created_branch);
+        assert!(!created.adopted_existing);
     }
 
     #[test]

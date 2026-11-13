@@ -297,7 +297,8 @@ pub(crate) fn stagedctl_env(lease: Option<&SessionLease>) -> Vec<(String, String
 }
 
 /// Mint a class A credential for a session this instance is starting: a
-/// read-write grant confined to the session's project, written to
+/// read-write grant scoped to the session's project, which also reaches the
+/// projects the session created (see `web_server::control_scope`), written to
 /// `~/.staged/control/<pid>/sessions/<session_id>-<epoch>.json` for
 /// `STAGEDCTL_LOCK`.
 /// `None` when the control server is not up or the grants registry is not

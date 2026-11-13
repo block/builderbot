@@ -19,7 +19,9 @@ pub(crate) struct FakeHost {
     pull_requests: HashMap<(String, u64), PullRequest>,
     pub(crate) parents: HashMap<String, String>,
     parent_error: Option<String>,
-    pub(crate) branch_pull_requests: HashMap<(String, String), PullRequest>,
+    /// Open pull requests by `(repo, head branch name)`, in the order
+    /// GitHub lists them. Forks that reuse the name are in the same list.
+    pub(crate) branch_pull_requests: HashMap<(String, String), Vec<PullRequest>>,
     branch_pull_request_error: Option<String>,
     default_branches: HashMap<String, String>,
     calls: Mutex<Vec<String>>,
@@ -116,18 +118,19 @@ impl RepoHost for FakeHost {
         }
     }
 
-    fn open_pull_request_for_branch(
+    fn open_pull_requests_for_branch(
         &self,
         github_repo: &str,
         branch_name: &str,
-    ) -> Result<Option<PullRequest>, String> {
+    ) -> Result<Vec<PullRequest>, String> {
         self.record(format!("branch-pr {github_repo}@{branch_name}"));
         match &self.branch_pull_request_error {
             Some(e) => Err(e.clone()),
             None => Ok(self
                 .branch_pull_requests
                 .get(&(github_repo.to_string(), branch_name.to_string()))
-                .cloned()),
+                .cloned()
+                .unwrap_or_default()),
         }
     }
 
@@ -660,7 +663,7 @@ fn a_branch_with_an_open_pull_request_adopts_it() {
     let mut host = FakeHost::with_widgets();
     host.branch_pull_requests.insert(
         ("acme/widgets".to_string(), "fix-login".to_string()),
-        pull_request(12, "fix-login", Some("acme/widgets")),
+        vec![pull_request(12, "fix-login", Some("acme/widgets"))],
     );
 
     let resolved = resolve_repo_spec(&host, branch_request(" fix-login ")).unwrap();
@@ -678,6 +681,62 @@ fn a_branch_with_an_open_pull_request_adopts_it() {
         }
     );
     assert!(host.asked("branch-pr acme/widgets@fix-login"));
+}
+
+/// `gh pr list --head <name>` matches the name alone. On a public repository
+/// anyone can open a pull request from a fork's branch called `test`, and
+/// the newest of those is listed first. Found live: `--branch test` on
+/// `octocat/Hello-World` checked out a stranger's fork instead of the
+/// repository's own `test` branch, which has an open pull request of its own.
+#[test]
+fn a_branch_adopts_its_own_pull_request_and_not_a_forks_of_the_same_name() {
+    let mut host = FakeHost::with_widgets();
+    host.branch_pull_requests.insert(
+        ("acme/widgets".to_string(), "test".to_string()),
+        vec![
+            pull_request(4518, "test", Some("stranger/widgets")),
+            pull_request(1051, "test", None),
+            // GitHub's spelling of the repository, in another case.
+            pull_request(504, "test", Some("Acme/Widgets")),
+        ],
+    );
+
+    let resolved = resolve_repo_spec(&host, branch_request("test")).unwrap();
+
+    assert_eq!(resolved.branch_name.as_deref(), Some("test"));
+    assert_eq!(resolved.pull_request, Some(resolved_pr(504)));
+    assert_eq!(resolved.base.as_deref(), Some("develop"));
+    // The head is the repository itself, so no head repo is recorded.
+    assert_eq!(resolved.head_repo, None);
+}
+
+#[test]
+fn a_branch_whose_name_only_forks_have_pull_requests_for_adopts_none() {
+    let mut host = FakeHost::with_widgets();
+    host.branch_pull_requests.insert(
+        ("acme/widgets".to_string(), "test".to_string()),
+        vec![
+            pull_request(4518, "test", Some("stranger/widgets")),
+            // A deleted fork: GitHub no longer knows the head repository.
+            pull_request(1051, "test", None),
+        ],
+    );
+
+    let resolved = resolve_repo_spec(&host, branch_request("test")).unwrap();
+
+    // The repository's own branch, from the default branch like any other
+    // branch with no pull request: no fork, no number, no description.
+    assert_eq!(
+        resolved,
+        ResolvedRepoSpec {
+            github_repo: "acme/widgets".to_string(),
+            subpath: None,
+            branch_name: Some("test".to_string()),
+            base: Some("main".to_string()),
+            head_repo: None,
+            pull_request: None,
+        }
+    );
 }
 
 #[test]
@@ -747,7 +806,7 @@ fn an_explicit_base_wins_over_a_pull_requests_base() {
     );
     host.branch_pull_requests.insert(
         ("acme/widgets".to_string(), "fix-login".to_string()),
-        pull_request(12, "fix-login", Some("acme/widgets")),
+        vec![pull_request(12, "fix-login", Some("acme/widgets"))],
     );
     let base = Some("release/2".to_string());
 

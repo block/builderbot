@@ -499,7 +499,7 @@ fn a_branch_with_an_open_pull_request_gets_the_note_too() {
     let mut host = FakeHost::with_widgets();
     host.branch_pull_requests.insert(
         ("acme/widgets".to_string(), "fix-login".to_string()),
-        pull_request(7, "fix-login", None),
+        vec![pull_request(7, "fix-login", Some("acme/widgets"))],
     );
 
     let request = create_project_request(

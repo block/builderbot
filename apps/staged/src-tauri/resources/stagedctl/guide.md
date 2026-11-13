@@ -7,8 +7,9 @@ by Staged receive everything needed to use it with zero configuration:
 - `$STAGEDCTL_LOCK` points at this session's credential file (under
   `~/.staged/control/<pid>/sessions/`), so the CLI always talks to the
   instance that spawned the session, even when several are running, and
-  authenticates as this session. The credential is confined to the
-  session's own project and is revoked when the session ends.
+  authenticates as this session. The credential covers the session's own
+  project and the projects the session created with
+  `stagedctl project create`, and is revoked when the session ends.
 
 Outside a Staged-spawned session (a terminal, a script, an agent the user
 started themselves) there is no `$STAGEDCTL_LOCK`. Run
@@ -43,8 +44,13 @@ at that Settings action.
 
 ## The boundary for spawned sessions
 
-A spawned session is issued exactly one credential: its own, scoped to its
-project. That is the credential to use, as is. Do not try to obtain wider
+A spawned session is issued exactly one credential: its own. It covers the
+session's own project and the projects the session created, and nothing
+else: every other project is refused (exit 4, `scope_denied`) or reads as
+`not_found`, and `stagedctl project list` shows only what the credential
+covers. A later run of the same session, after a follow-up message or a
+resume, gets a fresh credential that still reaches what an earlier run
+created. That is the credential to use, as is. Do not try to obtain wider
 access from inside a session — not by running `stagedctl connect`, not by
 unsetting or emptying `$STAGEDCTL_LOCK` to reach the instance file, and not
 by using a connected-app grant the user approved for something else.
@@ -56,9 +62,9 @@ calling process is traceable to a running session's agent process. Be
 clear about what that is: processes running as the same user are not a hard
 security boundary, so this is a strong default and an honest attribution,
 not a sandbox. The rule stands regardless of whether a given attempt would
-be caught. If a task genuinely needs access beyond this session's project,
-say so in your output and let the user run `stagedctl connect` from their
-own terminal.
+be caught. If a task genuinely needs access beyond this session's project
+and the projects it created, say so in your output and let the user run
+`stagedctl connect` from their own terminal.
 
 ## Discover, don't memorize
 
@@ -96,6 +102,36 @@ window switches in front of the user, who can switch back, and all it
 records is the project's read mark and which project was shown last. It
 is not available to a spawned session; see "Showing a project in the
 app" below.
+
+Creating a project and attaching a repo (`stagedctl project create`,
+`stagedctl project add-repo`) fit the invariant: the project and the repo
+show at once in the app, where the user can delete the project or remove
+the repo. Neither can be undone from the CLI. Both do more than write rows,
+on the user's machine and account:
+
+- A local repo is cloned under `~/.staged/repos` on first use, a worktree
+  is checked out for its branch, and the repo's setup actions run in that
+  worktree. All of it runs in the background after the command returns, so
+  a failure shows in the app and its log, not in the command's exit code.
+  `stagedctl project get` shows the repo as soon as the command returns and
+  its `worktree:` path once the checkout exists. A session started on the
+  repo before then is queued and starts when the worktree is ready.
+- `--location remote` provisions a Blox workspace for the first repo, and a
+  repo added to a remote project is cloned into its running workspace. This
+  needs `sq` on the machine (the command is refused without it) and an open
+  Staged window, and a workspace costs money while it runs.
+- `--pr` saves the pull request's description as a project note. So does
+  `--branch` when the repo has an open pull request from that branch.
+
+Create a project only when the task calls for one. The app checks the repo
+before it writes anything: it must exist on GitHub, a subpath must be a
+directory in it, and the root of a monorepo is refused unless
+`--allow-monorepo-root` is passed (prefer a subpath). A project name
+already in use is refused. One session may hold at most 10 created
+projects; the user frees a slot by deleting one in the app. A session may
+add a repo to its own project and to the projects it created. A connected
+app approved for one project can add repos to that project and cannot
+create projects.
 
 Tag assignments (`stagedctl project tag`, `stagedctl project untag`) fit the
 invariant: they show at once as the pills and chips in the project header,
@@ -149,7 +185,7 @@ Outside a session:
   Staged keeps a project's worktrees. From any other directory it exits 1
   (`not_in_workspace`) without looking for the app, and never starts it.
   A workspace whose project was deleted exits 1 (`not_found`), as does
-  one whose project a grant confined to another project does not reach.
+  one whose project a grant approved for another project does not reach.
 - `--no-launch` exits 3 instead of starting Staged when it is not
   running.
 - `staged [<project> | <directory>] [--no-launch]` is the same command,
@@ -185,7 +221,7 @@ connect --client <name>` once while Staged is running and approve the
 consent dialog; until then the command exits 4 (`authorization_required`).
 A read-only grant (`connect --read-only`) is refused (exit 4,
 `scope_denied`), because showing a project marks it read and records it
-as the last one shown. A grant confined to one project (`connect
+as the last one shown. A grant approved for one project (`connect
 --project`) opens that project only; any other reads `not_found`, because
 that grant does not list it.
 

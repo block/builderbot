@@ -1239,3 +1239,41 @@ fn no_help_says_a_session_is_confined_to_its_own_project() {
     }
     assert!(help.contains("projects the session created"), "{help}");
 }
+
+#[test]
+fn the_guide_describes_both_verbs_and_what_a_session_covers() {
+    // The guide ships with the app and is named in every session's prompt.
+    let guide = include_str!("../../../../resources/stagedctl/guide.md");
+    // One paragraph per line of thought, whatever the wrapping.
+    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // A session's credential covers its own project and the projects it
+    // created. A guide that calls it confined to one project would send an
+    // agent away from `project create`.
+    assert!(!flat.contains("confined"), "the guide still says confined");
+    assert!(
+        flat.contains("covers the session's own project and the projects the session created"),
+        "{flat}"
+    );
+
+    // Both verbs, under the safety invariant, with what they start.
+    for expected in [
+        "`stagedctl project create`",
+        "`stagedctl project add-repo`",
+        "the user can delete the project or remove the repo",
+        "cloned under `~/.staged/repos`",
+        "setup actions run",
+        "provisions a Blox workspace",
+        "--allow-monorepo-root",
+    ] {
+        assert!(flat.contains(expected), "the guide lacks {expected:?}");
+    }
+
+    // The limit, as the app has it.
+    let control = include_str!("../../../../src/project_commands/control.rs");
+    assert!(
+        control.contains("pub(crate) const CREATED_PROJECT_LIMIT: usize = 10;"),
+        "the creation limit changed; update the guide"
+    );
+    assert!(flat.contains("at most 10 created projects"), "{flat}");
+}

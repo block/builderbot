@@ -40,8 +40,9 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
     // The credential verbs come before the credential lookup: `connect`
     // is how a grant is obtained, `disconnect` must work with a grant the
     // app no longer accepts. Neither is available to a spawned session,
-    // whose credential is its own and confined; the app refuses the same
-    // way, but the answer is known here without a round trip.
+    // whose credential is its own and scoped to its project and the
+    // projects it created; the app refuses the same way, but the answer is
+    // known here without a round trip.
     match &cli.command {
         Noun::Connect { .. } | Noun::Disconnect { .. } => {
             if let Some(path) = session_credential_in_use(

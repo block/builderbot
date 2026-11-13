@@ -730,6 +730,35 @@ pub fn get_pr_for_branch_for_repo(
     Ok(items.into_iter().next().map(Into::into))
 }
 
+/// The open PRs whose head branch is named `branch_name`, newest first.
+///
+/// `--head` filters on the head ref name alone, so PRs opened from forks of
+/// `github_repo` under the same branch name are included, and on a popular
+/// name they outnumber the branch's own. Callers that mean the branch in
+/// `github_repo` compare [`PullRequest::head_repo`]. The limit is generous
+/// for the same reason [`PrListState::Open`]'s is.
+pub fn list_open_prs_for_branch_for_repo(
+    github_repo: &str,
+    branch_name: &str,
+) -> Result<Vec<PullRequest>, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "list",
+        "-R",
+        github_repo,
+        "--head",
+        branch_name,
+        "--state=open",
+        "--limit=50",
+        "--json=number,title,body,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+    ])?;
+
+    let items: Vec<GhPrListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
 /// A pull request whose head branch has a given name, in whatever state it
 /// is in. Narrower than [`PullRequest`]: only the fields needed to decide
 /// whether the PR belongs to a local branch.

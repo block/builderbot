@@ -2304,8 +2304,9 @@ pub(crate) mod tests {
         let client = discover_and_connect(Some(&session_file), None, Some(dir.path())).unwrap();
         assert_eq!(client.bearer(), Some(token.as_str()));
         assert_eq!(seen.lock().unwrap().len(), 1, "ping only; no challenge");
-        // A session lease is confined to its project; the client knows
-        // without asking, and knows it is a lease and not a grant.
+        // A session lease is confined to its project (and reaches what the
+        // session created); the client knows without asking, and knows it
+        // is a lease and not a grant.
         assert_eq!(client.scope, CredentialScope::Session);
     }
 

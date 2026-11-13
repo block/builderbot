@@ -42,13 +42,14 @@ pub(crate) trait RepoHost: Sync {
     /// fork.
     fn parent_repo(&self, github_repo: &str) -> Result<Option<String>, String>;
 
-    /// The open pull request whose head branch has this name, if there is
-    /// one.
-    fn open_pull_request_for_branch(
+    /// Every open pull request whose head branch has this name. GitHub
+    /// matches the name alone, so the list includes pull requests opened
+    /// from forks that reuse it.
+    fn open_pull_requests_for_branch(
         &self,
         github_repo: &str,
         branch_name: &str,
-    ) -> Result<Option<PullRequest>, String>;
+    ) -> Result<Vec<PullRequest>, String>;
 
     /// The repository's default branch, without an `origin/` prefix.
     fn default_branch(&self, github_repo: &str) -> Result<String, String>;
@@ -80,12 +81,12 @@ impl RepoHost for GitHubCli {
         git::github::get_parent_repo(github_repo).map_err(gh_error)
     }
 
-    fn open_pull_request_for_branch(
+    fn open_pull_requests_for_branch(
         &self,
         github_repo: &str,
         branch_name: &str,
-    ) -> Result<Option<PullRequest>, String> {
-        git::github::get_pr_for_branch_for_repo(github_repo, branch_name).map_err(gh_error)
+    ) -> Result<Vec<PullRequest>, String> {
+        git::github::list_open_prs_for_branch_for_repo(github_repo, branch_name).map_err(gh_error)
     }
 
     fn default_branch(&self, github_repo: &str) -> Result<String, String> {
@@ -147,7 +148,7 @@ pub(crate) struct ResolvedRepoSpec {
     /// `github_repo`.
     pub head_repo: Option<String>,
     /// The pull request the branch belongs to: the one asked for by number,
-    /// or the open one found for the caller's branch.
+    /// or the open one whose head is the caller's branch of `github_repo`.
     pub pull_request: Option<ResolvedPullRequest>,
 }
 
@@ -176,7 +177,9 @@ pub(crate) struct ResolvedPullRequest {
 ///   becomes the repository (as `BranchPicker` does for a pasted fork URL).
 ///   A pull request that cannot be found is an error.
 /// - **Branch.** A branch name gets a best-effort lookup of its open pull
-///   request, which is then treated like one asked for by number.
+///   request, which is then treated like one asked for by number. Only a
+///   pull request whose head is that branch of the repository counts: one
+///   opened from a fork that reuses the name is somebody else's branch.
 /// - **Base.** The caller's, else the pull request's, else the repository's
 ///   default branch.
 ///
@@ -248,7 +251,7 @@ pub(crate) fn resolve_repo_spec(
             .then(|| scope.spawn(move || host.monorepo_module_count(repo)));
         let branch_pr = match (&numbered_pr, branch_name.as_deref()) {
             (None, Some(branch)) => {
-                Some(scope.spawn(move || host.open_pull_request_for_branch(repo, branch)))
+                Some(scope.spawn(move || host.open_pull_requests_for_branch(repo, branch)))
             }
             _ => None,
         };
@@ -284,8 +287,18 @@ pub(crate) fn resolve_repo_spec(
         _ => {}
     }
 
+    // The caller named a branch of this repository. GitHub's lookup goes by
+    // the name alone, and on a public repository anyone can open a pull
+    // request from a fork's branch of the same name. Adopting that one would
+    // check out a stranger's code under the name the caller asked for, so
+    // only a head in this repository counts. A head repository GitHub no
+    // longer knows was a fork.
     let pull_request = numbered_pr.or_else(|| match branch_pr? {
-        Ok(found) => found,
+        Ok(found) => found.into_iter().find(|pr| {
+            pr.head_repo
+                .as_deref()
+                .is_some_and(|head| head.eq_ignore_ascii_case(&github_repo))
+        }),
         Err(e) => {
             log::warn!("[repo_spec] pull request lookup for a branch of {github_repo} failed: {e}");
             None

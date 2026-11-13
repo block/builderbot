@@ -1,7 +1,8 @@
 //! Tests for the image-reference checks in `images.rs`: what counts as a
 //! reference, that the batched pass answers exactly what the per-image checks
-//! answer, and that the chat statements read the partial index from migration
-//! 0049 instead of scanning `session_messages`.
+//! answer, that the chat statements read the partial index from migration
+//! 0049 instead of scanning `session_messages`, and that a session's
+//! attachment lookup returns what its one-statement form returned.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -460,5 +461,239 @@ fn test_media_references_take_one_pass_however_many_ids_are_asked_about() {
         .unwrap()
         .unused("any"));
     assert!(f.store.media_embedded_in_notes(none()).unwrap().is_empty());
+    assert_eq!(take_reference_passes(), ReferencePasses::default());
+}
+
+/// A store holding one of every kind of row the session attachment lookup
+/// has to tell apart: linked to the session or not, an attachment's mime type
+/// or not, embedded by a branch note, a project note, both or neither.
+struct Attachments {
+    store: Store,
+    project: String,
+    session: String,
+    other_session: String,
+    /// What the lookup should return for `session`, in the order the rows
+    /// were inserted.
+    expected: Vec<String>,
+    /// What it should return for `other_session`.
+    other_expected: Vec<String>,
+    /// What it should return for the pending-session marker.
+    pending_expected: Vec<String>,
+}
+
+fn attachments() -> Attachments {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test/attachments");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let queued = Session::new_queued("work");
+    store.create_session(&queued).unwrap();
+    let other = running_session(&store);
+
+    // Ids are handed out high to low, so the order the rows are inserted in
+    // is the reverse of the order of their ids.
+    let next = std::cell::Cell::new(900u32);
+    let add = |session: Option<&str>, mime: &str| -> String {
+        let n = next.replace(next.get() - 1);
+        let mut image = Image::new(Some(&branch.id), &project.id, "file.bin", mime, 1, false);
+        image.id = format!("bbbbbbbb-0000-4000-8000-{n:012}");
+        image.session_id = session.map(str::to_owned);
+        store.create_image(&image).unwrap();
+        image.id
+    };
+    let mine = Some(queued.id.as_str());
+    let theirs = Some(other.id.as_str());
+    let embed = |id: &str| format!("![shot](staged-media://{id}.png)");
+
+    // Unreferenced attachments: returned.
+    let plain = add(mine, "image/png");
+    let pdf = add(mine, "application/pdf");
+    // `LIKE` ignores ASCII case; `=` does not.
+    let upper_image = add(mine, "IMAGE/JPEG");
+    add(mine, "application/PDF");
+    // Referenced by a branch note, a project note, or both: dropped.
+    let in_note = add(mine, "image/jpeg");
+    let in_project = add(mine, "image/png");
+    let in_both = add(mine, "image/webp");
+    let pdf_in_note = add(mine, "application/pdf");
+    // The conservative rule: a reference inside an example still counts, and
+    // so does one in a body that is not valid UTF-8.
+    let in_example = add(mine, "image/png");
+    let in_blob = add(mine, "image/png");
+    // Named in a note without the scheme, or with no extension: not embedded.
+    let mentioned = add(mine, "image/png");
+    let bare = add(mine, "image/png");
+    // An id that an embedded id is part of, or is part of an embedded id.
+    let longer = format!("{in_note}0");
+    let shorter = in_note[1..].to_string();
+    for id in [&longer, &shorter] {
+        let mut image = Image::new(None, &project.id, "file.bin", "image/png", 1, false);
+        image.id = id.clone();
+        image.session_id = Some(queued.id.clone());
+        store.create_image(&image).unwrap();
+    }
+    // Not an attachment's mime type, embedded or not: never returned.
+    add(mine, "video/mp4");
+    let video_in_note = add(mine, "video/quicktime");
+    add(mine, "text/plain");
+    add(mine, "image");
+    // Linked to another session, to none, or still pending.
+    let theirs_plain = add(theirs, "image/png");
+    let theirs_in_note = add(theirs, "image/png");
+    add(theirs, "video/mp4");
+    add(None, "image/png");
+    let pending = add(Some(PENDING_SESSION_ID), "image/png");
+    add(Some(NOTE_MEDIA_SESSION_ID), "video/mp4");
+
+    let notes = [
+        Note::new_standalone(
+            &branch.id,
+            "Owner",
+            &format!(
+                "{} {} {} {} {}\n\nsee {mentioned}.png and staged-media://{bare}",
+                embed(&in_note),
+                embed(&in_both),
+                embed(&pdf_in_note),
+                embed(&video_in_note),
+                embed(&theirs_in_note),
+            ),
+        ),
+        Note::new_standalone(
+            &branch.id,
+            "Example",
+            &format!("```md\n{}\n```", embed(&in_example)),
+        ),
+        Note::new_standalone(&branch.id, "Plain", "nothing embedded"),
+    ];
+    for note in &notes {
+        store.create_note(note).unwrap();
+    }
+    let blob_note = Note::new_standalone(&branch.id, "Blob", "placeholder");
+    store.create_note(&blob_note).unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        let mut body = vec![0xff, 0xfe];
+        body.extend_from_slice(embed(&in_blob).as_bytes());
+        conn.execute(
+            "UPDATE notes SET content = ?1 WHERE id = ?2",
+            params![body, blob_note.id],
+        )
+        .unwrap();
+    }
+    let project_note = ProjectNote::new(
+        &project.id,
+        "Plan",
+        &format!("{} {}", embed(&in_project), embed(&in_both)),
+    );
+    store.create_project_note(&project_note).unwrap();
+
+    // A chat message attaching a row is what makes it an attachment, and is
+    // no reason to leave it out: the lookup asks the notes, never the chat.
+    store
+        .add_session_message_with_images(
+            &queued.id,
+            MessageRole::User,
+            "three attachments",
+            &[plain.clone(), pdf.clone(), in_note.clone()],
+        )
+        .unwrap();
+
+    Attachments {
+        store,
+        project: project.id,
+        session: queued.id,
+        other_session: other.id,
+        expected: vec![plain, pdf, upper_image, mentioned, bare, longer, shorter],
+        other_expected: vec![theirs_plain],
+        pending_expected: vec![pending],
+    }
+}
+
+/// The lookup must return, for every session, exactly what its one-statement
+/// form returned, in the same order.
+#[test]
+fn test_session_attachments_match_the_per_image_query() {
+    let f = attachments();
+    for session_id in [
+        f.session.as_str(),
+        f.other_session.as_str(),
+        PENDING_SESSION_ID,
+        NOTE_MEDIA_SESSION_ID,
+        "no-such-session",
+        "",
+    ] {
+        assert_eq!(
+            f.store.get_image_ids_for_session(session_id).unwrap(),
+            f.store
+                .get_image_ids_for_session_per_image(session_id)
+                .unwrap(),
+            "session {session_id:?}"
+        );
+    }
+
+    // What the fixture is meant to exercise, spelled out, so the comparison
+    // cannot pass on a store where both forms return nothing.
+    let lookup = |session_id: &str| f.store.get_image_ids_for_session(session_id).unwrap();
+    assert_eq!(lookup(&f.session), f.expected);
+    assert_eq!(lookup(&f.other_session), f.other_expected);
+    assert_eq!(lookup(PENDING_SESSION_ID), f.pending_expected);
+    assert!(lookup(NOTE_MEDIA_SESSION_ID).is_empty());
+    assert!(lookup("no-such-session").is_empty());
+}
+
+/// The answer follows the notes: an attachment a note starts to embed drops
+/// out, and comes back when the note stops, in both forms alike.
+#[test]
+fn test_session_attachments_follow_the_notes_like_the_per_image_query() {
+    let f = attachments();
+    let both = |store: &Store| {
+        let ids = store.get_image_ids_for_session(&f.session).unwrap();
+        assert_eq!(
+            ids,
+            store
+                .get_image_ids_for_session_per_image(&f.session)
+                .unwrap()
+        );
+        ids
+    };
+    let embedded = f.expected[0].clone();
+    let note = ProjectNote::new(
+        &f.project,
+        "Later",
+        &format!("![later](staged-media://{embedded}.png)"),
+    );
+    f.store.create_project_note(&note).unwrap();
+    assert_eq!(both(&f.store), f.expected[1..]);
+
+    f.store.delete_project_note(&note.id).unwrap();
+    assert_eq!(both(&f.store), f.expected);
+}
+
+/// One pass over the note bodies for the whole set, none over the chat
+/// attachment lists, and no pass at all for a session with no attachment.
+#[test]
+fn test_session_attachments_take_one_note_pass_however_many_are_attached() {
+    let f = attachments();
+    take_reference_passes();
+
+    assert_eq!(
+        f.store.get_image_ids_for_session(&f.session).unwrap().len(),
+        f.expected.len()
+    );
+    assert_eq!(
+        take_reference_passes(),
+        ReferencePasses { notes: 1, chat: 0 }
+    );
+
+    // Only a video is linked to the note-media marker, and nothing to an
+    // unknown session: no attachment, so nothing to ask the notes about.
+    for session_id in [NOTE_MEDIA_SESSION_ID, "no-such-session"] {
+        assert!(f
+            .store
+            .get_image_ids_for_session(session_id)
+            .unwrap()
+            .is_empty());
+    }
     assert_eq!(take_reference_passes(), ReferencePasses::default());
 }

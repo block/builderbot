@@ -58,6 +58,26 @@ pub(super) const CHAT_REFERENCE_SQL: &str = "SELECT EXISTS(
        SELECT 1 FROM queued_session_messages
         WHERE image_ids IS NOT NULL AND instr(image_ids, ?1) > 0)";
 
+/// The images and PDFs linked to session `?1`, before the ones a note embeds
+/// are dropped ([`Store::get_image_ids_for_session`]). Videos and other note
+/// media are linked to a session too and are never chat attachments.
+///
+/// Nothing indexes `images.session_id`, so this reads the `images` table: one
+/// row per stored file, small beside the note bodies it used to be joined to.
+const SESSION_ATTACHMENTS_SQL: &str = "SELECT id FROM images
+      WHERE session_id = ?1
+        AND (mime_type LIKE 'image/%' OR mime_type = 'application/pdf')";
+
+/// [`Store::get_image_ids_for_session`] as one statement, with the note
+/// check as two correlated scans of the note tables for each attachment:
+/// the query it ran before the note pass, kept for the test that holds the
+/// two to the same answer.
+#[cfg(test)]
+const SESSION_ATTACHMENTS_PER_IMAGE_SQL: &str = "SELECT id FROM images WHERE session_id = ?1
+             AND (mime_type LIKE 'image/%' OR mime_type = 'application/pdf')
+             AND NOT EXISTS (SELECT 1 FROM notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)
+             AND NOT EXISTS (SELECT 1 FROM project_notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)";
+
 /// What still uses each of a set of candidate media ids, read in one pass
 /// over the note bodies and the chat attachment lists instead of one pass per
 /// id ([`Store::media_references`]).
@@ -239,7 +259,8 @@ impl Store {
 }
 
 /// The checks one id at a time, as every caller ran them before
-/// [`Store::media_references`] answered for a whole set in one pass. Nothing
+/// [`Store::media_references`] answered for a whole set in one pass, and the
+/// session attachment lookup as it ran before it used that pass. Nothing
 /// outside the tests calls these now; they stay as the definition the batched
 /// pass is held to (`images_tests.rs`).
 #[cfg(test)]
@@ -290,6 +311,19 @@ impl Store {
         let needle = format!("\"{id}\"");
         conn.query_row(CHAT_REFERENCE_SQL, params![needle], |row| row.get(0))
             .map_err(Into::into)
+    }
+
+    /// [`Self::get_image_ids_for_session`] as it ran before the note pass.
+    pub(crate) fn get_image_ids_for_session_per_image(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(SESSION_ATTACHMENTS_PER_IMAGE_SQL)?;
+        let ids = stmt
+            .query_map(params![session_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
     }
 }
 
@@ -520,15 +554,23 @@ impl Store {
     /// Return chat attachments linked to a session, excluding note-owned media
     /// so restarted sessions don't send videos as ACP image input. PDFs are
     /// chat attachments too; the runner renders their pages for the prompt.
+    ///
+    /// The ids come back in the order the table yields them. Whatever a note
+    /// embeds is dropped by one pass over the note bodies for the whole set,
+    /// the note half of [`Self::media_references`], under the same lock,
+    /// rather than by a scan of both note tables for each attachment. A
+    /// session with nothing attached makes no pass.
     pub fn get_image_ids_for_session(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1
-             AND (mime_type LIKE 'image/%' OR mime_type = 'application/pdf')
-             AND NOT EXISTS (SELECT 1 FROM notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)
-             AND NOT EXISTS (SELECT 1 FROM project_notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)")?;
-        let ids = stmt
+        let mut stmt = conn.prepare(SESSION_ATTACHMENTS_SQL)?;
+        let mut ids = stmt
             .query_map(params![session_id], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
+        let embedded = {
+            let candidates: Vec<&str> = ids.iter().map(String::as_str).collect();
+            Self::embedded_in_notes(&conn, &candidates, None)?
+        };
+        ids.retain(|id| !embedded.contains(id));
         Ok(ids)
     }
 

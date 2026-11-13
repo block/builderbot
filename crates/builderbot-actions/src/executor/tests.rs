@@ -1,4 +1,4 @@
-//! Tests for how the executor buffers, bounds and retains output.
+//! Tests for how the executor buffers, bounds, retains and delivers output.
 //!
 //! Most of them run a short `/bin/sh` script through `execute_remote`, which
 //! spawns the program directly on pipes: unlike the local path it does not
@@ -427,11 +427,7 @@ async fn reads_of_one_stream_are_coalesced() {
         let Finished { id, outcome, .. } = run_sh_to_finish(&executor, script).await;
 
         // Many reads were streamed, and they are buffered as a single block.
-        assert!(
-            outcome.streamed.len() > 10,
-            "{} reads",
-            outcome.streamed.len()
-        );
+        assert_eq!(outcome.streamed_text(), written);
         let chunks = executor.get_buffered_output(&id).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].stream, stream);
@@ -443,6 +439,14 @@ async fn reads_of_one_stream_are_coalesced() {
 async fn a_character_split_across_reads_is_decoded_whole() {
     let (listener, events) = recorder();
     let buffer = OutputBuffer::shared(MAX_OUTPUT_BYTES);
+    let output = output_emitter::spawn(
+        "exec".to_string(),
+        listener,
+        buffer.clone(),
+        Handle::current(),
+        WAIT,
+        EMIT_MAX_BYTES,
+    );
     let (reader_done, readers_done) = mpsc::channel();
     // "café €" with both multi-byte characters cut by a read boundary.
     let reads = vec![
@@ -455,13 +459,11 @@ async fn a_character_split_across_reads_is_decoded_whole() {
     spawn_stream_reader(
         ScriptedReads(reads.into_iter()),
         "stdout",
-        "exec".to_string(),
-        listener,
-        buffer.clone(),
-        Handle::current(),
+        output.clone(),
         reader_done,
     );
-    assert!(wait_for_readers(&readers_done, WAIT));
+    assert!(wait_for_readers(&readers_done, Instant::now() + WAIT));
+    assert!(output.flush_by(Instant::now() + WAIT));
 
     let streamed: Vec<String> = events
         .try_iter()
@@ -470,8 +472,8 @@ async fn a_character_split_across_reads_is_decoded_whole() {
             other => panic!("unexpected event {other:?}"),
         })
         .collect();
-    // Each character is delivered once, with the read that completes it.
-    assert_eq!(streamed, vec!["caf", "é ", "€"]);
+    // Each character is delivered once, and whole.
+    assert_eq!(streamed, vec!["café €"]);
     let chunks = buffer.lock().unwrap().snapshot();
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].chunk, "café €");
@@ -574,4 +576,126 @@ async fn discarding_a_finished_execution_frees_its_output_now() {
     assert!(executor.discard_output(&id));
     assert_eq!(buffered_text(&executor, &id), None);
     assert!(!executor.discard_output("no-such-execution"));
+}
+
+// =============================================================================
+// Item 4: output is delivered to the listener in batches
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_is_delivered_in_batches_instead_of_read_by_read() {
+    // The interval never elapses in this test, and the output is smaller than
+    // a batch may be, so nothing delivers it before the execution ends.
+    let executor = ActionExecutor::with_limits(Limits {
+        emit_interval: WAIT,
+        ..patient_limits()
+    });
+    let started = Instant::now();
+    let Finished {
+        events, outcome, ..
+    } = run_sh_to_finish(&executor, "seq 1 3000").await;
+
+    outcome.assert_completed();
+    // Dozens of reads reach the listener as one event. It arrives ahead of
+    // the terminal status, which does not wait out the interval for it, and
+    // nothing follows that status.
+    let written: String = (1..=3_000).map(|n| format!("{n}\n")).collect();
+    assert_eq!(outcome.streamed, vec![written]);
+    assert!(started.elapsed() < WAIT);
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_batch_is_delivered_without_waiting_for_the_interval() {
+    let emit_max_bytes = 4096;
+    let executor = ActionExecutor::with_limits(Limits {
+        emit_interval: WAIT,
+        emit_max_bytes,
+        ..patient_limits()
+    });
+    let Finished { outcome, .. } = run_sh_to_finish(&executor, "seq 1 20000").await;
+
+    outcome.assert_completed();
+    let written: String = (1..=20_000).map(|n| format!("{n}\n")).collect();
+    assert_eq!(outcome.streamed_text(), written);
+    // Every batch but the last went out on reaching the size, so it is at
+    // least that large and overshoots by less than the one read that filled
+    // it.
+    let (last, full) = outcome.streamed.split_last().unwrap();
+    let largest_read = 1024;
+    assert!(full.len() >= 20, "{} batches", full.len());
+    for batch in full {
+        assert!(
+            (emit_max_bytes..emit_max_bytes + largest_read).contains(&batch.len()),
+            "a batch of {} bytes",
+            batch.len()
+        );
+    }
+    assert!(last.len() < emit_max_bytes + largest_read);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_reaches_the_listener_while_the_action_is_still_running() {
+    // The production interval and batch size.
+    let executor = ActionExecutor::with_limits(patient_limits());
+    let gate = Gate::closed();
+    let (id, events) = run_sh_until_output(
+        &executor,
+        &format!("printf start; {}; printf end", gate.wait()),
+        "start",
+    )
+    .await;
+
+    // The script is waiting at its gate and the batch is far from full: the
+    // interval alone delivers it.
+    let first = loop {
+        match events.recv_timeout(WAIT).expect("no output was delivered") {
+            ExecutionEvent::Started { .. } => {}
+            ExecutionEvent::Output { chunk, .. } => break chunk,
+            other => panic!("unexpected event {other:?}"),
+        }
+    };
+    assert_eq!(first, "start");
+    assert!(executor.is_running(&id));
+
+    gate.open();
+    let outcome = wait_for_finish(&events);
+    outcome.assert_completed();
+    assert_eq!(outcome.streamed, vec!["end"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_still_pending_at_exit_is_delivered_before_the_status() {
+    // The interval never elapses, so "first" is still waiting in its batch
+    // when the shell exits. The readers then time out, because the background
+    // job holds the pipes open.
+    let executor = ActionExecutor::with_limits(Limits {
+        emit_interval: WAIT,
+        reader_drain_timeout: Duration::from_secs(2),
+        ..Limits::default()
+    });
+    let gate = Gate::closed();
+    let Finished {
+        id,
+        events,
+        outcome,
+    } = run_sh_to_finish(
+        &executor,
+        &format!("printf first; ({}; printf late) &", gate.wait()),
+    )
+    .await;
+
+    // What had been read went out ahead of the terminal status all the same,
+    // and is in the finished log.
+    outcome.assert_completed();
+    assert_eq!(outcome.streamed, vec!["first"]);
+    assert_eq!(buffered_text(&executor, &id).as_deref(), Some("first"));
+
+    // What the survivor writes afterwards is still delivered, after it.
+    gate.open();
+    match events.recv_timeout(WAIT).expect("no late output") {
+        ExecutionEvent::Output { chunk, .. } => assert_eq!(chunk, "late"),
+        other => panic!("unexpected event {other:?}"),
+    }
+    assert_eq!(buffered_text(&executor, &id).as_deref(), Some("firstlate"));
 }

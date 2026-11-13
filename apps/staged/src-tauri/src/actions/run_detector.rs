@@ -1,7 +1,8 @@
 //! Run detection: regex matching and AI-powered autodetection.
 //!
 //! * `spawn_regex_matcher` — polls the output buffer every 2 seconds and applies
-//!   a compiled regex to detect when the service is running.
+//!   a compiled regex to detect when the service is running. The buffer keeps
+//!   only recent lines, so the matcher follows it by line number.
 //! * `spawn_autodetect_poller` — uses an AI model on a backoff schedule to
 //!   derive a regex pattern from terminal output, then hands off to the regex
 //!   matcher once a valid pattern is found.
@@ -90,20 +91,10 @@ pub fn spawn_regex_matcher(
                 }
             }
 
-            // Read new lines since last check. Re-check the previous line too:
-            // it may have been an in-progress line that gained more text since
-            // the last poll.
-            let new_lines: Vec<String> = {
-                let Some(lines) = registry.get_output_lines(&execution_id) else {
-                    continue;
-                };
-                let start_index = last_checked_index.saturating_sub(1);
-                if lines.len() <= start_index {
-                    continue;
-                }
-                let new_lines = lines[start_index..].to_vec();
-                last_checked_index = lines.len();
-                new_lines
+            let Some(new_lines) =
+                unchecked_lines(&registry, &execution_id, &mut last_checked_index)
+            else {
+                continue;
             };
 
             // Apply regex to each normalized plain-text line.
@@ -133,6 +124,29 @@ pub fn spawn_regex_matcher(
             }
         }
     });
+}
+
+/// The output lines to match since the last check, or `None` if there are
+/// none. `last_checked_index` is the number of lines seen by the last check
+/// and is advanced past the lines returned.
+///
+/// The line before the new ones is returned again: it may have been an
+/// in-progress line that gained more text since the last poll. Lines are
+/// addressed by their number in the whole output, so this keeps working once
+/// the buffer has dropped its oldest lines; lines dropped before they were
+/// ever checked are skipped.
+fn unchecked_lines(
+    registry: &ActionRegistry,
+    execution_id: &str,
+    last_checked_index: &mut usize,
+) -> Option<Vec<String>> {
+    let start_index = last_checked_index.saturating_sub(1);
+    let (line_count, new_lines) = registry.get_output_lines_from(execution_id, start_index)?;
+    if line_count <= start_index {
+        return None;
+    }
+    *last_checked_index = line_count;
+    Some(new_lines)
 }
 
 // =============================================================================
@@ -211,14 +225,9 @@ pub fn spawn_autodetect_poller(
             }
 
             // ---- Read the last ~200 lines of output ----
-            let lines = match registry.get_output_lines(&execution_id) {
+            let tail = match registry.get_last_output_lines(&execution_id, 200) {
                 Some(l) => l,
                 None => continue, // buffer not yet created
-            };
-            let tail: Vec<&String> = if lines.len() > 200 {
-                lines[lines.len() - 200..].iter().collect()
-            } else {
-                lines.iter().collect()
             };
             if tail.is_empty() {
                 continue;
@@ -444,4 +453,95 @@ If still building, set regex and has_endpoint_capture to null/false."#,
             },
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::registry::DETECTION_MAX_LINES;
+    use super::*;
+    use builderbot_actions::ActionType;
+
+    fn registry_with(execution_id: &str, action_type: ActionType) -> ActionRegistry {
+        let registry = ActionRegistry::new();
+        registry.register(
+            execution_id.to_string(),
+            "branch".to_string(),
+            "action".to_string(),
+            "Action".to_string(),
+            action_type.as_str().to_string(),
+            0,
+        );
+        registry
+    }
+
+    #[test]
+    fn the_matcher_reads_new_lines_and_rereads_the_one_before_them() {
+        let registry = registry_with("run", ActionType::Run);
+        let mut checked = 0;
+
+        // Nothing written yet.
+        assert_eq!(unchecked_lines(&registry, "run", &mut checked), None);
+
+        registry.append_output_chunk("run", "building\nListe");
+        assert_eq!(
+            unchecked_lines(&registry, "run", &mut checked).unwrap(),
+            vec!["building", "Liste"]
+        );
+
+        // The in-progress line is read again once it is whole.
+        registry.append_output_chunk("run", "ning on :3000\nnext\n");
+        assert_eq!(
+            unchecked_lines(&registry, "run", &mut checked).unwrap(),
+            vec!["Listening on :3000", "next"]
+        );
+        assert_eq!(
+            unchecked_lines(&registry, "run", &mut checked).unwrap(),
+            vec!["next"]
+        );
+        assert_eq!(checked, 3);
+    }
+
+    #[test]
+    fn the_matcher_keeps_reading_once_the_buffer_has_dropped_lines() {
+        let registry = registry_with("run", ActionType::Run);
+        let mut checked = 0;
+
+        registry.append_output_chunk("run", "first\n");
+        assert_eq!(
+            unchecked_lines(&registry, "run", &mut checked).unwrap(),
+            vec!["first"]
+        );
+
+        // More than the buffer holds arrives between two polls: the matcher
+        // gets what is retained, oldest first, up to the newest line.
+        let flood = DETECTION_MAX_LINES + 10;
+        let chunk: String = (0..flood).map(|line| format!("noise {line}\n")).collect();
+        registry.append_output_chunk("run", &chunk);
+        let lines = unchecked_lines(&registry, "run", &mut checked).unwrap();
+        assert_eq!(lines.len(), DETECTION_MAX_LINES);
+        assert_eq!(lines[0], "noise 10");
+        assert_eq!(lines.last().unwrap(), &format!("noise {}", flood - 1));
+        assert_eq!(checked, flood + 1);
+
+        // And it still sees what is written after that.
+        registry.append_output_chunk("run", "Listening on :3000\n");
+        assert_eq!(
+            unchecked_lines(&registry, "run", &mut checked).unwrap(),
+            vec![
+                format!("noise {}", flood - 1),
+                "Listening on :3000".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_execution_without_a_detection_buffer_has_no_lines_to_match() {
+        let registry = registry_with("build", ActionType::Build);
+        registry.append_output_chunk("build", "Listening on :3000\n");
+
+        let mut checked = 0;
+        assert_eq!(unchecked_lines(&registry, "build", &mut checked), None);
+        assert_eq!(unchecked_lines(&registry, "ended", &mut checked), None);
+        assert_eq!(checked, 0);
+    }
 }

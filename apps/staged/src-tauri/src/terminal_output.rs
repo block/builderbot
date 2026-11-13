@@ -5,6 +5,8 @@
 //! action output viewer does, and strips ANSI/control sequences before text is
 //! used for AI prompts or regex matching.
 
+use std::collections::VecDeque;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum EscapeState {
     #[default]
@@ -15,16 +17,50 @@ enum EscapeState {
     OscEsc,
 }
 
+/// How much a processor fed by a long-running command retains.
+#[derive(Debug, Clone, Copy)]
+struct RecentLines {
+    max_lines: usize,
+    /// Bound on the text of the finalized lines, and separately on the text
+    /// of the in-progress line.
+    max_bytes: usize,
+}
+
 /// Incrementally renders terminal text into plain lines.
+///
+/// Lines are numbered from zero in the order they were written. A processor
+/// built with [`TerminalOutputProcessor::keeping_recent`] drops its oldest
+/// lines once it is over its bound, and the numbers of the lines that remain
+/// do not change.
 #[derive(Debug, Default)]
 pub(crate) struct TerminalOutputProcessor {
-    finalized_lines: Vec<String>,
+    /// Oldest first. The first one is line number `dropped_lines`.
+    finalized_lines: VecDeque<String>,
+    /// Bytes of text in `finalized_lines`.
+    finalized_bytes: usize,
+    /// How many finalized lines have been dropped from the front.
+    dropped_lines: usize,
     current_text: String,
     pending_cr: bool,
     escape_state: EscapeState,
+    /// `None` retains every line.
+    recent: Option<RecentLines>,
 }
 
 impl TerminalOutputProcessor {
+    /// A processor that retains only its most recent lines: at most
+    /// `max_lines` finalized lines holding at most `max_bytes` of text. The
+    /// in-progress line stops growing at `max_bytes` too, until it ends.
+    pub(crate) fn keeping_recent(max_lines: usize, max_bytes: usize) -> Self {
+        Self {
+            recent: Some(RecentLines {
+                max_lines,
+                max_bytes,
+            }),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn process_chunk(&mut self, raw: &str) {
         for ch in raw.chars() {
             if let Some(clean) = self.consume_escape_or_control(ch) {
@@ -33,15 +69,30 @@ impl TerminalOutputProcessor {
         }
     }
 
-    /// Return finalized lines plus the visible in-progress line. Even when a
-    /// trailing `\r` is unresolved, live snapshots expose the current text so
-    /// readiness detection matches the frontend incremental output view.
-    pub(crate) fn snapshot_lines(&self) -> Vec<String> {
-        let mut lines = self.finalized_lines.clone();
-        if !self.current_text.is_empty() {
-            lines.push(self.current_text.clone());
-        }
-        lines
+    /// How many lines there have been so far: every finalized line, retained
+    /// or not, plus the in-progress line if it is visible.
+    pub(crate) fn line_count(&self) -> usize {
+        self.dropped_lines + self.finalized_lines.len() + usize::from(!self.current_text.is_empty())
+    }
+
+    /// The lines numbered `from` and up: finalized lines, then the visible
+    /// in-progress line. Even when a trailing `\r` is unresolved, live
+    /// snapshots expose the current text so readiness detection matches the
+    /// frontend incremental output view. Lines that are no longer retained
+    /// are left out.
+    pub(crate) fn lines_from(&self, from: usize) -> Vec<String> {
+        let skip = from.saturating_sub(self.dropped_lines);
+        self.finalized_lines
+            .iter()
+            .chain((!self.current_text.is_empty()).then_some(&self.current_text))
+            .skip(skip)
+            .cloned()
+            .collect()
+    }
+
+    /// The last `count` lines, as [`Self::lines_from`] lists them.
+    pub(crate) fn last_lines(&self, count: usize) -> Vec<String> {
+        self.lines_from(self.line_count().saturating_sub(count))
     }
 
     fn finish(mut self) -> Vec<String> {
@@ -50,7 +101,7 @@ impl TerminalOutputProcessor {
             self.pending_cr = false;
         }
 
-        let mut lines = self.finalized_lines;
+        let mut lines = Vec::from(self.finalized_lines);
         if !self.current_text.is_empty() {
             lines.push(self.current_text);
         }
@@ -116,22 +167,46 @@ impl TerminalOutputProcessor {
         if self.pending_cr {
             self.pending_cr = false;
             if ch == '\n' {
-                self.finalized_lines
-                    .push(std::mem::take(&mut self.current_text));
+                self.finalize_current_line();
                 return;
             }
             self.current_text.clear();
         }
 
         match ch {
-            '\n' => {
-                self.finalized_lines
-                    .push(std::mem::take(&mut self.current_text));
-            }
+            '\n' => self.finalize_current_line(),
             '\r' => {
                 self.pending_cr = true;
             }
-            c => self.current_text.push(c),
+            c => {
+                // A line with no end in sight must not grow without bound
+                // either: past the bound, the rest of it is dropped.
+                let full = self
+                    .recent
+                    .is_some_and(|recent| self.current_text.len() >= recent.max_bytes);
+                if !full {
+                    self.current_text.push(c);
+                }
+            }
+        }
+    }
+
+    fn finalize_current_line(&mut self) {
+        let line = std::mem::take(&mut self.current_text);
+        self.finalized_bytes += line.len();
+        self.finalized_lines.push_back(line);
+
+        let Some(recent) = self.recent else {
+            return;
+        };
+        while self.finalized_lines.len() > recent.max_lines
+            || self.finalized_bytes > recent.max_bytes
+        {
+            let Some(dropped) = self.finalized_lines.pop_front() else {
+                break;
+            };
+            self.finalized_bytes -= dropped.len();
+            self.dropped_lines += 1;
         }
     }
 }
@@ -269,10 +344,79 @@ mod tests {
     fn snapshot_includes_unresolved_carriage_return_line() {
         let mut processor = TerminalOutputProcessor::default();
         processor.process_chunk("10%\r");
-        assert_eq!(processor.snapshot_lines(), vec!["10%".to_string()]);
+        assert_eq!(processor.lines_from(0), vec!["10%".to_string()]);
 
         processor.process_chunk("done");
-        assert_eq!(processor.snapshot_lines(), vec!["done".to_string()]);
+        assert_eq!(processor.lines_from(0), vec!["done".to_string()]);
+    }
+
+    #[test]
+    fn lines_are_numbered_from_the_start_of_the_output() {
+        let mut processor = TerminalOutputProcessor::default();
+        processor.process_chunk("zero\none\ntwo\nthr");
+
+        assert_eq!(processor.line_count(), 4);
+        assert_eq!(processor.lines_from(2), vec!["two", "thr"]);
+        assert_eq!(processor.lines_from(4), Vec::<String>::new());
+        assert_eq!(processor.lines_from(9), Vec::<String>::new());
+        assert_eq!(processor.last_lines(2), vec!["two", "thr"]);
+        assert_eq!(processor.last_lines(9), processor.lines_from(0));
+
+        // An in-progress line that is cleared stops counting.
+        processor.process_chunk("\rx\r");
+        processor.process_chunk("\r");
+        assert_eq!(processor.line_count(), 3);
+        assert_eq!(processor.lines_from(2), vec!["two"]);
+    }
+
+    #[test]
+    fn a_processor_keeping_recent_lines_drops_the_oldest() {
+        let mut processor = TerminalOutputProcessor::keeping_recent(3, usize::MAX);
+        for line in 0..10 {
+            processor.process_chunk(&format!("line {line}\n"));
+        }
+        processor.process_chunk("partial");
+
+        assert_eq!(
+            processor.lines_from(0),
+            vec!["line 7", "line 8", "line 9", "partial"]
+        );
+        // The lines that remain keep their numbers.
+        assert_eq!(processor.line_count(), 11);
+        assert_eq!(processor.lines_from(9), vec!["line 9", "partial"]);
+        // Asking for a dropped line starts at the oldest one retained.
+        assert_eq!(processor.lines_from(2), processor.lines_from(0));
+        assert_eq!(processor.last_lines(2), vec!["line 9", "partial"]);
+    }
+
+    #[test]
+    fn a_processor_keeping_recent_lines_is_bounded_in_bytes() {
+        let max_bytes = 100;
+        let mut processor = TerminalOutputProcessor::keeping_recent(usize::MAX, max_bytes);
+        for line in 0..1_000 {
+            processor.process_chunk(&format!("line {line:04}\n"));
+            assert!(processor.finalized_bytes <= max_bytes);
+        }
+        assert_eq!(processor.lines_from(0).len(), max_bytes / "line 0000".len());
+        assert_eq!(processor.lines_from(0).last().unwrap(), "line 0999");
+        assert_eq!(processor.line_count(), 1_000);
+
+        // A line that never ends stops growing, and the next line is whole.
+        processor.process_chunk(&"x".repeat(10 * max_bytes));
+        assert_eq!(processor.current_text.len(), max_bytes);
+        processor.process_chunk("\nnext\n");
+        assert_eq!(processor.lines_from(0), vec!["next"]);
+        assert_eq!(processor.line_count(), 1_002);
+    }
+
+    #[test]
+    fn a_default_processor_keeps_every_line() {
+        let mut processor = TerminalOutputProcessor::default();
+        for line in 0..30_000 {
+            processor.process_chunk(&format!("{line}\n"));
+        }
+        assert_eq!(processor.lines_from(0).len(), 30_000);
+        assert_eq!(processor.dropped_lines, 0);
     }
 
     #[test]

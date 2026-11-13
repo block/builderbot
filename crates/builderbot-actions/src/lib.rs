@@ -56,6 +56,7 @@ pub mod executor;
 mod finished_outputs;
 pub mod models;
 mod output_buffer;
+mod output_emitter;
 mod utf8_stream;
 
 // Re-export main types for convenience

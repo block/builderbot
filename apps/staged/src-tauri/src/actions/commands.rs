@@ -752,8 +752,10 @@ fn wire_run_detection(
     working_dir: String,
     provider_id: Option<String>,
 ) {
-    // Ensure the output buffer for this execution_id exists so the
-    // regex matcher can obtain a reference to it.
+    // A Run action has had its output buffer since it started, so that no
+    // output is missed before this point. Make sure of it for whatever else
+    // is wired up here. Nothing below is stored if the action has already
+    // ended: the registry only holds state for running executions.
     registry.register_output_buffer(&execution_id);
 
     match action.run_detection_mode.clone() {

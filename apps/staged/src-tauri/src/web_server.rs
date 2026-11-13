@@ -129,15 +129,34 @@ pub fn emit_to_all<R: tauri::Runtime, S: serde::Serialize + Clone>(
     payload: S,
 ) {
     use tauri::{Emitter, Manager};
-    let _ = app_handle.emit(event_name, payload.clone());
+    let _ = app_handle.emit(event_name, &payload);
     if let Some(tx) = app_handle.try_state::<broadcast::Sender<WebEvent>>() {
-        if let Ok(json) = serialize_web_event(event_name, payload) {
-            let _ = tx.send(WebEvent {
-                event_name: event_name.to_string(),
-                payload: json,
-            });
-        }
+        broadcast_web_event(&tx, event_name, &payload);
     }
+}
+
+/// Send an event to the browser clients connected over WebSocket. Returns
+/// whether there was anyone to send it to.
+///
+/// With no client connected the payload is not serialized at all. Most
+/// installs never have one, and events such as action output are frequent.
+/// A client that connects a moment later misses the event either way: the
+/// channel only delivers what is sent after a client subscribes.
+fn broadcast_web_event<S: serde::Serialize>(
+    tx: &broadcast::Sender<WebEvent>,
+    event_name: &str,
+    payload: &S,
+) -> bool {
+    if tx.receiver_count() == 0 {
+        return false;
+    }
+    if let Ok(json) = serialize_web_event(event_name, payload) {
+        let _ = tx.send(WebEvent {
+            event_name: event_name.to_string(),
+            payload: json,
+        });
+    }
+    true
 }
 
 // =============================================================================
@@ -4476,8 +4495,8 @@ mod blocking_guard_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        control_create_image_args, event_gap_payload, normalize_ws_client_id, web_caller_rejection,
-        web_client_id, DispatchCaller,
+        broadcast_web_event, control_create_image_args, emit_to_all, event_gap_payload,
+        normalize_ws_client_id, web_caller_rejection, web_client_id, DispatchCaller, WebEvent,
     };
     use serde_json::{json, Value};
     use std::collections::{BTreeMap, BTreeSet};
@@ -4757,6 +4776,78 @@ mod tests {
         assert!(web_client_id(&json!({ "clientId": "TAURI-main" })).is_ok());
         assert!(web_client_id(&json!({})).is_err());
         assert!(web_client_id(&json!({ "clientId": 7 })).is_err());
+    }
+
+    /// A payload that counts how many times it is serialized.
+    #[derive(Clone)]
+    struct CountedPayload<'a>(&'a std::sync::atomic::AtomicUsize);
+
+    impl serde::Serialize for CountedPayload<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            serializer.serialize_str("payload")
+        }
+    }
+
+    #[test]
+    fn web_events_are_serialized_only_while_a_client_is_connected() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let serialized = AtomicUsize::new(0);
+        let payload = CountedPayload(&serialized);
+        let (tx, _) = tokio::sync::broadcast::channel::<WebEvent>(4);
+
+        // Nobody connected: nothing is serialized and nothing is queued.
+        assert!(!broadcast_web_event(&tx, "action_output", &payload));
+        assert_eq!(serialized.load(Ordering::SeqCst), 0);
+        assert!(tx.is_empty());
+
+        // A connected client gets the events sent from then on.
+        let mut client = tx.subscribe();
+        assert!(broadcast_web_event(&tx, "action_output", &payload));
+        assert_eq!(serialized.load(Ordering::SeqCst), 1);
+        let event = client.try_recv().unwrap();
+        assert_eq!(event.event_name, "action_output");
+        assert_eq!(
+            serde_json::from_str::<Value>(&event.payload).unwrap(),
+            json!({ "event": "action_output", "payload": "payload" })
+        );
+        assert!(client.try_recv().is_err());
+
+        // Once it disconnects, events are skipped again.
+        drop(client);
+        assert!(!broadcast_web_event(&tx, "action_output", &payload));
+        assert_eq!(serialized.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn emit_to_all_reaches_the_window_and_only_connected_web_clients() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tauri::{Listener, Manager};
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+        let (tx, _) = tokio::sync::broadcast::channel::<WebEvent>(4);
+        app.manage(tx.clone());
+        let (heard_tx, heard) = std::sync::mpsc::channel();
+        app.listen("action_output", move |event| {
+            let _ = heard_tx.send(event.payload().to_string());
+        });
+        let serialized = AtomicUsize::new(0);
+        let payload = CountedPayload(&serialized);
+
+        // No web client: the Tauri side still gets the event.
+        emit_to_all(app.handle(), "action_output", payload.clone());
+        assert_eq!(heard.try_recv().unwrap(), "\"payload\"");
+        let for_tauri_alone = serialized.swap(0, Ordering::SeqCst);
+
+        // A web client costs exactly one more serialization, and gets it.
+        let mut client = tx.subscribe();
+        emit_to_all(app.handle(), "action_output", payload.clone());
+        assert_eq!(heard.try_recv().unwrap(), "\"payload\"");
+        assert_eq!(serialized.load(Ordering::SeqCst), for_tauri_alone + 1);
+        assert_eq!(client.try_recv().unwrap().event_name, "action_output");
+        assert!(client.try_recv().is_err());
     }
 
     #[test]

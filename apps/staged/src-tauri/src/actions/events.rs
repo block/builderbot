@@ -72,7 +72,8 @@ impl ExecutionListener for TauriExecutionListener {
                 execution_id,
                 started_at,
             } => {
-                // Register the running action
+                // Register the running action. For a Run action this also
+                // creates the buffer Run detection reads, ahead of any output.
                 self.registry.register(
                     execution_id.clone(),
                     self.branch_id.clone(),
@@ -106,8 +107,10 @@ impl ExecutionListener for TauriExecutionListener {
                 ..
             } => {
                 // Feed normalized terminal output into the shared buffer for
-                // regex matching and autodetect prompts. The frontend still
-                // receives the original chunk for live display.
+                // regex matching and autodetect prompts. Only executions Run
+                // detection reads have one; for the rest this does nothing.
+                // The frontend still receives the original chunk for live
+                // display.
                 self.registry.append_output_chunk(&execution_id, &chunk);
 
                 crate::web_server::emit_to_all(

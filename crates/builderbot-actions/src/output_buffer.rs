@@ -61,14 +61,25 @@ impl OutputBuffer {
         Arc::new(Mutex::new(Self::new(max_bytes)))
     }
 
-    /// Append one read of `stream`, evicting the oldest output once the buffer
+    /// Append output of `stream`, evicting the oldest output once the buffer
     /// is over its bound. `timestamp` is kept only for the first read of a
     /// block.
+    ///
+    /// Output arrives in batches that can be larger than a block. Such a
+    /// batch is stored as several blocks, so that the bound holds whatever
+    /// size the buffer is fed in.
     pub(crate) fn push(&mut self, stream: &str, text: &str, timestamp: i64) {
-        if text.is_empty() {
-            return;
+        let mut rest = text;
+        while !rest.is_empty() {
+            let (piece, after) = rest.split_at(piece_len(rest, self.block_bytes));
+            self.push_piece(stream, piece, timestamp);
+            rest = after;
         }
+    }
 
+    /// Append text that is no larger than a block, unless it is a single
+    /// character that is.
+    fn push_piece(&mut self, stream: &str, text: &str, timestamp: i64) {
         let block_bytes = self.block_bytes;
         let merged = match self.blocks.back_mut() {
             Some(last) if last.stream == stream && last.chunk.len() + text.len() <= block_bytes => {
@@ -137,6 +148,18 @@ impl OutputBuffer {
             }
         }
         chunks
+    }
+}
+
+/// How much of `text` goes into one block: all of it if it fits, otherwise
+/// as many whole characters as do, and always at least one.
+fn piece_len(text: &str, block_bytes: usize) -> usize {
+    if text.len() <= block_bytes {
+        return text.len();
+    }
+    match text.floor_char_boundary(block_bytes) {
+        0 => text.chars().next().map_or(0, char::len_utf8),
+        fits => fits,
     }
 }
 
@@ -234,6 +257,42 @@ mod tests {
         assert_eq!(text_of(&chunks).len(), 200 * 1024);
         assert_eq!(chunks.len(), 200 * 1024 / MAX_BLOCK_BYTES + 1);
         assert!(chunks.iter().all(|c| c.chunk.len() <= MAX_BLOCK_BYTES));
+    }
+
+    #[test]
+    fn a_batch_larger_than_a_block_is_stored_as_several() {
+        let max_bytes = 8 * 1024;
+        let mut buffer = OutputBuffer::new(max_bytes);
+        let block_bytes = buffer.block_bytes;
+        // Two-byte characters at odd offsets, so that a block boundary falls
+        // inside one.
+        let written: String = (0..20_000).map(|n| format!("é{n}\n")).collect();
+        assert!(written.len() > 10 * max_bytes);
+
+        buffer.push("stdout", &written, 7);
+
+        assert!(buffer.retained_bytes <= max_bytes);
+        assert!(buffer.blocks.len() > 1);
+        assert!(buffer.blocks.iter().all(|b| b.chunk.len() <= block_bytes));
+        assert!(buffer.blocks.iter().all(|b| b.timestamp == 7));
+        // Whole characters only, and nothing lost at the block boundaries.
+        let retained: String = buffer.blocks.iter().map(|b| b.chunk.as_str()).collect();
+        assert!(written.ends_with(&retained));
+        assert_eq!(
+            buffer.dropped_bytes as usize + retained.len(),
+            written.len()
+        );
+    }
+
+    #[test]
+    fn a_character_larger_than_a_block_is_kept_whole() {
+        // The smallest buffer has one-byte blocks.
+        let mut buffer = OutputBuffer::new(1);
+        buffer.push("stdout", "a€b", 0);
+
+        let blocks: Vec<&str> = buffer.blocks.iter().map(|b| b.chunk.as_str()).collect();
+        assert_eq!(blocks, vec!["b"]);
+        assert_eq!(buffer.dropped_bytes, 4);
     }
 
     #[test]

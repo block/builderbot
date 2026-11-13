@@ -3,7 +3,8 @@
 //! Manages spawning shell commands with real-time output streaming,
 //! tracking running processes, and handling termination.
 //!
-//! Output is also buffered so a viewer can catch up on it. That buffer is
+//! Output is delivered to the listener in batches rather than read by read,
+//! and is also buffered so a viewer can catch up on it. That buffer is
 //! bounded: each execution keeps only its most recent output, and only the
 //! last few finished executions keep theirs.
 
@@ -23,6 +24,7 @@ use tokio::sync::oneshot;
 use crate::finished_outputs::{FinishedOutputs, MAX_FINISHED_EXECUTIONS};
 use crate::models::{ActionStatus, ExecutionEvent, OutputChunk};
 use crate::output_buffer::{OutputBuffer, SharedOutputBuffer, MAX_OUTPUT_BYTES};
+use crate::output_emitter::{self, OutputSender, EMIT_INTERVAL, EMIT_MAX_BYTES};
 use crate::utf8_stream::Utf8StreamDecoder;
 
 #[cfg(all(test, unix))]
@@ -32,6 +34,9 @@ mod tests;
 /// threads to reach the end of its output. Only what the kernel still holds
 /// is left to read by then, so this elapses only when something that outlived
 /// the process keeps the output open.
+///
+/// Completion then waits as long again, at most, for the listener to be given
+/// what was read. That elapses only when the listener is far behind.
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // =============================================================================
@@ -136,6 +141,11 @@ struct Limits {
     /// How many finished executions keep their output.
     max_finished: usize,
     reader_drain_timeout: Duration,
+    /// How long output waits to be merged with what follows it before the
+    /// listener is given it.
+    emit_interval: Duration,
+    /// Size at which a batch of output is delivered without waiting.
+    emit_max_bytes: usize,
 }
 
 impl Default for Limits {
@@ -144,6 +154,8 @@ impl Default for Limits {
             max_output_bytes: MAX_OUTPUT_BYTES,
             max_finished: MAX_FINISHED_EXECUTIONS,
             reader_drain_timeout: READER_DRAIN_TIMEOUT,
+            emit_interval: EMIT_INTERVAL,
+            emit_max_bytes: EMIT_MAX_BYTES,
         }
     }
 }
@@ -174,40 +186,20 @@ impl Default for ActionExecutor {
     }
 }
 
-/// Spawn a thread that reads from `stream` and emits output events via `listener`.
+/// Spawn a thread that reads from `stream` and queues what it reads on
+/// `output`, which buffers it and delivers it to the listener in batches.
 ///
-/// Each chunk is also appended to `buffer` for later retrieval. `done` is
-/// dropped when the thread reaches the end of the stream, which is how the
-/// completion thread learns that all of the output has been delivered.
+/// `done` is dropped when the thread reaches the end of the stream, after its
+/// last read has been queued, which is how the completion thread learns that
+/// all of the output is on its way.
 fn spawn_stream_reader(
     mut stream: impl Read + Send + 'static,
     stream_name: &'static str,
-    exec_id: String,
-    listener: Arc<dyn ExecutionListener>,
-    buffer: SharedOutputBuffer,
-    handle: Handle,
+    output: OutputSender,
     done: mpsc::Sender<Infallible>,
 ) {
     thread::spawn(move || {
         let _done = done;
-
-        let deliver = |chunk: String| {
-            if chunk.is_empty() {
-                return;
-            }
-            let timestamp = now_timestamp();
-
-            // Store in buffer
-            buffer.lock().unwrap().push(stream_name, &chunk, timestamp);
-
-            // Emit event
-            handle.block_on(listener.on_event(ExecutionEvent::Output {
-                execution_id: exec_id.clone(),
-                chunk,
-                stream: stream_name.to_string(),
-                timestamp,
-            }));
-        };
 
         // A read can end part-way through a multi-byte character, so the
         // decoder carries the unfinished bytes over to the next read.
@@ -216,25 +208,25 @@ fn spawn_stream_reader(
         loop {
             match stream.read(&mut buf) {
                 Ok(0) => break, // EOF
-                Ok(n) => deliver(decoder.decode(&buf[..n])),
+                Ok(n) => output.send(stream_name, decoder.decode(&buf[..n]), now_timestamp()),
                 // PTY master returns EIO (not EOF) when the slave side is
                 // closed, which is the normal shutdown path. Treat all read
                 // errors as end-of-stream.
                 Err(_) => break,
             }
         }
-        deliver(decoder.finish());
+        output.send(stream_name, decoder.finish(), now_timestamp());
     });
 }
 
-/// Wait up to `timeout` for every reader thread to reach the end of its
+/// Wait until `deadline` for every reader thread to reach the end of its
 /// stream. Returns whether they all did.
 ///
 /// Nothing is ever sent on the channel. Each reader holds a sender and drops
 /// it when it ends, so the channel disconnects once the last one is done.
-fn wait_for_readers(readers_done: &mpsc::Receiver<Infallible>, timeout: Duration) -> bool {
+fn wait_for_readers(readers_done: &mpsc::Receiver<Infallible>, deadline: Instant) -> bool {
     matches!(
-        readers_done.recv_timeout(timeout),
+        readers_done.recv_timeout(deadline.saturating_duration_since(Instant::now())),
         Err(mpsc::RecvTimeoutError::Disconnected)
     )
 }
@@ -302,6 +294,17 @@ impl ActionExecutor {
         // command handler), so `Handle::current()` is guaranteed to succeed.
         let handle = Handle::current();
 
+        // Everything read from the process goes through one emitter, which
+        // appends it to the buffer and hands it to the listener in batches.
+        let output = output_emitter::spawn(
+            execution_id.clone(),
+            listener.clone(),
+            output_buffer.clone(),
+            handle.clone(),
+            self.limits.emit_interval,
+            self.limits.emit_max_bytes,
+        );
+
         // Spawn threads to read output.
         //
         // When a PTY reader is provided (local execution), we use it as the
@@ -310,38 +313,14 @@ impl ActionExecutor {
         // the child's piped stdout and stderr separately.
         let (reader_done, readers_done) = mpsc::channel::<Infallible>();
         if let Some(pty_master) = pty_reader {
-            spawn_stream_reader(
-                pty_master,
-                "stdout",
-                execution_id.clone(),
-                listener.clone(),
-                output_buffer.clone(),
-                handle.clone(),
-                reader_done.clone(),
-            );
+            spawn_stream_reader(pty_master, "stdout", output.clone(), reader_done.clone());
         } else {
             if let Some(stdout) = child.stdout.take() {
-                spawn_stream_reader(
-                    stdout,
-                    "stdout",
-                    execution_id.clone(),
-                    listener.clone(),
-                    output_buffer.clone(),
-                    handle.clone(),
-                    reader_done.clone(),
-                );
+                spawn_stream_reader(stdout, "stdout", output.clone(), reader_done.clone());
             }
 
             if let Some(stderr) = child.stderr.take() {
-                spawn_stream_reader(
-                    stderr,
-                    "stderr",
-                    execution_id.clone(),
-                    listener.clone(),
-                    output_buffer.clone(),
-                    handle.clone(),
-                    reader_done.clone(),
-                );
+                spawn_stream_reader(stderr, "stderr", output.clone(), reader_done.clone());
             }
         }
 
@@ -368,8 +347,8 @@ impl ActionExecutor {
             };
 
             // Remove from running and hand the output buffer to the finished
-            // set. The buffer itself moves: nothing is copied, and the readers
-            // keep appending to the same one.
+            // set. The buffer itself moves: nothing is copied, and the emitter
+            // keeps appending to the same one.
             {
                 let mut running = running_clone.lock().unwrap();
                 if let Some(state) = running.remove(&exec_id) {
@@ -380,13 +359,22 @@ impl ActionExecutor {
                 }
             }
 
-            // The process has exited, but the readers may not have delivered
-            // the last of its output yet. Wait for them, so that the terminal
-            // status follows all of the output and the finished log is whole.
-            // The wait is bounded because a process that outlives the action
-            // can hold the output open indefinitely; whatever it writes later
-            // still lands in the same buffer.
-            wait_for_readers(&readers_done, reader_drain_timeout);
+            // The process has exited, but the last of its output may still be
+            // unread, or read and waiting in a batch. Wait for the readers,
+            // then have the emitter deliver what it holds, so that the
+            // terminal status follows all of the output and the finished log
+            // is whole.
+            //
+            // The wait for the readers is bounded because a process that
+            // outlives the action can hold the output open indefinitely;
+            // whatever it writes later still lands in the same buffer and is
+            // still delivered. The flush has a bound of its own, so that what
+            // was read is delivered ahead of the status even when the readers
+            // used theirs up.
+            wait_for_readers(&readers_done, Instant::now() + reader_drain_timeout);
+            output.flush_by(Instant::now() + reader_drain_timeout);
+            // The readers keep the emitter alive for as long as they run.
+            drop(output);
 
             let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
 

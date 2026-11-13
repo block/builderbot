@@ -298,9 +298,12 @@ mark.label-match {
   text-underline-offset: 1.5px;
 }
 
+/* The wash alone is faint in the light theme; the ring keeps the current
+   match obvious on every surface. */
 mark.search-match-current {
   background-color: var(--search-current-match-bg);
-  border-radius: 2px 2px 0 0;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--search-match-accent);
 }
 
 /* ── Hashtag badges (shared across all badge contexts) ── */

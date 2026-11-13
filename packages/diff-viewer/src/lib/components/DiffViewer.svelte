@@ -3364,8 +3364,12 @@
     text-decoration-skip-ink: none;
   }
 
+  /* On a modified line the wash is nearly the same colour as the
+     changed-character tint it replaces; the ring is what keeps the current
+     match visible there. */
   .search-current {
     background-color: var(--search-current-match-bg, rgba(242, 199, 68, 0.3));
-    border-radius: 2px 2px 0 0;
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px var(--search-match-accent, #f2c744);
   }
 </style>

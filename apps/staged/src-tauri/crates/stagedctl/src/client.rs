@@ -1031,11 +1031,16 @@ fn classify(what: &str, status: u16, body: Value) -> Result<Value, CtlError> {
         200 => Ok(body),
         400 => Err(CtlError::command("app_error", error_message(&body))),
         404 => {
-            // Not allowlisted. For a tag command the likely cause is a Staged
-            // from before tags reached the control server, not a typo.
+            // Not allowlisted. For a command a newer Staged added, the likely
+            // cause is a Staged from before it reached the control server,
+            // not a typo.
             let mut message = error_message(&body);
             if crate::tags::is_tag_command(what) {
                 message.push_str(" (this Staged does not have tags yet; update it)");
+            } else if what == crate::open::OPEN_PROJECT_COMMAND {
+                message.push_str(
+                    " (this Staged cannot open a project from the command line yet; update it)",
+                );
             }
             Err(CtlError::command("app_error", message))
         }
@@ -1170,6 +1175,32 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "app_error: Tag group not found: g1");
+    }
+
+    #[test]
+    fn a_404_on_open_project_hints_at_updating_staged() {
+        // An app from before `project open` answers `open_project` as it
+        // answers any unknown command; no protocol bump tells the two apart.
+        let err = classify(
+            "open_project",
+            404,
+            serde_json::json!({"error": "command not available through stagedctl: open_project"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            "app_error: command not available through stagedctl: open_project \
+             (this Staged cannot open a project from the command line yet; update it)"
+        );
+        // A current app's own refusal is passed through as it is.
+        let err = classify(
+            "open_project",
+            400,
+            serde_json::json!({"error": "Project not found: p1"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "app_error: Project not found: p1");
     }
 
     #[test]

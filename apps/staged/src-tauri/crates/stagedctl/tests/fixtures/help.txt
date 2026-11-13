@@ -43,7 +43,7 @@ Exit codes:
 Usage: stagedctl [OPTIONS] <COMMAND>
 
 Commands:
-  project     Inspect projects and the repos attached to them
+  project     Inspect projects and the repos attached to them, and show one in the app
   timeline    Read project and repo timelines (commits, notes, reviews, images)
   session     Start, observe, wait for, and cancel agent sessions
   image       Attach images to a repo's timeline
@@ -66,13 +66,14 @@ Options:
           Print version
 
 === stagedctl project --help ===
-Inspect projects and the repos attached to them
+Inspect projects and the repos attached to them, and show one in the app
 
 Usage: stagedctl project [OPTIONS] <COMMAND>
 
 Commands:
   list   List every project in the app
   get    Show one project's repos and branches
+  open   Show a project in the Staged window and bring that window to the front
   tags   Show one project's tags: its choice in each group, then its free tags
   tag    Tag a project: pick its tag in a group, or add free tags
   untag  Untag a project: remove the named tags, or clear its choice in a group
@@ -123,6 +124,47 @@ the --repo flag of `timeline show`, `session start`, `session list`, and
 `image add` expects.
 
 Usage: stagedctl project get [OPTIONS] <PROJECT>
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl project open --help ===
+Show a project in the Staged app. The window a click on Staged's Dock
+icon would raise is brought to the front and switched to the project.
+Prints the project's name and id and the pid of the Staged instance that
+showed it. A project that is already on screen is a success too.
+
+A <project> that matches nothing (`not_found`), or several projects when
+case is ignored (`ambiguous`), exits 1 before any window is touched.
+
+Otherwise the window is raised whether or not it could switch, so the
+user sees what is in the way. When it could not, the command exits 1:
+  ui_busy     a dialog is open in the window, or the diff comment being
+              written could not be saved: close or finish it and run the
+              command again. Also when another `project open` replaced
+              this one before the window acted on it.
+  ui_timeout  the window did not answer in time
+  not_found   the project was deleted meanwhile
+
+Needs a connected-app grant with write access that reaches the project
+(see `stagedctl connect --help`): showing a project marks it read and
+records it as the last one shown, so a read-only grant is refused (exit
+4, `scope_denied`). Not for Staged-spawned sessions: the app refuses a
+session's credential the same way, for the session's own project too, so
+an agent cannot pull the user's window away.
+
+Usage: stagedctl project open [OPTIONS] <PROJECT>
 
 Arguments:
   <PROJECT>

@@ -21,6 +21,7 @@ use crate::client::{
     Client, CtlError, STAGEDCTL_LOCK_ENV,
 };
 use crate::grants::{self, GrantFile};
+use crate::open;
 use crate::tags;
 
 /// One command's result: the value `--json` prints, and the human rendering.
@@ -100,6 +101,7 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
     match cli.command {
         Noun::Project(ProjectVerb::List { tag }) => project_list(&client, &tag),
         Noun::Project(ProjectVerb::Get { project }) => project_get(&client, &project),
+        Noun::Project(ProjectVerb::Open { project }) => open::project_open(&client, &project),
         Noun::Project(ProjectVerb::Tags { project }) => tags::project_tags(&client, &project),
         Noun::Project(ProjectVerb::Tag {
             project,
@@ -746,7 +748,7 @@ pub(crate) fn find_project<'a>(
     }
 }
 
-fn resolve_project(client: &Client, needle: &str) -> Result<Project, CtlError> {
+pub(crate) fn resolve_project(client: &Client, needle: &str) -> Result<Project, CtlError> {
     let raw = client.invoke("list_projects", json!({}))?;
     let projects: Vec<Project> = parse(&raw, "project list")?;
     find_project(&projects, needle).cloned()

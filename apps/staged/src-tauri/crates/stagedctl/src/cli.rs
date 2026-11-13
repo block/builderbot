@@ -70,7 +70,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Noun {
-    /// Inspect projects and the repos attached to them
+    /// Inspect projects and the repos attached to them, and show one in the
+    /// app
     #[command(alias = "projects", subcommand)]
     Project(ProjectVerb),
 
@@ -186,6 +187,36 @@ The printed repo addresses (<owner>/<repo>[:<subpath>]) are exactly what
 the --repo flag of `timeline show`, `session start`, `session list`, and
 `image add` expects.")]
     Get {
+        /// Project name or id (see `stagedctl project list`)
+        project: String,
+    },
+
+    /// Show a project in the Staged window and bring that window to the front
+    #[command(long_about = "\
+Show a project in the Staged app. The window a click on Staged's Dock
+icon would raise is brought to the front and switched to the project.
+Prints the project's name and id and the pid of the Staged instance that
+showed it. A project that is already on screen is a success too.
+
+A <project> that matches nothing (`not_found`), or several projects when
+case is ignored (`ambiguous`), exits 1 before any window is touched.
+
+Otherwise the window is raised whether or not it could switch, so the
+user sees what is in the way. When it could not, the command exits 1:
+  ui_busy     a dialog is open in the window, or the diff comment being
+              written could not be saved: close or finish it and run the
+              command again. Also when another `project open` replaced
+              this one before the window acted on it.
+  ui_timeout  the window did not answer in time
+  not_found   the project was deleted meanwhile
+
+Needs a connected-app grant with write access that reaches the project
+(see `stagedctl connect --help`): showing a project marks it read and
+records it as the last one shown, so a read-only grant is refused (exit
+4, `scope_denied`). Not for Staged-spawned sessions: the app refuses a
+session's credential the same way, for the session's own project too, so
+an agent cannot pull the user's window away.")]
+    Open {
         /// Project name or id (see `stagedctl project list`)
         project: String,
     },
@@ -917,6 +948,31 @@ mod tests {
         assert!(matches!(cli.command, Noun::Disconnect { client: None }));
         let cli = Cli::try_parse_from(["stagedctl", "disconnect", "--client", "x"]).unwrap();
         assert!(matches!(cli.command, Noun::Disconnect { client: Some(c) } if c == "x"));
+    }
+
+    #[test]
+    fn project_open_takes_one_project() {
+        for noun in ["project", "projects"] {
+            let cli = Cli::try_parse_from(["stagedctl", noun, "open", "Widgets"]).unwrap();
+            assert!(
+                matches!(cli.command, Noun::Project(ProjectVerb::Open { project }) if project == "Widgets")
+            );
+        }
+        // A name with spaces is one argument, and --json stays global.
+        let cli =
+            Cli::try_parse_from(["stagedctl", "project", "open", "My Project", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(
+            matches!(cli.command, Noun::Project(ProjectVerb::Open { project }) if project == "My Project")
+        );
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "open"]).is_err(),
+            "the project is required"
+        );
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "open", "a", "b"]).is_err(),
+            "one project at a time"
+        );
     }
 
     #[test]

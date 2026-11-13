@@ -460,7 +460,6 @@ const SYNCHRONOUS_COMMANDS: &[(&str, &str)] = &[
     ("actions/commands.rs", "stop_branch_action"),
     ("actions/commands.rs", "get_running_branch_actions"),
     ("actions/commands.rs", "get_all_running_actions"),
-    ("actions/commands.rs", "get_action_output_buffer"),
     ("actions/commands.rs", "clear_action_execution"),
     // An environment variable.
     ("branches.rs", "get_blox_env"),

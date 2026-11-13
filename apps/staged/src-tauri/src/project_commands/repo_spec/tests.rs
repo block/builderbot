@@ -5,20 +5,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// A GitHub that knows only what a test tells it, and records what it
-/// was asked.
+/// was asked. Shared with the control request tests, which resolve through
+/// it too.
 #[derive(Default)]
-struct FakeHost {
+pub(crate) struct FakeHost {
     /// Canonical names, found by any casing.
     repos: Vec<String>,
     repo_lookup_error: Option<String>,
     /// `(repo, subpath)` pairs that are directories.
     directories: HashSet<(String, String)>,
-    module_counts: HashMap<String, u32>,
+    pub(crate) module_counts: HashMap<String, u32>,
     module_count_error: Option<String>,
     pull_requests: HashMap<(String, u64), PullRequest>,
-    parents: HashMap<String, String>,
+    pub(crate) parents: HashMap<String, String>,
     parent_error: Option<String>,
-    branch_pull_requests: HashMap<(String, String), PullRequest>,
+    pub(crate) branch_pull_requests: HashMap<(String, String), PullRequest>,
     branch_pull_request_error: Option<String>,
     default_branches: HashMap<String, String>,
     calls: Mutex<Vec<String>>,
@@ -26,24 +27,24 @@ struct FakeHost {
 
 impl FakeHost {
     /// A host with `acme/widgets`, whose default branch is `main`.
-    fn with_widgets() -> Self {
+    pub(crate) fn with_widgets() -> Self {
         let mut host = Self::default();
         host.add_repo("acme/widgets", "main");
         host
     }
 
-    fn add_repo(&mut self, github_repo: &str, default_branch: &str) {
+    pub(crate) fn add_repo(&mut self, github_repo: &str, default_branch: &str) {
         self.repos.push(github_repo.to_string());
         self.default_branches
             .insert(github_repo.to_string(), default_branch.to_string());
     }
 
-    fn add_pull_request(&mut self, github_repo: &str, pr: PullRequest) {
+    pub(crate) fn add_pull_request(&mut self, github_repo: &str, pr: PullRequest) {
         self.pull_requests
             .insert((github_repo.to_string(), pr.number), pr);
     }
 
-    fn add_directory(&mut self, github_repo: &str, subpath: &str) {
+    pub(crate) fn add_directory(&mut self, github_repo: &str, subpath: &str) {
         self.directories
             .insert((github_repo.to_string(), subpath.to_string()));
     }
@@ -54,13 +55,13 @@ impl FakeHost {
 
     /// What was asked, sorted: lookups that run concurrently arrive in
     /// no fixed order.
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         let mut calls = self.calls.lock().unwrap().clone();
         calls.sort();
         calls
     }
 
-    fn asked(&self, call: &str) -> bool {
+    pub(crate) fn asked(&self, call: &str) -> bool {
         self.calls.lock().unwrap().iter().any(|c| c == call)
     }
 }
@@ -140,7 +141,7 @@ impl RepoHost for FakeHost {
 }
 
 /// Pull request `number`, from `head_ref` in `head_repo` into `develop`.
-fn pull_request(number: u64, head_ref: &str, head_repo: Option<&str>) -> PullRequest {
+pub(crate) fn pull_request(number: u64, head_ref: &str, head_repo: Option<&str>) -> PullRequest {
     PullRequest {
         number,
         title: format!("Change {number}"),

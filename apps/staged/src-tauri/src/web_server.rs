@@ -898,6 +898,7 @@ pub(crate) fn preferences_store(
         .map_err(|e| format!("Failed to load preferences store: {e}"))
 }
 
+mod control_project_args;
 pub(crate) mod control_scope;
 pub(crate) use control_scope::SCOPE_DENIED_PREFIX;
 
@@ -1060,8 +1061,9 @@ pub(crate) async fn dispatch(
     let action_registry: &Arc<ActionRegistry> = &app_handle.state::<Arc<ActionRegistry>>();
     let pr_scheduler: &Arc<PrPollScheduler> = &app_handle.state::<Arc<PrPollScheduler>>();
 
-    // A control caller's grant confines it to one project (and maybe to
-    // reads); refused here, before any arm, so no arm has to remember to.
+    // A control caller's grant confines it to its own project and the ones
+    // it created (and maybe to reads); refused here, before any arm, so no
+    // arm has to remember to.
     if let DispatchCaller::Control(grant) = &caller {
         control_scope::check(command, &args, grant, store_mutex)?;
     }
@@ -1177,15 +1179,35 @@ pub(crate) async fn dispatch(
         }
         "create_project" => {
             let store = get_store(store_mutex)?;
-            let request = crate::project_commands::CreateProjectRequest {
-                name: arg(&args, "name")?,
-                github_repo: opt_arg(&args, "githubRepo")?,
-                location: opt_arg(&args, "location")?,
-                subpath: opt_arg(&args, "subpath")?,
-                branch_name: opt_arg(&args, "branchName")?,
-                pr_number: opt_arg(&args, "prNumber")?,
-                default_branch: opt_arg(&args, "defaultBranch")?,
-                head_repo: opt_arg(&args, "headRepo")?,
+            let request = match &caller {
+                // A control caller has no form to check what it typed, so
+                // the checks run here, ahead of any write: the creator's
+                // limit, `sq` for a remote project, then the repository.
+                // The project records the caller as its creator, which is
+                // what keeps it within the caller's reach.
+                DispatchCaller::Control(grant) => {
+                    crate::project_commands::control_create_project_request(
+                        Arc::clone(&store),
+                        crate::project_commands::ProjectCreator::for_grant(grant),
+                        control_project_args::create_project(&args)?,
+                    )
+                    .await?
+                }
+                DispatchCaller::Web => crate::project_commands::CreateProjectRequest {
+                    name: arg(&args, "name")?,
+                    github_repo: opt_arg(&args, "githubRepo")?,
+                    location: opt_arg(&args, "location")?,
+                    subpath: opt_arg(&args, "subpath")?,
+                    branch_name: opt_arg(&args, "branchName")?,
+                    pr_number: opt_arg(&args, "prNumber")?,
+                    default_branch: opt_arg(&args, "defaultBranch")?,
+                    head_repo: opt_arg(&args, "headRepo")?,
+                    // The user's own project, like one made in the desktop
+                    // window: no creator, and the form writes the pull
+                    // request note itself.
+                    created_by: None,
+                    pr_note: None,
+                },
             };
             // The desktop command's body: the rows, then the worktree and the
             // repo's setup actions in the background.
@@ -1227,14 +1249,35 @@ pub(crate) async fn dispatch(
         }
         "add_project_repo" => {
             let store = get_store(store_mutex)?;
-            let project_id: String = arg(&args, "projectId")?;
-            let github_repo: String = arg(&args, "githubRepo")?;
-            let branch_name: Option<String> = opt_arg(&args, "branchName")?;
-            let subpath: Option<String> = opt_arg(&args, "subpath")?;
-            let set_as_primary: Option<bool> = opt_arg(&args, "setAsPrimary")?;
-            let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
-            let default_branch: Option<String> = opt_arg(&args, "defaultBranch")?;
-            let head_repo: Option<String> = opt_arg(&args, "headRepo")?;
+            let (project_id, request) = match &caller {
+                // As for `create_project`: a control caller's repository is
+                // checked here, and its branch must be free in the project.
+                DispatchCaller::Control(_) => {
+                    let (project_id, ask) = control_project_args::add_project_repo(&args)?;
+                    let request = crate::project_commands::control_add_repo_request(
+                        Arc::clone(&store),
+                        project_id.clone(),
+                        ask,
+                    )
+                    .await?;
+                    (project_id, request)
+                }
+                DispatchCaller::Web => (
+                    arg(&args, "projectId")?,
+                    crate::project_commands::AddProjectRepoRequest {
+                        github_repo: arg(&args, "githubRepo")?,
+                        branch_name: opt_arg(&args, "branchName")?,
+                        subpath: opt_arg(&args, "subpath")?,
+                        set_as_primary: opt_arg(&args, "setAsPrimary")?,
+                        reason: None,
+                        pr_number: opt_arg(&args, "prNumber")?,
+                        default_branch: opt_arg(&args, "defaultBranch")?,
+                        head_repo: opt_arg(&args, "headRepo")?,
+                        // The form writes the pull request note itself.
+                        pr_note: None,
+                    },
+                ),
+            };
 
             // The desktop command's body: the rows, then the worktree and
             // setup actions, or the clone into the project's workspace, in
@@ -1243,14 +1286,7 @@ pub(crate) async fn dispatch(
                 app_handle.clone(),
                 store,
                 project_id,
-                github_repo,
-                branch_name,
-                subpath,
-                set_as_primary,
-                None,
-                pr_number,
-                default_branch,
-                head_repo,
+                request,
             )
             .await?;
             Ok(serde_json::to_value(repo).unwrap())
@@ -5213,6 +5249,98 @@ mod tests {
                     "the {what} must not add around the shared body (`{inline}`): {source}"
                 );
             }
+        }
+    }
+
+    /// The control and web halves of a `dispatch` arm that branches on its
+    /// caller ahead of `body`, the shared call both halves feed.
+    fn caller_branches<'a>(arm: &'a str, control: &str, body: &str) -> (&'a str, &'a str) {
+        let control_at = arm
+            .find(control)
+            .unwrap_or_else(|| panic!("the arm should branch on `{control}`: {arm}"));
+        let web_at = arm
+            .find("DispatchCaller::Web =>")
+            .expect("the arm should have a web branch");
+        let body_at = arm.find(body).expect("the arm should call the shared body");
+        assert!(
+            control_at < web_at && web_at < body_at,
+            "the arm must settle its request before the shared body runs: {arm}"
+        );
+        (&arm[control_at..web_at], &arm[web_at..body_at])
+    }
+
+    /// A project made through the control server records who made it, and
+    /// its request is checked in the app first, since no form checked it.
+    /// A project made in the desktop window or a browser is the user's own:
+    /// it names no creator, so `projects.created_by` stays NULL and no
+    /// control credential reaches it by the creator rule.
+    #[test]
+    fn only_a_control_caller_creates_a_project_with_a_creator() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "create_project");
+        let (control, web) = caller_branches(
+            &arm,
+            "DispatchCaller::Control(grant) =>",
+            "project_commands::create_project_and_setup(",
+        );
+        for needed in [
+            "project_commands::control_create_project_request(",
+            "ProjectCreator::for_grant(grant)",
+            "control_project_args::create_project(&args)?",
+        ] {
+            assert!(
+                control.contains(needed),
+                "a control `create_project` must go through `{needed}`: {control}"
+            );
+        }
+        let command = tauri_command_source("create_project");
+        for (what, source) in [
+            ("web branch of the `create_project` arm", web),
+            ("`create_project` Tauri command", command),
+        ] {
+            assert!(
+                source.contains("created_by: None") && source.contains("pr_note: None"),
+                "the {what} must name no creator and write no note: {source}"
+            );
+            assert!(
+                !source.contains("ProjectCreator"),
+                "the {what} must not name a creator: {source}"
+            );
+        }
+    }
+
+    /// A control caller's repo is checked in the app before it is added. A
+    /// web caller's arguments come from a form that already checked them,
+    /// and go to the shared body as they are, as the desktop command's do.
+    #[test]
+    fn only_a_control_caller_has_its_added_repo_checked_in_the_app() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "add_project_repo");
+        let (control, web) = caller_branches(
+            &arm,
+            "DispatchCaller::Control(_) =>",
+            "project_commands::add_project_repo_and_setup(",
+        );
+        for needed in [
+            "control_project_args::add_project_repo(&args)?",
+            "project_commands::control_add_repo_request(",
+        ] {
+            assert!(
+                control.contains(needed),
+                "a control `add_project_repo` must go through `{needed}`: {control}"
+            );
+        }
+        let command = tauri_command_source("add_project_repo");
+        for (what, source) in [
+            ("web branch of the `add_project_repo` arm", web),
+            ("`add_project_repo` Tauri command", command),
+        ] {
+            assert!(
+                source.contains("reason: None") && source.contains("pr_note: None"),
+                "the {what} must pass no reason and write no note: {source}"
+            );
+            assert!(
+                !source.contains("control_"),
+                "the {what} must not run the control checks: {source}"
+            );
         }
     }
 

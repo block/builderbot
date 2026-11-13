@@ -548,6 +548,10 @@ async fn create_project(
             pr_number,
             default_branch,
             head_repo,
+            // Made in the app: no control actor, and the form writes the
+            // pull request note itself.
+            created_by: None,
+            pr_note: None,
         },
     )
     .await
@@ -640,14 +644,18 @@ async fn add_project_repo(
         app_handle,
         store,
         project_id,
-        github_repo,
-        branch_name,
-        subpath,
-        set_as_primary,
-        None,
-        pr_number,
-        default_branch,
-        head_repo,
+        project_commands::AddProjectRepoRequest {
+            github_repo,
+            branch_name,
+            subpath,
+            set_as_primary,
+            reason: None,
+            pr_number,
+            default_branch,
+            head_repo,
+            // The form writes the pull request note itself.
+            pr_note: None,
+        },
     )
     .await
 }

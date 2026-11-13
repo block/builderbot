@@ -422,4 +422,4 @@ fn join<T>(handle: Option<std::thread::ScopedJoinHandle<'_, T>>) -> Option<T> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

@@ -1,7 +1,8 @@
 //! Creating a project: the store writes, then the background setup.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use super::pr_note::PrNote;
 use super::setup::spawn_project_repo_setup;
 use crate::store::{self, Store};
 use crate::{blox, branches, git};
@@ -29,11 +30,55 @@ pub(crate) struct CreateProjectRequest {
     pub default_branch: Option<String>,
     /// The fork a pull request's head lives in, when it isn't `github_repo`.
     pub head_repo: Option<String>,
+    /// The control-server actor creating the project, recorded in
+    /// `projects.created_by`. `None` for a project made in the app, which
+    /// has no creator.
+    pub created_by: Option<ProjectCreator>,
+    /// The pull request's description, saved as a project note once the
+    /// rows are written. The desktop forms leave it unset and write the
+    /// note themselves.
+    pub pr_note: Option<PrNote>,
 }
 
 impl CreateProjectRequest {
     fn wants_remote(&self) -> bool {
         self.location.as_deref() == Some("remote")
+    }
+}
+
+/// The control-server actor creating a project, and how many it may hold.
+/// Not persisted: only `actor` reaches the store, as `projects.created_by`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectCreator {
+    /// What `projects.created_by` records: `session:<session-id>` or
+    /// `app:<grant-id>`.
+    pub actor: String,
+    /// The most projects this actor may hold at once, counted from the
+    /// `created_by` rows, so deleting one in the app frees a slot. `None`
+    /// for an actor that is not limited.
+    pub limit: Option<usize>,
+}
+
+impl ProjectCreator {
+    /// Refuse when the creator already holds as many projects as it may.
+    ///
+    /// Only a session is limited today (see `ProjectCreator::for_grant`),
+    /// which is why the message speaks of one.
+    pub(super) fn ensure_within_limit(&self, store: &Store) -> Result<(), String> {
+        let Some(limit) = self.limit else {
+            return Ok(());
+        };
+        let held = store
+            .list_project_ids_created_by(&self.actor)
+            .map_err(|e| e.to_string())?
+            .len();
+        if held >= limit {
+            return Err(format!(
+                "This session has created {held} projects, the limit for one session. \
+                 Deleting one in Staged frees a slot."
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -128,12 +173,11 @@ pub(crate) async fn create_project_impl(
         pr_number,
         default_branch,
         head_repo,
+        created_by,
+        pr_note,
     } = request;
 
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err("Project name is required".to_string());
-    }
+    let trimmed = required_name(&name)?;
 
     let location = match (wants_remote, remote_available) {
         (true, true) => store::ProjectLocation::Remote,
@@ -159,6 +203,9 @@ pub(crate) async fn create_project_impl(
     }
     if let Some(sub) = &subpath {
         project = project.with_subpath(sub.clone());
+    }
+    if let Some(creator) = &created_by {
+        project = project.with_created_by(&creator.actor);
     }
 
     // Checked on the name as it will be stored (`with_subpath` can extend
@@ -188,7 +235,10 @@ pub(crate) async fn create_project_impl(
         None => None,
     };
 
-    insert_project(&store, &project)?;
+    match &created_by {
+        Some(creator) => insert_project_within_limit(&store, &project, creator)?,
+        None => insert_project(&store, &project)?,
+    }
 
     if let Some(repo) = project.primary_repo() {
         store
@@ -246,10 +296,24 @@ pub(crate) async fn create_project_impl(
         );
     }
 
+    if let Some(note) = &pr_note {
+        note.write(&store, &project.id, "create_project");
+    }
+
     Ok(CreatedProject {
         project,
         initial_repo: Some(InitialRepo { repo, branch }),
     })
+}
+
+/// The project's name without surrounding whitespace. A blank name is
+/// refused.
+pub(super) fn required_name(name: &str) -> Result<&str, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Project name is required".to_string());
+    }
+    Ok(trimmed)
 }
 
 /// What a caller is told when the name is taken. Project names are unique
@@ -268,6 +332,22 @@ fn insert_project(store: &Store, project: &store::Project) -> Result<(), String>
             Ok(Some(_)) => duplicate_name_error(&project.name),
             _ => e.to_string(),
         })
+}
+
+/// [`insert_project`] for a project with a creator, holding the creator to
+/// its limit. The count and the insert happen under one lock, so creates
+/// racing for a creator's last slot cannot both take it.
+fn insert_project_within_limit(
+    store: &Store,
+    project: &store::Project,
+    creator: &ProjectCreator,
+) -> Result<(), String> {
+    static COUNTING: Mutex<()> = Mutex::new(());
+    let _counting = COUNTING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    creator.ensure_within_limit(store)?;
+    insert_project(store, project)
 }
 
 #[cfg(test)]
@@ -301,6 +381,70 @@ mod tests {
             request,
             remote_available,
         ))
+    }
+
+    /// The desktop and browser requests name no creator, so the column stays
+    /// NULL: the project is the user's own, no control credential reaches it
+    /// by the creator rule, and it counts toward nobody's limit. They write
+    /// their pull request note themselves, so the body writes none.
+    #[test]
+    fn a_project_made_in_the_app_has_no_creator_and_no_note() {
+        let store = Arc::new(Store::in_memory().unwrap());
+
+        let bare = create(&store, request("Fix login"), false).unwrap();
+        let with_repo = create(
+            &store,
+            CreateProjectRequest {
+                pr_number: Some(42),
+                ..request_with_repo("Fix logout")
+            },
+            false,
+        )
+        .unwrap();
+
+        for created in [&bare, &with_repo] {
+            let project = store.get_project(&created.project.id).unwrap().unwrap();
+            assert_eq!(project.created_by, None);
+            assert!(store.list_project_notes(&project.id).unwrap().is_empty());
+        }
+    }
+
+    /// A creator is recorded as given, and its limit is not part of what is
+    /// stored.
+    #[test]
+    fn a_creator_is_recorded_on_the_project_row() {
+        let store = Arc::new(Store::in_memory().unwrap());
+
+        let created = create(
+            &store,
+            CreateProjectRequest {
+                created_by: Some(ProjectCreator {
+                    actor: "session:s1".to_string(),
+                    limit: Some(1),
+                }),
+                ..request("Fix login")
+            },
+            false,
+        )
+        .unwrap();
+
+        let project = store.get_project(&created.project.id).unwrap().unwrap();
+        assert_eq!(project.created_by.as_deref(), Some("session:s1"));
+        // The one slot is taken now.
+        let err = create(
+            &store,
+            CreateProjectRequest {
+                created_by: Some(ProjectCreator {
+                    actor: "session:s1".to_string(),
+                    limit: Some(1),
+                }),
+                ..request("Fix logout")
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("the limit for one session"), "{err}");
+        assert!(store.get_project_by_name("Fix logout").unwrap().is_none());
     }
 
     /// A project needs no repo: it is one row, local, with nothing attached.

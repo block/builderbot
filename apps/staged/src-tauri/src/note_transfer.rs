@@ -658,14 +658,11 @@ pub(crate) async fn add_repo_to_project(
         app_handle,
         store,
         project_id,
-        key.github_repo,
-        None,
-        key.subpath,
-        None,
-        None,
-        None,
-        None,
-        None,
+        crate::project_commands::AddProjectRepoRequest {
+            github_repo: key.github_repo,
+            subpath: key.subpath,
+            ..Default::default()
+        },
     )
     .await
     .map(|_| ())

@@ -2,7 +2,7 @@
 //! ahead of its arm table.
 //!
 //! A `DispatchCaller::Control(grant)` carries the project its credential is
-//! confined to and whether it may write. Every allowlisted control command
+//! scoped to and whether it may write. Every allowlisted control command
 //! has a row in [`CONTROL_SCOPE`] saying how to find the project a call
 //! addresses — a `projectId` argument, a branch id, a session id, or the
 //! `create_image` pair — and whether the command changes the app. The check
@@ -10,7 +10,9 @@
 //! rows of a project outside its reach however it spells the request, and a
 //! read-only credential never reaches a writing arm. The two commands that
 //! take no identifier (`list_projects`, `get_active_sessions`) are filtered
-//! inside their arms instead, through [`reach`].
+//! inside their arms instead, through [`reach`]. `create_project` addresses
+//! no project either, since the project does not exist yet. It has its own
+//! rule, below.
 //!
 //! # Reach
 //!
@@ -24,13 +26,25 @@
 //! projects a session created are looked up from it on every check, and
 //! they stay within reach across runs and app restarts. Reach grows only by
 //! creating a project. Projects the user made in the app have no creator,
-//! so no credential reaches one this way. No control command creates a
-//! project yet, so until one does the rule admits nothing new.
+//! so no credential reaches one this way.
 //!
 //! The check applies the rule in [`require_in_scope`], with one single-row
 //! read of the addressed project, and only when that project is not the
 //! credential's own. The result filters apply it through [`reach`], which
 //! lists the actor's created projects and so runs in the arm, not here.
+//!
+//! # Creating a project
+//!
+//! `create_project` ([`ScopeKey::NewProject`]) names no project to compare,
+//! so the decision is the access level and who is asking. A session may
+//! create one, and so may a connected app approved for every project. A
+//! connected app approved for one project may not: the user's consent named
+//! that project. The arm stamps the new project with the caller's actor
+//! string, which is what puts it within the caller's reach from then on,
+//! and holds a session to a limit on how many it may hold
+//! (`project_commands::control`). `add_project_repo` is an ordinary
+//! `projectId` command, so a session may add repos to its own project and
+//! to the ones it created.
 //!
 //! # Tags
 //!
@@ -80,6 +94,10 @@ pub(crate) enum ScopeKey {
     ResultFilter,
     /// A `projectId` argument.
     ProjectArg,
+    /// `create_project`: no project exists to compare. Any session may, and
+    /// any connected app approved for every project. A connected app
+    /// approved for one project may not.
+    NewProject,
     /// A `branchId` argument; the branch's project.
     BranchArg,
     /// A `sessionId` argument; the session's project, through its project
@@ -105,7 +123,9 @@ pub(crate) enum ScopeKey {
 /// and the access it needs.
 pub(crate) const CONTROL_SCOPE: &[(&str, ScopeKey, Access)] = &[
     ("list_projects", ScopeKey::ResultFilter, Access::ReadOnly),
+    ("create_project", ScopeKey::NewProject, Access::ReadWrite),
     ("list_project_repos", ScopeKey::ProjectArg, Access::ReadOnly),
+    ("add_project_repo", ScopeKey::ProjectArg, Access::ReadWrite),
     (
         "list_branches_for_project",
         ScopeKey::ProjectArg,
@@ -261,6 +281,14 @@ pub(crate) fn check_with_store(
             require_in_scope(store, grant, &project_id, "project")?;
             require_images_in_scope(store, args, grant)
         }
+        ScopeKey::NewProject => match (&grant.actor, scope) {
+            (Actor::App { .. }, Some(allowed)) => Err(denied(format!(
+                "{cmd} needs a connected app approved for every project; this one was \
+                 approved for project {allowed} only. Reconnect without --project to create \
+                 projects"
+            ))),
+            _ => Ok(()),
+        },
         ScopeKey::BranchArg => {
             let branch_id: String = arg(args, "branchId")?;
             if scope.is_some() {
@@ -302,25 +330,26 @@ pub(crate) fn check_with_store(
             let group_id: Option<String> = opt_arg(args, "groupId")?;
             if group_id.is_some() {
                 return Err(denied(format!(
-                    "{cmd} with a groupId adds an option to a shared tag group; this credential \
-                     is confined to project {allowed} and may only create an ungrouped tag it \
-                     assigns to that project"
+                    "{cmd} with a groupId adds an option to a shared tag group; {}, and it may \
+                     only create an ungrouped tag it assigns to one of them",
+                    covers(allowed)
                 )));
             }
             let assign_project_id: Option<String> = opt_arg(args, "assignProjectId")?;
             match assign_project_id {
                 Some(project_id) => require_in_scope(store, grant, &project_id, "project"),
                 None => Err(denied(format!(
-                    "{cmd} edits the shared tag catalog; this credential is confined to project \
-                     {allowed} and may only create a tag it assigns to that project \
-                     (assignProjectId)"
+                    "{cmd} edits the shared tag catalog; {}, and it may only create a tag it \
+                     assigns to one of them (assignProjectId)",
+                    covers(allowed)
                 ))),
             }
         }
         ScopeKey::Unconfined => match scope {
             Some(allowed) => Err(denied(format!(
                 "{cmd} edits the shared tag catalog, which needs a credential for every \
-                 project; this one is confined to project {allowed}"
+                 project; {}",
+                covers(allowed)
             ))),
             None => Ok(()),
         },
@@ -343,6 +372,12 @@ fn denied(message: String) -> String {
     format!("{SCOPE_DENIED_PREFIX}{message}")
 }
 
+/// What a confined credential reaches, as every refusal says it: its own
+/// project and the projects its actor created (see the module docs).
+fn covers(allowed: &str) -> String {
+    format!("this credential covers project {allowed} and the projects it created")
+}
+
 /// `Ok` when the grant is unconfined, `project_id` is its own project, or
 /// its actor created `project_id` (see the module docs).
 fn require_in_scope(
@@ -358,7 +393,8 @@ fn require_in_scope(
         return Ok(());
     }
     Err(denied(format!(
-        "the {what} belongs to another project; this credential is confined to project {allowed}"
+        "the {what} belongs to another project; {}",
+        covers(allowed)
     )))
 }
 
@@ -401,8 +437,8 @@ fn require_images_in_scope(
             .ok_or_else(|| denied(format!("image {image_id} not found")))?;
         if !within_reach(store, grant, allowed, &image.project_id)? {
             return Err(denied(format!(
-                "image {image_id} belongs to another project; this credential is confined to \
-                 project {allowed}"
+                "image {image_id} belongs to another project; {}",
+                covers(allowed)
             )));
         }
     }
@@ -834,6 +870,10 @@ mod tests {
         ] {
             calls.push((cmd, json!({ "projectId": created.project })));
         }
+        calls.push((
+            "add_project_repo",
+            json!({ "projectId": created.project, "githubRepo": "acme/widgets" }),
+        ));
         for cmd in ["get_branch_timeline", "start_branch_session"] {
             calls.push((cmd, json!({ "branchId": created.branch })));
         }
@@ -1083,10 +1123,7 @@ mod tests {
         );
         // Creating a project does not make a credential unconfined.
         for (cmd, args) in catalog_writes() {
-            assert_denied(
-                check_with_store(cmd, &args, &g, &f.store),
-                "confined to project",
-            );
+            assert_denied(check_with_store(cmd, &args, &g, &f.store), "covers project");
         }
     }
 
@@ -1327,7 +1364,7 @@ mod tests {
         for (cmd, args) in catalog_writes() {
             assert_denied(
                 check_with_store(cmd, &args, &session, &f.store),
-                "confined to project",
+                "covers project",
             );
             check_with_store(cmd, &args, &all, &f.store).unwrap();
         }
@@ -1453,6 +1490,167 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Creating a project and adding a repo
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_session_and_an_all_projects_grant_may_create_a_project() {
+        let f = fixture();
+        let args = json!({ "name": "gamma" });
+        // A session is confined to one project and may still create one:
+        // that is how its reach grows.
+        check_with_store("create_project", &args, &scoped(&f.project_a), &f.store).unwrap();
+        check_with_store(
+            "create_project",
+            &args,
+            &session_grant("other", 3, &f.project_b),
+            &f.store,
+        )
+        .unwrap();
+        check_with_store(
+            "create_project",
+            &args,
+            &ControlGrant::test_all_projects(),
+            &f.store,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn create_project_is_refused_to_read_only_and_to_single_project_app_grants() {
+        let f = fixture();
+        let args = json!({ "name": "gamma" });
+        for read_only in [
+            grant(Scope::Project(f.project_a.clone()), Access::ReadOnly),
+            grant(Scope::AllProjects, Access::ReadOnly),
+        ] {
+            assert_denied(
+                check_with_store("create_project", &args, &read_only, &f.store),
+                "read-only",
+            );
+        }
+        // The user approved this app for one project. The refusal says how
+        // to get a credential that may create.
+        let err = check_with_store(
+            "create_project",
+            &args,
+            &app_grant("g1", &f.project_a),
+            &f.store,
+        );
+        assert_denied(err.clone(), "approved for every project");
+        assert_denied(err.clone(), &format!("project {} only", f.project_a));
+        assert_denied(err, "Reconnect without --project");
+        // Having created a project by some other route changes nothing.
+        create_project_by(&f, "delta", "app:g1");
+        assert_denied(
+            check_with_store(
+                "create_project",
+                &args,
+                &app_grant("g1", &f.project_a),
+                &f.store,
+            ),
+            "approved for every project",
+        );
+    }
+
+    #[test]
+    fn add_project_repo_reaches_the_own_project_and_a_created_one_only() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        let add_to = |project_id: &str| json!({ "projectId": project_id, "githubRepo": "a/b" });
+        check_with_store("add_project_repo", &add_to(&f.project_a), &g, &f.store).unwrap();
+        check_with_store("add_project_repo", &add_to(&created.project), &g, &f.store).unwrap();
+        assert_denied(
+            check_with_store("add_project_repo", &add_to(&f.project_b), &g, &f.store),
+            "another project",
+        );
+        assert_denied(
+            check_with_store("add_project_repo", &add_to("nope"), &g, &f.store),
+            "another project",
+        );
+        // Another session reaches neither the creator's project nor the
+        // one it created.
+        let other = session_grant("other", 1, &f.project_b);
+        for project_id in [&f.project_a, &created.project] {
+            assert_denied(
+                check_with_store("add_project_repo", &add_to(project_id), &other, &f.store),
+                "another project",
+            );
+        }
+        // A read-only grant adds nothing, even where it may read.
+        for project_id in [&f.project_a, &created.project] {
+            assert_denied(
+                check_with_store(
+                    "add_project_repo",
+                    &add_to(project_id),
+                    &grant(Scope::Project(f.project_a.clone()), Access::ReadOnly),
+                    &f.store,
+                ),
+                "read-only",
+            );
+        }
+        check_with_store(
+            "add_project_repo",
+            &add_to(&f.project_b),
+            &ControlGrant::test_all_projects(),
+            &f.store,
+        )
+        .unwrap();
+        // The project is the one thing the check needs of the arguments.
+        let err = check_with_store(
+            "add_project_repo",
+            &json!({ "githubRepo": "a/b" }),
+            &g,
+            &f.store,
+        )
+        .unwrap_err();
+        assert!(err.contains("missing argument: projectId"), "{err}");
+    }
+
+    /// A confined credential is no longer confined to one project, so no
+    /// refusal may say it is. Each names the own project and says that
+    /// created projects are covered too.
+    #[test]
+    fn refusals_describe_reach_as_the_own_project_and_the_created_ones() {
+        let f = fixture();
+        let g = scoped(&f.project_a);
+        let covers = format!(
+            "this credential covers project {} and the projects it created",
+            f.project_a
+        );
+        let mut refusals = vec![
+            ("list_project_repos", json!({ "projectId": f.project_b })),
+            ("get_branch_timeline", json!({ "branchId": f.branch_b })),
+            ("get_session", json!({ "sessionId": f.session_b })),
+            (
+                "start_project_session",
+                json!({ "projectId": f.project_a, "imageIds": [f.image_b] }),
+            ),
+            (
+                "create_image",
+                json!({ "branchId": f.branch_b, "projectId": f.project_b, "filePath": "/tmp/x" }),
+            ),
+            ("create_tag", json!({ "name": "q4" })),
+            ("create_tag", json!({ "name": "q4", "groupId": "g" })),
+            (
+                "create_tag",
+                json!({ "name": "q4", "assignProjectId": f.project_b }),
+            ),
+        ];
+        refusals.extend(catalog_writes());
+        for (cmd, args) in refusals {
+            let err = check_with_store(cmd, &args, &g, &f.store)
+                .expect_err(&format!("{cmd} {args} should be refused"));
+            assert!(err.contains(&covers), "{cmd} {args}: {err}");
+            assert!(
+                !err.contains("confined to"),
+                "{cmd} {args} still says the credential is confined to one project: {err}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Access and scope breadth
     // -------------------------------------------------------------------
 
@@ -1461,6 +1659,11 @@ mod tests {
         let f = fixture();
         let g = grant(Scope::Project(f.project_a.clone()), Access::ReadOnly);
         let mut writes = vec![
+            ("create_project", json!({ "name": "gamma" })),
+            (
+                "add_project_repo",
+                json!({ "projectId": f.project_a, "githubRepo": "acme/widgets" }),
+            ),
             ("open_project", json!({ "projectId": f.project_a })),
             ("start_branch_session", json!({ "branchId": f.branch_a })),
             ("start_project_session", json!({ "projectId": f.project_a })),

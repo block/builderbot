@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use super::pr_note::PrNote;
 use super::setup::spawn_project_repo_setup;
 use crate::store::repo_affinities::repo_affinity_key;
 use crate::store::{self, Store};
@@ -17,6 +18,32 @@ pub(crate) struct AddedProjectRepo {
     pub provisions_workspace: bool,
 }
 
+/// What a caller asks for when adding a repository to a project. Not
+/// persisted: it is the argument list of the `add_project_repo` command,
+/// gathered so the Tauri command, the web/control `dispatch` arm and the
+/// note move hand the shared body the same thing.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AddProjectRepoRequest {
+    /// The repository, `owner/repo`.
+    pub github_repo: String,
+    /// The repo's branch. Blank means the name inferred from the project's.
+    pub branch_name: Option<String>,
+    pub subpath: Option<String>,
+    pub set_as_primary: Option<bool>,
+    /// Why the repo was added, shown on its branch card.
+    pub reason: Option<String>,
+    pub pr_number: Option<u64>,
+    /// The branch the repo's branch starts from, when the caller already
+    /// knows it. Detected with `gh` otherwise.
+    pub default_branch: Option<String>,
+    /// The fork a pull request's head lives in, when it isn't `github_repo`.
+    pub head_repo: Option<String>,
+    /// The pull request's description, saved as a project note once the
+    /// rows are written. The desktop form leaves it unset and writes the
+    /// note itself.
+    pub pr_note: Option<PrNote>,
+}
+
 /// Add a GitHub repository to a project and start its background setup.
 ///
 /// The one body behind the `add_project_repo` Tauri command, the web/control
@@ -25,25 +52,28 @@ pub(crate) struct AddedProjectRepo {
 /// worktree and prerun actions, or a repo never cloned into the project's
 /// running workspace. See [`spawn_project_repo_setup`] for what the setup is.
 ///
-/// The arguments are [`add_project_repo_impl`]'s. Every await is inside it
-/// and ahead of its first write, and the setup is spawned in the same
-/// synchronous stretch as the last write, so a request future dropped
-/// part-way (see the `web_server` module docs) has either written nothing or
-/// written every row and started the setup.
-#[allow(clippy::too_many_arguments)]
+/// Every await is inside [`add_project_repo_impl`] and ahead of its first
+/// write, and the note and the setup follow the last write in the same
+/// synchronous stretch, so a request future dropped part-way (see the
+/// `web_server` module docs) has either written nothing or written every row
+/// and started the setup.
 pub(crate) async fn add_project_repo_and_setup(
     app_handle: tauri::AppHandle,
     store: Arc<Store>,
     project_id: String,
-    github_repo: String,
-    branch_name: Option<String>,
-    subpath: Option<String>,
-    set_as_primary: Option<bool>,
-    reason: Option<String>,
-    pr_number: Option<u64>,
-    default_branch: Option<String>,
-    head_repo: Option<String>,
+    request: AddProjectRepoRequest,
 ) -> Result<store::ProjectRepo, String> {
+    let AddProjectRepoRequest {
+        github_repo,
+        branch_name,
+        subpath,
+        set_as_primary,
+        reason,
+        pr_number,
+        default_branch,
+        head_repo,
+        pr_note,
+    } = request;
     let added = add_project_repo_impl(
         Arc::clone(&store),
         project_id.clone(),
@@ -57,6 +87,9 @@ pub(crate) async fn add_project_repo_and_setup(
         head_repo,
     )
     .await?;
+    if let Some(note) = &pr_note {
+        note.write(&store, &project_id, "add_project_repo");
+    }
     spawn_project_repo_setup(
         app_handle,
         store,

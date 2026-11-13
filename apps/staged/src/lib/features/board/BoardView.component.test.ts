@@ -89,7 +89,7 @@ vi.mock(
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
 vi.mock(
-  '../projects/ProjectRepoBadges.svelte',
+  '../projects/ProjectCardLabels.svelte',
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
 vi.mock(

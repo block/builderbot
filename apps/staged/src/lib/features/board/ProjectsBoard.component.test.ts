@@ -1,9 +1,10 @@
 // Mounts the real board over the real tagsStore, tagActions and board
 // preferences, with the backend commands and the preference store mocked: a
 // drop or a "Move to" ends in `set_project_group_tag` and moves the card at
-// once, and a collapsed column is saved to `projects-board-columns`. The last
-// block puts the real projectFiltersStore in front of it, as ProjectsList
-// does, so the tag chips decide which cards it shows.
+// once, and a collapsed column is saved to `projects-board-columns`. A card's
+// labels are the real ones, so its chips show which tags its column leaves
+// out. The last block puts the real projectFiltersStore in front of it, as
+// ProjectsList does, so the tag chips decide which cards it shows.
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, TagState } from '../../types';
@@ -85,10 +86,7 @@ vi.mock(
   '../projects/ProjectTransferMenuItem.svelte',
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
-vi.mock(
-  '../projects/ProjectRepoBadges.svelte',
-  () => import('../sessions/testStubs/EmptyStub.svelte')
-);
+vi.mock('../../stores/repoBadges.svelte', () => ({ repoBadgeStore: { lookup: () => null } }));
 vi.mock(
   '../projects/ProjectCardStatusIndicator.svelte',
   () => import('../sessions/testStubs/EmptyStub.svelte')
@@ -115,15 +113,18 @@ async function settle() {
 }
 
 /**
- * Mount the Status board (idea, doing, done) over p1 (Done), p2 (no status)
- * and p3 (Idea).
+ * Mount a group's board, by default the Status board (idea, doing, done)
+ * over p1 (Done), p2 (no status) and p3 (Idea).
  */
 async function mountBoard(
   state: TagState = tagState([
     { projectId: 'p1', tagId: 'done' },
     { projectId: 'p3', tagId: 'idea' },
   ]),
-  { searchRank = null }: { searchRank?: Set<string> | null } = {}
+  {
+    searchRank = null,
+    groupId = 'status',
+  }: { searchRank?: Set<string> | null; groupId?: string } = {}
 ) {
   backend.state = state;
   await tagsStore.load({ force: true });
@@ -131,7 +132,7 @@ async function mountBoard(
   const target = document.createElement('div');
   document.body.appendChild(target);
   const props = reactiveProps({
-    group: tagsStore.catalog.groupsById.get('status') ?? null,
+    group: tagsStore.catalog.groupsById.get(groupId) ?? null,
     projects: [...projects],
     searchRank,
     onOpen: openProject,
@@ -168,6 +169,13 @@ function card(root: ParentNode, projectId: string): HTMLElement {
   );
   if (!found) throw new Error(`No card ${projectId}`);
   return found;
+}
+
+/** The names on a card's tag chips, in order. */
+function chipsOn(root: ParentNode, projectId: string): string[] {
+  return [...card(root, projectId).querySelectorAll('.tag-chip-name')].map((el) =>
+    el.textContent!.trim()
+  );
 }
 
 /** A drag event carrying a stub DataTransfer (jsdom has neither). */
@@ -280,6 +288,63 @@ describe('ProjectsBoard', () => {
     // Still mounted, just hidden.
     expect(card(root, 'p2').closest('[hidden]')).not.toBeNull();
     expect(column(root, 'idea').querySelector('.column-count')?.textContent).toBe('0');
+  });
+
+  it('leaves the tag a card’s column stands for off the card, and keeps its other tags', async () => {
+    // The Priority board: p1 under P0, p2 under P1, p3 under "No Priority".
+    const root = await mountBoard(
+      tagState([
+        { projectId: 'p1', tagId: 'p0' },
+        { projectId: 'p1', tagId: 'q4' },
+        { projectId: 'p1', tagId: 'infra' },
+        { projectId: 'p2', tagId: 'p1' },
+        { projectId: 'p3', tagId: 'q4' },
+      ]),
+      { groupId: 'priority' }
+    );
+
+    expect(cardsIn(root, 'p0')).toEqual(['p1']);
+    expect(chipsOn(root, 'p1')).toEqual(['q4', 'infra']);
+    // Nothing but the column's tag: no chips at all.
+    expect(cardsIn(root, 'p1')).toEqual(['p2']);
+    expect(chipsOn(root, 'p2')).toEqual([]);
+    // "No ‹group›" stands for no tag, so its cards show every chip.
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p3']);
+    expect(chipsOn(root, 'p3')).toEqual(['q4']);
+  });
+
+  it('leaves out the new column’s tag once a card moves, not the old one’s', async () => {
+    const root = await mountBoard(
+      tagState([
+        { projectId: 'p1', tagId: 'p0' },
+        { projectId: 'p1', tagId: 'q4' },
+      ]),
+      { groupId: 'priority' }
+    );
+
+    expect(chipsOn(root, 'p1')).toEqual(['q4']);
+
+    await moveWithMenu(root, 'p1', 'P1');
+
+    expect(cardsIn(root, 'p1')).toEqual(['p1']);
+    expect(chipsOn(root, 'p1')).toEqual(['q4']);
+  });
+
+  it('keeps another group’s tag on the card: only the board’s own group is implied', async () => {
+    // On the Status board a card's Priority tag is not what its column says.
+    const root = await mountBoard(
+      tagState([
+        { projectId: 'p1', tagId: 'done' },
+        { projectId: 'p1', tagId: 'p0' },
+        { projectId: 'p2', tagId: 'p1' },
+      ])
+    );
+
+    expect(cardsIn(root, 'done')).toEqual(['p1']);
+    expect(chipsOn(root, 'p1')).toEqual(['P0']);
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2', 'p3']);
+    expect(chipsOn(root, 'p2')).toEqual(['P1']);
+    expect(chipsOn(root, 'p3')).toEqual([]);
   });
 
   it('opens a project when its card is clicked', async () => {

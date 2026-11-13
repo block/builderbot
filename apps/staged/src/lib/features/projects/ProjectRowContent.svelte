@@ -1,8 +1,9 @@
 <!--
   ProjectRowContent.svelte — how a project introduces itself in a row: a state
   icon on the left (see ProjectStatusIcon), the name, and a meta line of
-  colored repo badges with any running activity (or a disconnected Blox
-  session's state) — falling back to a repo count while badges haven't landed.
+  colored repo badges (a repo count while badges haven't landed), then the
+  project's tags as chips (see ProjectTagChips), then any running activity
+  (or a disconnected Blox session's state).
   A remote project also gets a muted cloud (RemoteProjectIcon) under its state
   icon, on the meta line.
 
@@ -28,7 +29,11 @@
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectMatchReason from './ProjectMatchReason.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
+  import ProjectTagChips from './ProjectTagChips.svelte';
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
+
+  /** Tag chips a row shows before "+N": a row is narrower than a card. */
+  const MAX_ROW_TAG_CHIPS = 2;
 
   interface Props {
     project: Project;
@@ -84,20 +89,19 @@
   <div class="row-meta">
     {#if matchReason}
       <ProjectMatchReason reason={matchReason} terms={matchTerms} iconSize={11} />
-    {:else if badges.length > 0}
+    {:else}
       <span class="badge-row">
         {#each badges as badge}
           <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
+        {:else}
+          <span class="repo-count">{projectSubtitle(repoCount, [])}</span>
         {/each}
+        <ProjectTagChips projectId={project.id} max={MAX_ROW_TAG_CHIPS} size="xs" />
       </span>
       {#if activity}
         <span class="activity-separator">&middot;</span>
         <span class="activity-text">{activity}</span>
       {/if}
-    {:else}
-      <span class="repo-count"
-        >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase, idleActivity)}</span
-      >
     {/if}
   </div>
 </div>

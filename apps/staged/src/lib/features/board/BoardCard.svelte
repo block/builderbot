@@ -1,8 +1,11 @@
 <!--
   BoardCard.svelte — a project on the board: its status icon and name, the
-  activity indicator (running, unread, …), chips for the tags its column and
-  icon don't already show, and its repos. Clicking opens the project; the
-  context menu is the grid card's, plus "Move to" for the board's group.
+  activity indicator (running, unread, …), and its repos with chips for the
+  tags its column and icon don't already show. A column stands for the card's
+  tag in the board's group, so that group's chip is the one left out; a card
+  under "No ‹group›" has no such tag and shows every chip. Clicking opens the
+  project; the context menu is the grid card's, plus "Move to" for the
+  board's group.
 
   With drag and drop on (a fine pointer, desktop layout) the card drags to
   another column. A search hides the card rather than unmounting it.
@@ -34,8 +37,7 @@
   import { workspaceLifecycle } from '../projects/workspaceLifecycle.svelte';
   import ProjectCardMenuContent from '../projects/ProjectCardMenuContent.svelte';
   import ProjectCardStatusIndicator from '../projects/ProjectCardStatusIndicator.svelte';
-  import ProjectCardTagChips from '../projects/ProjectCardTagChips.svelte';
-  import ProjectRepoBadges from '../projects/ProjectRepoBadges.svelte';
+  import ProjectCardLabels from '../projects/ProjectCardLabels.svelte';
   import ProjectStatusIcon from '../projects/ProjectStatusIcon.svelte';
   import RemoteProjectIcon from '../projects/RemoteProjectIcon.svelte';
 
@@ -84,14 +86,14 @@
           />
           <span class="board-card-name">{projectDisplayName(project)}</span>
         </div>
-        <ProjectCardTagChips projectId={project.id} excludeGroupId={group.id} />
         <div class="board-card-footer">
           {#if project.location === 'remote'}
             <RemoteProjectIcon size={12} />
           {/if}
-          <ProjectRepoBadges
+          <ProjectCardLabels
             {project}
             repos={projectsDataStore.reposByProject.get(project.id) ?? []}
+            excludeTagGroupId={group.id}
           />
         </div>
       </button>
@@ -178,7 +180,7 @@
     font-size: var(--size-xs);
   }
 
-  .board-card-footer :global(.repo) {
+  .board-card-footer :global(.card-labels) {
     font-size: var(--size-xs);
   }
 

@@ -1,8 +1,10 @@
 <!--
-  ProjectRepoBadges.svelte — a project card's repos, sorted, each as its badge
-  (the repo's hue) or a plain label; a project whose repos haven't loaded
-  falls back to its own repo, and one with none says so. Shared by the home
-  grid's cards and the board's.
+  ProjectCardLabels.svelte — what a project card is labelled with, as one
+  wrapping cluster: its repos, sorted, each as its badge (the repo's hue) or a
+  plain label, then its tags as chips (see ProjectTagChips). A project whose
+  repos haven't loaded falls back to its own repo, and one with none says so.
+  Shared by the home grid's cards and the board's; a board card leaves out
+  the board's group (`excludeTagGroupId`), whose tag its column stands for.
 -->
 <script lang="ts">
   import type { Project, ProjectRepo } from '../../types';
@@ -10,13 +12,16 @@
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import ProjectTagChips from './ProjectTagChips.svelte';
 
   interface Props {
     project: Project;
     repos: ProjectRepo[];
+    /** A tag group whose chip to leave out besides the icon group's. */
+    excludeTagGroupId?: string | null;
   }
 
-  let { project, repos }: Props = $props();
+  let { project, repos, excludeTagGroupId = null }: Props = $props();
 
   function repoKey(repo: Pick<ProjectRepo, 'githubRepo' | 'subpath'>): string {
     return repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo;
@@ -43,7 +48,7 @@
   );
 </script>
 
-<div class="repo">
+<div class="card-labels">
   {#each labels as label, i (i)}
     {@const badge = repoBadgeStore.lookup(label.githubRepo, label.subpath)}
     {#if badge}
@@ -64,10 +69,11 @@
   {:else}
     No repo attached
   {/each}
+  <ProjectTagChips projectId={project.id} excludeGroupId={excludeTagGroupId} />
 </div>
 
 <style>
-  .repo {
+  .card-labels {
     flex: 1;
     min-width: 0;
     font-size: var(--size-sm);

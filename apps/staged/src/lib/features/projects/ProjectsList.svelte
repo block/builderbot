@@ -27,10 +27,9 @@
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
-  import ProjectCardTagChips from './ProjectCardTagChips.svelte';
   import ProjectCardMenuContent from './ProjectCardMenuContent.svelte';
   import ProjectCardStatusIndicator from './ProjectCardStatusIndicator.svelte';
-  import ProjectRepoBadges from './ProjectRepoBadges.svelte';
+  import ProjectCardLabels from './ProjectCardLabels.svelte';
   import { projectActions } from './projectActions.svelte';
   import { neighbourAfterRemove } from './focusAfterRemove';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -608,7 +607,6 @@
                         />
                         <span>{projectDisplayName(project)}</span>
                       </div>
-                      <ProjectCardTagChips projectId={project.id} />
                       {#if matchReason}
                         <div class="card-match">
                           <ProjectMatchReason reason={matchReason} terms={searchTerms} />
@@ -623,7 +621,7 @@
                         {#if project.location === 'remote'}
                           <RemoteProjectIcon size={14} />
                         {/if}
-                        <ProjectRepoBadges {project} {repos} />
+                        <ProjectCardLabels {project} {repos} />
                       </div>
                     </button>
                   </ContextMenu.Trigger>

@@ -215,7 +215,7 @@ user sees what is in the way. When it could not, the command exits 1:
   ui_busy     a dialog is open in the window, or the diff comment being
               written could not be saved: close or finish it and run the
               command again. Also when another `project open` replaced
-              this one before the window acted on it.
+              this one before the window answered it.
   ui_timeout  the window did not answer in time
   not_found   the project was deleted meanwhile
 

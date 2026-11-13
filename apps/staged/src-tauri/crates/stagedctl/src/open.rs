@@ -285,14 +285,17 @@ fn open_resolved(
              window and run the command again",
         )),
         // Not a dialog in the way, but the same class of failure: the
-        // window was taken up with something else, so nothing was shown
-        // for this caller, and running the command again is the remedy.
+        // window was taken up with something else and never reported
+        // showing this project, and running the command again is the
+        // remedy. The message stops short of "was not shown": the window
+        // checks that a request is still pending right before it switches,
+        // but a replacement can land between that check and the switch.
         Outcome::Superseded => Err(CtlError::command(
             "ui_busy",
             format!(
                 "another `stagedctl project open` reached the same Staged window and replaced \
-                 this one before the window acted on it, so {name:?} was not shown; run the \
-                 command again if it still should be"
+                 this one before the window answered it, so {name:?} may not be showing; run \
+                 the command again if it still should be"
             ),
         )),
         Outcome::ProjectNotFound => Err(CtlError::command(
@@ -838,8 +841,8 @@ mod tests {
         assert_eq!(
             line,
             "ui_busy: another `stagedctl project open` reached the same Staged window and \
-             replaced this one before the window acted on it, so \"Widgets\" was not shown; \
-             run the command again if it still should be"
+             replaced this one before the window answered it, so \"Widgets\" may not be \
+             showing; run the command again if it still should be"
         );
         assert_ne!(line, refusal("dialogOpen").1);
     }

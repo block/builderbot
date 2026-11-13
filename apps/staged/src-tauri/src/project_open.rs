@@ -21,9 +21,31 @@
 //!
 //! **Only while someone waits.** A request lives exactly as long as the
 //! [`PendingProjectOpen`] its caller holds. When the wait times out, or the
-//! caller goes away without waiting it out, the request is withdrawn — a
-//! window that comes up later never navigates for a caller that has already
-//! been told it failed, and there is nothing to expire or prune.
+//! caller goes away without waiting it out, the request is withdrawn, so
+//! there is nothing to expire or prune. From then on the snapshot no longer
+//! lists it and an answer to it is refused. The same holds for a request a
+//! newer one superseded.
+//!
+//! **What a failed caller can rely on.** This state decides what the caller
+//! is told. It cannot stop a window that has already taken the request. The
+//! window (`projectOpenListener.ts`) therefore reads the snapshot again right
+//! before it navigates, after any wait on its project list, on a diff comment
+//! being saved, or behind an earlier request. It navigates only if the
+//! request is still listed. So:
+//!
+//! - A window that comes up after a request was withdrawn or superseded is
+//!   never offered it.
+//! - A window that had taken the request, and was waiting when that
+//!   happened, does not navigate for it.
+//! - One gap remains. The timeout or the newer request can land between the
+//!   snapshot's reply and the navigation it allows, which is one round trip
+//!   to the window. The window then switches project and its answer is
+//!   refused. Closing the gap would mean holding this lock across the
+//!   window's navigation, which the backend cannot do.
+//!
+//! [`ProjectOpenOutcome::TimedOut`] and [`ProjectOpenOutcome::Superseded`]
+//! therefore mean the window did not report showing the project. They do not
+//! promise that it is not on screen.
 //!
 //! In memory only: nothing here is persisted.
 

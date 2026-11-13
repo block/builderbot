@@ -15,7 +15,9 @@ use super::{ProjectOpenAnswer, ProjectOpenRequest, ProjectOpenState};
 
 /// The request this window has yet to answer: none, or one. The frontend
 /// takes this snapshot once its event listener is live, so a request that
-/// arrived before the window loaded is still acted on.
+/// arrived before the window loaded is still acted on. It reads it again
+/// right before it navigates for a request, and leaves the window alone when
+/// that request is no longer listed.
 #[tauri::command]
 pub fn list_pending_project_opens<R: Runtime>(
     window: WebviewWindow<R>,

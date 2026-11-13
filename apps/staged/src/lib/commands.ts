@@ -176,7 +176,9 @@ export function revokeControlGrant(grantId: string): Promise<void> {
 /**
  * The request to show a project that this window has yet to answer: none, or
  * one. Taken once the `project-open-requested` listener is live, so a request
- * parked before the window loaded is still acted on. Desktop only.
+ * parked before the window loaded is still acted on, and again right before
+ * the window navigates for a request, to see that its caller has not timed out
+ * or been superseded meanwhile. Desktop only.
  */
 export function listPendingProjectOpens(): Promise<ProjectOpenRequest[]> {
   return invokeCommand('list_pending_project_opens');

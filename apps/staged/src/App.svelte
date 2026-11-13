@@ -447,8 +447,11 @@
     // navigates underneath the route restore, which would then put the
     // restored or seeded project back over it. Nothing is missed by waiting:
     // the listener takes the backend's snapshot of a request parked earlier.
+    let projectOpenStartupHandled: Promise<void> = Promise.resolve();
     if (isTauri && !destroyed) {
-      unlistenProjectOpens = listenForProjectOpens();
+      const projectOpens = listenForProjectOpens();
+      unlistenProjectOpens = projectOpens.stop;
+      projectOpenStartupHandled = projectOpens.startupHandled;
     }
 
     const sweep = () => void sweepCache();
@@ -645,8 +648,17 @@
     // window only: the backend holds the set until it is answered, and the
     // store-reset prompt wins when there is no store to resume against. Not awaited — the
     // dialog appears over the shell once the window shows.
+    //
+    // Loaded only once a `stagedctl project open` request parked before this
+    // window was listening has been acted on. That request refuses while a
+    // dialog is open, so loading the offer alongside it let the same command
+    // end `opened` or `ui_busy` by whichever chain of round trips finished
+    // first. In this order the project opens and the offer appears over it.
+    // With nothing parked the wait is two round trips, started well before
+    // this line, and it is capped (see `startupHandled`), so the offer is
+    // never lost.
     if (isTauri && getWindowLabel() === 'main' && !storeIncompat && !storeError) {
-      void resumeOnLaunch.load();
+      void projectOpenStartupHandled.then(() => resumeOnLaunch.load());
     }
 
     // Discover available agents in the background.

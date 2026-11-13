@@ -138,7 +138,7 @@ On failure, stderr carries one `code: message` line.
 | 1    | `not_found`              | No project matches; the message lists the project names. Also a workspace whose project was deleted.                                      |
 | 1    | `ambiguous`              | The name matches several projects when case is ignored.                                                                                   |
 | 1    | `not_in_workspace`       | No argument, and the current directory is not inside a Staged project workspace.                                                          |
-| 1    | `ui_busy`                | A dialog is open, a diff comment could not be saved, or another `project open` replaced this one. The window was raised but not switched. |
+| 1    | `ui_busy`                | The window was raised but did not switch: a dialog is open, or a diff comment was not saved. Or another `project open` replaced this one. |
 | 1    | `ui_timeout`             | The window was raised but did not answer in time.                                                                                         |
 | 1    | `app_error`              | The app could not make the request, for example a running Staged from before this command existed (update it).                            |
 | 2    | `transport`              | A fault talking to the app.                                                                                                               |

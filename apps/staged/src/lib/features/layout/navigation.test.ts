@@ -987,6 +987,156 @@ describe('openProjectExternally', () => {
     expect(projectsStoreMock.whenLoaded).toHaveBeenCalledTimes(1);
     expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
   });
+
+  describe('with a stillWanted check', () => {
+    it('navigates once the check says the request is still wanted', async () => {
+      const { openProjectExternally, navigation } = await importNavigation();
+      const stillWanted = vi.fn().mockResolvedValue(true);
+
+      await expect(openProjectExternally('a', stillWanted)).resolves.toBe('opened');
+
+      expect(stillWanted).toHaveBeenCalledTimes(1);
+      expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    });
+
+    it('leaves the window alone for a request withdrawn during the wait for the list', async () => {
+      projectsStoreMock.projects = [];
+      projectsStoreMock.loaded = false;
+      let finishLoad!: () => void;
+      projectsStoreMock.whenLoaded.mockReturnValue(
+        new Promise<void>((resolve) => (finishLoad = resolve))
+      );
+      const { openProjectExternally, navigation } = await importNavigation();
+      // The caller is waiting when the request is taken, and has timed out
+      // by the time the list lands.
+      let pending = true;
+      const stillWanted = vi.fn(async () => pending);
+
+      const opening = openProjectExternally('a', stillWanted);
+      await Promise.resolve();
+      await Promise.resolve();
+      // Asked only at the end: an early yes would be stale by now.
+      expect(stillWanted).not.toHaveBeenCalled();
+
+      pending = false;
+      projectsStoreMock.projects = [{ id: 'a' }];
+      projectsStoreMock.loaded = true;
+      finishLoad();
+
+      await expect(opening).resolves.toBe('withdrawn');
+      expect(stillWanted).toHaveBeenCalledTimes(1);
+      expect(navigation.detailStack).toEqual([home]);
+      expect(setStoreValue).not.toHaveBeenCalled();
+    });
+
+    it('leaves the window on the diff for a request withdrawn during the save', async () => {
+      const {
+        openProjectExternally,
+        selectProject,
+        openDiffRoute,
+        registerDiffLeaveCheck,
+        navigation,
+      } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const stack = navigation.detailStack;
+      let finishSave!: (saved: boolean) => void;
+      const check = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+      registerDiffLeaveCheck(check);
+      let pending = true;
+      const stillWanted = vi.fn(async () => pending);
+
+      const opening = openProjectExternally('b', stillWanted);
+      await vi.waitFor(() => expect(check).toHaveBeenCalledTimes(1));
+      expect(stillWanted).not.toHaveBeenCalled();
+
+      // Superseded, or timed out, while the comment was being saved.
+      pending = false;
+      finishSave(true);
+
+      await expect(opening).resolves.toBe('withdrawn');
+      expect(stillWanted).toHaveBeenCalledTimes(1);
+      // The comment is saved all the same; only the navigation is dropped.
+      expect(navigation.detailStack).toBe(stack);
+      expect(dispatchEvent).not.toHaveBeenCalled();
+    });
+
+    it('asks only after the save, and navigates when still wanted', async () => {
+      const {
+        openProjectExternally,
+        selectProject,
+        openDiffRoute,
+        registerDiffLeaveCheck,
+        navigation,
+      } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const order: string[] = [];
+      registerDiffLeaveCheck(async () => {
+        order.push('save');
+        return true;
+      });
+      const stillWanted = vi.fn(async () => {
+        order.push('stillWanted');
+        return true;
+      });
+
+      await expect(openProjectExternally('b', stillWanted)).resolves.toBe('opened');
+
+      expect(order).toEqual(['save', 'stillWanted']);
+      expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    });
+
+    it('does not ask when there is nothing to navigate', async () => {
+      const { openProjectExternally, selectProject, openDiffRoute, registerDiffLeaveCheck } =
+        await importNavigation();
+      const stillWanted = vi.fn().mockResolvedValue(true);
+      selectProject('a');
+
+      // Already on screen, unknown to the window, and behind a dialog.
+      await expect(openProjectExternally('a', stillWanted)).resolves.toBe('opened');
+      await expect(openProjectExternally('missing', stillWanted)).resolves.toBe('projectNotFound');
+      addDialog();
+      await expect(openProjectExternally('b', stillWanted)).resolves.toBe('dialogOpen');
+      dialogs = [];
+
+      // And a comment that could not be saved.
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      registerDiffLeaveCheck(async () => false);
+      await expect(openProjectExternally('b', stillWanted)).resolves.toBe('diffCommentUnsaved');
+
+      expect(stillWanted).not.toHaveBeenCalled();
+    });
+
+    it('looks at the dialogs and the project again after the check', async () => {
+      const { openProjectExternally, navigation } = await importNavigation();
+
+      // The check is a round trip, and the window does not stand still for it.
+      const opensDialog = vi.fn(async () => {
+        addDialog();
+        return true;
+      });
+      await expect(openProjectExternally('a', opensDialog)).resolves.toBe('dialogOpen');
+      dialogs = [];
+
+      const losesProject = vi.fn(async () => {
+        projectsStoreMock.projects = [{ id: 'b' }];
+        return true;
+      });
+      await expect(openProjectExternally('a', losesProject)).resolves.toBe('projectNotFound');
+
+      expect(navigation.detailStack).toEqual([home]);
+    });
+
+    it('rejects, and navigates nowhere, when the check itself fails', async () => {
+      const { openProjectExternally, navigation } = await importNavigation();
+      const stillWanted = vi.fn().mockRejectedValue(new Error('ipc down'));
+
+      await expect(openProjectExternally('a', stillWanted)).rejects.toThrow('ipc down');
+
+      expect(navigation.detailStack).toEqual([home]);
+    });
+  });
 });
 
 describe('workspace layers', () => {

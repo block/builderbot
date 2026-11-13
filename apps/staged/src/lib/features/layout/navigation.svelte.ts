@@ -768,6 +768,17 @@ function projectOpenable(projectId: string): boolean {
   );
 }
 
+/** The answer that needs no navigation, as things stand in this tick: the
+ *  project cannot be shown, is already the view on screen, or is blocked by a
+ *  dialog. Null when the project should be navigated to. */
+function answerWithoutNavigating(projectId: string): ProjectOpenAnswer | null {
+  if (!projectOpenable(projectId)) return 'projectNotFound';
+  const route = currentRoute();
+  if (route.kind === 'project' && route.projectId === projectId) return 'opened';
+  if (dialogOpen()) return 'dialogOpen';
+  return null;
+}
+
 /**
  * Show a project because something outside the window asked for it, and say
  * what happened. Unlike selectProject, which trusts its caller to have picked
@@ -787,18 +798,27 @@ function projectOpenable(projectId: string): boolean {
  * - Over the diff view it waits for the comment being typed to save, like the
  *   palette and the view's own close, and stays with `diffCommentUnsaved`
  *   when the save failed so the text is still there to retry.
+ * - Last, it asks `stillWanted`, when one is given. The waits above take
+ *   time, and whoever asked may have given up or been replaced meanwhile.
+ *   When it resolves false nothing is navigated and the result is
+ *   `withdrawn`, which is not an answer: there is nobody left to tell.
  *
- * A save takes time, so the dialog and the project are checked again after it
- * and before navigating. From Settings or the diff view the project replaces
- * the workspace route underneath, as selectProject describes.
+ * Each wait is followed by a fresh look at the project and the dialogs, so
+ * the navigation runs in the same tick as the checks it depends on. The
+ * `stillWanted` round trip is the last wait: nothing is awaited between it
+ * resolving true and the navigation. When it rejects, so does this, and
+ * nothing is navigated.
+ *
+ * From Settings or the diff view the project replaces the workspace route
+ * underneath, as selectProject describes.
  */
-export async function openProjectExternally(projectId: string): Promise<ProjectOpenAnswer> {
+export async function openProjectExternally(
+  projectId: string,
+  stillWanted?: () => Promise<boolean>
+): Promise<ProjectOpenAnswer | 'withdrawn'> {
   await projectsDataStore.whenLoaded();
-  if (!projectOpenable(projectId)) return 'projectNotFound';
-
-  const route = currentRoute();
-  if (route.kind === 'project' && route.projectId === projectId) return 'opened';
-  if (dialogOpen()) return 'dialogOpen';
+  let answer = answerWithoutNavigating(projectId);
+  if (answer) return answer;
 
   const diffSaved = diffLeaveCheck();
   if (diffSaved) {
@@ -809,8 +829,14 @@ export async function openProjectExternally(projectId: string): Promise<ProjectO
       console.error('[Navigation] Could not save the diff comment before leaving:', e);
     }
     if (!saved) return 'diffCommentUnsaved';
-    if (!projectOpenable(projectId)) return 'projectNotFound';
-    if (dialogOpen()) return 'dialogOpen';
+    answer = answerWithoutNavigating(projectId);
+    if (answer) return answer;
+  }
+
+  if (stillWanted) {
+    if (!(await stillWanted())) return 'withdrawn';
+    answer = answerWithoutNavigating(projectId);
+    if (answer) return answer;
   }
 
   selectProject(projectId);

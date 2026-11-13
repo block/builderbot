@@ -8,6 +8,8 @@
 //!   running: the decision, the bundle path, the wait, and the one spawn
 //! - [`open`]: `project open`: finds the project, by name, id or the current
 //!   directory, asks a window to show it and words what the window did
+//! - [`projects`]: the `project create` and `project add-repo` writes:
+//!   their request mapping, re-reads and renderers
 //! - [`tags`]: the `tag` noun and `project tags`: tag wire shapes, `<tag>`
 //!   and `<group>` resolution, and their renderers
 //!
@@ -22,4 +24,5 @@ pub mod commands;
 pub mod grants;
 pub mod launch;
 pub mod open;
+pub mod projects;
 pub mod tags;

@@ -498,10 +498,11 @@ pub(crate) fn render_tag_show(
 }
 
 /// The usage counts' reach, for output that shows them. The app confines
-/// `get_tag_state`'s assignments (and `list_projects`) to a project-scoped
-/// credential's own project, so under one every count is 0 or 1 and a tag
-/// that reads as unused may be carried by other projects. `--json` carries
-/// it as `usageScope`; the human output gets [`USAGE_SCOPE_NOTE`].
+/// `get_tag_state`'s assignments (and `list_projects`) to the projects a
+/// project-scoped credential covers: its own, and for a session the ones
+/// it created. Under one the counts leave every other project out, and a
+/// tag that reads as unused may be carried by them. `--json` carries it as
+/// `usageScope`; the human output gets [`USAGE_SCOPE_NOTE`].
 pub fn usage_scope(scope: CredentialScope) -> &'static str {
     match scope {
         CredentialScope::AllProjects => "all",
@@ -510,8 +511,8 @@ pub fn usage_scope(scope: CredentialScope) -> &'static str {
 }
 
 /// The line under a scoped credential's counts.
-pub const USAGE_SCOPE_NOTE: &str =
-    "(project counts cover only this credential's project; other projects' tags are not shown)";
+pub const USAGE_SCOPE_NOTE: &str = "(project counts cover only the projects this credential \
+     covers; other projects' tags are not shown)";
 
 /// `human` with the note appended when `scope` is confined.
 fn with_usage_scope_note(human: String, scope: CredentialScope) -> String {
@@ -1711,7 +1712,7 @@ mod tests {
             assert_eq!(text, format!("Tags\n  a\n{USAGE_SCOPE_NOTE}"));
         }
         assert!(
-            USAGE_SCOPE_NOTE.contains("only this credential's project"),
+            USAGE_SCOPE_NOTE.contains("only the projects this credential covers"),
             "{USAGE_SCOPE_NOTE}"
         );
     }

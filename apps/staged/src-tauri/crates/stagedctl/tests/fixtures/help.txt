@@ -4,7 +4,8 @@ Control a running Staged app from the command line.
 stagedctl is built for agents running inside Staged-spawned sessions: the
 app injects $STAGEDCTL_LOCK into those sessions — a per-session credential
 file — and stagedctl uses it to find the app and authenticate with zero
-configuration. The credential is confined to the session's own project
+configuration. The credential covers the session's own project and the
+projects the session created (see `stagedctl project create --help`),
 and is revoked when the session ends; it is the only credential a
 spawned session is issued, and a session must not try to obtain wider
 access (see `stagedctl connect --help`). Outside a session it tries each
@@ -43,7 +44,7 @@ Exit codes:
 Usage: stagedctl [OPTIONS] <COMMAND>
 
 Commands:
-  project     Inspect projects and the repos attached to them, and show one in the app
+  project     Inspect and create projects, attach repos to them, and show one in the app
   timeline    Read project and repo timelines (commits, notes, reviews, images)
   session     Start, observe, wait for, and cancel agent sessions
   image       Attach images to a repo's timeline
@@ -66,18 +67,20 @@ Options:
           Print version
 
 === stagedctl project --help ===
-Inspect projects and the repos attached to them, and show one in the app
+Inspect and create projects, attach repos to them, and show one in the app
 
 Usage: stagedctl project [OPTIONS] <COMMAND>
 
 Commands:
-  list   List every project in the app
-  get    Show one project's repos and branches
-  open   Show a project in the Staged window and bring that window to the front
-  tags   Show one project's tags: its choice in each group, then its free tags
-  tag    Tag a project: pick its tag in a group, or add free tags
-  untag  Untag a project: remove the named tags, or clear its choice in a group
-  help   Print this message or the help of the given subcommand(s)
+  list      List every project in the app
+  get       Show one project's repos and branches
+  open      Show a project in the Staged window and bring that window to the front
+  create    Create a project, optionally with its first repo
+  add-repo  Attach a repo to a project, with one branch
+  tags      Show one project's tags: its choice in each group, then its free tags
+  tag       Tag a project: pick its tag in a group, or add free tags
+  untag     Untag a project: remove the named tags, or clear its choice in a group
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
       --lock-path <PATH>
@@ -95,6 +98,11 @@ List every project in the app.
 Each line shows the project name, its primary repo address, where its
 branches run (local or remote), and the project id. Both the name and the
 id are accepted anywhere a <project> argument is expected.
+
+Under a session's own credential the list holds the session's own
+project and the projects it created with `stagedctl project create`.
+Under a connected-app grant approved for one project it holds that
+project.
 
 With --tag, only the projects carrying that tag are listed. Repeating the
 flag narrows further: a project must carry every tag named (AND), even
@@ -215,6 +223,178 @@ Options:
 
       --json
           Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl project create --help ===
+Create a project. Without --repo it is empty; attach repos afterwards
+with `stagedctl project add-repo`. With --repo, that repo becomes the
+project's primary repo and gets one branch:
+
+  --branch   an existing remote branch, or the name of a new one. When
+             the branch has an open pull request, the pull request is
+             linked as with --pr.
+  --pr       the pull request's branch and base. A pull request from a
+             fork is found through the fork or its parent repo. Its
+             description is saved as a project note titled
+             "PR #<number>: <title>".
+  neither    a new branch named after the project, with the user's
+             branch prefix, as the New Project form does when its
+             branch field is left blank.
+
+--base is the branch a new branch starts from and the one the branch is
+compared against (main and origin/main mean the same). Without it the
+repo's default branch is used.
+
+The app checks the repo the way the New Project form does, before it
+writes anything: the repo must exist on GitHub, a subpath must be a
+directory in it, and the root of a monorepo (20 or more modules) is
+refused unless --allow-monorepo-root is given. Name the subpath of the
+service or package to work in where there is one. Project names are
+unique: a name another project has is refused.
+
+--location is local unless given. The location the New Project form
+remembers is neither read nor changed.
+
+  local    Staged creates a git worktree for the branch on this machine
+           and then runs the repo's setup actions, in the background.
+  remote   The branch runs in a Blox workspace, which Staged provisions.
+           This needs the `sq` CLI and is refused without it; it never
+           falls back to a local project. The workspace starts while a
+           Staged window is open.
+
+The command returns once the project exists; setup carries on in the
+background, and a failure there is written to the app's log, not
+reported here. `stagedctl project get` shows the branch's worktree once
+it exists.
+
+A session may create projects. Its credential covers its own project
+and the projects it created, in later runs of the session too, so it
+can add repos to a created project, read it and start sessions in it.
+One session may hold at most 10 created projects at a time; deleting
+one in Staged frees a slot. A connected app approved for every project
+may create without that limit. One approved for a single project may
+not create (exit 4, `scope_denied`): reconnect without --project.
+
+The project shows at once in the app's sidebar, where the user can
+delete it. stagedctl has no delete.
+
+Usage: stagedctl project create [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          The project's name; must not be another project's
+
+Options:
+      --location <LOCATION>
+          Where the project's branches run
+
+          Possible values:
+          - local:  Git worktrees on this machine
+          - remote: A Blox workspace
+          
+          [default: local]
+
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+      --repo <REPO>
+          The project's first repo, <owner>/<repo>[:<subpath>]; default: no repo
+
+      --branch <BRANCH>
+          An existing remote branch, or the name of a new one; default: a new branch named after the project (needs --repo, not with --pr)
+
+      --pr <NUMBER>
+          A pull request number: use its branch and base (needs --repo, not with --branch or --base)
+
+      --base <BRANCH>
+          The base branch; default: the repo's default branch (needs --repo, not with --pr)
+
+      --allow-monorepo-root
+          Accept the root of a monorepo (needs --repo)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl project add-repo --help ===
+Attach a repo to a project, with one branch. <PROJECT> is a name or id
+among the projects this credential covers (see `stagedctl project
+list`).
+
+--repo names the repo and, for part of a monorepo, its subpath. One repo
+may be attached several times under different subpaths. A repo and
+subpath the project already has is refused before anything is written
+(exit 1, `already_attached`), naming the branch it has there.
+
+The branch is chosen as in `stagedctl project create`: --branch for an
+existing remote branch or a new one, --pr for a pull request's branch
+and base (its description is saved as a project note), neither for a
+new branch named after the project. --base is the branch a new branch
+starts from; without it the repo's default branch is used. A branch the
+same repo already has in the project is refused, since a branch can be
+checked out once per project.
+
+The app checks the repo before it writes anything: the repo must exist
+on GitHub, a subpath must be a directory in it, and the root of a
+monorepo (20 or more modules) is refused unless --allow-monorepo-root is
+given. The first repo a project gets becomes its primary repo.
+stagedctl cannot change which repo is primary.
+
+--reason says why the repo was added. It is shown on the repo's branch
+card in the app.
+
+What starts depends on where the project runs, and all of it is in the
+background after the command returns:
+
+  local    Staged creates a git worktree for the branch on this machine
+           and then runs the repo's setup actions.
+  remote   The repo is cloned into the project's Blox workspace, which
+           must be running. The first repo of a remote project has no
+           workspace to join: its branch provisions one, which starts
+           while a Staged window is open.
+
+A failure in that setup is written to the app's log, not reported here.
+
+Needs write access to the project (exit 4, `scope_denied`, under a
+read-only credential). A session may add repos to its own project and to
+the projects it created; it cannot address any other. The repo shows at
+once in the project, where the user can remove it. stagedctl has no
+remove.
+
+Usage: stagedctl project add-repo [OPTIONS] --repo <REPO> <PROJECT>
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --repo <REPO>
+          The repo to attach, <owner>/<repo>[:<subpath>]
+
+      --branch <BRANCH>
+          An existing remote branch, or the name of a new one; default: a new branch named after the project (not with --pr)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+      --pr <NUMBER>
+          A pull request number: use its branch and base (not with --branch or --base)
+
+      --base <BRANCH>
+          The base branch; default: the repo's default branch (not with --pr)
+
+      --reason <TEXT>
+          Why the repo is being added; shown on its branch card
+
+      --allow-monorepo-root
+          Accept the root of a monorepo
 
   -h, --help
           Print help (see a summary with '-h')
@@ -663,8 +843,9 @@ Options:
 Show one tag: its group (if any), colour and icon, and every project that
 carries it.
 
-Under a project-scoped credential the project list holds at most the
-credential's own project.
+Under a session's own credential the project list holds at most the
+session's own project and the projects it created. Under a connected-app
+grant approved for one project it holds at most that project.
 
 Usage: stagedctl tag show [OPTIONS] <TAG>
 
@@ -1047,14 +1228,15 @@ left unanswered for five minutes expires in the app; the default
 this command has stopped listening for it.
 
 Not for Staged-spawned sessions. A spawned session is issued only its
-own project-scoped credential and must not try to obtain wider access:
-the app refuses `connect` (exit 4, `scope_denied`) when the caller
-presents a session credential or when its process is traceable to a
-running session's agent, and the CLI refuses it locally under a
-per-session $STAGEDCTL_LOCK. That check is a strong default, not a
-sandbox — same-user processes are not a hard security boundary — and
-the rule holds either way. If a task needs wider access, say so and let
-the user run this command from their own terminal.
+own credential, which covers its project and the projects it created,
+and must not try to obtain wider access: the app refuses `connect`
+(exit 4, `scope_denied`) when the caller presents a session credential
+or when its process is traceable to a running session's agent, and the
+CLI refuses it locally under a per-session $STAGEDCTL_LOCK. That check
+is a strong default, not a sandbox — same-user processes are not a hard
+security boundary — and the rule holds either way. If a task needs
+wider access, say so and let the user run this command from their own
+terminal.
 
 Usage: stagedctl connect [OPTIONS] --client <NAME>
 

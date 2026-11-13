@@ -23,6 +23,7 @@ use crate::client::{
 use crate::grants::{self, GrantFile};
 use crate::launch;
 use crate::open;
+use crate::projects;
 use crate::tags;
 
 /// One command's result: the value `--json` prints, and the human rendering.
@@ -117,6 +118,42 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
     match cli.command {
         Noun::Project(ProjectVerb::List { tag }) => project_list(&client, &tag),
         Noun::Project(ProjectVerb::Get { project }) => project_get(&client, &project),
+        Noun::Project(ProjectVerb::Create {
+            name,
+            location,
+            repo,
+            branch,
+            pr,
+            base,
+            allow_monorepo_root,
+        }) => {
+            let repo = projects::RepoRequest::for_create(
+                repo.as_deref(),
+                branch.as_deref(),
+                pr,
+                base.as_deref(),
+                allow_monorepo_root,
+            )?;
+            projects::project_create(&client, &name, location, repo.as_ref())
+        }
+        Noun::Project(ProjectVerb::AddRepo {
+            project,
+            repo,
+            branch,
+            pr,
+            base,
+            reason,
+            allow_monorepo_root,
+        }) => {
+            let repo = projects::RepoRequest::from_flags(
+                &repo,
+                branch.as_deref(),
+                pr,
+                base.as_deref(),
+                allow_monorepo_root,
+            )?;
+            projects::project_add_repo(&client, &project, &repo, reason.as_deref())
+        }
         Noun::Project(ProjectVerb::Tags { project }) => tags::project_tags(&client, &project),
         Noun::Project(ProjectVerb::Tag {
             project,
@@ -254,6 +291,42 @@ fn validate(command: &Noun) -> Result<(), CtlError> {
         {
             invalid("--repo requires --project (repo addresses are project-scoped)")
         }
+        Noun::Project(ProjectVerb::Create {
+            name,
+            repo,
+            branch,
+            pr,
+            base,
+            allow_monorepo_root,
+            ..
+        }) => {
+            if name.trim().is_empty() {
+                return invalid("a project name must not be empty");
+            }
+            projects::RepoRequest::for_create(
+                repo.as_deref(),
+                branch.as_deref(),
+                *pr,
+                base.as_deref(),
+                *allow_monorepo_root,
+            )
+            .map(|_| ())
+        }
+        Noun::Project(ProjectVerb::AddRepo {
+            repo,
+            branch,
+            pr,
+            base,
+            allow_monorepo_root,
+            ..
+        }) => projects::RepoRequest::from_flags(
+            repo,
+            branch.as_deref(),
+            *pr,
+            base.as_deref(),
+            *allow_monorepo_root,
+        )
+        .map(|_| ()),
         Noun::Project(ProjectVerb::Untag { tags, group, .. }) => match (tags.is_empty(), group) {
             (false, Some(_)) => invalid(
                 "--group clears the project's whole choice in that group and takes no <tag> \
@@ -318,9 +391,9 @@ fn session_enrolment_refusal(command: &Noun, path: &std::path::Path) -> CtlError
         message: format!(
             "spawned sessions cannot request connected-app access: `stagedctl {verb}` is for \
              clients the user runs outside a Staged session, and this invocation runs inside \
-             one ({} is the session's own credential, confined to its project). Use that \
-             credential as is; if the task needs wider access, ask the user to run `stagedctl \
-             connect` from their own terminal",
+             one ({} is the session's own credential, which covers its project and the \
+             projects it created). Use that credential as is; if the task needs wider \
+             access, ask the user to run `stagedctl connect` from their own terminal",
             path.display()
         ),
     }
@@ -483,36 +556,42 @@ pub(crate) struct Project {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RepoRow {
-    id: String,
-    github_repo: String,
+pub(crate) struct RepoRow {
+    pub(crate) id: String,
+    pub(crate) github_repo: String,
     #[serde(default)]
-    subpath: Option<String>,
+    pub(crate) subpath: Option<String>,
     #[serde(default)]
-    is_primary: bool,
+    pub(crate) is_primary: bool,
+    /// The branch the repo was attached with.
+    #[serde(default)]
+    pub(crate) branch_name: String,
+    /// Why the repo was added, when the caller that added it said.
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BranchRow {
-    id: String,
+pub(crate) struct BranchRow {
+    pub(crate) id: String,
     #[serde(default)]
-    project_repo_id: Option<String>,
-    branch_name: String,
+    pub(crate) project_repo_id: Option<String>,
+    pub(crate) branch_name: String,
     #[serde(default)]
-    base_branch: String,
+    pub(crate) base_branch: String,
     #[serde(default)]
-    pr_number: Option<u64>,
+    pub(crate) pr_number: Option<u64>,
     #[serde(default)]
-    pr_state: Option<String>,
+    pub(crate) pr_state: Option<String>,
     #[serde(default)]
-    pr_checks_status: Option<String>,
+    pub(crate) pr_checks_status: Option<String>,
     #[serde(default)]
-    pr_url: Option<String>,
+    pub(crate) pr_url: Option<String>,
     #[serde(default)]
-    worktree_path: Option<String>,
+    pub(crate) worktree_path: Option<String>,
     #[serde(default)]
-    workspace_name: Option<String>,
+    pub(crate) workspace_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -718,7 +797,7 @@ impl RepoAddress {
     }
 }
 
-fn repo_address(github_repo: &str, subpath: Option<&str>) -> String {
+pub(crate) fn repo_address(github_repo: &str, subpath: Option<&str>) -> String {
     match subpath {
         Some(subpath) => format!("{github_repo}:{subpath}"),
         None => github_repo.to_string(),
@@ -970,15 +1049,7 @@ fn project_get(client: &Client, needle: &str) -> Result<CmdOutput, CtlError> {
         }
         joined.push(json!({
             "repo": repos_raw.get(i).cloned().unwrap_or(Value::Null),
-            "branches": branches_raw
-                .as_array()
-                .map(|a| a
-                    .iter()
-                    .filter(|v| v.get("projectRepoId").and_then(Value::as_str)
-                        == Some(repo.id.as_str()))
-                    .cloned()
-                    .collect::<Vec<_>>())
-                .unwrap_or_default(),
+            "branches": raw_branches_of_repo(&branches_raw, &repo.id),
         }));
     }
 
@@ -988,7 +1059,20 @@ fn project_get(client: &Client, needle: &str) -> Result<CmdOutput, CtlError> {
     })
 }
 
-fn branch_summary(branch: &BranchRow) -> String {
+/// The app's branch rows that belong to one attached repo, as they came.
+pub(crate) fn raw_branches_of_repo(branches_raw: &Value, repo_id: &str) -> Vec<Value> {
+    branches_raw
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row.get("projectRepoId").and_then(Value::as_str) == Some(repo_id))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn branch_summary(branch: &BranchRow) -> String {
     let mut parts = vec![format!("branch {}", branch.branch_name)];
     if !branch.base_branch.is_empty() {
         parts.push(format!("base:{}", branch.base_branch));
@@ -2254,6 +2338,113 @@ mod tests {
                 &["stagedctl", "tag", "group", "set-sidebar", "Status"],
                 "pass --on",
             ),
+            (
+                &["stagedctl", "project", "create", "  "],
+                "a project name must not be empty",
+            ),
+            (
+                &["stagedctl", "project", "create", "n", "--branch", "b"],
+                "--branch describes the project's first repo and needs --repo",
+            ),
+            (
+                &["stagedctl", "project", "create", "n", "--pr", "4"],
+                "--pr describes the project's first repo and needs --repo",
+            ),
+            (
+                &["stagedctl", "project", "create", "n", "--base", "main"],
+                "--base describes the project's first repo and needs --repo",
+            ),
+            (
+                &[
+                    "stagedctl",
+                    "project",
+                    "create",
+                    "n",
+                    "--allow-monorepo-root",
+                ],
+                "--allow-monorepo-root describes the project's first repo and needs --repo",
+            ),
+            (
+                &[
+                    "stagedctl",
+                    "project",
+                    "create",
+                    "n",
+                    "--repo",
+                    "o/r",
+                    "--branch",
+                    "b",
+                    "--pr",
+                    "4",
+                ],
+                "--branch and --pr cannot be combined",
+            ),
+            (
+                &[
+                    "stagedctl",
+                    "project",
+                    "create",
+                    "n",
+                    "--repo",
+                    "o/r",
+                    "--pr",
+                    "4",
+                    "--base",
+                    "main",
+                ],
+                "--base and --pr cannot be combined",
+            ),
+            (
+                &["stagedctl", "project", "create", "n", "--repo", "widgets"],
+                "--repo must look like <owner>/<repo>[:<subpath>]",
+            ),
+            (
+                &[
+                    "stagedctl",
+                    "project",
+                    "add-repo",
+                    "p",
+                    "--repo",
+                    "o/r",
+                    "--branch",
+                    "b",
+                    "--pr",
+                    "4",
+                ],
+                "--branch and --pr cannot be combined",
+            ),
+            (
+                &[
+                    "stagedctl",
+                    "project",
+                    "add-repo",
+                    "p",
+                    "--repo",
+                    "o/r",
+                    "--pr",
+                    "4",
+                    "--base",
+                    "main",
+                ],
+                "--base and --pr cannot be combined",
+            ),
+            (
+                &[
+                    "stagedctl",
+                    "project",
+                    "add-repo",
+                    "p",
+                    "--repo",
+                    "o/r",
+                    "--branch",
+                    "",
+                ],
+                "--branch must not be empty",
+            ),
+            (
+                &["stagedctl", "project", "add-repo", "p", "--repo", "widgets"],
+                "--repo must look like <owner>/<repo>[:<subpath>]",
+            ),
         ];
         for (args, expected) in cases {
             let err = validate(&parse_cli(args)).unwrap_err();
@@ -2270,6 +2461,64 @@ mod tests {
     fn validate_accepts_well_paired_flags() {
         let good: &[&[&str]] = &[
             &["stagedctl", "project", "list"],
+            &["stagedctl", "project", "create", "n"],
+            &[
+                "stagedctl",
+                "project",
+                "create",
+                "n",
+                "--location",
+                "remote",
+            ],
+            &[
+                "stagedctl",
+                "project",
+                "create",
+                "n",
+                "--repo",
+                "o/r:services/auth",
+                "--branch",
+                "b",
+                "--base",
+                "develop",
+                "--allow-monorepo-root",
+            ],
+            &[
+                "stagedctl",
+                "project",
+                "create",
+                "n",
+                "--repo",
+                "o/r",
+                "--pr",
+                "4",
+            ],
+            &["stagedctl", "project", "add-repo", "p", "--repo", "o/r"],
+            &[
+                "stagedctl",
+                "project",
+                "add-repo",
+                "p",
+                "--repo",
+                "o/r",
+                "--pr",
+                "4",
+                "--reason",
+                "why",
+                "--allow-monorepo-root",
+            ],
+            &[
+                "stagedctl",
+                "project",
+                "add-repo",
+                "p",
+                "--repo",
+                "o/r:sub",
+                "--branch",
+                "b",
+                "--base",
+                "develop",
+            ],
             &["stagedctl", "tag", "edit", "Status/Done", "--no-icon"],
             &["stagedctl", "tag", "edit", "Status/Done", "--color", "red"],
             &["stagedctl", "tag", "move", "q4", "--ungroup"],

@@ -11,7 +11,8 @@ Control a running Staged app from the command line.
 stagedctl is built for agents running inside Staged-spawned sessions: the
 app injects $STAGEDCTL_LOCK into those sessions — a per-session credential
 file — and stagedctl uses it to find the app and authenticate with zero
-configuration. The credential is confined to the session's own project
+configuration. The credential covers the session's own project and the
+projects the session created (see `stagedctl project create --help`),
 and is revoked when the session ends; it is the only credential a
 spawned session is issued, and a session must not try to obtain wider
 access (see `stagedctl connect --help`). Outside a session it tries each
@@ -70,8 +71,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Noun {
-    /// Inspect projects and the repos attached to them, and show one in the
-    /// app
+    /// Inspect and create projects, attach repos to them, and show one in
+    /// the app
     #[command(alias = "projects", subcommand)]
     Project(ProjectVerb),
 
@@ -112,14 +113,15 @@ left unanswered for five minutes expires in the app; the default
 this command has stopped listening for it.
 
 Not for Staged-spawned sessions. A spawned session is issued only its
-own project-scoped credential and must not try to obtain wider access:
-the app refuses `connect` (exit 4, `scope_denied`) when the caller
-presents a session credential or when its process is traceable to a
-running session's agent, and the CLI refuses it locally under a
-per-session $STAGEDCTL_LOCK. That check is a strong default, not a
-sandbox — same-user processes are not a hard security boundary — and
-the rule holds either way. If a task needs wider access, say so and let
-the user run this command from their own terminal.")]
+own credential, which covers its project and the projects it created,
+and must not try to obtain wider access: the app refuses `connect`
+(exit 4, `scope_denied`) when the caller presents a session credential
+or when its process is traceable to a running session's agent, and the
+CLI refuses it locally under a per-session $STAGEDCTL_LOCK. That check
+is a strong default, not a sandbox — same-user processes are not a hard
+security boundary — and the rule holds either way. If a task needs
+wider access, say so and let the user run this command from their own
+terminal.")]
     Connect {
         /// The name shown to the user in the consent dialog
         #[arg(long, value_name = "NAME")]
@@ -167,6 +169,11 @@ List every project in the app.
 Each line shows the project name, its primary repo address, where its
 branches run (local or remote), and the project id. Both the name and the
 id are accepted anywhere a <project> argument is expected.
+
+Under a session's own credential the list holds the session's own
+project and the projects it created with `stagedctl project create`.
+Under a connected-app grant approved for one project it holds that
+project.
 
 With --tag, only the projects carrying that tag are listed. Repeating the
 flag narrows further: a project must carry every tag named (AND), even
@@ -260,6 +267,169 @@ directory outside every project workspace never starts it.")]
         /// Exit 3 instead of starting Staged when it is not running
         #[arg(long)]
         no_launch: bool,
+    },
+
+    /// Create a project, optionally with its first repo
+    #[command(long_about = "\
+Create a project. Without --repo it is empty; attach repos afterwards
+with `stagedctl project add-repo`. With --repo, that repo becomes the
+project's primary repo and gets one branch:
+
+  --branch   an existing remote branch, or the name of a new one. When
+             the branch has an open pull request, the pull request is
+             linked as with --pr.
+  --pr       the pull request's branch and base. A pull request from a
+             fork is found through the fork or its parent repo. Its
+             description is saved as a project note titled
+             \"PR #<number>: <title>\".
+  neither    a new branch named after the project, with the user's
+             branch prefix, as the New Project form does when its
+             branch field is left blank.
+
+--base is the branch a new branch starts from and the one the branch is
+compared against (main and origin/main mean the same). Without it the
+repo's default branch is used.
+
+The app checks the repo the way the New Project form does, before it
+writes anything: the repo must exist on GitHub, a subpath must be a
+directory in it, and the root of a monorepo (20 or more modules) is
+refused unless --allow-monorepo-root is given. Name the subpath of the
+service or package to work in where there is one. Project names are
+unique: a name another project has is refused.
+
+--location is local unless given. The location the New Project form
+remembers is neither read nor changed.
+
+  local    Staged creates a git worktree for the branch on this machine
+           and then runs the repo's setup actions, in the background.
+  remote   The branch runs in a Blox workspace, which Staged provisions.
+           This needs the `sq` CLI and is refused without it; it never
+           falls back to a local project. The workspace starts while a
+           Staged window is open.
+
+The command returns once the project exists; setup carries on in the
+background, and a failure there is written to the app's log, not
+reported here. `stagedctl project get` shows the branch's worktree once
+it exists.
+
+A session may create projects. Its credential covers its own project
+and the projects it created, in later runs of the session too, so it
+can add repos to a created project, read it and start sessions in it.
+One session may hold at most 10 created projects at a time; deleting
+one in Staged frees a slot. A connected app approved for every project
+may create without that limit. One approved for a single project may
+not create (exit 4, `scope_denied`): reconnect without --project.
+
+The project shows at once in the app's sidebar, where the user can
+delete it. stagedctl has no delete.")]
+    Create {
+        /// The project's name; must not be another project's
+        name: String,
+
+        /// Where the project's branches run
+        #[arg(long, value_name = "LOCATION", value_enum, default_value_t = ProjectLocation::Local)]
+        location: ProjectLocation,
+
+        /// The project's first repo, <owner>/<repo>[:<subpath>]; default:
+        /// no repo
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+
+        /// An existing remote branch, or the name of a new one; default: a
+        /// new branch named after the project (needs --repo, not with --pr)
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
+
+        /// A pull request number: use its branch and base (needs --repo,
+        /// not with --branch or --base)
+        #[arg(long, value_name = "NUMBER", value_parser = clap::value_parser!(u64).range(1..))]
+        pr: Option<u64>,
+
+        /// The base branch; default: the repo's default branch (needs
+        /// --repo, not with --pr)
+        #[arg(long, value_name = "BRANCH")]
+        base: Option<String>,
+
+        /// Accept the root of a monorepo (needs --repo)
+        #[arg(long)]
+        allow_monorepo_root: bool,
+    },
+
+    /// Attach a repo to a project, with one branch
+    #[command(long_about = "\
+Attach a repo to a project, with one branch. <PROJECT> is a name or id
+among the projects this credential covers (see `stagedctl project
+list`).
+
+--repo names the repo and, for part of a monorepo, its subpath. One repo
+may be attached several times under different subpaths. A repo and
+subpath the project already has is refused before anything is written
+(exit 1, `already_attached`), naming the branch it has there.
+
+The branch is chosen as in `stagedctl project create`: --branch for an
+existing remote branch or a new one, --pr for a pull request's branch
+and base (its description is saved as a project note), neither for a
+new branch named after the project. --base is the branch a new branch
+starts from; without it the repo's default branch is used. A branch the
+same repo already has in the project is refused, since a branch can be
+checked out once per project.
+
+The app checks the repo before it writes anything: the repo must exist
+on GitHub, a subpath must be a directory in it, and the root of a
+monorepo (20 or more modules) is refused unless --allow-monorepo-root is
+given. The first repo a project gets becomes its primary repo.
+stagedctl cannot change which repo is primary.
+
+--reason says why the repo was added. It is shown on the repo's branch
+card in the app.
+
+What starts depends on where the project runs, and all of it is in the
+background after the command returns:
+
+  local    Staged creates a git worktree for the branch on this machine
+           and then runs the repo's setup actions.
+  remote   The repo is cloned into the project's Blox workspace, which
+           must be running. The first repo of a remote project has no
+           workspace to join: its branch provisions one, which starts
+           while a Staged window is open.
+
+A failure in that setup is written to the app's log, not reported here.
+
+Needs write access to the project (exit 4, `scope_denied`, under a
+read-only credential). A session may add repos to its own project and to
+the projects it created; it cannot address any other. The repo shows at
+once in the project, where the user can remove it. stagedctl has no
+remove.")]
+    AddRepo {
+        /// Project name or id (see `stagedctl project list`)
+        project: String,
+
+        /// The repo to attach, <owner>/<repo>[:<subpath>]
+        #[arg(long, value_name = "REPO")]
+        repo: String,
+
+        /// An existing remote branch, or the name of a new one; default: a
+        /// new branch named after the project (not with --pr)
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
+
+        /// A pull request number: use its branch and base (not with
+        /// --branch or --base)
+        #[arg(long, value_name = "NUMBER", value_parser = clap::value_parser!(u64).range(1..))]
+        pr: Option<u64>,
+
+        /// The base branch; default: the repo's default branch (not with
+        /// --pr)
+        #[arg(long, value_name = "BRANCH")]
+        base: Option<String>,
+
+        /// Why the repo is being added; shown on its branch card
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+
+        /// Accept the root of a monorepo
+        #[arg(long)]
+        allow_monorepo_root: bool,
     },
 
     /// Show one project's tags: its choice in each group, then its free tags
@@ -370,8 +540,9 @@ With --group, only that group's tags are listed.")]
 Show one tag: its group (if any), colour and icon, and every project that
 carries it.
 
-Under a project-scoped credential the project list holds at most the
-credential's own project.")]
+Under a session's own credential the project list holds at most the
+session's own project and the projects it created. Under a connected-app
+grant approved for one project it holds at most that project.")]
     Show {
         /// Tag id, <group>/<name>, or a bare tag name (see `stagedctl tag list`)
         tag: String,
@@ -637,6 +808,25 @@ impl TagColor {
             Self::Purple => "purple",
             Self::Cyan => "cyan",
             Self::Gray => "gray",
+        }
+    }
+}
+
+/// Where a project's branches run. Mirrors the app's `ProjectLocation` wire
+/// values, which are also what the control surface accepts for `location`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ProjectLocation {
+    /// Git worktrees on this machine
+    Local,
+    /// A Blox workspace
+    Remote,
+}
+
+impl ProjectLocation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
         }
     }
 }
@@ -1144,6 +1334,174 @@ mod tests {
         match cli.command {
             Noun::Project(ProjectVerb::List { tag }) => assert_eq!(tag, vec!["status/done", "q4"]),
             other => panic!("parsed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_write_verbs_parse_their_arguments() {
+        // create: only the name is required, and the location is local.
+        let cli = Cli::try_parse_from(["stagedctl", "project", "create", "Fix login"]).unwrap();
+        match cli.command {
+            Noun::Project(ProjectVerb::Create {
+                name,
+                location,
+                repo,
+                branch,
+                pr,
+                base,
+                allow_monorepo_root,
+            }) => {
+                assert_eq!(name, "Fix login");
+                assert_eq!(location, ProjectLocation::Local);
+                assert_eq!((repo, branch, pr, base), (None, None, None, None));
+                assert!(!allow_monorepo_root);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "projects",
+            "create",
+            "Fix login",
+            "--location",
+            "remote",
+            "--repo",
+            "acme/widgets:services/auth",
+            "--branch",
+            "fix-login",
+            "--base",
+            "develop",
+            "--allow-monorepo-root",
+        ])
+        .unwrap();
+        match cli.command {
+            Noun::Project(ProjectVerb::Create {
+                location,
+                repo,
+                branch,
+                pr,
+                base,
+                allow_monorepo_root,
+                ..
+            }) => {
+                assert_eq!(location, ProjectLocation::Remote);
+                assert_eq!(repo.as_deref(), Some("acme/widgets:services/auth"));
+                assert_eq!(branch.as_deref(), Some("fix-login"));
+                assert_eq!(pr, None);
+                assert_eq!(base.as_deref(), Some("develop"));
+                assert!(allow_monorepo_root);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "create"]).is_err(),
+            "the name is required"
+        );
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "create", "n", "--location", "cloud"])
+                .is_err(),
+            "a location is local or remote"
+        );
+        for bad in ["0", "-3", "forty-two"] {
+            assert!(
+                Cli::try_parse_from([
+                    "stagedctl",
+                    "project",
+                    "create",
+                    "n",
+                    "--repo",
+                    "o/r",
+                    "--pr",
+                    bad
+                ])
+                .is_err(),
+                "--pr {bad} is not a pull request number"
+            );
+        }
+
+        // add-repo: the project and --repo are required. The flag pairings
+        // (--pr against --branch and --base) are validate()'s.
+        let cli = Cli::try_parse_from([
+            "stagedctl",
+            "project",
+            "add-repo",
+            "Fix login",
+            "--repo",
+            "acme/widgets",
+            "--pr",
+            "42",
+            "--reason",
+            "needs the auth service",
+        ])
+        .unwrap();
+        match cli.command {
+            Noun::Project(ProjectVerb::AddRepo {
+                project,
+                repo,
+                branch,
+                pr,
+                base,
+                reason,
+                allow_monorepo_root,
+            }) => {
+                assert_eq!(project, "Fix login");
+                assert_eq!(repo, "acme/widgets");
+                assert_eq!((branch, base), (None, None));
+                assert_eq!(pr, Some(42));
+                assert_eq!(reason.as_deref(), Some("needs the auth service"));
+                assert!(!allow_monorepo_root);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "add-repo", "Fix login"]).is_err(),
+            "--repo is required"
+        );
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "add-repo", "--repo", "o/r"]).is_err(),
+            "the project is required"
+        );
+        // Neither verb offers what the control surface refuses or what the
+        // app cannot undo.
+        for flag in ["--head-repo", "--primary", "--set-as-primary"] {
+            assert!(Cli::try_parse_from([
+                "stagedctl",
+                "project",
+                "add-repo",
+                "p",
+                "--repo",
+                "o/r",
+                flag,
+                "x"
+            ])
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn project_location_values_match_the_wire() {
+        // clap's lowercase value names must equal what the app accepts for
+        // `location` from a control caller.
+        let rules = include_str!("../../../src/web_server/control_project_args.rs");
+        for location in [ProjectLocation::Local, ProjectLocation::Remote] {
+            let cli = Cli::try_parse_from([
+                "stagedctl",
+                "project",
+                "create",
+                "n",
+                "--location",
+                location.as_str(),
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Noun::Project(ProjectVerb::Create { location: l, .. }) if l == location
+            ));
+            assert!(
+                rules.contains(&format!("Some(\"{}\")", location.as_str())),
+                "the control surface no longer takes location {:?}",
+                location.as_str()
+            );
         }
     }
 

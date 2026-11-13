@@ -324,9 +324,10 @@ pub fn is_instance_discovery_file(path: &Path) -> bool {
 /// control file resolves to one: an explicit `--lock-path` or
 /// `$STAGEDCTL_LOCK` naming anything but an instance `discovery.json`.
 /// `stagedctl connect` and `disconnect` refuse to run under one — a spawned
-/// session's credential is confined to its project and cannot request
-/// connected-app access — without a round trip to the app. The data-dir
-/// fallback only ever yields instance files, so it never answers `Some`.
+/// session's credential covers its project and the projects it created, and
+/// cannot request connected-app access — without a round trip to the app.
+/// The data-dir fallback only ever yields instance files, so it never
+/// answers `Some`.
 pub fn session_credential_in_use(
     flag: Option<&Path>,
     env_value: Option<std::ffi::OsString>,
@@ -610,11 +611,12 @@ struct PingResponse {
 
 /// A verified connection to one Staged instance's control server.
 /// How far the credential this client sends reaches, as far as the client
-/// can tell without a round trip. The app confines two kinds of credential
-/// to one project: a session lease (a per-session control file) and a
-/// grant approved for one project (`connect --project`); both are known at
-/// connect time. Anything else is either unconfined or refused by the app
-/// as `authorization_required` before any answer is read.
+/// can tell without a round trip. The app scopes two kinds of credential
+/// to one project: a session lease (a per-session control file), which
+/// also reaches the projects the session created, and a grant approved for
+/// one project (`connect --project`); both are known at connect time.
+/// Anything else is either unconfined or refused by the app as
+/// `authorization_required` before any answer is read.
 ///
 /// The two confined kinds are kept apart because their remedies differ. A
 /// grant can be swapped for one that reaches further. A session lease
@@ -641,9 +643,9 @@ pub struct Client {
     /// What the handshake confirmed, for the grant the client later writes.
     pub pid: u32,
     pub generation: u64,
-    /// See [`CredentialScope`]. Reads the app confines to the credential's
-    /// project (`get_tag_state`'s assignments, `list_projects`) are
-    /// labelled from this.
+    /// See [`CredentialScope`]. Reads the app confines to the projects the
+    /// credential covers (`get_tag_state`'s assignments, `list_projects`)
+    /// are labelled from this.
     pub scope: CredentialScope,
 }
 
@@ -1070,15 +1072,10 @@ fn classify(what: &str, status: u16, body: Value) -> Result<Value, CtlError> {
         400 => Err(CtlError::command("app_error", error_message(&body))),
         404 => {
             // Not allowlisted. For a command a newer Staged added, the likely
-            // cause is a Staged from before it reached the control server,
-            // not a typo.
+            // cause is an older app, not a typo.
             let mut message = error_message(&body);
-            if crate::tags::is_tag_command(what) {
-                message.push_str(" (this Staged does not have tags yet; update it)");
-            } else if what == crate::open::OPEN_PROJECT_COMMAND {
-                message.push_str(
-                    " (this Staged cannot open a project from the command line yet; update it)",
-                );
+            if let Some(hint) = older_app_hint(what) {
+                message.push_str(&format!(" ({hint})"));
             }
             Err(CtlError::command("app_error", message))
         }
@@ -1096,6 +1093,22 @@ fn classify(what: &str, status: u16, body: Value) -> Result<Value, CtlError> {
             "unexpected HTTP {code} from control server ({what}): {}",
             error_message(&body)
         ))),
+    }
+}
+
+/// What to say when the app does not allowlist `command`, for the commands
+/// that reached the control server after its first release. No protocol
+/// bump came with them, so an older Staged answers them like any unknown
+/// command, and this is the only place that can tell the caller why.
+fn older_app_hint(command: &str) -> Option<&'static str> {
+    if crate::tags::is_tag_command(command) {
+        Some("this Staged does not have tags yet; update it")
+    } else if crate::projects::is_project_write_command(command) {
+        Some("this Staged cannot create projects or add repos through stagedctl yet; update it")
+    } else if command == crate::open::OPEN_PROJECT_COMMAND {
+        Some("this Staged cannot open a project from the command line yet; update it")
+    } else {
+        None
     }
 }
 
@@ -1246,6 +1259,53 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "app_error: Project not found: p1");
+    }
+
+    #[test]
+    fn a_404_on_a_project_write_hints_at_updating_staged() {
+        // `create_project` and `add_project_repo` reached the control server
+        // without a protocol bump, so an older Staged answers them as it
+        // answers any unknown command.
+        for command in ["create_project", "add_project_repo"] {
+            let err = classify(
+                command,
+                404,
+                serde_json::json!({
+                    "error": format!("command not available through stagedctl: {command}")
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(err.exit_code(), 1);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "app_error: command not available through stagedctl: {command} (this \
+                     Staged cannot create projects or add repos through stagedctl yet; update it)"
+                )
+            );
+        }
+        // A current app's refusal of the same command is passed through as
+        // it is: the duplicate-name error is a 400.
+        let err = classify(
+            "create_project",
+            400,
+            serde_json::json!({"error": "A project named \"Fix login\" already exists."}),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            "app_error: A project named \"Fix login\" already exists."
+        );
+        // A scope refusal keeps its own code and exit 4.
+        let err = classify(
+            "create_project",
+            403,
+            serde_json::json!({"code": "scope_denied", "error": "reconnect without --project"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 4);
+        assert_eq!(err.to_string(), "scope_denied: reconnect without --project");
     }
 
     #[test]

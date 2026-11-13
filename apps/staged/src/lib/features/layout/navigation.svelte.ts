@@ -724,3 +724,95 @@ export function registerDiffLeaveCheck(check: DiffLeaveCheck): () => void {
 export function diffLeaveCheck(): DiffLeaveCheck | null {
   return currentRoute().kind === 'diff' ? registeredDiffLeaveCheck : null;
 }
+
+// ── Opening a project for a caller outside the window ──
+//
+// `stagedctl project open` asks the backend to put a project on screen, and
+// the backend hands the request to one window (project_open.rs), since only
+// the window knows whether a dialog is open or a diff comment still needs
+// saving. This is what that window does with it.
+
+/**
+ * What the window did with an outside request to show a project. The values
+ * are the backend's `ProjectOpenAnswer` (src-tauri/src/project_open.rs) as it
+ * deserializes them, so a result goes to `answer_project_open` unchanged.
+ *
+ * - `opened`: the project is on screen. The window switched to it, or was
+ *   already showing it.
+ * - `dialogOpen`: a dialog is open, and the project is unchanged.
+ * - `diffCommentUnsaved`: the diff view could not save the comment being
+ *   typed, so the window stayed on it.
+ * - `projectNotFound`: the window knows no project with that id.
+ */
+export type ProjectOpenAnswer = 'opened' | 'dialogOpen' | 'diffCommentUnsaved' | 'projectNotFound';
+
+/** Whether a dialog or alert dialog is open (design-system or hand-rolled,
+ *  they all carry the role), not counting one that is only playing its exit
+ *  animation. Unlike the palette's otherModalOpen, the ⌘K palette counts. */
+function dialogOpen(): boolean {
+  for (const dialog of document.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
+    if (dialog.getAttribute('data-state') !== 'closed') return true;
+  }
+  return false;
+}
+
+/** Whether the window can show this project: it is in the list and has no
+ *  delete in flight, the ⌘K palette's rule for a row it will open. A list that
+ *  failed to load refuses nothing, as for a new window's seed (initNavigation):
+ *  the backend checked the id against the database before it asked. */
+function projectOpenable(projectId: string): boolean {
+  if (!projectsDataStore.loaded) return true;
+  return (
+    projectsDataStore.projects.some((project) => project.id === projectId) &&
+    !projectsDataStore.isProjectDeleting(projectId)
+  );
+}
+
+/**
+ * Show a project because something outside the window asked for it, and say
+ * what happened. Unlike selectProject, which trusts its caller to have picked
+ * a moment when navigating is safe, the request can land at any time, so this
+ * makes the checks itself:
+ *
+ * - It waits for the first project list. The app may have been launched for
+ *   this request, and the window still be loading.
+ * - A project the window cannot show is `projectNotFound`, whatever else is
+ *   going on, so the caller is not told to close a dialog and retry a request
+ *   that can only fail.
+ * - A project that is already the view on screen is `opened`, even under a
+ *   dialog: there is nothing to navigate, so nothing for the dialog to block.
+ * - Otherwise an open dialog refuses with `dialogOpen`. Navigating would
+ *   unmount the view that owns it along with whatever was typed into it, and
+ *   a pending confirmation would outlive the project it was asked about.
+ * - Over the diff view it waits for the comment being typed to save, like the
+ *   palette and the view's own close, and stays with `diffCommentUnsaved`
+ *   when the save failed so the text is still there to retry.
+ *
+ * A save takes time, so the dialog and the project are checked again after it
+ * and before navigating. From Settings or the diff view the project replaces
+ * the workspace route underneath, as selectProject describes.
+ */
+export async function openProjectExternally(projectId: string): Promise<ProjectOpenAnswer> {
+  await projectsDataStore.whenLoaded();
+  if (!projectOpenable(projectId)) return 'projectNotFound';
+
+  const route = currentRoute();
+  if (route.kind === 'project' && route.projectId === projectId) return 'opened';
+  if (dialogOpen()) return 'dialogOpen';
+
+  const diffSaved = diffLeaveCheck();
+  if (diffSaved) {
+    let saved = false;
+    try {
+      saved = await diffSaved();
+    } catch (e) {
+      console.error('[Navigation] Could not save the diff comment before leaving:', e);
+    }
+    if (!saved) return 'diffCommentUnsaved';
+    if (!projectOpenable(projectId)) return 'projectNotFound';
+    if (dialogOpen()) return 'dialogOpen';
+  }
+
+  selectProject(projectId);
+  return 'opened';
+}

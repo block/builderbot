@@ -29,7 +29,9 @@
     }
   }}
 >
-  <AlertDialog.Content>
+  <!-- Approving grants access, and this dialog opens unprompted: Return
+       doesn't approve. -->
+  <AlertDialog.Content defaultAction="none">
     {#if request}
       <AlertDialog.Header>
         <AlertDialog.Title>Allow “{request.client}” to control Staged?</AlertDialog.Title>

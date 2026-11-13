@@ -7,6 +7,10 @@
   import { onMount } from 'svelte';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
+  import { findEnabledButton, isDefaultActionKeydown } from '$lib/shared/dialogDefaultAction';
+
+  /** Which button a plain Return presses; see `defaultAction`. */
+  type DefaultAction = 'action' | 'cancel' | 'none';
 
   let {
     ref = $bindable(null),
@@ -15,9 +19,18 @@
     portalProps,
     onOpenAutoFocus,
     onCloseAutoFocus,
+    defaultAction,
+    onkeydown,
     ...restProps
   }: WithoutChild<AlertDialogPrimitive.ContentProps> & {
     size?: 'default' | 'sm';
+    /**
+     * The button a plain Return presses while focus is on the dialog rather
+     * than on one of its controls: the Action, the Cancel, or neither. Left
+     * unset, it is the Action, unless that is destructive: Return never
+     * confirms a destructive action by default, so there it does nothing.
+     */
+    defaultAction?: DefaultAction;
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof AlertDialogPortal>>;
   } = $props();
 
@@ -35,6 +48,26 @@
   function handleCloseAutoFocus(event: Event) {
     onCloseAutoFocus?.(event);
     focusRestore.restore(event);
+  }
+
+  // The dialog opens with focus on its own container, where no button hears
+  // Return. The default button is clicked, not called, so its disabled state
+  // and click handler apply as they do for the mouse.
+  function handleKeydown(event: KeyboardEvent & { currentTarget: EventTarget & HTMLDivElement }) {
+    onkeydown?.(event);
+    if (!isDefaultActionKeydown(event)) return;
+    const content = event.currentTarget;
+    const action = content.querySelector<HTMLElement>('[data-slot="alert-dialog-action"]');
+    const which: DefaultAction =
+      defaultAction ?? (action?.dataset.variant === 'destructive' ? 'none' : 'action');
+    if (which === 'none') return;
+    const button = findEnabledButton(content, `[data-slot="alert-dialog-${which}"]`);
+    if (!button) return;
+    // Stopped as well as prevented: views under the dialog listen on the
+    // window (the splash form creates a project on Return).
+    event.preventDefault();
+    event.stopPropagation();
+    button.click();
   }
 </script>
 
@@ -58,6 +91,7 @@
     )}
     onOpenAutoFocus={handleOpenAutoFocus}
     onCloseAutoFocus={handleCloseAutoFocus}
+    onkeydown={handleKeydown}
     preventOverflowTextSelection={false}
     preventScroll={false}
     {...restProps}

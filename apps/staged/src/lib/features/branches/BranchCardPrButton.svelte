@@ -1246,7 +1246,8 @@
     open={showPrDetectionDialog}
     onOpenChange={(open) => !open && linkingPrNumber === null && handlePrDetectionDialogClose()}
   >
-    <AlertDialog.Content>
+    <!-- Close is the only footer button, so Return presses it. -->
+    <AlertDialog.Content defaultAction="cancel">
       {#if prDetectionFailure.kind === 'notFound'}
         <AlertDialog.Header>
           <AlertDialog.Title>No pull request found</AlertDialog.Title>

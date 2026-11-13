@@ -3004,12 +3004,17 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            crate::note_commands::delete_note_impl(
-                &store,
-                app_handle,
-                &note_id,
-                delete_session_flag.unwrap_or(false),
-            )?;
+            let app = app_handle.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::note_commands::delete_note_impl(
+                    &store,
+                    &app,
+                    &note_id,
+                    delete_session_flag.unwrap_or(false),
+                )
+            })
+            .await
+            .map_err(|e| format!("Note delete task failed: {e}"))??;
             Ok(Value::Null)
         }
         "get_note" => {
@@ -3102,17 +3107,12 @@ pub(crate) async fn dispatch(
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
-            let media_ids = crate::note_media::project_note_media_ids(&store, &note_id)?;
-            let orphaned = store
-                .delete_project_note(&note_id)
-                .map_err(|e| e.to_string())?;
-            crate::note_media::cleanup_unreferenced(&store, media_ids);
-            // Mirrors note_commands::delete_project_note: child sessions can
-            // still be running, so cancel before removing their rows.
-            for sid in orphaned.all_session_ids() {
-                session_registry.cancel(&sid);
-                let _ = store.delete_session(&sid);
-            }
+            let registry = Arc::clone(session_registry);
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::note_commands::delete_project_note_impl(&store, &registry, &note_id)
+            })
+            .await
+            .map_err(|e| format!("Project note delete task failed: {e}"))??;
             Ok(Value::Null)
         }
 
@@ -4879,6 +4879,10 @@ mod tests {
         let source = include_str!("web_server.rs");
         for (command, body) in [
             ("delete_note", "note_commands::delete_note_impl("),
+            (
+                "delete_project_note",
+                "note_commands::delete_project_note_impl(",
+            ),
             ("delete_review", "timeline::delete_review_impl("),
             (
                 "delete_pending_commit",
@@ -4896,6 +4900,37 @@ mod tests {
             assert!(
                 arm.contains(body),
                 "the web `{command}` arm must call `{body}`, not delete inline: {arm}"
+            );
+        }
+    }
+
+    /// A note delete reads every note body that embeds media and every chat
+    /// attachment list, and cascades a session's messages, on the one store
+    /// connection. Inline, that held the tokio worker that also services
+    /// `/api/events`; the desktop commands moved to the blocking pool for the
+    /// same scans. The project-note arm also used to carry its own copy of the
+    /// delete, which is what the second half rules out.
+    #[test]
+    fn web_note_delete_arms_run_under_spawn_blocking() {
+        let source = include_str!("web_server.rs");
+        for command in ["delete_note", "delete_project_note"] {
+            let arm = dispatch_arm_body(source, command);
+            assert!(
+                arm.contains("spawn_blocking("),
+                "the web `{command}` arm must run its body on the blocking pool: {arm}"
+            );
+        }
+
+        let arm = dispatch_arm_body(source, "delete_project_note");
+        for inline in [
+            ".delete_project_note(",
+            "cleanup_unreferenced(",
+            ".delete_session(",
+        ] {
+            assert!(
+                !arm.contains(inline),
+                "the web `delete_project_note` arm must not delete around the shared \
+                 body (`{inline}`): {arm}"
             );
         }
     }

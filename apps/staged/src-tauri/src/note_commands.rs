@@ -138,22 +138,35 @@ pub(crate) fn update_note_impl(
 }
 
 /// Delete a note and optionally its linked session.
+///
+/// Async, with the body on the blocking pool: deciding which of the note's
+/// media nothing else uses reads every note body that embeds media and every
+/// chat attachment list, and deleting the session cascades its messages, all
+/// on the one store connection. Tauri runs a synchronous command on the main
+/// thread, where this froze the window for as long as it took.
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_note(
+pub async fn delete_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     note_id: String,
     delete_session: Option<bool>,
 ) -> Result<(), String> {
-    delete_note_impl(
-        &crate::get_store(&store)?,
-        &app_handle,
-        &note_id,
-        delete_session.unwrap_or(false),
-    )
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_note_impl(
+            &store,
+            &app_handle,
+            &note_id,
+            delete_session.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("Note delete task failed: {e}"))?
 }
 
-/// The body of [`delete_note`], shared with the web dispatcher's arm.
+/// The body of [`delete_note`], shared with the web dispatcher's arm. Callers
+/// run it inside `spawn_blocking`.
 ///
 /// A note's session may be the branch's busy marker or a barrier in its
 /// queue, so the branch is kicked after the delete; the kick is what starts
@@ -335,23 +348,47 @@ pub fn set_project_note_read(
 
 /// Delete a project note, its child notes, and every session they owned.
 ///
-/// The store cascade removes the child-note rows, but their sessions may still
-/// be running — the note-delete trigger skips those, and a child session that
-/// outlived its note would keep running with nowhere to write its result. So
-/// each orphaned session (the project note's own plus every child's) is
-/// cancelled in the registry and then deleted.
+/// Async, with the body on the blocking pool, for the reason given on
+/// [`delete_note`]; here the media check covers the parent and every child,
+/// and there is a session cascade per note that had one.
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_project_note(
+pub async fn delete_project_note(
     registry: tauri::State<'_, Arc<crate::session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
-    let media_ids = crate::note_media::project_note_media_ids(&store, &note_id)?;
+    let registry = Arc::clone(&registry);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_project_note_impl(&store, &registry, &note_id)
+    })
+    .await
+    .map_err(|e| format!("Project note delete task failed: {e}"))?
+}
+
+/// The body of [`delete_project_note`], shared with the web dispatcher's arm.
+/// Callers run it inside `spawn_blocking`.
+///
+/// The media ids are read before the delete, while the bodies still exist,
+/// and checked after it in one pass for the whole family (see
+/// [`crate::note_media::cleanup_unreferenced`]).
+///
+/// The store cascade removes the child-note rows, but their sessions may still
+/// be running — the note-delete trigger skips those, and a child session that
+/// outlived its note would keep running with nowhere to write its result. So
+/// each orphaned session (the project note's own plus every child's) is
+/// cancelled in the registry and then deleted.
+pub(crate) fn delete_project_note_impl(
+    store: &Store,
+    registry: &crate::session_runner::SessionRegistry,
+    note_id: &str,
+) -> Result<(), String> {
+    let media_ids = crate::note_media::project_note_media_ids(store, note_id)?;
     let orphaned = store
-        .delete_project_note(&note_id)
+        .delete_project_note(note_id)
         .map_err(|e| e.to_string())?;
-    crate::note_media::cleanup_unreferenced(&store, media_ids);
+    crate::note_media::cleanup_unreferenced(store, media_ids);
 
     for sid in orphaned.all_session_ids() {
         registry.cancel(&sid);
@@ -371,6 +408,39 @@ mod tests {
 
     fn embed(image: &Image) -> String {
         format!("![{}](staged-media://{}.png)", image.filename, image.id)
+    }
+
+    /// `count` media files of the fixture's branch, as a copy or a written
+    /// note's paste lands them.
+    fn stored_media(f: &Fixture, count: usize) -> Vec<Image> {
+        (0..count)
+            .map(|n| {
+                store_media_file(
+                    &f.store,
+                    Some(&f.branch.id),
+                    &f.project.id,
+                    Some(NOTE_MEDIA_SESSION_ID),
+                    &format!("shot-{n}.png"),
+                    PNG,
+                    true,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn embed_all(images: &[Image]) -> String {
+        images.iter().map(embed).collect::<Vec<_>>().join("\n\n")
+    }
+
+    fn assert_collected(f: &Fixture, image: &Image) {
+        assert!(
+            f.store.get_image(&image.id).unwrap().is_none(),
+            "{} kept its row",
+            image.filename
+        );
+        let path = image_file_path(&image.project_id, &image.id, &image.filename).unwrap();
+        assert!(!path.exists(), "{} kept its file", image.filename);
     }
 
     fn assert_kept(f: &Fixture, image: &Image) {
@@ -426,23 +496,9 @@ mod tests {
         use crate::store::images::{take_reference_passes, ReferencePasses};
 
         let f = Fixture::new();
-        let images: Vec<Image> = (0..8)
-            .map(|n| {
-                store_media_file(
-                    &f.store,
-                    Some(&f.branch.id),
-                    &f.project.id,
-                    Some(NOTE_MEDIA_SESSION_ID),
-                    &format!("shot-{n}.png"),
-                    PNG,
-                    true,
-                )
-                .unwrap()
-            })
-            .collect();
-        let body = images.iter().map(embed).collect::<Vec<_>>().join("\n\n");
-        let mut note =
-            Note::new_standalone(&f.branch.id, "Shots", &body).with_subtype(Note::SUBTYPE_WRITTEN);
+        let images = stored_media(&f, 8);
+        let mut note = Note::new_standalone(&f.branch.id, "Shots", &embed_all(&images))
+            .with_subtype(Note::SUBTYPE_WRITTEN);
         f.store.create_note_with_unique_title(&mut note).unwrap();
         // Another note still embeds the first image.
         let mut other = Note::new_standalone(&f.branch.id, "Other", &embed(&images[0]))
@@ -461,11 +517,142 @@ mod tests {
 
         assert_kept(&f, &images[0]);
         for image in &images[1..] {
-            assert!(f.store.get_image(&image.id).unwrap().is_none());
+            assert_collected(&f, image);
+        }
+    }
+
+    /// The body both transports run for a project note. The parent's media and
+    /// every child's are checked together, in one pass over the note bodies
+    /// and one over the chat attachments; what a note outside the family or a
+    /// chat message still uses is kept; and every session the family owned is
+    /// stopped and removed, running or not.
+    #[test]
+    fn deleting_a_project_note_checks_the_family_media_in_one_pass_and_ends_its_sessions() {
+        use crate::session_runner::SessionRegistry;
+        use crate::store::images::{take_reference_passes, ReferencePasses};
+        use crate::store::models::{ProjectNote, Session};
+        use crate::store::{MessageRole, SessionStatus};
+
+        let f = Fixture::new();
+        let images = stored_media(&f, 8);
+        let registry = Arc::new(SessionRegistry::new());
+        let running_session = |prompt: &str| {
+            let session = Session::new_running(prompt, f.dir.path());
+            f.store.create_session(&session).unwrap();
+            session
+        };
+
+        // The parent embeds three images and its session is still running.
+        let parent_session = running_session("write project note");
+        let parent = ProjectNote::new(&f.project.id, "Parent", &embed_all(&images[..3]))
+            .with_session(&parent_session.id);
+        f.store.create_project_note(&parent).unwrap();
+        let parent_run = registry.register_external(&parent_session.id);
+
+        // Three children: one still running, one finished, one with no
+        // session, embedding the other five images between them.
+        let child_session = running_session("write child note");
+        let finished_session = running_session("write finished child note");
+        f.store
+            .update_session_status(&finished_session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let child_run = registry.register_external(&child_session.id);
+        let children = [
+            Note::new(&f.branch.id, "Running child", &embed_all(&images[3..5]))
+                .with_session(&child_session.id),
+            Note::new(&f.branch.id, "Finished child", &embed_all(&images[5..7]))
+                .with_session(&finished_session.id),
+            Note::new(&f.branch.id, "Plain child", &embed(&images[7])),
+        ]
+        .map(|child| child.with_parent_project_note(&parent.id));
+        for child in &children {
+            f.store.create_note(child).unwrap();
+        }
+
+        // Outside the family: a note embedding one of the parent's images and
+        // one of a child's, and a chat message attaching another child's.
+        let mut outsider = Note::new_standalone(
+            &f.branch.id,
+            "Outsider",
+            &embed_all(&[images[0].clone(), images[3].clone()]),
+        )
+        .with_subtype(Note::SUBTYPE_WRITTEN);
+        f.store
+            .create_note_with_unique_title(&mut outsider)
+            .unwrap();
+        f.store
+            .add_session_message_with_images(
+                &f.session.id,
+                MessageRole::User,
+                "Screenshot",
+                std::slice::from_ref(&images[5].id),
+            )
+            .unwrap();
+        let kept = [0, 3, 5];
+
+        take_reference_passes();
+        delete_project_note_impl(&f.store, &registry, &parent.id).unwrap();
+        assert_eq!(
+            take_reference_passes(),
+            ReferencePasses { notes: 1, chat: 1 }
+        );
+
+        assert!(f.store.get_project_note(&parent.id).unwrap().is_none());
+        for child in &children {
+            assert!(f.store.get_note(&child.id).unwrap().is_none());
+        }
+        assert!(f.store.get_note(&outsider.id).unwrap().is_some());
+        for (n, image) in images.iter().enumerate() {
+            if kept.contains(&n) {
+                assert_kept(&f, image);
+            } else {
+                assert_collected(&f, image);
+            }
+        }
+
+        // Both running sessions were told to stop, and no session row of the
+        // family is left. The session the chat message belongs to is not the
+        // family's and stays.
+        assert!(parent_run.token().is_cancelled());
+        assert!(child_run.token().is_cancelled());
+        for session in [&parent_session, &child_session, &finished_session] {
             assert!(
-                !image_file_path(&image.project_id, &image.id, &image.filename)
-                    .unwrap()
-                    .exists()
+                f.store.get_session(&session.id).unwrap().is_none(),
+                "session `{}` outlived its note",
+                session.prompt
+            );
+        }
+        assert!(f.store.get_session(&f.session.id).unwrap().is_some());
+
+        // A note that is already gone: nothing to delete and nothing to check.
+        delete_project_note_impl(&f.store, &registry, &parent.id).unwrap();
+        assert_eq!(take_reference_passes(), ReferencePasses::default());
+    }
+
+    /// Tauri runs a synchronous command on the main thread, where these two
+    /// held the window for the whole media check and session cascade. Each
+    /// must stay async and hand its shared body to the blocking pool.
+    #[test]
+    fn the_delete_commands_run_their_bodies_on_the_blocking_pool() {
+        let source = include_str!("note_commands.rs");
+        for (command, body) in [
+            ("delete_note", "delete_note_impl("),
+            ("delete_project_note", "delete_project_note_impl("),
+        ] {
+            let start = source
+                .find(&format!("pub async fn {command}("))
+                .unwrap_or_else(|| panic!("`{command}` must be an async command"));
+            let end = start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the command should have a body");
+            let declaration = &source[start..end];
+            let pool = declaration.find("spawn_blocking(").unwrap_or_else(|| {
+                panic!("`{command}` must run on the blocking pool: {declaration}")
+            });
+            assert!(
+                declaration[pool..].contains(body),
+                "`{command}` must call `{body}` inside `spawn_blocking`: {declaration}"
             );
         }
     }

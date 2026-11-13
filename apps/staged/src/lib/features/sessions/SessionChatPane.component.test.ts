@@ -252,6 +252,15 @@ describe('SessionChatPane quoted replies', () => {
     await settle();
   }
 
+  /**
+   * Redo the removal last undone, as the browser's redo reaches the
+   * composer's step for it.
+   */
+  async function redoRemoval() {
+    document.querySelector<HTMLElement>('[data-testid="redo-remove-quote"]')!.click();
+    await settle();
+  }
+
   /** Whether the pane took each undo so far, oldest first. */
   function undoResults(): boolean[] {
     const input = document.querySelector<HTMLElement>('[data-testid="prompt-input"]');
@@ -452,6 +461,72 @@ describe('SessionChatPane quoted replies', () => {
     expect(quoteCount()).toBe(3);
     expect(composerDraftFromContent(lastSaved(replyKey('session-reload')))).toEqual(before);
     expect(restoredQuotes()).toEqual([second.id]);
+
+    unmount(pane);
+  });
+
+  it('leaves the quote out when the removal is redone while its undo is still held for the reloading draft', async () => {
+    // Undo, then redo, both inside the reload: the held restore has put no
+    // block in the box for the redo to take out, so the redo withdraws it.
+    // Left queued, it would bring the block back once the draft landed.
+    const { pane, props, before, second } = await removeMiddleQuote('session-reload-redo');
+    const stored = lastSaved(replyKey('session-reload-redo'));
+
+    props.active = false;
+    flushSync();
+    await settle();
+
+    let land!: (value: typeof stored) => void;
+    loadDraftMock.mockImplementation(
+      () =>
+        new Promise<typeof stored>((resolve) => {
+          land = resolve;
+        })
+    );
+    props.active = true;
+    flushSync();
+    await settle();
+
+    await undoRemoval();
+    expect(undoResults()).toEqual([true]);
+    await redoRemoval();
+
+    land(stored);
+    await settle();
+    expect(quoteCount()).toBe(2);
+    // The composer is never told of a block that did not come back.
+    expect(restoredQuotes()).toEqual([]);
+
+    // The removal is still there to undo, and puts the block back as it was.
+    await undoRemoval();
+    expect(undoResults()).toEqual([true, true]);
+    expect(quoteCount()).toBe(3);
+    expect(composerDraftFromContent(lastSaved(replyKey('session-reload-redo')))).toEqual(before);
+    expect(restoredQuotes()).toEqual([second.id]);
+
+    unmount(pane);
+  });
+
+  it('sends no held edit to the stored draft when the pane moves on after a withdrawn undo', async () => {
+    const { pane, props } = await removeMiddleQuote('session-reload-away');
+    const stored = lastSaved(replyKey('session-reload-away'));
+
+    props.active = false;
+    flushSync();
+    await settle();
+    loadDraftMock.mockImplementation(() => new Promise<typeof stored>(() => {}));
+    props.active = true;
+    flushSync();
+    await settle();
+
+    await undoRemoval();
+    await redoRemoval();
+    writer.run.mockClear();
+
+    props.active = false;
+    flushSync();
+    await settle();
+    expect(writer.run).not.toHaveBeenCalled();
 
     unmount(pane);
   });

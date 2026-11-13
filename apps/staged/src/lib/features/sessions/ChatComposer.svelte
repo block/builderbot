@@ -55,13 +55,23 @@
       the tallest control. */
   const attachButtonClass = `${composerControlClass} h-auto [&_svg]:!size-4`;
 
-  /**
-   * Puts a quote `onRemoveQuote` took out back where it was, reply and
-   * lead-in text included, and answers whether it did: false once the draft
-   * it was taken from is no longer the one in the composer. `then` runs when
-   * the quote is in the composer again, which may be later than the call.
-   */
-  export type RestoreRemovedQuote = (then: () => void) => boolean;
+  /** A quote `onRemoveQuote` took out, as the parent's way back from that. */
+  export type RemovedQuote = {
+    /**
+     * Puts the quote back where it was, reply and lead-in text included, and
+     * answers whether it did: false once the draft it was taken from is no
+     * longer the one in the composer. `then` runs when the quote is in the
+     * composer again, which may be later than the call.
+     */
+    restore: (then: () => void) => boolean;
+    /**
+     * Takes back a `restore` the parent accepted but has not carried out yet
+     * (its `then` has not run), so the quote stays out and `then` never
+     * runs. Answers whether there was one to take back: false when the
+     * quote is back in the composer, or was never on its way.
+     */
+    withdraw: () => boolean;
+  };
 </script>
 
 <script lang="ts">
@@ -111,7 +121,7 @@
      * Take a quote out of the draft. Returns how to put it back, which makes
      * the removal undoable; nothing when no quote was removed.
      */
-    onRemoveQuote?: (id: string) => RestoreRemovedQuote | null | void;
+    onRemoveQuote?: (id: string) => RemovedQuote | null | void;
     /** The contenteditable input element (for focus/resize from the parent). */
     textareaEl?: HTMLElement | null;
     /**
@@ -327,10 +337,10 @@
    * would fall to the page, so it moves to the input the gap's text joined:
    * the next quote's gap, or the main input after the last quote. The caret
    * goes where that text now ends, or to the start when there was none.
-   * Returns the parent's way to put the quote back with where the caret was
+   * Returns the parent's way back from the removal with where the caret was
    * in its block, or null when nothing was removed or it can't be put back.
    */
-  function takeQuote(id: string): { restore: RestoreRemovedQuote; held: HeldCaret } | null {
+  function takeQuote(id: string): { removal: RemovedQuote; held: HeldCaret } | null {
     const index = quotes.findIndex((quote) => quote.id === id);
     if (index === -1) return null;
     const hadText = quotes[index].before.trim().length > 0;
@@ -338,7 +348,7 @@
     const hadFocus = draftQuotesView?.holdsFocus(id) ?? false;
     const inGap = document.activeElement?.classList.contains('composer-gap-input') ?? false;
     const held: HeldCaret = !hadFocus ? null : inGap ? 'gap' : 'reply';
-    const restore = onRemoveQuote?.(id);
+    const removal = onRemoveQuote?.(id);
     if (hadFocus) {
       void tick().then(() => {
         const caret = hadText ? 'end' : 'start';
@@ -346,7 +356,7 @@
         else placeCaretIn(textareaEl, caret);
       });
     }
-    return restore ? { restore, held } : null;
+    return removal ? { removal, held } : null;
   }
 
   /**
@@ -359,18 +369,29 @@
   function removeQuote(id: string) {
     let taken = takeQuote(id);
     if (!taken) return;
+    // The removal the last undo handed back to the parent, while redo may
+    // still find that restore waiting there rather than the quote in the box.
+    let restored: ReturnType<typeof takeQuote> = null;
     recordingUndo = true;
     try {
       undoAnchor?.record({
         undo() {
-          const held = taken?.held ?? null;
+          if (!taken) return;
+          const { removal, held } = taken;
           const shown = () => void tick().then(() => showRestoredQuote(id, held));
-          if (taken?.restore(shown)) taken = null;
+          if (!removal.restore(shown)) return;
+          restored = taken;
+          taken = null;
         },
         redo() {
           // Only a quote undo put back: one a refused undo left out is still
           // out, and still this step's to restore.
-          if (taken === null) taken = takeQuote(id);
+          if (taken !== null) return;
+          // A restore the parent is still holding (its draft is loading) has
+          // put no quote in the box to take out: taking the restore back is
+          // the redo, and leaves the removal as it stood before the undo.
+          taken = restored?.removal.withdraw() ? restored : takeQuote(id);
+          restored = null;
         },
       });
     } finally {

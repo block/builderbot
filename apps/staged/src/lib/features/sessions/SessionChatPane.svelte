@@ -107,10 +107,7 @@
     setAcpConfigPref,
     setComposerSendMode,
   } from '../settings/preferences.svelte';
-  import ChatComposer, {
-    composerControlClass,
-    type RestoreRemovedQuote,
-  } from './ChatComposer.svelte';
+  import ChatComposer, { composerControlClass, type RemovedQuote } from './ChatComposer.svelte';
   import ComposerError from './ComposerError.svelte';
   import {
     composerSendControl,
@@ -464,10 +461,8 @@
    * the field scrolled to it) runs then too, once the block is rendered.
    * Keyed to the session they were made for.
    */
-  let pendingDraftEdits: {
-    sessionId: string;
-    edits: Array<{ edit: (draft: ComposerDraft) => ComposerDraft; then?: () => void }>;
-  } | null = null;
+  type PendingDraftEdit = { edit: (draft: ComposerDraft) => ComposerDraft; then?: () => void };
+  let pendingDraftEdits: { sessionId: string; edits: PendingDraftEdit[] } | null = null;
   /**
    * Counts the drafts sent from this composer. A removed quote block can be
    * put back by undo (see `removeQuote`) only into the draft it was taken
@@ -536,22 +531,40 @@
    * the held edits land — so a caret or scroll meant for a block the edit
    * adds finds it rendered rather than running against the loading draft.
    * It is dropped with the edits that go to the stored draft instead when
-   * the pane moves on, there being no composer to act in.
+   * the pane moves on, there being no composer to act in. Returns the edit
+   * as it is held (for `withdrawPendingDraftEdit`), or null once applied.
    */
   function receiveDraftEdit(
     id: string,
     edit: (draft: ComposerDraft) => ComposerDraft,
     then?: () => void
-  ) {
+  ): PendingDraftEdit | null {
     if (loadedDraftSessionId !== id) {
       if (pendingDraftEdits?.sessionId !== id) pendingDraftEdits = { sessionId: id, edits: [] };
-      pendingDraftEdits.edits.push({ edit, then });
-      return;
+      const held = { edit, then };
+      pendingDraftEdits.edits.push(held);
+      return held;
     }
     // Quoting is a draft edit: the last failure line has been read.
     sendError = null;
     setDraft(edit(currentDraft()));
     then?.();
+    return null;
+  }
+
+  /**
+   * Take a held edit back before the draft's load lands, so it is never
+   * applied and its `then` never runs. False when it is no longer held: it
+   * went into the composer with the loaded draft, or to the stored draft
+   * when the pane moved on.
+   */
+  function withdrawPendingDraftEdit(held: PendingDraftEdit): boolean {
+    const index = pendingDraftEdits?.edits.indexOf(held) ?? -1;
+    if (!pendingDraftEdits || index === -1) return false;
+    pendingDraftEdits.edits.splice(index, 1);
+    // Nothing left to hold: a pane moving on has no edit to send to the store.
+    if (pendingDraftEdits.edits.length === 0) pendingDraftEdits = null;
+    return true;
   }
 
   function applyPendingDraftEdits(id: string) {
@@ -591,9 +604,12 @@
    * while this pane shows it — after a send the backend accepted, or with
    * another session in the box, the undo does nothing — and by the same way
    * in as a quote a note adds, so one made while the draft is loading again
-   * is held until it has landed rather than being replaced by it.
+   * is held until it has landed rather than being replaced by it. A redo
+   * that comes while it is still held finds no block in the box to take
+   * out: it withdraws the held undo instead, and the block stays out when
+   * the draft lands, still this removal's to put back.
    */
-  function removeQuote(id: string): RestoreRemovedQuote | null {
+  function removeQuote(id: string): RemovedQuote | null {
     const taken = takeDraftQuote(currentDraft(), id);
     if (!taken) return null;
     sendError = null;
@@ -603,10 +619,23 @@
     const sid = sessionId;
     if (!sid) return null;
     const epoch = draftEpoch;
-    return (then) => {
-      if (closed || !active || sessionId !== sid || epoch !== draftEpoch) return false;
-      receiveDraftEdit(sid, (draft) => restoreDraftQuote(draft, taken.removed), then);
-      return true;
+    // The undo while it waits on the draft's load, for a redo to withdraw.
+    let heldRestore: PendingDraftEdit | null = null;
+    return {
+      restore(then) {
+        if (closed || !active || sessionId !== sid || epoch !== draftEpoch) return false;
+        heldRestore = receiveDraftEdit(
+          sid,
+          (draft) => restoreDraftQuote(draft, taken.removed),
+          then
+        );
+        return true;
+      },
+      withdraw() {
+        const held = heldRestore;
+        heldRestore = null;
+        return held !== null && withdrawPendingDraftEdit(held);
+      },
     };
   }
 

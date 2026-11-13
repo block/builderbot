@@ -11,13 +11,18 @@
   composer's X would, a Send button (`data-testid="composer-send"`) that
   calls `onSend`, and a `focusQuoteReply` that places no caret.
 
-  The composer's undo history is stood in for by a stack of the restores
+  The composer's undo history is stood in for by a stack of the removals
   `onRemoveQuote` returned: an undo button (`data-testid="undo-remove-quote"`)
-  runs the newest, as the browser's undo would, records on the input whether
-  the pane took it (`data-undo-results`), and the ids of the quotes the pane
-  then reported back in the composer (`data-restored-quotes`).
+  restores the newest, as the browser's undo would, records on the input
+  whether the pane took it (`data-undo-results`), and the ids of the quotes
+  the pane then reported back in the composer (`data-restored-quotes`). A
+  redo button (`data-testid="redo-remove-quote"`) takes the quote last
+  undone out again as the composer's redo does: it withdraws an undo the
+  pane is still holding, and otherwise removes the quote from the box.
 -->
 <script lang="ts">
+  type Removal = { restore: (then: () => void) => boolean; withdraw: () => boolean };
+
   let {
     value = $bindable(''),
     quotes = $bindable([]),
@@ -36,25 +41,35 @@
     sendControl?: { split: boolean };
     onStartNewSession?: (kind: 'note' | 'commit') => void;
     newSessionDisabled?: boolean;
-    onRemoveQuote?: (id: string) => ((then: () => void) => boolean) | null | void;
+    onRemoveQuote?: (id: string) => Removal | null | void;
     onSend?: () => void;
   } = $props();
 
   /** The removals still to undo, newest last, as the composer's undo history holds them. */
-  let removals: Array<{ id: string; restore: (then: () => void) => boolean }> = [];
+  let removals: Array<{ id: string; removal: Removal }> = [];
+  /** The removals undone and still to redo, newest last. */
+  let undone: Array<{ id: string; removal: Removal }> = [];
   let undoResults = $state<boolean[]>([]);
   let restoredQuotes = $state<string[]>([]);
 
   function removeQuote(id: string) {
-    const restore = onRemoveQuote?.(id);
-    if (restore) removals.push({ id, restore });
+    const removal = onRemoveQuote?.(id);
+    if (removal) removals.push({ id, removal });
   }
 
   function undoRemoval() {
-    const removal = removals.pop();
-    if (!removal) return;
-    const restored = removal.restore(() => (restoredQuotes = [...restoredQuotes, removal.id]));
+    const step = removals.pop();
+    if (!step) return;
+    const restored = step.removal.restore(() => (restoredQuotes = [...restoredQuotes, step.id]));
     undoResults = [...undoResults, restored];
+    if (restored) undone.push(step);
+  }
+
+  function redoRemoval() {
+    const step = undone.pop();
+    if (!step) return;
+    if (step.removal.withdraw()) removals.push(step);
+    else removeQuote(step.id);
   }
 
   /** The composer's caret placement, which the stub lays nothing out for. */
@@ -86,6 +101,7 @@
   ></button>
 {/each}
 <button type="button" data-testid="undo-remove-quote" onclick={undoRemoval}>Undo</button>
+<button type="button" data-testid="redo-remove-quote" onclick={redoRemoval}>Redo</button>
 <button type="button" data-testid="composer-send" onclick={() => onSend?.()}>Send</button>
 
 {#if sendError}

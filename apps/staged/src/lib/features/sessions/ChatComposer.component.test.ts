@@ -532,6 +532,49 @@ describe('ChatComposer quote removal', () => {
     expect(host.draft()).toEqual(draft);
   });
 
+  it('withdraws an undo the parent is still holding on redo, rather than letting it land', async () => {
+    const draft = { quotes: [quote('a', '', 'a reply')], text: '' };
+    renderDraft(draft);
+    await pressRemove('a');
+
+    // The parent accepts the undo but has not put the quote back yet (the
+    // pane's draft is loading): redo finds no quote in the box to take out.
+    host.holdUndo(true);
+    await undo();
+    expect(quoteIds()).toEqual([]);
+    await redo();
+
+    host.landHeldUndo();
+    await settle();
+    expect(quoteIds()).toEqual([]);
+    // Taken back, not removed a second time.
+    expect(host.removedIds()).toEqual(['a']);
+
+    // The removal is the step's to undo still.
+    host.holdUndo(false);
+    await undo();
+    expect(host.draft()).toEqual(draft);
+    await redo();
+    expect(quoteIds()).toEqual([]);
+    expect(host.removedIds()).toEqual(['a', 'a']);
+  });
+
+  it('takes the quote out again on redo once a held undo has landed', async () => {
+    const draft = { quotes: [quote('a', '', 'a reply')], text: '' };
+    renderDraft(draft);
+    await pressRemove('a');
+
+    host.holdUndo(true);
+    await undo();
+    host.landHeldUndo();
+    await settle();
+    expect(host.draft()).toEqual(draft);
+
+    await redo();
+    expect(quoteIds()).toEqual([]);
+    expect(host.removedIds()).toEqual(['a', 'a']);
+  });
+
   it('records nothing for a removal the parent gives no way back from', async () => {
     const props = render([quote('a')]);
     const anchor = target.querySelector<HTMLElement>('.native-undo-anchor');

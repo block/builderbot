@@ -37,9 +37,19 @@ export interface TagCatalog {
   sidebarGroups: TagGroup[];
 }
 
-/** Catalog order: by position, then creation (the backend's `ORDER BY`). */
-export function byPosition<T extends { position: number; createdAt: number }>(a: T, b: T): number {
-  return a.position - b.position || a.createdAt - b.createdAt;
+/**
+ * Catalog order: by position, then creation, then id (the backend's
+ * `ORDER BY`). The backend keeps positions dense, so the tie-breaks only
+ * decide the order of rows that broke that rule. Ids compare by code unit,
+ * which is how SQLite orders them, not by locale.
+ */
+export function byPosition<T extends { id: string; position: number; createdAt: number }>(
+  a: T,
+  b: T
+): number {
+  return (
+    a.position - b.position || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
 }
 
 /** Longest tag or group name, in characters (the backend rejects longer). */

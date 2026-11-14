@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Tag, TagGroup, TagState } from '../../types';
 import {
   applyIntents,
+  byPosition,
   chipTags,
   currentIntent,
   effectiveProjectTagIds,
@@ -115,6 +116,24 @@ describe('indexTagCatalog', () => {
       assignments: [],
     });
     expect(tied.tagsByGroup.get(null)!.map((t) => t.id)).toEqual(['a', 'b']);
+  });
+
+  it('breaks position and creation ties by id, as the backend does', () => {
+    const tied = indexTagCatalog({
+      groups: [group('g-c', 0), group('g-a', 0), group('g-b', 0)],
+      tags: [tag('t-c', null, 0), tag('t-a', null, 0), tag('t-b', null, 0)],
+      assignments: [],
+    });
+    expect(tied.groups.map((g) => g.id)).toEqual(['g-a', 'g-b', 'g-c']);
+    expect(tied.tagsByGroup.get(null)!.map((t) => t.id)).toEqual(['t-a', 't-b', 't-c']);
+  });
+
+  it('compares ids by code unit, as SQLite compares text, not by locale', () => {
+    // A locale-aware compare puts "a" before "B"; SQLite's BINARY collation,
+    // and so the backend's `ORDER BY`, puts every capital first.
+    expect(byPosition(tag('B', null, 0), tag('a', null, 0))).toBeLessThan(0);
+    expect(byPosition(tag('a', null, 0), tag('B', null, 0))).toBeGreaterThan(0);
+    expect(byPosition(tag('a', null, 0), tag('a', null, 0))).toBe(0);
   });
 
   it('gives every group an entry and reports no icon group when none is flagged', () => {

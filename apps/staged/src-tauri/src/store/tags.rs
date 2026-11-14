@@ -492,19 +492,23 @@ impl Store {
     }
 
     /// The whole tag catalog and every assignment, read in one snapshot.
+    ///
+    /// Groups and tags come back by position, then creation time, then id:
+    /// the order the write paths renumber from, so a read and a write agree
+    /// even on rows that broke the dense-position rule.
     pub fn get_tag_state(&self) -> Result<TagState, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let groups = {
             let mut stmt = tx.prepare(&format!(
-                "SELECT {GROUP_COLUMNS} FROM tag_groups ORDER BY position, created_at"
+                "SELECT {GROUP_COLUMNS} FROM tag_groups ORDER BY position, created_at, id"
             ))?;
             let rows = stmt.query_map([], group_from_row)?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         let tags = {
             let mut stmt = tx.prepare(&format!(
-                "SELECT {TAG_COLUMNS} FROM tags ORDER BY position, created_at"
+                "SELECT {TAG_COLUMNS} FROM tags ORDER BY position, created_at, id"
             ))?;
             let rows = stmt.query_map([], tag_from_row)?;
             rows.collect::<Result<Vec<_>, _>>()?

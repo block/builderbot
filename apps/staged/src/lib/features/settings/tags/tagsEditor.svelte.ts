@@ -4,13 +4,10 @@
  *
  * Catalog writes go through tagActions, which queues them, awaits the
  * backend and then patches tagsStore. Tag moves (drag and the row menu) also
- * show at once: the editor's view of the catalog is the store's snapshot
- * with the moves still in flight applied on top, in order. Each move is
- * resolved against that view, so Move down pressed three times quickly
- * steps from where the last press left the tag, and leaves the list once its
- * write lands (the store then holds it). A failed move clears them all and
- * starts a new generation: the later ones were resolved against an order
- * that never happened, so the ones still queued are skipped, not sent.
+ * show at once, through pendingCatalogMoves: the editor's catalog is the
+ * store's snapshot with the moves still in flight applied on top. Each move
+ * is resolved against that catalog, so Move down pressed three times quickly
+ * steps from where the last press left the tag.
  *
  * Create one per mounted panel; its $derived fields belong to that
  * component.
@@ -21,8 +18,8 @@ import { toast } from 'svelte-sonner';
 import type { DeleteTagGroupMode, Tag, TagGroup } from '../../../types';
 import { projectsDataStore } from '../../../stores/projectsData.svelte';
 import { tagsStore } from '../../../stores/tags.svelte';
+import { pendingCatalogMoves } from '../../tags/pendingCatalogMoves.svelte';
 import { tagActions } from '../../tags/tagActions.svelte';
-import { withTagMoved, type TagMove } from '../../tags/tagCatalogPatches';
 import {
   resolveTagDrop,
   stepTarget,
@@ -30,7 +27,7 @@ import {
   type ResolvedTagMove,
   type TagDropTarget,
 } from '../../tags/tagReorder';
-import { indexTagCatalog, numberedName, tagNameKey, type TagCatalog } from '../../tags/tagState';
+import { numberedName, tagNameKey, type TagCatalog } from '../../tags/tagState';
 import { freeGroupName, type TagGroupTemplate } from '../../tags/tagTemplates';
 
 /** The name input of a tag row. */
@@ -58,30 +55,11 @@ export const UNGROUPED_LABEL = 'Ungrouped';
 
 const NEW_TAG_NAME = 'New tag';
 
-/** A move in flight. The token finds it again once its write settles. */
-interface PendingMove {
-  token: number;
-  move: TagMove;
-}
-
 export class TagsEditor {
-  /**
-   * Moves whose writes are in flight, oldest first. Raw, and replaced
-   * wholesale: a deep `$state` proxy would hand back proxies, not the objects
-   * pushed in, and the list is only ever read as a whole.
-   */
-  private pendingMoves = $state.raw<readonly PendingMove[]>([]);
-  /** Bumped when a move fails; moves queued under an older one are skipped. */
-  private moveGeneration = 0;
-  private nextMoveToken = 0;
-
-  /** The store's snapshot with the pending moves applied on top. */
-  private readonly view = $derived(
-    this.pendingMoves.reduce((state, { move }) => withTagMoved(state, move), tagsStore.snapshot)
-  );
-
-  /** The catalog every section renders. */
-  readonly catalog: TagCatalog = $derived(indexTagCatalog(this.view));
+  /** The catalog every section renders, moves in flight included. */
+  get catalog(): TagCatalog {
+    return pendingCatalogMoves.catalog;
+  }
 
   /** The tag being dragged, if a drag started in this panel. */
   dragTagId = $state<string | null>(null);
@@ -206,35 +184,14 @@ export class TagsEditor {
   }
 
   private async applyMove(move: ResolvedTagMove, refocus: boolean): Promise<void> {
-    const generation = this.moveGeneration;
-    const pending: PendingMove = {
-      token: this.nextMoveToken++,
-      move: { tagId: move.tagId, groupId: move.groupId, index: move.index },
-    };
-    this.pendingMoves = [...this.pendingMoves, pending];
     // WebKit drops focus from a node a keyed {#each} moves; put it back on
     // the row's menu so Move up / Move down can repeat from the keyboard.
+    // The focus waits for a render, by which time the move is showing.
     if (refocus) void focusAfterRender(tagMenuTriggerId(move.tagId));
-    // The bookkeeping runs inside tagActions' chain, so a failure is seen
-    // here before the next queued move asks whether it's still wanted.
-    await tagActions.moveTag(pending.move, {
-      stillWanted: () => this.moveGeneration === generation,
-      onSettled: (moved) => {
-        // An earlier move of this generation failed: the overlay already
-        // went, and this one was skipped.
-        if (this.moveGeneration !== generation) return;
-        if (moved) {
-          // Once it lands the store's own patch holds the move, so the
-          // overlay entry can go.
-          this.pendingMoves = this.pendingMoves.filter((m) => m.token !== pending.token);
-        } else {
-          // The failure's refetch brings server truth. The later moves were
-          // resolved against an order that never happened, so they go too,
-          // and the ones still queued see the new generation and aren't sent.
-          this.moveGeneration++;
-          this.pendingMoves = [];
-        }
-      },
+    await pendingCatalogMoves.moveTag({
+      tagId: move.tagId,
+      groupId: move.groupId,
+      index: move.index,
     });
   }
 

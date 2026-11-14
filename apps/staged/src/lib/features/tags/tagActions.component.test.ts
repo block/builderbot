@@ -90,6 +90,7 @@ let setProjectTagAssigned: ReturnType<typeof vi.fn>;
 let createTag: ReturnType<typeof vi.fn>;
 let deleteTag: ReturnType<typeof vi.fn>;
 let moveTag: ReturnType<typeof vi.fn>;
+let reorderTagGroups: ReturnType<typeof vi.fn>;
 let toastError: ReturnType<typeof vi.fn>;
 let deleting: Set<string>;
 
@@ -135,6 +136,12 @@ beforeEach(() => {
     server = { ...server, tags: server.tags.filter((t) => t.id !== tagId) };
   });
   moveTag = vi.fn(async () => {});
+  reorderTagGroups = vi.fn(async (groupIds: string[]) => {
+    server = {
+      ...server,
+      groups: server.groups.map((group) => ({ ...group, position: groupIds.indexOf(group.id) })),
+    };
+  });
 
   const commandsMock = {
     getTagState: vi.fn(async () => ({ data: structuredClone(server), revalidating: null })),
@@ -143,6 +150,7 @@ beforeEach(() => {
     createTag,
     deleteTag,
     moveTag,
+    reorderTagGroups,
   };
   vi.doMock('../../commands', () => commandsMock);
   vi.doMock('../../api/commands', () => commandsMock);
@@ -507,5 +515,46 @@ describe('catalog writes', () => {
     expect(order).toEqual(['first settled false', 'second asked', 'second settled false']);
     expect(moveTag).toHaveBeenCalledTimes(1);
     expect(toastError).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives a group reorder the same hooks as a tag move', async () => {
+    const { tagsStore, tagActions } = await setup();
+    const groupIds = () => tagsStore.groups.map((group) => group.id);
+    const order: string[] = [];
+
+    // Skipped: nothing sent or patched, no toast.
+    expect(
+      await tagActions.reorderTagGroups(['priority', 'status'], {
+        stillWanted: () => false,
+        onSettled: (ok) => order.push(`skipped settled ${ok}`),
+      })
+    ).toBe(false);
+    expect(reorderTagGroups).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+    expect(groupIds()).toEqual(['status', 'priority']);
+
+    // A failed tag move settles with its caller before the reorder queued
+    // behind it is asked, and a wanted reorder is then sent and patched in.
+    moveTag.mockRejectedValueOnce(new Error('db locked'));
+    const move = tagActions.moveTag(
+      { tagId: 'idea', groupId: 'status', index: 2 },
+      { onSettled: (ok) => order.push(`move settled ${ok}`) }
+    );
+    const reorder = tagActions.reorderTagGroups(['priority', 'status'], {
+      stillWanted: () => {
+        order.push('reorder asked');
+        return true;
+      },
+      onSettled: (ok) => order.push(`reorder settled ${ok}`),
+    });
+    expect(await Promise.all([move, reorder])).toEqual([false, true]);
+    expect(order).toEqual([
+      'skipped settled false',
+      'move settled false',
+      'reorder asked',
+      'reorder settled true',
+    ]);
+    expect(reorderTagGroups.mock.calls).toEqual([[['priority', 'status']]]);
+    expect(groupIds()).toEqual(['priority', 'status']);
   });
 });

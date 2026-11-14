@@ -197,10 +197,11 @@ class TagActionsController {
    * into a group drops it from projects that already have a tag there.
    * Resolves to whether it moved.
    *
-   * A move's index means something only against the order the moves before
+   * A move's index means something only against the order the writes before
    * it produced, so a caller queuing several can pass `hooks`: `onSettled`
    * tells it each outcome inside the chain, and `stillWanted` lets it skip
-   * the moves it queued behind one that failed (see CatalogWriteHooks).
+   * the ones it queued behind one that failed (see CatalogWriteHooks, and
+   * pendingCatalogMoves, which is that caller).
    */
   moveTag(move: TagMove, hooks?: CatalogWriteHooks): Promise<boolean> {
     return this.catalogWrite(
@@ -263,12 +264,19 @@ class TagActionsController {
     );
   }
 
-  /** Reorder the groups; `groupIds` must list every group once. */
-  reorderTagGroups(groupIds: string[]): Promise<boolean> {
+  /**
+   * Reorder the groups; `groupIds` must list every group once. Resolves to
+   * whether it landed.
+   *
+   * The list means something only against the groups the writes before it
+   * left, so it takes the same `hooks` as `moveTag`.
+   */
+  reorderTagGroups(groupIds: string[], hooks?: CatalogWriteHooks): Promise<boolean> {
     return this.catalogWrite(
       'Unable to reorder groups',
       () => commands.reorderTagGroups(groupIds),
-      (state) => withGroupOrder(state, groupIds)
+      (state) => withGroupOrder(state, groupIds),
+      hooks
     );
   }
 

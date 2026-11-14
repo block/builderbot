@@ -1,47 +1,115 @@
 #!/bin/bash
-# CLI launcher for Staged app
-# Usage: staged [path]
-#   path - Optional directory to open (defaults to current directory)
+# `staged`: show a project in the Staged app.
+#
+# Usage: staged [<project> | <directory>] [--no-launch]
+#   <project>    Project name or id. Omit it inside a project's workspace
+#                (~/.staged/workspaces/<local|remote>/projects/<id>/...) to
+#                open that project.
+#   <directory>  An existing directory written as a path: `.`, `..`, or
+#                anything with a slash in it, such as `./repo`, `repo/` or
+#                `/path/to/repo`. Opens the project whose workspace that
+#                directory is in, as if run from there.
+#   --no-launch  Fail instead of starting Staged when it is not running.
+#
+# A thin wrapper around `stagedctl project open`, which decides the output
+# and the exit code. See `stagedctl project open --help`. The arguments go
+# to it unchanged, with one exception: a single argument that is written as
+# a path and is an existing directory is not passed on. stagedctl is run
+# from that directory with no project instead, so the project is resolved
+# from the directory, as `cd <directory> && staged` would.
+#
+# A bare word is always a project name or id, whether or not a directory of
+# that name exists. Projects are usually named after their repository, so
+# `staged builderbot` beside a `builderbot/` folder means the project. Write
+# `staged ./builderbot` or `staged builderbot/` for the folder.
+#
+# This script never starts the app itself. stagedctl asks a running Staged
+# to show the project, and starts one only when none is running, the caller
+# is already authorized, and it sits inside the Staged.app to start. When
+# stagedctl cannot be found, nothing is opened or started and the exit code
+# is 127.
 
-set -e
+set -eu
 
-# Resolve the target path
-if [ -n "$1" ]; then
-    TARGET_PATH="$1"
-else
-    TARGET_PATH="."
-fi
-
-# Convert to absolute path
-TARGET_PATH=$(cd "$TARGET_PATH" 2>/dev/null && pwd) || {
-    echo "Error: '$1' is not a valid directory" >&2
-    exit 1
+# stagedctl ships inside the app bundle. Prefer the one on PATH, which is
+# the one typing `stagedctl` would run, then the usual install locations.
+find_stagedctl() {
+    # `type -P` searches PATH only, so a shell function or alias of the same
+    # name is never mistaken for the binary.
+    if type -P stagedctl; then
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        "/Applications/Staged.app/Contents/MacOS/stagedctl" \
+        "${HOME:+$HOME/Applications/Staged.app/Contents/MacOS/stagedctl}"; do
+        if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
-# Find the Staged app
-# Priority: /Applications > ~/Applications > built app in repo
-if [ -d "/Applications/Staged.app" ]; then
-    APP_PATH="/Applications/Staged.app"
-elif [ -d "$HOME/Applications/Staged.app" ]; then
-    APP_PATH="$HOME/Applications/Staged.app"
-else
-    # Try to find it relative to this script (for development)
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-    STAGED_APP="$REPO_ROOT/apps/staged"
+if ! STAGEDCTL="$(find_stagedctl)"; then
+    cat >&2 <<'MESSAGE'
+staged: stagedctl was not found, so no project was opened and Staged was not started.
+It was looked for on PATH, then in /Applications/Staged.app and ~/Applications/Staged.app.
+stagedctl ships inside Staged.app. Install Staged, then press "Add to PATH" under
+Settings > Connected apps > Command line. Or link it onto PATH by hand:
+  ln -s /path/to/Staged.app/Contents/MacOS/stagedctl /usr/local/bin/stagedctl
+MESSAGE
+    exit 127
+fi
 
-    if [ -d "$STAGED_APP/src-tauri/target/release/bundle/macos/Staged.app" ]; then
-        APP_PATH="$STAGED_APP/src-tauri/target/release/bundle/macos/Staged.app"
-    elif [ -d "$STAGED_APP/src-tauri/target/debug/bundle/macos/Staged.app" ]; then
-        APP_PATH="$STAGED_APP/src-tauri/target/debug/bundle/macos/Staged.app"
-    else
-        echo "Error: Could not find Staged.app" >&2
-        echo "Install it to /Applications or build with 'just app staged build'" >&2
+# `staged .` and `staged /path/to/repo`: one argument that is written as a
+# path and is an existing directory, alone or beside flags that take no
+# value. Anything else, a flag this script does not know included, is left
+# for stagedctl to read.
+dir=""
+positionals=0
+known=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-launch | --json) ;;
+        -*) known=0 ;;
+        *)
+            positionals=$((positionals + 1))
+            dir="$arg"
+            ;;
+    esac
+done
+
+# Only what cannot be a bare project name is read as a path: `.`, `..`, or
+# an argument with a slash in it. A bare word stays a name even when a
+# directory of that name exists here.
+is_path=0
+case "$dir" in
+    . | .. | */*) is_path=1 ;;
+esac
+
+if [ "$known" -eq 1 ] && [ "$positionals" -eq 1 ] && [ "$is_path" -eq 1 ] && [ -d "$dir" ]; then
+    # Drop the directory from the arguments and keep the flags in order.
+    for arg in "$@"; do
+        shift
+        [ "$arg" = "$dir" ] || set -- "$@" "$arg"
+    done
+    # A stagedctl found through a relative PATH entry must still be the one
+    # that runs after the directory change.
+    case "$STAGEDCTL" in
+        /*) ;;
+        *) STAGEDCTL="$PWD/$STAGEDCTL" ;;
+    esac
+    # `./` keeps `cd` from searching $CDPATH for a relative name.
+    asked="$dir"
+    case "$dir" in
+        /*) ;;
+        *) dir="./$dir" ;;
+    esac
+    if ! cd -- "$dir" 2>/dev/null; then
+        printf 'staged: cannot change to the directory %s, so no project was opened.\n' "$asked" >&2
         exit 1
     fi
 fi
 
-# Launch the app with the target path as argument
-# Run in background and detach so CLI returns immediately
-"$APP_PATH/Contents/MacOS/staged" "$TARGET_PATH" &>/dev/null &
-disown
+exec "$STAGEDCTL" project open "$@"

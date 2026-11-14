@@ -21,6 +21,8 @@ use crate::client::{
     Client, CtlError, STAGEDCTL_LOCK_ENV,
 };
 use crate::grants::{self, GrantFile};
+use crate::launch;
+use crate::open;
 use crate::tags;
 
 /// One command's result: the value `--json` prints, and the human rendering.
@@ -89,6 +91,21 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
             return disconnect(app.as_ref(), data_dir, client.as_deref());
         }
         _ => {}
+    }
+
+    // `project open` finds its own app: it is the one verb that starts
+    // Staged when none is running (see `launch`), and it settles what it was
+    // pointed at before looking for one.
+    if let Noun::Project(ProjectVerb::Open { project, no_launch }) = &cli.command {
+        return open::run(
+            project.as_deref(),
+            *no_launch,
+            cli.lock_path.as_deref(),
+            std::env::var_os(STAGEDCTL_LOCK_ENV),
+            std::env::current_dir,
+            data_dir.as_deref(),
+            &launch::LaunchEnv::real(),
+        );
     }
 
     let client = discover_and_connect(
@@ -190,7 +207,11 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
             branch,
             file,
         }) => image_add(&client, &project, &repo, branch.as_deref(), &file),
-        Noun::Connect { .. } | Noun::Disconnect { .. } => unreachable!("handled above"),
+        Noun::Project(ProjectVerb::Open { .. })
+        | Noun::Connect { .. }
+        | Noun::Disconnect { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -746,10 +767,14 @@ pub(crate) fn find_project<'a>(
     }
 }
 
-fn resolve_project(client: &Client, needle: &str) -> Result<Project, CtlError> {
+/// Every project the caller's credential can see.
+pub(crate) fn list_projects(client: &Client) -> Result<Vec<Project>, CtlError> {
     let raw = client.invoke("list_projects", json!({}))?;
-    let projects: Vec<Project> = parse(&raw, "project list")?;
-    find_project(&projects, needle).cloned()
+    parse(&raw, "project list")
+}
+
+pub(crate) fn resolve_project(client: &Client, needle: &str) -> Result<Project, CtlError> {
+    find_project(&list_projects(client)?, needle).cloned()
 }
 
 struct ResolvedBranch {

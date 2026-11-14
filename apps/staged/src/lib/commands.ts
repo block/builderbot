@@ -6,6 +6,7 @@
 
 import { invokeCommand, isTauri } from './transport';
 import type { ActionType, ProjectAction } from './features/actions/actions';
+import type { ProjectOpenAnswer } from './features/layout/navigation.svelte';
 import {
   cachedCommand,
   cachedInvoke,
@@ -45,6 +46,7 @@ import type {
   PollWorkspaceResult,
   PrDetectionResult,
   Project,
+  ProjectOpenRequest,
   ProjectRepo,
   ProjectTransferDirection,
   ProjectTransferPreflight,
@@ -63,6 +65,8 @@ import type {
   SessionPoll,
   SessionPollRequest,
   SessionReconcileEvent,
+  StagedctlLinkOutcome,
+  StagedctlShownLink,
   StoreIncompatibility,
   SuggestedRepo,
   ToolCallBody,
@@ -167,6 +171,41 @@ export function listControlGrants(): Promise<ControlGrantSummary[]> {
  */
 export function revokeControlGrant(grantId: string): Promise<void> {
   return invokeCommand('revoke_control_grant', { grantId });
+}
+
+/**
+ * The request to show a project that this window has yet to answer: none, or
+ * one. Taken once the `project-open-requested` listener is live, so a request
+ * parked before the window loaded is still acted on, and again right before
+ * the window navigates for a request, to see that its caller has not timed out
+ * or been superseded meanwhile. Desktop only.
+ */
+export function listPendingProjectOpens(): Promise<ProjectOpenRequest[]> {
+  return invokeCommand('list_pending_project_opens');
+}
+
+/**
+ * Tell the waiting `stagedctl project open` what this window did with request
+ * `requestId`. Rejects when the request is no longer this window's to answer:
+ * a newer one superseded it, or its caller stopped waiting.
+ */
+export function answerProjectOpen(requestId: string, outcome: ProjectOpenAnswer): Promise<void> {
+  return invokeCommand('answer_project_open', { requestId, outcome });
+}
+
+/**
+ * Link the app's bundled `stagedctl` into `/usr/local/bin`, or into
+ * `~/.local/bin` when that cannot be written, so a terminal can run it.
+ * Desktop only.
+ *
+ * Nothing already at the path is overwritten: a `conflict` outcome says what
+ * is there. Pass that conflict's `link` and `target` back as `replace` once
+ * the user has seen them and asked for the link to be replaced. Rejects with
+ * a sentence for the user when nothing could be linked, for one when Staged
+ * is running from a location a link should not point at.
+ */
+export function linkStagedctlOnPath(replace?: StagedctlShownLink): Promise<StagedctlLinkOutcome> {
+  return invokeCommand('link_stagedctl_on_path', { replace: replace ?? null });
 }
 
 // =============================================================================
@@ -2463,6 +2502,15 @@ export function newWindow(seedProjectId: string | null): Promise<string> {
  */
 export function takeWindowSeed(): Promise<string | null> {
   return invokeCommand('take_window_seed');
+}
+
+/**
+ * Tell the backend this window's frontend has shown it. The backend records
+ * the window as revealed and, if a `stagedctl project open` arrived while it
+ * was still loading, brings it to the front now. Desktop only.
+ */
+export function noteWindowRevealed(): Promise<void> {
+  return invokeCommand('note_window_revealed');
 }
 
 /** Claim process-wide ownership of the updater loop for the current window. */

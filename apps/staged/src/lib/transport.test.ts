@@ -588,6 +588,124 @@ describe('tauri listener establishment', () => {
   });
 });
 
+describe('tauri window listener establishment', () => {
+  let resolveListen: ((unlisten: () => void) => void) | undefined;
+  let rejectListen: ((error: unknown) => void) | undefined;
+  let windowListen: ReturnType<typeof vi.fn>;
+  let anyTargetListen: ReturnType<typeof vi.fn>;
+  let tauriUnlisten: ReturnType<typeof vi.fn<() => void>>;
+  let consoleError: MockInstance<typeof console.error>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubGlobal('__TAURI__', {});
+    resolveListen = undefined;
+    rejectListen = undefined;
+    tauriUnlisten = vi.fn<() => void>();
+    windowListen = vi.fn(
+      () =>
+        new Promise<() => void>((resolve, reject) => {
+          resolveListen = resolve;
+          rejectListen = reject;
+        })
+    );
+    anyTargetListen = vi.fn();
+    vi.doMock('@tauri-apps/api/window', () => ({
+      getCurrentWindow: () => ({ listen: windowListen }),
+    }));
+    vi.doMock('@tauri-apps/api/event', () => ({ listen: anyTargetListen }));
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleError.mockRestore();
+    vi.doUnmock('@tauri-apps/api/window');
+    vi.doUnmock('@tauri-apps/api/event');
+    vi.unstubAllGlobals();
+  });
+
+  it('registers on the current window and delivers the payload', async () => {
+    const { listenToWindowEvent } = await import('./transport');
+    const callback = vi.fn();
+    const unlisten = listenToWindowEvent('project-open-requested', callback);
+
+    await vi.waitFor(() => expect(windowListen).toHaveBeenCalledTimes(1));
+    expect(windowListen.mock.calls[0][0]).toBe('project-open-requested');
+    // An any-target listener would also match emits addressed to other windows.
+    expect(anyTargetListen).not.toHaveBeenCalled();
+
+    const handler = windowListen.mock.calls[0][1] as (event: { payload: unknown }) => void;
+    handler({ payload: { requestId: 'r1' } });
+    expect(callback).toHaveBeenCalledExactlyOnceWith({ requestId: 'r1' });
+
+    resolveListen?.(tauriUnlisten);
+    await Promise.resolve();
+    unlisten();
+    await vi.waitFor(() => expect(tauriUnlisten).toHaveBeenCalledTimes(1));
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('announces establishment only once the window registration resolves', async () => {
+    const { listenToWindowEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const unlisten = listenToWindowEvent('project-open-requested', vi.fn(), { onEstablished });
+
+    await vi.waitFor(() => expect(windowListen).toHaveBeenCalledTimes(1));
+    // The gap the hook exists for: an event emitted to this window before the
+    // registration lands is never delivered, so the snapshot waits for it.
+    expect(onEstablished).not.toHaveBeenCalled();
+
+    resolveListen?.(tauriUnlisten);
+    await vi.waitFor(() => expect(onEstablished).toHaveBeenCalledTimes(1));
+
+    unlisten();
+    expect(tauriUnlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays silent when the unlisten precedes registration', async () => {
+    const { listenToWindowEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const unlisten = listenToWindowEvent('project-open-requested', vi.fn(), { onEstablished });
+
+    await vi.waitFor(() => expect(windowListen).toHaveBeenCalledTimes(1));
+    unlisten();
+    resolveListen?.(tauriUnlisten);
+
+    await vi.waitFor(() => expect(tauriUnlisten).toHaveBeenCalledTimes(1));
+    expect(onEstablished).not.toHaveBeenCalled();
+  });
+
+  it('reports a registration that fails, unless the consumer walked away', async () => {
+    const { listenToWindowEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const onRegistrationFailed = vi.fn();
+    listenToWindowEvent('project-open-requested', vi.fn(), {
+      onEstablished,
+      onRegistrationFailed,
+    });
+
+    await vi.waitFor(() => expect(windowListen).toHaveBeenCalledTimes(1));
+    const failure = new Error('ipc down');
+    rejectListen?.(failure);
+
+    await vi.waitFor(() => expect(onRegistrationFailed).toHaveBeenCalledWith(failure));
+    expect(onEstablished).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+
+    const abandoned = vi.fn();
+    const unlisten = listenToWindowEvent('project-open-requested', vi.fn(), {
+      onRegistrationFailed: abandoned,
+    });
+    await vi.waitFor(() => expect(windowListen).toHaveBeenCalledTimes(2));
+    unlisten();
+    rejectListen?.(new Error('ipc down'));
+
+    // Still logged, but the hook stays silent after an early unlisten.
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(2));
+    expect(abandoned).not.toHaveBeenCalled();
+  });
+});
+
 describe('tauri window label', () => {
   let consoleError: MockInstance<typeof console.error>;
 

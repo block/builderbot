@@ -6,13 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    getWindowLabel,
-    isTauri,
-    getWindowSync,
-    listenToEvent,
-    type UnlistenFn,
-  } from './lib/transport';
+  import { getWindowLabel, isTauri, listenToEvent, type UnlistenFn } from './lib/transport';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -82,12 +76,14 @@
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
   import { listenForControlAuthorizations } from './lib/listeners/controlAuthorizationListener';
   import { listenForMenuEvents } from './lib/listeners/menuListener';
+  import { listenForProjectOpens } from './lib/listeners/projectOpenListener';
   import { listenForReferenceCopy } from './lib/features/sessions/referenceClipboard';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { sweepCache } from './lib/cache';
   import { initUpdater, initUpdaterMirror } from './lib/services/updater.svelte';
   import { isUpdaterAvailable, logUpdaterMessage } from './lib/services/updater';
+  import { revealWindow } from './lib/services/windowReveal';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
@@ -98,6 +94,7 @@
   let unlistenPageLifecycle: (() => void) | undefined;
   let unlistenAcpToolsReconciled: UnlistenFn | undefined;
   let unlistenControlAuthorizations: UnlistenFn | undefined;
+  let unlistenProjectOpens: UnlistenFn | undefined;
   let unlistenStoreReset: UnlistenFn | undefined;
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
@@ -439,6 +436,19 @@
       console.error('Failed to restore last viewed project:', e);
     }
 
+    // `stagedctl project open` requests for this window: every desktop
+    // window, since the backend picks whichever one the user was last in.
+    // Started only now, unlike the listeners above, so a request never
+    // navigates underneath the route restore, which would then put the
+    // restored or seeded project back over it. Nothing is missed by waiting:
+    // the listener takes the backend's snapshot of a request parked earlier.
+    let projectOpenStartupHandled: Promise<void> = Promise.resolve();
+    if (isTauri && !destroyed) {
+      const projectOpens = listenForProjectOpens();
+      unlistenProjectOpens = projectOpens.stop;
+      projectOpenStartupHandled = projectOpens.startupHandled;
+    }
+
     const sweep = () => void sweepCache();
     if (typeof requestIdleCallback === 'function') {
       requestIdleCallback(sweep, { timeout: 10_000 });
@@ -633,8 +643,17 @@
     // window only: the backend holds the set until it is answered, and the
     // store-reset prompt wins when there is no store to resume against. Not awaited — the
     // dialog appears over the shell once the window shows.
+    //
+    // Loaded only once a `stagedctl project open` request parked before this
+    // window was listening has been acted on. That request refuses while a
+    // dialog is open, so loading the offer alongside it let the same command
+    // end `opened` or `ui_busy` by whichever chain of round trips finished
+    // first. In this order the project opens and the offer appears over it.
+    // With nothing parked the wait is two round trips, started well before
+    // this line, and it is capped (see `startupHandled`), so the offer is
+    // never lost.
     if (isTauri && getWindowLabel() === 'main' && !storeIncompat && !storeError) {
-      void resumeOnLaunch.load();
+      void projectOpenStartupHandled.then(() => resumeOnLaunch.load());
     }
 
     // Discover available agents in the background.
@@ -649,8 +668,9 @@
     // Check for `sq` CLI in the background if preferences did not need it.
     ensureSqAvailabilityLoaded();
 
-    // Window was created hidden — show it now that the theme is applied
-    await getWindowSync().show();
+    // Window was created hidden — show it now that the theme is applied,
+    // and tell the backend it is revealed.
+    await revealWindow();
     // Start the updater service in whichever window wins the ownership claim
     // (gated: only official release builds check).
     requestUpdaterLoopStart();
@@ -669,6 +689,7 @@
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
     unlistenControlAuthorizations?.();
+    unlistenProjectOpens?.();
     unlistenStoreReset?.();
     unlistenUpdaterOwnerAvailable?.();
     projectsDataStore.stopListeners();

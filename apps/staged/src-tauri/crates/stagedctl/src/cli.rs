@@ -70,7 +70,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Noun {
-    /// Inspect projects and the repos attached to them
+    /// Inspect projects and the repos attached to them, and show one in the
+    /// app
     #[command(alias = "projects", subcommand)]
     Project(ProjectVerb),
 
@@ -188,6 +189,77 @@ the --repo flag of `timeline show`, `session start`, `session list`, and
     Get {
         /// Project name or id (see `stagedctl project list`)
         project: String,
+    },
+
+    /// Show a project in the Staged window and bring that window to the front
+    #[command(long_about = "\
+Show a project in the Staged app. The Staged window you were last in is
+brought to the front and switched to the project: the window that holds
+focus, or else the one that held it most recently and is still open.
+Prints the project's name and id and the pid of the Staged instance that
+showed it. A project that is already on screen is a success too.
+
+With no <project>, the project is the one whose workspace the current
+directory is in: any directory under
+~/.staged/workspaces/<local|remote>/projects/<project-id>/, where Staged
+keeps a project's worktrees. From any other directory the command exits 1
+(`not_in_workspace`) without looking for the app; pass a <project> there.
+
+A <project> that matches nothing (`not_found`), or several projects when
+case is ignored (`ambiguous`), exits 1 before any window is touched. So
+does a directory whose project the app does not list (`not_found`): the
+worktree of a project that was deleted, or of one that a grant confined
+to another project does not reach.
+
+Otherwise the window is raised whether or not it could switch, so the
+user sees what is in the way. When it could not, the command exits 1:
+  ui_busy     a dialog is open in the window, or the diff comment being
+              written could not be saved: close or finish it and run the
+              command again. Also when another `project open` replaced
+              this one before the window answered it.
+  ui_timeout  the window did not answer in time
+  not_found   the project was deleted meanwhile
+
+Needs a connected-app grant with write access that reaches the project
+(see `stagedctl connect --help`): showing a project marks it read and
+records it as the last one shown, so a read-only grant is refused (exit
+4, `scope_denied`). Not for Staged-spawned sessions: the app refuses a
+session's credential the same way, for the session's own project too, so
+an agent cannot pull the user's window away.
+
+When Staged is not running, the command starts it, waits for it to come
+up, and then asks as above; the app holds the request until its window
+has loaded. A window that is still loading is not shown early: it comes
+to the front once it is ready, which can be after the command has
+exited. What it starts is the Staged.app this stagedctl is bundled in,
+and nothing else. A line on stderr says so; stdout is unchanged. A
+Staged that is running but too busy to answer is treated the same way:
+opening the app only brings it forward, and the command uses it as soon
+as it answers.
+
+Staged is never started:
+  - with --no-launch: the command exits 3 instead;
+  - when --lock-path or $STAGEDCTL_LOCK names a control file. That
+    points at one instance, and when it is gone the command exits 3, so
+    a spawned session never starts an app;
+  - when this machine holds no unexpired connected-app grant (exit 4,
+    `authorization_required`). Start Staged and run `stagedctl connect`
+    once; the consent dialog is not raised for you;
+  - from a development build, whose app needs its dev server (exit 3).
+    Run `just dev`;
+  - beside a Staged that is running but cannot be used, such as one
+    that was updated underneath this CLI (exit 3).
+A <project> name is looked up only once the app is up, so a name that
+matches nothing still exits 1 (`not_found`) after Staged has started. A
+directory outside every project workspace never starts it.")]
+    Open {
+        /// Project name or id (see `stagedctl project list`); omit it to
+        /// open the project the current directory belongs to
+        project: Option<String>,
+
+        /// Exit 3 instead of starting Staged when it is not running
+        #[arg(long)]
+        no_launch: bool,
     },
 
     /// Show one project's tags: its choice in each group, then its free tags
@@ -917,6 +989,61 @@ mod tests {
         assert!(matches!(cli.command, Noun::Disconnect { client: None }));
         let cli = Cli::try_parse_from(["stagedctl", "disconnect", "--client", "x"]).unwrap();
         assert!(matches!(cli.command, Noun::Disconnect { client: Some(c) } if c == "x"));
+    }
+
+    #[test]
+    fn project_open_takes_at_most_one_project() {
+        for noun in ["project", "projects"] {
+            let cli = Cli::try_parse_from(["stagedctl", noun, "open", "Widgets"]).unwrap();
+            assert!(
+                matches!(cli.command, Noun::Project(ProjectVerb::Open { project, no_launch: false }) if project.as_deref() == Some("Widgets"))
+            );
+        }
+        // A name with spaces is one argument, and --json stays global.
+        let cli =
+            Cli::try_parse_from(["stagedctl", "project", "open", "My Project", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(
+            matches!(cli.command, Noun::Project(ProjectVerb::Open { project, no_launch: false }) if project.as_deref() == Some("My Project"))
+        );
+        // No project means the current directory's, with or without flags.
+        for args in [
+            &["stagedctl", "project", "open"][..],
+            &["stagedctl", "project", "open", "--json"][..],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                cli.command,
+                Noun::Project(ProjectVerb::Open {
+                    project: None,
+                    no_launch: false
+                })
+            ));
+        }
+        // --no-launch goes either side of the project, or with none.
+        for args in [
+            &["stagedctl", "project", "open", "--no-launch", "Widgets"][..],
+            &["stagedctl", "project", "open", "Widgets", "--no-launch"][..],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(
+                matches!(cli.command, Noun::Project(ProjectVerb::Open { project, no_launch: true }) if project.as_deref() == Some("Widgets"))
+            );
+        }
+        let cli = Cli::try_parse_from(["stagedctl", "project", "open", "--no-launch"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Noun::Project(ProjectVerb::Open {
+                project: None,
+                no_launch: true
+            })
+        ));
+        // It is `project open`'s alone: no other verb starts the app.
+        assert!(Cli::try_parse_from(["stagedctl", "project", "list", "--no-launch"]).is_err());
+        assert!(
+            Cli::try_parse_from(["stagedctl", "project", "open", "a", "b"]).is_err(),
+            "one project at a time"
+        );
     }
 
     #[test]

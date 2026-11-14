@@ -933,10 +933,11 @@ impl DispatchCaller {
 
 /// Why a web (remote-browser) caller may not run `command`, or `None` if it
 /// may. From a remote browser, `create_image` would mean "read any file on
-/// the app's machine into a viewable timeline" and `open_in_app` would mean
-/// "open an arbitrary path in an arbitrary local app" — so both are rejected
-/// before any dispatch arm runs, and restoring the web listener cannot
-/// silently inherit them.
+/// the app's machine into a viewable timeline", `open_in_app` would mean
+/// "open an arbitrary path in an arbitrary local app" and `open_project`
+/// would mean "pull a window on the user's desk to the front and change what
+/// it shows" — so all three are rejected before any dispatch arm runs, and
+/// restoring the web listener cannot silently inherit them.
 fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static str> {
     if !matches!(caller, DispatchCaller::Web) {
         return None;
@@ -952,6 +953,10 @@ fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static s
         "open_in_app" => Some(
             "open_in_app is not available in web mode: it launches an app on \
              the app's machine",
+        ),
+        "open_project" => Some(
+            "open_project is not available in web mode: it raises a Staged \
+             window on the app's machine and switches the project it shows",
         ),
         _ => None,
     }
@@ -1069,6 +1074,10 @@ pub(crate) async fn dispatch(
         "claim_updater_ownership" => {
             Err("claim_updater_ownership is not supported in web mode".to_string())
         }
+        // A native window telling the backend its frontend has shown it,
+        // which makes the raise a `stagedctl project open` is owed. A browser
+        // client has no native window to reveal or raise.
+        "note_window_revealed" => Err(format!("{command} is not available in web mode")),
 
         // =====================================================================
         // App lifecycle
@@ -1104,6 +1113,32 @@ pub(crate) async fn dispatch(
         "answer_control_authorization" => Err(format!("{command} is not available in web mode")),
         "list_control_grants" => Err(format!("{command} is not available in web mode")),
         "revoke_control_grant" => Err(format!("{command} is not available in web mode")),
+
+        // =====================================================================
+        // stagedctl project open (desktop only)
+        // =====================================================================
+        // A request is addressed to one native window, which the backend
+        // raises and which answers for its own navigation. A browser client
+        // is not that window: it must neither read nor answer the request.
+        "list_pending_project_opens" => Err(format!("{command} is not available in web mode")),
+        "answer_project_open" => Err(format!("{command} is not available in web mode")),
+        // The request itself: control callers only (`web_caller_rejection`
+        // turns a browser away before this arm), and only a connected app's
+        // read-write grant covering the project (`control_scope`).
+        "open_project" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            crate::project_open::control::open_project(app_handle, &store, &project_id).await
+        }
+
+        // =====================================================================
+        // stagedctl on PATH (desktop only)
+        // =====================================================================
+        // Links the app's bundled CLI into a directory on the user's PATH. It
+        // is the user's own gesture in Settings: a browser client, which may
+        // be on another machine, must not change what their shell runs. It is
+        // outside `ALLOWED_COMMANDS` too, so no stagedctl caller reaches it.
+        "link_stagedctl_on_path" => Err(format!("{command} is not available in web mode")),
 
         // =====================================================================
         // Projects
@@ -4563,11 +4598,11 @@ mod tests {
     fn web_callers_cannot_reach_same_host_only_commands() {
         let control =
             DispatchCaller::Control(crate::control_server::ControlGrant::test_all_projects());
-        for command in ["create_image", "open_in_app"] {
+        for command in ["create_image", "open_in_app", "open_project"] {
             assert!(
                 web_caller_rejection(command, &DispatchCaller::Web).is_some(),
-                "{command} takes local paths / launches local apps and must be \
-                 rejected for web callers"
+                "{command} takes local paths, launches local apps or raises a \
+                 native window and must be rejected for web callers"
             );
             assert!(
                 web_caller_rejection(command, &control).is_none(),

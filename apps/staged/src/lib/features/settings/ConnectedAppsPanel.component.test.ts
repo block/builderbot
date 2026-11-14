@@ -10,6 +10,8 @@ const { commands, transport } = vi.hoisted(() => ({
   commands: {
     listControlGrants: vi.fn<() => Promise<ControlGrantSummary[]>>(),
     revokeControlGrant: vi.fn<(id: string) => Promise<void>>(),
+    // The "Command line" setting above the list; it calls nothing on mount.
+    linkStagedctlOnPath: vi.fn(),
   },
   transport: {
     listeners: new Map<string, (payload: unknown) => void>(),
@@ -181,6 +183,19 @@ describe('ConnectedAppsPanel', () => {
     expect(host.textContent).not.toContain('Revoke access for');
     expect(commands.revokeControlGrant).not.toHaveBeenCalled();
     expect(rows()).toHaveLength(1);
+  });
+
+  it('offers the command line setting above the list, and runs nothing for it on load', async () => {
+    commands.listControlGrants.mockResolvedValue([]);
+    await render();
+    expect(buttonsNamed('Add to PATH')).toHaveLength(1);
+    const setting = host.querySelector('section[aria-labelledby="stagedctl-path-heading"]');
+    const empty = host.querySelector('[data-testid="connected-apps-empty"]');
+    expect(setting).not.toBeNull();
+    expect(
+      setting!.compareDocumentPosition(empty!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(commands.linkStagedctlOnPath).not.toHaveBeenCalled();
   });
 
   it('surfaces a failed load and tears down its listener on unmount', async () => {

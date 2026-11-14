@@ -14,7 +14,9 @@ let projectsStoreMock: {
   loaded: boolean;
   ensureLoaded: ReturnType<typeof vi.fn>;
   whenLoaded: ReturnType<typeof vi.fn>;
+  isProjectDeleting: (projectId: string) => boolean;
 };
+let deletingProjectIds: Set<string>;
 let takeWindowSeed: ReturnType<typeof vi.fn>;
 let pruneDeletedProjects: ReturnType<typeof vi.fn>;
 
@@ -35,11 +37,13 @@ beforeEach(() => {
   writeSnapshot = vi.fn();
   clearSnapshot = vi.fn();
   snapshotProjectId = null;
+  deletingProjectIds = new Set();
   projectsStoreMock = {
     projects: [],
     loaded: false,
     ensureLoaded: vi.fn().mockResolvedValue(undefined),
     whenLoaded: vi.fn().mockResolvedValue(undefined),
+    isProjectDeleting: (projectId) => deletingProjectIds.has(projectId),
   };
   takeWindowSeed = vi.fn().mockResolvedValue(null);
   pruneDeletedProjects = vi.fn().mockResolvedValue(undefined);
@@ -675,6 +679,463 @@ describe('diffLeaveCheck', () => {
     unregisterOld();
 
     expect(diffLeaveCheck()).toBe(newer);
+  });
+});
+
+describe('openProjectExternally', () => {
+  const home = { kind: 'projects' };
+  const projectRoute = (projectId: string) => ({ kind: 'project', projectId });
+
+  /** Stand in for the DOM's dialogs: the helper only asks for the elements
+   *  carrying a dialog role and reads their `data-state`. */
+  let dialogs: Array<{ getAttribute: (name: string) => string | null }>;
+  function addDialog(state: string | null = 'open') {
+    dialogs.push({ getAttribute: (name) => (name === 'data-state' ? state : null) });
+  }
+  let dispatchEvent: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    dialogs = [];
+    dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent });
+    vi.stubGlobal('document', { querySelectorAll: () => dialogs });
+    projectsStoreMock.projects = [{ id: 'a' }, { id: 'b' }];
+    projectsStoreMock.loaded = true;
+  });
+
+  it('opens a project from home and persists it like any other open', async () => {
+    const { openProjectExternally, navigation } = await importNavigation();
+
+    await expect(openProjectExternally('a')).resolves.toBe('opened');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(setStoreValue).toHaveBeenCalledWith('last-viewed-project', 'a');
+  });
+
+  it('replaces the project on screen, and the one under Settings', async () => {
+    const { openProjectExternally, selectProject, openSettings, navigation } =
+      await importNavigation();
+    selectProject('a');
+
+    await expect(openProjectExternally('b')).resolves.toBe('opened');
+    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+
+    openSettings('general');
+    await expect(openProjectExternally('a')).resolves.toBe('opened');
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('answers opened for the project already on screen without navigating', async () => {
+    const { openProjectExternally, selectProject, navigation } = await importNavigation();
+    selectProject('a');
+    const stack = navigation.detailStack;
+    setStoreValue.mockClear();
+
+    await expect(openProjectExternally('a')).resolves.toBe('opened');
+
+    expect(navigation.detailStack).toBe(stack);
+    expect(setStoreValue).not.toHaveBeenCalled();
+  });
+
+  it('answers opened for the project already on screen under a dialog', async () => {
+    const { openProjectExternally, selectProject, navigation } = await importNavigation();
+    selectProject('a');
+    addDialog();
+
+    await expect(openProjectExternally('a')).resolves.toBe('opened');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('refuses while a dialog is open and leaves the route alone', async () => {
+    const { openProjectExternally, selectProject, navigation } = await importNavigation();
+    selectProject('a');
+    addDialog();
+
+    await expect(openProjectExternally('b')).resolves.toBe('dialogOpen');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('counts a dialog with no data-state, as hand-rolled ones have none', async () => {
+    const { openProjectExternally, navigation } = await importNavigation();
+    addDialog(null);
+
+    await expect(openProjectExternally('a')).resolves.toBe('dialogOpen');
+
+    expect(navigation.detailStack).toEqual([home]);
+  });
+
+  it('ignores a dialog that is only animating out', async () => {
+    const { openProjectExternally, navigation } = await importNavigation();
+    addDialog('closed');
+
+    await expect(openProjectExternally('a')).resolves.toBe('opened');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('looks for dialogs and alert dialogs', async () => {
+    const querySelectorAll = vi.fn().mockReturnValue([]);
+    vi.stubGlobal('document', { querySelectorAll });
+    const { openProjectExternally } = await importNavigation();
+
+    await openProjectExternally('a');
+
+    expect(querySelectorAll).toHaveBeenCalledWith('[role="dialog"], [role="alertdialog"]');
+  });
+
+  it('leaves the diff view once the comment being typed is saved', async () => {
+    const {
+      openProjectExternally,
+      selectProject,
+      openDiffRoute,
+      registerDiffLeaveCheck,
+      navigation,
+    } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const diffRoute = navigation.currentRoute;
+    let finishSave!: (saved: boolean) => void;
+    const check = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+    registerDiffLeaveCheck(check);
+
+    const opening = openProjectExternally('b');
+    await vi.waitFor(() => expect(check).toHaveBeenCalledTimes(1));
+    // Still on the diff while the save runs.
+    expect(navigation.currentRoute).toBe(diffRoute);
+
+    finishSave(true);
+    await expect(opening).resolves.toBe('opened');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(dispatchEvent).toHaveBeenCalledTimes(1);
+    const event = dispatchEvent.mock.calls[0][0] as CustomEvent;
+    expect(event.type).toBe('staged:diff-route-replaced');
+    expect(event.detail).toEqual({ route: diffRoute });
+  });
+
+  it('leaves a diff over the requested project for the project itself', async () => {
+    const {
+      openProjectExternally,
+      selectProject,
+      openDiffRoute,
+      registerDiffLeaveCheck,
+      navigation,
+    } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const check = vi.fn().mockResolvedValue(true);
+    registerDiffLeaveCheck(check);
+
+    await expect(openProjectExternally('a')).resolves.toBe('opened');
+
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('stays on the diff when the comment could not be saved', async () => {
+    const {
+      openProjectExternally,
+      selectProject,
+      openDiffRoute,
+      registerDiffLeaveCheck,
+      navigation,
+    } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const stack = navigation.detailStack;
+    registerDiffLeaveCheck(async () => false);
+
+    await expect(openProjectExternally('b')).resolves.toBe('diffCommentUnsaved');
+
+    expect(navigation.detailStack).toBe(stack);
+    expect(dispatchEvent).not.toHaveBeenCalled();
+  });
+
+  it('stays on the diff when the save throws', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const {
+      openProjectExternally,
+      selectProject,
+      openDiffRoute,
+      registerDiffLeaveCheck,
+      navigation,
+    } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const stack = navigation.detailStack;
+    registerDiffLeaveCheck(async () => {
+      throw new Error('save failed');
+    });
+
+    await expect(openProjectExternally('b')).resolves.toBe('diffCommentUnsaved');
+
+    expect(navigation.detailStack).toBe(stack);
+    expect(error).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses for a dialog that opened while the comment was saving', async () => {
+    const {
+      openProjectExternally,
+      selectProject,
+      openDiffRoute,
+      registerDiffLeaveCheck,
+      navigation,
+    } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const stack = navigation.detailStack;
+    registerDiffLeaveCheck(async () => {
+      addDialog();
+      return true;
+    });
+
+    await expect(openProjectExternally('b')).resolves.toBe('dialogOpen');
+
+    expect(navigation.detailStack).toBe(stack);
+  });
+
+  it('answers not found for a project deleted while the comment was saving', async () => {
+    const {
+      openProjectExternally,
+      selectProject,
+      openDiffRoute,
+      registerDiffLeaveCheck,
+      navigation,
+    } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const stack = navigation.detailStack;
+    registerDiffLeaveCheck(async () => {
+      projectsStoreMock.projects = [{ id: 'a' }];
+      return true;
+    });
+
+    await expect(openProjectExternally('b')).resolves.toBe('projectNotFound');
+
+    expect(navigation.detailStack).toBe(stack);
+  });
+
+  it('answers not found for an id the window does not list', async () => {
+    const { openProjectExternally, navigation } = await importNavigation();
+
+    await expect(openProjectExternally('missing')).resolves.toBe('projectNotFound');
+
+    expect(navigation.detailStack).toEqual([home]);
+    expect(setStoreValue).not.toHaveBeenCalled();
+  });
+
+  it('answers not found for a project with a delete in flight, even on screen', async () => {
+    const { openProjectExternally, selectProject, navigation } = await importNavigation();
+    selectProject('a');
+    deletingProjectIds.add('a');
+    deletingProjectIds.add('b');
+
+    await expect(openProjectExternally('b')).resolves.toBe('projectNotFound');
+    await expect(openProjectExternally('a')).resolves.toBe('projectNotFound');
+
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('answers not found ahead of an open dialog and without a diff save', async () => {
+    const { openProjectExternally, selectProject, openDiffRoute, registerDiffLeaveCheck } =
+      await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+    const check = vi.fn().mockResolvedValue(true);
+    registerDiffLeaveCheck(check);
+    addDialog();
+
+    await expect(openProjectExternally('missing')).resolves.toBe('projectNotFound');
+
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('waits for the first project list before deciding', async () => {
+    projectsStoreMock.projects = [];
+    projectsStoreMock.loaded = false;
+    let finishLoad!: () => void;
+    projectsStoreMock.whenLoaded.mockReturnValue(
+      new Promise<void>((resolve) => (finishLoad = resolve))
+    );
+    const { openProjectExternally, navigation } = await importNavigation();
+    let answer: string | null = null;
+
+    const opening = openProjectExternally('a').then((value) => (answer = value));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(answer).toBeNull();
+    expect(navigation.detailStack).toEqual([home]);
+
+    projectsStoreMock.projects = [{ id: 'a' }];
+    projectsStoreMock.loaded = true;
+    finishLoad();
+    await opening;
+
+    expect(answer).toBe('opened');
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  it('opens the project when the list failed to load, as a window seed does', async () => {
+    projectsStoreMock.projects = [];
+    projectsStoreMock.loaded = false;
+    const { openProjectExternally, navigation } = await importNavigation();
+
+    await expect(openProjectExternally('a')).resolves.toBe('opened');
+
+    expect(projectsStoreMock.whenLoaded).toHaveBeenCalledTimes(1);
+    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+  });
+
+  describe('with a stillWanted check', () => {
+    it('navigates once the check says the request is still wanted', async () => {
+      const { openProjectExternally, navigation } = await importNavigation();
+      const stillWanted = vi.fn().mockResolvedValue(true);
+
+      await expect(openProjectExternally('a', stillWanted)).resolves.toBe('opened');
+
+      expect(stillWanted).toHaveBeenCalledTimes(1);
+      expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    });
+
+    it('leaves the window alone for a request withdrawn during the wait for the list', async () => {
+      projectsStoreMock.projects = [];
+      projectsStoreMock.loaded = false;
+      let finishLoad!: () => void;
+      projectsStoreMock.whenLoaded.mockReturnValue(
+        new Promise<void>((resolve) => (finishLoad = resolve))
+      );
+      const { openProjectExternally, navigation } = await importNavigation();
+      // The caller is waiting when the request is taken, and has timed out
+      // by the time the list lands.
+      let pending = true;
+      const stillWanted = vi.fn(async () => pending);
+
+      const opening = openProjectExternally('a', stillWanted);
+      await Promise.resolve();
+      await Promise.resolve();
+      // Asked only at the end: an early yes would be stale by now.
+      expect(stillWanted).not.toHaveBeenCalled();
+
+      pending = false;
+      projectsStoreMock.projects = [{ id: 'a' }];
+      projectsStoreMock.loaded = true;
+      finishLoad();
+
+      await expect(opening).resolves.toBe('withdrawn');
+      expect(stillWanted).toHaveBeenCalledTimes(1);
+      expect(navigation.detailStack).toEqual([home]);
+      expect(setStoreValue).not.toHaveBeenCalled();
+    });
+
+    it('leaves the window on the diff for a request withdrawn during the save', async () => {
+      const {
+        openProjectExternally,
+        selectProject,
+        openDiffRoute,
+        registerDiffLeaveCheck,
+        navigation,
+      } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const stack = navigation.detailStack;
+      let finishSave!: (saved: boolean) => void;
+      const check = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+      registerDiffLeaveCheck(check);
+      let pending = true;
+      const stillWanted = vi.fn(async () => pending);
+
+      const opening = openProjectExternally('b', stillWanted);
+      await vi.waitFor(() => expect(check).toHaveBeenCalledTimes(1));
+      expect(stillWanted).not.toHaveBeenCalled();
+
+      // Superseded, or timed out, while the comment was being saved.
+      pending = false;
+      finishSave(true);
+
+      await expect(opening).resolves.toBe('withdrawn');
+      expect(stillWanted).toHaveBeenCalledTimes(1);
+      // The comment is saved all the same; only the navigation is dropped.
+      expect(navigation.detailStack).toBe(stack);
+      expect(dispatchEvent).not.toHaveBeenCalled();
+    });
+
+    it('asks only after the save, and navigates when still wanted', async () => {
+      const {
+        openProjectExternally,
+        selectProject,
+        openDiffRoute,
+        registerDiffLeaveCheck,
+        navigation,
+      } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const order: string[] = [];
+      registerDiffLeaveCheck(async () => {
+        order.push('save');
+        return true;
+      });
+      const stillWanted = vi.fn(async () => {
+        order.push('stillWanted');
+        return true;
+      });
+
+      await expect(openProjectExternally('b', stillWanted)).resolves.toBe('opened');
+
+      expect(order).toEqual(['save', 'stillWanted']);
+      expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    });
+
+    it('does not ask when there is nothing to navigate', async () => {
+      const { openProjectExternally, selectProject, openDiffRoute, registerDiffLeaveCheck } =
+        await importNavigation();
+      const stillWanted = vi.fn().mockResolvedValue(true);
+      selectProject('a');
+
+      // Already on screen, unknown to the window, and behind a dialog.
+      await expect(openProjectExternally('a', stillWanted)).resolves.toBe('opened');
+      await expect(openProjectExternally('missing', stillWanted)).resolves.toBe('projectNotFound');
+      addDialog();
+      await expect(openProjectExternally('b', stillWanted)).resolves.toBe('dialogOpen');
+      dialogs = [];
+
+      // And a comment that could not be saved.
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      registerDiffLeaveCheck(async () => false);
+      await expect(openProjectExternally('b', stillWanted)).resolves.toBe('diffCommentUnsaved');
+
+      expect(stillWanted).not.toHaveBeenCalled();
+    });
+
+    it('looks at the dialogs and the project again after the check', async () => {
+      const { openProjectExternally, navigation } = await importNavigation();
+
+      // The check is a round trip, and the window does not stand still for it.
+      const opensDialog = vi.fn(async () => {
+        addDialog();
+        return true;
+      });
+      await expect(openProjectExternally('a', opensDialog)).resolves.toBe('dialogOpen');
+      dialogs = [];
+
+      const losesProject = vi.fn(async () => {
+        projectsStoreMock.projects = [{ id: 'b' }];
+        return true;
+      });
+      await expect(openProjectExternally('a', losesProject)).resolves.toBe('projectNotFound');
+
+      expect(navigation.detailStack).toEqual([home]);
+    });
+
+    it('rejects, and navigates nowhere, when the check itself fails', async () => {
+      const { openProjectExternally, navigation } = await importNavigation();
+      const stillWanted = vi.fn().mockRejectedValue(new Error('ipc down'));
+
+      await expect(openProjectExternally('a', stillWanted)).rejects.toThrow('ipc down');
+
+      expect(navigation.detailStack).toEqual([home]);
+    });
   });
 });
 

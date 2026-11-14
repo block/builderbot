@@ -74,9 +74,16 @@ pub enum CtlError {
     Command { code: &'static str, message: String },
     /// The app was reachable at handshake time but a call later failed.
     Transport(String),
-    /// No usable app: not spawned by Staged, the app exited or restarted,
-    /// or the app speaks a different protocol version.
+    /// No usable app: not spawned by Staged, the app restarted, or the app
+    /// speaks a different protocol version.
     Environment(String),
+    /// No app at all, as far as one control file (or the lack of any) can
+    /// say: there is no live instance directory, the file is gone, or
+    /// nothing answers at the endpoint it names. Reported exactly like
+    /// [`Environment`](Self::Environment) (exit 3). It is its own variant
+    /// because `project open` starts Staged on it, and must not on an app
+    /// that is running but unusable (see [`crate::launch`]).
+    NotRunning(String),
     /// The app answered but refused the credential: none was sent, it was
     /// revoked or expired, the user denied it, or the command addresses
     /// something outside the credential's scope. `code` is one of
@@ -110,7 +117,7 @@ impl CtlError {
             Self::Command { code, .. } => code,
             Self::Authorization { code, .. } => code,
             Self::Transport(_) => "transport",
-            Self::Environment(_) => "environment",
+            Self::Environment(_) | Self::NotRunning(_) => "environment",
             Self::Partial { error, .. } => error.code(),
         }
     }
@@ -119,7 +126,9 @@ impl CtlError {
     fn message(&self) -> String {
         match self {
             Self::Command { message, .. } | Self::Authorization { message, .. } => message.clone(),
-            Self::Transport(message) | Self::Environment(message) => message.clone(),
+            Self::Transport(message) | Self::Environment(message) | Self::NotRunning(message) => {
+                message.clone()
+            }
             Self::Partial { error, .. } => error.message(),
         }
     }
@@ -153,7 +162,7 @@ impl CtlError {
         match self {
             Self::Command { .. } => 1,
             Self::Transport(_) => 2,
-            Self::Environment(_) => 3,
+            Self::Environment(_) | Self::NotRunning(_) => 3,
             Self::Authorization { .. } => 4,
             Self::Partial { error, .. } => error.exit_code(),
         }
@@ -165,7 +174,7 @@ impl std::fmt::Display for CtlError {
         match self {
             Self::Command { code, message } => write!(f, "{code}: {message}"),
             Self::Transport(message) => write!(f, "transport: {message}"),
-            Self::Environment(message) => write!(f, "{message}"),
+            Self::Environment(message) | Self::NotRunning(message) => write!(f, "{message}"),
             Self::Authorization { code, message } => write!(f, "{code}: {message}"),
             Self::Partial { error, .. } => write!(f, "{error}"),
         }
@@ -250,7 +259,7 @@ pub fn resolve_lock_candidates(
     }
     let candidates = data_dir.map(live_discovery_files).unwrap_or_default();
     if candidates.is_empty() {
-        return Err(CtlError::Environment(
+        return Err(CtlError::NotRunning(
             "not running under a Staged app: $STAGEDCTL_LOCK is not set and no running \
              Staged instance was found (no live control/<pid>/discovery.json under \
              ~/.staged). Start the Staged app, or pass --lock-path."
@@ -279,7 +288,7 @@ pub fn discover_and_connect(
     } else {
         // A per-session control file carries a session lease, which the
         // app confines to the session's project.
-        client.scope = CredentialScope::Project;
+        client.scope = CredentialScope::Session;
     }
     Ok(client)
 }
@@ -337,6 +346,23 @@ pub fn session_credential_in_use(
 /// candidate — they try each in order until the ping handshake picks out a
 /// real control server.
 fn live_discovery_files(data_dir: &Path) -> Vec<PathBuf> {
+    live_discovery_candidates(data_dir)
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect()
+}
+
+/// One live-pid `control/<pid>/discovery.json` and when it was last
+/// written. The pair tells a file the app has since rewritten from the one
+/// seen earlier at the same path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveryCandidate {
+    pub(crate) path: PathBuf,
+    pub(crate) modified: std::time::SystemTime,
+}
+
+/// [`live_discovery_files`] with each file's mtime, in the same order.
+pub(crate) fn live_discovery_candidates(data_dir: &Path) -> Vec<DiscoveryCandidate> {
     let Ok(entries) = std::fs::read_dir(data_dir.join("control")) else {
         return Vec::new();
     };
@@ -360,7 +386,10 @@ fn live_discovery_files(data_dir: &Path) -> Vec<PathBuf> {
         candidates.push((mtime, path));
     }
     candidates.sort_by(|(a, _), (b, _)| b.cmp(a));
-    candidates.into_iter().map(|(_, path)| path).collect()
+    candidates
+        .into_iter()
+        .map(|(modified, path)| DiscoveryCandidate { path, modified })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -400,7 +429,7 @@ pub fn read_discovery(path: &Path) -> Result<Discovery, CtlError> {
                 Err(e) => last_err = format!("cannot parse {}: {e}", path.display()),
             },
             Err(ReadError::Missing(e)) => {
-                return Err(CtlError::Environment(format!(
+                return Err(CtlError::NotRunning(format!(
                     "cannot read control file {}: {e} — the Staged app that wrote it has \
                      probably exited; restart Staged or re-run from a fresh session",
                     path.display()
@@ -586,10 +615,19 @@ struct PingResponse {
 /// grant approved for one project (`connect --project`); both are known at
 /// connect time. Anything else is either unconfined or refused by the app
 /// as `authorization_required` before any answer is read.
+///
+/// The two confined kinds are kept apart because their remedies differ. A
+/// grant can be swapped for one that reaches further. A session lease
+/// cannot, and the app refuses it some commands outright, `open_project`
+/// among them, whatever project they name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialScope {
+    /// A grant approved for every project.
     AllProjects,
+    /// A grant approved for one project.
     Project,
+    /// An agent session's lease, confined to the session's own project.
+    Session,
 }
 
 #[derive(Debug)]
@@ -636,7 +674,7 @@ impl Client {
                 }
                 Err(e) => {
                     if attempt > 0 {
-                        return Err(CtlError::Environment(format!(
+                        return Err(CtlError::NotRunning(format!(
                             "cannot reach the Staged app at {} ({e}) — the app has probably \
                              exited; restart Staged or re-run from a fresh session",
                             discovery.endpoint()
@@ -1031,11 +1069,16 @@ fn classify(what: &str, status: u16, body: Value) -> Result<Value, CtlError> {
         200 => Ok(body),
         400 => Err(CtlError::command("app_error", error_message(&body))),
         404 => {
-            // Not allowlisted. For a tag command the likely cause is a Staged
-            // from before tags reached the control server, not a typo.
+            // Not allowlisted. For a command a newer Staged added, the likely
+            // cause is a Staged from before it reached the control server,
+            // not a typo.
             let mut message = error_message(&body);
             if crate::tags::is_tag_command(what) {
                 message.push_str(" (this Staged does not have tags yet; update it)");
+            } else if what == crate::open::OPEN_PROJECT_COMMAND {
+                message.push_str(
+                    " (this Staged cannot open a project from the command line yet; update it)",
+                );
             }
             Err(CtlError::command("app_error", message))
         }
@@ -1072,8 +1115,10 @@ fn authorization_code(body: &Value) -> Option<&str> {
         .filter(|code| AUTHORIZATION_CODES.contains(code))
 }
 
+// `pub(crate)` so the launch tests can stand up the same fake control
+// servers and on-disk fixtures.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1130,6 +1175,11 @@ mod tests {
         assert_eq!(CtlError::command("app_error", "boom").exit_code(), 1);
         assert_eq!(CtlError::Transport("boom".into()).exit_code(), 2);
         assert_eq!(CtlError::Environment("boom".into()).exit_code(), 3);
+        // "Not running" is the environment exit and reads the same way.
+        let not_running = CtlError::NotRunning("boom".into());
+        assert_eq!(not_running.exit_code(), 3);
+        assert_eq!(not_running.code(), "environment");
+        assert_eq!(not_running.to_string(), "boom");
         assert_eq!(
             CtlError::Authorization {
                 code: "scope_denied".into(),
@@ -1173,6 +1223,32 @@ mod tests {
     }
 
     #[test]
+    fn a_404_on_open_project_hints_at_updating_staged() {
+        // An app from before `project open` answers `open_project` as it
+        // answers any unknown command; no protocol bump tells the two apart.
+        let err = classify(
+            "open_project",
+            404,
+            serde_json::json!({"error": "command not available through stagedctl: open_project"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            "app_error: command not available through stagedctl: open_project \
+             (this Staged cannot open a project from the command line yet; update it)"
+        );
+        // A current app's own refusal is passed through as it is.
+        let err = classify(
+            "open_project",
+            400,
+            serde_json::json!({"error": "Project not found: p1"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "app_error: Project not found: p1");
+    }
+
+    #[test]
     fn command_errors_render_as_code_colon_message() {
         let err = CtlError::command("app_error", "Branch not found: xyz");
         assert_eq!(err.to_string(), "app_error: Branch not found: xyz");
@@ -1207,7 +1283,7 @@ mod tests {
 
     /// A data dir the hardened reader accepts: `tempfile` creates
     /// directories with the default (umask) mode, not `0700`.
-    fn private_tempdir() -> tempfile::TempDir {
+    pub(crate) fn private_tempdir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         make_private_dir(dir.path());
         dir
@@ -1255,7 +1331,12 @@ mod tests {
 
     /// A TCP-fallback discovery file (no token, as a v1-shaped server fake
     /// would answer) under the v2 layout.
-    fn write_tcp_discovery(data_dir: &Path, pid: u32, port: u16, generation: u64) -> PathBuf {
+    pub(crate) fn write_tcp_discovery(
+        data_dir: &Path,
+        pid: u32,
+        port: u16,
+        generation: u64,
+    ) -> PathBuf {
         let path = instance_dir(data_dir, pid).join("discovery.json");
         write_private(
             &path,
@@ -1386,7 +1467,7 @@ mod tests {
 
     /// Backdate a file's mtime by `age` so candidate ordering is
     /// deterministic regardless of filesystem timestamp granularity.
-    fn set_mtime(path: &Path, age: Duration) {
+    pub(crate) fn set_mtime(path: &Path, age: Duration) {
         std::fs::OpenOptions::new()
             .write(true)
             .open(path)
@@ -1580,7 +1661,7 @@ mod tests {
     }
 
     /// Loopback-TCP fake (the app's fallback transport).
-    fn fake_server<F>(mut handler: F) -> (u16, std::thread::JoinHandle<()>)
+    pub(crate) fn fake_server<F>(mut handler: F) -> (u16, std::thread::JoinHandle<()>)
     where
         F: FnMut(&str) -> (u16, String) + Send + 'static,
     {
@@ -1604,19 +1685,30 @@ mod tests {
 
     /// Loopback-TCP fake whose handler also sees the request body (the
     /// credential routes carry their arguments there).
-    fn fake_server_with_body<F>(mut handler: F) -> (u16, std::thread::JoinHandle<()>)
+    pub(crate) fn fake_server_with_body<F>(handler: F) -> (u16, std::thread::JoinHandle<()>)
     where
         F: FnMut(&str, &str) -> (u16, String) + Send + 'static,
     {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || {
+        (port, fake_server_with_body_on(listener, handler))
+    }
+
+    /// [`fake_server_with_body`] on a listener the caller bound, for a fake
+    /// that has to come up at a port already written to a discovery file.
+    fn fake_server_with_body_on<F>(
+        listener: TcpListener,
+        mut handler: F,
+    ) -> std::thread::JoinHandle<()>
+    where
+        F: FnMut(&str, &str) -> (u16, String) + Send + 'static,
+    {
+        std::thread::spawn(move || {
             run_fake(listener.incoming(), move |head, body| {
                 let (status, body) = handler(head, body);
                 (status, body, Vec::new())
             })
-        });
-        (port, handle)
+        })
     }
 
     /// Unix-socket fake (the app's primary transport), bound at `socket`.
@@ -1638,7 +1730,7 @@ mod tests {
     // Connected-app grants
     // -----------------------------------------------------------------
 
-    fn grant_file(id: &str, secret: &str, expires_at: i64) -> crate::grants::GrantFile {
+    pub(crate) fn grant_file(id: &str, secret: &str, expires_at: i64) -> crate::grants::GrantFile {
         crate::grants::GrantFile {
             grant_id: id.to_string(),
             reconnect_secret: secret.to_string(),
@@ -1663,13 +1755,27 @@ mod tests {
     /// one fixed nonce per challenge, checking the proof on reconnect
     /// exactly as `control_server::enrol` does. Records every
     /// `Authorization` header it sees.
-    fn grant_aware_server(
+    pub(crate) fn grant_aware_server(
         pid: u32,
         known: Vec<(String, String)>,
         renew_to: i64,
         seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> (u16, std::thread::JoinHandle<()>) {
-        fake_server_with_body(move |head, body| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = grant_aware_server_on(listener, pid, known, renew_to, seen);
+        (port, handle)
+    }
+
+    /// [`grant_aware_server`] on a listener the caller bound.
+    pub(crate) fn grant_aware_server_on(
+        listener: TcpListener,
+        pid: u32,
+        known: Vec<(String, String)>,
+        renew_to: i64,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::thread::JoinHandle<()> {
+        fake_server_with_body_on(listener, move |head, body| {
             seen.lock().unwrap().push(
                 header_value(head, "authorization")
                     .unwrap_or("")
@@ -2139,8 +2245,8 @@ mod tests {
         assert_eq!(client.bearer(), Some(token.as_str()));
         assert_eq!(seen.lock().unwrap().len(), 1, "ping only; no challenge");
         // A session lease is confined to its project; the client knows
-        // without asking.
-        assert_eq!(client.scope, CredentialScope::Project);
+        // without asking, and knows it is a lease and not a grant.
+        assert_eq!(client.scope, CredentialScope::Session);
     }
 
     #[test]
@@ -2360,7 +2466,7 @@ mod tests {
         );
     }
 
-    fn ping_body(pid: u32, generation: u64, protocol_version: u32) -> String {
+    pub(crate) fn ping_body(pid: u32, generation: u64, protocol_version: u32) -> String {
         serde_json::json!({
             "ok": true,
             "pid": pid,
@@ -2370,7 +2476,7 @@ mod tests {
         .to_string()
     }
 
-    fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    pub(crate) fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
         head.lines().find_map(|l| {
             let (n, v) = l.split_once(':')?;
             n.eq_ignore_ascii_case(name).then(|| v.trim())
@@ -2578,6 +2684,50 @@ mod tests {
             err.to_string().contains("app updated — restart Staged"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn only_an_app_that_is_not_there_is_not_running() {
+        // `project open` starts Staged on `NotRunning` and on nothing
+        // else, so which failures carry it is pinned here.
+        let not_running = |err: &CtlError| matches!(err, CtlError::NotRunning(_));
+        let pid = std::process::id();
+        let dir = private_tempdir();
+
+        // Not there: no instance directory at all, a control file that is
+        // gone, and one whose endpoint nothing listens on.
+        let err = resolve_lock_candidates(None, None, Some(dir.path())).unwrap_err();
+        assert!(not_running(&err), "no candidates: {err:?}");
+        let err = Client::connect(&dir.path().join("control/1/discovery.json")).unwrap_err();
+        assert!(not_running(&err), "missing file: {err:?}");
+        let closed_port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let dead = write_tcp_discovery(dir.path(), pid, closed_port, 1);
+        let err = Client::connect(&dead).unwrap_err();
+        assert!(not_running(&err), "dead endpoint: {err:?}");
+        assert_eq!(err.exit_code(), 3);
+
+        // There, but not usable: another protocol version, another
+        // generation, a file that is not safe to read, an empty
+        // `$STAGEDCTL_LOCK`.
+        let (port, _handle) = fake_server(move |_| (200, ping_body(pid, 1, PROTOCOL_VERSION + 1)));
+        let updated = write_tcp_discovery(dir.path(), pid, port, 1);
+        let err = Client::connect(&updated).unwrap_err();
+        assert!(!not_running(&err), "protocol mismatch: {err:?}");
+        let (port, _handle) = fake_server(move |_| (200, ping_body(pid, 99, PROTOCOL_VERSION)));
+        let restarted = write_tcp_discovery(dir.path(), pid, port, 1);
+        let err = Client::connect(&restarted).unwrap_err();
+        assert!(!not_running(&err), "stale generation: {err:?}");
+        let corrupt = dir.path().join("control").join("corrupt.json");
+        write_private(&corrupt, "{");
+        let err = Client::connect(&corrupt).unwrap_err();
+        assert!(!not_running(&err), "corrupt file: {err:?}");
+        let err = resolve_lock_candidates(None, Some(std::ffi::OsString::new()), Some(dir.path()))
+            .unwrap_err();
+        assert!(!not_running(&err), "empty $STAGEDCTL_LOCK: {err:?}");
     }
 
     #[test]

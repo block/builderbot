@@ -39,6 +39,7 @@ pub mod pr_poll_scheduler;
 mod preference_events;
 pub mod project_commands;
 pub mod project_mcp;
+pub mod project_open;
 pub mod project_search;
 pub mod project_transfer;
 pub mod prs;
@@ -50,6 +51,7 @@ pub mod session_completion;
 pub mod session_queue;
 pub mod session_runner;
 pub mod shell_env;
+pub mod stagedctl_link;
 pub mod store;
 pub mod store_events;
 mod tag_commands;
@@ -2142,10 +2144,13 @@ pub fn run() {
             app.manage(pr_scheduler);
             app.manage(window_commands::NewWindowState::new());
             app.manage(window_commands::UpdaterWindowState::default());
+            app.manage(project_open::ProjectOpenState::default());
             app.manage(rate_limit_scheduler);
             app.manage(action_executor);
             app.manage(action_registry);
             app.manage(app_lifecycle::QuitState::default());
+            app.manage(app_lifecycle::UsedWindows::default());
+            app.manage(app_lifecycle::RevealedWindows::default());
             app.manage(launch_resume::LaunchResumeState::default());
             app.manage(DbState {
                 db_path,
@@ -2320,6 +2325,9 @@ pub fn run() {
             window_commands::new_window,
             window_commands::take_window_seed,
             window_commands::claim_updater_ownership,
+            // Window reveal — desktop only; refused in web-mode `dispatch`,
+            // where there is no native window to reveal.
+            app_lifecycle::window_reveal::note_window_revealed,
             // Lifecycle — desktop only; the web-mode `dispatch` table refuses
             // this so a browser client can't quit the host.
             app_lifecycle::quit_app,
@@ -2579,6 +2587,11 @@ pub fn run() {
             control_server::commands::answer_control_authorization,
             control_server::commands::list_control_grants,
             control_server::commands::revoke_control_grant,
+            // stagedctl project open (the window's side of a request)
+            project_open::commands::list_pending_project_opens,
+            project_open::commands::answer_project_open,
+            // stagedctl on PATH (Settings action)
+            stagedctl_link::commands::link_stagedctl_on_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

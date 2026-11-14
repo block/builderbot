@@ -67,6 +67,14 @@ use crate::session_commands::{self, ActiveSessionInfo};
 use crate::session_runner::SessionRegistry;
 use crate::store::{CompletionReason, Session, SessionStatus, Store};
 
+pub(crate) mod window_raise;
+pub mod window_reveal;
+pub(crate) mod window_use;
+
+pub use window_raise::show_a_window;
+pub use window_reveal::RevealedWindows;
+pub use window_use::UsedWindows;
+
 /// Title of the quit confirmation alert.
 const QUIT_PROMPT_TITLE: &str = "Quit Staged?";
 
@@ -216,9 +224,22 @@ fn should_prompt(blockers: &QuitBlockers) -> bool {
 
 /// `Builder::on_window_event` hook — see the module docs for why closing the
 /// last window doesn't end the process.
+///
+/// Also keeps the record of used windows ([`UsedWindows`]) in step with focus,
+/// which is how a reveal finds the window the user was last in once Staged is
+/// no longer the frontmost app, and drops a destroyed window from it and from
+/// the record of revealed windows ([`RevealedWindows`]).
 pub fn on_window_event(window: &Window, event: &WindowEvent) {
-    if let WindowEvent::CloseRequested { api, .. } = event {
-        on_close_requested(window, api);
+    match event {
+        WindowEvent::CloseRequested { api, .. } => on_close_requested(window, api),
+        WindowEvent::Focused(true) => {
+            window_use::note_window_used(window.app_handle(), window.label());
+        }
+        WindowEvent::Destroyed => {
+            window_use::forget_window(window.app_handle(), window.label());
+            window_reveal::forget_window(window.app_handle(), window.label());
+        }
+        _ => {}
     }
 }
 
@@ -271,46 +292,13 @@ fn hide_window(window: &Window) {
     set_native_focus(window.app_handle(), window.label(), false);
 }
 
-/// Bring a window back on screen: the Dock-icon click and `Window ▸ Staged`
-/// both funnel here. Deliberately *not* on the quit path — see the module docs.
-///
-/// Prefers where the user already is (focused, then visible), then falls back to
-/// unhiding one: `main` for its restored geometry, else any surviving `win-N`
-/// peer. Finds nothing only if every window has been destroyed, which no close
-/// path produces — closing the last window hides it instead.
-pub fn show_a_window(app: &AppHandle) {
-    let windows = app.webview_windows();
-    let Some(window) = windows
-        .values()
-        .find(|window| window.is_focused().unwrap_or(false))
-        .or_else(|| {
-            windows
-                .values()
-                .find(|window| window.is_visible().unwrap_or(false))
-        })
-        .or_else(|| windows.get(MAIN_WINDOW_LABEL))
-        .or_else(|| windows.values().next())
-    else {
-        log::warn!("No window left to show");
-        return;
-    };
-
-    if let Err(e) = window.show() {
-        log::warn!("Failed to show window: {e}");
-    }
-    if let Err(e) = window.unminimize() {
-        log::warn!("Failed to unminimize window: {e}");
-    }
-    if let Err(e) = window.set_focus() {
-        log::warn!("Failed to focus window: {e}");
-    }
-    set_native_focus(app, window.label(), true);
-}
-
 /// Mirror a native window's visibility onto its PR-poll client's focus hint.
 /// Paired with the webview's own focus events, which report the same value once
 /// the window is back on screen.
-fn set_native_focus(app: &AppHandle, window_label: &str, focused: bool) {
+///
+/// Generic over the runtime so [`window_raise`]'s mock-app tests can raise a
+/// window too.
+fn set_native_focus<R: tauri::Runtime>(app: &AppHandle<R>, window_label: &str, focused: bool) {
     if let Some(scheduler) = app.try_state::<Arc<crate::pr_poll_scheduler::PrPollScheduler>>() {
         crate::pr_poll_scheduler::set_tauri_client_focus(&scheduler, window_label, focused);
     }

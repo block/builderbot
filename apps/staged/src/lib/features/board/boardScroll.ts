@@ -56,3 +56,15 @@ export function revealStep(direction: 1 | -1, view: Span, columns: readonly Span
   }
   return view.left - view.right;
 }
+
+/**
+ * How far to scroll (negative is left) to bring `column` fully into `view`,
+ * or 0 when it already is. A column wider than the view lines its left edge
+ * up with the view's.
+ */
+export function revealOffset(view: Span, column: Span): number {
+  const wider = column.right - column.left > view.right - view.left;
+  if (wider || column.left < view.left - EPSILON) return column.left - view.left;
+  if (column.right > view.right + EPSILON) return column.right - view.right;
+  return 0;
+}

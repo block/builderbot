@@ -1,10 +1,13 @@
 <!--
   BoardColumnMenu.svelte — a board column's ⋯ menu: collapse it to a narrow
   strip, rename or recolour its tag (edits the tag itself, everywhere it
-  shows), or hide the column. "No ‹group›" has no tag, so it only collapses
-  and hides.
+  shows), move it left or right among the columns (reorders the group's
+  tags, everywhere they show), or hide the column. "No ‹group›" has no tag
+  and stays first, so it only collapses and hides.
 -->
 <script lang="ts">
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import EyeOff from '@lucide/svelte/icons/eye-off';
   import FoldHorizontal from '@lucide/svelte/icons/fold-horizontal';
@@ -20,13 +23,27 @@
     column: BoardColumn;
     /** False on the phone pager, where columns are always full width. */
     canCollapse: boolean;
+    /** Whether a showing tag column sits on that side to move past. */
+    canMoveLeft: boolean;
+    canMoveRight: boolean;
     onCollapse: () => void;
+    /** Move the column one step left (-1) or right (1). */
+    onMove: (step: -1 | 1) => void;
     onHide: () => void;
     /** Rename was picked; called once the menu has closed, so the name field can take focus. */
     onRename: () => void;
   }
 
-  let { column, canCollapse, onCollapse, onHide, onRename }: Props = $props();
+  let {
+    column,
+    canCollapse,
+    canMoveLeft,
+    canMoveRight,
+    onCollapse,
+    onMove,
+    onHide,
+    onRename,
+  }: Props = $props();
 
   let renameRequested = false;
 
@@ -53,6 +70,7 @@
     class="board-column-menu-trigger touch-hit"
     title="Column actions"
     aria-label={`Actions for ${column.name}`}
+    data-board-column-menu={column.key}
   >
     <Ellipsis size={14} />
   </DropdownMenu.Trigger>
@@ -84,6 +102,15 @@
           </DropdownMenu.RadioGroup>
         </DropdownMenu.SubContent>
       </DropdownMenu.Sub>
+      <DropdownMenu.Separator />
+      <DropdownMenu.Item disabled={!canMoveLeft} onSelect={() => onMove(-1)}>
+        <ArrowLeft size={14} />
+        Move left
+      </DropdownMenu.Item>
+      <DropdownMenu.Item disabled={!canMoveRight} onSelect={() => onMove(1)}>
+        <ArrowRight size={14} />
+        Move right
+      </DropdownMenu.Item>
     {/if}
     {#if canCollapse || column.tag}
       <DropdownMenu.Separator />

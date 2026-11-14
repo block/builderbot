@@ -3,18 +3,22 @@
 // drop or a "Move to" ends in `set_project_group_tag` and moves the card at
 // once, and a collapsed column is saved to `projects-board-columns`. A card's
 // labels are the real ones, so its chips show which tags its column leaves
-// out. The last block puts the real projectFiltersStore in front of it, as
+// out. Moving a column from its menu ends in `move_tag`, through the real
+// pending overlay, so the board shows it before the write lands. The last
+// block puts the real projectFiltersStore in front of it, as
 // ProjectsList does, so the tag chips decide which cards it shows.
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, TagState } from '../../types';
-import { tagState, withGroupTag } from '../tags/testStubs/tagFixtures';
+import { withTagMoved } from '../tags/tagCatalogPatches';
+import { scopeIds, tagState, withGroupTag } from '../tags/testStubs/tagFixtures';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 
-const { backend, setStoreValue, openProject } = vi.hoisted(() => ({
+const { backend, setStoreValue, openProject, toastError } = vi.hoisted(() => ({
   backend: { state: null as unknown as TagState },
   setStoreValue: vi.fn(async (_key: string, _value: unknown) => {}),
   openProject: vi.fn(),
+  toastError: vi.fn(),
 }));
 
 const commandsMock = vi.hoisted(() => ({
@@ -22,6 +26,7 @@ const commandsMock = vi.hoisted(() => ({
   setProjectGroupTag: vi.fn(
     async (_projectId: string, _groupId: string, _tagId: string | null) => {}
   ),
+  moveTag: vi.fn(async (_tagId: string, _groupId: string | null, _index: number) => {}),
   createTagGroup: vi.fn(async (name: string) => ({
     id: 'new-group',
     name,
@@ -92,7 +97,7 @@ vi.mock(
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
 vi.mock('../layout/navigation.svelte', () => ({ openSettings: vi.fn() }));
-vi.mock('svelte-sonner', () => ({ toast: { error: vi.fn() } }));
+vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
 import { tagsStore } from '../../stores/tags.svelte';
 import { projectFiltersStore } from '../projects/projectFilters.svelte';
@@ -230,6 +235,61 @@ async function openColumnMenu(root: ParentNode, key: string): Promise<HTMLElemen
   return menus[menus.length - 1];
 }
 
+function columnMenuTrigger(root: ParentNode, key: string): HTMLElement {
+  return column(root, key).querySelector<HTMLElement>('.board-column-menu-trigger')!;
+}
+
+/** Pick "Move left" or "Move right" from a column's menu. */
+async function moveColumn(root: ParentNode, key: string, item: 'Move left' | 'Move right') {
+  menuItem(await openColumnMenu(root, key), item).click();
+  await settle();
+}
+
+/** Whether a column's menu offers `item`, and whether it can be picked. */
+async function columnMenuItem(
+  root: ParentNode,
+  key: string,
+  item: string
+): Promise<'enabled' | 'disabled' | 'absent'> {
+  const content = await openColumnMenu(root, key);
+  const found = [...content.querySelectorAll<HTMLElement>('[role^="menuitem"]')].find((el) =>
+    el.textContent?.includes(item)
+  );
+  const state = !found ? 'absent' : found.hasAttribute('data-disabled') ? 'disabled' : 'enabled';
+  content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  return state;
+}
+
+/**
+ * Settles each `move_tag` a test held open. The pending overlay and the
+ * catalog write chain are module-scoped, so one left open (by a failed
+ * assertion, say) would hold up every later test's moves; afterEach runs
+ * whatever the test didn't.
+ */
+const openMoves = new Set<() => void>();
+
+/**
+ * Hold every `move_tag` open. Each entry of the result lands one, in call
+ * order, as the backend would.
+ */
+function holdMoves(): (() => void)[] {
+  const finishes: (() => void)[] = [];
+  commandsMock.moveTag.mockImplementation(
+    (tagId, groupId, index) =>
+      new Promise<void>((resolve) => {
+        const finish = () => {
+          if (!openMoves.delete(finish)) return;
+          backend.state = withTagMoved(backend.state, { tagId, groupId, index });
+          resolve();
+        };
+        openMoves.add(finish);
+        finishes.push(finish);
+      })
+  );
+  return finishes;
+}
+
 beforeAll(() => {
   window.matchMedia = ((query: string) => ({
     matches: false,
@@ -258,9 +318,16 @@ beforeEach(() => {
   commandsMock.setProjectGroupTag.mockImplementation(async (projectId, groupId, tagId) => {
     backend.state = withGroupTag(backend.state, projectId, groupId, tagId);
   });
+  commandsMock.moveTag.mockImplementation(async (tagId, groupId, index) => {
+    backend.state = withTagMoved(backend.state, { tagId, groupId, index });
+  });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  while (openMoves.size > 0) {
+    for (const settleMove of [...openMoves]) settleMove();
+    await settle();
+  }
   if (component) unmount(component);
   component = null;
   document.body.innerHTML = '';
@@ -544,6 +611,264 @@ describe('ProjectsBoard', () => {
       expect.arrayContaining([expect.objectContaining({ name: 'Idea' })])
     );
     expect(setStoreValue).toHaveBeenCalledWith('projects-board-group', 'new-group');
+  });
+});
+
+describe('ProjectsBoard column moves', () => {
+  it('moves a column right from its menu, showing it before the write lands', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+
+    // The write is still open, and the board already shows the new order.
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+    expect(scopeIds(backend.state, 'status')).toEqual(['idea', 'doing', 'done']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    // The cards went with their column.
+    expect(cardsIn(root, 'idea')).toEqual(['p3']);
+
+    finishes[0]();
+    await settle();
+
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'idea', 'done']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    expect(commandsMock.moveTag).toHaveBeenCalledTimes(1);
+  });
+
+  it('moves a column left from its menu', async () => {
+    const root = await mountBoard();
+
+    await moveColumn(root, 'done', 'Move left');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 1]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done', 'doing']);
+  });
+
+  it.each([
+    ['idea', 'Move right'],
+    ['doing', 'Move left'],
+  ] as const)('returns focus to %s’s menu trigger after "%s"', async (key, item) => {
+    const root = await mountBoard();
+
+    await moveColumn(root, key, item);
+
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    expect(document.activeElement).toBe(columnMenuTrigger(root, key));
+  });
+
+  it('takes focus back on the next frame if it dropped once the move had rendered', async () => {
+    const root = await mountBoard();
+    const content = await openColumnMenu(root, 'idea');
+    // Hold the frames from here on, the board's recheck among them.
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => frames.push(callback));
+    try {
+      menuItem(content, 'Move right').click();
+      await settle();
+      const trigger = columnMenuTrigger(root, 'idea');
+      expect(document.activeElement).toBe(trigger);
+
+      // As when the menu closes late and WebKit drops focus from the column.
+      trigger.blur();
+      expect(document.activeElement).toBe(document.body);
+      for (const frame of frames.splice(0)) frame(0);
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
+  it('leaves focus the user has since put elsewhere where it is', async () => {
+    const root = await mountBoard();
+    const content = await openColumnMenu(root, 'idea');
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => frames.push(callback));
+    try {
+      menuItem(content, 'Move right').click();
+      await settle();
+
+      card(root, 'p1').focus();
+      for (const frame of frames.splice(0)) frame(0);
+      expect(document.activeElement).toBe(card(root, 'p1'));
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
+  it('turns a move off at the ends, and offers none on "No ‹group›"', async () => {
+    const root = await mountBoard();
+
+    // "No Status" is not a tag: it stays first, and the first tag column
+    // can't move past it.
+    expect(await columnMenuItem(root, NO_TAG_COLUMN_KEY, 'Move left')).toBe('absent');
+    expect(await columnMenuItem(root, NO_TAG_COLUMN_KEY, 'Move right')).toBe('absent');
+    expect(await columnMenuItem(root, 'idea', 'Move left')).toBe('disabled');
+    expect(await columnMenuItem(root, 'idea', 'Move right')).toBe('enabled');
+    expect(await columnMenuItem(root, 'doing', 'Move left')).toBe('enabled');
+    expect(await columnMenuItem(root, 'doing', 'Move right')).toBe('enabled');
+    expect(await columnMenuItem(root, 'done', 'Move left')).toBe('enabled');
+    expect(await columnMenuItem(root, 'done', 'Move right')).toBe('disabled');
+
+    // Picking a move that is off sends nothing.
+    await moveColumn(root, 'idea', 'Move left');
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+  });
+
+  it('follows the order a move in flight shows when turning moves off', async () => {
+    holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'doing', 'Move right');
+
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done', 'doing']);
+    expect(await columnMenuItem(root, 'doing', 'Move right')).toBe('disabled');
+    expect(await columnMenuItem(root, 'done', 'Move right')).toBe('enabled');
+  });
+
+  it('steps over a hidden column, taking the move past it', async () => {
+    boardViewPrefs.columns = { status: { collapsed: [], hidden: ['doing'] } };
+    const root = await mountBoard();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done']);
+
+    await moveColumn(root, 'idea', 'Move right');
+
+    // Past Done, the next column showing, not just past the hidden Doing.
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea']);
+  });
+
+  it('counts only showing columns as an end', async () => {
+    boardViewPrefs.columns = { status: { collapsed: [], hidden: ['idea', 'done'] } };
+    const root = await mountBoard();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing']);
+
+    // Idea and Done sit either side of Doing in the stored order, hidden.
+    expect(await columnMenuItem(root, 'doing', 'Move left')).toBe('disabled');
+    expect(await columnMenuItem(root, 'doing', 'Move right')).toBe('disabled');
+  });
+
+  it('steps over a collapsed column as over any showing one', async () => {
+    boardViewPrefs.columns = { status: { collapsed: ['doing'], hidden: [] } };
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+  });
+
+  it('queues quick presses, each from where the last left the column', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+    await moveColumn(root, 'idea', 'Move right');
+
+    // Both show at once, and the backend sees them one at a time, in order.
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+
+    finishes[0]();
+    await settle();
+    expect(commandsMock.moveTag.mock.calls).toEqual([
+      ['idea', 'status', 1],
+      ['idea', 'status', 2],
+    ]);
+    // The first write landing doesn't throw the second's move away.
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+
+    finishes[1]();
+    await settle();
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('resolves a move against the order the moves in flight show', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+    await moveColumn(root, 'done', 'Move left');
+
+    // Done steps past Idea, its neighbour as shown, to second. Against the
+    // stored order its neighbour is Doing, and it would land first.
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+
+    finishes[0]();
+    await settle();
+    expect(commandsMock.moveTag.mock.calls).toEqual([
+      ['idea', 'status', 1],
+      ['done', 'status', 1],
+    ]);
+
+    finishes[1]();
+    await settle();
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('puts the columns back when the write fails', async () => {
+    let fail: (error: Error) => void = () => {};
+    commandsMock.moveTag.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = (error) => {
+            openMoves.delete(unsettled);
+            reject(error);
+          };
+          const unsettled = () => fail(new Error('left open'));
+          openMoves.add(unsettled);
+        })
+    );
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+
+    fail(new Error('database is locked'));
+    await settle();
+
+    expect(toastError).toHaveBeenCalledWith('Unable to move tag', {
+      description: 'database is locked',
+    });
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+  });
+
+  it('scrolls a moved column back clear of the edge fade', async () => {
+    const root = await mountBoard();
+    const scroller = root.querySelector<HTMLElement>('.board-columns')!;
+    // An 800px row of 272px columns 12px apart, laid out in DOM order: Doing,
+    // the third, ends at 840, under the right fade (from 752).
+    let scrollLeft = 0;
+    Object.defineProperty(scroller, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => (scrollLeft = value),
+    });
+    const rect = (left: number, width: number) =>
+      ({ left, right: left + width, top: 0, bottom: 300, width, height: 300 }) as DOMRect;
+    scroller.getBoundingClientRect = () => rect(0, 800);
+    for (const child of scroller.children) {
+      child.getBoundingClientRect = () =>
+        rect([...scroller.children].indexOf(child) * 284 - scrollLeft, 272);
+    }
+
+    // Idea, the second column, is in full view where it starts.
+    await moveColumn(root, 'idea', 'Move right');
+
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    expect(scrollLeft).toBe(840 - 752);
+
+    // Back to second, it is in view again: the row stays where it is.
+    await moveColumn(root, 'idea', 'Move left');
+    expect(scrollLeft).toBe(840 - 752);
   });
 });
 

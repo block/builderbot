@@ -7,6 +7,7 @@
   the strip itself (the column's thin accent border is too little to read
   on a 40px strip). "Rename" in the menu edits the
   name in the header: Enter or leaving the field saves, Escape puts it back.
+  "Move left" and "Move right" there are the board's to carry out.
 -->
 <script lang="ts">
   import CircleDashed from '@lucide/svelte/icons/circle-dashed';
@@ -28,10 +29,15 @@
     dropTarget: boolean;
     /** On the phone pager: full width, never collapsed. */
     paged: boolean;
+    /** Whether the column can move a step that way (never for "No ‹group›"). */
+    canMoveLeft: boolean;
+    canMoveRight: boolean;
     onDragOver: (event: DragEvent) => void;
     onDragLeave: (event: DragEvent) => void;
     onDrop: (event: DragEvent) => void;
     onCollapse: (collapsed: boolean) => void;
+    /** Move the column one step left (-1) or right (1). */
+    onMove: (step: -1 | 1) => void;
     onHide: () => void;
   }
 
@@ -42,10 +48,13 @@
     isVisible,
     dropTarget,
     paged,
+    canMoveLeft,
+    canMoveRight,
     onDragOver,
     onDragLeave,
     onDrop,
     onCollapse,
+    onMove,
     onHide,
   }: Props = $props();
 
@@ -134,7 +143,10 @@
       <BoardColumnMenu
         {column}
         canCollapse={!paged}
+        {canMoveLeft}
+        {canMoveRight}
         onCollapse={() => onCollapse(true)}
+        {onMove}
         {onHide}
         onRename={() => void startRename()}
       />

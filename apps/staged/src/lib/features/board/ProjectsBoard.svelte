@@ -17,6 +17,12 @@
   the columns run past the window, a fade and chevron mark each side with
   more (BoardScrollEdges).
 
+  A tag column moves left or right from its ⋯ menu, which reorders the
+  group's tags. The move shows before its write lands (the column order is
+  read through pendingCatalogMoves), steps over hidden columns, and leaves
+  focus on the column's menu, with the column kept on screen, so it can be
+  repeated. "No ‹group›" is not a tag and stays first.
+
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, or inside
   the project layer by a pinned board's view (BoardView), never as a layer
@@ -27,7 +33,9 @@
   import type { Project, TagGroup } from '../../types';
   import { tagsStore } from '../../stores/tags.svelte';
   import { viewport } from '../../shared/viewport.svelte';
+  import { pendingCatalogMoves } from '../tags/pendingCatalogMoves.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
+  import { resolveTagDrop } from '../tags/tagReorder';
   import { projectActions } from '../projects/projectActions.svelte';
   import { focusIfDropped, neighbourAfterRemove } from '../projects/focusAfterRemove';
   import type { BoardCardHandlers } from './BoardCard.svelte';
@@ -36,6 +44,7 @@
   import BoardEmptyState from './BoardEmptyState.svelte';
   import BoardPhonePager from './BoardPhonePager.svelte';
   import BoardScrollEdges from './BoardScrollEdges.svelte';
+  import { columnStepTarget } from './boardColumnReorder';
   import { buildBoardColumns } from './boardColumns';
   import {
     PROJECT_DRAG_TYPE,
@@ -44,6 +53,7 @@
     writeProjectDrag,
   } from './boardDrop';
   import { columnPrefsFor } from './boardPrefs';
+  import { revealOffset, SCROLL_FADE_WIDTH } from './boardScroll';
   import { boardViewPrefs, setBoardColumnFlag } from './boardViewPrefs.svelte';
 
   interface Props {
@@ -74,16 +84,21 @@
     return searchRank === null || searchRank.has(projectId);
   }
 
+  // The columns come from the catalog with the reorders in flight applied,
+  // so a moved column shows at once and the next move steps from there.
+  let columnPrefs = $derived(
+    group ? columnPrefsFor(boardViewPrefs.columns, group.id, pendingCatalogMoves.catalog) : null
+  );
   let layout = $derived.by(() => {
-    if (!group) return null;
+    if (!group || !columnPrefs) return null;
     const groupId = group.id;
     return buildBoardColumns({
       group,
-      tags: tagsStore.tagsByGroup.get(groupId) ?? [],
+      tags: pendingCatalogMoves.catalog.tagsByGroup.get(groupId) ?? [],
       projects,
       groupTagIdOf: (projectId) => tagsStore.groupTagFor(projectId, groupId)?.id ?? null,
       isVisible,
-      prefs: columnPrefsFor(boardViewPrefs.columns, groupId, tagsStore.catalog),
+      prefs: columnPrefs,
     });
   });
   let activeKey = $derived(layout?.columns[activeIndex]?.key ?? null);
@@ -204,6 +219,69 @@
     setBoardColumnFlag(group.id, key, 'hidden', true, tagsStore.catalog);
   }
 
+  /** Where a step left (-1) or right (1) would put a column, or null at that end. */
+  function columnStep(key: string, step: -1 | 1) {
+    if (!group || !columnPrefs) return null;
+    return columnStepTarget(pendingCatalogMoves.catalog, group.id, columnPrefs.hidden, key, step);
+  }
+
+  /** Move a tag column past the nearest showing one on that side. */
+  function moveColumn(key: string, step: -1 | 1) {
+    const target = columnStep(key, step);
+    const move = target && resolveTagDrop(pendingCatalogMoves.catalog, key, target);
+    if (!move) return;
+    void focusColumnMenu(key);
+    void pendingCatalogMoves.moveTag({
+      tagId: move.tagId,
+      groupId: move.groupId,
+      index: move.index,
+    });
+  }
+
+  function columnElement(key: string): HTMLElement | null {
+    for (const el of columnsEl?.querySelectorAll<HTMLElement>('[data-board-column]') ?? []) {
+      if (el.dataset.boardColumn === key) return el;
+    }
+    return null;
+  }
+
+  function columnMenuTrigger(key: string): HTMLElement | null {
+    for (const el of columnsEl?.querySelectorAll<HTMLElement>('[data-board-column-menu]') ?? []) {
+      if (el.dataset.boardColumnMenu === key) return el;
+    }
+    return null;
+  }
+
+  /**
+   * Put focus back on the ⋯ menu of a column that just moved, so the move
+   * can be repeated from the keyboard, and keep the column on screen. The
+   * closing menu hands focus to its trigger, but the keyed list then moves
+   * the column and WebKit drops focus from a node that moves. The focus
+   * waits for a render, by which time the move is showing, and is checked
+   * once more on the next frame in case the menu closed after it.
+   */
+  async function focusColumnMenu(key: string) {
+    await tick();
+    columnMenuTrigger(key)?.focus({ preventScroll: true });
+    revealColumn(key);
+    requestAnimationFrame(() => focusIfDropped(() => columnMenuTrigger(key)));
+  }
+
+  /**
+   * Scroll the columns sideways, and only them, until a column is clear of
+   * the edge fades. On the phone pager that is the column's own page: the
+   * move changed which column sits at the scroll position.
+   */
+  function revealColumn(key: string) {
+    const column = columnElement(key);
+    if (!columnsEl || !column) return;
+    const box = columnsEl.getBoundingClientRect();
+    const fade = paged ? 0 : SCROLL_FADE_WIDTH;
+    const view = { left: box.left + fade, right: box.right - fade };
+    const offset = revealOffset(view, column.getBoundingClientRect());
+    if (offset !== 0) columnsEl.scrollLeft += offset;
+  }
+
   function showHiddenColumns() {
     if (!group || !layout) return;
     for (const column of layout.hidden) {
@@ -217,10 +295,7 @@
   }
 
   function pageTo(key: string) {
-    const column = [
-      ...(columnsEl?.querySelectorAll<HTMLElement>('[data-board-column]') ?? []),
-    ].find((el) => el.dataset.boardColumn === key);
-    column?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
+    columnElement(key)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
   }
 
   /** The card element for a project, for the home page's scroll restore. */
@@ -271,10 +346,13 @@
             {isVisible}
             {paged}
             dropTarget={draggingId !== null && dropKey === column.key}
+            canMoveLeft={columnStep(column.key, -1) !== null}
+            canMoveRight={columnStep(column.key, 1) !== null}
             onDragOver={(event) => handleDragOver(column.key, event)}
             onDragLeave={(event) => handleDragLeave(column.key, event)}
             onDrop={(event) => handleDrop(column.key, event)}
             onCollapse={(collapsed) => setCollapsed(column.key, collapsed)}
+            onMove={(step) => moveColumn(column.key, step)}
             onHide={() => hideColumn(column.key)}
           />
         {/each}

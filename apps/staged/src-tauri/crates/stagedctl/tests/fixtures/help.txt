@@ -275,8 +275,10 @@ and the projects it created, in later runs of the session too, so it
 can add repos to a created project, read it and start sessions in it.
 The allowance is shared along a chain of sessions: a session, the
 sessions it starts and the sessions those start in turn may together
-hold at most 10 created projects at a time. Deleting one of them in
-Staged frees a slot. A connected app approved for every project may
+hold at most 10 created projects at a time. It makes no difference how
+a session was started: with `stagedctl session start`, or by a project
+session handing work to a repo session. Deleting one of those projects
+in Staged frees a slot. A connected app approved for every project may
 create without that limit. One approved for a single project may not
 create (exit 4, `scope_denied`): reconnect without --project.
 

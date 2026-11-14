@@ -245,10 +245,9 @@ pub(crate) async fn add_project_repo_impl(
     // await left, the check and the rows it admits happen under one lock, so
     // the second of them sees the first and is refused. Only a branch the
     // caller chose is held to this: an inferred name got its own suffix
-    // above.
-    let _adding = refuse_branch_in_use.then(branch_in_use::adding);
-    if refuse_branch_in_use && branch_name.is_some() {
-        branch_in_use::ensure_branch_is_free(
+    // above, and takes the lock so that a chosen one sees its rows.
+    let _adding = match (refuse_branch_in_use, branch_name.is_some()) {
+        (true, true) => Some(branch_in_use::claim_free_branch(
             &store,
             &project_id,
             &BranchAsk {
@@ -256,8 +255,10 @@ pub(crate) async fn add_project_repo_impl(
                 branch: &resolved_branch_name,
                 pr_number,
             },
-        )?;
-    }
+        )?),
+        (true, false) => Some(branch_in_use::adding()),
+        (false, _) => None,
+    };
     store
         .create_project_repo(&repo)
         .map_err(|e| e.to_string())?;

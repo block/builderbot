@@ -122,6 +122,16 @@ fn child_of(store: &Store, parent: &str) -> String {
     session_started_by(store, Some(&format!("session:{parent}")))
 }
 
+/// A session row the session `parent` started through an MCP tool, as a
+/// project session starts a repo session with `start_repo_session`: the
+/// starter is in `parent_session_id`, and `started_by` is unset.
+fn mcp_child_of(store: &Store, parent: &str) -> String {
+    let session = store::Session::new_queued("repo work").with_parent_session(parent);
+    assert_eq!(session.started_by, None);
+    store.create_session(&session).unwrap();
+    session.id
+}
+
 /// Create `count` projects as `session_id`, named after `label`.
 fn create_many(host: &FakeHost, store: &Arc<Store>, session_id: &str, label: &str, count: usize) {
     for n in 0..count {
@@ -331,6 +341,88 @@ fn a_session_started_by_a_session_shares_its_allowance() {
             .len(),
         3
     );
+}
+
+/// The bypass the second review found. A session at its limit runs
+/// `stagedctl session start --project` on a project it created, and that
+/// project session calls the MCP `start_repo_session` tool. The repo session
+/// records its starter in `parent_session_id` and has no `started_by`, so a
+/// walk that followed `started_by` alone made it the root of a new chain,
+/// with an allowance of its own. This is also how a project session hands
+/// out repo work, so it happened without anyone trying.
+#[test]
+fn a_repo_session_started_through_mcp_shares_its_starters_allowance() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let root = session_started_by(&store, None);
+    let project_session = child_of(&store, &root);
+    let repo_session = mcp_child_of(&store, &project_session);
+    // And onward: a session the repo session starts with `stagedctl`, and a
+    // second repo session beside the first.
+    let below = child_of(&store, &repo_session);
+    let sibling = mcp_child_of(&store, &project_session);
+
+    create_many(&host, &store, &root, "Root", CREATED_PROJECT_LIMIT - 2);
+    // What the repo session creates counts against the root's allowance.
+    let made = create(
+        &host,
+        &store,
+        session(&repo_session),
+        bare("Repo session's"),
+    )
+    .unwrap();
+    assert_eq!(
+        created_by(&store, &made.project.id),
+        Some(format!("session:{repo_session}"))
+    );
+    create(&host, &store, session(&below), bare("Below's")).unwrap();
+
+    for (who, session_id) in [
+        ("the root", &root),
+        ("the project session", &project_session),
+        ("the repo session", &repo_session),
+        ("a session the repo session started", &below),
+        ("another repo session of the project session", &sibling),
+    ] {
+        let err = create(
+            &host,
+            &store,
+            session(session_id),
+            with_repo("One too many", repo("acme/widgets")),
+        )
+        .unwrap_err();
+        assert_eq!(err, LIMIT_REACHED, "{who}");
+    }
+    assert!(host.calls().is_empty(), "{:?}", host.calls());
+
+    // Deleting the repo session's project frees a slot for the whole chain.
+    store.delete_project(&made.project.id).unwrap();
+    create(&host, &store, session(&sibling), bare("Admitted")).unwrap();
+    create(&host, &store, session(&root), bare("Refused")).unwrap_err();
+}
+
+/// Repo sessions under a project session the user started share one
+/// allowance: the project session is their root.
+#[test]
+fn repo_sessions_of_a_user_started_project_session_share_one_allowance() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let project_session = session_started_by(&store, None);
+    let first = mcp_child_of(&store, &project_session);
+    let second = mcp_child_of(&store, &project_session);
+
+    create_many(&host, &store, &first, "First", 6);
+    create_many(&host, &store, &second, "Second", 4);
+
+    for session_id in [&first, &second, &project_session] {
+        assert_eq!(
+            create(&host, &store, session(session_id), bare("One too many")).unwrap_err(),
+            LIMIT_REACHED
+        );
+    }
+    // Another project session's repo session is another chain.
+    let elsewhere = mcp_child_of(&store, &session_started_by(&store, None));
+    create(&host, &store, session(&elsewhere), bare("Elsewhere")).unwrap();
 }
 
 /// A session running in a project another session created can still create

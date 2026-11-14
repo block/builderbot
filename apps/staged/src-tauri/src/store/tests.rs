@@ -226,6 +226,81 @@ fn test_session_lineage_root_follows_started_by_to_the_top() {
     assert_eq!(root("unknown"), Some("unknown".to_string()));
 }
 
+/// A session started through an MCP tool has no `started_by`: its starter is
+/// in `parent_session_id`. The walk follows that link too, so a repo session
+/// a project session started with `start_repo_session` is in the project
+/// session's chain and not the root of a new one.
+#[test]
+fn test_session_lineage_root_follows_the_parent_session_when_started_by_names_none() {
+    let store = Store::in_memory().unwrap();
+    let by_user = session_started_by(&store, None);
+    // `stagedctl session start --project`, then `start_repo_session`, then
+    // `stagedctl session start` again.
+    let project_session = session_started_by(&store, Some(&format!("session:{}", by_user.id)));
+    let repo_session = Session::new_queued("repo work").with_parent_session(&project_session.id);
+    store.create_session(&repo_session).unwrap();
+    let below = session_started_by(&store, Some(&format!("session:{}", repo_session.id)));
+
+    let root = |id: &str| store.session_lineage_root(id, 8).unwrap();
+    for session in [&project_session, &repo_session, &below] {
+        assert_eq!(root(&session.id), Some(by_user.id.clone()));
+    }
+
+    // A `started_by` that names a session is the link taken, whatever the
+    // parent says.
+    let elsewhere = session_started_by(&store, None);
+    let both = Session::new_queued("both")
+        .with_started_by(&format!("session:{}", by_user.id))
+        .with_parent_session(&elsewhere.id);
+    store.create_session(&both).unwrap();
+    assert_eq!(root(&both.id), Some(by_user.id.clone()));
+
+    // One that names a connected app is no session, so the parent is.
+    let by_app_under_parent = Session::new_queued("app")
+        .with_started_by("app:g1")
+        .with_parent_session(&elsewhere.id);
+    store.create_session(&by_app_under_parent).unwrap();
+    assert_eq!(root(&by_app_under_parent.id), Some(elsewhere.id.clone()));
+
+    // Both kinds of link count toward the one bound: three links up.
+    assert_eq!(
+        store.session_lineage_root(&below.id, 3).unwrap(),
+        Some(by_user.id.clone())
+    );
+    assert_eq!(store.session_lineage_root(&below.id, 2).unwrap(), None);
+}
+
+/// Deleting a session in the middle of a chain splits it, and the two links
+/// split it differently. `started_by` still names the deleted session, so
+/// the sessions it started share its id as their root. `parent_session_id`
+/// goes NULL with the parent, so each of those children is a root.
+#[test]
+fn test_session_lineage_root_after_a_session_in_the_chain_is_deleted() {
+    let store = Store::in_memory().unwrap();
+    let by_user = session_started_by(&store, None);
+    let middle = session_started_by(&store, Some(&format!("session:{}", by_user.id)));
+    let by_stagedctl =
+        [(); 2].map(|_| session_started_by(&store, Some(&format!("session:{}", middle.id))));
+    let by_mcp = [(); 2].map(|_| {
+        let session = Session::new_queued("repo work").with_parent_session(&middle.id);
+        store.create_session(&session).unwrap();
+        session
+    });
+    let root = |id: &str| store.session_lineage_root(id, 8).unwrap();
+    for session in by_stagedctl.iter().chain(&by_mcp) {
+        assert_eq!(root(&session.id), Some(by_user.id.clone()));
+    }
+
+    store.delete_session(&middle.id).unwrap();
+
+    for session in &by_stagedctl {
+        assert_eq!(root(&session.id), Some(middle.id.clone()));
+    }
+    for session in &by_mcp {
+        assert_eq!(root(&session.id), Some(session.id.clone()));
+    }
+}
+
 /// The walk follows at most `max_depth` links, and says so when the top is
 /// further up instead of naming a session that is not the root.
 #[test]

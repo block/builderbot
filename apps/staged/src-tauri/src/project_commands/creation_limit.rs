@@ -5,24 +5,53 @@
 //! Counting per session id would not stop one, because a session can start
 //! another session, and that one has a session id of its own.
 //!
-//! So the allowance belongs to a chain. `sessions.started_by` records the
-//! session that started a session, and following it upward ends at the
-//! chain's root: a session the user started in the app, one a connected app
-//! started, or one whose row is gone. Every session under one root draws on
-//! one allowance, counted from the `projects.created_by` rows of all of
-//! them, so deleting any of those projects in the app frees a slot.
+//! So the allowance belongs to a chain. A session row records the session
+//! that started it: in `sessions.started_by` for a start made through
+//! `stagedctl`, and in `sessions.parent_session_id` for one made through an
+//! MCP tool, which is how a project session starts a repo session
+//! (`start_repo_session`). Following those links upward ends at the chain's
+//! root: a session the user started in the app, or one a connected app
+//! started. Every session under one root draws on one allowance, counted
+//! from the `projects.created_by` rows of all of them, so deleting any of
+//! those projects in the app frees a slot.
 //!
-//! Nothing new is stored for this. The root is found by walking
-//! `started_by`, and the walk is bounded
+//! Both links are followed because either one alone leaves a way out. A
+//! session at its limit can start a project session with `stagedctl`, and
+//! that one can start a repo session with the MCP tool. The repo session has
+//! no `started_by`, and read by that link alone it was a root with a fresh
+//! allowance.
+//!
+//! Nothing new is stored for this. The root is found by walking the links
+//! ([`Store::session_lineage_root`]), and the walk is bounded
 //! ([`SESSION_LINEAGE_MAX_DEPTH`]).
+//!
+//! # A deleted session splits its chain
+//!
+//! The chain is rebuilt from the session rows on every count, and session
+//! rows go when the user deletes a project, a branch or a timeline item.
+//! When a session in the middle of a chain is deleted, the sessions below it
+//! no longer lead to the root:
+//!
+//! - Sessions it started through `stagedctl` still name its id, and share
+//!   that id as their root.
+//! - Sessions it started through an MCP tool lose their parent link (the
+//!   foreign key is `ON DELETE SET NULL`), and each becomes a root.
+//!
+//! Either way the projects those sessions hold stop counting against the
+//! original root, which gets that much of its allowance back while the
+//! projects still exist, and the split-off sessions count from nothing.
+//! This is known and left as it is. Only the user can delete a session, so a
+//! session cannot use it to get past the limit. Closing it would mean
+//! storing the root on the project, which is a change to the data model.
 
 use super::create::ProjectCreator;
 use crate::store::{session_actor_id, Store};
 
-/// How many `started_by` links the walk to a chain's root follows. A session
-/// further than this from its root is refused a project: a chain that long
-/// is what a runaway looks like, and treating some session part-way up as
-/// the root would hand every stretch of the chain a fresh allowance.
+/// How many links the walk to a chain's root follows, of either kind. A
+/// session further than this from its root is refused a project: a chain
+/// that long is what a runaway looks like, and treating some session
+/// part-way up as the root would hand every stretch of the chain a fresh
+/// allowance.
 pub(crate) const SESSION_LINEAGE_MAX_DEPTH: usize = 32;
 
 impl ProjectCreator {

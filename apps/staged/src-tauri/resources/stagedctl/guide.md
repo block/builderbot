@@ -131,7 +131,9 @@ already in use is refused. The allowance is shared along a chain of
 sessions: a session and every session started from it, directly or through
 another, may together hold at most 10 created projects, and the user frees
 a slot by deleting one of them in the app. Starting a session to create
-more does not help. A session may add a repo to its own project and to the
+more does not help, whether with `stagedctl session start` or with a
+project session's `start_repo_session` tool: both are in the starter's
+chain. A session may add a repo to its own project and to the
 projects it created. A connected app approved for one project can add repos
 to that project and cannot create projects.
 

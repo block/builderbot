@@ -8,9 +8,11 @@
 //!
 //! The refusal is a control caller's: a desktop form shows the user the
 //! project while they pick a branch. It runs twice. Once ahead of the GitHub
-//! lookups, to save them, and once beside the write, under [`adding`], so of
-//! two parallel adds of one branch exactly one is written.
+//! lookups, to save them ([`ensure_branch_is_free`]), and once beside the
+//! write, under the lock [`claim_free_branch`] returns, so of two parallel
+//! adds of one branch exactly one is written.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -28,13 +30,23 @@ pub(super) struct BranchAsk<'a> {
     pub pr_number: Option<u64>,
 }
 
-/// Held from [`ensure_branch_is_free`] to the last row of the add it admits,
-/// so a second add of the same branch sees the first one's rows. One lock
-/// for the process: an add writes a handful of rows and never waits on
-/// anything while it holds this.
+/// The one lock adds are written under, for the process.
+static ADDING: Mutex<()> = Mutex::new(());
+
+/// The lock a control caller's add holds from its last look at the project's
+/// branches to the last row it writes, so a second add of the same branch
+/// sees the first one's rows. An add that names no branch takes it here; one
+/// that names a branch gets it from [`claim_free_branch`].
+///
+/// Nothing waits while holding it. An add writes a handful of rows under it,
+/// and the check that precedes them reads the store and nothing else: what a
+/// checkout tracks is asked of git before the lock is taken.
 pub(super) fn adding() -> MutexGuard<'static, ()> {
-    static ADDING: Mutex<()> = Mutex::new(());
-    ADDING
+    lock(&ADDING)
+}
+
+fn lock(adding: &Mutex<()>) -> MutexGuard<'_, ()> {
+    adding
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -50,6 +62,9 @@ pub(super) fn adding() -> MutexGuard<'static, ()> {
 ///   as `<name>-2` and stores that. The branch on origin is still `<name>`,
 ///   and only git's upstream tracking says so, so a stored name of that
 ///   shape is settled by asking its checkout.
+///
+/// This takes no lock, so the answer can be out of date by the time the
+/// caller acts on it. [`claim_free_branch`] is the one to write under.
 pub(super) fn ensure_branch_is_free(
     store: &Store,
     project_id: &str,
@@ -66,6 +81,92 @@ fn ensure_branch_is_free_with(
     ask: &BranchAsk<'_>,
     origin_branch_of: &dyn Fn(&Store, &store::Branch) -> Option<String>,
 ) -> Result<(), String> {
+    match judge(store, project_id, ask, &|row| {
+        Some(origin_branch_of(store, row))
+    })? {
+        Verdict::Free => Ok(()),
+        Verdict::Taken(refusal) => Err(refusal),
+        // Every checkout asked about was answered just above.
+        Verdict::Unsettled(_) => Ok(()),
+    }
+}
+
+/// [`ensure_branch_is_free`], and the [`adding`] lock when the branch is
+/// free. The caller writes its rows and then lets the lock go, so the rows
+/// are written with the answer still true.
+///
+/// Settling a renamed branch means asking git what its checkout tracks,
+/// which spawns a process. That is not done under the lock, which every add
+/// in the process takes. The rule is read under the lock from the store and
+/// from what is already known of the checkouts. When it turns on a checkout
+/// not yet asked about, the lock is let go, the checkout is asked, and the
+/// rule is read again from the start under the lock. So the read that admits
+/// the add is always made under the lock the rows are written under.
+///
+/// A checkout is asked about once in a claim. It is asked only when its row
+/// has the renamed name, and the worktree code sets the upstream before it
+/// stores that name, so what the checkout tracks does not change after that.
+/// A row whose worktree is not linked yet has no checkout to ask and reads
+/// as tracking nothing, as it did when git was asked under the lock.
+pub(super) fn claim_free_branch(
+    store: &Store,
+    project_id: &str,
+    ask: &BranchAsk<'_>,
+) -> Result<MutexGuard<'static, ()>, String> {
+    claim_free_branch_with(&ADDING, store, project_id, ask, &origin_branch_of_checkout)
+}
+
+/// [`claim_free_branch`] with the lock and the lookup of a checkout's branch
+/// on origin passed in, so a test can hold the one and watch the other.
+fn claim_free_branch_with<'a>(
+    adding: &'a Mutex<()>,
+    store: &Store,
+    project_id: &str,
+    ask: &BranchAsk<'_>,
+    origin_branch_of: &dyn Fn(&Store, &store::Branch) -> Option<String>,
+) -> Result<MutexGuard<'a, ()>, String> {
+    // What each checkout asked about so far tracks on origin, by branch id.
+    let mut asked: HashMap<String, Option<String>> = HashMap::new();
+    // Each round asks about at least one checkout not asked about before,
+    // and a project has only so many, so this ends.
+    loop {
+        let unsettled = {
+            let guard = lock(adding);
+            match judge(store, project_id, ask, &|row| asked.get(&row.id).cloned())? {
+                Verdict::Free => return Ok(guard),
+                Verdict::Taken(refusal) => return Err(refusal),
+                Verdict::Unsettled(rows) => rows,
+            }
+        };
+        // The lock is free again here.
+        for row in unsettled {
+            let tracks = origin_branch_of(store, &row);
+            asked.insert(row.id, tracks);
+        }
+    }
+}
+
+/// What [`judge`] makes of a branch a caller asks to attach.
+enum Verdict {
+    Free,
+    /// An attachment has the branch. The refusal, worded for the caller.
+    Taken(String),
+    /// Nothing known has the branch, and these rows might: each is stored
+    /// under a name the worktree code could have made from the one asked
+    /// for, and what its checkout tracks is not known yet.
+    Unsettled(Vec<store::Branch>),
+}
+
+/// The rule of [`ensure_branch_is_free`], read from the store. `tracks`
+/// answers what a branch row's checkout tracks on origin: `Some(answer)`
+/// when that is known, where the answer is `None` for a branch with no
+/// checkout, and `None` when it has not been looked up.
+fn judge(
+    store: &Store,
+    project_id: &str,
+    ask: &BranchAsk<'_>,
+    tracks: &dyn Fn(&store::Branch) -> Option<Option<String>>,
+) -> Result<Verdict, String> {
     let attached: Vec<store::ProjectRepo> = store
         .list_project_repos(project_id)
         .map_err(|e| e.to_string())?
@@ -73,12 +174,13 @@ fn ensure_branch_is_free_with(
         .filter(|repo| repo.github_repo.eq_ignore_ascii_case(ask.github_repo))
         .collect();
     if attached.is_empty() {
-        return Ok(());
+        return Ok(Verdict::Free);
     }
     let branches = store
         .list_branches_for_project(project_id)
         .map_err(|e| e.to_string())?;
 
+    let mut unsettled = Vec::new();
     let taken = attached.iter().find(|repo| {
         if repo.branch_name == ask.branch {
             return true;
@@ -92,11 +194,23 @@ fn ensure_branch_is_free_with(
         if ask.pr_number.is_some() && row.pr_number == ask.pr_number {
             return true;
         }
-        is_deduplicated_name_of(&repo.branch_name, ask.branch)
-            && origin_branch_of(store, row).as_deref() == Some(ask.branch)
+        if !is_deduplicated_name_of(&repo.branch_name, ask.branch) {
+            return false;
+        }
+        match tracks(row) {
+            Some(tracked) => tracked.as_deref() == Some(ask.branch),
+            None => {
+                unsettled.push(row.clone());
+                false
+            }
+        }
     });
     let Some(taken) = taken else {
-        return Ok(());
+        return Ok(if unsettled.is_empty() {
+            Verdict::Free
+        } else {
+            Verdict::Unsettled(unsettled)
+        });
     };
 
     let place = match taken.subpath.as_deref() {
@@ -108,11 +222,11 @@ fn ensure_branch_is_free_with(
     } else {
         format!(", checked out as '{}'", taken.branch_name)
     };
-    Err(format!(
+    Ok(Verdict::Taken(format!(
         "Branch '{}' of '{}' is already attached to this project {place}{checked_out_as}. \
          A branch can be checked out once per project, so give a different branch name.",
         ask.branch, ask.github_repo
-    ))
+    )))
 }
 
 /// Whether `stored` is a name the worktree code makes for `branch` when the
@@ -316,6 +430,134 @@ mod tests {
         ] {
             assert!(!is_deduplicated_name_of(stored, branch), "{stored}");
         }
+    }
+
+    /// A claim settles a renamed branch by asking git about its checkout,
+    /// and does that with the lock free: every add in the process takes the
+    /// lock, and none of them should wait on a spawned process. The checkout
+    /// is asked once, and the lock is held when the claim returns.
+    #[test]
+    fn a_claim_asks_the_checkout_with_the_lock_free() {
+        let store = Store::in_memory().unwrap();
+        let project_id = project_with(&store, "fix-login-2", None, None);
+        let adding = Mutex::new(());
+        let asked = std::cell::Cell::new(0);
+        let tracks = |name: &'static str| {
+            let (adding, asked) = (&adding, &asked);
+            move |_: &Store, row: &store::Branch| {
+                asked.set(asked.get() + 1);
+                assert_eq!(row.branch_name, "fix-login-2");
+                assert!(
+                    adding.try_lock().is_ok(),
+                    "the checkout is asked while the lock is held"
+                );
+                Some(name.to_string())
+            }
+        };
+
+        // The checkout tracks the branch asked for: refused, and the lock is
+        // not left held.
+        let err = claim_free_branch_with(
+            &adding,
+            &store,
+            &project_id,
+            &ask("acme/widgets", "fix-login", None),
+            &tracks("fix-login"),
+        )
+        .unwrap_err();
+        assert!(err.contains("checked out as 'fix-login-2'"), "{err}");
+        assert_eq!(asked.get(), 1);
+        assert!(adding.try_lock().is_ok());
+
+        // A branch really called `fix-login-2` leaves `fix-login` free, and
+        // the claim comes back holding the lock.
+        asked.set(0);
+        let claim = claim_free_branch_with(
+            &adding,
+            &store,
+            &project_id,
+            &ask("acme/widgets", "fix-login", None),
+            &tracks("fix-login-2"),
+        )
+        .unwrap();
+        assert_eq!(asked.get(), 1, "one checkout is asked about once");
+        assert!(adding.try_lock().is_err(), "the claim holds the lock");
+        drop(claim);
+        assert!(adding.try_lock().is_ok());
+    }
+
+    /// The read that admits an add is made under the lock, after the
+    /// checkouts were asked. An add of the same branch that was written
+    /// while git was being asked is seen by it.
+    #[test]
+    fn a_branch_attached_while_the_checkout_was_asked_is_seen_by_the_claim() {
+        let store = Store::in_memory().unwrap();
+        let project_id = project_with(&store, "fix-login-2", None, None);
+        let adding = Mutex::new(());
+        let parallel_add = |store: &Store, _: &store::Branch| {
+            // Another add of `fix-login`, at a subpath, takes the lock for
+            // its rows while this one is asking git.
+            let _adding = adding
+                .try_lock()
+                .expect("the lock is free during the lookup");
+            let repo = store::ProjectRepo::new(
+                &project_id,
+                "acme/widgets",
+                "fix-login",
+                Some("docs".to_string()),
+            );
+            store.create_project_repo(&repo).unwrap();
+            store
+                .create_branch(
+                    &store::Branch::new(&project_id, "fix-login", "origin/main")
+                        .with_project_repo(&repo.id),
+                )
+                .unwrap();
+            // The renamed branch is another branch altogether.
+            Some("fix-login-2".to_string())
+        };
+
+        let err = claim_free_branch_with(
+            &adding,
+            &store,
+            &project_id,
+            &ask("acme/widgets", "fix-login", None),
+            &parallel_add,
+        )
+        .map(drop)
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "Branch 'fix-login' of 'acme/widgets' is already attached to this project at \
+             subpath 'docs'. A branch can be checked out once per project, so give a \
+             different branch name."
+        );
+        assert!(adding.try_lock().is_ok());
+    }
+
+    /// A claim that turns on no checkout asks git nothing: a free branch is
+    /// claimed, and one taken by name or by pull request is refused, from
+    /// the store alone.
+    #[test]
+    fn a_claim_settled_by_the_store_asks_no_checkout() {
+        let store = Store::in_memory().unwrap();
+        let project_id = project_with(&store, "fix-login", None, Some(42));
+        let adding = Mutex::new(());
+        let never = |_: &Store, _: &store::Branch| -> Option<String> {
+            panic!("the store settles this, so no checkout is asked")
+        };
+        let claim = |ask: BranchAsk<'_>| {
+            claim_free_branch_with(&adding, &store, &project_id, &ask, &never).map(drop)
+        };
+
+        claim(ask("acme/widgets", "fix-logout", None)).unwrap();
+        claim(ask("acme/gadgets", "fix-login", None)).unwrap();
+        let by_name = claim(ask("acme/widgets", "fix-login", None)).unwrap_err();
+        assert!(by_name.contains("is already attached"), "{by_name}");
+        let by_pr = claim(ask("acme/widgets", "renamed-head", Some(42))).unwrap_err();
+        assert!(by_pr.contains("checked out as 'fix-login'"), "{by_pr}");
+        assert!(adding.try_lock().is_ok());
     }
 
     /// The real lookup reads git's upstream tracking in the branch's

@@ -1198,9 +1198,18 @@ fn help_states_the_apps_limits_as_the_app_has_them() {
         "the creation limit changed; update `project create --help`"
     );
     assert!(create.contains("at most 10 created projects"), "{create}");
-    // Whose limit it is: a chain's, so a session it starts gets no more.
+    // Whose limit it is: a chain's, so a session it starts gets no more,
+    // however it starts it.
     assert!(
         create.contains("shared along a chain of sessions"),
+        "{create}"
+    );
+    let create_flat = create.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        create_flat.contains(
+            "no difference how a session was started: with `stagedctl session start`, or by \
+             a project session handing work to a repo session"
+        ),
         "{create}"
     );
 
@@ -1283,4 +1292,18 @@ fn the_guide_describes_both_verbs_and_what_a_session_covers() {
     );
     assert!(flat.contains("at most 10 created projects"), "{flat}");
     assert!(flat.contains("shared along a chain of sessions"), "{flat}");
+    // Both ways a session starts another are in the chain. The app follows
+    // `started_by` and `parent_session_id` to find its root.
+    assert!(
+        flat.contains(
+            "whether with `stagedctl session start` or with a project session's \
+             `start_repo_session` tool"
+        ),
+        "{flat}"
+    );
+    let sessions = include_str!("../../../../src/store/sessions.rs");
+    assert!(
+        sessions.contains("SELECT started_by, parent_session_id FROM sessions WHERE id = ?1"),
+        "the chain walk changed; check the guide and `project create --help` still describe it"
+    );
 }

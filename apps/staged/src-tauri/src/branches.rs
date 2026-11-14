@@ -101,6 +101,36 @@ fn clone_worktree_lock_for(repo_path: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
+/// Lock for one pull request's head in one clone, held around the fetch of
+/// it in [`check_out_worktree`]. Every setup of a pull request fetches into
+/// the same local ref, `refs/staged/pr/<N>`. Two fetches of a ref that is
+/// already there at an older commit both read the old value, and git refuses
+/// the second update: `cannot lock ref 'refs/staged/pr/<N>': is at <new> but
+/// expected <old>`. One at a time, the second finds the ref up to date.
+///
+/// The fetch reaches the network, so this is never held together with the
+/// clone's [`CLONE_WORKTREE_LOCKS`] entry: it is taken once that one has
+/// been let go and released before that one is retaken. Setups of other
+/// pull requests and of plain branches do not take it.
+static PR_HEAD_FETCH_LOCKS: OnceLock<Mutex<PrHeadFetchLocks>> = OnceLock::new();
+
+/// Keyed by the clone's canonical path and the pull request's number.
+type PrHeadFetchLocks = HashMap<(PathBuf, u64), Arc<Mutex<()>>>;
+
+fn pr_head_fetch_lock_for(repo_path: &Path, pr_number: u64) -> Arc<Mutex<()>> {
+    let locks = PR_HEAD_FETCH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = locks.lock().unwrap_or_else(|p| p.into_inner());
+    // As for `WORKTREE_SETUP_LOCKS`: drop the entries nobody holds.
+    map.retain(|_, v| Arc::strong_count(v) > 1);
+    // As for `CLONE_WORKTREE_LOCKS`: one clone is one key.
+    let clone = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    map.entry((clone, pr_number))
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
     store
         .lock()
@@ -1290,6 +1320,11 @@ struct CheckedOutWorktree {
 /// the name during the fetch is seen by that second lookup, so the lookup
 /// that decides and the creation are still one step.
 ///
+/// Two setups of one pull request would then fetch its head at the same
+/// time, and git fails one of them when the local ref is already there at an
+/// older commit. The fetch has a lock of its own for that, keyed by clone
+/// and pull request ([`PR_HEAD_FETCH_LOCKS`]).
+///
 /// A setup that needs no fetch runs the same steps in the same order as
 /// before the lock. One that does makes its lookups twice, and fetches only
 /// when it has a branch to create, as before.
@@ -1344,8 +1379,12 @@ fn check_out_worktree_with(
         };
         match attempt {
             CheckOutAttempt::Done(checked_out) => return Ok(checked_out),
-            // The lock is free again here.
+            // The clone's lock is free again here. Fetches of this pull
+            // request's head take turns, and the turn ends with the fetch,
+            // before the clone's lock is retaken.
             CheckOutAttempt::NeedsPrHead(pr_number) => {
+                let fetch_lock = pr_head_fetch_lock_for(repo_path, pr_number);
+                let _fetching = fetch_lock.lock().unwrap_or_else(|p| p.into_inner());
                 pr_head_sha = Some(fetch_pr_head_sha(repo_path, pr_number)?);
             }
         }
@@ -5291,6 +5330,118 @@ mod upstream_tracking_tests {
         // The other project's checkout is untouched.
         let other_path = other_path.into_inner().unwrap();
         assert_eq!(head_branch(&other_path), "feature-x");
+    }
+
+    /// Two projects set up the same pull request at once, in a clone that
+    /// fetched its head before the pull request moved, so
+    /// `refs/staged/pr/7` is there at an older commit. Both setups fetch
+    /// into that ref with the clone's lock free. At the same time, both git
+    /// processes read the old value, and the second to write is refused:
+    /// `cannot lock ref 'refs/staged/pr/7': is at <new> but expected <old>`.
+    /// The fetches take turns instead, and both setups come out at the new
+    /// head.
+    #[test]
+    fn two_setups_of_one_pull_request_fetch_its_head_in_turn() {
+        let (origin, clone, _) = clone_of_origin(false);
+        let stale_head = fetch_pr_head(clone.path(), 7).unwrap();
+        // The pull request gains a commit on origin.
+        let tree = git(origin.path(), &["rev-parse", "refs/pull/7/head^{tree}"]);
+        let new_head = git(
+            origin.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit-tree",
+                &tree,
+                "-p",
+                &stale_head,
+                "-m",
+                "more",
+            ],
+        );
+        git(
+            origin.path(),
+            &["update-ref", "refs/pull/7/head", &new_head],
+        );
+        assert_ne!(stale_head, new_head);
+
+        let roots = [TempDir::new("first-root"), TempDir::new("second-root")];
+        // (setups inside the fetch now, the most there ever were, arrivals)
+        let fetching = Mutex::new((0_u32, 0_u32, 0_u32));
+        let arrived = std::sync::Condvar::new();
+        let fetch_together = |repo: &Path, pr_number: u64| {
+            {
+                let mut state = fetching.lock().unwrap();
+                state.0 += 1;
+                state.1 = state.1.max(state.0);
+                state.2 += 1;
+                arrived.notify_all();
+                // Give the other setup the time to get here too, so that
+                // two fetches nothing keeps apart start together. One that
+                // is kept out never arrives, and the wait runs out.
+                let _both = arrived
+                    .wait_timeout_while(state, std::time::Duration::from_millis(500), |state| {
+                        state.2 < 2
+                    })
+                    .unwrap();
+            }
+            let fetched = fetch_pr_head(repo, pr_number);
+            fetching.lock().unwrap().0 -= 1;
+            fetched
+        };
+
+        let checked_out: Vec<_> = std::thread::scope(|scope| {
+            let setups: Vec<_> = roots
+                .iter()
+                .map(|root| {
+                    let (clone_path, fetch) = (clone.path(), &fetch_together);
+                    scope.spawn(move || check_out_pr(clone_path, root.path(), fetch))
+                })
+                .collect();
+            setups.into_iter().map(|s| s.join().unwrap()).collect()
+        });
+
+        let mut names = Vec::new();
+        for (worktree, root) in checked_out.into_iter().zip(&roots) {
+            let worktree = worktree.expect("both setups fetch the pull request's head");
+            assert!(worktree.created_branch && !worktree.adopted_existing);
+            assert!(worktree.path.starts_with(root.path()));
+            assert_eq!(git(&worktree.path, &["rev-parse", "HEAD"]), new_head);
+            names.push(worktree.local_branch_name);
+        }
+        names.sort();
+        assert_eq!(names, ["feature-x", "feature-x-2"]);
+        assert_eq!(
+            git(clone.path(), &["rev-parse", "refs/staged/pr/7"]),
+            new_head
+        );
+        let (now, most, arrivals) = *fetching.lock().unwrap();
+        assert_eq!((now, arrivals), (0, 2));
+        assert_eq!(most, 1, "two fetches of one pull request's head overlapped");
+    }
+
+    /// The fetch lock is for one pull request in one clone, however the
+    /// clone's path is spelled. Another pull request, another clone and the
+    /// clone's worktree lock are all free while it is held.
+    #[test]
+    fn the_pr_head_fetch_lock_is_per_clone_and_pull_request() {
+        let (_origin, clone, _) = clone_of_origin(false);
+        let (_other_origin, other_clone, _) = clone_of_origin(false);
+
+        let lock = pr_head_fetch_lock_for(clone.path(), 7);
+        let respelled = pr_head_fetch_lock_for(&clone.path().join("."), 7);
+        let other_pr = pr_head_fetch_lock_for(clone.path(), 8);
+        let other_clone = pr_head_fetch_lock_for(other_clone.path(), 7);
+
+        assert!(Arc::ptr_eq(&lock, &respelled));
+        assert!(!Arc::ptr_eq(&lock, &other_pr));
+        assert!(!Arc::ptr_eq(&lock, &other_clone));
+        let _held = lock.lock().unwrap();
+        assert!(other_pr.try_lock().is_ok());
+        assert!(other_clone.try_lock().is_ok());
+        assert!(clone_worktree_lock_for(clone.path()).try_lock().is_ok());
     }
 
     /// The head is fetched only for a branch that has to be created, as

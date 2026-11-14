@@ -1629,6 +1629,60 @@ describe('TagsSettingsPanel', () => {
       }
     });
 
+    // A wheel or trackpad scroll moves the sections under a held pointer
+    // that sends no move of its own. The line and the cursor have to
+    // follow, or they describe one place while the release lands in another.
+
+    it('follows the list as the wheel scrolls it under a held group', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutScrollingList(root);
+      try {
+        const list = root.querySelector<HTMLElement>('.panel-body')!;
+        const wheelTo = (scrollTop: number) => {
+          list.scrollTop = scrollTop;
+          // As the engines send it: from the list, and it does not bubble.
+          list.dispatchEvent(new Event('scroll'));
+          flushSync();
+        };
+        // Status, held over Priority's upper half, which is where Status
+        // already is. Clear of both scroll zones, so the drag scrolls
+        // nothing itself.
+        const held = { clientX: 300, clientY: 200 };
+        pressGroup('status');
+        movePointer(held);
+        expect(groupDropLines(root)).toEqual([]);
+        expect(dragMark()).toBe('refused');
+
+        // Priority, now from 100 to 220, has its lower half under the pointer.
+        wheelTo(60);
+        expect(groupDropLines(root)).toEqual(['priority:after']);
+        expect(dragMark()).toBe('active');
+
+        // Area, now from 130 to 250, has its lower half under the pointer.
+        wheelTo(174);
+        expect(groupDropLines(root)).toEqual(['area:after']);
+
+        // And back to where the drag began.
+        wheelTo(0);
+        expect(groupDropLines(root)).toEqual([]);
+        expect(dragMark()).toBe('refused');
+
+        wheelTo(174);
+        await releasePointer(held);
+        expect(commandsMock.reorderTagGroups.mock.calls).toEqual([
+          [['priority', 'area', 'status']],
+        ]);
+        expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+
+        // The drag is over: a scroll resolves nothing.
+        wheelTo(60);
+        expect(groupDropLines(root)).toEqual([]);
+        expect(dragMark()).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     // The list scrolls for a pointer exactly where the panel still lands
     // the group: never at full speed under a cursor that says not-allowed
     // for being away from the list.

@@ -229,8 +229,9 @@ export interface PointerDragOptions {
   /**
    * The pointer is at `point`. Returns whether a drop there would act, which
    * the cursor shows. Called once straight after `start`, on each pointer
-   * move, and again when the drag scrolls its container under a still
-   * pointer.
+   * move, and again when something scrolls under a still pointer: the
+   * drag's own scrolling of its container, or a wheel or trackpad scroll of
+   * that container or of anything the handle is inside.
    */
   move(point: PointerDragPoint): boolean;
   /**
@@ -285,7 +286,9 @@ type Phase =
  * needs no guard against a drag that never ended.
  *
  * The click that a release sends after a drag is swallowed, so a handle that
- * is also a button does not act on being dragged.
+ * is also a button does not act on being dragged. A release the page never
+ * saw swallows nothing: the pointer's next press, wherever it is made, ends
+ * the wait for it, and that press's click is its own.
  *
  * Given an `image`, a small chip naming what is dragged follows the pointer
  * (see `dragChipOrigin` for where). It is a child of the body, fixed and out
@@ -310,6 +313,12 @@ export function pointerDrag(
   let frame: number | null = null;
   let frameTime: number | null = null;
   let carry = 0;
+  /**
+   * Where the drag's own scroll step last left its container. `move` was
+   * re-issued there as it stepped, so the scroll event that step sends is
+   * not news.
+   */
+  let stepped: { container: HTMLElement; left: number; top: number } | null = null;
   /** The edges whose zone the pointer has been outside of during this drag. */
   let startEdgeLive = false;
   let endEdgeLive = false;
@@ -424,7 +433,39 @@ export function pointerDrag(
     else container.scrollTop = before + next.step;
     const after = along ? container.scrollLeft : container.scrollTop;
     // What is under the pointer changed without the pointer moving.
-    if (after !== before) issueMove();
+    if (after !== before) {
+      stepped = { container, left: container.scrollLeft, top: container.scrollTop };
+      issueMove();
+    }
+  }
+
+  /**
+   * Something scrolled while the drag is held: by the wheel or a trackpad,
+   * by the keyboard, or by the step above. A scroll of the drag's container,
+   * or of anything the handle is inside (the document included), moves what
+   * the surface resolves against under a pointer that did not move, so the
+   * place is resolved again. Without this the drop line and the cursor
+   * would describe the old place, and the release, resolved at its own
+   * point, would land somewhere else.
+   *
+   * A scroll event does not bubble, so this listens on the window's capture
+   * phase, which hears one from any element.
+   */
+  function handleScroll(event: Event) {
+    if (phase !== 'dragging') return;
+    const target = event.target as Node | null;
+    const container = options.scroll?.container() ?? null;
+    if (!target || (target !== container && !target.contains(node))) return;
+    // The step's own event, with nothing else having scrolled the container
+    // since: `move` has been issued for this offset already. Each record
+    // answers for one event, so an offset the wheel returns to later is new.
+    const own =
+      stepped !== null &&
+      target === stepped.container &&
+      stepped.container.scrollLeft === stepped.left &&
+      stepped.container.scrollTop === stepped.top;
+    if (stepped !== null && target === stepped.container) stepped = null;
+    if (!own) issueMove();
   }
 
   function startScrolling() {
@@ -438,6 +479,7 @@ export function pointerDrag(
     frame = null;
     frameTime = null;
     carry = 0;
+    stepped = null;
   }
 
   // ── Click suppression ──
@@ -469,20 +511,24 @@ export function pointerDrag(
   // ── The drag ──
 
   function listen() {
+    window.addEventListener('pointerdown', handleFollowedPointerDown, true);
     window.addEventListener('pointermove', handlePointerMove, true);
     window.addEventListener('pointerup', handlePointerUp, true);
     window.addEventListener('pointercancel', handlePointerCancel, true);
     window.addEventListener('lostpointercapture', handleLostCapture, true);
     window.addEventListener('keydown', handleKeydown, true);
+    window.addEventListener('scroll', handleScroll, true);
     window.addEventListener('blur', handleBlur);
   }
 
   function unlisten() {
+    window.removeEventListener('pointerdown', handleFollowedPointerDown, true);
     window.removeEventListener('pointermove', handlePointerMove, true);
     window.removeEventListener('pointerup', handlePointerUp, true);
     window.removeEventListener('pointercancel', handlePointerCancel, true);
     window.removeEventListener('lostpointercapture', handleLostCapture, true);
     window.removeEventListener('keydown', handleKeydown, true);
+    window.removeEventListener('scroll', handleScroll, true);
     window.removeEventListener('blur', handleBlur);
   }
 
@@ -553,6 +599,30 @@ export function pointerDrag(
     pressed = pointOf(event);
     last = pressed;
     listen();
+  }
+
+  /**
+   * The pointer this handle is following was pressed again, anywhere in the
+   * window. A pointer sends a pointerdown only when none of its buttons was
+   * down (a second button pressed during a drag is a pointermove), so the
+   * release this handle was waiting for never reached the page. It went to
+   * another window, say, after this one lost focus, and the click that
+   * brought the focus back was passed through to the page with no move
+   * before it.
+   *
+   * The gesture is over, without a drop. Left to wait, the release of this
+   * new press would be taken for the old one: after a cancelled drag it
+   * would swallow the new press's click, during a drag it would drop, and
+   * before one it would let a press made elsewhere drag this handle.
+   *
+   * It listens on the window's capture phase. A press on the handle itself
+   * reaches it before the handle's own listener, which then arms afresh.
+   * And it never hears the press that armed the handle: that press is past
+   * the window's capture phase by the time the handle starts listening.
+   */
+  function handleFollowedPointerDown(event: PointerEvent) {
+    if (event.pointerId !== pointerId) return;
+    abandon(false);
   }
 
   function handlePointerMove(event: PointerEvent) {

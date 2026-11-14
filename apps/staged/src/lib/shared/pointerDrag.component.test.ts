@@ -578,6 +578,47 @@ describe('cancelling', () => {
     ]);
   });
 
+  it('a press made elsewhere cancels a drag whose release never came, and its release drops nothing', () => {
+    attach();
+    startDrag();
+    // The same pointer, pressed again: its button had come up unseen.
+    pointer('pointerdown', outside, 300, 300);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+    expect(dragMark()).toBeNull();
+    moveTo(310, 300);
+    release(310, 300);
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+  });
+
+  it('a press made elsewhere ends a press whose release never came: it does not drag the handle', () => {
+    attach();
+    press(100, 100);
+    pointer('pointerdown', outside, 300, 300);
+    moveTo(310, 300);
+    release(310, 300);
+
+    expect(calls).toEqual([]);
+  });
+
+  it('another pointer pressed elsewhere does not end the drag', () => {
+    attach();
+    startDrag();
+    pointer('pointerdown', outside, 300, 300, { pointerId: 2 });
+    release(120, 100);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'drop 120,100']);
+  });
+
+  it('hears a press made elsewhere that stops on its way down', () => {
+    attach();
+    outside.addEventListener('pointerdown', (event) => event.stopPropagation());
+    startDrag();
+    pointer('pointerdown', outside, 300, 300);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+  });
+
   it('leaves nothing behind when a callback throws', () => {
     attach({
       cancel: () => {
@@ -676,6 +717,47 @@ describe('the click after a drag', () => {
 
     startDrag();
     action.update?.(surface({ enabled: false }));
+    release(110, 100);
+    click();
+
+    expect(clicks).not.toHaveBeenCalled();
+  });
+
+  it('is not taken from a press made elsewhere, after a cancelled drag whose release never came', () => {
+    attach();
+    const heard = vi.fn();
+    outside.addEventListener('click', heard);
+    startDrag();
+    // The window lost focus mid-drag, and the release went to another one.
+    window.dispatchEvent(new FocusEvent('blur'));
+    // The click that brings the focus back reaches the page, with no move
+    // before it: a whole new press, release and click, somewhere else.
+    pointer('pointerdown', outside, 300, 300);
+    release(300, 300);
+    const later = click(outside);
+
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(later.defaultPrevented).toBe(false);
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+  });
+
+  it('is not taken from a press made elsewhere, after a drag whose release never came', () => {
+    attach();
+    const heard = vi.fn();
+    outside.addEventListener('click', heard);
+    startDrag();
+    pointer('pointerdown', outside, 300, 300);
+    release(300, 300);
+    click(outside);
+
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it('is still swallowed when another pointer is pressed before the button comes up', () => {
+    attach();
+    startDrag();
+    keydown('Escape');
+    pointer('pointerdown', outside, 300, 300, { pointerId: 2 });
     release(110, 100);
     click();
 
@@ -1446,5 +1528,211 @@ describe('scrolling near an edge', () => {
     runFrame(1060);
     runFrame(1080);
     expect(scroller.scrollLeft).toBe(36);
+  });
+});
+
+describe('a scroll under a held drag', () => {
+  let scroller: HTMLDivElement;
+
+  /** A scroller from 100 to 500 across and 0 to 300 down, as above. */
+  beforeEach(() => {
+    scroller = document.createElement('div');
+    document.body.append(scroller);
+    scroller.getBoundingClientRect = () => new DOMRect(100, 0, 400, 300);
+  });
+
+  const across = (overrides: Partial<PointerDragOptions> = {}) =>
+    attach({ scroll: { container: () => scroller, axis: 'x' }, ...overrides });
+
+  /** A press in the scroller's middle, dragged to `x`. */
+  function dragAcrossTo(x: number) {
+    press(300, 150);
+    moveTo(x, 150);
+    calls = [];
+  }
+
+  /** A scroll event as the engines send one from an element: it does not bubble. */
+  const scrolled = (target: EventTarget) => target.dispatchEvent(new Event('scroll'));
+
+  it('of the container, by the wheel, re-issues the move where the pointer is', () => {
+    across();
+    // In the middle, where the drag itself scrolls nothing.
+    dragAcrossTo(310);
+    scroller.scrollLeft = 300;
+    scrolled(scroller);
+
+    expect(calls).toEqual(['move 310,150']);
+  });
+
+  it('shows what the re-issued move answers', () => {
+    across();
+    dragAcrossTo(310);
+    accepts = false;
+    scrolled(scroller);
+    expect(dragMark()).toBe('refused');
+
+    accepts = true;
+    scrolled(scroller);
+    expect(dragMark()).toBe('active');
+  });
+
+  it('of anything the handle is inside re-issues the move, with no container to scroll', () => {
+    const list = document.createElement('div');
+    const section = document.createElement('div');
+    document.body.append(list);
+    list.append(section);
+    section.append(handle);
+    attach();
+    startDrag();
+    calls = [];
+
+    scrolled(section);
+    scrolled(list);
+    // The page itself: its scroll event comes from the document.
+    scrolled(document);
+
+    expect(calls).toEqual(['move 110,100', 'move 110,100', 'move 110,100']);
+  });
+
+  it('of something the handle is not inside re-issues nothing', () => {
+    across();
+    dragAcrossTo(310);
+    const cards = document.createElement('div');
+    scroller.append(cards);
+    scrolled(cards);
+    scrolled(outside);
+
+    expect(calls).toEqual([]);
+  });
+
+  it('re-issues nothing before the press is a drag, or once the drag is over', () => {
+    across();
+    press(300, 150);
+    scrolled(scroller);
+    moveTo(302, 150);
+    scrolled(scroller);
+    expect(calls).toEqual([]);
+
+    moveTo(310, 150);
+    release(310, 150);
+    calls = [];
+    scrolled(scroller);
+    expect(calls).toEqual([]);
+
+    // Cancelled, with the button still down.
+    press(300, 150);
+    moveTo(310, 150);
+    keydown('Escape');
+    calls = [];
+    scrolled(scroller);
+    expect(calls).toEqual([]);
+  });
+
+  it('re-issues nothing for the event the drag’s own scroll step sends', () => {
+    across();
+    dragAcrossTo(500);
+    runFrame(1000);
+    runFrame(1020);
+    expect(scroller.scrollLeft).toBe(18);
+    expect(calls).toEqual(['move 500,150']);
+
+    // The engine reports the step a frame later. The step re-issued the move
+    // as it scrolled.
+    scrolled(scroller);
+    expect(calls).toEqual(['move 500,150']);
+
+    runFrame(1040);
+    scrolled(scroller);
+    expect(scroller.scrollLeft).toBe(36);
+    expect(calls).toEqual(['move 500,150', 'move 500,150']);
+  });
+
+  it('re-issues the move when the wheel scrolled on top of the drag’s own step', () => {
+    across();
+    dragAcrossTo(500);
+    runFrame(1000);
+    runFrame(1020);
+    // One event reports both: the step to 18, and the wheel on to 200.
+    scroller.scrollLeft = 200;
+    scrolled(scroller);
+
+    expect(calls).toEqual(['move 500,150', 'move 500,150']);
+  });
+
+  it('does not take another scroller’s event for the step’s own', () => {
+    across();
+    dragAcrossTo(500);
+    runFrame(1000);
+    runFrame(1020);
+    // The page scrolled too, and its event comes first.
+    scrolled(document);
+    expect(calls).toEqual(['move 500,150', 'move 500,150']);
+
+    // The step's own event is still to come, and is still not news.
+    scrolled(scroller);
+    expect(calls).toEqual(['move 500,150', 'move 500,150']);
+  });
+
+  it('lets a step answer for one event only: the wheel coming back to that offset is news', () => {
+    across();
+    dragAcrossTo(500);
+    runFrame(1000);
+    runFrame(1020);
+    scrolled(scroller);
+    // Out of the edge zone: the drag itself scrolls no more.
+    moveTo(300, 150);
+    runFrame(1040);
+    calls = [];
+
+    scroller.scrollLeft = 200;
+    scrolled(scroller);
+    scroller.scrollLeft = 18;
+    scrolled(scroller);
+
+    expect(calls).toEqual(['move 300,150', 'move 300,150']);
+  });
+
+  it('forgets a step the drag ended on: the next drag’s first scroll is news', () => {
+    across();
+    dragAcrossTo(500);
+    runFrame(1000);
+    runFrame(1020);
+    release(500, 150);
+
+    // The container is still where the step left it.
+    dragAcrossTo(310);
+    scrolled(scroller);
+
+    expect(calls).toEqual(['move 310,150']);
+  });
+
+  it('follows a container given part-way through a drag', () => {
+    attach();
+    startDrag();
+    calls = [];
+    scrolled(scroller);
+    expect(calls).toEqual([]);
+
+    action.update?.(surface({ scroll: { container: () => scroller, axis: 'x' } }));
+    scrolled(scroller);
+    expect(calls).toEqual(['move 110,100']);
+  });
+
+  it('ends the drag cleanly when the re-issued move turns the handle off', () => {
+    across({
+      move: (point) => {
+        calls.push(`move ${xy(point)}`);
+        if (scroller.scrollLeft === 300) {
+          action.update?.(surface({ enabled: false }));
+        }
+        return true;
+      },
+    });
+    dragAcrossTo(310);
+    scroller.scrollLeft = 300;
+    scrolled(scroller);
+
+    expect(calls).toEqual(['move 310,150', 'cancel']);
+    expect(dragMark()).toBeNull();
   });
 });

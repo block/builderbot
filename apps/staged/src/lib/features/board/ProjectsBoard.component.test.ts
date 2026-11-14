@@ -1843,6 +1843,57 @@ describe('ProjectsBoard column drag', () => {
     }
   });
 
+  // A wheel or trackpad scroll moves the columns under a held pointer that
+  // sends no move of its own. The line and the cursor have to follow, or
+  // they describe one place while the release lands in another.
+
+  it('follows the row as the wheel scrolls it under a held column', async () => {
+    const root = await mountBoard();
+    layOutScrollingRow(root);
+    try {
+      const row = root.querySelector<HTMLElement>('.board-columns')!;
+      const wheelTo = (scrollLeft: number) => {
+        row.scrollLeft = scrollLeft;
+        // As the engines send it: from the row, and it does not bubble.
+        row.dispatchEvent(new Event('scroll'));
+        flushSync();
+      };
+      // Idea, held over Doing's left half, which is where Idea already is.
+      // Clear of both scroll zones, so the drag scrolls nothing itself.
+      const held = { clientX: 620, clientY: 20 };
+      pressColumn(root, 'idea');
+      movePointer(held);
+      expect(dropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+
+      // Doing, now from 468 to 740, has its right half under the pointer.
+      wheelTo(100);
+      expect(dropLines(root)).toEqual(['doing:after']);
+      expect(dragMark()).toBe('active');
+
+      // Done, now from 452 to 724, has its right half under the pointer.
+      wheelTo(400);
+      expect(dropLines(root)).toEqual(['done:after']);
+
+      // And back to where the drag began.
+      wheelTo(0);
+      expect(dropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+
+      wheelTo(400);
+      await releasePointer(held);
+      expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+
+      // The drag is over: a scroll resolves nothing.
+      wheelTo(100);
+      expect(dropLines(root)).toEqual([]);
+      expect(dragMark()).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   // The row scrolls for a pointer exactly where the board still lands the
   // column: never at full speed under a cursor that says not-allowed for
   // being away from the row.

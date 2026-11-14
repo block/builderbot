@@ -598,3 +598,23 @@ mark.search-match-current {
     pointer-events: auto;
   }
 }
+
+/* ── Pointer drags (shared/pointerDrag.ts) ──
+   While a drag made of pointer events is under way, the root carries
+   `data-pointer-drag` and the cursor says what a release would do: grabbing,
+   or not-allowed where a drop would change nothing. It has to say so
+   whatever the pointer is over, a button or a text field included, so the
+   rule covers every element and beats their own cursors. Nothing selects as
+   text while the drag crosses it. Outside the layers, where a component's
+   own style would otherwise win. */
+:root[data-pointer-drag],
+:root[data-pointer-drag] * {
+  cursor: grabbing !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+:root[data-pointer-drag='refused'],
+:root[data-pointer-drag='refused'] * {
+  cursor: not-allowed !important;
+}

@@ -11,10 +11,13 @@
   moves them up or down. The group order is the one every list of groups in
   the app follows.
 
-  Each group section takes a group dropped on it. The list also takes one
-  dropped between sections or below them, where the drop line is drawn: it
-  lands where the last section it crossed put that line. The line goes once
-  the drag leaves the list.
+  A group's drag is made of pointer events (shared/pointerDrag), because the
+  desktop build's native file-drop handler takes every HTML5 drag. The panel
+  resolves each point the pointer reaches from the sections' rects. Over a
+  section, the group lands above or below it. Between sections or below
+  them, where the drop line is drawn, it lands where the last section the
+  pointer crossed put that line. Outside the list it lands nowhere and the
+  line goes. Held near the top or bottom of the list, the group scrolls it.
 
   State and actions live in a TagsEditor (see tagsEditor.svelte.ts) that the
   sections and rows share.
@@ -22,14 +25,16 @@
 <script lang="ts">
   import Info from '@lucide/svelte/icons/info';
   import Tags from '@lucide/svelte/icons/tags';
-  import { dragStillInside } from '../../../shared/dragStillInside';
+  import type { PointerDragPoint } from '../../../shared/pointerDrag';
   import { tagsStore } from '../../../stores/tags.svelte';
+  import type { GroupDropTarget } from '../../tags/tagReorder';
   import DeleteTagDialog from './DeleteTagDialog.svelte';
   import DeleteTagGroupDialog from './DeleteTagGroupDialog.svelte';
   import MoveTagConfirmDialog from './MoveTagConfirmDialog.svelte';
   import NewTagGroupMenu from './NewTagGroupMenu.svelte';
-  import TagGroupSection from './TagGroupSection.svelte';
+  import TagGroupSection, { type TagGroupDragHandlers } from './TagGroupSection.svelte';
   import UngroupedTagsSection from './UngroupedTagsSection.svelte';
+  import { groupAtPoint } from './tagSettingsDrag';
   import { TagsEditor } from './tagsEditor.svelte';
 
   const editor = new TagsEditor();
@@ -43,31 +48,52 @@
   let move = $derived(editor.moveConfirmTarget);
   let moveTagName = $derived(move ? (catalog.tagsById.get(move.tagId)?.name ?? '') : '');
 
-  // A group dragged into the gap between two sections, or past the last one.
-  // The sections take their own events; these are the ones no section saw,
-  // and they keep the target the last section named. Nothing is accepted
-  // unless a drop would move the group, so the cursor says when it won't.
-  // Text and files are not a group, even with a group drag left over.
-  function handleGroupDragOver(event: DragEvent) {
-    if (!editor.isGroupDrag(event) || !editor.groupDropWouldMove) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  /**
+   * Where a group held at `point` would land (see `groupAtPoint`), from the
+   * list and the sections as they are laid out now. The drag scrolls the
+   * list, so the rects are read afresh each time.
+   */
+  function groupDropAt(point: PointerDragPoint): GroupDropTarget | null {
+    if (!body) return null;
+    const sections = [...body.querySelectorAll<HTMLElement>('[data-tag-group]')].map((el) => ({
+      groupId: el.dataset.tagGroup ?? '',
+      rect: el.getBoundingClientRect(),
+    }));
+    return groupAtPoint(point, body.getBoundingClientRect(), sections, editor.groupDropTarget);
   }
 
-  // A dragleave bubbles from everything the drag crosses in the list. Only
-  // one that takes it out of the list forgets the target: over the sidebar
-  // or outside the window a release does nothing, so no line should say
-  // otherwise, and a drag that comes back has to cross a section again.
-  function handleGroupDragLeave(event: DragEvent) {
-    if (editor.groupDropTarget === null || !body || dragStillInside(body, event)) return;
-    editor.groupDragLeave();
+  /** Tell the editor where a group held at `point` would land, or that it would land nowhere. */
+  function holdGroupAt(point: PointerDragPoint) {
+    const target = groupDropAt(point);
+    if (target) editor.groupDragOver(target);
+    else editor.groupDragLeave();
   }
 
-  function handleGroupDrop(event: DragEvent) {
-    if (!editor.isGroupDrag(event) || !editor.groupDropWouldMove) return;
-    event.preventDefault();
-    editor.groupDrop();
-  }
+  // A group's drag, as the pointerDrag action on its handle reports it. The
+  // action follows every `start` with a `drop` or a `cancel`, so no group
+  // drag is ever left over.
+  const groupDragHandlers: TagGroupDragHandlers = {
+    scroll: { container: () => body, axis: 'y' },
+    start: (groupId) => editor.groupDragStart(groupId),
+    /**
+     * The cursor says a drop is refused wherever it would leave the groups
+     * in their order: over the group's own section, over the half where it
+     * already is, in a gap with no line, and outside the list.
+     */
+    move(point) {
+      holdGroupAt(point);
+      return editor.groupDropWouldMove;
+    },
+    /**
+     * Drop the dragged group where the pointer was released, which is
+     * resolved as any other point.
+     */
+    drop(point) {
+      holdGroupAt(point);
+      editor.groupDrop();
+    },
+    cancel: () => editor.groupDragEnd(),
+  };
 </script>
 
 <div class="tags-settings-panel">
@@ -88,14 +114,7 @@
     />
   </div>
 
-  <div
-    bind:this={body}
-    class="panel-body"
-    role="presentation"
-    ondragover={handleGroupDragOver}
-    ondragleave={handleGroupDragLeave}
-    ondrop={handleGroupDrop}
-  >
+  <div bind:this={body} class="panel-body">
     {#if !tagsStore.loaded}
       <p class="panel-note">Loading tags…</p>
     {:else}
@@ -106,6 +125,7 @@
           tags={catalog.tagsByGroup.get(group.id) ?? []}
           canMoveUp={i > 0}
           canMoveDown={i < catalog.groups.length - 1}
+          groupDrag={groupDragHandlers}
         />
       {:else}
         <p class="panel-note">

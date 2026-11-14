@@ -10,11 +10,12 @@
  * so Move down pressed three times quickly steps from where the last press
  * left the tag or group.
  *
- * A tag drag and a group drag are separate gestures with separate state, and
- * at most one is live: a handler that sees its own drag id null leaves the
- * event alone, which is how a tag row ignores a group dragged across it.
- * Each drag also carries a type of its own, so text or files dragged over
- * the panel are not taken for either (see tagSettingsDrag).
+ * A tag drag and a group drag are separate gestures with separate state. A
+ * tag's is an HTML5 drag, which carries a type of its own, so text or files
+ * dragged over the panel are not taken for it (see tagSettingsDrag). A
+ * group's is made of pointer events (see shared/pointerDrag) and sends no
+ * drag events at all: the panel resolves each point the pointer reaches and
+ * tells the editor where the group would land.
  *
  * Create one per mounted panel; its $derived fields belong to that
  * component.
@@ -38,7 +39,7 @@ import {
 } from '../../tags/tagReorder';
 import { numberedName, tagNameKey, type TagCatalog } from '../../tags/tagState';
 import { freeGroupName, type TagGroupTemplate } from '../../tags/tagTemplates';
-import { isTagDrag, isTagGroupDrag } from './tagSettingsDrag';
+import { isTagDrag } from './tagSettingsDrag';
 
 /** The name input of a tag row. */
 export function tagNameInputId(tagId: string): string {
@@ -82,7 +83,7 @@ export class TagsEditor {
       resolveTagDrop(this.catalog, this.dragTagId, this.dropTarget) !== null
   );
 
-  /** The group being dragged, if a drag started on a group's handle. */
+  /** The group being dragged by its handle, if any. */
   dragGroupId = $state<string | null>(null);
   /** Where the dragged group would land. */
   groupDropTarget = $state<GroupDropTarget | null>(null);
@@ -219,8 +220,6 @@ export class TagsEditor {
   // ── Drag and drop ──
 
   dragStart(tagId: string): void {
-    // A group drag whose source left the page never got its dragend.
-    this.groupDragEnd();
     this.dragTagId = tagId;
     this.dropTarget = null;
   }
@@ -302,6 +301,9 @@ export class TagsEditor {
   }
 
   // ── Dragging groups ──
+  //
+  // The pointerDrag action on a group's handle follows every start with a
+  // drop or an end, so no group drag is ever left over.
 
   groupDragStart(groupId: string): void {
     // A tag drag whose row left the page never got its dragend.
@@ -310,11 +312,7 @@ export class TagsEditor {
     this.groupDropTarget = null;
   }
 
-  /** Whether a drag event belongs to the group drag that started here. */
-  isGroupDrag(event: DragEvent): boolean {
-    return isTagGroupDrag(event.dataTransfer, this.dragGroupId !== null);
-  }
-
+  /** The pointer is over a place that puts the group at `target`. */
   groupDragOver(target: GroupDropTarget): void {
     const current = this.groupDropTarget;
     if (this.dragGroupId === null) return;
@@ -323,7 +321,7 @@ export class TagsEditor {
   }
 
   /**
-   * The group drag left the panel: forget where it would have landed, so no
+   * The group drag left the list: forget where it would have landed, so no
    * line is drawn while it is held somewhere a release does nothing, and a
    * drag that comes back lands nowhere until it crosses a section again.
    */
@@ -331,7 +329,7 @@ export class TagsEditor {
     this.groupDropTarget = null;
   }
 
-  /** Drop the dragged group where the last dragover put it. */
+  /** Drop the dragged group where the pointer last put it. */
   groupDrop(): void {
     const groupId = this.dragGroupId;
     const target = this.groupDropTarget;
@@ -341,6 +339,7 @@ export class TagsEditor {
     if (order) void pendingCatalogMoves.reorderGroups(order);
   }
 
+  /** The group drag ended, by a drop or without one. */
   groupDragEnd(): void {
     this.dragGroupId = null;
     this.groupDropTarget = null;

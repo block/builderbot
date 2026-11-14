@@ -61,8 +61,9 @@ vi.mock('../../../stores/projectsData.svelte', () => ({
 }));
 vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
+import { POINTER_DRAG_ATTRIBUTE } from '../../../shared/pointerDrag';
 import { tagsStore } from '../../../stores/tags.svelte';
-import { TAG_DRAG_TYPE, TAG_GROUP_DRAG_TYPE } from './tagSettingsDrag';
+import { TAG_DRAG_TYPE } from './tagSettingsDrag';
 import TagsSettingsPanel from './TagsSettingsPanel.svelte';
 
 let component: ReturnType<typeof mount> | null = null;
@@ -125,9 +126,10 @@ function button(root: ParentNode, text: string): HTMLButtonElement {
 }
 
 /**
- * Dispatch a drag event on `el` and return it. jsdom lays nothing out, so
- * every rect is empty at the origin: the default `clientY` is the lower half
- * of whatever is under it, and a negative one the upper half.
+ * Dispatch a drag event on `el` and return it, for a tag's drag, which is an
+ * HTML5 one. jsdom lays nothing out, so every rect is empty at the origin:
+ * the default `clientY` is the lower half of whatever is under it, and a
+ * negative one the upper half.
  *
  * jsdom has no DataTransfer either. Without `data` the event carries none,
  * as from an engine that drops what a drag carries. With it, the event
@@ -171,6 +173,131 @@ function section(groupId: string): HTMLElement {
 
 function groupHandle(groupId: string): HTMLElement {
   return section(groupId).querySelector<HTMLElement>('.group-head .drag-handle')!;
+}
+
+interface Point {
+  clientX: number;
+  clientY: number;
+}
+
+/**
+ * Lay the list of sections out, which jsdom does not: a 600 by 500 list at
+ * the origin, with 560px sections 120px tall and 24px apart from (16, 16),
+ * in the order they are in when asked. So the first spans 16 to 136 down,
+ * the second 160 to 280 and a third 304 to 424. A group's drag is made of
+ * pointer events, and the panel resolves each point from these rects.
+ */
+function layOutGroups(root: ParentNode): HTMLElement {
+  const list = root.querySelector<HTMLElement>('.panel-body')!;
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({ left, right: left + width, top, bottom: top + height, width, height }) as DOMRect;
+  list.getBoundingClientRect = () => rect(0, 0, 600, 500);
+  for (const el of list.querySelectorAll<HTMLElement>('[data-tag-group]')) {
+    el.getBoundingClientRect = () =>
+      rect(16, 16 + [...list.querySelectorAll('[data-tag-group]')].indexOf(el) * 144, 560, 120);
+  }
+  return list;
+}
+
+/** A point over the upper or lower half of a group's section (laid out by `layOutGroups`). */
+function pointerOver(groupId: string, half: 'upper' | 'lower'): Point {
+  const rect = section(groupId).getBoundingClientRect();
+  return { clientX: 300, clientY: half === 'upper' ? rect.top + 30 : rect.bottom - 30 };
+}
+
+/** In the list, over no section: between the first section (to 136) and the second (from 160). */
+const IN_FIRST_GAP: Point = { clientX: 300, clientY: 148 };
+
+/** In the list, below every section a test lays out (three end at 424). */
+const BELOW_GROUPS: Point = { clientX: 300, clientY: 460 };
+
+/** Past the list's left edge, over the Settings sidebar. */
+const LEFT_OF_LIST: Point = { clientX: -20, clientY: 200 };
+
+/**
+ * A mouse's pointer event at `at`, as the engines send it: the primary
+ * button, down for all but the release.
+ */
+function pointerEvent(
+  type: string,
+  target: EventTarget,
+  at: Point,
+  init: PointerEventInit = {}
+): PointerEvent {
+  const event = new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    pointerId: 1,
+    pointerType: 'mouse',
+    isPrimary: true,
+    button: 0,
+    buttons: type === 'pointerup' ? 0 : 1,
+    ...at,
+    ...init,
+  });
+  target.dispatchEvent(event);
+  return event;
+}
+
+/** Where a press on a group's handle lands: at the left of its section's header. */
+function pressPoint(groupId: string): Point {
+  const rect = section(groupId).getBoundingClientRect();
+  return { clientX: rect.left + 8, clientY: rect.top + 12 };
+}
+
+/** Press a group's handle. No drag yet: the pointer has to move first. */
+function pressGroup(groupId: string, init: PointerEventInit = {}) {
+  pointerEvent('pointerdown', groupHandle(groupId), pressPoint(groupId), init);
+}
+
+/** Move the pressed pointer to `at`. The drag listens on the window, whatever is under it. */
+function movePointer(at: Point) {
+  pointerEvent('pointermove', document.body, at);
+  flushSync();
+}
+
+/** Let the pointer go at `at`. */
+async function releasePointer(at: Point) {
+  pointerEvent('pointerup', document.body, at);
+  await settle();
+}
+
+/** Pick a group up by its handle and hold it over a half of group `onto`'s section. */
+function dragGroupOver(groupId: string, onto: string, half: 'upper' | 'lower') {
+  pressGroup(groupId);
+  movePointer(pointerOver(onto, half));
+}
+
+/** Let go of the group being dragged over a half of group `onto`'s section. */
+async function dropGroupOn(onto: string, half: 'upper' | 'lower') {
+  await releasePointer(pointerOver(onto, half));
+}
+
+/** Drag a group by its handle and drop it on a half of group `onto`'s section. */
+async function dragGroup(groupId: string, onto: string, half: 'upper' | 'lower') {
+  dragGroupOver(groupId, onto, half);
+  await dropGroupOn(onto, half);
+}
+
+/**
+ * What the cursor says while a group is dragged, from the mark the drag
+ * leaves on the root: `active` where a release would move the group,
+ * `refused` where it would not, and null when nothing is being dragged.
+ */
+const dragMark = () => document.documentElement.getAttribute(POINTER_DRAG_ATTRIBUTE);
+
+/** Each group section showing a drop line, as `groupId:side`. */
+function groupDropLines(root: ParentNode): string[] {
+  return [...root.querySelectorAll<HTMLElement>('[data-tag-group]')].flatMap((el) =>
+    ['before', 'after']
+      .filter((side) => el.classList.contains(`drop-${side}`))
+      .map((side) => `${el.dataset.tagGroup}:${side}`)
+  );
+}
+
+/** The group whose section is dimmed as the one being dragged, if any. */
+function draggedGroup(root: ParentNode): string | null {
+  return root.querySelector<HTMLElement>('.tag-group.dragging')?.dataset.tagGroup ?? null;
 }
 
 /** The group ids in position order. */
@@ -785,16 +912,15 @@ describe('TagsSettingsPanel', () => {
     it('reorders by drag from the group handle, showing the new order at once', async () => {
       const writes = holdReorders();
       const root = await mountPanel(tagState());
+      layOutGroups(root);
 
       // Status over the lower half of Priority: the line goes below Priority.
-      drag('dragstart', groupHandle('status'));
-      drag('dragover', section('priority'));
-      flushSync();
-      expect(section('status').classList.contains('dragging')).toBe(true);
-      expect(section('priority').classList.contains('drop-after')).toBe(true);
+      dragGroupOver('status', 'priority', 'lower');
+      expect(draggedGroup(root)).toBe('status');
+      expect(groupDropLines(root)).toEqual(['priority:after']);
+      expect(dragMark()).toBe('active');
 
-      drag('drop', section('priority'));
-      await settle();
+      await dropGroupOn('priority', 'lower');
 
       // The write is still open, and the panel already shows the new order.
       expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status']]]);
@@ -808,9 +934,10 @@ describe('TagsSettingsPanel', () => {
         'Doing',
         'Done',
       ]);
-      // The drop ended the drag.
-      expect(root.querySelector('.tag-group.dragging')).toBeNull();
-      expect(root.querySelector('.tag-group.drop-after')).toBeNull();
+      // The release ended the drag.
+      expect(draggedGroup(root)).toBeNull();
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBeNull();
 
       writes[0].land();
       await settle();
@@ -821,214 +948,301 @@ describe('TagsSettingsPanel', () => {
 
     it('lands a group above the one whose upper half it is dropped on', async () => {
       const root = await mountPanel(threeGroups());
+      layOutGroups(root);
 
-      drag('dragstart', groupHandle('area'));
-      drag('dragover', section('status'), -1);
-      flushSync();
-      expect(section('status').classList.contains('drop-before')).toBe(true);
-      drag('drop', section('status'), -1);
-      await settle();
+      dragGroupOver('area', 'status', 'upper');
+      expect(groupDropLines(root)).toEqual(['status:before']);
+      await dropGroupOn('status', 'upper');
 
       expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['area', 'status', 'priority']]]);
       expect(nameInputs(root, 'Group name')).toEqual(['Area', 'Status', 'Priority']);
+      // The pointer crossed Status's rows on the way, and no tag moved.
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
     });
 
-    it('takes a drop in the gap between sections, where the line is drawn', async () => {
+    it('does not drag for a press that does not move, or moves under the threshold', async () => {
       const root = await mountPanel(threeGroups());
-      const body = root.querySelector<HTMLElement>('.panel-body')!;
+      layOutGroups(root);
+      const pressed = pressPoint('status');
 
-      drag('dragstart', groupHandle('status'));
-      // Nothing to land on until a section has named a place.
-      expect(drag('dragover', body).defaultPrevented).toBe(false);
-
-      drag('dragover', section('priority'));
+      pressGroup('status');
       flushSync();
-      expect(drag('dragover', body).defaultPrevented).toBe(true);
-      expect(drag('drop', body).defaultPrevented).toBe(true);
-      await settle();
+      expect(draggedGroup(root)).toBeNull();
+      await releasePointer(pressed);
+
+      // 3px is short of the 4px a drag takes.
+      pressGroup('status');
+      movePointer({ clientX: pressed.clientX, clientY: pressed.clientY + 3 });
+      expect(draggedGroup(root)).toBeNull();
+      expect(dragMark()).toBeNull();
+      await releasePointer(pointerOver('area', 'lower'));
+
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('takes a release in the gap between sections, where the line is drawn', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      // Status held below Priority, then in the gap under it, where that
+      // line is drawn: over neither section.
+      const gapBelowPriority = { clientX: 300, clientY: 292 };
+      dragGroupOver('status', 'priority', 'lower');
+      movePointer(gapBelowPriority);
+      expect(groupDropLines(root)).toEqual(['priority:after']);
+      expect(dragMark()).toBe('active');
+
+      await releasePointer(gapBelowPriority);
 
       expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status', 'area']]]);
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status', 'Area']);
     });
 
-    it('forgets the line once the drag leaves the list, until a section is crossed again', async () => {
+    it('takes a release below the last group, where the last section put the line', async () => {
       const root = await mountPanel(threeGroups());
-      const body = root.querySelector<HTMLElement>('.panel-body')!;
-      /** A dragleave off `el`, saying what the drag moved on to. */
-      const leave = (el: HTMLElement, relatedTarget: EventTarget | null) =>
-        el.dispatchEvent(new MouseEvent('dragleave', { bubbles: true, relatedTarget }));
+      layOutGroups(root);
 
-      drag('dragstart', groupHandle('status'));
-      drag('dragover', section('priority'));
-      flushSync();
-      expect(section('priority').classList.contains('drop-after')).toBe(true);
+      dragGroupOver('status', 'area', 'lower');
+      movePointer(BELOW_GROUPS);
+      expect(groupDropLines(root)).toEqual(['area:after']);
 
-      // Off Priority and on to Area, or into the gap: still in the list.
-      leave(section('priority'), section('area'));
-      leave(section('priority'), body);
-      flushSync();
-      expect(section('priority').classList.contains('drop-after')).toBe(true);
-      expect(drag('dragover', body).defaultPrevented).toBe(true);
-
-      // Off the list, on to the rest of the page.
-      leave(section('priority'), document.body);
-      flushSync();
-      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
-      // The group is still being dragged.
-      expect(section('status').classList.contains('dragging')).toBe(true);
-
-      // Back in through the gap: nowhere to land until a section says where.
-      expect(drag('dragover', body).defaultPrevented).toBe(false);
-      expect(drag('drop', body).defaultPrevented).toBe(false);
-      await settle();
-      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
-
-      drag('dragover', section('area'));
-      flushSync();
-      expect(section('area').classList.contains('drop-after')).toBe(true);
-      drag('drop', body);
-      await settle();
+      await releasePointer(BELOW_GROUPS);
 
       expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
     });
 
-    it('forgets the line when a dragleave names nothing and the pointer is off the list', async () => {
+    it('has nowhere to land in a gap before a section has named a place', async () => {
       const root = await mountPanel(threeGroups());
-      const body = root.querySelector<HTMLElement>('.panel-body')!;
-      // jsdom lays nothing out: give the list a box, 600 by 400 at the origin.
-      body.getBoundingClientRect = () =>
-        ({ left: 0, right: 600, top: 0, bottom: 400, width: 600, height: 400 }) as DOMRect;
-      const leave = (clientX: number, clientY: number) =>
-        section('priority').dispatchEvent(
-          new MouseEvent('dragleave', { bubbles: true, clientX, clientY })
-        );
+      layOutGroups(root);
 
-      drag('dragstart', groupHandle('status'));
-      drag('dragover', section('priority'));
-      flushSync();
+      // Straight from the handle into the gap under Status.
+      pressGroup('status');
+      movePointer(IN_FIRST_GAP);
+      expect(draggedGroup(root)).toBe('status');
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
 
-      // Not every engine says what a dragleave moved on to. Inside the box
-      // the drag is still over the list.
-      leave(300, 200);
-      flushSync();
-      expect(section('priority').classList.contains('drop-after')).toBe(true);
+      await releasePointer(IN_FIRST_GAP);
 
-      // Past its left edge, over the Settings sidebar.
-      leave(-20, 200);
-      flushSync();
-      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
-      expect(drag('dragover', body).defaultPrevented).toBe(false);
+      expect(draggedGroup(root)).toBeNull();
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('forgets the line once the pointer leaves the list, until a section is crossed again', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      dragGroupOver('status', 'priority', 'lower');
+      expect(groupDropLines(root)).toEqual(['priority:after']);
+
+      // Off the list, over the Settings sidebar: a release there does
+      // nothing, so no line says otherwise.
+      movePointer(LEFT_OF_LIST);
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+      // The group is still being dragged.
+      expect(draggedGroup(root)).toBe('status');
+
+      // Back in through the gap: nowhere to land until a section says where.
+      movePointer(BELOW_GROUPS);
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+
+      movePointer(pointerOver('area', 'lower'));
+      expect(groupDropLines(root)).toEqual(['area:after']);
+      expect(dragMark()).toBe('active');
+      await releasePointer(BELOW_GROUPS);
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+    });
+
+    it('does nothing for a release outside the list', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      // The last move was over a place that moves the group. The release is
+      // resolved at its own point.
+      dragGroupOver('status', 'priority', 'lower');
+      await releasePointer(LEFT_OF_LIST);
+
+      expect(draggedGroup(root)).toBeNull();
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBeNull();
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('lands the group where it is released, over another section than the last move', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      dragGroupOver('status', 'priority', 'lower');
+      await dropGroupOn('area', 'lower');
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
     });
 
     it('ignores a drop that would leave the groups in their order', async () => {
       const root = await mountPanel(threeGroups());
-      const body = root.querySelector<HTMLElement>('.panel-body')!;
-      drag('dragstart', groupHandle('status'));
+      layOutGroups(root);
 
       // Above Priority is where Status already is: no line, and no write.
-      drag('dragover', section('priority'), -1);
-      flushSync();
-      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
-      // The gap takes nothing either, so the cursor says the drop is refused.
-      expect(drag('dragover', body).defaultPrevented).toBe(false);
-      drag('drop', section('priority'), -1);
-      await settle();
+      dragGroupOver('status', 'priority', 'upper');
+      expect(groupDropLines(root)).toEqual([]);
+      // Nor is there a line in the gap, where a release lands on the same place.
+      movePointer(IN_FIRST_GAP);
+      expect(groupDropLines(root)).toEqual([]);
+      await dropGroupOn('priority', 'upper');
 
       // Nor does a group dropped on itself move.
-      drag('dragstart', groupHandle('status'));
-      drag('dragover', section('status'));
-      flushSync();
-      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
-      drag('drop', section('status'));
-      await settle();
+      dragGroupOver('status', 'status', 'lower');
+      expect(groupDropLines(root)).toEqual([]);
+      await dropGroupOn('status', 'lower');
 
       expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
       expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
     });
 
-    it('carries a dragged group under its own type, with no text for a name field', async () => {
-      const root = await mountPanel(tagState());
-
-      const start = drag('dragstart', groupHandle('priority'), 10, {});
-      expect(carried(start).types).toEqual([TAG_GROUP_DRAG_TYPE]);
-      expect(carried(start).getData(TAG_GROUP_DRAG_TYPE)).toBe('priority');
-      expect(carried(start).effectAllowed).toBe('move');
-
-      // The last group has nowhere to go below itself. Over an ungrouped
-      // tag's name the panel takes nothing, so the field's own handling
-      // stands, and the drag has no text for it to insert.
-      const field = row('q4').querySelector<HTMLInputElement>('input[aria-label="Tag name"]')!;
-      const over = drag('dragover', field, 10, { [TAG_GROUP_DRAG_TYPE]: 'priority' });
-      expect(over.defaultPrevented).toBe(false);
-      expect(carried(over).types).not.toContain('text/plain');
-      drag('drop', field, 10, { [TAG_GROUP_DRAG_TYPE]: 'priority' });
-      await settle();
-
-      expect(nameInputs(root, 'Tag name')).toContain('q4');
-      expect(commandsMock.updateTag).not.toHaveBeenCalled();
-      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
-    });
-
-    it('says through the cursor when a drop on a section would not move the group', async () => {
+    it('says through the cursor when a release would not move the group', async () => {
       const root = await mountPanel(threeGroups());
-      const data = { [TAG_GROUP_DRAG_TYPE]: 'status' };
-      drag('dragstart', groupHandle('status'), 10, {});
+      layOutGroups(root);
 
       // Below Priority is a move.
-      const moving = drag('dragover', section('priority'), 10, data);
-      expect(moving.defaultPrevented).toBe(true);
-      expect(carried(moving).dropEffect).toBe('move');
+      dragGroupOver('status', 'priority', 'lower');
+      expect(dragMark()).toBe('active');
 
-      // Above Priority is where Status already is. The section still takes
-      // the drag, so nothing under it does, and refuses the drop.
-      const inPlace = drag('dragover', section('priority'), -1, data);
-      expect(inPlace.defaultPrevented).toBe(true);
-      expect(carried(inPlace).dropEffect).toBe('none');
+      // Above Priority is where Status already is, and so is the gap above
+      // that, which keeps the place.
+      movePointer(pointerOver('priority', 'upper'));
+      expect(dragMark()).toBe('refused');
+      movePointer(IN_FIRST_GAP);
+      expect(dragMark()).toBe('refused');
 
       // So is the group's own section, either half.
-      for (const clientY of [-1, 10]) {
-        const onItself = drag('dragover', section('status'), clientY, data);
-        expect(onItself.defaultPrevented).toBe(true);
-        expect(carried(onItself).dropEffect).toBe('none');
+      for (const half of ['upper', 'lower'] as const) {
+        movePointer(pointerOver('status', half));
+        expect(dragMark()).toBe('refused');
       }
 
       // Back over a half that moves, the cursor says so again.
-      const again = drag('dragover', section('area'), 10, data);
-      expect(carried(again).dropEffect).toBe('move');
+      movePointer(pointerOver('area', 'lower'));
+      expect(dragMark()).toBe('active');
+      expect(groupDropLines(root)).toEqual(['area:after']);
+
+      await dropGroupOn('status', 'lower');
+      expect(dragMark()).toBeNull();
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('writes nothing when Escape ends the drag', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      dragGroupOver('status', 'area', 'lower');
+      expect(groupDropLines(root)).toEqual(['area:after']);
+
+      const escape = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      });
+      document.body.dispatchEvent(escape);
       flushSync();
-      expect(section('area').classList.contains('drop-after')).toBe(true);
+
+      // The drag took the key, so Settings stays open, and is over with the
+      // button still down.
+      expect(escape.defaultPrevented).toBe(true);
+      expect(dragMark()).toBeNull();
+      expect(groupDropLines(root)).toEqual([]);
+      expect(draggedGroup(root)).toBeNull();
+
+      // Neither a move nor the release after it brings it back.
+      movePointer(pointerOver('area', 'lower'));
+      expect(groupDropLines(root)).toEqual([]);
+      await dropGroupOn('area', 'lower');
 
       expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
       expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
     });
 
-    it('leaves text and files alone, even after a group drag that never ended', async () => {
+    it('swallows the click the release sends after a drag, and not the next one', async () => {
       const root = await mountPanel(threeGroups());
-      const body = root.querySelector<HTMLElement>('.panel-body')!;
+      layOutGroups(root);
+      const clicks = vi.fn();
+      root.addEventListener('click', clicks);
 
-      // A group drag that got as far as a place it would move to, and whose
-      // source then left the page: no drop, and no dragend.
-      drag('dragstart', groupHandle('status'), 10, {});
-      drag('dragover', section('priority'), 10, { [TAG_GROUP_DRAG_TYPE]: 'status' });
-      flushSync();
-      expect(section('priority').classList.contains('drop-after')).toBe(true);
+      dragGroupOver('status', 'priority', 'lower');
+      // An engine sends the click in the same task as the release.
+      pointerEvent('pointerup', document.body, pointerOver('priority', 'lower'));
+      groupHandle('status').click();
+      expect(clicks).not.toHaveBeenCalled();
+      await settle();
 
-      // Text and files dragged in after it are not that group, on a section
-      // or in the gap between two.
-      const foreign: Record<string, string>[] = [{ 'text/plain': 'Status' }, { Files: '' }];
-      for (const data of foreign) {
-        for (const el of [section('area'), body]) {
-          expect(drag('dragover', el, 10, data).defaultPrevented).toBe(false);
-          expect(drag('drop', el, 10, data).defaultPrevented).toBe(false);
-        }
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status', 'area']]]);
+
+      // A click made afterwards is its own.
+      groupHandle('status').click();
+      expect(clicks).toHaveBeenCalledTimes(1);
+    });
+
+    it('drags by the handle only, not by the name field or the menu trigger', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+      const head = section('status').querySelector<HTMLElement>('.group-head')!;
+      const others = [
+        head.querySelector<HTMLElement>('input[aria-label="Group name"]')!,
+        head.querySelector<HTMLElement>('[aria-label="Actions for Status"]')!,
+      ];
+
+      for (const el of others) {
+        pointerEvent('pointerdown', el, pressPoint('status'));
+        movePointer(pointerOver('area', 'lower'));
+        expect(draggedGroup(root)).toBeNull();
+        expect(dragMark()).toBeNull();
+        await releasePointer(pointerOver('area', 'lower'));
       }
+
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('does not drag a group under a finger', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pressGroup('status', { pointerType: 'touch' });
+      pointerEvent('pointermove', document.body, pointerOver('area', 'lower'), {
+        pointerType: 'touch',
+      });
+      flushSync();
+      expect(draggedGroup(root)).toBeNull();
+      expect(dragMark()).toBeNull();
+      pointerEvent('pointerup', document.body, pointerOver('area', 'lower'), {
+        pointerType: 'touch',
+      });
       await settle();
 
       expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
       expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
-      // The line stayed where the group drag left it.
-      expect(section('priority').classList.contains('drop-after')).toBe(true);
+    });
+
+    it('refuses a native drag from a group handle, and leaves a tag row’s alone', async () => {
+      await mountPanel(tagState());
+
+      // A group's drag is made of pointer events. A native one starting in
+      // its handle would take the pointer away.
+      expect(drag('dragstart', groupHandle('status'), 10, {}).defaultPrevented).toBe(true);
+
+      // A tag's drag is still an HTML5 one.
+      const start = drag('dragstart', row('idea').querySelector('.drag-handle')!, 10, {});
+      expect(start.defaultPrevented).toBe(false);
+      expect(carried(start).types).toEqual([TAG_DRAG_TYPE]);
     });
 
     it('leaves a tag drag to the rows and lists', async () => {
@@ -1040,7 +1254,7 @@ describe('TagsSettingsPanel', () => {
       expect(drag('dragover', head).defaultPrevented).toBe(false);
       expect(drag('drop', head).defaultPrevented).toBe(false);
       flushSync();
-      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
+      expect(groupDropLines(root)).toEqual([]);
 
       // Dropped on the group's list, the tag joins the end of that group.
       const list = section('priority').querySelector<HTMLElement>('.tag-list')!;
@@ -1054,42 +1268,106 @@ describe('TagsSettingsPanel', () => {
       expect(scopeIds(tagsStore.snapshot, 'priority')).toEqual(['p0', 'p1', 'idea']);
     });
 
-    it('takes a group dragged across a tag row, without moving the tag', async () => {
+    it('moves a group, not a tag, after a tag drag that never ended', async () => {
       const root = await mountPanel(tagState());
+      layOutGroups(root);
 
-      // Priority over a row in Status: the row passes the drag up to its
-      // section, whose upper half it is.
-      drag('dragstart', groupHandle('priority'));
-      drag('dragover', row('idea'), -1);
+      // The tag's dragend never comes (its row left the page, say).
+      drag('dragstart', row('idea').querySelector('.drag-handle')!);
+      drag('dragover', row('done'));
       flushSync();
-      expect(row('idea').classList.contains('drop-before')).toBe(false);
-      expect(section('status').classList.contains('drop-before')).toBe(true);
-      drag('drop', row('idea'), -1);
-      await settle();
+      expect(row('idea').classList.contains('dragging')).toBe(true);
+      expect(row('done').classList.contains('drop-after')).toBe(true);
+
+      dragGroupOver('status', 'priority', 'lower');
+
+      expect(row('idea').classList.contains('dragging')).toBe(false);
+      expect(row('done').classList.contains('drop-after')).toBe(false);
+      expect(draggedGroup(root)).toBe('status');
+      expect(groupDropLines(root)).toEqual(['priority:after']);
+
+      await dropGroupOn('priority', 'lower');
 
       expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status']]]);
       expect(commandsMock.moveTag).not.toHaveBeenCalled();
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status']);
     });
 
-    it('starts each kind of drag clean of one of the other kind that never ended', async () => {
-      await mountPanel(tagState());
+    it('scrolls the list while a group is held near its bottom, and the line follows', async () => {
+      const root = await mountPanel(threeGroups());
+      const list = root.querySelector<HTMLElement>('.panel-body')!;
+      // A 300px list of 120px sections 24px apart from 16, which scrolls:
+      // Priority, the second, spans 160 to 280, and Area starts at 304,
+      // past the list's bottom edge.
+      let scrollTop = 0;
+      Object.defineProperty(list, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => (scrollTop = value),
+      });
+      const rect = (left: number, top: number, width: number, height: number) =>
+        ({ left, right: left + width, top, bottom: top + height, width, height }) as DOMRect;
+      list.getBoundingClientRect = () => rect(0, 0, 600, 300);
+      for (const el of list.querySelectorAll<HTMLElement>('[data-tag-group]')) {
+        el.getBoundingClientRect = () =>
+          rect(
+            16,
+            16 + [...list.querySelectorAll('[data-tag-group]')].indexOf(el) * 144 - scrollTop,
+            560,
+            120
+          );
+      }
+      // Hold the frames, as the drag's scroll loop asks for them.
+      const frames = new Map<number, FrameRequestCallback>();
+      let frameId = 0;
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frames.set(++frameId, callback);
+        return frameId;
+      });
+      vi.stubGlobal('cancelAnimationFrame', (id: number) => void frames.delete(id));
+      const runFrame = (time: number) => {
+        const due = [...frames.values()];
+        frames.clear();
+        for (const callback of due) callback(time);
+        flushSync();
+      };
+      try {
+        // Status, held 20px short of the list's bottom edge, inside its 48px
+        // scroll zone, having crossed Priority's lower half on the way.
+        const held = { clientX: 300, clientY: 280 };
+        pressGroup('status');
+        movePointer({ clientX: 300, clientY: 270 });
+        movePointer(held);
+        expect(groupDropLines(root)).toEqual(['priority:after']);
 
-      // A drag whose source leaves the page gets no dragend.
-      drag('dragstart', groupHandle('status'));
-      drag('dragstart', row('idea').querySelector('.drag-handle')!);
-      flushSync();
-      expect(section('status').classList.contains('dragging')).toBe(false);
-      expect(row('idea').classList.contains('dragging')).toBe(true);
+        // The first frame only starts the clock.
+        runFrame(0);
+        expect(scrollTop).toBe(0);
+        // 28px into the zone is 525px a second: 52px in 100ms, and half a
+        // pixel carried.
+        runFrame(100);
+        expect(scrollTop).toBe(52);
+        // The pointer has not moved. Area, now from 252 to 372, has come
+        // under it, and its upper half is the same place as below Priority.
+        expect(groupDropLines(root)).toEqual(['area:before']);
+        // Another 53px, and the pointer is over Area's lower half.
+        runFrame(200);
+        expect(scrollTop).toBe(105);
+        expect(groupDropLines(root)).toEqual(['area:after']);
+        expect(dragMark()).toBe('active');
 
-      drag('dragstart', groupHandle('status'));
-      flushSync();
-      expect(row('idea').classList.contains('dragging')).toBe(false);
-      expect(section('status').classList.contains('dragging')).toBe(true);
+        await releasePointer(held);
+        expect(commandsMock.reorderTagGroups.mock.calls).toEqual([
+          [['priority', 'area', 'status']],
+        ]);
+        expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
 
-      drag('dragend', groupHandle('status'));
-      flushSync();
-      expect(section('status').classList.contains('dragging')).toBe(false);
+        // The release ended the scrolling with the drag.
+        runFrame(300);
+        expect(scrollTop).toBe(105);
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('queues quick Move down presses, each from where the last left the group', async () => {
@@ -1127,10 +1405,8 @@ describe('TagsSettingsPanel', () => {
       const writes = holdReorders();
       const root = await mountPanel(threeGroups());
 
-      drag('dragstart', groupHandle('status'));
-      drag('dragover', section('area'));
-      drag('drop', section('area'));
-      await settle();
+      layOutGroups(root);
+      await dragGroup('status', 'area', 'lower');
       await moveDown('Priority');
       expect(nameInputs(root, 'Group name')).toEqual(['Area', 'Priority', 'Status']);
 

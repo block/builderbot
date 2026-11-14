@@ -115,8 +115,7 @@
   }
 
   function handleDragOver(event: DragEvent) {
-    // Only drags that started on a tag row; groups, files and text pass
-    // through.
+    // Only drags that started on a tag row; files and text pass through.
     if (!editor.isTagDrag(event) || !row) return;
     event.preventDefault();
     event.stopPropagation();

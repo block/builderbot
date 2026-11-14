@@ -10,15 +10,34 @@
 
   The handle drags the group among the others, and the whole section is the
   drop zone: a group dropped on its upper half lands above it, on its lower
-  half below. Only a drag that started on a group's handle counts, and it
-  carries a type of its own (see tagSettingsDrag). A tag drag is the rows' and
-  the list's to take, and they in turn leave a group drag alone, so it
-  reaches this section from anywhere inside it. Over a place that would
-  leave the groups in their order, the cursor says the drop is refused.
+  half below. The drag is made of pointer events (shared/pointerDrag), not
+  an HTML5 drag, which the desktop build's native file-drop handler would
+  take. The panel resolves every point the pointer reaches, from the
+  sections' rects, so the section only says which group is being dragged and
+  draws the line when the group would land beside it. A tag's drag is still
+  an HTML5 one, and is the rows' and the list's to take.
 
   Like a tag's name (TagRow), the group name keeps what's being typed while
   it has focus, whatever catalog echoes arrive meanwhile.
 -->
+<script module lang="ts">
+  import type { PointerDragPoint, PointerDragScroll } from '../../../shared/pointerDrag';
+
+  /** What every group section shares for dragging groups, from TagsSettingsPanel. */
+  export interface TagGroupDragHandlers {
+    /** The list of sections, which a drag scrolls near its top or bottom edge. */
+    readonly scroll: PointerDragScroll;
+    /** A drag of this group began. `drop` or `cancel` always follows. */
+    start(groupId: string): void;
+    /** The pointer is at `point`: whether a drop there would move the group. */
+    move(point: PointerDragPoint): boolean;
+    /** The group was released at `point`. */
+    drop(point: PointerDragPoint): void;
+    /** The drag ended without a release. */
+    cancel(): void;
+  }
+</script>
+
 <script lang="ts">
   import { untrack } from 'svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
@@ -30,9 +49,9 @@
   import Star from '@lucide/svelte/icons/star';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { pointerDrag, type PointerDragOptions } from '../../../shared/pointerDrag';
   import type { Tag, TagGroup } from '../../../types';
   import { MAX_TAG_NAME_CHARS } from '../../tags/tagState';
-  import { writeTagGroupDrag } from './tagSettingsDrag';
   import TagList from './TagList.svelte';
   import { groupMenuTriggerId, groupNameInputId, type TagsEditor } from './tagsEditor.svelte';
 
@@ -42,13 +61,22 @@
     tags: Tag[];
     canMoveUp: boolean;
     canMoveDown: boolean;
+    groupDrag: TagGroupDragHandlers;
   }
 
-  let { editor, group, tags, canMoveUp, canMoveDown }: Props = $props();
+  let { editor, group, tags, canMoveUp, canMoveDown, groupDrag }: Props = $props();
 
-  let section = $state<HTMLElement | null>(null);
-  let head = $state<HTMLElement | null>(null);
   let dropPlace = $derived(editor.groupDropPlaceFor(group.id));
+
+  // What the handle hands the drag action. The panel resolves every point,
+  // so the section only says which group is being dragged.
+  let dragOptions = $derived<PointerDragOptions>({
+    scroll: groupDrag.scroll,
+    start: () => groupDrag.start(group.id),
+    move: (point) => groupDrag.move(point),
+    drop: (point) => groupDrag.drop(point),
+    cancel: () => groupDrag.cancel(),
+  });
 
   // "Rename" in the menu focuses the name once the menu has closed, rather
   // than letting the menu hand focus back to its trigger.
@@ -90,65 +118,25 @@
       input.select();
     }
   }
-
-  function handleDragStart(event: DragEvent) {
-    if (event.dataTransfer) {
-      writeTagGroupDrag(event.dataTransfer, group.id);
-      // The header, not the section: a group with many tags would hide the
-      // list it is dragged over.
-      if (head) event.dataTransfer.setDragImage(head, 16, head.offsetHeight / 2);
-    }
-    editor.groupDragStart(group.id);
-  }
-
-  function handleDragOver(event: DragEvent) {
-    // Only drags that started on a group's handle; tags, files and text pass
-    // through.
-    if (!editor.isGroupDrag(event) || !section) return;
-    // The section answers for every group drag over it, so none reaches the
-    // name fields or the panel body.
-    event.preventDefault();
-    event.stopPropagation();
-    const rect = section.getBoundingClientRect();
-    editor.groupDragOver({
-      anchorGroupId: group.id,
-      place: event.clientY < rect.top + rect.height / 2 ? 'before' : 'after',
-    });
-    // As in the gap between sections (see TagsSettingsPanel): the cursor
-    // says when a drop won't move the group, which is over the group itself
-    // and over the half that is where it already is.
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = editor.groupDropWouldMove ? 'move' : 'none';
-    }
-  }
-
-  function handleDrop(event: DragEvent) {
-    if (!editor.isGroupDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    editor.groupDrop();
-  }
 </script>
 
 <section
-  bind:this={section}
   class="tag-group"
   class:dragging={editor.dragGroupId === group.id}
   class:drop-before={dropPlace === 'before'}
   class:drop-after={dropPlace === 'after'}
   data-tag-group={group.id}
   aria-labelledby={groupNameInputId(group.id)}
-  ondragover={handleDragOver}
-  ondrop={handleDrop}
 >
-  <header bind:this={head} class="group-head">
+  <header class="group-head">
+    <!-- Dragging is the pointer's way to move a group. The ⋯ menu's Move up
+         and Move down are the keyboard's, so the handle takes no role or tab
+         stop for it. -->
     <span
       class="drag-handle"
-      draggable="true"
       title="Drag to reorder groups"
       aria-hidden="true"
-      ondragstart={handleDragStart}
-      ondragend={() => editor.groupDragEnd()}
+      use:pointerDrag={dragOptions}
     >
       <GripVertical size={14} />
     </span>
@@ -273,7 +261,9 @@
     min-width: 0;
   }
 
-  /* The same handle a tag row has, in the same column. */
+  /* The same handle a tag row has, in the same column. The press that drags
+     it must not start a selection on the way, and the cursor during the
+     drag is the root's (see app.css). */
   .drag-handle {
     display: flex;
     align-items: center;
@@ -283,6 +273,8 @@
     height: 24px;
     color: var(--text-faint);
     cursor: grab;
+    -webkit-user-select: none;
+    user-select: none;
   }
 
   .drag-handle:hover {

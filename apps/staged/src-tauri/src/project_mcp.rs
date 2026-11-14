@@ -1104,6 +1104,9 @@ impl ProjectToolsHandler {
             None,
             p.base_branch,
             head_repo,
+            // The tool's own contract: a branch name that clashes is not
+            // refused here, and the setup it runs inline reports the outcome.
+            false,
         )
         .await
         {

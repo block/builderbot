@@ -126,6 +126,24 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// How many projects each control-server actor holds: every
+    /// [`Project::created_by`] value in use, with the number of projects that
+    /// carry it. Projects created from the app's own UI have no creator and
+    /// are not counted.
+    pub fn count_projects_by_creator(&self) -> Result<Vec<(String, usize)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT created_by, COUNT(*) FROM projects
+             WHERE created_by IS NOT NULL
+             GROUP BY created_by
+             ORDER BY created_by",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Update a project's editable fields. `created_by` is not one of them.
     pub fn update_project(
         &self,

@@ -73,6 +73,26 @@ fn worktree_setup_lock_for(branch_id: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
+/// Per-clone lock that serializes choosing a local branch name and creating
+/// its worktree (see [`check_out_worktree`]). Branches of different projects
+/// are different rows, so [`WORKTREE_SETUP_LOCKS`] does not keep two of them
+/// apart, and they share the clone when they are for the same repository.
+static CLONE_WORKTREE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn clone_worktree_lock_for(repo_path: &Path) -> Arc<Mutex<()>> {
+    let locks = CLONE_WORKTREE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = locks.lock().unwrap_or_else(|p| p.into_inner());
+    // As for `WORKTREE_SETUP_LOCKS`: drop the entries nobody holds.
+    map.retain(|_, v| Arc::strong_count(v) > 1);
+    // One clone must be one key however its path was spelled.
+    let key = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    map.entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
     store
         .lock()
@@ -1131,104 +1151,199 @@ struct NewBranchWorktree {
     created_branch: bool,
 }
 
-/// How many times [`create_worktree_on_new_branch`] moves to another local
-/// name because another project took the one it was about to create.
-const NEW_BRANCH_NAME_ATTEMPTS: usize = 3;
-
 /// Create a worktree on a new local branch `local_branch_name`, started at
-/// `start_point`. The caller found the name free before calling.
-///
-/// The name can be taken between that lookup and the attempt: worktree setup
-/// is serialized per branch row, and two projects that ask for the same
-/// branch of one clone are two rows. When the other project's setup wins,
-/// its worktree holds the name, as a stale worktree found up front would,
-/// and the answer is the same: a unique local name. `local_branch_name` is
-/// updated to it, and `requested_branch` stays the branch on origin.
+/// `start_point`. The caller found the name free, and holds the clone's
+/// worktree lock from that lookup to here ([`check_out_worktree`]), so no
+/// other setup in this process can have taken the name in between.
 fn create_worktree_on_new_branch(
     repo_path: &Path,
-    requested_branch: &str,
-    local_branch_name: &mut String,
+    local_branch_name: &str,
     start_point: &str,
     desired_worktree_path: &Path,
     project_root: Option<&Path>,
 ) -> Result<NewBranchWorktree, String> {
-    let mut attempt = 1;
-    loop {
-        let create_err = match create_worktree_with_fallback(
-            repo_path,
-            local_branch_name,
-            start_point,
-            desired_worktree_path,
-            project_root,
-        ) {
-            Ok(path) => {
-                return Ok(NewBranchWorktree {
-                    path,
-                    adopted_existing: false,
-                    created_branch: true,
-                })
-            }
-            Err(create_err) => create_err,
-        };
+    let create_err = match create_worktree_with_fallback(
+        repo_path,
+        local_branch_name,
+        start_point,
+        desired_worktree_path,
+        project_root,
+    ) {
+        Ok(path) => {
+            return Ok(NewBranchWorktree {
+                path,
+                adopted_existing: false,
+                created_branch: true,
+            })
+        }
+        Err(create_err) => create_err,
+    };
 
-        match find_existing_worktree_for_branch(repo_path, local_branch_name, project_root)? {
-            ExistingWorktree::Found(path) => {
-                log::warn!(
-                    "Reusing existing worktree '{}' for branch '{}' after create failure",
-                    path.display(),
-                    local_branch_name
-                );
-                // Another process created it between the lookup above
-                // and the attempt: theirs to keep.
-                return Ok(NewBranchWorktree {
-                    path,
-                    adopted_existing: true,
-                    created_branch: false,
-                });
+    match find_existing_worktree_for_branch(repo_path, local_branch_name, project_root)? {
+        ExistingWorktree::Found(path) => {
+            log::warn!(
+                "Reusing existing worktree '{}' for branch '{}' after create failure",
+                path.display(),
+                local_branch_name
+            );
+            // Another process created it between the lookup and the
+            // attempt: theirs to keep.
+            Ok(NewBranchWorktree {
+                path,
+                adopted_existing: true,
+                created_branch: false,
+            })
+        }
+        // Something outside this process checked the name out for another
+        // project after the lookup. Retrying with that branch can only
+        // fail: git checks a branch out in one worktree.
+        ExistingWorktree::Stale => Err(create_err),
+        ExistingWorktree::None => {
+            if !git::branch_exists(repo_path, local_branch_name).map_err(|e| e.to_string())? {
+                return Err(create_err);
             }
-            ExistingWorktree::Stale if attempt < NEW_BRANCH_NAME_ATTEMPTS => {
-                // Another project's setup created the branch and checked it
-                // out while this call ran. Retrying with that branch can
-                // only fail: git checks a branch out in one worktree.
-                let unique = unique_branch_name(repo_path, requested_branch)?;
-                log::info!(
-                    "Branch '{local_branch_name}' was checked out by another project during \
-                     setup; using '{unique}' instead"
-                );
-                *local_branch_name = unique;
-                attempt += 1;
-            }
-            ExistingWorktree::Stale => return Err(create_err),
-            ExistingWorktree::None => {
-                if !git::branch_exists(repo_path, local_branch_name).map_err(|e| e.to_string())? {
-                    return Err(create_err);
-                }
-                log::warn!(
-                    "Branch '{}' already exists after create attempt; retrying with existing branch",
-                    local_branch_name
-                );
-                // This arm is only reached for a name that did not exist
-                // when the caller looked (its `branch_exists` check was
-                // false, or `unique_branch_name` had just found it free),
-                // so the branch is the one `worktree add -b` left behind
-                // when it failed after creating it. It is Staged's to point
-                // at origin/<requested> and to delete on a later failure,
-                // the same as when the first attempt succeeds.
-                let path = create_worktree_for_existing_branch_with_fallback(
-                    repo_path,
-                    local_branch_name,
-                    desired_worktree_path,
-                    project_root,
-                )
-                .map_err(|e| e.to_string())?;
-                return Ok(NewBranchWorktree {
-                    path,
-                    adopted_existing: false,
-                    created_branch: true,
-                });
-            }
+            log::warn!(
+                "Branch '{}' already exists after create attempt; retrying with existing branch",
+                local_branch_name
+            );
+            // The name did not exist when the caller looked (its
+            // `branch_exists` check was false, or `unique_branch_name` had
+            // just found it free), and the clone's worktree lock has been
+            // held since. So the branch is the one `worktree add -b` left
+            // behind when it failed after creating it, and not one another
+            // setup is part-way through checking out. It is Staged's to
+            // point at origin/<requested> and to delete on a later failure,
+            // the same as when the first attempt succeeds.
+            let path = create_worktree_for_existing_branch_with_fallback(
+                repo_path,
+                local_branch_name,
+                desired_worktree_path,
+                project_root,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(NewBranchWorktree {
+                path,
+                adopted_existing: false,
+                created_branch: true,
+            })
         }
     }
+}
+
+/// The checkout [`check_out_worktree`] made or found for a branch.
+struct CheckedOutWorktree {
+    path: PathBuf,
+    /// The local branch the worktree is on: the requested name, or a unique
+    /// one when another project's worktree holds that name.
+    local_branch_name: String,
+    /// Whether the worktree belongs to someone else: one the user already
+    /// had, or one another process made while this call was running. Its
+    /// upstream is left alone and it is never removed on failure.
+    adopted_existing: bool,
+    /// Whether the local branch itself was created here, so a failure
+    /// further down can delete it along with the worktree instead of
+    /// leaving the name taken for the next attempt, and so its upstream may
+    /// be cleared.
+    created_branch: bool,
+}
+
+/// Find or create the worktree for `requested_branch` in the clone at
+/// `repo_path`: reuse one this project already has, check out the local
+/// branch when it exists and is free, and otherwise create the branch, under
+/// a unique local name when another project's worktree holds the requested
+/// one.
+///
+/// The whole of it runs under the clone's worktree lock. Looking a name up
+/// and creating it are two steps, and two projects setting up the same
+/// branch of one clone used to interleave them: both found the name free,
+/// one `git worktree add -b` won, and the loser could not tell the winner's
+/// branch from a leftover of its own failed attempt. `git worktree add -b`
+/// creates the branch a moment before a worktree holds it, so no check made
+/// from outside that window can tell either. With the lock the second setup
+/// looks only after the first has finished, finds the name held, and takes
+/// a unique one, the way it does for a worktree that was there all along.
+///
+/// A setup with nothing racing it runs the same steps in the same order as
+/// before the lock, and only waits when another setup is working in the
+/// same clone.
+fn check_out_worktree(
+    repo_path: &Path,
+    requested_branch: &str,
+    pr_number: Option<u64>,
+    base_branch: &str,
+    desired_worktree_path: &Path,
+    project_root: Option<&Path>,
+) -> Result<CheckedOutWorktree, String> {
+    let lock = clone_worktree_lock_for(repo_path);
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    // When a stale worktree from another project holds the branch name, pick
+    // a unique local branch name so we don't collide.
+    let mut local_branch_name = requested_branch.to_string();
+    let existing_worktree =
+        find_existing_worktree_for_branch(repo_path, requested_branch, project_root)?;
+    if let ExistingWorktree::Stale = &existing_worktree {
+        local_branch_name = unique_branch_name(repo_path, requested_branch)?;
+        log::info!(
+            "Branch '{}' is checked out in a stale worktree; using '{}' instead",
+            requested_branch,
+            local_branch_name,
+        );
+    }
+
+    if let ExistingWorktree::Found(path) = existing_worktree {
+        return Ok(CheckedOutWorktree {
+            path,
+            local_branch_name,
+            adopted_existing: true,
+            created_branch: false,
+        });
+    }
+    if local_branch_name == requested_branch
+        && git::branch_exists(repo_path, &local_branch_name).map_err(|e| e.to_string())?
+    {
+        let path = create_worktree_for_existing_branch_with_fallback(
+            repo_path,
+            &local_branch_name,
+            desired_worktree_path,
+            project_root,
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(CheckedOutWorktree {
+            path,
+            local_branch_name,
+            adopted_existing: false,
+            created_branch: false,
+        });
+    }
+
+    // For PRs, always start from `refs/pull/<N>/head` — the branch
+    // name on origin may belong to a different branch when the PR
+    // comes from a fork repo.  For non-PR branches, fall back to the
+    // remote tracking ref or base_branch.
+    let remote_ref = format!("origin/{requested_branch}");
+    let pr_head_sha;
+    let start_point = if let Some(pr_num) = pr_number {
+        pr_head_sha = git::fetch_pr_head_sha(repo_path, pr_num).map_err(|e| e.to_string())?;
+        &pr_head_sha
+    } else if git::remote_branch_exists(repo_path, requested_branch).map_err(|e| e.to_string())? {
+        &remote_ref
+    } else {
+        base_branch
+    };
+    let created = create_worktree_on_new_branch(
+        repo_path,
+        &local_branch_name,
+        start_point,
+        desired_worktree_path,
+        project_root,
+    )?;
+    Ok(CheckedOutWorktree {
+        path: created.path,
+        local_branch_name,
+        adopted_existing: created.adopted_existing,
+        created_branch: created.created_branch,
+    })
 }
 
 fn local_base_ref_for_worktree(repo_path: &Path, base_branch: &str) -> Option<String> {
@@ -1745,69 +1860,21 @@ pub(crate) fn create_and_link_worktree<R: tauri::Runtime>(
     // become the push target, so such a checkout is left tracking nothing.
     let head_in_fork = branch.pr_number.is_some() && pr_head_is_in_fork(store, branch)?;
 
-    // When a stale worktree from another project holds the branch name, pick
-    // a unique local branch name so we don't collide.
-    let mut local_branch_name = branch.branch_name.clone();
-    let existing_worktree =
-        find_existing_worktree_for_branch(repo_path, requested_branch, project_root_ref)?;
-    if let ExistingWorktree::Stale = &existing_worktree {
-        local_branch_name = unique_branch_name(repo_path, &branch.branch_name)?;
-        log::info!(
-            "Branch '{}' is checked out in a stale worktree; using '{}' instead",
-            branch.branch_name,
-            local_branch_name,
-        );
-    }
-
-    // Whether the worktree belongs to someone else — one the user already had,
-    // or one another process made while this call was running. Its upstream
-    // is left alone and it is never removed on failure.
-    let mut adopted_existing = matches!(existing_worktree, ExistingWorktree::Found(_));
-    // Whether the local branch itself was created here, so a failure further
-    // down can delete it along with the worktree instead of leaving the name
-    // taken for the next attempt, and so its upstream may be cleared.
-    let mut created_branch = false;
-    let worktree_path = if let ExistingWorktree::Found(path) = existing_worktree {
-        path
-    } else if local_branch_name == branch.branch_name
-        && git::branch_exists(repo_path, &local_branch_name).map_err(|e| e.to_string())?
-    {
-        create_worktree_for_existing_branch_with_fallback(
-            repo_path,
-            &local_branch_name,
-            desired_worktree_path,
-            project_root_ref,
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        // For PRs, always start from `refs/pull/<N>/head` — the branch
-        // name on origin may belong to a different branch when the PR
-        // comes from a fork repo.  For non-PR branches, fall back to the
-        // remote tracking ref or base_branch.
-        let remote_ref = format!("origin/{requested_branch}");
-        let pr_head_sha;
-        let start_point = if let Some(pr_num) = branch.pr_number {
-            pr_head_sha = git::fetch_pr_head_sha(repo_path, pr_num).map_err(|e| e.to_string())?;
-            &pr_head_sha
-        } else if git::remote_branch_exists(repo_path, requested_branch)
-            .map_err(|e| e.to_string())?
-        {
-            &remote_ref
-        } else {
-            &branch.base_branch
-        };
-        let created = create_worktree_on_new_branch(
-            repo_path,
-            requested_branch,
-            &mut local_branch_name,
-            start_point,
-            desired_worktree_path,
-            project_root_ref,
-        )?;
-        adopted_existing = created.adopted_existing;
-        created_branch = created.created_branch;
-        created.path
-    };
+    // The name lookup and the `git worktree add` it leads to, serialized per
+    // clone: another project's setup may be working in this clone too.
+    let CheckedOutWorktree {
+        path: worktree_path,
+        local_branch_name,
+        adopted_existing,
+        created_branch,
+    } = check_out_worktree(
+        repo_path,
+        requested_branch,
+        branch.pr_number,
+        &branch.base_branch,
+        desired_worktree_path,
+        project_root_ref,
+    )?;
 
     // Git's upstream tracking is what every push, pull, rebase and
     // comparison reads the branch on origin from, so a worktree Staged
@@ -4875,67 +4942,239 @@ mod upstream_tracking_tests {
         );
     }
 
-    /// Found live: two projects created seconds apart on the same pull
-    /// request branch of one clone. Each setup looked the name up before the
-    /// other had created it, so the loser reached `worktree add -b` with a
-    /// name the winner's worktree now held, retried with "the existing
-    /// branch", and failed for good. This is the loser's state: the caller
-    /// saw the name free, and another project's worktree holds it.
+    /// [`check_out_worktree`] for a project whose worktrees live under
+    /// `project_root`, on a branch started from `origin/main` when new.
+    fn check_out(
+        clone: &Path,
+        branch: &str,
+        project_root: &Path,
+    ) -> Result<CheckedOutWorktree, String> {
+        check_out_worktree(
+            clone,
+            branch,
+            None,
+            "origin/main",
+            &project_root.join(branch),
+            Some(project_root),
+        )
+    }
+
+    fn head_branch(worktree: &Path) -> String {
+        git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"])
+    }
+
+    /// Found live, and then again in review: two projects created seconds
+    /// apart on the same branch of one clone. Each setup looked the name up
+    /// before the other had created it. The loser reached `worktree add -b`
+    /// with a name the winner had taken, and could not tell the winner's
+    /// branch from a leftover of its own failed attempt.
+    ///
+    /// The lookup and the creation are one step per clone now. However the
+    /// setups are scheduled, each gets a worktree, on a local name nobody
+    /// else has, at the branch they all asked for.
     #[test]
-    fn a_name_another_project_takes_during_setup_is_deduplicated() {
+    fn projects_setting_up_the_same_branch_at_once_get_a_worktree_each() {
+        const PROJECTS: usize = 6;
+        let (_origin, clone, _) = clone_of_origin(false);
+        let roots: Vec<TempDir> = (0..PROJECTS)
+            .map(|_| TempDir::new("project-root"))
+            .collect();
+        let start = std::sync::Barrier::new(PROJECTS);
+
+        let checked_out: Vec<CheckedOutWorktree> = std::thread::scope(|scope| {
+            let setups: Vec<_> = roots
+                .iter()
+                .map(|root| {
+                    let (clone, start) = (clone.path(), &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        check_out(clone, "feature-x", root.path())
+                    })
+                })
+                .collect();
+            setups
+                .into_iter()
+                .map(|setup| setup.join().unwrap().expect("every setup gets a worktree"))
+                .collect()
+        });
+
+        let mut names: Vec<&str> = checked_out
+            .iter()
+            .map(|worktree| worktree.local_branch_name.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "feature-x",
+                "feature-x-2",
+                "feature-x-3",
+                "feature-x-4",
+                "feature-x-5",
+                "feature-x-6"
+            ]
+        );
+        let requested = git(clone.path(), &["rev-parse", "origin/feature-x"]);
+        for (worktree, root) in checked_out.iter().zip(&roots) {
+            assert!(worktree.created_branch, "{}", worktree.local_branch_name);
+            assert!(!worktree.adopted_existing, "{}", worktree.local_branch_name);
+            assert!(worktree.path.starts_with(root.path()));
+            assert_eq!(head_branch(&worktree.path), worktree.local_branch_name);
+            assert_eq!(git(&worktree.path, &["rev-parse", "HEAD"]), requested);
+        }
+    }
+
+    /// The same race with its timing pinned: a setup that arrives while
+    /// another holds the clone does nothing until that one is done, and then
+    /// looks the name up, so it sees what the other made. A lookup made
+    /// before the wait would have found the name free.
+    #[test]
+    fn a_setup_looks_the_name_up_only_once_it_has_the_clone() {
+        let (_origin, clone, _) = clone_of_origin(false);
+        let winner_root = TempDir::new("winner-root");
+        let loser_root = TempDir::new("loser-root");
+        let lock = clone_worktree_lock_for(clone.path());
+        let winner = lock.lock().unwrap();
+
+        std::thread::scope(|scope| {
+            let (done, finished) = std::sync::mpsc::channel();
+            let (clone_path, loser_path) = (clone.path(), loser_root.path());
+            scope.spawn(move || {
+                done.send(check_out(clone_path, "feature-x", loser_path))
+                    .unwrap();
+            });
+
+            // The loser is held off while the winner works.
+            assert!(
+                finished
+                    .recv_timeout(std::time::Duration::from_millis(400))
+                    .is_err(),
+                "a setup must wait for the clone's worktree lock"
+            );
+            assert!(!git::branch_exists(clone.path(), "feature-x").unwrap());
+            assert!(!loser_root.path().join("feature-x").exists());
+
+            // The winner creates the branch and its worktree, as its own
+            // `git worktree add -b` does, and lets go.
+            let winner_path = winner_root.path().join("feature-x");
+            git(
+                clone.path(),
+                &[
+                    "worktree",
+                    "add",
+                    winner_path.to_str().unwrap(),
+                    "-b",
+                    "feature-x",
+                    "origin/feature-x",
+                ],
+            );
+            drop(winner);
+
+            let loser = finished
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .expect("the waiting setup runs once the clone is free")
+                .unwrap();
+            assert_eq!(loser.local_branch_name, "feature-x-2");
+            assert!(loser.created_branch);
+            assert!(!loser.adopted_existing);
+            assert_eq!(head_branch(&loser.path), "feature-x-2");
+            // The winner's checkout is untouched.
+            assert_eq!(head_branch(&winner_path), "feature-x");
+        });
+    }
+
+    /// One clone is one lock however its path is spelled, and two clones
+    /// never wait on each other.
+    #[test]
+    fn the_worktree_lock_is_per_clone() {
+        let (_origin, clone, _) = clone_of_origin(false);
+        let (_other_origin, other_clone, _) = clone_of_origin(false);
+
+        let lock = clone_worktree_lock_for(clone.path());
+        let respelled = clone_worktree_lock_for(&clone.path().join("."));
+        let other = clone_worktree_lock_for(other_clone.path());
+
+        assert!(Arc::ptr_eq(&lock, &respelled));
+        assert!(!Arc::ptr_eq(&lock, &other));
+        let _held = lock.lock().unwrap();
+        assert!(other.try_lock().is_ok());
+    }
+
+    /// With nothing racing it, a setup does what it did before the lock, in
+    /// each of the four cases it tells apart.
+    #[test]
+    fn a_setup_on_its_own_checks_out_as_before() {
         let (_origin, clone, _other_project) = clone_with_stale_feature_x();
         let project_root = TempDir::new("project-root");
-        let mut local_branch_name = "feature-x".to_string();
+        // Spelled the way git lists a worktree, so the project's own one is
+        // recognised under it: the temp directory is behind a symlink on
+        // macOS.
+        let root = &project_root.path().canonicalize().unwrap();
 
-        let created = create_worktree_on_new_branch(
-            clone.path(),
-            "feature-x",
-            &mut local_branch_name,
-            "origin/feature-x",
-            &project_root.path().join("feature-x"),
-            Some(project_root.path()),
-        )
-        .unwrap();
-
-        assert_eq!(local_branch_name, "feature-x-2");
-        assert!(created.created_branch);
-        assert!(!created.adopted_existing);
+        // A name nobody holds is created as asked, from the base.
+        let fresh = check_out(clone.path(), "feature-y", root).unwrap();
+        assert_eq!(fresh.local_branch_name, "feature-y");
+        assert!(fresh.created_branch && !fresh.adopted_existing);
+        assert_eq!(head_branch(&fresh.path), "feature-y");
         assert_eq!(
-            git(&created.path, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "feature-x-2"
+            git(&fresh.path, &["rev-parse", "HEAD"]),
+            git(clone.path(), &["rev-parse", "origin/main"])
         );
+
+        // This project's own worktree for the branch is reused, not made
+        // again.
+        let again = check_out(clone.path(), "feature-y", root).unwrap();
+        assert_eq!(again.path, fresh.path);
+        assert_eq!(again.local_branch_name, "feature-y");
+        assert!(again.adopted_existing && !again.created_branch);
+
+        // A local branch with no worktree gets one, and is not Staged's to
+        // delete.
+        git(clone.path(), &["branch", "feature-z", "origin/main"]);
+        let existing = check_out(clone.path(), "feature-z", root).unwrap();
+        assert_eq!(existing.local_branch_name, "feature-z");
+        assert!(!existing.created_branch && !existing.adopted_existing);
+        assert_eq!(head_branch(&existing.path), "feature-z");
+
+        // A name another project's worktree holds is de-duplicated, and
+        // starts where the branch on origin is.
+        let deduplicated = check_out(clone.path(), "feature-x", root).unwrap();
+        assert_eq!(deduplicated.local_branch_name, "feature-x-2");
+        assert!(deduplicated.created_branch && !deduplicated.adopted_existing);
+        assert_eq!(head_branch(&deduplicated.path), "feature-x-2");
         assert_eq!(
-            git(&created.path, &["rev-parse", "HEAD"]),
+            git(&deduplicated.path, &["rev-parse", "HEAD"]),
             git(clone.path(), &["rev-parse", "origin/feature-x"])
         );
         // The other project's checkout is untouched.
         assert!(matches!(
-            find_existing_worktree_for_branch(clone.path(), "feature-x", Some(project_root.path())),
+            find_existing_worktree_for_branch(clone.path(), "feature-x", Some(root)),
             Ok(ExistingWorktree::Stale)
         ));
     }
 
-    /// The ordinary case is unchanged: a name nobody holds is created as
-    /// asked, on the first attempt.
+    /// A name that something outside this process checked out for another
+    /// project after the lookup is not retried under the same name: git
+    /// checks a branch out in one worktree, so the attempt's own error is
+    /// the answer.
     #[test]
-    fn a_name_nobody_holds_is_created_as_asked() {
+    fn a_name_taken_outside_the_lock_fails_with_the_create_error() {
         let (_origin, clone, _other_project) = clone_with_stale_feature_x();
         let project_root = TempDir::new("project-root");
-        let mut local_branch_name = "feature-y".to_string();
 
-        let created = create_worktree_on_new_branch(
+        let err = match create_worktree_on_new_branch(
             clone.path(),
-            "feature-y",
-            &mut local_branch_name,
-            "origin/main",
-            &project_root.path().join("feature-y"),
+            "feature-x",
+            "origin/feature-x",
+            &project_root.path().join("feature-x"),
             Some(project_root.path()),
-        )
-        .unwrap();
+        ) {
+            Ok(created) => panic!("checked out twice at {}", created.path.display()),
+            Err(err) => err,
+        };
 
-        assert_eq!(local_branch_name, "feature-y");
-        assert!(created.created_branch);
-        assert!(!created.adopted_existing);
+        assert!(err.contains("feature-x"), "{err}");
+        assert!(!project_root.path().join("feature-x").exists());
     }
 
     #[test]

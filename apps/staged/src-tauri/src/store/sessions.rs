@@ -36,7 +36,49 @@ pub struct ChildSessionInfo {
     pub branch_id: String,
 }
 
+/// What a session's control credential is recorded as, in
+/// `sessions.started_by` and `projects.created_by`: this prefix and the
+/// session's id (`Actor::started_by` in `control_server`).
+const SESSION_ACTOR_PREFIX: &str = "session:";
+
+/// The session id a recorded actor names, when the actor is a session.
+/// `None` for a connected app (`app:<grant-id>`) and for anything else.
+pub fn session_actor_id(actor: &str) -> Option<&str> {
+    actor
+        .strip_prefix(SESSION_ACTOR_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
 impl Store {
+    /// The session at the top of the chain of sessions that started
+    /// `session_id`: follow `sessions.started_by` from session to session
+    /// until one was not started by a session. That is one the user started
+    /// in the app (NULL), one a connected app started (`app:<grant-id>`), or
+    /// one whose row is gone, which ends the chain where it broke.
+    ///
+    /// The walk is bounded: `None` when the top is more than `max_depth`
+    /// links up, which also covers a chain that loops. Each link is one
+    /// single-row read by primary key, all under one hold of the connection.
+    pub fn session_lineage_root(
+        &self,
+        session_id: &str,
+        max_depth: usize,
+    ) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut starter = conn.prepare("SELECT started_by FROM sessions WHERE id = ?1")?;
+        let mut current = session_id.to_string();
+        for _ in 0..=max_depth {
+            let started_by: Option<Option<String>> = starter
+                .query_row(params![current], |row| row.get(0))
+                .optional()?;
+            match started_by.flatten().as_deref().and_then(session_actor_id) {
+                Some(parent) => current = parent.to_string(),
+                None => return Ok(Some(current)),
+            }
+        }
+        Ok(None)
+    }
+
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let provider_metadata_json = session

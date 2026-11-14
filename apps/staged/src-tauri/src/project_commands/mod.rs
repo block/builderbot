@@ -2,8 +2,11 @@
 //! the Tauri commands, the web/control `dispatch` arms and the MCP tools.
 
 mod add_repo;
+mod branch_in_use;
+mod branch_name;
 mod control;
 mod create;
+mod creation_limit;
 mod pr_note;
 mod rename;
 mod repo_spec;

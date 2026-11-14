@@ -53,33 +53,11 @@ pub(crate) struct ProjectCreator {
     /// What `projects.created_by` records: `session:<session-id>` or
     /// `app:<grant-id>`.
     pub actor: String,
-    /// The most projects this actor may hold at once, counted from the
-    /// `created_by` rows, so deleting one in the app frees a slot. `None`
-    /// for an actor that is not limited.
+    /// The most projects this actor's chain may hold at once, counted from
+    /// the `created_by` rows, so deleting one in the app frees a slot. A
+    /// session shares the allowance with the sessions under the same root
+    /// (see `creation_limit`). `None` for an actor that is not limited.
     pub limit: Option<usize>,
-}
-
-impl ProjectCreator {
-    /// Refuse when the creator already holds as many projects as it may.
-    ///
-    /// Only a session is limited today (see `ProjectCreator::for_grant`),
-    /// which is why the message speaks of one.
-    pub(super) fn ensure_within_limit(&self, store: &Store) -> Result<(), String> {
-        let Some(limit) = self.limit else {
-            return Ok(());
-        };
-        let held = store
-            .list_project_ids_created_by(&self.actor)
-            .map_err(|e| e.to_string())?
-            .len();
-        if held >= limit {
-            return Err(format!(
-                "This session has created {held} projects, the limit for one session. \
-                 Deleting one in Staged frees a slot."
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// A project just created.
@@ -211,13 +189,7 @@ pub(crate) async fn create_project_impl(
     // Checked on the name as it will be stored (`with_subpath` can extend
     // it), and ahead of the `gh` wait below so a taken name fails at once.
     // A project created in the meantime is caught by the insert itself.
-    if store
-        .get_project_by_name(&project.name)
-        .map_err(|e| e.to_string())?
-        .is_some()
-    {
-        return Err(duplicate_name_error(&project.name));
-    }
+    ensure_name_is_free(&store, &project.name)?;
 
     // Use the frontend-prefetched default branch when available to avoid a
     // ~500ms-2s GitHub API round-trip during project creation. The fallback
@@ -235,10 +207,99 @@ pub(crate) async fn create_project_impl(
         None => None,
     };
 
-    match &created_by {
-        Some(creator) => insert_project_within_limit(&store, &project, creator)?,
-        None => insert_project(&store, &project)?,
+    let initial_repo = write_project_and(&store, &project, created_by.as_ref(), || {
+        write_initial_repo(
+            &store,
+            &project,
+            InitialRepoRequest {
+                github_repo,
+                effective_base,
+                branch_name,
+                subpath,
+                pr_number,
+                head_repo,
+            },
+        )
+    })?;
+
+    if let Some(note) = &pr_note {
+        note.write(&store, &project.id, "create_project");
     }
+
+    Ok(CreatedProject {
+        project,
+        initial_repo,
+    })
+}
+
+/// Write the project row, then run `rest`, which writes what belongs to the
+/// project. Either both happen or neither does: when `rest` fails, the
+/// project row is deleted again, and its repo and branch rows go with it
+/// (the foreign keys cascade).
+///
+/// A failed create used to leave the project behind with nothing set up.
+/// The caller got an error with no project id, and a project made by a
+/// session went on holding one of its chain's slots.
+///
+/// The store has no transaction that spans these writes: each store method
+/// takes the connection for itself. Deleting on failure gives a caller the
+/// same result. The row is briefly visible to a reader in between.
+fn write_project_and<T>(
+    store: &Store,
+    project: &store::Project,
+    created_by: Option<&ProjectCreator>,
+    rest: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match created_by {
+        Some(creator) => insert_project_within_limit(store, project, creator)?,
+        None => insert_project(store, project)?,
+    }
+    rest().inspect_err(|e| {
+        log::warn!(
+            "[create_project] removing project '{}' again, its creation failed part-way: {e}",
+            project.id
+        );
+        if let Err(delete_err) = store.delete_project(&project.id) {
+            log::error!(
+                "[create_project] could not remove half-created project '{}': {delete_err}",
+                project.id
+            );
+        }
+    })
+}
+
+/// What [`write_initial_repo`] needs beyond the project row.
+struct InitialRepoRequest {
+    github_repo: Option<String>,
+    /// The `origin/`-prefixed base, resolved when there is a repo.
+    effective_base: Option<String>,
+    branch_name: String,
+    subpath: Option<String>,
+    pr_number: Option<u64>,
+    head_repo: Option<String>,
+}
+
+/// The rows that follow a new project's own: the action context of its
+/// primary repo, and, when it was created with a repo, the repo and the one
+/// branch tracked for it.
+///
+/// Runs inside [`write_project_and`], so an error here takes the project row
+/// back out. The action context and the recent-repo entry are keyed by
+/// repository, not by project, and stay: they record that the repository
+/// was used.
+fn write_initial_repo(
+    store: &Store,
+    project: &store::Project,
+    request: InitialRepoRequest,
+) -> Result<Option<InitialRepo>, String> {
+    let InitialRepoRequest {
+        github_repo,
+        effective_base,
+        branch_name,
+        subpath,
+        pr_number,
+        head_repo,
+    } = request;
 
     if let Some(repo) = project.primary_repo() {
         store
@@ -253,10 +314,7 @@ pub(crate) async fn create_project_impl(
                 project.id
             );
         }
-        return Ok(CreatedProject {
-            project,
-            initial_repo: None,
-        });
+        return Ok(None);
     };
 
     // Record this repo as recently used
@@ -296,14 +354,7 @@ pub(crate) async fn create_project_impl(
         );
     }
 
-    if let Some(note) = &pr_note {
-        note.write(&store, &project.id, "create_project");
-    }
-
-    Ok(CreatedProject {
-        project,
-        initial_repo: Some(InitialRepo { repo, branch }),
-    })
+    Ok(Some(InitialRepo { repo, branch }))
 }
 
 /// The project's name without surrounding whitespace. A blank name is
@@ -320,6 +371,54 @@ pub(super) fn required_name(name: &str) -> Result<&str, String> {
 /// (`idx_projects_name`).
 fn duplicate_name_error(name: &str) -> String {
     format!("A project named \"{name}\" already exists.")
+}
+
+/// Refuse a name another project is stored under. `stored_name` is the name
+/// as it will be written, which `Project::with_subpath` can have extended.
+fn ensure_name_is_free(store: &Store, stored_name: &str) -> Result<(), String> {
+    if name_is_taken(store, stored_name)? {
+        return Err(duplicate_name_error(stored_name));
+    }
+    Ok(())
+}
+
+fn name_is_taken(store: &Store, stored_name: &str) -> Result<bool, String> {
+    store
+        .get_project_by_name(stored_name)
+        .map(|project| project.is_some())
+        .map_err(|e| e.to_string())
+}
+
+/// [`ensure_name_is_free`] for a caller that does not know the repository
+/// yet, and so cannot say which name will be stored: refuse only when every
+/// name the project could be stored under is taken.
+///
+/// A project is stored under its name as given, except that one named after
+/// its repository and given a subpath has the subpath appended
+/// (`Project::with_subpath`). Which repository that is is GitHub's to say: it
+/// spells the name, follows a rename, and a pull request can move the
+/// request to a fork's parent. So with a subpath there are two candidates,
+/// and without one there is only the name. Passing here never skips the
+/// check in [`create_project_impl`], which knows the stored name.
+pub(super) fn ensure_a_name_is_free(
+    store: &Store,
+    name: &str,
+    subpath: Option<&str>,
+) -> Result<(), String> {
+    if !name_is_taken(store, name)? {
+        return Ok(());
+    }
+    if let Some(subpath) = subpath {
+        // The model's own rule, applied to a repository named like the
+        // project.
+        let named_after_repo = store::Project::named(name)
+            .with_primary_repo(name)
+            .with_subpath(subpath.to_string());
+        if !name_is_taken(store, &named_after_repo.name)? {
+            return Ok(());
+        }
+    }
+    Err(duplicate_name_error(name))
 }
 
 /// Write the project row. A failure that leaves a project of that name in
@@ -443,8 +542,146 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(err.contains("the limit for one session"), "{err}");
+        assert!(err.contains("the limit they share"), "{err}");
         assert!(store.get_project_by_name("Fix logout").unwrap().is_none());
+    }
+
+    fn limited_creator(limit: usize) -> ProjectCreator {
+        ProjectCreator {
+            actor: "session:s1".to_string(),
+            limit: Some(limit),
+        }
+    }
+
+    /// A create that fails after the project row is written used to leave
+    /// the project behind: no repo set up, no id returned to the caller, and
+    /// one of the creator's slots taken. The row now goes again, with
+    /// whatever was written under it.
+    #[test]
+    fn a_create_that_fails_after_the_insert_leaves_nothing_behind() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let creator = limited_creator(1);
+        let project = store::Project::named("Fix login").with_created_by(&creator.actor);
+
+        let err = write_project_and(&store, &project, Some(&creator), || {
+            // As far as a real create gets before its last write fails.
+            let repo =
+                store::ProjectRepo::new(&project.id, "acme/widgets", "fix-login", None).primary();
+            store.create_project_repo(&repo).unwrap();
+            let branch = store::Branch::new(&project.id, "fix-login", "origin/main")
+                .with_project_repo(&repo.id);
+            store.create_branch(&branch).unwrap();
+            Err::<(), _>("disk I/O error".to_string())
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "disk I/O error", "the caller gets the cause");
+        assert!(store.get_project(&project.id).unwrap().is_none());
+        assert!(store.list_projects().unwrap().is_empty());
+        assert!(store.list_project_repos(&project.id).unwrap().is_empty());
+        assert!(store
+            .list_branches_for_project(&project.id)
+            .unwrap()
+            .is_empty());
+        // The slot is free again, and so is the name.
+        assert!(store
+            .list_project_ids_created_by(&creator.actor)
+            .unwrap()
+            .is_empty());
+        let retried = create(
+            &store,
+            CreateProjectRequest {
+                created_by: Some(creator),
+                ..request_with_repo("Fix login")
+            },
+            false,
+        )
+        .unwrap();
+        assert!(retried.initial_repo.is_some());
+    }
+
+    /// The same for a project made in the app, which has no creator.
+    #[test]
+    fn a_failed_create_in_the_app_leaves_nothing_behind_either() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::named("Fix login");
+
+        let err = write_project_and(&store, &project, None, || {
+            Err::<(), _>("no space left".to_string())
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "no space left");
+        assert!(store.list_projects().unwrap().is_empty());
+    }
+
+    /// A create that succeeds keeps its rows, and one refused at the insert
+    /// (a taken name, a full limit) never runs what follows the insert or
+    /// touches the project that holds the name.
+    #[test]
+    fn only_a_failure_after_the_insert_removes_the_project() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let creator = limited_creator(1);
+        let first = store::Project::named("Fix login").with_created_by(&creator.actor);
+
+        let wrote = write_project_and(&store, &first, Some(&creator), || Ok("rows")).unwrap();
+        assert_eq!(wrote, "rows");
+        assert!(store.get_project(&first.id).unwrap().is_some());
+
+        let ran = std::cell::Cell::new(false);
+        let same_name = store::Project::named("Fix login");
+        let err = write_project_and(&store, &same_name, None, || {
+            ran.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err, "A project named \"Fix login\" already exists.");
+        let over_limit = store::Project::named("Fix logout").with_created_by(&creator.actor);
+        let err = write_project_and(&store, &over_limit, Some(&creator), || {
+            ran.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.contains("the limit they share"), "{err}");
+
+        assert!(!ran.get(), "nothing follows an insert that was refused");
+        assert_eq!(store.list_projects().unwrap().len(), 1);
+        assert!(store.get_project(&first.id).unwrap().is_some());
+    }
+
+    /// Before the repository is resolved the stored name is not always
+    /// known, so the early check refuses only when every candidate is
+    /// taken. It must never refuse a request the full check would admit.
+    #[test]
+    fn the_early_name_check_refuses_only_when_every_candidate_is_taken() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        create(&store, request("widgets"), false).unwrap();
+
+        // No subpath: the name is stored as given.
+        assert_eq!(
+            ensure_a_name_is_free(&store, "widgets", None).unwrap_err(),
+            "A project named \"widgets\" already exists."
+        );
+        ensure_a_name_is_free(&store, "gadgets", None).unwrap();
+        ensure_a_name_is_free(&store, "gadgets", Some("services/auth")).unwrap();
+
+        // With a subpath, a project named after its repository would be
+        // stored as `widgets (services/auth)`, which is free.
+        ensure_a_name_is_free(&store, "widgets", Some("services/auth")).unwrap();
+        let in_subpath = CreateProjectRequest {
+            subpath: Some("services/auth".to_string()),
+            ..request_with_repo("widgets")
+        };
+        let extended = create(&store, in_subpath, false).unwrap();
+        assert_eq!(extended.project.name, "widgets (services/auth)");
+
+        // Now both candidates are taken.
+        assert_eq!(
+            ensure_a_name_is_free(&store, "widgets", Some("services/auth")).unwrap_err(),
+            "A project named \"widgets\" already exists."
+        );
+        // Another subpath leaves a candidate free.
+        ensure_a_name_is_free(&store, "widgets", Some("services/billing")).unwrap();
     }
 
     /// A project needs no repo: it is one row, local, with nothing attached.

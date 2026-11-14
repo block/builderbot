@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::control_server::{Access, Actor, Scope};
+use crate::project_commands::add_repo::add_project_repo_impl;
 use crate::project_commands::create::{create_project_impl, CreatedProject};
+use crate::project_commands::creation_limit::SESSION_LINEAGE_MAX_DEPTH;
 use crate::project_commands::repo_spec::tests::{pull_request, FakeHost};
 use crate::store;
 
@@ -100,6 +102,39 @@ fn add(repo: RepoSpecRequest) -> ControlAddRepo {
     ControlAddRepo { repo, reason: None }
 }
 
+/// What a chain that has used its allowance is told.
+const LIMIT_REACHED: &str = "This session and the sessions in its chain have created 10 \
+     projects, the limit they share. A chain is a session and every session started from it, \
+     directly or through another. Deleting one of those projects in Staged frees a slot.";
+
+/// A session row started by `starter` (an actor string), and its id.
+fn session_started_by(store: &Store, starter: Option<&str>) -> String {
+    let mut session = store::Session::new_queued("work");
+    if let Some(starter) = starter {
+        session = session.with_started_by(starter);
+    }
+    store.create_session(&session).unwrap();
+    session.id
+}
+
+/// A session row started by the session `parent`, and its id.
+fn child_of(store: &Store, parent: &str) -> String {
+    session_started_by(store, Some(&format!("session:{parent}")))
+}
+
+/// Create `count` projects as `session_id`, named after `label`.
+fn create_many(host: &FakeHost, store: &Arc<Store>, session_id: &str, label: &str, count: usize) {
+    for n in 0..count {
+        create(
+            host,
+            store,
+            session(session_id),
+            bare(&format!("{label} {n}")),
+        )
+        .unwrap_or_else(|e| panic!("{label} {n} is within the limit: {e}"));
+    }
+}
+
 // --- Who created it -----------------------------------------------
 
 #[test]
@@ -181,11 +216,7 @@ fn a_session_is_refused_its_eleventh_project_and_admitted_again_after_a_deletion
         with_repo("One too many", repo("acme/widgets")),
     )
     .unwrap_err();
-    assert_eq!(
-        err,
-        "This session has created 10 projects, the limit for one session. \
-         Deleting one in Staged frees a slot."
-    );
+    assert_eq!(err, LIMIT_REACHED);
     assert!(
         host.calls().is_empty(),
         "the limit is checked before GitHub is asked anything: {:?}",
@@ -246,8 +277,330 @@ fn the_limit_is_held_where_the_row_is_written() {
     write(&store, first).unwrap();
     let err = write(&store, second).unwrap_err();
 
-    assert!(err.contains("the limit for one session"), "{err}");
+    assert_eq!(err, LIMIT_REACHED);
     assert!(store.get_project_by_name("Second").unwrap().is_none());
+}
+
+// --- The limit is a chain's ---------------------------------------
+
+/// The bypass the review found: a session at its limit starts a session,
+/// and that one has a session id of its own. Counted per session id it got
+/// a fresh allowance, and so did every session it started in turn. A
+/// session and the sessions descended from it now draw on one allowance.
+#[test]
+fn a_session_started_by_a_session_shares_its_allowance() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let root = session_started_by(&store, None);
+    let child = child_of(&store, &root);
+    let grandchild = child_of(&store, &child);
+
+    create_many(&host, &store, &root, "Root", 6);
+    create_many(&host, &store, &child, "Child", 3);
+    create_many(&host, &store, &grandchild, "Grandchild", 1);
+
+    // Ten between them: none of the three may create another, and a
+    // session started now is in the same chain.
+    let newcomer = child_of(&store, &grandchild);
+    for (who, session_id) in [
+        ("the root", &root),
+        ("its child", &child),
+        ("its grandchild", &grandchild),
+        ("a session started after the limit was reached", &newcomer),
+    ] {
+        let err = create(
+            &host,
+            &store,
+            session(session_id),
+            with_repo("One too many", repo("acme/widgets")),
+        )
+        .unwrap_err();
+        assert_eq!(err, LIMIT_REACHED, "{who}");
+    }
+    assert!(
+        host.calls().is_empty(),
+        "the chain's limit is checked before GitHub is asked anything: {:?}",
+        host.calls()
+    );
+    // Each project is still stamped with the session that made it, which is
+    // what that session's reach is looked up from.
+    assert_eq!(
+        store
+            .list_project_ids_created_by(&format!("session:{child}"))
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+/// A session running in a project another session created can still create
+/// projects. It draws on the allowance of the chain it belongs to.
+#[test]
+fn a_session_in_a_session_created_project_can_create_within_the_chains_allowance() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let root = session_started_by(&store, None);
+    let made_by_root = create(&host, &store, session(&root), bare("Made by the root")).unwrap();
+    assert_eq!(
+        created_by(&store, &made_by_root.project.id),
+        Some(format!("session:{root}"))
+    );
+    // The root starts a session in the project it made.
+    let child = child_of(&store, &root);
+
+    let made_by_child = create(&host, &store, session(&child), bare("Made by the child")).unwrap();
+
+    assert_eq!(
+        created_by(&store, &made_by_child.project.id),
+        Some(format!("session:{child}"))
+    );
+    // Two of the chain's ten are used, so eight more fit, from either.
+    create_many(&host, &store, &child, "Child", 4);
+    create_many(&host, &store, &root, "Root", 4);
+    let err = create(&host, &store, session(&child), bare("One too many")).unwrap_err();
+    assert_eq!(err, LIMIT_REACHED);
+}
+
+/// The projects a chain holds are counted wherever in the chain they were
+/// made, so deleting any of them frees a slot for every session in it.
+#[test]
+fn deleting_a_project_anywhere_in_the_chain_frees_a_slot_for_all_of_it() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let root = session_started_by(&store, None);
+    let child = child_of(&store, &root);
+    create_many(&host, &store, &root, "Root", CREATED_PROJECT_LIMIT - 1);
+    let last = create(&host, &store, session(&child), bare("The child's")).unwrap();
+    create(&host, &store, session(&root), bare("Refused")).unwrap_err();
+
+    // The user deletes the child's project, and the root may create again.
+    store.delete_project(&last.project.id).unwrap();
+
+    create(&host, &store, session(&root), bare("Admitted")).unwrap();
+    create(&host, &store, session(&child), bare("Refused again")).unwrap_err();
+}
+
+/// Chains are counted apart. Sessions the user started are different roots,
+/// and so is a session a connected app started: an app is not a session.
+#[test]
+fn chains_under_different_roots_do_not_share_an_allowance() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let root = session_started_by(&store, None);
+    let child = child_of(&store, &root);
+    create_many(&host, &store, &child, "Full chain", CREATED_PROJECT_LIMIT);
+
+    let another_root = session_started_by(&store, None);
+    let under_another = child_of(&store, &another_root);
+    let by_app = session_started_by(&store, Some("app:g1"));
+    let by_same_app = session_started_by(&store, Some("app:g1"));
+    for session_id in [&another_root, &under_another, &by_app, &by_same_app] {
+        create(
+            &host,
+            &store,
+            session(session_id),
+            bare(&format!("From {session_id}")),
+        )
+        .unwrap_or_else(|e| panic!("another chain has its own allowance: {e}"));
+    }
+    // A session the store holds no row for is a chain of its own, as the
+    // tests above this section rely on.
+    create(&host, &store, session("no-row"), bare("From no-row")).unwrap();
+}
+
+/// Two sessions of one chain that both passed the early check cannot both
+/// take the chain's last slot: the chain is counted again, under the lock,
+/// where the row is written.
+#[test]
+fn a_chains_limit_is_held_where_the_row_is_written() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let root = session_started_by(&store, None);
+    let child = child_of(&store, &root);
+    create_many(&host, &store, &root, "Root", CREATED_PROJECT_LIMIT - 1);
+    let from_root =
+        create_project_request(&host, &store, session(&root), bare("Root's"), true).unwrap();
+    let from_child =
+        create_project_request(&host, &store, session(&child), bare("Child's"), true).unwrap();
+
+    write(&store, from_child).unwrap();
+    let err = write(&store, from_root).unwrap_err();
+
+    assert_eq!(err, LIMIT_REACHED);
+    assert!(store.get_project_by_name("Root's").unwrap().is_none());
+}
+
+/// The same, with the creates racing for real: many sessions of one chain
+/// ask at once for more projects than the chain has slots left.
+#[test]
+fn racing_creates_across_a_chain_never_exceed_its_allowance() {
+    let store = store();
+    let root = session_started_by(&store, None);
+    let mut sessions = vec![root.clone()];
+    for _ in 0..7 {
+        let parent = sessions.last().unwrap().clone();
+        sessions.push(child_of(&store, &parent));
+    }
+    let host = FakeHost::with_widgets();
+    create_many(&host, &store, &root, "Before", CREATED_PROJECT_LIMIT - 3);
+    let start = std::sync::Barrier::new(sessions.len());
+
+    let admitted = std::thread::scope(|scope| {
+        let creates: Vec<_> = sessions
+            .iter()
+            .map(|session_id| {
+                let (store, start) = (&store, &start);
+                scope.spawn(move || {
+                    let host = FakeHost::with_widgets();
+                    start.wait();
+                    create(
+                        &host,
+                        store,
+                        session(session_id),
+                        bare(&format!("Racing {session_id}")),
+                    )
+                    .is_ok()
+                })
+            })
+            .collect();
+        creates
+            .into_iter()
+            .map(|create| create.join().unwrap())
+            .filter(|admitted| *admitted)
+            .count()
+    });
+
+    assert_eq!(admitted, 3, "exactly the free slots are taken");
+    let held: usize = store
+        .count_projects_by_creator()
+        .unwrap()
+        .iter()
+        .map(|(_, projects)| projects)
+        .sum();
+    assert_eq!(held, CREATED_PROJECT_LIMIT);
+}
+
+/// The walk to the root is bounded. A session further down than the bound
+/// is refused, and is not handed an allowance counted from part-way up.
+#[test]
+fn a_session_too_far_down_its_chain_is_refused() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    let root = session_started_by(&store, None);
+    let mut deepest = root.clone();
+    for _ in 0..SESSION_LINEAGE_MAX_DEPTH {
+        deepest = child_of(&store, &deepest);
+    }
+
+    // As far down as the walk reaches: still in the root's chain.
+    create(&host, &store, session(&deepest), bare("At the bound")).unwrap();
+    assert_eq!(
+        created_by(
+            &store,
+            &store
+                .get_project_by_name("At the bound")
+                .unwrap()
+                .unwrap()
+                .id
+        ),
+        Some(format!("session:{deepest}"))
+    );
+    create_many(&host, &store, &root, "Root", CREATED_PROJECT_LIMIT - 1);
+    assert_eq!(
+        create(&host, &store, session(&deepest), bare("Shared")).unwrap_err(),
+        LIMIT_REACHED
+    );
+
+    // One further: refused whatever the chain holds.
+    let beyond = child_of(&store, &deepest);
+    let err = create(
+        &host,
+        &store,
+        session(&beyond),
+        with_repo("Too deep", repo("acme/widgets")),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        "This session is more than 32 sessions removed from the one that started its chain, \
+         and a chain that long may not create projects."
+    );
+    assert!(host.calls().is_empty(), "{:?}", host.calls());
+    assert!(store.get_project_by_name("Too deep").unwrap().is_none());
+}
+
+/// The actor string a grant records is what the chain is walked from.
+#[test]
+fn a_session_grants_actor_names_the_session_the_chain_is_walked_from() {
+    let creator = ProjectCreator::for_grant(&session_grant("s1"));
+    assert_eq!(store::session_actor_id(&creator.actor), Some("s1"));
+    let app = ProjectCreator::for_grant(&all_projects_app_grant("g1"));
+    assert_eq!(store::session_actor_id(&app.actor), None);
+}
+
+// --- A name already in use ----------------------------------------
+
+/// A taken name used to be refused only by the shared body, after the
+/// resolver had asked GitHub about the repository.
+#[test]
+fn a_taken_name_is_refused_before_github_is_asked_anything() {
+    let store = store();
+    let host = FakeHost::with_widgets();
+    create(&host, &store, session("s1"), bare("Fix login")).unwrap();
+
+    let err = create_project_request(
+        &host,
+        &store,
+        session("s2"),
+        with_repo(" Fix login ", repo("acme/widgets")),
+        true,
+    )
+    .unwrap_err();
+
+    assert_eq!(err, "A project named \"Fix login\" already exists.");
+    assert!(host.calls().is_empty(), "{:?}", host.calls());
+}
+
+/// With a subpath the stored name is not known until the repository is
+/// (`Project::with_subpath` extends a project named after its repository),
+/// so the early check lets a request through while a candidate is free, and
+/// the shared body decides.
+#[test]
+fn a_name_that_may_be_extended_is_left_to_the_shared_body() {
+    let store = store();
+    let mut host = FakeHost::with_widgets();
+    host.add_directory("acme/widgets", "services/auth");
+    create(&host, &store, session("s1"), bare("widgets")).unwrap();
+    let in_auth = |name: &str| {
+        with_repo(
+            name,
+            RepoSpecRequest {
+                subpath: Some("/services/auth/".to_string()),
+                ..repo("Acme/Widgets")
+            },
+        )
+    };
+
+    // Named after the repository as GitHub spells it: stored extended.
+    let extended = create(&host, &store, session("s1"), in_auth("widgets")).unwrap();
+    assert_eq!(extended.project.name, "widgets (services/auth)");
+
+    // Both candidates are taken now, so the same request is refused early.
+    let calls_before = host.calls().len();
+    let err =
+        create_project_request(&host, &store, session("s1"), in_auth("widgets"), true).unwrap_err();
+    assert_eq!(err, "A project named \"widgets\" already exists.");
+    assert_eq!(host.calls().len(), calls_before, "nothing more was asked");
+
+    // A name that is not the repository's is stored as given. `Fix login`
+    // is taken, but `Fix login (services/auth)` is free and the repository
+    // is not known yet, so the request passes the early check.
+    create(&host, &store, session("s1"), bare("Fix login")).unwrap();
+    let request =
+        create_project_request(&host, &store, session("s1"), in_auth("Fix login"), true).unwrap();
+    // The shared body knows the stored name and refuses it.
+    let err = write(&store, request).unwrap_err();
+    assert_eq!(err, "A project named \"Fix login\" already exists.");
 }
 
 // --- What is refused before GitHub is asked ------------------------
@@ -695,6 +1048,216 @@ fn a_pull_request_whose_branch_is_already_attached_is_refused() {
             && err.contains("at subpath 'services/auth'"),
         "{err}"
     );
+}
+
+/// A control caller's request asks the shared body to check the branch
+/// again beside its write.
+#[test]
+fn a_control_add_has_its_branch_checked_again_at_the_write() {
+    let store = store();
+    let project_id = project_with_widgets(&store, "fix-login", None);
+    let mut host = FakeHost::with_widgets();
+    host.add_repo("acme/gadgets", "main");
+
+    let request = add_repo_request(&host, &store, &project_id, add(repo("acme/gadgets"))).unwrap();
+
+    assert!(request.refuse_branch_in_use);
+}
+
+/// The rows an add writes, for a request that passed the early checks.
+fn write_add(
+    store: &Arc<Store>,
+    project_id: &str,
+    request: AddProjectRepoRequest,
+) -> Result<store::ProjectRepo, String> {
+    tauri::async_runtime::block_on(add_project_repo_impl(
+        Arc::clone(store),
+        project_id.to_string(),
+        request.github_repo,
+        request.branch_name,
+        request.subpath,
+        request.set_as_primary,
+        request.reason,
+        request.pr_number,
+        request.default_branch,
+        request.head_repo,
+        request.refuse_branch_in_use,
+    ))
+    .map(|added| added.repo)
+}
+
+/// `acme/widgets` with the directories the parallel adds below attach.
+fn widgets_with_services() -> FakeHost {
+    let mut host = FakeHost::with_widgets();
+    host.add_directory("acme/widgets", "services/auth");
+    host.add_directory("acme/widgets", "services/billing");
+    host
+}
+
+fn branch_in(subpath: &str, branch: &str) -> ControlAddRepo {
+    add(RepoSpecRequest {
+        subpath: Some(subpath.to_string()),
+        branch_name: Some(branch.to_string()),
+        ..repo("acme/widgets")
+    })
+}
+
+/// The gap the review found: the branch was checked before the shared
+/// body's awaits and not again, so two adds of one branch that overlapped
+/// both passed, and the second checkout failed in the background. Both
+/// requests here passed the early check before either wrote.
+#[test]
+fn two_adds_of_one_branch_that_both_passed_the_early_check_cannot_both_be_written() {
+    let store = store();
+    let project_id = project_with_widgets(&store, "main-work", None);
+    let host = widgets_with_services();
+    let first = add_repo_request(
+        &host,
+        &store,
+        &project_id,
+        branch_in("services/auth", "fix-login"),
+    )
+    .unwrap();
+    let second = add_repo_request(
+        &host,
+        &store,
+        &project_id,
+        branch_in("services/billing", "fix-login"),
+    )
+    .unwrap();
+
+    write_add(&store, &project_id, first).unwrap();
+    let err = write_add(&store, &project_id, second).unwrap_err();
+
+    assert_eq!(
+        err,
+        "Branch 'fix-login' of 'acme/widgets' is already attached to this project at subpath \
+         'services/auth'. A branch can be checked out once per project, so give a different \
+         branch name."
+    );
+    let repos = store.list_project_repos(&project_id).unwrap();
+    assert_eq!(repos.len(), 2, "the project's own repo and the first add");
+    assert_eq!(
+        store.list_branches_for_project(&project_id).unwrap().len(),
+        1,
+        "only the first add wrote a branch"
+    );
+}
+
+/// The same with the writes racing for real: of several adds of one branch
+/// to different subpaths, exactly one is written.
+#[test]
+fn racing_adds_of_one_branch_write_exactly_one() {
+    let store = store();
+    let project_id = project_with_widgets(&store, "main-work", None);
+    let subpaths: Vec<String> = (0..6).map(|n| format!("services/s{n}")).collect();
+    let mut host = FakeHost::with_widgets();
+    for subpath in &subpaths {
+        host.add_directory("acme/widgets", subpath);
+    }
+    let requests: Vec<AddProjectRepoRequest> = subpaths
+        .iter()
+        .map(|subpath| {
+            add_repo_request(&host, &store, &project_id, branch_in(subpath, "fix-login")).unwrap()
+        })
+        .collect();
+    let start = std::sync::Barrier::new(requests.len());
+
+    let written = std::thread::scope(|scope| {
+        let adds: Vec<_> = requests
+            .into_iter()
+            .map(|request| {
+                let (store, project_id, start) = (&store, &project_id, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    write_add(store, project_id, request).is_ok()
+                })
+            })
+            .collect();
+        adds.into_iter()
+            .map(|add| add.join().unwrap())
+            .filter(|written| *written)
+            .count()
+    });
+
+    assert_eq!(written, 1);
+    let attached = store
+        .list_project_repos(&project_id)
+        .unwrap()
+        .iter()
+        .filter(|repo| repo.branch_name == "fix-login")
+        .count();
+    assert_eq!(attached, 1);
+}
+
+/// A request from a form is not held to the check, as before: the body
+/// writes the branch the user picked.
+#[test]
+fn an_add_from_a_form_is_not_refused_at_the_write() {
+    let store = store();
+    let project_id = project_with_widgets(&store, "fix-login", None);
+
+    let repo = write_add(
+        &store,
+        &project_id,
+        AddProjectRepoRequest {
+            github_repo: "acme/widgets".to_string(),
+            branch_name: Some("fix-login".to_string()),
+            subpath: Some("services/auth".to_string()),
+            default_branch: Some("main".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(repo.branch_name, "fix-login");
+}
+
+/// A pull request already attached is refused by its number, whatever the
+/// worktree code renamed its local branch to.
+#[test]
+fn a_pull_request_whose_branch_was_renamed_is_refused_by_its_number() {
+    let store = store();
+    let project = store::Project::named("alpha");
+    store.create_project(&project).unwrap();
+    // As the worktree code leaves it when another project's worktree holds
+    // `fix-login`: both rows renamed, the pull request number kept.
+    let attached = store::ProjectRepo::new(&project.id, "acme/widgets", "fix-login-2", None);
+    store.create_project_repo(&attached).unwrap();
+    let branch = store::Branch::new(&project.id, "fix-login-2", "origin/main")
+        .with_project_repo(&attached.id)
+        .with_pr(42);
+    store.create_branch(&branch).unwrap();
+    let mut host = widgets_with_services();
+    host.add_pull_request("acme/widgets", pull_request(42, "fix-login", None));
+    let ask = || {
+        add(RepoSpecRequest {
+            pr_number: Some(42),
+            subpath: Some("services/auth".to_string()),
+            ..repo("acme/widgets")
+        })
+    };
+
+    let err = add_repo_request(&host, &store, &project.id, ask()).unwrap_err();
+
+    assert!(
+        err.contains("Branch 'fix-login' of 'acme/widgets' is already attached")
+            && err.contains("checked out as 'fix-login-2'"),
+        "{err}"
+    );
+    // Another pull request of the repository is free.
+    host.add_pull_request("acme/widgets", pull_request(43, "fix-logout", None));
+    add_repo_request(
+        &host,
+        &store,
+        &project.id,
+        add(RepoSpecRequest {
+            pr_number: Some(43),
+            subpath: Some("services/auth".to_string()),
+            ..repo("acme/widgets")
+        }),
+    )
+    .unwrap();
 }
 
 #[test]

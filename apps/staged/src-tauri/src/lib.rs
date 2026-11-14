@@ -655,6 +655,7 @@ async fn add_project_repo(
             head_repo,
             // The form writes the pull request note itself.
             pr_note: None,
+            refuse_branch_in_use: false,
         },
     )
     .await

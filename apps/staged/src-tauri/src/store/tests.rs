@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::models::*;
 use super::{
-    ChildSessionInfo, SessionPollRequest, Store, ToolCallBody, TranscriptWindow,
+    session_actor_id, ChildSessionInfo, SessionPollRequest, Store, ToolCallBody, TranscriptWindow,
     DEFERRED_TOOL_BODY_MIN_BYTES,
 };
 
@@ -141,6 +141,123 @@ fn test_project_created_by_round_trips_and_lists_by_creator() {
         store.list_project_ids_created_by("session:s1").unwrap(),
         vec![first.id.clone()]
     );
+}
+
+/// The per-creator count is what a shared creation limit is added up from:
+/// one row per actor in use, and nothing for projects made in the app.
+#[test]
+fn test_projects_are_counted_per_creator() {
+    let store = Store::in_memory().unwrap();
+    assert!(store.count_projects_by_creator().unwrap().is_empty());
+
+    store
+        .create_project(&Project::named("By the user"))
+        .unwrap();
+    for name in ["One", "Two", "Three"] {
+        store
+            .create_project(&Project::named(name).with_created_by("session:s1"))
+            .unwrap();
+    }
+    let by_other = Project::named("Other").with_created_by("session:s2");
+    store.create_project(&by_other).unwrap();
+    store
+        .create_project(&Project::named("By an app").with_created_by("app:g1"))
+        .unwrap();
+
+    assert_eq!(
+        store.count_projects_by_creator().unwrap(),
+        vec![
+            ("app:g1".to_string(), 1),
+            ("session:s1".to_string(), 3),
+            ("session:s2".to_string(), 1),
+        ]
+    );
+
+    // A deleted project leaves the count, and its creator when it was the
+    // last one.
+    store.delete_project(&by_other.id).unwrap();
+    assert_eq!(
+        store.count_projects_by_creator().unwrap(),
+        vec![("app:g1".to_string(), 1), ("session:s1".to_string(), 3)]
+    );
+}
+
+/// A session started by `parent`, written to the store.
+fn session_started_by(store: &Store, parent: Option<&str>) -> Session {
+    let mut session = Session::new_queued("work");
+    if let Some(parent) = parent {
+        session = session.with_started_by(parent);
+    }
+    store.create_session(&session).unwrap();
+    session
+}
+
+#[test]
+fn test_session_actor_id_reads_only_a_session_actor() {
+    assert_eq!(session_actor_id("session:s1"), Some("s1"));
+    for other in ["app:g1", "session:", "s1", "SESSION:s1", ""] {
+        assert_eq!(session_actor_id(other), None, "{other:?}");
+    }
+}
+
+/// The root of a chain is the first session not started by a session:
+/// started by the user, by a connected app, or no longer in the store.
+#[test]
+fn test_session_lineage_root_follows_started_by_to_the_top() {
+    let store = Store::in_memory().unwrap();
+    let by_user = session_started_by(&store, None);
+    let child = session_started_by(&store, Some(&format!("session:{}", by_user.id)));
+    let grandchild = session_started_by(&store, Some(&format!("session:{}", child.id)));
+    let by_app = session_started_by(&store, Some("app:g1"));
+    let under_app = session_started_by(&store, Some(&format!("session:{}", by_app.id)));
+    let orphan = session_started_by(&store, Some("session:gone"));
+
+    let root = |id: &str| store.session_lineage_root(id, 8).unwrap();
+    assert_eq!(root(&by_user.id), Some(by_user.id.clone()));
+    assert_eq!(root(&child.id), Some(by_user.id.clone()));
+    assert_eq!(root(&grandchild.id), Some(by_user.id.clone()));
+    // A connected app is not a session, so the session it started is a root.
+    assert_eq!(root(&by_app.id), Some(by_app.id.clone()));
+    assert_eq!(root(&under_app.id), Some(by_app.id.clone()));
+    // A starter whose row is gone ends the chain at its id, so every session
+    // it started still shares one root.
+    assert_eq!(root(&orphan.id), Some("gone".to_string()));
+    // So does a session the store has never held.
+    assert_eq!(root("unknown"), Some("unknown".to_string()));
+}
+
+/// The walk follows at most `max_depth` links, and says so when the top is
+/// further up instead of naming a session that is not the root.
+#[test]
+fn test_session_lineage_root_is_bounded() {
+    let store = Store::in_memory().unwrap();
+    let root = session_started_by(&store, None);
+    let mut chain = vec![root.id.clone()];
+    for _ in 0..4 {
+        let parent = format!("session:{}", chain.last().unwrap());
+        chain.push(session_started_by(&store, Some(&parent)).id);
+    }
+    let deepest = chain.last().unwrap();
+
+    // Four links up: within a bound of four, beyond a bound of three.
+    assert_eq!(
+        store.session_lineage_root(deepest, 4).unwrap(),
+        Some(root.id.clone())
+    );
+    assert_eq!(store.session_lineage_root(deepest, 3).unwrap(), None);
+    assert_eq!(
+        store.session_lineage_root(&root.id, 0).unwrap(),
+        Some(root.id.clone())
+    );
+    assert_eq!(store.session_lineage_root(&chain[1], 0).unwrap(), None);
+
+    // A chain that loops has no top, and the bound ends the walk.
+    let a = Session::new_queued("a");
+    let b = Session::new_queued("b").with_started_by(&format!("session:{}", a.id));
+    let a = a.with_started_by(&format!("session:{}", b.id));
+    store.create_session(&a).unwrap();
+    store.create_session(&b).unwrap();
+    assert_eq!(store.session_lineage_root(&a.id, 32).unwrap(), None);
 }
 
 #[test]

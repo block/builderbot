@@ -17,6 +17,8 @@ pub(crate) struct FakeHost {
     pub(crate) module_counts: HashMap<String, u32>,
     module_count_error: Option<String>,
     pull_requests: HashMap<(String, u64), PullRequest>,
+    /// Repositories whose pull request lookups fail, and with what.
+    pull_request_errors: HashMap<String, String>,
     pub(crate) parents: HashMap<String, String>,
     parent_error: Option<String>,
     /// Open pull requests by `(repo, head branch name)`, in the order
@@ -24,6 +26,9 @@ pub(crate) struct FakeHost {
     pub(crate) branch_pull_requests: HashMap<(String, String), Vec<PullRequest>>,
     branch_pull_request_error: Option<String>,
     default_branches: HashMap<String, String>,
+    /// `(repo, branch)` pairs that exist.
+    branches: HashSet<(String, String)>,
+    branch_lookup_error: Option<String>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -39,6 +44,12 @@ impl FakeHost {
         self.repos.push(github_repo.to_string());
         self.default_branches
             .insert(github_repo.to_string(), default_branch.to_string());
+        self.add_branch(github_repo, default_branch);
+    }
+
+    pub(crate) fn add_branch(&mut self, github_repo: &str, branch: &str) {
+        self.branches
+            .insert((github_repo.to_string(), branch.to_string()));
     }
 
     pub(crate) fn add_pull_request(&mut self, github_repo: &str, pr: PullRequest) {
@@ -102,12 +113,15 @@ impl RepoHost for FakeHost {
         }
     }
 
-    fn pull_request(&self, github_repo: &str, number: u64) -> Result<PullRequest, String> {
+    fn pull_request(&self, github_repo: &str, number: u64) -> Result<Option<PullRequest>, String> {
         self.record(format!("pr {github_repo}#{number}"));
-        self.pull_requests
+        if let Some(e) = self.pull_request_errors.get(github_repo) {
+            return Err(e.clone());
+        }
+        Ok(self
+            .pull_requests
             .get(&(github_repo.to_string(), number))
-            .cloned()
-            .ok_or_else(|| "no pull requests found".to_string())
+            .cloned())
     }
 
     fn parent_repo(&self, github_repo: &str) -> Result<Option<String>, String> {
@@ -140,6 +154,16 @@ impl RepoHost for FakeHost {
             .get(github_repo)
             .cloned()
             .ok_or_else(|| "could not determine the default branch".to_string())
+    }
+
+    fn branch_exists(&self, github_repo: &str, branch_name: &str) -> Result<bool, String> {
+        self.record(format!("branch {github_repo}@{branch_name}"));
+        match &self.branch_lookup_error {
+            Some(e) => Err(e.clone()),
+            None => Ok(self
+                .branches
+                .contains(&(github_repo.to_string(), branch_name.to_string()))),
+        }
     }
 }
 
@@ -573,10 +597,7 @@ fn a_pull_request_that_cannot_be_found_is_refused() {
     )
     .unwrap_err();
 
-    assert_eq!(
-        err,
-        "Could not find pull request #99 in 'acme/widgets': no pull requests found"
-    );
+    assert_eq!(err, "Pull request #99 was not found in 'acme/widgets'.");
     // Nothing else is asked once the pull request is known to be missing.
     assert_eq!(
         host.calls(),
@@ -603,11 +624,87 @@ fn a_pull_request_missing_from_a_fork_and_its_parent_is_refused() {
 
     assert_eq!(
         err,
-        "Could not find pull request #99 in 'forker/widgets' or in 'acme/widgets', \
-         the repository it was forked from: no pull requests found"
+        "Pull request #99 was not found in 'forker/widgets' or in 'acme/widgets', \
+         the repository it was forked from."
     );
 }
 
+/// The fault the review found: any failure of the first lookup used to send
+/// the request to the fork's parent. A network blip on a fork would then
+/// swap the repository for the parent and adopt the parent's pull request of
+/// the same number, which is other code than the caller asked for.
+#[test]
+fn a_failed_pull_request_lookup_on_a_fork_does_not_fall_back_to_its_parent() {
+    let mut host = fork_host(Some("forker/widgets"));
+    host.add_directory("acme/widgets", "services/auth");
+    // The fork has its own pull request 12. The parent's 12 is another
+    // change entirely.
+    host.add_pull_request(
+        "forker/widgets",
+        pull_request(12, "experiment", Some("forker/widgets")),
+    );
+    host.pull_request_errors.insert(
+        "forker/widgets".to_string(),
+        "error connecting to api.github.com".to_string(),
+    );
+
+    let err = resolve_repo_spec(&host, fork_pr_request()).unwrap_err();
+
+    assert_eq!(
+        err,
+        "Could not look up pull request #12 in 'forker/widgets': \
+         error connecting to api.github.com"
+    );
+    assert_eq!(
+        host.calls(),
+        ["pr forker/widgets#12", "repo forker/widgets"],
+        "the parent is asked nothing"
+    );
+}
+
+/// The fallback itself is unchanged: the fork answered that it has no such
+/// pull request, and the parent's lookup failing is reported as that.
+#[test]
+fn a_failed_pull_request_lookup_on_the_parent_is_reported_with_its_cause() {
+    let mut host = fork_host(Some("forker/widgets"));
+    host.pull_request_errors
+        .insert("acme/widgets".to_string(), "HTTP 502".to_string());
+
+    let err = resolve_repo_spec(&host, fork_pr_request()).unwrap_err();
+
+    assert_eq!(
+        err,
+        "Pull request #12 was not found in 'forker/widgets', and it could not be looked up \
+         in 'acme/widgets', the repository it was forked from: HTTP 502"
+    );
+}
+
+#[test]
+fn a_failed_pull_request_lookup_on_a_repo_that_is_no_fork_is_not_a_missing_pull_request() {
+    let mut host = FakeHost::with_widgets();
+    host.pull_request_errors.insert(
+        "acme/widgets".to_string(),
+        "API rate limit exceeded".to_string(),
+    );
+
+    let err = resolve_repo_spec(
+        &host,
+        RepoSpecRequest {
+            pr_number: Some(7),
+            ..request("acme/widgets")
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        "Could not look up pull request #7 in 'acme/widgets': API rate limit exceeded"
+    );
+    assert!(!host.asked("parent acme/widgets"));
+}
+
+/// The pull request is known to be missing from the named repository. Whether
+/// that repository is a fork could not be learned, and the refusal says so.
 #[test]
 fn a_failed_parent_lookup_leaves_the_pull_request_not_found() {
     let host = FakeHost {
@@ -619,7 +716,8 @@ fn a_failed_parent_lookup_leaves_the_pull_request_not_found() {
 
     assert_eq!(
         err,
-        "Could not find pull request #12 in 'forker/widgets': no pull requests found"
+        "Pull request #12 was not found in 'forker/widgets', and Staged could not check \
+         whether that repository is a fork: HTTP 502"
     );
 }
 
@@ -782,7 +880,8 @@ fn a_blank_branch_is_left_to_be_inferred_and_is_not_looked_up() {
 
 #[test]
 fn an_explicit_base_wins_and_nothing_is_detected() {
-    let host = FakeHost::with_widgets();
+    let mut host = FakeHost::with_widgets();
+    host.add_branch("acme/widgets", "release/2");
 
     let resolved = resolve_repo_spec(
         &host,
@@ -795,6 +894,177 @@ fn an_explicit_base_wins_and_nothing_is_detected() {
 
     assert_eq!(resolved.base.as_deref(), Some("release/2"));
     assert!(!host.asked("default-branch acme/widgets"));
+    assert!(host.asked("branch acme/widgets@release/2"));
+}
+
+/// The forms offer only the repository's real branches as a base. A typed
+/// one that does not exist used to write every row and then fail in the
+/// background worktree setup.
+#[test]
+fn an_explicit_base_the_repo_does_not_have_is_refused() {
+    let host = FakeHost::with_widgets();
+
+    let err = resolve_repo_spec(
+        &host,
+        RepoSpecRequest {
+            base: Some("mian".to_string()),
+            ..request("acme/widgets")
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(err, "Base branch 'mian' was not found in 'acme/widgets'.");
+}
+
+/// Unlike the best-effort lookups, the base check must succeed: the caller
+/// chose where the branch starts, and a check that could not be made has
+/// not shown that the base exists.
+#[test]
+fn a_base_check_that_fails_refuses_the_request() {
+    let host = FakeHost {
+        branch_lookup_error: Some("HTTP 502".to_string()),
+        ..FakeHost::with_widgets()
+    };
+
+    let err = resolve_repo_spec(
+        &host,
+        RepoSpecRequest {
+            base: Some("main".to_string()),
+            ..request("acme/widgets")
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        "Could not check that base branch 'main' exists in 'acme/widgets': HTTP 502"
+    );
+}
+
+/// The shared bodies read `origin/<branch>` as `<branch>` on origin, so the
+/// check does too, and the base is passed on as it was typed.
+#[test]
+fn an_origin_prefixed_base_is_checked_without_the_prefix() {
+    let host = FakeHost::with_widgets();
+
+    let resolved = resolve_repo_spec(
+        &host,
+        RepoSpecRequest {
+            base: Some("origin/main".to_string()),
+            ..request("acme/widgets")
+        },
+    )
+    .unwrap();
+
+    assert_eq!(resolved.base.as_deref(), Some("origin/main"));
+    assert!(host.asked("branch acme/widgets@main"));
+}
+
+/// After a fork fallback the base is checked in the parent, which is the
+/// repository that will be cloned.
+#[test]
+fn a_base_is_checked_in_the_repo_that_will_be_cloned() {
+    let mut host = fork_host(Some("forker/widgets"));
+    host.add_directory("acme/widgets", "services/auth");
+
+    // `trunk` is the fork's default branch, and the parent has no such
+    // branch.
+    let err = resolve_repo_spec(
+        &host,
+        RepoSpecRequest {
+            base: Some("trunk".to_string()),
+            ..fork_pr_request()
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(err, "Base branch 'trunk' was not found in 'acme/widgets'.");
+}
+
+/// A base nobody chose is not checked: the pull request's and the detected
+/// default are GitHub's own answers.
+#[test]
+fn only_an_explicit_base_is_checked() {
+    let mut host = FakeHost::with_widgets();
+    host.add_pull_request(
+        "acme/widgets",
+        pull_request(12, "fix-login", Some("acme/widgets")),
+    );
+
+    resolve_repo_spec(&host, request("acme/widgets")).unwrap();
+    resolve_repo_spec(
+        &host,
+        RepoSpecRequest {
+            pr_number: Some(12),
+            ..request("acme/widgets")
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !host.calls().iter().any(|call| call.starts_with("branch ")),
+        "{:?}",
+        host.calls()
+    );
+}
+
+// --- Branch names -------------------------------------------------
+
+/// A name git refuses used to write every row and fail in the background.
+/// It is refused before GitHub is asked anything, the leading `-` that git
+/// would read as an option included.
+#[test]
+fn a_branch_name_git_would_refuse_is_refused_before_any_lookup() {
+    for (name, rule) in [
+        ("-x", "it starts with '-'"),
+        ("--upload-pack=evil", "it starts with '-'"),
+        (
+            "fix login",
+            "it contains a space, a control character or one of ~ ^ : ? * [ \\",
+        ),
+        ("fix..login", "it contains '..'"),
+        ("fix.lock", "a part of it ends with '.lock'"),
+        ("HEAD", "'HEAD' is reserved"),
+    ] {
+        let host = FakeHost::with_widgets();
+
+        let err = resolve_repo_spec(&host, branch_request(name)).unwrap_err();
+
+        assert_eq!(err, format!("'{name}' is not a valid branch name: {rule}."));
+        assert!(host.calls().is_empty(), "{name}: {:?}", host.calls());
+    }
+}
+
+#[test]
+fn a_base_git_would_refuse_is_refused_before_any_lookup() {
+    for base in ["-main", "origin/-main", "ma in", "origin/"] {
+        let host = FakeHost::with_widgets();
+
+        let err = resolve_repo_spec(
+            &host,
+            RepoSpecRequest {
+                base: Some(base.to_string()),
+                ..request("acme/widgets")
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.starts_with(&format!("'{base}' is not a valid branch name: ")),
+            "{base}: {err}"
+        );
+        assert!(host.calls().is_empty(), "{base}: {:?}", host.calls());
+    }
+}
+
+#[test]
+fn an_ordinary_branch_name_passes_the_name_check() {
+    let host = FakeHost::with_widgets();
+
+    for name in ["fix-login", "user/fix_login.2", "caf\u{e9}"] {
+        let resolved = resolve_repo_spec(&host, branch_request(name)).unwrap();
+        assert_eq!(resolved.branch_name.as_deref(), Some(name));
+    }
 }
 
 #[test]
@@ -808,6 +1078,7 @@ fn an_explicit_base_wins_over_a_pull_requests_base() {
         ("acme/widgets".to_string(), "fix-login".to_string()),
         vec![pull_request(12, "fix-login", Some("acme/widgets"))],
     );
+    host.add_branch("acme/widgets", "release/2");
     let base = Some("release/2".to_string());
 
     let by_number = resolve_repo_spec(

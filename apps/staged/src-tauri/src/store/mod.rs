@@ -65,7 +65,7 @@ pub use project_transfer::{BranchLanding, BranchTransfer, ProjectTransfer};
 pub use repo_badges::{fallback_short_name, next_hue};
 pub use session_poll::{SessionPoll, SessionPollRequest};
 pub use session_titles::{non_empty_acp_title, pending_commit_subject, review_title};
-pub use sessions::ChildSessionInfo;
+pub use sessions::{session_actor_id, ChildSessionInfo};
 pub use tag_import::{
     parse_legacy_status_options, LegacyImportOutcome, LegacyStatusOption, LegacyStatusOptions,
     LEGACY_DEFAULT_STATUSES, LEGACY_STATUS_GROUP_ID, LEGACY_STATUS_OPTIONS_KEY,

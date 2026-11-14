@@ -8,6 +8,7 @@
 //! with no form (the control surface `stagedctl` talks to) sends what was
 //! typed, so the same rules run here instead.
 
+use super::branch_name::check_branch_name;
 use crate::git::{self, GitError, PullRequest};
 
 /// A repository with at least this many modules in its `MODULES.yaml` is
@@ -35,8 +36,11 @@ pub(crate) trait RepoHost: Sync {
     /// How many modules the repository's `MODULES.yaml` lists; 0 without one.
     fn monorepo_module_count(&self, github_repo: &str) -> Result<u32, String>;
 
-    /// The pull request with this number, whatever state it is in.
-    fn pull_request(&self, github_repo: &str, number: u64) -> Result<PullRequest, String>;
+    /// The pull request with this number, whatever state it is in. `None`
+    /// when GitHub answered that the repository has no such pull request.
+    /// A lookup that failed is an `Err`: it says nothing about whether the
+    /// pull request exists.
+    fn pull_request(&self, github_repo: &str, number: u64) -> Result<Option<PullRequest>, String>;
 
     /// The repository this one was forked from, or `None` when it is not a
     /// fork.
@@ -53,6 +57,9 @@ pub(crate) trait RepoHost: Sync {
 
     /// The repository's default branch, without an `origin/` prefix.
     fn default_branch(&self, github_repo: &str) -> Result<String, String>;
+
+    /// Whether the repository has a branch with exactly this name.
+    fn branch_exists(&self, github_repo: &str, branch_name: &str) -> Result<bool, String>;
 }
 
 /// [`RepoHost`] answered by the `gh` CLI.
@@ -73,8 +80,8 @@ impl RepoHost for GitHubCli {
         git::check_monorepo_modules(github_repo).map_err(gh_error)
     }
 
-    fn pull_request(&self, github_repo: &str, number: u64) -> Result<PullRequest, String> {
-        git::github::get_pr_for_repo(github_repo, number).map_err(gh_error)
+    fn pull_request(&self, github_repo: &str, number: u64) -> Result<Option<PullRequest>, String> {
+        git::github::find_pr_for_repo(github_repo, number).map_err(gh_error)
     }
 
     fn parent_repo(&self, github_repo: &str) -> Result<Option<String>, String> {
@@ -91,6 +98,10 @@ impl RepoHost for GitHubCli {
 
     fn default_branch(&self, github_repo: &str) -> Result<String, String> {
         git::detect_default_branch_for_repo(github_repo).map_err(gh_error)
+    }
+
+    fn branch_exists(&self, github_repo: &str, branch_name: &str) -> Result<bool, String> {
+        git::github::branch_exists_for_repo(github_repo, branch_name).map_err(gh_error)
     }
 }
 
@@ -114,13 +125,14 @@ pub(crate) struct RepoSpecRequest {
     /// A directory in the repository to work in. Surrounding slashes and
     /// whitespace are dropped; blank means the repository root.
     pub subpath: Option<String>,
-    /// An existing remote branch or a new name. Blank leaves the name to be
-    /// inferred from the project's.
+    /// An existing remote branch or a new name, which must be one git
+    /// accepts. Blank leaves the name to be inferred from the project's.
     pub branch_name: Option<String>,
     /// A pull request to check out. It brings its own branch, so a
     /// `branch_name` given with it must be that branch.
     pub pr_number: Option<u64>,
-    /// The branch a new branch starts from, when the caller chooses one.
+    /// The branch a new branch starts from, when the caller chooses one. It
+    /// must be a branch of the repository. An `origin/` prefix is accepted.
     pub base: Option<String>,
     /// Accept the root of a monorepo, which is refused otherwise.
     pub allow_monorepo_root: bool,
@@ -172,16 +184,22 @@ pub(crate) struct ResolvedPullRequest {
 /// - **Subpath.** Normalised, and it must be a directory in the repository.
 /// - **Monorepo.** A monorepo with no subpath is refused unless
 ///   `allow_monorepo_root` is set.
-/// - **Pull request.** Fetched by number. When the named repository has no
-///   such pull request and is a fork, its parent is tried, and the parent
-///   becomes the repository (as `BranchPicker` does for a pasted fork URL).
-///   A pull request that cannot be found is an error.
-/// - **Branch.** A branch name gets a best-effort lookup of its open pull
-///   request, which is then treated like one asked for by number. Only a
-///   pull request whose head is that branch of the repository counts: one
-///   opened from a fork that reuses the name is somebody else's branch.
+/// - **Pull request.** Fetched by number. When GitHub answers that the
+///   named repository has no such pull request and the repository is a
+///   fork, its parent is tried, and the parent becomes the repository (as
+///   `BranchPicker` does for a pasted fork URL). A pull request that cannot
+///   be found is an error, and so is a lookup that failed: only GitHub's
+///   own "no such pull request" sends the lookup to the parent.
+/// - **Branch.** The name must be one git accepts. A branch name gets a
+///   best-effort lookup of its open pull request, which is then treated
+///   like one asked for by number. Only a pull request whose head is that
+///   branch of the repository counts: one opened from a fork that reuses
+///   the name is somebody else's branch.
 /// - **Base.** The caller's, else the pull request's, else the repository's
-///   default branch.
+///   default branch. The caller's must be a branch of the repository: the
+///   forms offer only real branches, and a typed one that does not exist
+///   would fail in the background worktree setup, after every row is
+///   written.
 ///
 /// Blocking: every lookup runs `gh`. Lookups that don't depend on each other
 /// run concurrently, so the whole call costs about three round-trips. Call
@@ -203,6 +221,15 @@ pub(crate) fn resolve_repo_spec(
     let base = non_blank(base);
 
     let (owner, name) = split_repo_name(&named)?;
+    // Names git would refuse are refused before GitHub is asked anything.
+    // The base's also goes into an API path.
+    if let Some(branch) = &branch_name {
+        check_branch_name(branch).map_err(|rule| invalid_branch_name(branch, rule))?;
+    }
+    let base_on_origin = base.as_deref().map(branch_on_origin);
+    if let (Some(base), Some(on_origin)) = (&base, base_on_origin) {
+        check_branch_name(on_origin).map_err(|rule| invalid_branch_name(base, rule))?;
+    }
     let named_repo = host
         .canonical_repo(owner, name)
         .map_err(|e| format!("Could not look up repository '{}': {e}", named.trim()))?
@@ -241,32 +268,36 @@ pub(crate) fn resolve_repo_spec(
     };
 
     let repo = github_repo.as_str();
-    let (subpath_check, module_count, branch_pr, default_branch) = std::thread::scope(|scope| {
-        let subpath_check = subpath
-            .as_deref()
-            .map(|subpath| scope.spawn(move || host.validate_subpath(repo, subpath)));
-        // Only the bare root of a monorepo is refused, so the count matters
-        // to nobody who gave a subpath or the override.
-        let module_count = (subpath.is_none() && !allow_monorepo_root)
-            .then(|| scope.spawn(move || host.monorepo_module_count(repo)));
-        let branch_pr = match (&numbered_pr, branch_name.as_deref()) {
-            (None, Some(branch)) => {
-                Some(scope.spawn(move || host.open_pull_requests_for_branch(repo, branch)))
-            }
-            _ => None,
-        };
-        // Asked for before the branch's pull request is known, like the
-        // form's prefetch: waiting to learn whether it is needed would cost
-        // a round-trip whenever it is.
-        let default_branch = (base.is_none() && numbered_pr.is_none())
-            .then(|| scope.spawn(move || host.default_branch(repo)));
-        (
-            join(subpath_check),
-            join(module_count),
-            join(branch_pr),
-            join(default_branch),
-        )
-    });
+    let (subpath_check, module_count, branch_pr, default_branch, base_check) =
+        std::thread::scope(|scope| {
+            let subpath_check = subpath
+                .as_deref()
+                .map(|subpath| scope.spawn(move || host.validate_subpath(repo, subpath)));
+            // Only the bare root of a monorepo is refused, so the count matters
+            // to nobody who gave a subpath or the override.
+            let module_count = (subpath.is_none() && !allow_monorepo_root)
+                .then(|| scope.spawn(move || host.monorepo_module_count(repo)));
+            let branch_pr = match (&numbered_pr, branch_name.as_deref()) {
+                (None, Some(branch)) => {
+                    Some(scope.spawn(move || host.open_pull_requests_for_branch(repo, branch)))
+                }
+                _ => None,
+            };
+            // Asked for before the branch's pull request is known, like the
+            // form's prefetch: waiting to learn whether it is needed would cost
+            // a round-trip whenever it is.
+            let default_branch = (base.is_none() && numbered_pr.is_none())
+                .then(|| scope.spawn(move || host.default_branch(repo)));
+            let base_check =
+                base_on_origin.map(|base| scope.spawn(move || host.branch_exists(repo, base)));
+            (
+                join(subpath_check),
+                join(module_count),
+                join(branch_pr),
+                join(default_branch),
+                join(base_check),
+            )
+        });
 
     if let (Some(subpath), Some(Err(e))) = (&subpath, subpath_check) {
         return Err(format!(
@@ -284,6 +315,23 @@ pub(crate) fn resolve_repo_spec(
         }
         // The form reads a failed check as "not a monorepo" too.
         Some(Err(e)) => log::warn!("[repo_spec] monorepo check failed for {github_repo}: {e}"),
+        _ => {}
+    }
+
+    // The base the caller chose is where the new branch starts, so unlike
+    // the best-effort lookups it must be known to exist: a check that could
+    // not be made refuses too.
+    match (&base, base_check) {
+        (Some(base), Some(Ok(false))) => {
+            return Err(format!(
+                "Base branch '{base}' was not found in '{github_repo}'."
+            ));
+        }
+        (Some(base), Some(Err(e))) => {
+            return Err(format!(
+                "Could not check that base branch '{base}' exists in '{github_repo}': {e}"
+            ));
+        }
         _ => {}
     }
 
@@ -351,41 +399,55 @@ struct FoundPullRequest {
 }
 
 /// Fetch pull request `number` from `github_repo`, or from the repository
-/// `github_repo` was forked from when it isn't there.
+/// `github_repo` was forked from when GitHub says it isn't there.
+///
+/// Only that answer sends the lookup to the parent. A lookup that failed
+/// (the network, a rate limit) is returned as the failure it is: trying the
+/// parent then would swap the repository for another one and adopt its pull
+/// request of the same number, and a caller with no form sees which pull
+/// request was found only after the project exists.
 fn find_pull_request(
     host: &dyn RepoHost,
     github_repo: &str,
     number: u64,
 ) -> Result<FoundPullRequest, String> {
-    let not_here = match host.pull_request(github_repo, number) {
-        Ok(pull_request) => {
-            return Ok(FoundPullRequest {
-                github_repo: github_repo.to_string(),
-                pull_request,
-                named_fork: None,
-            });
-        }
-        Err(e) => e,
-    };
+    let here = host
+        .pull_request(github_repo, number)
+        .map_err(|e| format!("Could not look up pull request #{number} in '{github_repo}': {e}"))?;
+    if let Some(pull_request) = here {
+        return Ok(FoundPullRequest {
+            github_repo: github_repo.to_string(),
+            pull_request,
+            named_fork: None,
+        });
+    }
 
-    let parent = host.parent_repo(github_repo).unwrap_or_else(|e| {
-        log::warn!("[repo_spec] parent lookup failed for {github_repo}: {e}");
-        None
-    });
+    let parent = host.parent_repo(github_repo).map_err(|e| {
+        format!(
+            "Pull request #{number} was not found in '{github_repo}', and Staged could not \
+             check whether that repository is a fork: {e}"
+        )
+    })?;
     let Some(parent) = parent else {
         return Err(format!(
-            "Could not find pull request #{number} in '{github_repo}': {not_here}"
+            "Pull request #{number} was not found in '{github_repo}'."
         ));
     };
-    match host.pull_request(&parent, number) {
-        Ok(pull_request) => Ok(FoundPullRequest {
+    let there = host.pull_request(&parent, number).map_err(|e| {
+        format!(
+            "Pull request #{number} was not found in '{github_repo}', and it could not be \
+             looked up in '{parent}', the repository it was forked from: {e}"
+        )
+    })?;
+    match there {
+        Some(pull_request) => Ok(FoundPullRequest {
             github_repo: parent,
             pull_request,
             named_fork: Some(github_repo.to_string()),
         }),
-        Err(e) => Err(format!(
-            "Could not find pull request #{number} in '{github_repo}' \
-             or in '{parent}', the repository it was forked from: {e}"
+        None => Err(format!(
+            "Pull request #{number} was not found in '{github_repo}' or in '{parent}', \
+             the repository it was forked from."
         )),
     }
 }
@@ -411,9 +473,19 @@ fn is_repo_name_part(part: &str) -> bool {
 
 /// A subpath as the forms submit it: without surrounding whitespace or
 /// slashes, and `None` when nothing is left.
-fn normalize_subpath(subpath: Option<&str>) -> Option<String> {
+pub(super) fn normalize_subpath(subpath: Option<&str>) -> Option<String> {
     let normalized = subpath?.trim().trim_matches('/').trim();
     (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
+/// A base as the lookups name it: the shared bodies accept `origin/<branch>`
+/// and read it as `<branch>` on origin (`git::resolve_default_branch`).
+fn branch_on_origin(base: &str) -> &str {
+    base.strip_prefix("origin/").unwrap_or(base)
+}
+
+fn invalid_branch_name(name: &str, rule: &str) -> String {
+    format!("'{name}' is not a valid branch name: {rule}.")
 }
 
 fn non_blank(value: Option<String>) -> Option<String> {

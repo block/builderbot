@@ -127,11 +127,13 @@ Create a project only when the task calls for one. The app checks the repo
 before it writes anything: it must exist on GitHub, a subpath must be a
 directory in it, and the root of a monorepo is refused unless
 `--allow-monorepo-root` is passed (prefer a subpath). A project name
-already in use is refused. One session may hold at most 10 created
-projects; the user frees a slot by deleting one in the app. A session may
-add a repo to its own project and to the projects it created. A connected
-app approved for one project can add repos to that project and cannot
-create projects.
+already in use is refused. The allowance is shared along a chain of
+sessions: a session and every session started from it, directly or through
+another, may together hold at most 10 created projects, and the user frees
+a slot by deleting one of them in the app. Starting a session to create
+more does not help. A session may add a repo to its own project and to the
+projects it created. A connected app approved for one project can add repos
+to that project and cannot create projects.
 
 Tag assignments (`stagedctl project tag`, `stagedctl project untag`) fit the
 invariant: they show at once as the pills and chips in the project header,

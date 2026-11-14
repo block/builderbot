@@ -1275,6 +1275,7 @@ pub(crate) async fn dispatch(
                         head_repo: opt_arg(&args, "headRepo")?,
                         // The form writes the pull request note itself.
                         pr_note: None,
+                        refuse_branch_in_use: false,
                     },
                 ),
             };
@@ -5336,6 +5337,10 @@ mod tests {
             assert!(
                 source.contains("reason: None") && source.contains("pr_note: None"),
                 "the {what} must pass no reason and write no note: {source}"
+            );
+            assert!(
+                source.contains("refuse_branch_in_use: false"),
+                "the {what} must not refuse a branch the form let the user pick: {source}"
             );
             assert!(
                 !source.contains("control_"),

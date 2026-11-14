@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use super::branch_in_use::{self, BranchAsk};
 use super::pr_note::PrNote;
 use super::setup::spawn_project_repo_setup;
 use crate::store::repo_affinities::repo_affinity_key;
@@ -42,6 +43,12 @@ pub(crate) struct AddProjectRepoRequest {
     /// rows are written. The desktop form leaves it unset and writes the
     /// note itself.
     pub pr_note: Option<PrNote>,
+    /// Refuse a branch the same repository already has in the project,
+    /// checked beside the write (see `branch_in_use`). Set for a control
+    /// caller, whose branch was checked once already, ahead of the GitHub
+    /// lookups. The forms leave it unset: the user sees the project while
+    /// picking a branch.
+    pub refuse_branch_in_use: bool,
 }
 
 /// Add a GitHub repository to a project and start its background setup.
@@ -73,6 +80,7 @@ pub(crate) async fn add_project_repo_and_setup(
         default_branch,
         head_repo,
         pr_note,
+        refuse_branch_in_use,
     } = request;
     let added = add_project_repo_impl(
         Arc::clone(&store),
@@ -85,6 +93,7 @@ pub(crate) async fn add_project_repo_and_setup(
         pr_number,
         default_branch,
         head_repo,
+        refuse_branch_in_use,
     )
     .await?;
     if let Some(note) = &pr_note {
@@ -106,6 +115,8 @@ pub(crate) async fn add_project_repo_and_setup(
 ///
 /// Called by [`add_project_repo_and_setup`], and directly by the MCP tool,
 /// which runs the setup inline so it can report the outcome to the agent.
+///
+/// `refuse_branch_in_use` is [`AddProjectRepoRequest::refuse_branch_in_use`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn add_project_repo_impl(
     store: Arc<Store>,
@@ -118,6 +129,7 @@ pub(crate) async fn add_project_repo_impl(
     pr_number: Option<u64>,
     default_branch: Option<String>,
     head_repo: Option<String>,
+    refuse_branch_in_use: bool,
 ) -> Result<AddedProjectRepo, String> {
     crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     // Use the frontend-prefetched default branch when available to avoid
@@ -226,6 +238,25 @@ pub(crate) async fn add_project_repo_impl(
         return Err(
             "The project moved while the repository was being added; add it again.".to_string(),
         );
+    }
+
+    // A control caller's branch was found free before the awaits above, and
+    // a parallel add of the same branch found it free too. Here, with no
+    // await left, the check and the rows it admits happen under one lock, so
+    // the second of them sees the first and is refused. Only a branch the
+    // caller chose is held to this: an inferred name got its own suffix
+    // above.
+    let _adding = refuse_branch_in_use.then(branch_in_use::adding);
+    if refuse_branch_in_use && branch_name.is_some() {
+        branch_in_use::ensure_branch_is_free(
+            &store,
+            &project_id,
+            &BranchAsk {
+                github_repo: &github_repo,
+                branch: &resolved_branch_name,
+                pr_number,
+            },
+        )?;
     }
     store
         .create_project_repo(&repo)
@@ -401,6 +432,7 @@ mod tests {
             None,
             Some("main".to_string()),
             None,
+            false,
         ))
         .unwrap();
 

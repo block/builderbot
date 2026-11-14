@@ -551,8 +551,9 @@ fn a_branch_whose_pull_request_the_app_found_gets_its_note_too() {
 fn a_name_in_use_and_the_creation_limit_pass_through_as_the_apps_error() {
     for refusal in [
         "A project named \"Fix login\" already exists.",
-        "This session has created 10 projects, the limit for one session. Deleting one in \
-         Staged frees a slot.",
+        "This session and the sessions in its chain have created 10 projects, the limit they \
+         share. A chain is a session and every session started from it, directly or through \
+         another. Deleting one of those projects in Staged frees a slot.",
     ] {
         let app = App::default().refuse("create_project", refusal);
         let err = create_with(app.invoke(), "Fix login", ProjectLocation::Local, None).unwrap_err();
@@ -1197,6 +1198,11 @@ fn help_states_the_apps_limits_as_the_app_has_them() {
         "the creation limit changed; update `project create --help`"
     );
     assert!(create.contains("at most 10 created projects"), "{create}");
+    // Whose limit it is: a chain's, so a session it starts gets no more.
+    assert!(
+        create.contains("shared along a chain of sessions"),
+        "{create}"
+    );
 
     // The monorepo rule, and the flag the app's refusal names.
     let resolver = include_str!("../../../../src/project_commands/repo_spec.rs");
@@ -1276,4 +1282,5 @@ fn the_guide_describes_both_verbs_and_what_a_session_covers() {
         "the creation limit changed; update the guide"
     );
     assert!(flat.contains("at most 10 created projects"), "{flat}");
+    assert!(flat.contains("shared along a chain of sessions"), "{flat}");
 }

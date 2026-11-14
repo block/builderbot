@@ -288,7 +288,8 @@ project's primary repo and gets one branch:
 
 --base is the branch a new branch starts from and the one the branch is
 compared against (main and origin/main mean the same). Without it the
-repo's default branch is used.
+repo's default branch is used. A --base the repo does not have is
+refused, and so is a branch name git would not accept.
 
 The app checks the repo the way the New Project form does, before it
 writes anything: the repo must exist on GitHub, a subpath must be a
@@ -315,10 +316,12 @@ it exists.
 A session may create projects. Its credential covers its own project
 and the projects it created, in later runs of the session too, so it
 can add repos to a created project, read it and start sessions in it.
-One session may hold at most 10 created projects at a time; deleting
-one in Staged frees a slot. A connected app approved for every project
-may create without that limit. One approved for a single project may
-not create (exit 4, `scope_denied`): reconnect without --project.
+The allowance is shared along a chain of sessions: a session, the
+sessions it starts and the sessions those start in turn may together
+hold at most 10 created projects at a time. Deleting one of them in
+Staged frees a slot. A connected app approved for every project may
+create without that limit. One approved for a single project may not
+create (exit 4, `scope_denied`): reconnect without --project.
 
 The project shows at once in the app's sidebar, where the user can
 delete it. stagedctl has no delete.")]

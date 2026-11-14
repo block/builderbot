@@ -8,13 +8,17 @@
 //! - The repository is resolved by [`resolve_repo_spec`]: its name as GitHub
 //!   spells it, the subpath, the monorepo rule, the pull request and the
 //!   base branch.
-//! - A session may hold only so many created projects
-//!   ([`CREATED_PROJECT_LIMIT`]).
+//! - A session and the sessions in its chain may hold only so many created
+//!   projects between them ([`CREATED_PROJECT_LIMIT`], `creation_limit`).
+//! - A project name already in use is refused here when that is certain
+//!   before the repository is resolved. The shared body checks again with
+//!   the name as it will be stored.
 //! - A remote project is refused when `sq` is missing. The desktop form
 //!   never offers one then, and the shared body would quietly create a local
 //!   project instead.
 //! - A branch the same repo already has in the project is refused: its
 //!   checkout would fail in the background, where only the log would say so.
+//!   The shared body repeats this beside its write (`branch_in_use`).
 //!
 //! The pull request's description rides along as a [`PrNote`], which the
 //! shared bodies save once the rows exist. The forms write that note with a
@@ -27,15 +31,22 @@
 use std::sync::Arc;
 
 use super::add_repo::AddProjectRepoRequest;
-use super::create::{required_name, CreateProjectRequest, ProjectCreator};
+use super::branch_in_use::{ensure_branch_is_free, BranchAsk};
+use super::create::{ensure_a_name_is_free, required_name, CreateProjectRequest, ProjectCreator};
 use super::pr_note::PrNote;
-use super::repo_spec::{resolve_repo_spec, GitHubCli, RepoHost, RepoSpecRequest, ResolvedRepoSpec};
+use super::repo_spec::{
+    normalize_subpath, resolve_repo_spec, GitHubCli, RepoHost, RepoSpecRequest, ResolvedRepoSpec,
+};
 use crate::blox;
 use crate::control_server::ControlGrant;
 use crate::store::Store;
 
-/// The most projects one confined control actor may hold at once. A runaway
-/// session stops here. Deleting a created project in the app frees a slot.
+/// The most projects one confined control actor may hold at once. For a
+/// session the allowance is shared with the sessions in its chain: the
+/// session that started it, and so on up, and every session started from
+/// those (see `creation_limit`). A runaway stops here, whether it creates
+/// projects itself or starts sessions that do. Deleting a created project in
+/// the app frees a slot.
 pub(crate) const CREATED_PROJECT_LIMIT: usize = 10;
 
 impl ProjectCreator {
@@ -103,13 +114,15 @@ pub(crate) async fn control_add_repo_request(
 
 /// The create-project request a control caller's ask becomes. The checks run
 /// cheapest first, so nothing asks GitHub about a request that is refused
-/// anyway: the name, the creator's limit, `sq` for a remote project, then
-/// the repository.
+/// anyway: the name, the creator's limit, a name already in use, `sq` for a
+/// remote project, then the repository.
 ///
 /// The limit is checked again when the project row is written, under a lock
 /// (see `create::insert_project_within_limit`). This check only saves the
-/// lookups. A duplicate name is left to the shared body, which knows the
-/// name as it will be stored.
+/// lookups. So does the name check: it refuses a taken name only when every
+/// name the project could be stored under is taken
+/// (`create::ensure_a_name_is_free`), and the shared body checks the name as
+/// it will be stored.
 fn create_project_request(
     host: &dyn RepoHost,
     store: &Store,
@@ -118,8 +131,12 @@ fn create_project_request(
     remote_available: bool,
 ) -> Result<CreateProjectRequest, String> {
     let ControlCreateProject { name, remote, repo } = ask;
-    required_name(&name)?;
+    let trimmed = required_name(&name)?;
     creator.ensure_within_limit(store)?;
+    let subpath = repo
+        .as_ref()
+        .and_then(|repo| normalize_subpath(repo.subpath.as_deref()));
+    ensure_a_name_is_free(store, trimmed, subpath.as_deref())?;
     if remote && !remote_available {
         return Err(
             "A remote project needs the `sq` CLI to provision its workspace, and Staged \
@@ -173,7 +190,20 @@ fn add_repo_request(
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     let resolved = resolve_repo_spec(host, ask.repo)?;
-    ensure_branch_is_free(store, project_id, &resolved)?;
+    // Checked again beside the write (`refuse_branch_in_use` below), where a
+    // parallel add of the same branch is seen. This one saves the caller the
+    // wait for a workspace check when the branch is plainly taken.
+    if let Some(branch) = resolved.branch_name.as_deref() {
+        ensure_branch_is_free(
+            store,
+            project_id,
+            &BranchAsk {
+                github_repo: &resolved.github_repo,
+                branch,
+                pr_number: resolved.pull_request.as_ref().map(|pr| pr.number),
+            },
+        )?;
+    }
     let pr_note = pr_note(&resolved);
     Ok(AddProjectRepoRequest {
         github_repo: resolved.github_repo,
@@ -190,41 +220,8 @@ fn add_repo_request(
         default_branch: resolved.base,
         head_repo: resolved.head_repo,
         pr_note,
+        refuse_branch_in_use: true,
     })
-}
-
-/// Refuse a branch the same repository already has in the project.
-///
-/// Two attachments of one repository share a clone, and a branch can be
-/// checked out in it once. The shared body avoids the clash for a name it
-/// infers, by adding a suffix. A name the caller gave, or a pull request's
-/// branch, is used as it is, and the second checkout would fail in the
-/// background setup, where only the log says so.
-fn ensure_branch_is_free(
-    store: &Store,
-    project_id: &str,
-    resolved: &ResolvedRepoSpec,
-) -> Result<(), String> {
-    let Some(branch) = resolved.branch_name.as_deref() else {
-        return Ok(());
-    };
-    let repos = store
-        .list_project_repos(project_id)
-        .map_err(|e| e.to_string())?;
-    let Some(taken) = repos.iter().find(|repo| {
-        repo.github_repo.eq_ignore_ascii_case(&resolved.github_repo) && repo.branch_name == branch
-    }) else {
-        return Ok(());
-    };
-    let place = match taken.subpath.as_deref() {
-        Some(subpath) => format!("at subpath '{subpath}'"),
-        None => "at the repository root".to_string(),
-    };
-    Err(format!(
-        "Branch '{branch}' of '{}' is already attached to this project {place}. \
-         A branch can be checked out once per project, so give a different branch name.",
-        resolved.github_repo
-    ))
 }
 
 /// The note for the pull request a resolved repo belongs to: the one asked

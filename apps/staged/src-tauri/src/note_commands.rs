@@ -70,8 +70,24 @@ pub(crate) fn standalone_note_to_timeline_item(note: Note) -> NoteTimelineItem {
 ///
 /// `subtype` is `"written"` when the user authored the note in the editor
 /// dialog; the drag-drop and save-action-output paths leave it unset.
+///
+/// Runs [`create_standalone_note`] on the blocking pool. As a synchronous
+/// command the write held the main thread, and so the window, for its own
+/// time and for any wait on the store lock.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
+///
+/// On the pool two creates in flight land in either order, where the main
+/// thread ran them in the order they arrived. The store call is one lock
+/// hold, so they cannot pick the same title suffix; the order itself is kept
+/// by the frontend, which sends a branch's creates one at a time (the
+/// `writeOrder` queue in `commands.ts`). The same holds for the other four
+/// writes that left the main thread with this one: [`update_note`],
+/// [`set_note_read`], `mark_session_chat_read` and `queue_session_message`.
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_note(
+pub async fn create_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
     title: String,
@@ -79,7 +95,11 @@ pub fn create_note(
     subtype: Option<String>,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
-    create_standalone_note(&store, &branch_id, &title, &content, subtype)
+    tauri::async_runtime::spawn_blocking(move || {
+        create_standalone_note(&store, &branch_id, &title, &content, subtype)
+    })
+    .await
+    .map_err(|e| format!("create_note task failed: {e}"))?
 }
 
 /// The body of [`create_note`], shared with the web dispatcher's arm.
@@ -106,15 +126,24 @@ pub(crate) fn create_standalone_note(
 ///
 /// Rejects notes an agent session produced — their content is owned by that
 /// session and would be overwritten on its next turn.
+///
+/// Runs [`update_note_impl`] on the blocking pool, like [`create_note`]; only
+/// the store handle lookup runs inline. Two saves of one note in flight
+/// would land in either order here, so the frontend sends a note's saves and
+/// read marks one at a time (see [`create_note`]).
 #[tauri::command(rename_all = "camelCase")]
-pub fn update_note(
+pub async fn update_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
     title: String,
     content: String,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
-    update_note_impl(&store, &note_id, &title, &content)
+    tauri::async_runtime::spawn_blocking(move || {
+        update_note_impl(&store, &note_id, &title, &content)
+    })
+    .await
+    .map_err(|e| format!("update_note task failed: {e}"))?
 }
 
 /// The body of [`update_note`], shared with the web dispatcher's arm.
@@ -144,6 +173,10 @@ pub(crate) fn update_note_impl(
 /// chat attachment list, and deleting the session cascades its messages, all
 /// on the one store connection. Tauri runs a synchronous command on the main
 /// thread, where this froze the window for as long as it took.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -152,7 +185,6 @@ pub async fn delete_note(
     delete_session: Option<bool>,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
-
     tauri::async_runtime::spawn_blocking(move || {
         delete_note_impl(
             &store,
@@ -162,7 +194,7 @@ pub async fn delete_note(
         )
     })
     .await
-    .map_err(|e| format!("Note delete task failed: {e}"))?
+    .map_err(|e| format!("delete_note task failed: {e}"))?
 }
 
 /// The body of [`delete_note`], shared with the web dispatcher's arm. Callers
@@ -218,28 +250,44 @@ pub(crate) fn delete_note_impl<R: tauri::Runtime>(
 /// note a review comment produced (for `NoteModal`) without refetching the
 /// whole branch timeline.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_branch_note_by_session(
+pub async fn get_branch_note_by_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<Option<crate::store::Note>, String> {
-    crate::get_store(&store)?
-        .get_note_by_session(&session_id)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_note_by_session(&session_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_branch_note_by_session task failed: {e}"))?
 }
 
 /// Mark a branch note read or unread, returning the row as it now reads.
 ///
 /// The note viewer marks a note read when it opens one; the viewer's toggle
 /// and the timeline context menu set either state.
+///
+/// A store write, run on the blocking pool like [`create_note`]: the viewer
+/// sends it every time it shows a note. The context menu's write is not
+/// awaited, so "Mark as unread" and the read mark of opening the note next
+/// can be in flight together; the frontend sends a note's read marks and
+/// saves one at a time to keep them in order (see [`create_note`]).
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_note_read(
+pub async fn set_note_read(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
     read: bool,
 ) -> Result<Note, String> {
-    crate::get_store(&store)?
-        .set_note_read(&note_id, read)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .set_note_read(&note_id, read)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("set_note_read task failed: {e}"))?
 }
 
 /// Fetch a single note by id (no branch filter), with resolved session status.
@@ -248,13 +296,17 @@ pub fn set_note_read(
 /// child notes that live on other repo branches and are therefore absent from
 /// any single branch timeline.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_note(
+pub async fn get_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
 ) -> Result<Option<NoteTimelineItem>, String> {
     let store = crate::get_store(&store)?;
-    let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
-    Ok(note.map(|n| note_to_timeline_item(&store, n)))
+    tauri::async_runtime::spawn_blocking(move || {
+        let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
+        Ok(note.map(|n| note_to_timeline_item(&store, n)))
+    })
+    .await
+    .map_err(|e| format!("get_note task failed: {e}"))?
 }
 
 /// List the child notes aggregated under a given project note, with resolved
@@ -262,18 +314,22 @@ pub fn get_note(
 /// dedicated path the parent project-note view uses to resolve `#note:<id>`
 /// hashtag references to their titles.
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_child_notes(
+pub async fn list_child_notes(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     parent_project_note_id: String,
 ) -> Result<Vec<NoteTimelineItem>, String> {
     let store = crate::get_store(&store)?;
-    let notes = store
-        .list_child_notes(&parent_project_note_id)
-        .map_err(|e| e.to_string())?;
-    Ok(notes
-        .into_iter()
-        .map(|n| note_to_timeline_item(&store, n))
-        .collect())
+    tauri::async_runtime::spawn_blocking(move || {
+        let notes = store
+            .list_child_notes(&parent_project_note_id)
+            .map_err(|e| e.to_string())?;
+        Ok(notes
+            .into_iter()
+            .map(|n| note_to_timeline_item(&store, n))
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("list_child_notes task failed: {e}"))?
 }
 
 // =============================================================================
@@ -281,28 +337,39 @@ pub fn list_child_notes(
 // =============================================================================
 
 #[tauri::command]
-pub fn create_project_note(
+pub async fn create_project_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     title: String,
     content: String,
 ) -> Result<crate::store::ProjectNote, String> {
     let store = crate::get_store(&store)?;
-    let note = crate::store::ProjectNote::new(&project_id, &title, &content);
-    store
-        .create_project_note(&note)
-        .map_err(|e| e.to_string())?;
-    Ok(note)
+    tauri::async_runtime::spawn_blocking(move || {
+        let note = crate::store::ProjectNote::new(&project_id, &title, &content);
+        store
+            .create_project_note(&note)
+            .map_err(|e| e.to_string())?;
+        Ok(note)
+    })
+    .await
+    .map_err(|e| format!("create_project_note task failed: {e}"))?
 }
 
+/// A store read, run on the blocking pool like [`delete_note`]: every
+/// mounted branch card and project section refetches it on a notes change.
 #[tauri::command]
-pub fn list_project_notes(
+pub async fn list_project_notes(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
 ) -> Result<Vec<crate::store::ProjectNote>, String> {
-    crate::get_store(&store)?
-        .list_project_notes_with_status(&project_id)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_project_notes_with_status(&project_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_project_notes task failed: {e}"))?
 }
 
 /// Fetch a single project note by id (no project filter), with resolved
@@ -313,44 +380,60 @@ pub fn list_project_notes(
 /// that reference into a note body whose reader is scoped to a different
 /// project. This lets such a reference open instead of silently no-opping.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_project_note(
+pub async fn get_project_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_note_id: String,
 ) -> Result<Option<crate::store::ProjectNote>, String> {
-    crate::get_store(&store)?
-        .get_project_note_with_status(&project_note_id)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_project_note_with_status(&project_note_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_project_note task failed: {e}"))?
 }
 
 /// Get a single project note by its linked session ID, with resolved session status.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_project_note_by_session(
+pub async fn get_project_note_by_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<Option<crate::store::ProjectNote>, String> {
-    crate::get_store(&store)?
-        .get_project_note_by_session_with_status(&session_id)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_project_note_by_session_with_status(&session_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_project_note_by_session task failed: {e}"))?
 }
 
 /// Mark a project note read or unread, returning the row as it now reads; the
 /// project-note counterpart of [`set_note_read`].
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_project_note_read(
+pub async fn set_project_note_read(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_note_id: String,
     read: bool,
 ) -> Result<crate::store::ProjectNote, String> {
-    crate::get_store(&store)?
-        .set_project_note_read(&project_note_id, read)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .set_project_note_read(&project_note_id, read)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("set_project_note_read task failed: {e}"))?
 }
 
 /// Delete a project note, its child notes, and every session they owned.
 ///
 /// Async, with the body on the blocking pool, for the reason given on
 /// [`delete_note`]; here the media check covers the parent and every child,
-/// and there is a session cascade per note that had one.
+/// and there is a session cascade per note that had one. Only the handle
+/// lookups run inline.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_project_note(
     registry: tauri::State<'_, Arc<crate::session_runner::SessionRegistry>>,
@@ -359,12 +442,11 @@ pub async fn delete_project_note(
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
     let registry = Arc::clone(&registry);
-
     tauri::async_runtime::spawn_blocking(move || {
         delete_project_note_impl(&store, &registry, &note_id)
     })
     .await
-    .map_err(|e| format!("Project note delete task failed: {e}"))?
+    .map_err(|e| format!("delete_project_note task failed: {e}"))?
 }
 
 /// The body of [`delete_project_note`], shared with the web dispatcher's arm.
@@ -655,6 +737,23 @@ mod tests {
                 "`{command}` must call `{body}` inside `spawn_blocking`: {declaration}"
             );
         }
+    }
+
+    /// The delete reports the sessions it orphaned, and the body removes
+    /// their rows: a session that outlived its note would have nowhere to
+    /// write its result.
+    #[test]
+    fn deleting_a_project_note_deletes_the_session_it_owned() {
+        let f = Fixture::new();
+        let note = crate::store::ProjectNote::new(&f.project.id, "Plan", "body")
+            .with_session(&f.session.id);
+        f.store.create_project_note(&note).unwrap();
+        let registry = crate::session_runner::SessionRegistry::new();
+
+        delete_project_note_impl(&f.store, &registry, &note.id).unwrap();
+
+        assert!(f.store.get_project_note(&note.id).unwrap().is_none());
+        assert!(f.store.get_session(&f.session.id).unwrap().is_none());
     }
 
     #[test]

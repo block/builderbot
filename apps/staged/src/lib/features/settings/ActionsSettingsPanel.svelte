@@ -33,6 +33,8 @@
   import { navigation } from '../layout/navigation.svelte';
   import { consumeRepoSettingsTarget } from './repoSettingsTarget';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
+  import { LatestWins } from '../../shared/latestWins';
+  import { RepoActionList } from './repoActionList.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -63,8 +65,13 @@
   let repoSearch = $state('');
   let sidebarEl: HTMLElement | null = null;
 
-  let actions = $state<ProjectAction[]>([]);
-  let loadingActions = $state(false);
+  /** The selected repo's actions, ordered against reads and local writes. */
+  const actionList = new RepoActionList(
+    () => selectedContext,
+    (githubRepo, subpath) => commands.listRepoActions(githubRepo, subpath)
+  );
+  const actions = $derived(actionList.actions);
+  const loadingActions = $derived(actionList.loading);
   let detecting = $state(false);
   let deletingRepo = $state(false);
   let showDeleteAllConfirm = $state(false);
@@ -254,11 +261,16 @@
     const requestedKey = requested ? repoKey(requested.githubRepo, requested.subpath) : null;
     let revealRequested = false;
 
+    const ticket = loadOrder.issue();
     loadingContexts = true;
     try {
       const nextContexts = await commands.listActionContexts();
-      contexts = nextContexts;
-      await loadRepoAttachments(nextContexts);
+      // A load sent after this one has already landed with a fresher list.
+      // Keep that, and still honor this load's parked target against it.
+      if (loadOrder.admit('contexts', ticket)) {
+        contexts = nextContexts;
+        await loadRepoAttachments(nextContexts);
+      }
       // Honor the parked target now that the entry list is resolved.
       if (requestedKey && mergedEntries.some((e) => e.key === requestedKey)) {
         openEntry(requestedKey);
@@ -285,23 +297,15 @@
     sidebarEl?.querySelector('.context-item.selected')?.scrollIntoView({ block: 'nearest' });
   }
 
-  async function loadActions() {
-    if (!selectedContext) {
-      actions = [];
-      return;
-    }
-    loadingActions = true;
-    try {
-      actions = await commands.listRepoActions(
-        selectedContext.githubRepo,
-        selectedContext.subpath ?? undefined
-      );
-    } catch (e) {
-      console.error('Failed to load actions:', e);
-      actions = [];
-    } finally {
-      loadingActions = false;
-    }
+  /**
+   * The context reads run concurrently on the backend, so two sent in a row
+   * can answer in either order: the list sent last stays. The action list
+   * keeps its own order (see RepoActionList).
+   */
+  const loadOrder = new LatestWins<'contexts'>();
+
+  function loadActions(): Promise<void> {
+    return actionList.load();
   }
 
   $effect(() => {
@@ -335,7 +339,7 @@
       // only adopt the list while we're still viewing the one we detected for;
       // the backend writes were scoped to the captured values regardless.
       if (selectedRepoKey === entryKey) {
-        actions = detected;
+        actionList.write(detected);
       }
 
       await loadContexts();
@@ -384,7 +388,7 @@
         values.icon
       );
       if (selectedRepoKey === entryKey) {
-        actions = [...actions, newAction];
+        actionList.write([...actions, newAction]);
       }
     } else {
       const actionId = actionToEdit.id;
@@ -399,17 +403,19 @@
         values.icon
       );
       if (selectedRepoKey === entryKey) {
-        actions = actions.map((a) =>
-          a.id === actionId
-            ? {
-                ...a,
-                name: values.name,
-                command: values.command,
-                actionType: values.actionType,
-                pinned: values.pinned,
-                icon: values.icon,
-              }
-            : a
+        actionList.write(
+          actions.map((a) =>
+            a.id === actionId
+              ? {
+                  ...a,
+                  name: values.name,
+                  command: values.command,
+                  actionType: values.actionType,
+                  pinned: values.pinned,
+                  icon: values.icon,
+                }
+              : a
+          )
         );
       }
     }
@@ -420,7 +426,7 @@
   async function deleteAction(actionId: string) {
     try {
       await commands.deleteProjectAction(actionId);
-      actions = actions.filter((a) => a.id !== actionId);
+      actionList.write(actions.filter((a) => a.id !== actionId));
       window.dispatchEvent(new CustomEvent('project-actions-changed'));
     } catch (e) {
       console.error('Failed to delete action:', e);
@@ -438,7 +444,7 @@
     try {
       await commands.deleteAllRepoActions(repoContextId);
       if (selectedRepoKey === entryKey) {
-        actions = [];
+        actionList.write([]);
       }
       showDeleteAllConfirm = false;
       window.dispatchEvent(new CustomEvent('project-actions-changed'));
@@ -469,7 +475,7 @@
       await commands.deleteRepoBadge(entry.githubRepo, entry.subpath);
       repoBadgeStore.remove(entry.githubRepo, entry.subpath);
       if (selectedRepoKey === entryKey) {
-        actions = [];
+        actionList.write([]);
       }
       showDeleteRepoConfirm = false;
       window.dispatchEvent(new CustomEvent('project-actions-changed'));

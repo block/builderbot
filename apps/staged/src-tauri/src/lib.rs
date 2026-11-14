@@ -450,54 +450,82 @@ fn reset_store(
     Ok(Some(store))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Runs on the blocking pool: deleting the old database files and opening
+/// the new store (schema and migrations) held the main thread as a
+/// synchronous command. [`reset_store`] holds the reset claim throughout, so
+/// two confirmations in flight still serialize. The state that is not an
+/// `Arc` is looked up from the handle inside the closure.
 #[tauri::command]
-fn confirm_reset_store(
+async fn confirm_reset_store(
     app_handle: tauri::AppHandle,
-    db_state: tauri::State<'_, DbState>,
-    store_slot: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    store_change_tx: tauri::State<'_, tokio::sync::broadcast::Sender<store::StoreChange>>,
     pr_scheduler: tauri::State<'_, Arc<pr_poll_scheduler::PrPollScheduler>>,
     rate_limit_scheduler: tauri::State<'_, Arc<rate_limit_scheduler::RateLimitScheduler>>,
     session_registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     action_executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
     action_registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
 ) -> Result<(), String> {
-    if let Some(store) = reset_store(&db_state, &store_slot, &store_change_tx)? {
-        start_store_services(
-            store,
-            Arc::clone(pr_scheduler.inner()),
-            Arc::clone(rate_limit_scheduler.inner()),
-            Arc::clone(session_registry.inner()),
-            Arc::clone(action_executor.inner()),
-            Arc::clone(action_registry.inner()),
-            app_handle.clone(),
-        );
-        // Every window owns its prompt state. Tell peers to dismiss it after
-        // the shared backend store has been replaced successfully.
-        if let Err(error) = app_handle.emit("store-reset-completed", ()) {
-            log::warn!("Failed to broadcast store reset completion: {error}");
+    let pr_scheduler = Arc::clone(&pr_scheduler);
+    let rate_limit_scheduler = Arc::clone(&rate_limit_scheduler);
+    let session_registry = Arc::clone(&session_registry);
+    let action_executor = Arc::clone(&action_executor);
+    let action_registry = Arc::clone(&action_registry);
+    tauri::async_runtime::spawn_blocking(move || {
+        let db_state = app_handle.state::<DbState>();
+        let store_slot = app_handle.state::<Mutex<Option<Arc<Store>>>>();
+        let store_change_tx =
+            app_handle.state::<tokio::sync::broadcast::Sender<store::StoreChange>>();
+        if let Some(store) = reset_store(&db_state, &store_slot, &store_change_tx)? {
+            start_store_services(
+                store,
+                pr_scheduler,
+                rate_limit_scheduler,
+                session_registry,
+                action_executor,
+                action_registry,
+                app_handle.clone(),
+            );
+            // Every window owns its prompt state. Tell peers to dismiss it after
+            // the shared backend store has been replaced successfully.
+            if let Err(error) = app_handle.emit("store-reset-completed", ()) {
+                log::warn!("Failed to broadcast store reset completion: {error}");
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("confirm_reset_store task failed: {e}"))?
 }
 
 // =============================================================================
 // Project commands
 // =============================================================================
 
+/// A store read, run on the blocking pool. The projects store refetches this
+/// on every project and branch change, so as a synchronous command it parked
+/// the main thread, and so the window, behind whatever held the store.
+///
+/// As for [`create_project`], nothing but the store handle lookup may run
+/// inline: the same goes for every command in `OFFLOADED_COMMANDS`.
 #[tauri::command]
-fn list_projects(
+async fn list_projects(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<store::Project>, String> {
-    get_store(&store)?
-        .list_projects()
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || store.list_projects().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("list_projects task failed: {e}"))?
 }
 
+/// Runs [`create_project_blocking`] on the blocking pool. As a synchronous
+/// command it held the main thread, and so the window, through its store
+/// writes and through the `gh` and `sq` lookups it can make.
+///
+/// Nothing but the store handle lookup may run inline here: an `async fn`
+/// command runs on a runtime worker, where a store lock wait or a child
+/// process would stall timers and event sockets instead.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
-fn create_project(
+async fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     name: String,
@@ -510,6 +538,41 @@ fn create_project(
     head_repo: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        create_project_blocking(
+            store,
+            app_handle,
+            name,
+            github_repo,
+            location,
+            subpath,
+            branch_name,
+            pr_number,
+            default_branch,
+            head_repo,
+        )
+    })
+    .await
+    .map_err(|e| format!("create_project task failed: {e}"))?
+}
+
+/// The body of [`create_project`]. Blocking: it writes to the store, creates
+/// the project directory, asks `gh` for the default branch when none was
+/// prefetched, and on the first remote create of the process looks `sq` up
+/// through a login shell.
+#[allow(clippy::too_many_arguments)]
+fn create_project_blocking(
+    store: Arc<Store>,
+    app_handle: tauri::AppHandle,
+    name: String,
+    github_repo: Option<String>,
+    location: Option<String>,
+    subpath: Option<String>,
+    branch_name: Option<String>,
+    pr_number: Option<u64>,
+    default_branch: Option<String>,
+    head_repo: Option<String>,
+) -> Result<store::Project, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Project name is required".to_string());
@@ -542,6 +605,17 @@ fn create_project(
     if let Some(sub) = subpath.clone() {
         project = project.with_subpath(sub);
     }
+
+    // Resolve the first branch's base before the first write. The frontend
+    // prefetches the default branch; without it this asks `gh`, which can
+    // take up to its 60 s timeout. Off the main thread, the refetches each
+    // write's change event triggers are served while this command is still
+    // running, so a lookup between the writes would show the project without
+    // its branch for as long as `gh` took.
+    let effective_base = github_repo
+        .as_deref()
+        .map(|repo| git::resolve_default_branch(default_branch, repo));
+
     store.create_project(&project).map_err(|e| e.to_string())?;
 
     // Create the project-scoped worktree root so project sessions always
@@ -563,7 +637,7 @@ fn create_project(
             .map_err(|e| e.to_string())?;
     }
 
-    if let Some(repo) = github_repo {
+    if let (Some(repo), Some(effective_base)) = (github_repo, effective_base) {
         let mut project_repo =
             store::ProjectRepo::new(&project.id, &repo, &inferred_branch_name, subpath).primary();
         project_repo.head_repo = head_repo;
@@ -573,10 +647,6 @@ fn create_project(
 
         // Create the initial branch record for the first repo so each new
         // project starts with exactly one branch tracked for that repository.
-        // Use the frontend-prefetched default branch when available to avoid
-        // a ~500ms-2s GitHub API round-trip during project creation.
-        let effective_base = git::resolve_default_branch(default_branch, &repo);
-
         let (branch_id, is_local) = match project.location {
             store::ProjectLocation::Local => {
                 let mut branch =
@@ -674,50 +744,71 @@ fn create_project(
 }
 
 /// Rename a project in place. Only the stored name changes; see
-/// [`project_commands::rename_project_impl`].
+/// [`project_commands::rename_project_impl`]. A store write and a read, run
+/// on the blocking pool so a wait on the store lock does not freeze the
+/// window.
 #[tauri::command(rename_all = "camelCase")]
-fn rename_project(
+async fn rename_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     name: String,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
-    project_commands::rename_project_impl(&store, &project_id, &name)
+    tauri::async_runtime::spawn_blocking(move || {
+        project_commands::rename_project_impl(&store, &project_id, &name)
+    })
+    .await
+    .map_err(|e| format!("rename_project task failed: {e}"))?
 }
 
+/// A store read, run on the blocking pool like [`list_projects`]: the
+/// frontend asks for it once per project at launch and again on every
+/// project change.
 #[tauri::command(rename_all = "camelCase")]
-fn list_project_repos(
+async fn list_project_repos(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
 ) -> Result<Vec<store::ProjectRepo>, String> {
     let store = get_store(&store)?;
-    store
-        .list_project_repos(&project_id)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_project_repos(&project_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_project_repos task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn list_recent_repos(
+async fn list_recent_repos(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     limit: Option<usize>,
 ) -> Result<Vec<store::RecentRepo>, String> {
     let store = get_store(&store)?;
-    let effective_limit = limit.unwrap_or(10);
-    store
-        .list_recent_repos(effective_limit)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let effective_limit = limit.unwrap_or(10);
+        store
+            .list_recent_repos(effective_limit)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_recent_repos task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn get_suggested_repos(
+async fn get_suggested_repos(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<store::SuggestedRepo>, String> {
     let store = get_store(&store)?;
-    store
-        .get_suggested_repos_for_project(&project_id, limit.unwrap_or(5))
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_suggested_repos_for_project(&project_id, limit.unwrap_or(5))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_suggested_repos task failed: {e}"))?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -761,14 +852,18 @@ async fn add_project_repo(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn clear_project_repo_reason(
+async fn clear_project_repo_reason(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_repo_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    store
-        .clear_project_repo_reason(&project_repo_id)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .clear_project_repo_reason(&project_repo_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("clear_project_repo_reason task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -792,49 +887,57 @@ async fn remove_project_repo(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn set_primary_project_repo(
+async fn set_primary_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     project_repo_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    let repo = store
-        .get_project_repo(&project_repo_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
-    store
-        .set_primary_project_repo(&project_id, &project_repo_id)
-        .map_err(|e| e.to_string())?;
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-    store
-        .update_project(
-            &project_id,
-            &project.name,
-            Some(&repo.github_repo),
-            &project.location,
-            repo.subpath.as_deref(),
-        )
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = store
+            .get_project_repo(&project_repo_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
+        store
+            .set_primary_project_repo(&project_id, &project_repo_id)
+            .map_err(|e| e.to_string())?;
+        let project = store
+            .get_project(&project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project not found: {project_id}"))?;
+        store
+            .update_project(
+                &project_id,
+                &project.name,
+                Some(&repo.github_repo),
+                &project.location,
+                repo.subpath.as_deref(),
+            )
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("set_primary_project_repo task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn update_project_repo_branch_name(
+async fn update_project_repo_branch_name(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     project_repo_id: String,
     branch_name: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    let trimmed = branch_name.trim();
-    if trimmed.is_empty() {
-        return Err("Branch name is required".to_string());
-    }
-    store
-        .update_project_repo_branch_name(&project_id, &project_repo_id, trimmed)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let trimmed = branch_name.trim();
+        if trimmed.is_empty() {
+            return Err("Branch name is required".to_string());
+        }
+        store
+            .update_project_repo_branch_name(&project_id, &project_repo_id, trimmed)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("update_project_repo_branch_name task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -860,103 +963,133 @@ async fn delete_project(
 // Repo badge commands
 // =============================================================================
 
+/// A store read, run on the blocking pool like [`list_projects`].
 #[tauri::command]
-fn get_all_repo_badges(
+async fn get_all_repo_badges(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<store::RepoBadge>, String> {
-    get_store(&store)?
-        .list_repo_badges()
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store.list_repo_badges().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_all_repo_badges task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn delete_repo_badge(
+async fn delete_repo_badge(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: String,
 ) -> Result<(), String> {
-    get_store(&store)?
-        .delete_repo_badge(&github_repo, &subpath)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .delete_repo_badge(&github_repo, &subpath)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("delete_repo_badge task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn update_repo_badge(
+async fn update_repo_badge(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: String,
     short_name: String,
     hue: f64,
 ) -> Result<store::RepoBadge, String> {
-    let short_name = short_name.trim().to_string();
-    if short_name.is_empty() || short_name.len() > 6 {
-        return Err("Short name must be 1-6 characters".into());
-    }
-    if !short_name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.')
-    {
-        return Err("Short name must be lowercase alphanumeric (dots allowed)".into());
-    }
-    if short_name.chars().filter(|&c| c == '.').count() > 1
-        || short_name.starts_with('.')
-        || short_name.ends_with('.')
-    {
-        return Err("Short name may contain at most one dot, not at start or end".into());
-    }
-    if !(0.0..=360.0).contains(&hue) {
-        return Err("Hue must be between 0 and 360".into());
-    }
     let store = get_store(&store)?;
-
-    // Check if another badge already uses this short name.
-    if let Some(existing) = store
-        .get_repo_badge_by_short_name(&short_name)
-        .map_err(|e| e.to_string())?
-    {
-        let is_same_badge = existing.github_repo == github_repo && existing.subpath == subpath;
-        if !is_same_badge {
-            let owner = if existing.subpath.is_empty() {
-                existing.github_repo.clone()
-            } else {
-                format!("{} ({})", existing.github_repo, existing.subpath)
-            };
-            return Err(format!(
-                "Short name '{}' is already used by {}",
-                short_name, owner
-            ));
+    tauri::async_runtime::spawn_blocking(move || {
+        let short_name = short_name.trim().to_string();
+        if short_name.is_empty() || short_name.len() > 6 {
+            return Err("Short name must be 1-6 characters".into());
         }
-    }
+        if !short_name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.')
+        {
+            return Err("Short name must be lowercase alphanumeric (dots allowed)".into());
+        }
+        if short_name.chars().filter(|&c| c == '.').count() > 1
+            || short_name.starts_with('.')
+            || short_name.ends_with('.')
+        {
+            return Err("Short name may contain at most one dot, not at start or end".into());
+        }
+        if !(0.0..=360.0).contains(&hue) {
+            return Err("Hue must be between 0 and 360".into());
+        }
 
-    store
-        .update_repo_badge(&github_repo, &subpath, &short_name, hue)
-        .map_err(|e| e.to_string())?;
-    store
-        .get_repo_badge(&github_repo, &subpath)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            format!(
-                "Badge not found after update for {}/{}",
-                github_repo, subpath
-            )
-        })
+        // Check if another badge already uses this short name.
+        if let Some(existing) = store
+            .get_repo_badge_by_short_name(&short_name)
+            .map_err(|e| e.to_string())?
+        {
+            let is_same_badge = existing.github_repo == github_repo && existing.subpath == subpath;
+            if !is_same_badge {
+                let owner = if existing.subpath.is_empty() {
+                    existing.github_repo.clone()
+                } else {
+                    format!("{} ({})", existing.github_repo, existing.subpath)
+                };
+                return Err(format!(
+                    "Short name '{}' is already used by {}",
+                    short_name, owner
+                ));
+            }
+        }
+
+        store
+            .update_repo_badge(&github_repo, &subpath, &short_name, hue)
+            .map_err(|e| e.to_string())?;
+        store
+            .get_repo_badge(&github_repo, &subpath)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "Badge not found after update for {}/{}",
+                    github_repo, subpath
+                )
+            })
+    })
+    .await
+    .map_err(|e| format!("update_repo_badge task failed: {e}"))?
 }
 
+/// Runs [`pin_repo_impl`] on the blocking pool. As a synchronous command it
+/// held the main thread, and so the window, through the pin write and the
+/// default-branch backfill. Like [`create_project`], nothing but the store
+/// handle lookup may run inline here.
 #[tauri::command(rename_all = "camelCase")]
-fn pin_repo(
+async fn pin_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || pin_repo_impl(&store, &github_repo, &subpath))
+        .await
+        .map_err(|e| format!("pin_repo task failed: {e}"))?
+}
+
+/// The body of [`pin_repo`], shared with the web arm. Blocking: after the pin
+/// write, a badge with no default branch has it backfilled, which asks git or
+/// `gh`.
+pub(crate) fn pin_repo_impl(
+    store: &Arc<Store>,
+    github_repo: &str,
+    subpath: &str,
+) -> Result<(), String> {
     store
-        .pin_repo(&github_repo, &subpath)
+        .pin_repo(github_repo, subpath)
         .map_err(|e| e.to_string())?;
 
     // Backfill default_branch if not yet detected
-    if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
+    if let Ok(Some(badge)) = store.get_repo_badge(github_repo, subpath) {
         if badge.default_branch.is_none() {
-            if let Err(e) = detect_and_store_default_branch(&store, &github_repo, &subpath) {
+            if let Err(e) = detect_and_store_default_branch(store, github_repo, subpath) {
                 log::warn!("[pin_repo] failed to backfill default_branch: {e}");
             }
         }
@@ -966,24 +1099,34 @@ fn pin_repo(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn unpin_repo(
+async fn unpin_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: String,
 ) -> Result<(), String> {
-    get_store(&store)?
-        .unpin_repo(&github_repo, &subpath)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .unpin_repo(&github_repo, &subpath)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("unpin_repo task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn reorder_pinned_repos(
+async fn reorder_pinned_repos(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     ordered_keys: Vec<(String, String)>,
 ) -> Result<(), String> {
-    get_store(&store)?
-        .reorder_pinned_repos(&ordered_keys)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .reorder_pinned_repos(&ordered_keys)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reorder_pinned_repos task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1012,15 +1155,20 @@ async fn list_repos_for_home(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn set_repo_default_branch(
+async fn set_repo_default_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: String,
     default_branch: String,
 ) -> Result<(), String> {
-    get_store(&store)?
-        .set_default_branch(&github_repo, &subpath, &default_branch)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .set_default_branch(&github_repo, &subpath, &default_branch)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("set_repo_default_branch task failed: {e}"))?
 }
 
 /// Detect the default branch for a repo, cache it in repo_badges, and return it.
@@ -1064,13 +1212,17 @@ pub(crate) fn detect_and_store_default_branch(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn detect_default_branch(
+async fn detect_default_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: String,
 ) -> Result<String, String> {
     let store = get_store(&store)?;
-    detect_and_store_default_branch(&store, &github_repo, &subpath)
+    tauri::async_runtime::spawn_blocking(move || {
+        detect_and_store_default_branch(&store, &github_repo, &subpath)
+    })
+    .await
+    .map_err(|e| format!("detect_default_branch task failed: {e}"))?
 }
 
 /// Get the commit timeline for a repo's default branch from its local clone.
@@ -1485,31 +1637,35 @@ fn get_or_create_project_action_context(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn list_project_actions(
+async fn list_project_actions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     project_repo_id: Option<String>,
 ) -> Result<Vec<store::models::RepoAction>, String> {
     let store = get_store(&store)?;
-    let context = if let Some(repo_id) = project_repo_id {
-        let repo = store
-            .get_project_repo(&repo_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let context = if let Some(repo_id) = project_repo_id {
+            let repo = store
+                .get_project_repo(&repo_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project repo not found: {repo_id}"))?;
+            store
+                .get_or_create_action_context(&repo.github_repo, repo.subpath.as_deref())
+                .map_err(|e| e.to_string())?
+        } else {
+            get_or_create_project_action_context(&store, &project_id)?
+        };
         store
-            .get_or_create_action_context(&repo.github_repo, repo.subpath.as_deref())
-            .map_err(|e| e.to_string())?
-    } else {
-        get_or_create_project_action_context(&store, &project_id)?
-    };
-    store
-        .list_repo_actions(&context.id)
-        .map_err(|e| e.to_string())
+            .list_repo_actions(&context.id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_project_actions task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
-fn update_project_action(
+async fn update_project_action(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     action_id: String,
     name: String,
@@ -1520,63 +1676,79 @@ fn update_project_action(
     icon: Option<String>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    let action = store
-        .get_repo_action(&action_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Action not found: {action_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let action = store
+            .get_repo_action(&action_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Action not found: {action_id}"))?;
 
-    let updated = store::models::RepoAction {
-        id: action.id,
-        context_id: action.context_id,
-        name,
-        command,
-        action_type: builderbot_actions::ActionType::parse(&action_type)
-            .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
-        sort_order,
-        run_detection_mode: action.run_detection_mode,
-        pinned,
-        icon,
-        created_at: action.created_at,
-        updated_at: store::now_timestamp(),
-    };
+        let updated = store::models::RepoAction {
+            id: action.id,
+            context_id: action.context_id,
+            name,
+            command,
+            action_type: builderbot_actions::ActionType::parse(&action_type)
+                .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
+            sort_order,
+            run_detection_mode: action.run_detection_mode,
+            pinned,
+            icon,
+            created_at: action.created_at,
+            updated_at: store::now_timestamp(),
+        };
 
-    store
-        .update_repo_action(&updated)
-        .map_err(|e| e.to_string())
+        store
+            .update_repo_action(&updated)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("update_project_action task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn delete_project_action(
+async fn delete_project_action(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     action_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    store
-        .delete_repo_action(&action_id)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .delete_repo_action(&action_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("delete_project_action task failed: {e}"))?
 }
 
 #[tauri::command]
-fn list_action_contexts(
+async fn list_action_contexts(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<store::models::ActionContext>, String> {
     let store = get_store(&store)?;
-    store.list_action_contexts().map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store.list_action_contexts().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_action_contexts task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn list_repo_actions(
+async fn list_repo_actions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: Option<String>,
 ) -> Result<Vec<store::models::RepoAction>, String> {
     let store = get_store(&store)?;
-    let context = store
-        .get_or_create_action_context(&github_repo, subpath.as_deref())
-        .map_err(|e| e.to_string())?;
-    store
-        .list_repo_actions(&context.id)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let context = store
+            .get_or_create_action_context(&github_repo, subpath.as_deref())
+            .map_err(|e| e.to_string())?;
+        store
+            .list_repo_actions(&context.id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_repo_actions task failed: {e}"))?
 }
 
 /// Every action context's actions in one read-only call — the bulk hydration
@@ -1599,7 +1771,7 @@ async fn list_all_repo_actions(
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
-fn create_repo_action(
+async fn create_repo_action(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
     subpath: Option<String>,
@@ -1611,83 +1783,95 @@ fn create_repo_action(
     icon: Option<String>,
 ) -> Result<store::models::RepoAction, String> {
     let store = get_store(&store)?;
-    let context = store
-        .get_or_create_action_context(&github_repo, subpath.as_deref())
-        .map_err(|e| e.to_string())?;
-    let parsed_type = builderbot_actions::ActionType::parse(&action_type)
-        .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
-    let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
-        .with_pinned(pinned)
-        .with_icon(icon);
-    store
-        .create_repo_action(&action)
-        .map_err(|e| e.to_string())?;
-    Ok(action)
+    tauri::async_runtime::spawn_blocking(move || {
+        let context = store
+            .get_or_create_action_context(&github_repo, subpath.as_deref())
+            .map_err(|e| e.to_string())?;
+        let parsed_type = builderbot_actions::ActionType::parse(&action_type)
+            .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
+        let action =
+            store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
+                .with_pinned(pinned)
+                .with_icon(icon);
+        store
+            .create_repo_action(&action)
+            .map_err(|e| e.to_string())?;
+        Ok(action)
+    })
+    .await
+    .map_err(|e| format!("create_repo_action task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn delete_all_repo_actions(
+async fn delete_all_repo_actions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     context_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    store
-        .delete_all_repo_actions(&context_id)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .delete_all_repo_actions(&context_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("delete_all_repo_actions task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn delete_action_context(
+async fn delete_action_context(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     context_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Look up the context before deleting so we can clean up the clone directory.
+        let context = store
+            .get_action_context(&context_id)
+            .map_err(|e| e.to_string())?;
 
-    // Look up the context before deleting so we can clean up the clone directory.
-    let context = store
-        .get_action_context(&context_id)
-        .map_err(|e| e.to_string())?;
+        store
+            .delete_action_context(&context_id)
+            .map_err(|e| e.to_string())?;
 
-    store
-        .delete_action_context(&context_id)
-        .map_err(|e| e.to_string())?;
-
-    // Clean up the git clone directory if no other action contexts reference the same repo.
-    // This runs on a background thread so the UI isn't blocked by large repo deletions.
-    if let Some(ctx) = context {
-        let remaining = store
-            .count_action_contexts_for_repo(&ctx.github_repo)
-            .unwrap_or(1);
-        if remaining == 0 {
-            if let Some(clone_path) = crate::paths::clone_path_for(&ctx.github_repo) {
-                std::thread::spawn(move || {
-                    if clone_path.exists() {
-                        // Rename to a temporary path first so that concurrent filesystem
-                        // activity (e.g. Spotlight indexing) doesn't cause "Directory not
-                        // empty" errors during removal.
-                        let trash_path = clone_path.with_extension("deleting");
-                        let target = if std::fs::rename(&clone_path, &trash_path).is_ok() {
-                            trash_path
-                        } else {
-                            clone_path.clone()
-                        };
-                        if let Err(e) = std::fs::remove_dir_all(&target) {
-                            log::warn!(
-                                "Failed to remove clone directory {}: {e}",
-                                target.display()
-                            );
+        // Clean up the git clone directory if no other action contexts reference the same repo.
+        // This runs on a background thread so the UI isn't blocked by large repo deletions.
+        if let Some(ctx) = context {
+            let remaining = store
+                .count_action_contexts_for_repo(&ctx.github_repo)
+                .unwrap_or(1);
+            if remaining == 0 {
+                if let Some(clone_path) = crate::paths::clone_path_for(&ctx.github_repo) {
+                    std::thread::spawn(move || {
+                        if clone_path.exists() {
+                            // Rename to a temporary path first so that concurrent filesystem
+                            // activity (e.g. Spotlight indexing) doesn't cause "Directory not
+                            // empty" errors during removal.
+                            let trash_path = clone_path.with_extension("deleting");
+                            let target = if std::fs::rename(&clone_path, &trash_path).is_ok() {
+                                trash_path
+                            } else {
+                                clone_path.clone()
+                            };
+                            if let Err(e) = std::fs::remove_dir_all(&target) {
+                                log::warn!(
+                                    "Failed to remove clone directory {}: {e}",
+                                    target.display()
+                                );
+                            }
                         }
-                    }
-                    // Try to remove the parent owner directory if it's now empty.
-                    if let Some(parent) = clone_path.parent() {
-                        let _ = std::fs::remove_dir(parent);
-                    }
-                });
+                        // Try to remove the parent owner directory if it's now empty.
+                        if let Some(parent) = clone_path.parent() {
+                            let _ = std::fs::remove_dir(parent);
+                        }
+                    });
+                }
             }
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("delete_action_context task failed: {e}"))?
 }
 
 // =============================================================================
@@ -2625,8 +2809,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch_menu_event, open_store, read_legacy_preferences, reset_store, DbState,
-        MenuDispatch, StoreIncompatibility,
+        dispatch_menu_event, open_store, pin_repo_impl, read_legacy_preferences, reset_store,
+        DbState, MenuDispatch, StoreIncompatibility,
     };
     use crate::store::{LegacyImportOutcome, LegacyStatusOptions};
     use std::sync::{Arc, Barrier, Mutex};
@@ -2852,5 +3036,52 @@ mod tests {
                 MenuDispatch::ShowWindow
             );
         }
+    }
+
+    fn store_with_badge(default_branch: Option<&str>) -> Arc<crate::store::Store> {
+        let store = Arc::new(crate::store::Store::in_memory().unwrap());
+        store
+            .create_repo_badge(&crate::store::RepoBadge {
+                github_repo: "acme/widgets".to_string(),
+                subpath: String::new(),
+                short_name: "wid".to_string(),
+                hue: 120.0,
+                created_at: crate::store::now_timestamp(),
+                pinned: false,
+                pin_sort_order: None,
+                default_branch: None,
+            })
+            .unwrap();
+        if let Some(branch) = default_branch {
+            store
+                .set_default_branch("acme/widgets", "", branch)
+                .unwrap();
+        }
+        store
+    }
+
+    /// The badge already knows its default branch, so the backfill has
+    /// nothing to ask git or `gh` for and the test spawns no process.
+    #[test]
+    fn pin_repo_impl_pins_a_badge_and_keeps_its_default_branch() {
+        let store = store_with_badge(Some("trunk"));
+
+        pin_repo_impl(&store, "acme/widgets", "").unwrap();
+
+        let badge = store.get_repo_badge("acme/widgets", "").unwrap().unwrap();
+        assert!(badge.pinned);
+        assert_eq!(badge.pin_sort_order, Some(0));
+        assert_eq!(badge.default_branch.as_deref(), Some("trunk"));
+    }
+
+    /// The pin write fails first, so no backfill is attempted for a repo
+    /// that has no badge.
+    #[test]
+    fn pin_repo_impl_reports_a_missing_badge() {
+        let store = store_with_badge(Some("trunk"));
+
+        let error = pin_repo_impl(&store, "acme/unknown", "").unwrap_err();
+
+        assert!(error.contains("No badge found"), "{error}");
     }
 }

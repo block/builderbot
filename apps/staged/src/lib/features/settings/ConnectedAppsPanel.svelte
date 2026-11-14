@@ -21,6 +21,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as commands from '../../api/commands';
   import { listenToEvent } from '../../transport';
+  import { LatestWins } from '../../shared/latestWins';
   import { formatRelativeTime } from '../../shared/relativeTime.svelte';
   import type { ControlGrantSummary } from '../../types';
   import { accessLabel, scopeLabel } from './controlAuthorization.svelte';
@@ -36,18 +37,48 @@
   let revoking = $state(false);
   let mounted = true;
 
-  async function load() {
+  /**
+   * `grants`: each `control-grants-changed` sends a load, and the backend
+   * reads them concurrently: the load sent for the latest change stays,
+   * whichever answers last.
+   *
+   * `revoked`: a revoke drops its row here as soon as it lands. A load sent
+   * before that may have read the grant while it was still there, and no
+   * later load has landed to refuse it, so it reads again instead of putting
+   * the row back.
+   */
+  const loadOrder = new LatestWins<'grants' | 'revoked'>();
+
+  async function load(): Promise<void> {
+    const ticket = loadOrder.issue();
     loading = true;
     try {
-      const list = await commands.listControlGrants();
-      if (!mounted) return;
-      grants = list;
-      error = null;
-    } catch (e) {
-      if (!mounted) return;
-      error = e instanceof Error ? e.message : String(e);
+      let list: ControlGrantSummary[] | null = null;
+      let failure: string | null = null;
+      try {
+        list = await commands.listControlGrants();
+      } catch (e) {
+        failure = e instanceof Error ? e.message : String(e);
+      }
+      // A failure is a response too: one from a load that a later load has
+      // already answered must not put its error above that load's list.
+      if (!mounted || !loadOrder.admit('grants', ticket)) return;
+      // Sent before a revoke landed here, so it may predate it. Whether it
+      // answered or failed, the list as it is now is one read away.
+      if (loadOrder.overtaken('revoked', ticket)) return await load();
+      if (list) {
+        grants = list;
+        error = null;
+      } else {
+        error = failure;
+      }
     } finally {
-      if (mounted) loading = false;
+      // `loading` is about the newest load. An older one settling while that
+      // is still out leaves the Refresh button disabled, and so does a load
+      // that went on to read again: its re-read is the newest. A revoke is
+      // not a load (`wrote`), so one landing does not keep the button
+      // disabled once the newest load is back.
+      if (mounted && loadOrder.isNewest(ticket)) loading = false;
     }
   }
 
@@ -67,6 +98,8 @@
     try {
       await commands.revokeControlGrant(grant.id);
       // The event refreshes too; this keeps the row gone even if it is late.
+      // A load still out was sent before the revoke landed: mark it stale.
+      loadOrder.wrote('revoked');
       grants = grants?.filter((g) => g.id !== grant.id) ?? null;
       confirming = null;
     } catch (e) {

@@ -1438,19 +1438,32 @@ pub(crate) fn cleanup_reviews_after_commit(
 }
 
 /// Delete a review and all its comments, optionally deleting its linked session.
+///
+/// Runs [`delete_review_impl`] on the blocking pool. Deleting the session
+/// with it cascades to every message of that session, so as a synchronous
+/// command it held the main thread, and so the window, for that delete.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_review(
+pub async fn delete_review(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     review_id: String,
     delete_session: Option<bool>,
 ) -> Result<(), String> {
-    delete_review_impl(
-        &crate::get_store(&store)?,
-        &app_handle,
-        &review_id,
-        delete_session.unwrap_or(false),
-    )
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_review_impl(
+            &store,
+            &app_handle,
+            &review_id,
+            delete_session.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("delete_review task failed: {e}"))?
 }
 
 /// The body of [`delete_review`], shared with the web dispatcher's arm. Kicks
@@ -1490,21 +1503,30 @@ pub(crate) fn delete_review_impl<R: tauri::Runtime>(
 
 /// Delete a pending commit (one with no SHA) by its DB id.
 /// This does NOT touch git — it only removes the DB record and optionally its session.
+///
+/// Runs [`delete_pending_commit_impl`] on the blocking pool, for the reason
+/// given on [`delete_review`]; only the handle lookups run inline.
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_pending_commit(
+pub async fn delete_pending_commit(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     commit_id: String,
     delete_session: Option<bool>,
 ) -> Result<(), String> {
-    delete_pending_commit_impl(
-        &crate::get_store(&store)?,
-        &registry,
-        &app_handle,
-        &commit_id,
-        delete_session.unwrap_or(false),
-    )
+    let store = crate::get_store(&store)?;
+    let registry = Arc::clone(&registry);
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_pending_commit_impl(
+            &store,
+            &registry,
+            &app_handle,
+            &commit_id,
+            delete_session.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("delete_pending_commit task failed: {e}"))?
 }
 
 /// The body of [`delete_pending_commit`], shared with the web dispatcher's

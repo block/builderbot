@@ -344,45 +344,57 @@ pub fn get_interrupted_sessions(
 /// restarted. A second answer is harmless: the marker is already recorded,
 /// and `run_launch_resume` ignores rows that are no longer terminal with the
 /// quit's reason.
+///
+/// Runs on the blocking pool: recording the marker saves the preferences
+/// file, which as a synchronous command held the main thread. The store
+/// handle is looked up inline but only checked where the run needs it, so a
+/// dismissal still succeeds without a store.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn resume_interrupted_sessions(
+pub async fn resume_interrupted_sessions(
     app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<SessionRegistry>>,
     action_executor: tauri::State<'_, Arc<ActionExecutor>>,
     action_registry: tauri::State<'_, Arc<ActionRegistry>>,
-    state: tauri::State<'_, LaunchResumeState>,
     session_ids: Vec<String>,
 ) -> Result<(), String> {
-    if let Some(through) = state.take_handled() {
-        if let Err(e) = write_handled_through(&app_handle, through) {
-            log::warn!("[launch_resume] could not record the handled marker: {e}");
+    let store = crate::get_store(&store);
+    let registry = Arc::clone(&registry);
+    let action_executor = Arc::clone(&action_executor);
+    let action_registry = Arc::clone(&action_registry);
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<LaunchResumeState>();
+        if let Some(through) = state.take_handled() {
+            if let Err(e) = write_handled_through(&app_handle, through) {
+                log::warn!("[launch_resume] could not record the handled marker: {e}");
+            }
         }
-    }
-    // The deferred pushes the startup pass held for this offer. On a
-    // dismissal nothing comes back, so they go now; otherwise after the run,
-    // once the resumed rows are in place for the drain's idle check.
-    let held_deferred_pushes = state.take_deferred_push_holds();
-    if session_ids.is_empty() {
-        kick_held_deferred_pushes(&app_handle, held_deferred_pushes);
-        return Ok(());
-    }
-    let deps = run::ResumeDeps {
-        store: crate::get_store(&store)?,
-        registry: Arc::clone(&registry),
-        action_executor: Arc::clone(&action_executor),
-        action_registry: Arc::clone(&action_registry),
-        app_handle: app_handle.clone(),
-    };
-    tauri::async_runtime::spawn(async move {
-        let summary = run::run_launch_resume(deps, session_ids).await;
-        kick_held_deferred_pushes(&app_handle, held_deferred_pushes);
-        if let Some(state) = app_handle.try_state::<LaunchResumeState>() {
-            *state.last_run.lock().unwrap() = Some(summary);
+        // The deferred pushes the startup pass held for this offer. On a
+        // dismissal nothing comes back, so they go now; otherwise after the run,
+        // once the resumed rows are in place for the drain's idle check.
+        let held_deferred_pushes = state.take_deferred_push_holds();
+        if session_ids.is_empty() {
+            kick_held_deferred_pushes(&app_handle, held_deferred_pushes);
+            return Ok(());
         }
-    });
-    Ok(())
+        let deps = run::ResumeDeps {
+            store: store?,
+            registry,
+            action_executor,
+            action_registry,
+            app_handle: app_handle.clone(),
+        };
+        tauri::async_runtime::spawn(async move {
+            let summary = run::run_launch_resume(deps, session_ids).await;
+            kick_held_deferred_pushes(&app_handle, held_deferred_pushes);
+            if let Some(state) = app_handle.try_state::<LaunchResumeState>() {
+                *state.last_run.lock().unwrap() = Some(summary);
+            }
+        });
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("resume_interrupted_sessions task failed: {e}"))?
 }
 
 fn kick_held_deferred_pushes<R: tauri::Runtime>(

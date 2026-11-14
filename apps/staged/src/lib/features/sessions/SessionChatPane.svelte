@@ -196,6 +196,7 @@
   import { viewport } from '../../shared/viewport.svelte';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
   import { observeSizeChanges } from '../../shared/observeSizeChanges';
+  import { LatestWins } from '../../shared/latestWins';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import {
     displayRootKey,
@@ -377,6 +378,13 @@
   let composerView = $state<ReturnType<typeof ChatComposer>>();
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
+  /**
+   * The follow-up queue is read by the load, by each poll and by a refresh
+   * after every status event and queue write, and the backend answers those
+   * concurrently. The read sent last stays: an earlier refresh answering after
+   * the one sent behind a delete would put the deleted message back.
+   */
+  const queuedReadOrder = new LatestWins<'queue'>();
   /** A terminal status arrived while a tick was in flight; poll once more
    *  when that tick settles. */
   let finalPollPending = false;
@@ -1456,6 +1464,7 @@
     statusLoadedForSessionId = null;
     const statusVersionBeforeFetch = statusEventVersion;
     const id = sessionId;
+    const queuedTicket = queuedReadOrder.issue();
     try {
       // Only the newest page of the transcript; older pages arrive through
       // `loadOlderMessages` as the user scrolls up.
@@ -1494,7 +1503,7 @@
       const page = transcriptPageFromRows(msgsResult.data, TRANSCRIPT_PAGE_ROWS);
       messages = page.messages;
       hasOlderMessages = page.hasMore;
-      queuedMessages = queued;
+      if (queuedReadOrder.admit('queue', queuedTicket)) queuedMessages = queued;
       if (msgsResult.revalidating) {
         msgsResult.revalidating
           .then((fresh) => {
@@ -1615,6 +1624,7 @@
       // An empty transcript polls from 0, which returns every visible row, so
       // there is nothing older to page in: `hasOlderMessages` stays false.
       const request = sessionPollRequest(messages, acpMetadataMessages);
+      const queuedTicket = queuedReadOrder.issue();
       const result = await pollSession(sessionId, request);
       if (closed) return 'skipped';
       const s = result.session;
@@ -1622,7 +1632,10 @@
       if (s && !statusEventDuringFetch && JSON.stringify(s) !== JSON.stringify(session)) {
         session = s;
       }
-      if (JSON.stringify(result.queuedMessages) !== JSON.stringify(queuedMessages)) {
+      if (
+        queuedReadOrder.admit('queue', queuedTicket) &&
+        JSON.stringify(result.queuedMessages) !== JSON.stringify(queuedMessages)
+      ) {
         queuedMessages = result.queuedMessages;
       }
       refreshLiveDelivery(s?.status ?? session?.status);
@@ -1710,8 +1723,13 @@
 
   async function refreshQueuedMessages() {
     if (!sessionId || closed) return;
+    const id = sessionId;
+    const ticket = queuedReadOrder.issue();
     try {
-      const queued = await listQueuedSessionMessages(sessionId);
+      const queued = await listQueuedSessionMessages(id);
+      // The pane may show another session by now; its own load reads the queue.
+      if (closed || sessionId !== id) return;
+      if (!queuedReadOrder.admit('queue', ticket)) return;
       if (JSON.stringify(queued) !== JSON.stringify(queuedMessages)) {
         queuedMessages = queued;
       }

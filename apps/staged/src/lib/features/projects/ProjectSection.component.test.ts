@@ -591,6 +591,33 @@ describe('ProjectSection note rows', () => {
     unmount(section);
   });
 
+  it('does not put a deleted note back when a list read before the delete lands after it', async () => {
+    const section = mountSection();
+    await settle();
+
+    // A list load is in flight, and read the note before it was deleted.
+    let answerList!: (notes: ProjectNote[]) => void;
+    commandMocks.listProjectNotes.mockImplementationOnce(
+      () => new Promise<ProjectNote[]>((resolve) => (answerList = resolve))
+    );
+    window.dispatchEvent(new CustomEvent('project-notes-invalidated'));
+    await settle();
+    expect(commandMocks.listProjectNotes).toHaveBeenCalledTimes(2);
+
+    listNotes();
+    clickDelete('session-1', { altKey: true });
+    await settle();
+    expect(document.querySelector('[data-testid="timeline-row"]')).toBeNull();
+
+    answerList([completedNote]);
+    await settle();
+    expect(document.querySelector('[data-testid="timeline-row"]')).toBeNull();
+    // The list is read again rather than dropped, for whatever else it held.
+    expect(commandMocks.listProjectNotes).toHaveBeenCalledTimes(3);
+
+    unmount(section);
+  });
+
   it('keeps the note when the confirmation is cancelled', async () => {
     const section = mountSection();
     await settle();

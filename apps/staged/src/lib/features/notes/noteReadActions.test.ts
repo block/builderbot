@@ -231,6 +231,59 @@ describe('setNoteReadState', () => {
     warn.mockRestore();
   });
 
+  describe('while the note’s project is being looked up', () => {
+    /** Mark a note unread whose branch no view has loaded, holding the lookup open. */
+    async function markUnreadHoldingLookup() {
+      noteBranches.set('note-1', 'elsewhere-branch');
+      let answerLookup!: (branch: Branch | null) => void;
+      commands.getBranch.mockImplementationOnce(
+        () => new Promise<Branch | null>((resolve) => (answerLookup = resolve))
+      );
+      const marked = setNoteReadState({ kind: 'branch', noteId: 'note-1' }, false);
+      await flush();
+      expect(commands.getBranch).toHaveBeenCalledTimes(1);
+      return {
+        marked,
+        answerLookup: () => answerLookup({ projectId: 'project-elsewhere' } as Branch),
+      };
+    }
+
+    it('does not flag the project of a note that was read in the meantime', async () => {
+      const { marked, answerLookup } = await markUnreadHoldingLookup();
+
+      // The viewer opens the note: nothing is flagged yet for it to release.
+      await writeNoteRead('branch', 'note-1', true);
+      answerLookup();
+      await marked;
+
+      expect(projectStateStore.isUnread('project-elsewhere')).toBe(false);
+    });
+
+    it('does not flag the project of a note that was deleted in the meantime', async () => {
+      const { marked, answerLookup } = await markUnreadHoldingLookup();
+
+      forgetDeletedNote('branch', 'note-1');
+      answerLookup();
+      await marked;
+
+      expect(projectStateStore.isUnread('project-elsewhere')).toBe(false);
+    });
+
+    it('still flags it when the note is marked unread again in the meantime', async () => {
+      const { marked, answerLookup } = await markUnreadHoldingLookup();
+
+      commands.getBranch.mockResolvedValue({ projectId: 'project-elsewhere' } as Branch);
+      await setNoteReadState({ kind: 'branch', noteId: 'note-1' }, false);
+      answerLookup();
+      await marked;
+
+      expect(projectStateStore.isUnread('project-elsewhere')).toBe(true);
+      // One hold, released by one read.
+      await writeNoteRead('branch', 'note-1', true);
+      expect(projectStateStore.isUnread('project-elsewhere')).toBe(false);
+    });
+  });
+
   it('clears the project flag when the note is marked read again', async () => {
     await setBranchNote('note-1', 'project-1', false);
 

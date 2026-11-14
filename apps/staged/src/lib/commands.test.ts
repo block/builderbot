@@ -1047,3 +1047,354 @@ describe('persisted branch timelines (desktop)', () => {
     expect(commands.getBranchTimelineWithRevalidation('b1').cached).toEqual(timeline('b1-v2'));
   });
 });
+
+/**
+ * `update_note`, `create_note`, `set_note_read`, `mark_session_chat_read`
+ * and `queue_session_message` run on the backend's thread pool, where two in
+ * flight land in either order. Each transport call here is settled by hand,
+ * so a test can leave the first in flight and see whether the second is sent.
+ */
+describe('writes sent without awaiting keep their send order', () => {
+  type Sent = { command: string; args: Record<string, unknown>; settle: (value?: unknown) => void };
+
+  async function load() {
+    vi.resetModules();
+    const sent: Sent[] = [];
+    const invokeCommand = vi.fn(
+      (command: string, args: Record<string, unknown>) =>
+        new Promise((resolve) => {
+          sent.push({ command, args, settle: resolve });
+        })
+    );
+    vi.doMock('./transport', () => ({ invokeCommand, isTauri: true }));
+    const commands = await import('./commands');
+    return { commands, sent };
+  }
+
+  async function flush(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  afterEach(() => {
+    vi.doUnmock('./transport');
+  });
+
+  it('sends a note’s second save only once the first has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.updateNote('note-1', 'Plan', 'older');
+    void commands.updateNote('note-1', 'Plan', 'newer');
+    await flush();
+    expect(sent.map((call) => call.args.content)).toEqual(['older']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.content)).toEqual(['older', 'newer']);
+  });
+
+  it('sends the read mark only once the unread mark before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setNoteRead('note-1', false);
+    void commands.setNoteRead('note-1', true);
+    await flush();
+    expect(sent.map((call) => call.args.read)).toEqual([false]);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.read)).toEqual([false, true]);
+  });
+
+  it('orders a note’s save and its read mark against each other', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setNoteRead('note-1', true);
+    void commands.updateNote('note-1', 'Plan', 'body');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_note_read']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_note_read', 'update_note']);
+  });
+
+  it('sends a note’s delete only once the unread mark before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setNoteRead('note-1', false);
+    void commands.deleteNote('note-1');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_note_read']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_note_read', 'delete_note']);
+  });
+
+  it('creates a branch’s dropped notes one at a time, in drop order', async () => {
+    const { commands, sent } = await load();
+
+    void commands.createNote('branch-1', 'a.md', 'A');
+    void commands.createNote('branch-1', 'b.md', 'B');
+    void commands.createNote('branch-1', 'c.md', 'C');
+    await flush();
+    expect(sent.map((call) => call.args.title)).toEqual(['a.md']);
+
+    sent[0].settle({});
+    await flush();
+    sent[1].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.title)).toEqual(['a.md', 'b.md', 'c.md']);
+  });
+
+  it('queues a session’s second message only once the first is queued', async () => {
+    const { commands, sent } = await load();
+
+    void commands.queueSessionMessage('session-1', 'first');
+    void commands.queueSessionMessage('session-1', 'second');
+    await flush();
+    expect(sent.map((call) => call.args.content)).toEqual(['first']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.content)).toEqual(['first', 'second']);
+  });
+
+  it('sends a chat’s close mark only once its open mark has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.markSessionChatRead('session-1');
+    void commands.markSessionChatRead('session-1');
+    await flush();
+    expect(sent).toHaveLength(1);
+
+    sent[0].settle();
+    await flush();
+    expect(sent).toHaveLength(2);
+  });
+
+  it('sends a repo badge’s second save only once the first has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.updateRepoBadge('acme/app', '', 'AP', 10);
+    void commands.updateRepoBadge('acme/app', '', 'APP', 10);
+    await flush();
+    expect(sent.map((call) => call.args.shortName)).toEqual(['AP']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.shortName)).toEqual(['AP', 'APP']);
+  });
+
+  it('sends a repo badge’s delete only once the save before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.updateRepoBadge('acme/app', 'web', 'AP', 10);
+    void commands.deleteRepoBadge('acme/app', 'web');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['update_repo_badge']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['update_repo_badge', 'delete_repo_badge']);
+  });
+
+  it('sends pinned repo reorders one at a time, in drop order', async () => {
+    const { commands, sent } = await load();
+
+    void commands.reorderPinnedRepos([
+      ['acme/a', ''],
+      ['acme/b', ''],
+    ]);
+    void commands.reorderPinnedRepos([
+      ['acme/b', ''],
+      ['acme/a', ''],
+    ]);
+    await flush();
+    expect(sent).toHaveLength(1);
+
+    sent[0].settle();
+    await flush();
+    expect(sent.map((call) => (call.args.orderedKeys as [string, string][])[0][0])).toEqual([
+      'acme/a',
+      'acme/b',
+    ]);
+  });
+
+  it('sends a project note’s read mark only once the unread mark before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setProjectNoteRead('pnote-1', false);
+    void commands.setProjectNoteRead('pnote-1', true);
+    await flush();
+    expect(sent.map((call) => call.args.read)).toEqual([false]);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.read)).toEqual([false, true]);
+  });
+
+  it('sends a project note’s delete only once the unread mark before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setProjectNoteRead('pnote-1', false);
+    void commands.deleteProjectNote('pnote-1');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_project_note_read']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual([
+      'set_project_note_read',
+      'delete_project_note',
+    ]);
+  });
+
+  it('sends a tag’s catalog edit only once the assignment before it has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.setProjectTagAssigned('project-1', 'tag-1', true);
+    void commands.moveTag('tag-1', 'group-1', 0);
+    void commands.setProjectGroupTag('project-2', 'group-1', 'tag-2');
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_project_tag_assigned']);
+
+    sent[0].settle();
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual(['set_project_tag_assigned', 'move_tag']);
+
+    sent[1].settle();
+    await flush();
+    expect(sent.map((call) => call.command)).toEqual([
+      'set_project_tag_assigned',
+      'move_tag',
+      'set_project_group_tag',
+    ]);
+  });
+
+  it('sends a project’s second rename only once the first has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.renameProject('project-1', 'older');
+    void commands.renameProject('project-1', 'newer');
+    // Another project's rename waits for neither.
+    void commands.renameProject('project-2', 'other');
+    await flush();
+    expect(sent.map((call) => call.args.name)).toEqual(['older', 'other']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.name)).toEqual(['older', 'other', 'newer']);
+  });
+
+  it('sends the next write after one that failed', async () => {
+    vi.resetModules();
+    const invokeCommand = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Note not found: note-1'))
+      .mockResolvedValueOnce({ id: 'note-1' });
+    vi.doMock('./transport', () => ({ invokeCommand, isTauri: true }));
+    const commands = await import('./commands');
+
+    const failed = commands.updateNote('note-1', 'Plan', 'older');
+    const next = commands.updateNote('note-1', 'Plan', 'newer');
+
+    await expect(failed).rejects.toThrow('Note not found');
+    await expect(next).resolves.toEqual({ id: 'note-1' });
+  });
+
+  it('does not hold a write back for another note, branch or session', async () => {
+    const { commands, sent } = await load();
+
+    void commands.updateNote('note-1', 'Plan', 'one');
+    void commands.updateNote('note-2', 'Plan', 'two');
+    void commands.setNoteRead('note-3', true);
+    void commands.createNote('branch-1', 'a.md', 'A');
+    void commands.createNote('branch-2', 'a.md', 'A');
+    void commands.queueSessionMessage('session-1', 'first');
+    void commands.queueSessionMessage('session-2', 'first');
+    void commands.markSessionChatRead('session-1');
+    void commands.updateRepoBadge('acme/app', '', 'AP', 10);
+    void commands.updateRepoBadge('acme/app', 'web', 'WB', 10);
+    void commands.setProjectNoteRead('pnote-1', true);
+    void commands.setProjectNoteRead('pnote-2', true);
+    void commands.reorderPinnedRepos([]);
+    void commands.setProjectTagAssigned('project-1', 'tag-1', true);
+    await flush();
+
+    expect(sent).toHaveLength(14);
+  });
+
+  describe('when the write ahead never settles', () => {
+    beforeEach(() => {
+      // Only the timers the wait bound uses, so module loading is untouched.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    async function loadFor(transport: 'tauri' | 'web') {
+      vi.resetModules();
+      const sent: Sent[] = [];
+      const invokeCommand = vi.fn(
+        (command: string, args: Record<string, unknown>) =>
+          new Promise((resolve) => {
+            sent.push({ command, args, settle: resolve });
+          })
+      );
+      vi.doMock('./transport', () => ({ invokeCommand, isTauri: transport === 'tauri' }));
+      const commands = await import('./commands');
+      return { commands, sent };
+    }
+
+    it('over HTTP, sends the next write for the key once the wait bound runs out', async () => {
+      const { commands, sent } = await loadFor('web');
+
+      // A request on a dropped connection: `fetch` has no timeout.
+      const hung = commands.updateNote('note-1', 'Plan', 'older');
+      void commands.updateNote('note-1', 'Plan', 'newer');
+      await vi.advanceTimersByTimeAsync(commands.WEB_WRITE_ORDER_MAX_WAIT_MS - 1);
+      expect(sent.map((call) => call.args.content)).toEqual(['older']);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sent.map((call) => call.args.content)).toEqual(['older', 'newer']);
+
+      // The hung request was not failed or cancelled: it can still answer.
+      sent[0].settle({ id: 'note-1' });
+      await expect(hung).resolves.toEqual({ id: 'note-1' });
+    });
+
+    it('over HTTP, keeps the writes queued behind a hung one in the order they were sent', async () => {
+      const { commands, sent } = await loadFor('web');
+
+      void commands.updateNote('note-1', 'Plan', 'hung');
+      void commands.updateNote('note-1', 'Plan', 'second');
+      void commands.updateNote('note-1', 'Plan', 'third');
+      await vi.advanceTimersByTimeAsync(commands.WEB_WRITE_ORDER_MAX_WAIT_MS);
+      // The bound ran out for both at the same moment, but only the write
+      // directly behind the hung one is sent beside it.
+      expect(sent.map((call) => call.args.content)).toEqual(['hung', 'second']);
+
+      sent[1].settle({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sent.map((call) => call.args.content)).toEqual(['hung', 'second', 'third']);
+    });
+
+    it('under Tauri, keeps the next write back for as long as the one ahead is out', async () => {
+      const { commands, sent } = await loadFor('tauri');
+
+      void commands.updateNote('note-1', 'Plan', 'older');
+      void commands.updateNote('note-1', 'Plan', 'newer');
+      await vi.advanceTimersByTimeAsync(100 * commands.WEB_WRITE_ORDER_MAX_WAIT_MS);
+      expect(sent.map((call) => call.args.content)).toEqual(['older']);
+
+      sent[0].settle({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sent.map((call) => call.args.content)).toEqual(['older', 'newer']);
+    });
+  });
+});

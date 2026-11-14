@@ -131,6 +131,25 @@ pub struct QuitState {
     /// the app: a second `Cmd+Q` always gets out. A repeated window close does
     /// not force — it asks again. See [`QuitTrigger`].
     prompt_pending: AtomicBool,
+    /// Held while [`decide`](Self::decide) works out what one quit request
+    /// does, so two requests on different threads (a pooled `quit_app` and a
+    /// `Cmd+Q` on the main thread, or two `quit_app`s) are decided one after
+    /// the other, as they were when every request came from the main thread.
+    gate: Mutex<()>,
+}
+
+/// What [`request_quit`] does with one request. See [`QuitState::decide`].
+#[derive(Debug)]
+enum QuitDecision {
+    /// An explicit repeat while the alert was unanswered: quit without asking.
+    Force,
+    /// A shutdown is already under way: nothing to do.
+    AlreadyQuitting,
+    /// Nothing a quit would stop: quit.
+    Quit,
+    /// Sessions would stop: raise the alert describing them. The prompt is
+    /// already marked pending.
+    Ask(QuitBlockers),
 }
 
 impl QuitState {
@@ -150,6 +169,61 @@ impl QuitState {
     /// Clear any pending prompt, returning whether one was pending.
     fn take_prompt(&self) -> bool {
         self.prompt_pending.swap(false, Ordering::SeqCst)
+    }
+
+    /// Decide what one quit request does: the whole check-then-act, under
+    /// [`gate`](Self::gate).
+    ///
+    /// The steps read and write separate flags (`prompt_pending`,
+    /// `quit_in_progress`) around a snapshot of the blockers, so they are only
+    /// right when one request finishes them before the next starts. The main
+    /// thread gave that for free while every request ran on it. `quit_app` now
+    /// runs on the blocking pool, where a second request could pass the
+    /// pending-prompt check before the first had set the flag: both then
+    /// raised an alert, and neither took the forced-quit path a repeated
+    /// explicit quit is owed. Under the gate the second request sees what the
+    /// first decided.
+    ///
+    /// `collect` runs under the gate, and it reads the store. So a `Cmd+Q` on
+    /// the main thread can wait here for a pooled request's read. That is no
+    /// new kind of wait: `Cmd+Q` makes the same read on the main thread
+    /// itself. The gate is released before the caller acts on the decision,
+    /// so it is never held across the alert's hop to the main thread.
+    ///
+    /// A poisoned gate is taken over: it guards no data, only the order.
+    fn decide(&self, trigger: QuitTrigger, collect: impl FnOnce() -> QuitBlockers) -> QuitDecision {
+        let _gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // An explicit quit arriving while the alert is unanswered (a second
+        // `Cmd+Q`) is the escape hatch from a prompt that never appeared or
+        // never came back. The system alert isn't app-modal, so that second
+        // `Cmd+Q` is still dispatchable with the alert on screen. A repeated
+        // window close deliberately doesn't take this path and falls through
+        // to the checks below, which ask again.
+        if trigger.may_force() && self.take_prompt() {
+            return QuitDecision::Force;
+        }
+
+        // Already shutting down, and the alert dismissed on click while cleanup
+        // runs out its budget — so there is nothing on screen saying so, and a
+        // `Cmd+Q` here means "I already answered", not "ask me again".
+        if self.is_quitting() {
+            return QuitDecision::AlreadyQuitting;
+        }
+
+        let blockers = collect();
+        if !should_prompt(&blockers) {
+            return QuitDecision::Quit;
+        }
+
+        // A prompt already pending here means a repeated window close: the flag
+        // is already set, so setting it again is a no-op, and the alert goes
+        // back up describing whatever is running *now*.
+        self.set_prompt_pending();
+        QuitDecision::Ask(blockers)
     }
 
     /// Run `cleanup` at most once. A caller that arrives while it is already
@@ -345,41 +419,21 @@ impl QuitTrigger {
     }
 }
 
-/// Handle a quit request from the app menu, `Cmd+Q`, or (off macOS) the last
-/// window's close. Cheap enough for the main thread: it snapshots blockers and
-/// either hands off to a background quit or raises the alert.
+/// Handle a quit request from the app menu, `Cmd+Q`, the store-incompatibility
+/// screens' Close button, or (off macOS) the last window's close. Cheap enough
+/// for the main thread: it snapshots blockers and either hands off to a
+/// background quit or raises the alert.
+///
+/// Callable from any thread. [`QuitState::decide`] makes the decision for one
+/// request at a time, so concurrent requests behave as if they had arrived in
+/// some order on the main thread.
 pub fn request_quit(app: &AppHandle, trigger: QuitTrigger) {
     let quit_state = app.state::<QuitState>();
-
-    // An explicit quit arriving while the alert is unanswered (a second
-    // `Cmd+Q`) is the escape hatch from a prompt that never appeared or never
-    // came back. The system alert isn't app-modal, so that second `Cmd+Q` is
-    // still dispatchable with the alert on screen. A repeated window close
-    // deliberately doesn't take this path and falls through to the gate below,
-    // which asks again.
-    if trigger.may_force() && quit_state.take_prompt() {
-        spawn_quit(app);
-        return;
+    match quit_state.decide(trigger, || collect_quit_blockers(app)) {
+        QuitDecision::Force | QuitDecision::Quit => spawn_quit(app),
+        QuitDecision::AlreadyQuitting => {}
+        QuitDecision::Ask(blockers) => ask_before_quitting(app, &blockers),
     }
-
-    // Already shutting down, and the alert dismissed on click while cleanup runs
-    // out its budget — so there is nothing on screen saying so, and a `Cmd+Q`
-    // here means "I already answered", not "ask me again".
-    if quit_state.is_quitting() {
-        return;
-    }
-
-    let blockers = collect_quit_blockers(app);
-    if !should_prompt(&blockers) {
-        spawn_quit(app);
-        return;
-    }
-
-    // A prompt already pending here means a repeated window close: the flag is
-    // already set, so setting it again is a no-op, and the alert goes back up
-    // describing whatever is running *now*.
-    quit_state.set_prompt_pending();
-    ask_before_quitting(app, &blockers);
 }
 
 /// Raise the confirmation alert and act on the answer.
@@ -427,9 +481,23 @@ fn quit_confirmed(result: &MessageDialogResult) -> bool {
 ///
 /// Deliberately absent from the web-mode `dispatch` table — a browser client
 /// must not be able to terminate the desktop host.
+///
+/// Runs [`request_quit`] on the blocking pool: with a store open it reads
+/// the sessions a quit would stop, and as a synchronous command a wait on
+/// the store lock there held the main thread. The menu and `Cmd+Q` paths
+/// still call [`request_quit`] on the main thread, so a quit from here can
+/// run beside one of those, or beside a second `quit_app`. Atomic flags do
+/// not make that safe by themselves: the gate reads one flag, snapshots the
+/// blockers and then sets another. [`QuitState::decide`] takes a lock for
+/// those steps, so of two racing requests one is decided first and the other
+/// sees its pending prompt. The alert hops to the main thread itself, after
+/// the lock is released, and the cleanup runs at most once however many
+/// quits race.
 #[tauri::command]
-pub fn quit_app(app_handle: AppHandle) {
-    request_quit(&app_handle, QuitTrigger::Explicit);
+pub async fn quit_app(app_handle: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || request_quit(&app_handle, QuitTrigger::Explicit))
+        .await
+        .map_err(|e| format!("quit_app task failed: {e}"))
 }
 
 /// Run the quit sequence off the main thread so the bounded waits never freeze
@@ -790,6 +858,7 @@ fn app_store(app: &AppHandle) -> Option<Arc<Store>> {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Barrier;
 
     fn active_session(session_type: Option<&str>, status: SessionStatus) -> ActiveSessionInfo {
@@ -931,6 +1000,108 @@ mod tests {
         state.set_prompt_pending();
         assert!(state.take_prompt(), "pending prompt did not arm the force");
         assert!(!state.take_prompt(), "prompt stayed armed after answering");
+    }
+
+    /// The gate in the order the main thread used to give it: the first quit
+    /// asks, an explicit repeat forces, a repeated window close asks again,
+    /// and nothing is asked once a shutdown is under way.
+    #[test]
+    fn the_gate_decides_one_request_after_another() {
+        let running = || blockers(&["review on fix-login"], 0);
+
+        let state = QuitState::default();
+        assert!(matches!(
+            state.decide(QuitTrigger::Explicit, QuitBlockers::default),
+            QuitDecision::Quit
+        ));
+        assert!(matches!(
+            state.decide(QuitTrigger::Explicit, running),
+            QuitDecision::Ask(_)
+        ));
+        assert!(matches!(
+            state.decide(QuitTrigger::Explicit, || panic!(
+                "a forced quit reads nothing"
+            )),
+            QuitDecision::Force
+        ));
+
+        let state = QuitState::default();
+        assert!(matches!(
+            state.decide(QuitTrigger::WindowClose, running),
+            QuitDecision::Ask(_)
+        ));
+        assert!(matches!(
+            state.decide(QuitTrigger::WindowClose, running),
+            QuitDecision::Ask(_)
+        ));
+
+        let state = QuitState::default();
+        state.run_cleanup_once(|| {});
+        assert!(matches!(
+            state.decide(QuitTrigger::WindowClose, || panic!(
+                "a shutdown reads nothing"
+            )),
+            QuitDecision::AlreadyQuitting
+        ));
+    }
+
+    /// `quit_app` runs on the blocking pool, so it can race a `Cmd+Q` on the
+    /// main thread or a second `quit_app`. Whichever is decided first asks;
+    /// the other must see that prompt and force the quit, as it did when the
+    /// main thread ran them one after the other. Without the gate both pass
+    /// the pending-prompt check before either sets the flag, and two alerts
+    /// go up.
+    #[test]
+    fn racing_explicit_quits_raise_one_prompt() {
+        let state = Arc::new(QuitState::default());
+        let start = Arc::new(Barrier::new(2));
+        // How many requests have reached the blocker snapshot.
+        let snapshots = Arc::new(AtomicUsize::new(0));
+
+        let requests: Vec<_> = (0..2)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let start = Arc::clone(&start);
+                let snapshots = Arc::clone(&snapshots);
+                std::thread::spawn(move || {
+                    start.wait();
+                    state.decide(QuitTrigger::Explicit, || {
+                        snapshots.fetch_add(1, Ordering::SeqCst);
+                        // Stands in for the store read, and holds this request
+                        // inside its check-then-act until the other one has
+                        // had every chance to get in beside it.
+                        let deadline = Instant::now() + Duration::from_millis(300);
+                        while snapshots.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        blockers(&["review on fix-login"], 0)
+                    })
+                })
+            })
+            .collect();
+        let decisions: Vec<QuitDecision> = requests
+            .into_iter()
+            .map(|request| request.join().unwrap())
+            .collect();
+
+        let asked = decisions
+            .iter()
+            .filter(|decision| matches!(decision, QuitDecision::Ask(_)))
+            .count();
+        let forced = decisions
+            .iter()
+            .filter(|decision| matches!(decision, QuitDecision::Force))
+            .count();
+        assert_eq!(
+            (asked, forced),
+            (1, 1),
+            "one request asks and the other forces, got {decisions:?}"
+        );
+        assert_eq!(
+            snapshots.load(Ordering::SeqCst),
+            1,
+            "the forced quit took a blocker snapshot beside the first request"
+        );
     }
 
     /// The `RunEvent::Exit` case: a `terminate:` arriving while a confirmed

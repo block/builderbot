@@ -5,8 +5,19 @@ use std::io::Read;
 use std::path::Path;
 
 /// Load a local image referenced by a tool result without persisting an attachment.
+///
+/// Runs [`read_image_file_impl`] on the blocking pool: as a synchronous
+/// command the read of up to [`MAX_IMAGE_SIZE`] and its base64 encoding held
+/// the main thread, and so the window.
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_image_file(file_path: String) -> Result<String, String> {
+pub async fn read_image_file(file_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_image_file_impl(file_path))
+        .await
+        .map_err(|e| format!("read_image_file task failed: {e}"))?
+}
+
+/// The body of [`read_image_file`], shared with the web dispatcher's arm.
+pub(crate) fn read_image_file_impl(file_path: String) -> Result<String, String> {
     let path = Path::new(&file_path);
     if !path.is_absolute() {
         return Err("Image path must be absolute".to_string());
@@ -54,7 +65,7 @@ mod tests {
         let bytes = include_bytes!("../../icons/32x32.png");
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(
-            read_image_file(path.to_string_lossy().into_owned()).unwrap(),
+            read_image_file_impl(path.to_string_lossy().into_owned()).unwrap(),
             format!(
                 "data:image/png;base64,{}",
                 base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -70,11 +81,11 @@ mod tests {
             dir.path().join("document.txt"),
             Path::new("relative.png").to_path_buf(),
         ] {
-            assert!(read_image_file(path.to_string_lossy().into_owned()).is_err());
+            assert!(read_image_file_impl(path.to_string_lossy().into_owned()).is_err());
         }
         let directory = dir.path().join("directory.png");
         std::fs::create_dir(&directory).unwrap();
-        assert!(read_image_file(directory.to_string_lossy().into_owned()).is_err());
+        assert!(read_image_file_impl(directory.to_string_lossy().into_owned()).is_err());
     }
 
     #[test]
@@ -85,7 +96,7 @@ mod tests {
             .unwrap()
             .set_len(MAX_IMAGE_SIZE + 1)
             .unwrap();
-        assert!(read_image_file(path.to_string_lossy().into_owned())
+        assert!(read_image_file_impl(path.to_string_lossy().into_owned())
             .unwrap_err()
             .contains("exceeds 10 MB limit"));
     }

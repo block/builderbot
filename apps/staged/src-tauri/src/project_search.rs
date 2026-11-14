@@ -12,11 +12,21 @@ use std::sync::{Arc, Mutex};
 
 use crate::store::{ProjectSearchItem, Store};
 
+/// A read over every note, project-note and review title, run on the
+/// blocking pool: as a synchronous command it held the main thread, and so
+/// the window, for the whole read and for any wait on the store before it.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
 #[tauri::command]
-pub fn get_project_search_index(
+pub async fn get_project_search_index(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<ProjectSearchItem>, String> {
-    crate::get_store(&store)?
-        .list_project_search_items()
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store.list_project_search_items().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_project_search_index task failed: {e}"))?
 }

@@ -266,6 +266,80 @@ describe('BranchCard file drops', () => {
     expect(cmd.createNote).toHaveBeenCalledWith('branch-1', 'Dropped', 'body');
     expect(cmd.createImage).toHaveBeenCalledWith('branch-1', 'project-1', '/tmp/b.png');
   });
+
+  it('creates the notes in drop order when the files are read out of order', async () => {
+    // The backend reads the files concurrently: the big one dropped first
+    // answers last.
+    const reads = new Map<string, (content: string) => void>();
+    cmd.readTextFile.mockImplementation(
+      (filePath) => new Promise<string>((resolve) => reads.set(filePath, resolve))
+    );
+    mountCard(remoteBranch('stopped'));
+
+    drop(['/tmp/big.md', '/tmp/small.md', '/tmp/tiny.md']);
+    await vi.waitFor(() => expect(reads.size).toBe(3));
+    reads.get('/tmp/tiny.md')!('tiny body');
+    reads.get('/tmp/small.md')!('small body');
+    // Give a note created as soon as its own read answered the time to be.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    reads.get('/tmp/big.md')!('big body');
+    await settle(() => expect(cmd.createNote).toHaveResolvedTimes(3));
+
+    expect(cmd.createNote.mock.calls.map(([, title]) => title)).toEqual(['big', 'small', 'tiny']);
+  });
+
+  it('stores the rest in drop order, and reports the one file that could not be read', async () => {
+    const reads = new Map<
+      string,
+      { answer: (content: string) => void; fail: (reason: Error) => void }
+    >();
+    cmd.readTextFile.mockImplementation(
+      (filePath) => new Promise<string>((answer, fail) => reads.set(filePath, { answer, fail }))
+    );
+    mountCard(remoteBranch('running'));
+    await timelineShown();
+    // Hold the reload after the stores open, so the stored notes keep their
+    // "adding..." rows and the failed file's row can be told from them.
+    let landReload!: () => void;
+    cmd.getBranchTimeline.mockImplementationOnce(
+      () => new Promise((resolve) => (landReload = () => resolve(emptyTimeline)))
+    );
+
+    drop(['/tmp/first.md', '/tmp/bad.md', '/tmp/third.md', '/tmp/fourth.md']);
+    await vi.waitFor(() => expect(reads.size).toBe(4));
+    expect(pendingRows()).toEqual(['first', 'bad', 'third', 'fourth']);
+
+    // The reads come back out of order, the failure among them, and the
+    // first file's last. Until it is back nothing is created or reported.
+    reads.get('/tmp/fourth.md')!.answer('fourth body');
+    reads.get('/tmp/bad.md')!.fail(new Error('unreadable'));
+    reads.get('/tmp/third.md')!.answer('third body');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cmd.createNote).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(pendingRows()).toEqual(['first', 'bad', 'third', 'fourth']);
+
+    reads.get('/tmp/first.md')!.answer('first body');
+    await vi.waitFor(() => expect(cmd.getBranchTimeline).toHaveBeenCalledTimes(2));
+
+    // The failed read skipped its own file only.
+    expect(cmd.createNote.mock.calls.map(([, title]) => title)).toEqual([
+      'first',
+      'third',
+      'fourth',
+    ]);
+    expect(cmd.createNote).toHaveResolvedTimes(3);
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledWith('Error', {
+      description: 'Could not read "bad" \u2014 unreadable',
+    });
+    // Its row is gone as it fails; the stored notes keep theirs for the reload.
+    expect(pendingRows()).toEqual(['first', 'third', 'fourth']);
+
+    landReload();
+    await settle(() => expect(cmd.getBranchTimeline).toHaveResolvedTimes(2));
+    expect(toast.error).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('BranchCard while it is being deleted', () => {

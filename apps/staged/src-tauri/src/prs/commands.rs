@@ -104,14 +104,19 @@ pub async fn get_pr_url(
 
 /// Update the PR number for a branch.
 #[tauri::command(rename_all = "camelCase")]
-pub fn update_branch_pr(
+pub async fn update_branch_pr(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
     pr_number: Option<u64>,
 ) -> Result<(), String> {
-    get_store(&store)?
-        .update_branch_pr_number(&branch_id, pr_number, None)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .update_branch_pr_number(&branch_id, pr_number, None)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("update_branch_pr task failed: {e}"))?
 }
 
 /// Refresh PR status for a single branch.
@@ -148,13 +153,17 @@ pub async fn refresh_all_pr_statuses(
 /// a `pr-status-cleared` event so the frontend can drop the stale indicators
 /// immediately instead of waiting for the next GitHub refresh.
 #[tauri::command(rename_all = "camelCase")]
-pub fn clear_branch_pr_status(
+pub async fn clear_branch_pr_status(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    clear_branch_pr_status_impl(&store, &app_handle, &branch_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        clear_branch_pr_status_impl(&store, &app_handle, &branch_id)
+    })
+    .await
+    .map_err(|e| format!("clear_branch_pr_status task failed: {e}"))?
 }
 
 /// Check if a branch has commits that haven't been pushed to the remote.
@@ -221,12 +230,16 @@ pub async fn defer_branch_push(
 
 /// Clear a branch's deferred push.
 #[tauri::command(rename_all = "camelCase")]
-pub fn cancel_deferred_push(
+pub async fn cancel_deferred_push(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    cancel_deferred_push_for_branch(&store, &branch_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        cancel_deferred_push_for_branch(&store, &branch_id)
+    })
+    .await
+    .map_err(|e| format!("cancel_deferred_push task failed: {e}"))?
 }
 
 /// Rebase a branch onto its base branch via a pipeline.

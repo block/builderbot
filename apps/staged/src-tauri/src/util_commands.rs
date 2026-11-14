@@ -49,21 +49,31 @@ const KNOWN_OPENERS: &[(&str, &str)] = &[
 
 /// Open a URL in the user's default browser.
 #[tauri::command]
-pub fn open_url(app_handle: tauri::AppHandle, url: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    app_handle
-        .opener()
-        .open_url(&url, None::<&str>)
-        .map_err(|e| format!("Failed to open URL: {e}"))
+pub async fn open_url(app_handle: tauri::AppHandle, url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_opener::OpenerExt;
+        app_handle
+            .opener()
+            .open_url(&url, None::<&str>)
+            .map_err(|e| format!("Failed to open URL: {e}"))
+    })
+    .await
+    .map_err(|e| format!("open_url task failed: {e}"))?
 }
 
 /// Check whether the `sq` CLI is available on this system.
 ///
 /// The frontend uses this to decide whether to show the Remote branch option
 /// in the new-branch modal.
+///
+/// The first call per process looks `sq` up through a login shell, with no
+/// timeout. It runs on the blocking pool: as a synchronous command it held
+/// the main thread, and so the window, for that whole lookup at every launch.
 #[tauri::command]
-pub fn is_sq_available() -> bool {
-    blox::is_sq_available()
+pub async fn is_sq_available() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(blox::is_sq_available)
+        .await
+        .map_err(|e| format!("Failed to check sq availability: {e}"))
 }
 
 /// Read a text file from an absolute path.
@@ -72,27 +82,38 @@ pub fn is_sq_available() -> bool {
 /// Tauri's native drag-and-drop events (which give file paths, not
 /// File objects like browser drag events).
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_text_file(file_path: String) -> Result<String, String> {
-    let path = Path::new(&file_path);
-    if !path.exists() {
-        return Err(format!("File does not exist: {file_path}"));
-    }
-    if !path.is_file() {
-        return Err(format!("Not a file: {file_path}"));
-    }
-    let metadata = path
-        .metadata()
-        .map_err(|e| format!("Failed to read file metadata: {e}"))?;
-    if metadata.len() > 307_200 {
-        return Err("File too large (>300 KB)".to_string());
-    }
-    std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
+pub async fn read_text_file(file_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = Path::new(&file_path);
+        if !path.exists() {
+            return Err(format!("File does not exist: {file_path}"));
+        }
+        if !path.is_file() {
+            return Err(format!("Not a file: {file_path}"));
+        }
+        let metadata = path
+            .metadata()
+            .map_err(|e| format!("Failed to read file metadata: {e}"))?;
+        if metadata.len() > 307_200 {
+            return Err("File too large (>300 KB)".to_string());
+        }
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
+    })
+    .await
+    .map_err(|e| format!("read_text_file task failed: {e}"))?
 }
 
 /// Resolve equivalent path roots for display-only relative path formatting.
+///
+/// Runs [`resolve_path_aliases_impl`] on the blocking pool. The live session
+/// hints ask every 750 ms per running session, and each path is a
+/// `canonicalize` on the filesystem, which as a synchronous command ran on
+/// the main thread.
 #[tauri::command]
-pub fn resolve_path_aliases(paths: Vec<String>) -> Vec<String> {
-    resolve_path_aliases_impl(paths)
+pub async fn resolve_path_aliases(paths: Vec<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || resolve_path_aliases_impl(paths))
+        .await
+        .map_err(|e| format!("resolve_path_aliases task failed: {e}"))
 }
 
 pub(crate) fn resolve_path_aliases_impl(paths: Vec<String>) -> Vec<String> {

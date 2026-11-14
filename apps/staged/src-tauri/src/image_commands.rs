@@ -94,34 +94,53 @@ pub(crate) fn create_image_impl(
 
 /// Return the filesystem path for an image (the frontend uses convertFileSrc).
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_image_path(
+pub async fn get_image_path(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     image_id: String,
 ) -> Result<String, String> {
     let store = crate::get_store(&store)?;
-    let image = store
-        .get_image(&image_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Image not found: {image_id}"))?;
-    let path =
-        crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)?;
-    Ok(path.to_string_lossy().to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let image = store
+            .get_image(&image_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Image not found: {image_id}"))?;
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("get_image_path task failed: {e}"))?
 }
 
 /// Delete an image record and its file on disk.
+///
+/// Runs [`delete_image_impl`] on the blocking pool. The delete can take the
+/// image's session and all its messages with it, so as a synchronous command
+/// it held the main thread, and so the window, for that delete.
+///
+/// As for every command in `OFFLOADED_COMMANDS`, only the store handle
+/// lookup may run inline: an `async fn` command runs on a runtime worker,
+/// where a store lock wait would stall timers and event sockets instead.
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_image(
+pub async fn delete_image(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     image_id: String,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || delete_image_impl(&store, &image_id))
+        .await
+        .map_err(|e| format!("delete_image task failed: {e}"))?
+}
+
+/// The body of [`delete_image`], shared with the web dispatcher's arm.
+pub(crate) fn delete_image_impl(store: &Store, image_id: &str) -> Result<(), String> {
     let image = store
-        .get_image(&image_id)
+        .get_image(image_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Image not found: {image_id}"))?;
 
     // Delete the DB record first (triggers session cleanup).
-    store.delete_image(&image_id).map_err(|e| e.to_string())?;
+    store.delete_image(image_id).map_err(|e| e.to_string())?;
 
     // Best-effort removal of the file and any cached PDF thumbnail.
     crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
@@ -144,13 +163,18 @@ pub async fn get_attachment_thumbnail(
 
 /// List all images for a branch.
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_branch_images(
+pub async fn list_branch_images(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<Vec<crate::store::Image>, String> {
-    crate::get_store(&store)?
-        .list_images_for_branch(&branch_id)
-        .map_err(|e| e.to_string())
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .list_images_for_branch(&branch_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_branch_images task failed: {e}"))?
 }
 
 /// Size and density of the raster images a note embeds, keyed by id, for
@@ -213,21 +237,26 @@ pub(crate) fn media_dimensions_impl(
 
 /// Read an image file and return its data as a base64-encoded data URL.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_image_data(
+pub async fn get_image_data(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     image_id: String,
 ) -> Result<String, String> {
     let store = crate::get_store(&store)?;
-    let image = store
-        .get_image(&image_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Image not found: {image_id}"))?;
-    let path = crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
-        .map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{};base64,{}", image.mime_type, encoded))
+    tauri::async_runtime::spawn_blocking(move || {
+        let image = store
+            .get_image(&image_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Image not found: {image_id}"))?;
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+                .map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(format!("data:{};base64,{}", image.mime_type, encoded))
+    })
+    .await
+    .map_err(|e| format!("get_image_data task failed: {e}"))?
 }
 
 /// Create an image from base64-encoded data (for browser file input / clipboard paste).
@@ -319,6 +348,30 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(bytes),
             Some(true),
         )
+    }
+
+    #[test]
+    fn delete_image_impl_removes_the_row_and_its_file() {
+        let f = Fixture::new();
+        let image = attach(&f, "shot.png", "image/png", PNG).unwrap();
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+                .unwrap();
+        assert!(path.exists());
+
+        delete_image_impl(&f.store, &image.id).unwrap();
+
+        assert!(f.store.get_image(&image.id).unwrap().is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn delete_image_impl_reports_a_missing_image() {
+        let f = Fixture::new();
+
+        let error = delete_image_impl(&f.store, "no-such-image").unwrap_err();
+
+        assert_eq!(error, "Image not found: no-such-image");
     }
 
     #[test]

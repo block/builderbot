@@ -33,20 +33,44 @@ function noteKey(kind: NoteKind, noteId: string): string {
 }
 
 /**
+ * "Mark as unread" flags the note's project only after it has found which
+ * project that is, and for a branch note no view has loaded that is a backend
+ * lookup. Until it answers the flag is not set, so a read mark or a delete
+ * landing in that time finds nothing to release, and the flag set afterwards
+ * would stay on a note that is read, or gone. Each such flag is held here, by
+ * note, as a claim taken when its unread write lands. Any later write or
+ * delete of the note takes the claim away, and a flag whose claim is gone is
+ * not set.
+ */
+const unreadFlagClaims = new Map<string, symbol>();
+
+/**
  * Write a note's read state. Every way a note gets read goes through here — the
  * viewer showing it, the editor opening it, "Mark as read" — so marking it read
  * also releases the project unread flag its "Mark as unread" set.
  */
-export async function writeNoteRead(
+export function writeNoteRead(kind: NoteKind, noteId: string, read: boolean): Promise<NoteReadRow> {
+  return landNoteRead(kind, noteId, read, null);
+}
+
+/**
+ * {@link writeNoteRead}, leaving `claim` as the note's unread flag claim once
+ * the write has landed (or none, for null). In the same step as the landing,
+ * so no other write's landing can come between the two.
+ */
+async function landNoteRead(
   kind: NoteKind,
   noteId: string,
-  read: boolean
+  read: boolean,
+  claim: symbol | null
 ): Promise<NoteReadRow> {
   const row = await (kind === 'project'
     ? commands.setProjectNoteRead(noteId, read)
     : commands.setNoteRead(noteId, read));
+  const key = noteKey(kind, noteId);
+  if (claim) unreadFlagClaims.set(key, claim);
+  else unreadFlagClaims.delete(key);
   if (read) {
-    const key = noteKey(kind, noteId);
     for (const projectId of projectStateStore.projectsFlaggedByNote(key)) {
       if (!projectsDataStore.isProjectDeleting(projectId)) {
         projectStateStore.releaseNoteUnread(projectId, key);
@@ -62,7 +86,9 @@ export async function writeNoteRead(
  * so unlike a read this needn't skip one.
  */
 export function forgetDeletedNote(kind: NoteKind, noteId: string): void {
-  projectStateStore.forgetNote(noteKey(kind, noteId));
+  const key = noteKey(kind, noteId);
+  unreadFlagClaims.delete(key);
+  projectStateStore.forgetNote(key);
 }
 
 /**
@@ -91,19 +117,25 @@ export async function setNoteReadState(
   target: NoteReadTarget,
   read: boolean
 ): Promise<NoteReadRow | null> {
+  const key = noteKey(target.kind, target.noteId);
+  const claim = read ? null : Symbol(key);
   let row: NoteReadRow;
   try {
-    row = await writeNoteRead(target.kind, target.noteId, read);
+    row = await landNoteRead(target.kind, target.noteId, read, claim);
   } catch (e) {
     toast.error(read ? 'Unable to mark note as read' : 'Unable to mark note as unread', {
       description: e instanceof Error ? e.message : String(e),
     });
     return null;
   }
-  if (!read) {
+  if (claim) {
     const projectId = await owningProjectId(row);
+    // The note was read, deleted or marked again while its project was being
+    // looked up (see unreadFlagClaims): that write decides the flag.
+    if (unreadFlagClaims.get(key) !== claim) return row;
+    unreadFlagClaims.delete(key);
     if (projectId && !projectsDataStore.isProjectDeleting(projectId)) {
-      projectStateStore.markUnreadForNote(projectId, noteKey(target.kind, target.noteId));
+      projectStateStore.markUnreadForNote(projectId, key);
     }
   }
   return row;

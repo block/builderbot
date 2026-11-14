@@ -41,6 +41,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
+  import { LatestWins } from '../../shared/latestWins';
   import { subscribeDragDrop } from './dragDrop';
   import { rebaseInFlight } from './rebaseInFlight';
   import type {
@@ -230,6 +231,9 @@
       : []
   );
   let projectNoteHashtagItems = $state<HashtagItem[]>([]);
+  // The two project-note fetches below run concurrently in the backend, so an
+  // older list can land after a newer one; only the latest sent is applied.
+  const projectNoteFetchOrder = new LatestWins();
   $effect(() => {
     const projectId = branch.projectId;
     if (!projectId) {
@@ -237,8 +241,9 @@
       return;
     }
     let stale = false;
+    const ticket = projectNoteFetchOrder.issue();
     commands.listProjectNotes(projectId).then((notes) => {
-      if (stale) return;
+      if (stale || !projectNoteFetchOrder.admit(projectId, ticket)) return;
       projectNoteHashtagItems = projectNotesToHashtagItems(notes);
     });
     return () => {
@@ -947,7 +952,9 @@
     const projectId = branch.projectId;
     if (!projectId) return;
     const handler = () => {
+      const ticket = projectNoteFetchOrder.issue();
       commands.listProjectNotes(projectId).then((notes) => {
+        if (!projectNoteFetchOrder.admit(projectId, ticket)) return;
         projectNoteHashtagItems = projectNotesToHashtagItems(notes);
       });
     };
@@ -1865,15 +1872,33 @@
     }));
     pendingAdds = [...pendingAdds, ...placeholders];
 
+    // Every file is read before any note is created. The reads run
+    // concurrently on the backend and answer in any order, and `createNote`
+    // keeps the order it is called in (see `writeOrder` in commands.ts). So a
+    // note created as soon as its own file had been read would be created in
+    // the order the reads answered: a small file dropped after a large one
+    // would be listed first, and take the plain title two same-named files
+    // compete for.
+    const reads = await Promise.all(
+      textPaths.map((filePath) =>
+        commands.readTextFile(filePath).then(
+          (content) => ({ ok: true as const, content }),
+          (error: unknown) => ({ ok: false as const, error })
+        )
+      )
+    );
     const stored = await Promise.all(
-      textPaths.map(async (filePath, i) => {
+      // Each callback runs up to its `createNote` call before the next one
+      // starts, so the creates are called in drop order.
+      reads.map(async (read, i) => {
+        const filePath = textPaths[i];
         try {
-          const content = await commands.readTextFile(filePath);
+          if (!read.ok) throw read.error;
           // Through the same split the editor saves through, so a dropped file
           // is stored like any other note: its own leading H1 becomes the
           // title (and leaves the body, which the viewer would otherwise show
           // straight under the file name), and the file name titles the rest.
-          const note = splitNoteMarkdown(content, fileNameFromPath(filePath));
+          const note = splitNoteMarkdown(read.content, fileNameFromPath(filePath));
           await commands.createNote(branch.id, note.title, note.body);
           return true;
         } catch (e) {

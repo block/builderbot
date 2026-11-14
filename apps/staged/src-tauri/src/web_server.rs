@@ -1145,12 +1145,16 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "list_projects" => {
             let store = get_store(store_mutex)?;
-            let mut projects = store.list_projects().map_err(|e| e.to_string())?;
             // A project-scoped control credential sees only its own project.
-            if let Some(project_id) = control_scope::project_filter(&caller) {
-                projects.retain(|project| project.id == project_id);
-            }
-            Ok(serde_json::to_value(projects).unwrap())
+            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
+            blocking_store_json(move || {
+                let mut projects = store.list_projects()?;
+                if let Some(project_id) = only_project {
+                    projects.retain(|project| project.id == project_id);
+                }
+                Ok(projects)
+            })
+            .await
         }
         "create_project" => {
             let store = get_store(store_mutex)?;
@@ -1301,27 +1305,30 @@ pub(crate) async fn dispatch(
         "list_project_repos" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
-            let repos = store
-                .list_project_repos(&project_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_store_json(move || store.list_project_repos(&project_id)).await
         }
         "list_recent_repos" => {
             let store = get_store(store_mutex)?;
             let limit: Option<usize> = opt_arg(&args, "limit")?;
-            let repos = store
-                .list_recent_repos(limit.unwrap_or(10))
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let repos = store
+                    .list_recent_repos(limit.unwrap_or(10))
+                    .map_err(|e| e.to_string())?;
+                Ok(repos)
+            })
+            .await
         }
         "get_suggested_repos" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let limit: Option<usize> = opt_arg(&args, "limit")?;
-            let repos = store
-                .get_suggested_repos_for_project(&project_id, limit.unwrap_or(5))
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let repos = store
+                    .get_suggested_repos_for_project(&project_id, limit.unwrap_or(5))
+                    .map_err(|e| e.to_string())?;
+                Ok(repos)
+            })
+            .await
         }
         "add_project_repo" => {
             let store = get_store(store_mutex)?;
@@ -1355,22 +1362,28 @@ pub(crate) async fn dispatch(
             let project_id: String = arg(&args, "projectId")?;
             let project_repo_id: String = arg(&args, "projectRepoId")?;
             let branch_name: String = arg(&args, "branchName")?;
-            let trimmed = branch_name.trim();
-            if trimmed.is_empty() {
-                return Err("Branch name is required".to_string());
-            }
-            store
-                .update_project_repo_branch_name(&project_id, &project_repo_id, trimmed)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                let trimmed = branch_name.trim();
+                if trimmed.is_empty() {
+                    return Err("Branch name is required".to_string());
+                }
+                store
+                    .update_project_repo_branch_name(&project_id, &project_repo_id, trimmed)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "clear_project_repo_reason" => {
             let store = get_store(store_mutex)?;
             let project_repo_id: String = arg(&args, "projectRepoId")?;
-            store
-                .clear_project_repo_reason(&project_repo_id)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .clear_project_repo_reason(&project_repo_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "remove_project_repo" => {
             let project_id: String = arg(&args, "projectId")?;
@@ -1394,34 +1407,39 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let name: String = arg(&args, "name")?;
-            let project = crate::project_commands::rename_project_impl(&store, &project_id, &name)?;
-            Ok(serde_json::to_value(project).unwrap())
+            blocking_json(move || {
+                crate::project_commands::rename_project_impl(&store, &project_id, &name)
+            })
+            .await
         }
         "set_primary_project_repo" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let project_repo_id: String = arg(&args, "projectRepoId")?;
-            let repo = store
-                .get_project_repo(&project_repo_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
-            store
-                .set_primary_project_repo(&project_id, &project_repo_id)
-                .map_err(|e| e.to_string())?;
-            let project = store
-                .get_project(&project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {project_id}"))?;
-            store
-                .update_project(
-                    &project_id,
-                    &project.name,
-                    Some(&repo.github_repo),
-                    &project.location,
-                    repo.subpath.as_deref(),
-                )
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                let repo = store
+                    .get_project_repo(&project_repo_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
+                store
+                    .set_primary_project_repo(&project_id, &project_repo_id)
+                    .map_err(|e| e.to_string())?;
+                let project = store
+                    .get_project(&project_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Project not found: {project_id}"))?;
+                store
+                    .update_project(
+                        &project_id,
+                        &project.name,
+                        Some(&repo.github_repo),
+                        &project.location,
+                        repo.subpath.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "delete_project" => {
             let id: String = arg(&args, "id")?;
@@ -1441,61 +1459,83 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "get_tag_state" => {
             let store = get_store(store_mutex)?;
-            let state = store.get_tag_state().map_err(|e| e.to_string())?;
-            let state = confine_tag_state(state, &caller);
-            Ok(serde_json::to_value(state).unwrap())
+            let caller = caller.clone();
+            blocking_json(move || -> Result<_, String> {
+                let state = store.get_tag_state().map_err(|e| e.to_string())?;
+                let state = confine_tag_state(state, &caller);
+                Ok(state)
+            })
+            .await
         }
         "create_tag_group" => {
             let store = get_store(store_mutex)?;
             let name: String = arg(&args, "name")?;
             let tags: Vec<store::NewTag> = arg(&args, "tags")?;
-            let group = store
-                .create_tag_group(&name, &tags)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(group).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let group = store
+                    .create_tag_group(&name, &tags)
+                    .map_err(|e| e.to_string())?;
+                Ok(group)
+            })
+            .await
         }
         "rename_tag_group" => {
             let store = get_store(store_mutex)?;
             let group_id: String = arg(&args, "groupId")?;
             let name: String = arg(&args, "name")?;
-            store
-                .rename_tag_group(&group_id, &name)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .rename_tag_group(&group_id, &name)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "set_icon_tag_group" => {
             let store = get_store(store_mutex)?;
             let group_id: Option<String> = opt_arg(&args, "groupId")?;
-            store
-                .set_icon_tag_group(group_id.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .set_icon_tag_group(group_id.as_deref())
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "set_tag_group_sidebar" => {
             let store = get_store(store_mutex)?;
             let group_id: String = arg(&args, "groupId")?;
             let shown: bool = arg(&args, "shown")?;
-            store
-                .set_tag_group_sidebar(&group_id, shown)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .set_tag_group_sidebar(&group_id, shown)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "reorder_tag_groups" => {
             let store = get_store(store_mutex)?;
             let group_ids: Vec<String> = arg(&args, "groupIds")?;
-            store
-                .reorder_tag_groups(&group_ids)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .reorder_tag_groups(&group_ids)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "delete_tag_group" => {
             let store = get_store(store_mutex)?;
             let group_id: String = arg(&args, "groupId")?;
             let mode: store::DeleteTagGroupMode = arg(&args, "mode")?;
-            store
-                .delete_tag_group(&group_id, mode)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .delete_tag_group(&group_id, mode)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "create_tag" => {
             let store = get_store(store_mutex)?;
@@ -1506,10 +1546,13 @@ pub(crate) async fn dispatch(
             };
             let group_id: Option<String> = opt_arg(&args, "groupId")?;
             let assign_project_id: Option<String> = opt_arg(&args, "assignProjectId")?;
-            let tag = store
-                .create_tag(&new, group_id.as_deref(), assign_project_id.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(tag).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let tag = store
+                    .create_tag(&new, group_id.as_deref(), assign_project_id.as_deref())
+                    .map_err(|e| e.to_string())?;
+                Ok(tag)
+            })
+            .await
         }
         "update_tag" => {
             let store = get_store(store_mutex)?;
@@ -1517,46 +1560,61 @@ pub(crate) async fn dispatch(
             let name: String = arg(&args, "name")?;
             let color: store::TagColor = arg(&args, "color")?;
             let icon: Option<String> = opt_arg(&args, "icon")?;
-            store
-                .update_tag(&tag_id, &name, color, icon.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .update_tag(&tag_id, &name, color, icon.as_deref())
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "move_tag" => {
             let store = get_store(store_mutex)?;
             let tag_id: String = arg(&args, "tagId")?;
             let group_id: Option<String> = opt_arg(&args, "groupId")?;
             let index: usize = arg(&args, "index")?;
-            store
-                .move_tag(&tag_id, group_id.as_deref(), index)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .move_tag(&tag_id, group_id.as_deref(), index)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "delete_tag" => {
             let store = get_store(store_mutex)?;
             let tag_id: String = arg(&args, "tagId")?;
-            store.delete_tag(&tag_id).map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store.delete_tag(&tag_id).map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "set_project_group_tag" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let group_id: String = arg(&args, "groupId")?;
             let tag_id: Option<String> = opt_arg(&args, "tagId")?;
-            store
-                .set_project_group_tag(&project_id, &group_id, tag_id.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .set_project_group_tag(&project_id, &group_id, tag_id.as_deref())
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "set_project_tag_assigned" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let tag_id: String = arg(&args, "tagId")?;
             let assigned: bool = arg(&args, "assigned")?;
-            store
-                .set_project_tag_assigned(&project_id, &tag_id, assigned)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .set_project_tag_assigned(&project_id, &tag_id, assigned)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
 
         // =====================================================================
@@ -1564,8 +1622,7 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "get_all_repo_badges" => {
             let store = get_store(store_mutex)?;
-            let badges = store.list_repo_badges().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(badges).unwrap())
+            blocking_store_json(move || store.list_repo_badges()).await
         }
         "ensure_repo_badges" => {
             // Simplified version — just returns existing badges without AI generation
@@ -1615,23 +1672,29 @@ pub(crate) async fn dispatch(
             let subpath: String = arg(&args, "subpath")?;
             let short_name: String = arg(&args, "shortName")?;
             let hue: f64 = arg(&args, "hue")?;
-            store
-                .update_repo_badge(&github_repo, &subpath, &short_name, hue)
-                .map_err(|e| e.to_string())?;
-            let badge = store
-                .get_repo_badge(&github_repo, &subpath)
-                .map_err(|e| e.to_string())?
-                .ok_or("Badge not found after update")?;
-            Ok(serde_json::to_value(badge).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .update_repo_badge(&github_repo, &subpath, &short_name, hue)
+                    .map_err(|e| e.to_string())?;
+                let badge = store
+                    .get_repo_badge(&github_repo, &subpath)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Badge not found after update")?;
+                Ok(badge)
+            })
+            .await
         }
         "delete_repo_badge" => {
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            store
-                .delete_repo_badge(&github_repo, &subpath)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .delete_repo_badge(&github_repo, &subpath)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
 
         // =====================================================================
@@ -1643,40 +1706,30 @@ pub(crate) async fn dispatch(
             let subpath: String = arg(&args, "subpath")?;
             // The backfill may ask `gh` or git for the default branch, so the
             // whole arm runs on the blocking pool.
-            blocking_json(move || {
-                store
-                    .pin_repo(&github_repo, &subpath)
-                    .map_err(|e| e.to_string())?;
-                // Backfill default_branch if not yet detected
-                if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
-                    if badge.default_branch.is_none() {
-                        if let Err(e) =
-                            crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
-                        {
-                            log::warn!("[pin_repo] failed to backfill default_branch: {e}");
-                        }
-                    }
-                }
-                Ok::<_, String>(())
-            })
-            .await
+            blocking_json(move || crate::pin_repo_impl(&store, &github_repo, &subpath)).await
         }
         "unpin_repo" => {
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            store
-                .unpin_repo(&github_repo, &subpath)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .unpin_repo(&github_repo, &subpath)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "reorder_pinned_repos" => {
             let store = get_store(store_mutex)?;
             let ordered_keys: Vec<(String, String)> = arg(&args, "orderedKeys")?;
-            store
-                .reorder_pinned_repos(&ordered_keys)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .reorder_pinned_repos(&ordered_keys)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "list_repos_for_home" => {
             let store = get_store(store_mutex)?;
@@ -1700,10 +1753,13 @@ pub(crate) async fn dispatch(
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
             let default_branch: String = arg(&args, "defaultBranch")?;
-            store
-                .set_default_branch(&github_repo, &subpath, &default_branch)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .set_default_branch(&github_repo, &subpath, &default_branch)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "detect_default_branch" => {
             let store = get_store(store_mutex)?;
@@ -1961,35 +2017,39 @@ pub(crate) async fn dispatch(
         "get_branch" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            let branch = store.get_branch(&branch_id).map_err(|e| e.to_string())?;
-            let enriched = match branch {
-                Some(branch) => {
-                    let workdir = store
-                        .get_workdir_for_branch(&branch.id)
-                        .map_err(|e| e.to_string())?;
-                    Some(crate::branches::to_branch_with_workdir_public(
-                        branch,
-                        workdir.map(|w| w.path),
-                    ))
-                }
-                None => None,
-            };
-            Ok(serde_json::to_value(enriched).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let branch = store.get_branch(&branch_id).map_err(|e| e.to_string())?;
+                let enriched = match branch {
+                    Some(branch) => {
+                        let workdir = store
+                            .get_workdir_for_branch(&branch.id)
+                            .map_err(|e| e.to_string())?;
+                        Some(crate::branches::to_branch_with_workdir_public(
+                            branch,
+                            workdir.map(|w| w.path),
+                        ))
+                    }
+                    None => None,
+                };
+                Ok(enriched)
+            })
+            .await
         }
         "list_branches_for_project" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
-            let branches = store
-                .list_branches_for_project(&project_id)
-                .map_err(|e| e.to_string())?;
-            let enriched: Vec<crate::BranchWithWorkdir> = branches
-                .into_iter()
-                .map(|b| {
-                    let workdir = store.get_workdir_for_branch(&b.id).ok().flatten();
-                    crate::branches::to_branch_with_workdir_public(b, workdir.map(|w| w.path))
-                })
-                .collect();
-            Ok(serde_json::to_value(enriched).unwrap())
+            blocking_store_json(move || {
+                let branches = store.list_branches_for_project(&project_id)?;
+                let enriched: Vec<crate::BranchWithWorkdir> = branches
+                    .into_iter()
+                    .map(|b| {
+                        let workdir = store.get_workdir_for_branch(&b.id).ok().flatten();
+                        crate::branches::to_branch_with_workdir_public(b, workdir.map(|w| w.path))
+                    })
+                    .collect();
+                Ok(enriched)
+            })
+            .await
         }
         "create_branch" => {
             let store = get_store(store_mutex)?;
@@ -1998,20 +2058,23 @@ pub(crate) async fn dispatch(
             let base_branch: String = arg(&args, "baseBranch")?;
             let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
-            crate::project_transfer::ensure_project_not_transferring(&project_id)?;
+            blocking_json(move || -> Result<_, String> {
+                crate::project_transfer::ensure_project_not_transferring(&project_id)?;
 
-            let mut branch = crate::store::Branch::new(&project_id, &branch_name, &base_branch);
-            if let Some(pr) = pr_number {
-                branch = branch.with_pr(pr);
-            }
-            if let Some(ref repo_id) = project_repo_id {
-                branch = branch.with_project_repo(repo_id);
-            }
-            store.create_branch(&branch).map_err(|e| e.to_string())?;
-            let workdir = store.get_workdir_for_branch(&branch.id).ok().flatten();
-            let enriched =
-                crate::branches::to_branch_with_workdir_public(branch, workdir.map(|w| w.path));
-            Ok(serde_json::to_value(enriched).unwrap())
+                let mut branch = crate::store::Branch::new(&project_id, &branch_name, &base_branch);
+                if let Some(pr) = pr_number {
+                    branch = branch.with_pr(pr);
+                }
+                if let Some(ref repo_id) = project_repo_id {
+                    branch = branch.with_project_repo(repo_id);
+                }
+                store.create_branch(&branch).map_err(|e| e.to_string())?;
+                let workdir = store.get_workdir_for_branch(&branch.id).ok().flatten();
+                let enriched =
+                    crate::branches::to_branch_with_workdir_public(branch, workdir.map(|w| w.path));
+                Ok(enriched)
+            })
+            .await
         }
         "delete_branch" => {
             let id: String = arg(&args, "branchId")?;
@@ -2695,30 +2758,33 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
-            let context = if let Some(repo_id) = project_repo_id {
-                let repo = store
-                    .get_project_repo(&repo_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project repo not found: {repo_id}"))?;
-                store
-                    .get_or_create_action_context(&repo.github_repo, repo.subpath.as_deref())
-                    .map_err(|e| e.to_string())?
-            } else {
-                let project = store
-                    .get_project(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project not found: {project_id}"))?;
-                let repo = project
-                    .primary_repo()
-                    .ok_or("Project has no repository attached")?;
-                store
-                    .get_or_create_action_context(repo, project.subpath.as_deref())
-                    .map_err(|e| e.to_string())?
-            };
-            let actions = store
-                .list_repo_actions(&context.id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(actions).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let context = if let Some(repo_id) = project_repo_id {
+                    let repo = store
+                        .get_project_repo(&repo_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("Project repo not found: {repo_id}"))?;
+                    store
+                        .get_or_create_action_context(&repo.github_repo, repo.subpath.as_deref())
+                        .map_err(|e| e.to_string())?
+                } else {
+                    let project = store
+                        .get_project(&project_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+                    let repo = project
+                        .primary_repo()
+                        .ok_or("Project has no repository attached")?;
+                    store
+                        .get_or_create_action_context(repo, project.subpath.as_deref())
+                        .map_err(|e| e.to_string())?
+                };
+                let actions = store
+                    .list_repo_actions(&context.id)
+                    .map_err(|e| e.to_string())?;
+                Ok(actions)
+            })
+            .await
         }
         "update_project_action" => {
             let store = get_store(store_mutex)?;
@@ -2729,53 +2795,65 @@ pub(crate) async fn dispatch(
             let sort_order: i32 = arg(&args, "sortOrder")?;
             let pinned: bool = arg(&args, "pinned")?;
             let icon: Option<String> = opt_arg(&args, "icon")?;
-            let action = store
-                .get_repo_action(&action_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Action not found: {action_id}"))?;
-            let updated = crate::store::models::RepoAction {
-                id: action.id,
-                context_id: action.context_id,
-                name,
-                command: command_str,
-                action_type: builderbot_actions::ActionType::parse(&action_type)
-                    .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
-                sort_order,
-                run_detection_mode: action.run_detection_mode,
-                pinned,
-                icon,
-                created_at: action.created_at,
-                updated_at: crate::store::now_timestamp(),
-            };
-            store
-                .update_repo_action(&updated)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                let action = store
+                    .get_repo_action(&action_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Action not found: {action_id}"))?;
+                let updated = crate::store::models::RepoAction {
+                    id: action.id,
+                    context_id: action.context_id,
+                    name,
+                    command: command_str,
+                    action_type: builderbot_actions::ActionType::parse(&action_type)
+                        .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
+                    sort_order,
+                    run_detection_mode: action.run_detection_mode,
+                    pinned,
+                    icon,
+                    created_at: action.created_at,
+                    updated_at: crate::store::now_timestamp(),
+                };
+                store
+                    .update_repo_action(&updated)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "delete_project_action" => {
             let store = get_store(store_mutex)?;
             let action_id: String = arg(&args, "actionId")?;
-            store
-                .delete_repo_action(&action_id)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .delete_repo_action(&action_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "list_action_contexts" => {
             let store = get_store(store_mutex)?;
-            let contexts = store.list_action_contexts().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(contexts).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let contexts = store.list_action_contexts().map_err(|e| e.to_string())?;
+                Ok(contexts)
+            })
+            .await
         }
         "list_repo_actions" => {
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: Option<String> = opt_arg(&args, "subpath")?;
-            let context = store
-                .get_or_create_action_context(&github_repo, subpath.as_deref())
-                .map_err(|e| e.to_string())?;
-            let actions = store
-                .list_repo_actions(&context.id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(actions).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let context = store
+                    .get_or_create_action_context(&github_repo, subpath.as_deref())
+                    .map_err(|e| e.to_string())?;
+                let actions = store
+                    .list_repo_actions(&context.id)
+                    .map_err(|e| e.to_string())?;
+                Ok(actions)
+            })
+            .await
         }
         "list_all_repo_actions" => {
             let store = get_store(store_mutex)?;
@@ -2792,40 +2870,49 @@ pub(crate) async fn dispatch(
             let sort_order: i32 = arg(&args, "sortOrder")?;
             let pinned: bool = arg(&args, "pinned")?;
             let icon: Option<String> = opt_arg(&args, "icon")?;
-            let context = store
-                .get_or_create_action_context(&github_repo, subpath.as_deref())
-                .map_err(|e| e.to_string())?;
-            let parsed_type = builderbot_actions::ActionType::parse(&action_type)
-                .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
-            let action = crate::store::models::RepoAction::new(
-                context.id,
-                name,
-                command_str,
-                parsed_type,
-                sort_order,
-            )
-            .with_pinned(pinned)
-            .with_icon(icon);
-            store
-                .create_repo_action(&action)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(action).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let context = store
+                    .get_or_create_action_context(&github_repo, subpath.as_deref())
+                    .map_err(|e| e.to_string())?;
+                let parsed_type = builderbot_actions::ActionType::parse(&action_type)
+                    .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
+                let action = crate::store::models::RepoAction::new(
+                    context.id,
+                    name,
+                    command_str,
+                    parsed_type,
+                    sort_order,
+                )
+                .with_pinned(pinned)
+                .with_icon(icon);
+                store
+                    .create_repo_action(&action)
+                    .map_err(|e| e.to_string())?;
+                Ok(action)
+            })
+            .await
         }
         "delete_all_repo_actions" => {
             let store = get_store(store_mutex)?;
             let context_id: String = arg(&args, "contextId")?;
-            store
-                .delete_all_repo_actions(&context_id)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .delete_all_repo_actions(&context_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "delete_action_context" => {
             let store = get_store(store_mutex)?;
             let context_id: String = arg(&args, "contextId")?;
-            store
-                .delete_action_context(&context_id)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .delete_action_context(&context_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
 
         // =====================================================================
@@ -3048,140 +3135,156 @@ pub(crate) async fn dispatch(
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
             let subtype: Option<String> = opt_arg(&args, "subtype")?;
-            let item = crate::note_commands::create_standalone_note(
-                &store, &branch_id, &title, &content, subtype,
-            )?;
-            Ok(serde_json::to_value(item).unwrap())
+            blocking_json(move || {
+                crate::note_commands::create_standalone_note(
+                    &store, &branch_id, &title, &content, subtype,
+                )
+            })
+            .await
         }
         "update_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
-            let item = crate::note_commands::update_note_impl(&store, &note_id, &title, &content)?;
-            Ok(serde_json::to_value(item).unwrap())
+            blocking_json(move || {
+                crate::note_commands::update_note_impl(&store, &note_id, &title, &content)
+            })
+            .await
         }
         "delete_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let app = app_handle.clone();
-            tauri::async_runtime::spawn_blocking(move || {
+            let app_handle = app_handle.clone();
+            // The media cleanup scans the note and message tables per image.
+            blocking_json(move || {
                 crate::note_commands::delete_note_impl(
                     &store,
-                    &app,
+                    &app_handle,
                     &note_id,
                     delete_session_flag.unwrap_or(false),
                 )
             })
             .await
-            .map_err(|e| format!("Note delete task failed: {e}"))??;
-            Ok(Value::Null)
         }
         "get_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
-            let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
-            let item = note.map(|n| crate::note_commands::note_to_timeline_item(&store, n));
-            Ok(serde_json::to_value(item).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
+                let item = note.map(|n| crate::note_commands::note_to_timeline_item(&store, n));
+                Ok(item)
+            })
+            .await
         }
         "set_note_read" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let read: bool = arg(&args, "read")?;
-            let note = store
-                .set_note_read(&note_id, read)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(note).unwrap())
+            blocking_store_json(move || store.set_note_read(&note_id, read)).await
         }
         "list_child_notes" => {
             let store = get_store(store_mutex)?;
             let parent_project_note_id: String = arg(&args, "parentProjectNoteId")?;
-            let notes = store
-                .list_child_notes(&parent_project_note_id)
-                .map_err(|e| e.to_string())?;
-            let items: Vec<crate::NoteTimelineItem> = notes
-                .into_iter()
-                .map(|n| crate::note_commands::note_to_timeline_item(&store, n))
-                .collect();
-            Ok(serde_json::to_value(items).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let notes = store
+                    .list_child_notes(&parent_project_note_id)
+                    .map_err(|e| e.to_string())?;
+                let items: Vec<crate::NoteTimelineItem> = notes
+                    .into_iter()
+                    .map(|n| crate::note_commands::note_to_timeline_item(&store, n))
+                    .collect();
+                Ok(items)
+            })
+            .await
         }
         "create_project_note" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
-            let note = crate::store::ProjectNote::new(&project_id, &title, &content);
-            store
-                .create_project_note(&note)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(note).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let note = crate::store::ProjectNote::new(&project_id, &title, &content);
+                store
+                    .create_project_note(&note)
+                    .map_err(|e| e.to_string())?;
+                Ok(note)
+            })
+            .await
         }
         "list_project_notes" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
-            let notes = store
-                .list_project_notes_with_status(&project_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(notes).unwrap())
+            blocking_store_json(move || store.list_project_notes_with_status(&project_id)).await
         }
         "get_project_search_index" => {
             let store = get_store(store_mutex)?;
-            let items = store
-                .list_project_search_items()
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(items).unwrap())
+            blocking_store_json(move || store.list_project_search_items()).await
         }
         "get_project_note" => {
             let store = get_store(store_mutex)?;
             let project_note_id: String = arg(&args, "projectNoteId")?;
-            let note = store
-                .get_project_note_with_status(&project_note_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(note).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let note = store
+                    .get_project_note_with_status(&project_note_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(note)
+            })
+            .await
         }
         "get_project_note_by_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let note = store
-                .get_project_note_by_session_with_status(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(note).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let note = store
+                    .get_project_note_by_session_with_status(&session_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(note)
+            })
+            .await
         }
         "get_branch_note_by_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let note = store
-                .get_note_by_session(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(note).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let note = store
+                    .get_note_by_session(&session_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(note)
+            })
+            .await
         }
         "set_project_note_read" => {
             let store = get_store(store_mutex)?;
             let project_note_id: String = arg(&args, "projectNoteId")?;
             let read: bool = arg(&args, "read")?;
-            let note = store
-                .set_project_note_read(&project_note_id, read)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(note).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let note = store
+                    .set_project_note_read(&project_note_id, read)
+                    .map_err(|e| e.to_string())?;
+                Ok(note)
+            })
+            .await
         }
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let registry = Arc::clone(session_registry);
-            tauri::async_runtime::spawn_blocking(move || {
+            blocking_json(move || {
                 crate::note_commands::delete_project_note_impl(&store, &registry, &note_id)
             })
             .await
-            .map_err(|e| format!("Project note delete task failed: {e}"))??;
-            Ok(Value::Null)
         }
 
         "get_note_repo" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
-            let repo = crate::note_transfer::branch_note_repo(&store, &note_id)?;
-            Ok(serde_json::to_value(repo).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let repo = crate::note_transfer::branch_note_repo(&store, &note_id)?;
+                Ok(repo)
+            })
+            .await
         }
         "move_note_to_project" | "copy_note_to_project" => {
             let store = get_store(store_mutex)?;
@@ -3292,51 +3395,52 @@ pub(crate) async fn dispatch(
         "get_image_path" => {
             let store = get_store(store_mutex)?;
             let image_id: String = arg(&args, "imageId")?;
-            let image = store
-                .get_image(&image_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Image not found: {image_id}"))?;
-            let path = crate::store::images::image_file_path(
-                &image.project_id,
-                &image.id,
-                &image.filename,
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(path.to_string_lossy().to_string()).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let image = store
+                    .get_image(&image_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Image not found: {image_id}"))?;
+                let path = crate::store::images::image_file_path(
+                    &image.project_id,
+                    &image.id,
+                    &image.filename,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(path.to_string_lossy().to_string())
+            })
+            .await
         }
         "get_image_data" => {
             let store = get_store(store_mutex)?;
             let image_id: String = arg(&args, "imageId")?;
-            let image = store
-                .get_image(&image_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Image not found: {image_id}"))?;
-            let path = crate::store::images::image_file_path(
-                &image.project_id,
-                &image.id,
-                &image.filename,
-            )
-            .map_err(|e| e.to_string())?;
-            let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
-            use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let data_url = format!("data:{};base64,{}", image.mime_type, encoded);
-            Ok(serde_json::to_value(data_url).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let image = store
+                    .get_image(&image_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Image not found: {image_id}"))?;
+                let path = crate::store::images::image_file_path(
+                    &image.project_id,
+                    &image.id,
+                    &image.filename,
+                )
+                .map_err(|e| e.to_string())?;
+                let bytes =
+                    std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let data_url = format!("data:{};base64,{}", image.mime_type, encoded);
+                Ok(data_url)
+            })
+            .await
         }
         "read_image_file" => {
             let file_path: String = arg(&args, "filePath")?;
-            crate::image_commands::read_image_file(file_path).map(Value::String)
+            blocking_json(move || crate::image_commands::read_image_file_impl(file_path)).await
         }
         "delete_image" => {
             let store = get_store(store_mutex)?;
             let image_id: String = arg(&args, "imageId")?;
-            let image = store
-                .get_image(&image_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Image not found: {image_id}"))?;
-            store.delete_image(&image_id).map_err(|e| e.to_string())?;
-            crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
-            Ok(Value::Null)
+            blocking_json(move || crate::image_commands::delete_image_impl(&store, &image_id)).await
         }
         "get_attachment_thumbnail" => {
             let store = get_store(store_mutex)?;
@@ -3351,10 +3455,13 @@ pub(crate) async fn dispatch(
         "list_branch_images" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            let images = store
-                .list_images_for_branch(&branch_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(images).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let images = store
+                    .list_images_for_branch(&branch_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(images)
+            })
+            .await
         }
         "get_media_dimensions" => {
             let store = get_store(store_mutex)?;
@@ -3374,26 +3481,33 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let review_id: String = arg(&args, "reviewId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            crate::timeline::delete_review_impl(
-                &store,
-                app_handle,
-                &review_id,
-                delete_session_flag.unwrap_or(false),
-            )?;
-            Ok(Value::Null)
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                crate::timeline::delete_review_impl(
+                    &store,
+                    &app_handle,
+                    &review_id,
+                    delete_session_flag.unwrap_or(false),
+                )
+            })
+            .await
         }
         "delete_pending_commit" => {
             let store = get_store(store_mutex)?;
             let commit_id: String = arg(&args, "commitId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            crate::timeline::delete_pending_commit_impl(
-                &store,
-                session_registry,
-                app_handle,
-                &commit_id,
-                delete_session_flag.unwrap_or(false),
-            )?;
-            Ok(Value::Null)
+            let registry = Arc::clone(session_registry);
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                crate::timeline::delete_pending_commit_impl(
+                    &store,
+                    &registry,
+                    &app_handle,
+                    &commit_id,
+                    delete_session_flag.unwrap_or(false),
+                )
+            })
+            .await
         }
         "delete_commit" => {
             let store = get_store(store_mutex)?;
@@ -3618,22 +3732,30 @@ pub(crate) async fn dispatch(
         }
         "get_active_sessions" => {
             let store = get_store(store_mutex)?;
-            let mut sessions =
-                crate::session_commands::get_active_sessions_impl(&store, session_registry)?;
+            let registry = Arc::clone(session_registry);
             // A project-scoped control credential sees only its own
             // project's sessions.
-            if let Some(project_id) = control_scope::project_filter(&caller) {
-                sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
-            }
-            Ok(serde_json::to_value(sessions).unwrap())
+            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
+            blocking_json(move || {
+                let mut sessions =
+                    crate::session_commands::get_active_sessions_impl(&store, &registry)?;
+                if let Some(project_id) = only_project.as_deref() {
+                    sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
+                }
+                Ok::<_, String>(sessions)
+            })
+            .await
         }
         "list_child_sessions" => {
             let store = get_store(store_mutex)?;
             let parent_session_id: String = arg(&args, "parentSessionId")?;
-            let children = store
-                .list_active_child_sessions(&parent_session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(children).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let children = store
+                    .list_active_child_sessions(&parent_session_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(children)
+            })
+            .await
         }
         "get_session" => {
             let store = get_store(store_mutex)?;
@@ -3668,18 +3790,19 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
             let after_timestamp: i64 = arg(&args, "afterTimestamp")?;
-            let count = store
-                .count_assistant_messages_after(&session_id, after_timestamp)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(count).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let count = store
+                    .count_assistant_messages_after(&session_id, after_timestamp)
+                    .map_err(|e| e.to_string())?;
+                Ok(count)
+            })
+            .await
         }
         "mark_session_chat_read" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            store
-                .mark_session_chat_read(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            // `()` serializes to `null`, the response the arm always gave.
+            blocking_store_json(move || store.mark_session_chat_read(&session_id)).await
         }
         "get_session_acp_metadata_messages" => {
             let store = get_store(store_mutex)?;
@@ -3707,10 +3830,13 @@ pub(crate) async fn dispatch(
         "get_session_acp_initialization" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let metadata = store
-                .get_session_acp_initialization(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(metadata).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let metadata = store
+                    .get_session_acp_initialization(&session_id)
+                    .map_err(|e| e.to_string())?;
+                Ok(metadata)
+            })
+            .await
         }
         // The browser normally loads `/api/tool-images/…` straight into an
         // `<img>`; this arm keeps the command callable from both transports.
@@ -3825,15 +3951,15 @@ pub(crate) async fn dispatch(
             let content: String = arg(&args, "content")?;
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
-            let message = store
-                .add_queued_session_message(
+            blocking_store_json(move || {
+                store.add_queued_session_message(
                     &session_id,
                     &content,
                     &image_ids.unwrap_or_default(),
                     branch_id.as_deref(),
                 )
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(message).unwrap())
+            })
+            .await
         }
         "list_queued_session_messages" => {
             let store = get_store(store_mutex)?;
@@ -3843,10 +3969,13 @@ pub(crate) async fn dispatch(
         "delete_queued_session_message" => {
             let store = get_store(store_mutex)?;
             let id: String = arg(&args, "id")?;
-            let deleted = store
-                .delete_queued_session_message(&id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(deleted).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let deleted = store
+                    .delete_queued_session_message(&id)
+                    .map_err(|e| e.to_string())?;
+                Ok(deleted)
+            })
+            .await
         }
         "send_queued_session_message" => {
             let store = get_store(store_mutex)?;
@@ -3888,9 +4017,16 @@ pub(crate) async fn dispatch(
         "get_session_live_delivery" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let capability =
-                session_commands::live_delivery_for_session(&store, session_registry, &session_id)?;
-            Ok(serde_json::to_value(capability).unwrap())
+            let session_registry = Arc::clone(session_registry);
+            blocking_json(move || -> Result<_, String> {
+                let capability = session_commands::live_delivery_for_session(
+                    &store,
+                    &session_registry,
+                    &session_id,
+                )?;
+                Ok(capability)
+            })
+            .await
         }
         "build_note_followup_message" => {
             let store = get_store(store_mutex)?;
@@ -4063,13 +4199,12 @@ pub(crate) async fn dispatch(
         "delete_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            session_commands::delete_session_impl(
-                session_registry,
-                &store,
-                app_handle,
-                &session_id,
-            )?;
-            Ok(Value::Null)
+            let registry = Arc::clone(session_registry);
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                session_commands::delete_session_impl(&registry, &store, &app_handle, &session_id)
+            })
+            .await
         }
         // =====================================================================
         // PRs
@@ -4127,8 +4262,11 @@ pub(crate) async fn dispatch(
         "cancel_deferred_push" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            crate::prs::cancel_deferred_push_for_branch(&store, &branch_id)?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                crate::prs::cancel_deferred_push_for_branch(&store, &branch_id)?;
+                Ok(())
+            })
+            .await
         }
         "rebase_branch" => {
             let store = get_store(store_mutex)?;
@@ -4193,10 +4331,13 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
-            store
-                .update_branch_pr_number(&branch_id, pr_number, None)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || -> Result<_, String> {
+                store
+                    .update_branch_pr_number(&branch_id, pr_number, None)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
         }
         "recover_branch_pr" => {
             let store = get_store(store_mutex)?;
@@ -4341,8 +4482,12 @@ pub(crate) async fn dispatch(
         "clear_branch_pr_status" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            crate::prs::clear_branch_pr_status_impl(&store, app_handle, &branch_id)?;
-            Ok(Value::Null)
+            let app_handle = app_handle.clone();
+            blocking_json(move || -> Result<_, String> {
+                crate::prs::clear_branch_pr_status_impl(&store, &app_handle, &branch_id)?;
+                Ok(())
+            })
+            .await
         }
 
         // =====================================================================
@@ -4401,23 +4546,26 @@ pub(crate) async fn dispatch(
         }
         "read_text_file" => {
             let file_path: String = arg(&args, "filePath")?;
-            let path = std::path::Path::new(&file_path);
-            if !path.exists() {
-                return Err(format!("File does not exist: {file_path}"));
-            }
-            if !path.is_file() {
-                return Err(format!("Not a file: {file_path}"));
-            }
-            let content =
-                std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
-            Ok(serde_json::to_value(content).unwrap())
+            blocking_json(move || -> Result<_, String> {
+                let path = std::path::Path::new(&file_path);
+                if !path.exists() {
+                    return Err(format!("File does not exist: {file_path}"));
+                }
+                if !path.is_file() {
+                    return Err(format!("Not a file: {file_path}"));
+                }
+                let content = std::fs::read_to_string(path)
+                    .map_err(|e| format!("Failed to read file: {e}"))?;
+                Ok(content)
+            })
+            .await
         }
         "resolve_path_aliases" => {
             let paths: Vec<String> = arg(&args, "paths")?;
-            Ok(
-                serde_json::to_value(crate::util_commands::resolve_path_aliases_impl(paths))
-                    .unwrap(),
-            )
+            blocking_json(move || -> Result<_, String> {
+                Ok(crate::util_commands::resolve_path_aliases_impl(paths))
+            })
+            .await
         }
         "preferences_store_path" => {
             let path = crate::preferences_store_path_buf()
@@ -5042,14 +5190,18 @@ mod tests {
     /// connection. Inline, that held the tokio worker that also services
     /// `/api/events`; the desktop commands moved to the blocking pool for the
     /// same scans. The project-note arm also used to carry its own copy of the
-    /// delete, which is what the second half rules out.
+    /// delete, which is what the second half rules out. The handoff may be a
+    /// direct `spawn_blocking` or one of the `blocking_json` helpers, which
+    /// wrap it (the same forms `blocking_guard_tests` accepts).
     #[test]
     fn web_note_delete_arms_run_under_spawn_blocking() {
         let source = include_str!("web_server.rs");
         for command in ["delete_note", "delete_project_note"] {
             let arm = dispatch_arm_body(source, command);
             assert!(
-                arm.contains("spawn_blocking("),
+                ["spawn_blocking(", "blocking_json(", "blocking_store_json("]
+                    .iter()
+                    .any(|handoff| arm.contains(handoff)),
                 "the web `{command}` arm must run its body on the blocking pool: {arm}"
             );
         }

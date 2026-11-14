@@ -17,6 +17,7 @@ import {
   readCachedEntries,
 } from './cache';
 import { readSnapshot, writeSnapshot, clearSnapshot, SNAPSHOT_KEYS } from './shared/webSnapshot';
+import { SendOrder } from './shared/sendOrder';
 import type {
   AcpConfigSelection,
   ActiveSessionInfo,
@@ -80,6 +81,51 @@ import type {
 } from './types';
 
 export type DiffScope = 'branch' | 'commit' | 'worktree';
+
+/**
+ * How long an ordered write waits, over HTTP, for the one sent before it for
+ * the same key. The ordered writes are single store writes that take
+ * milliseconds, and `delete_note`, which can take a few seconds. Well past
+ * those, so only a request that has hung is given up on, and it is only
+ * given up waiting for: the request itself is left to finish. The writes
+ * queued behind it are then sent one after another as before, not all at
+ * once.
+ */
+export const WEB_WRITE_ORDER_MAX_WAIT_MS = 30_000;
+
+/**
+ * Keeps the writes the frontend sends without awaiting in the order it sent
+ * them. `update_note`, `create_note`, `set_note_read`,
+ * `mark_session_chat_read` and `queue_session_message` were synchronous
+ * commands, which ran one at a time in arrival order; they now run on the
+ * backend's thread pool, like every command over HTTP, where two in flight
+ * land in either order. Each wrapper sends through here under the key of
+ * what it writes to, so a write waits for the one sent before it for the same
+ * note, branch or session and for nothing else. `delete_note` shares its
+ * note's key, so it cannot overtake a write sent before it.
+ *
+ * The rest of the synchronous writes followed them onto the pool. The ones a
+ * call site can have two of in flight, or sends without awaiting, are ordered
+ * the same way: a repo badge's saves and its delete (`repo-badge:`), pinned
+ * repo reorders (`pinned-repos`), a project note's read marks and its delete
+ * (`project-note:`), every tag write (`tags`), and a project's renames
+ * (`project:`).
+ *
+ * Only these wrappers are ordered. A command sent through another wrapper
+ * while one of these is in flight is not held back for it.
+ *
+ * Under Tauri a write waits for the one ahead of it however long that takes.
+ * Over HTTP it waits at most {@link WEB_WRITE_ORDER_MAX_WAIT_MS}: a request
+ * on a dropped connection can stay pending until the page is reloaded, and
+ * would otherwise stop every later write for its key (every tag write, for
+ * `tags`). See {@link SendOrder}.
+ */
+const writeOrder = new SendOrder(isTauri ? {} : { maxWaitMs: WEB_WRITE_ORDER_MAX_WAIT_MS });
+
+/** A branch note's saves and read marks share one order. */
+function noteWriteKey(noteId: string): string {
+  return `note:${noteId}`;
+}
 
 export interface WorktreeChangesPreview {
   revertPaths: string[];
@@ -269,8 +315,17 @@ export async function createProject(
   return project;
 }
 
+/**
+ * Sent behind the project's rename before it (see {@link writeOrder}): each
+ * rename carries the whole name, and the last one to land stays. The inline
+ * editor sends one at a time, but only while it stays mounted. Leaving the
+ * project and coming back while a rename is still out mounts a fresh editor,
+ * which can send a second.
+ */
 export async function renameProject(projectId: string, name: string): Promise<Project> {
-  const project = await invokeCommand<Project>('rename_project', { projectId, name });
+  const project = await writeOrder.run(`project:${projectId}`, () =>
+    invokeCommand<Project>('rename_project', { projectId, name })
+  );
   await invalidateCacheByCommand('list_projects');
   return project;
 }
@@ -509,8 +564,14 @@ export function getProjectNoteBySession(
   return invokeCommand('get_project_note_by_session', { sessionId });
 }
 
+/**
+ * Sent behind the note's read marks (see {@link writeOrder}), so a mark still
+ * in flight cannot land after the delete and fail on the missing note.
+ */
 export function deleteProjectNote(noteId: string): Promise<void> {
-  return invokeCommand('delete_project_note', { noteId });
+  return writeOrder.run(`project-note:${noteId}`, () =>
+    invokeCommand('delete_project_note', { noteId })
+  );
 }
 
 /**
@@ -526,17 +587,29 @@ export function getNote(noteId: string): Promise<import('./types').NoteTimelineI
  * Mark a branch note read or unread, returning the row as it now reads. A
  * write that changes the read state publishes `notes-changed`; marking a read
  * note read, or a note still being written, writes nothing.
+ *
+ * Sent in order with the note's other writes (see {@link writeOrder}): the
+ * timeline's "Mark as unread" is not awaited, and opening the note straight
+ * after sends the read mark that must land second.
  */
 export function setNoteRead(noteId: string, read: boolean): Promise<BranchNote> {
-  return invokeCommand('set_note_read', { noteId, read });
+  return writeOrder.run(noteWriteKey(noteId), () =>
+    invokeCommand('set_note_read', { noteId, read })
+  );
 }
 
-/** The project-note counterpart of {@link setNoteRead}. */
+/**
+ * The project-note counterpart of {@link setNoteRead}, ordered the same way
+ * (see {@link writeOrder}): "Mark as unread" from the row menu is not awaited,
+ * and the viewer's own read mark can be sent right behind it.
+ */
 export function setProjectNoteRead(
   projectNoteId: string,
   read: boolean
 ): Promise<import('./types').ProjectNote> {
-  return invokeCommand('set_project_note_read', { projectNoteId, read });
+  return writeOrder.run(`project-note:${projectNoteId}`, () =>
+    invokeCommand('set_project_note_read', { projectNoteId, read })
+  );
 }
 
 /**
@@ -1509,9 +1582,16 @@ export function countAssistantMessagesAfter(
   return invokeCommand('count_assistant_messages_after', { sessionId, afterTimestamp });
 }
 
-/** Record that the user has read the session's chat, clearing its note row's unread dot. */
+/**
+ * Record that the user has read the session's chat, clearing its note row's
+ * unread dot. The note viewer sends one when the chat opens and one when it
+ * closes, awaiting neither; they are sent in that order (see
+ * {@link writeOrder}).
+ */
 export function markSessionChatRead(sessionId: string): Promise<void> {
-  return invokeCommand('mark_session_chat_read', { sessionId });
+  return writeOrder.run(`chat-read:${sessionId}`, () =>
+    invokeCommand('mark_session_chat_read', { sessionId })
+  );
 }
 
 /** Create a session and immediately start the agent. */
@@ -1555,18 +1635,27 @@ export function resumeSession(
   });
 }
 
+/**
+ * Queue a follow-up behind a running session's turn. The queue drains in the
+ * order its rows were stamped, and the composer accepts the next message
+ * while this one is still being queued, so a session's messages are sent one
+ * at a time (see {@link writeOrder}): the agent gets them in the order they
+ * were typed.
+ */
 export function queueSessionMessage(
   sessionId: string,
   content: string,
   imageIds?: string[],
   branchId?: string | null
 ): Promise<QueuedSessionMessage> {
-  return invokeCommand('queue_session_message', {
-    sessionId,
-    content,
-    imageIds: imageIds ?? null,
-    branchId: branchId ?? null,
-  });
+  return writeOrder.run(`queue:${sessionId}`, () =>
+    invokeCommand('queue_session_message', {
+      sessionId,
+      content,
+      imageIds: imageIds ?? null,
+      branchId: branchId ?? null,
+    })
+  );
 }
 
 export function listQueuedSessionMessages(sessionId: string): Promise<QueuedSessionMessage[]> {
@@ -1754,6 +1843,14 @@ export function startQueuedSessionNow(branchId: string, sessionId: string): Prom
  *
  * `subtype` is `'written'` when the user authored the note in the editor
  * dialog; the drag-drop and save-action-output paths leave it unset.
+ *
+ * A branch's creates are sent one at a time (see {@link writeOrder}), in the
+ * order this is called in. A drop of several files creates its notes without
+ * awaiting each, and the order they land in is the order the timeline lists
+ * them in and the order same-titled ones get their ` (2)`, ` (3)` suffixes
+ * in. Keeping the call order is all this does: a caller that reads each file
+ * before creating its note has to finish the reads first, or the reads
+ * decide the order (see `addTextFileNotes` in BranchCard).
  */
 export function createNote(
   branchId: string,
@@ -1761,7 +1858,9 @@ export function createNote(
   content: string,
   subtype: import('./types').NoteSubtype = null
 ): Promise<import('./types').NoteTimelineItem> {
-  return invokeCommand('create_note', { branchId, title, content, subtype });
+  return writeOrder.run(`branch-notes:${branchId}`, () =>
+    invokeCommand('create_note', { branchId, title, content, subtype })
+  );
 }
 
 /**
@@ -1771,18 +1870,33 @@ export function createNote(
  * Like the other note mutations this publishes `notes-changed`, so other views
  * refresh on their own; the calling card still invalidates locally so its own
  * timeline updates without waiting for the round trip.
+ *
+ * A note's saves are sent in order (see {@link writeOrder}): the editor's
+ * save before a transfer does not hold its Save button, so a second save can
+ * be sent while the first is in flight, and the older one must not land last.
  */
 export function updateNote(
   noteId: string,
   title: string,
   content: string
 ): Promise<import('./types').NoteTimelineItem> {
-  return invokeCommand('update_note', { noteId, title, content });
+  return writeOrder.run(noteWriteKey(noteId), () =>
+    invokeCommand('update_note', { noteId, title, content })
+  );
 }
 
-/** Delete a note and optionally its linked session. */
+/**
+ * Delete a note and optionally its linked session.
+ *
+ * Sent after the note's saves and read marks still in flight (see
+ * {@link writeOrder}). The timeline's "Mark as unread" is not awaited, and
+ * landing after a delete sent behind it would fail on the missing note and
+ * toast an error for a note the user had just deleted.
+ */
 export function deleteNote(noteId: string, deleteSession = true): Promise<void> {
-  return invokeCommand('delete_note', { noteId, deleteSession });
+  return writeOrder.run(noteWriteKey(noteId), () =>
+    invokeCommand('delete_note', { noteId, deleteSession })
+  );
 }
 
 /**
@@ -2643,18 +2757,37 @@ export function ensureRepoBadges(
   return invokeCommand('ensure_repo_badges', { repos, provider: provider ?? null });
 }
 
-/** Update the short name and hue of an existing repo badge. */
+/** A repo badge's saves and its delete share one order. */
+function repoBadgeWriteKey(githubRepo: string, subpath: string): string {
+  return `repo-badge:${githubRepo}\u0000${subpath}`;
+}
+
+/**
+ * Update the short name and hue of an existing repo badge.
+ *
+ * A badge's saves are sent in order (see {@link writeOrder}): the settings
+ * panel saves on every keystroke without awaiting, each save carries the
+ * whole name and hue, and the last one to land stays.
+ */
 export function updateRepoBadge(
   githubRepo: string,
   subpath: string,
   shortName: string,
   hue: number
 ): Promise<import('./types').RepoBadge> {
-  return invokeCommand('update_repo_badge', { githubRepo, subpath, shortName, hue });
+  return writeOrder.run(repoBadgeWriteKey(githubRepo, subpath), () =>
+    invokeCommand('update_repo_badge', { githubRepo, subpath, shortName, hue })
+  );
 }
 
+/**
+ * Sent behind the badge's saves (see {@link writeOrder}), so a save still in
+ * flight cannot land after the delete and fail on the missing badge.
+ */
 export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<void> {
-  return invokeCommand('delete_repo_badge', { githubRepo, subpath });
+  return writeOrder.run(repoBadgeWriteKey(githubRepo, subpath), () =>
+    invokeCommand('delete_repo_badge', { githubRepo, subpath })
+  );
 }
 
 // =============================================================================
@@ -2664,6 +2797,18 @@ export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<vo
 // Every write publishes `tags-changed` (never `project-changed`), and drops
 // the one argless `get_tag_state` cache key before returning, so a read
 // issued after the write resolves never sees a pre-write snapshot.
+
+/**
+ * Send a tag write behind every tag write sent before it (see
+ * {@link writeOrder}). `tagActions` queues catalog edits and each project's
+ * assignments separately, and nothing there orders one queue against the
+ * other: an assignment still in flight when its tag is moved into a group, or
+ * deleted, depends on which lands first. As synchronous commands they landed
+ * in the order sent, and one key for all twelve keeps that.
+ */
+function tagWrite<T = void>(command: string, args: Record<string, unknown>): Promise<T> {
+  return writeOrder.run('tags', () => invokeCommand<T>(command, args));
+}
 
 /** The tag catalog and every project's tags. */
 export function getTagState(options: ForceRefreshOptions = {}): Promise<SwrResult<TagState>> {
@@ -2675,36 +2820,36 @@ export function getTagState(options: ForceRefreshOptions = {}): Promise<SwrResul
 
 /** Append a group, with its initial tags in the order given. */
 export async function createTagGroup(name: string, tags: NewTag[] = []): Promise<TagGroup> {
-  const group = await invokeCommand<TagGroup>('create_tag_group', { name, tags });
+  const group = await tagWrite<TagGroup>('create_tag_group', { name, tags });
   await invalidateCache('get_tag_state');
   return group;
 }
 
 export async function renameTagGroup(groupId: string, name: string): Promise<void> {
-  await invokeCommand('rename_tag_group', { groupId, name });
+  await tagWrite('rename_tag_group', { groupId, name });
   await invalidateCache('get_tag_state');
 }
 
 /** Make a group the icon group, or turn the icon group off with null. */
 export async function setIconTagGroup(groupId: string | null): Promise<void> {
-  await invokeCommand('set_icon_tag_group', { groupId });
+  await tagWrite('set_icon_tag_group', { groupId });
   await invalidateCache('get_tag_state');
 }
 
 /** Pin a group's board to the projects sidebar, or unpin it. */
 export async function setTagGroupSidebar(groupId: string, shown: boolean): Promise<void> {
-  await invokeCommand('set_tag_group_sidebar', { groupId, shown });
+  await tagWrite('set_tag_group_sidebar', { groupId, shown });
   await invalidateCache('get_tag_state');
 }
 
 /** Reorder groups; `groupIds` must name every group exactly once. */
 export async function reorderTagGroups(groupIds: string[]): Promise<void> {
-  await invokeCommand('reorder_tag_groups', { groupIds });
+  await tagWrite('reorder_tag_groups', { groupIds });
   await invalidateCache('get_tag_state');
 }
 
 export async function deleteTagGroup(groupId: string, mode: DeleteTagGroupMode): Promise<void> {
-  await invokeCommand('delete_tag_group', { groupId, mode });
+  await tagWrite('delete_tag_group', { groupId, mode });
   await invalidateCache('get_tag_state');
 }
 
@@ -2720,7 +2865,7 @@ export async function createTag(input: {
   icon?: string | null;
   assignProjectId?: string | null;
 }): Promise<Tag> {
-  const tag = await invokeCommand<Tag>('create_tag', {
+  const tag = await tagWrite<Tag>('create_tag', {
     name: input.name,
     groupId: input.groupId ?? null,
     color: input.color ?? null,
@@ -2736,18 +2881,18 @@ export async function updateTag(
   tagId: string,
   value: { name: string; color: TagColor; icon: string | null }
 ): Promise<void> {
-  await invokeCommand('update_tag', { tagId, ...value });
+  await tagWrite('update_tag', { tagId, ...value });
   await invalidateCache('get_tag_state');
 }
 
 /** Move a tag to `index` within a group (or ungrouped, with null). */
 export async function moveTag(tagId: string, groupId: string | null, index: number): Promise<void> {
-  await invokeCommand('move_tag', { tagId, groupId, index });
+  await tagWrite('move_tag', { tagId, groupId, index });
   await invalidateCache('get_tag_state');
 }
 
 export async function deleteTag(tagId: string): Promise<void> {
-  await invokeCommand('delete_tag', { tagId });
+  await tagWrite('delete_tag', { tagId });
   await invalidateCache('get_tag_state');
 }
 
@@ -2757,7 +2902,7 @@ export async function setProjectGroupTag(
   groupId: string,
   tagId: string | null
 ): Promise<void> {
-  await invokeCommand('set_project_group_tag', { projectId, groupId, tagId });
+  await tagWrite('set_project_group_tag', { projectId, groupId, tagId });
   await invalidateCache('get_tag_state');
 }
 
@@ -2767,7 +2912,7 @@ export async function setProjectTagAssigned(
   tagId: string,
   assigned: boolean
 ): Promise<void> {
-  await invokeCommand('set_project_tag_assigned', { projectId, tagId, assigned });
+  await tagWrite('set_project_tag_assigned', { projectId, tagId, assigned });
   await invalidateCache('get_tag_state');
 }
 
@@ -2785,9 +2930,16 @@ export function unpinRepo(githubRepo: string, subpath: string): Promise<void> {
   return invokeCommand('unpin_repo', { githubRepo, subpath });
 }
 
-/** Bulk-update pin sort order from an ordered list of [githubRepo, subpath] keys. */
+/**
+ * Bulk-update pin sort order from an ordered list of [githubRepo, subpath] keys.
+ *
+ * Reorders are sent one at a time (see {@link writeOrder}): each carries the
+ * whole order, so of two drops in a row the first must not land last.
+ */
 export function reorderPinnedRepos(orderedKeys: [string, string][]): Promise<void> {
-  return invokeCommand('reorder_pinned_repos', { orderedKeys });
+  return writeOrder.run('pinned-repos', () =>
+    invokeCommand('reorder_pinned_repos', { orderedKeys })
+  );
 }
 
 /** List all repo badges ordered: pinned first by sort order, then unpinned by project count. */

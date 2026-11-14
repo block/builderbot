@@ -38,6 +38,7 @@
 import { listenToEvent, type UnlistenFn } from '../transport';
 import * as commands from '../commands';
 import { repoBadgeStore } from './repoBadges.svelte';
+import { LatestWins } from '../shared/latestWins';
 import type {
   Branch,
   BranchChangedEvent,
@@ -64,6 +65,12 @@ import type {
 const BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS = 3000;
 
 /**
+ * What offering a fetched branch list resolves to when a local write landed
+ * after the read was sent: neither applied nor refused, to be read again.
+ */
+const BRANCH_READ_SET_ASIDE = 'set-aside';
+
+/**
  * Merge incoming branches with existing ones, preserving worktreePath when
  * a stale async response would overwrite an already-populated value with null.
  * Only for a branch that is local on both sides: a remote branch has no
@@ -83,6 +90,13 @@ export function mergeBranchesPreservingWorktree(existing: Branch[], incoming: Br
     }
     return newBranch;
   });
+}
+
+/** Whether two branch lists hold the same branch objects in the same order. */
+function sameBranchList(existing: Branch[] | undefined, next: Branch[]): boolean {
+  const current = existing ?? [];
+  if (current === next) return true;
+  return current.length === next.length && current.every((branch, i) => branch === next[i]);
 }
 
 /**
@@ -170,6 +184,17 @@ class ProjectsDataStore {
    * fresher state. Same role as ProjectHome's loadGeneration.
    */
   private loadGeneration = 0;
+  /**
+   * Orders the reads within one generation by when they were sent. The
+   * refresh, hydrate and branch-refetch paths can each have a read of the
+   * same project in flight, and the backend serves them concurrently, so an
+   * older response can land last. Keyed per list: `projects`,
+   * `branches:<project>` and `repos:<project>`. `branch-writes:<project>`
+   * records the view's own writes to a branch list (setBranchesByProject),
+   * which a branch read sent before them must not be applied over, and
+   * `project-writes` does the same for the project list (projectRenamed).
+   */
+  private readOrder = new LatestWins();
   private initialLoad: Promise<void> | null = null;
   private revalidatePending = false;
   private revalidateQueued = false;
@@ -421,12 +446,21 @@ class ProjectsDataStore {
    * `replaceBranches` applies the branch list as fetched, without carrying
    * worktree paths over from the old one. Resolves whether the result was
    * applied: false when a newer load overtook it, or the fetch failed.
+   *
+   * Callers await this to know the store shows what their mutation left
+   * (the branch delete clears its "Deleting…" state on it). So when the
+   * branch list is set aside because a local write landed while it was out
+   * (see offerProjectBranches), this reads the list again itself and resolves
+   * only once a list read after that write has been offered. Any local write
+   * to the project sets the read aside, related to the refresh or not, such
+   * as a workspace status change on another branch.
    */
   async refreshProject(
     projectId: string,
     { replaceBranches = false }: { replaceBranches?: boolean } = {}
   ): Promise<boolean> {
     const generation = this.loadGeneration;
+    const ticket = this.readOrder.issue();
     try {
       const [projectsResult, branchesResult, reposResult] = await Promise.all([
         commands.listProjects({ force: true }),
@@ -434,15 +468,25 @@ class ProjectsDataStore {
         commands.listProjectRepos(projectId, { force: true }),
       ]);
       if (generation !== this.loadGeneration) return false;
-      this._projects = projectsResult.data;
-      const mergedBranches = this.applyProjectBranches(projectId, branchesResult.data, generation, {
+      if (this.admitProjectList(ticket)) {
+        this._projects = projectsResult.data;
+      }
+      let offered = this.offerProjectBranches(projectId, branchesResult.data, generation, ticket, {
         replace: replaceBranches,
       });
-      if (mergedBranches) {
-        commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
-      }
-      this.applyProjectRepos(projectId, reposResult.data, generation);
+      this.applyProjectRepos(projectId, reposResult.data, generation, ticket);
       this.markProjectHydrated(projectId, generation);
+      // Each further round needs another local write to land during a read,
+      // so this ends as soon as one read comes back with none.
+      while (offered === BRANCH_READ_SET_ASIDE) {
+        const again = this.readOrder.issue();
+        const { data } = await commands.listBranchesForProject(projectId, { force: true });
+        if (generation !== this.loadGeneration) return false;
+        offered = this.offerProjectBranches(projectId, data, generation, again);
+      }
+      if (offered) {
+        commands.invalidateProjectBranchTimelines(offered.map((b) => b.id));
+      }
       return true;
     } catch (e) {
       console.error(`[projectsData] Failed to refresh project '${projectId}':`, e);
@@ -494,7 +538,36 @@ class ProjectsDataStore {
    * the sidebar filters, not the project name, so it is unaffected.)
    */
   projectRenamed(projectId: string, name: string): void {
+    // A read of the project list still in flight was sent before this write
+    // and may have read the store before the rename. Mark the write so that
+    // read is not applied over it (see admitProjectList). Only a name that
+    // really changes counts, as in setBranchesByProject.
+    if (this._projects.some((p) => p.id === projectId && p.name !== name)) {
+      this.readOrder.wrote('project-writes');
+    }
     this._projects = this._projects.map((p) => (p.id === projectId ? { ...p, name } : p));
+  }
+
+  /**
+   * Whether a fetched project list may replace the one shown.
+   *
+   * Refused when a list sent after it has already landed. Set aside when the
+   * view's own rename (projectRenamed) landed while it was out: it may have
+   * read the store before the rename, and would put the old name back until
+   * the next list arrived. A list that is set aside is read again in the
+   * background, since it may be the only one carrying some other change.
+   *
+   * The checks run in that order and the list is recorded only when it is
+   * applied, as in offerProjectBranches, so a list that was set aside is
+   * never taken for one that landed.
+   */
+  private admitProjectList(ticket: number): boolean {
+    if (this.readOrder.overtaken('projects', ticket)) return false;
+    if (this.readOrder.overtaken('project-writes', ticket)) {
+      void this.revalidate({ force: true, soft: true });
+      return false;
+    }
+    return this.readOrder.admit('projects', ticket);
   }
 
   /**
@@ -504,6 +577,16 @@ class ProjectsDataStore {
    * through the generation-guarded paths instead.
    */
   setBranchesByProject(next: Map<string, Branch[]>): void {
+    // A read of a project's branches still in flight was sent before this
+    // write and may have read the store before it. Mark the write so that
+    // read is not applied over it (see offerProjectBranches). Only lists that
+    // really differ count: callers rebuild the array even when no branch in
+    // it matched, and such a call must not turn a first hydration away.
+    for (const [projectId, branches] of next) {
+      if (!sameBranchList(this._branchesByProject.get(projectId), branches)) {
+        this.readOrder.wrote(`branch-writes:${projectId}`);
+      }
+    }
     this._branchesByProject = next;
   }
 
@@ -556,20 +639,23 @@ class ProjectsDataStore {
       this._loading = true;
     }
     this._error = null;
+    const ticket = this.readOrder.issue();
     try {
       const [{ data, revalidating }] = await Promise.all([
         commands.listProjects({ force }),
         repoBadgeStore.loadAll({ force }),
       ]);
       if (generation !== this.loadGeneration) return;
-      this.applyProjectList(data, generation, { scheduleHydration: !soft });
+      this.applyProjectList(data, generation, ticket, { scheduleHydration: !soft });
       this._loaded = true;
 
       if (revalidating) {
         // Applied outside the awaited chain so callers aren't blocked on the
         // SWR refresh — they already have renderable data.
         revalidating
-          .then((fresh) => this.applyProjectList(fresh, generation, { scheduleHydration: !soft }))
+          .then((fresh) =>
+            this.applyProjectList(fresh, generation, ticket, { scheduleHydration: !soft })
+          )
           .catch((e) => {
             console.error('[projectsData] Failed to revalidate project list:', e);
           });
@@ -595,9 +681,14 @@ class ProjectsDataStore {
   private applyProjectList(
     projectList: Project[],
     generation: number,
+    ticket: number,
     { scheduleHydration = true }: { scheduleHydration?: boolean } = {}
   ): void {
     if (generation !== this.loadGeneration) return;
+    // A list sent after this one has already landed, or the view's own
+    // rename has (see admitProjectList): keep the list shown, and seed, prune
+    // and hydrate against it.
+    if (!this.admitProjectList(ticket)) projectList = this._projects;
     const previousProjectIds = new Set(this._projects.map((project) => project.id));
     const newlySeenProjectIds = projectList
       .map((project) => project.id)
@@ -672,6 +763,7 @@ class ProjectsDataStore {
   }
 
   private async hydrateProjectInternal(projectId: string, generation: number): Promise<void> {
+    const ticket = this.readOrder.issue();
     try {
       const [branchesResult, reposResult] = await Promise.all([
         commands.listBranchesForProject(projectId),
@@ -679,13 +771,13 @@ class ProjectsDataStore {
       ]);
       if (generation !== this.loadGeneration) return;
 
-      this.applyProjectBranches(projectId, branchesResult.data, generation);
-      this.applyProjectRepos(projectId, reposResult.data, generation);
+      this.applyProjectBranches(projectId, branchesResult.data, generation, ticket);
+      this.applyProjectRepos(projectId, reposResult.data, generation, ticket);
 
       if (branchesResult.revalidating) {
         branchesResult.revalidating
           .then((fresh) => {
-            this.applyProjectBranches(projectId, fresh, generation);
+            this.applyProjectBranches(projectId, fresh, generation, ticket);
           })
           .catch((e) => {
             console.error(`[projectsData] Failed to revalidate branches for '${projectId}':`, e);
@@ -694,7 +786,7 @@ class ProjectsDataStore {
 
       if (reposResult.revalidating) {
         reposResult.revalidating
-          .then((fresh) => this.applyProjectRepos(projectId, fresh, generation))
+          .then((fresh) => this.applyProjectRepos(projectId, fresh, generation, ticket))
           .catch((e) => {
             console.error(`[projectsData] Failed to revalidate repos for '${projectId}':`, e);
           });
@@ -713,13 +805,40 @@ class ProjectsDataStore {
     this._hydratedProjects = new Map(this._hydratedProjects).set(projectId, generation);
   }
 
-  private applyProjectBranches(
+  /**
+   * Offer a fetched branch list to the store. Resolves to the list applied,
+   * or to null when it was refused: a newer load has started, or a read sent
+   * after this one (`ticket`, see readOrder) has already been applied. A
+   * `replace` list is applied even then: it is read after the transfer that
+   * asked for it, and it alone drops the worktree paths the transfer removed.
+   *
+   * A list sent before a local write landed (setBranchesByProject) is not
+   * applied either: it may predate the rename, delete or status change the
+   * view has already painted, and would put the old row back until the
+   * write's change event refetched. That is BRANCH_READ_SET_ASIDE, not a
+   * refusal, since the list may be the only read carrying some other change:
+   * the caller must have the list read again.
+   */
+  private offerProjectBranches(
     projectId: string,
     branches: Branch[],
     generation: number,
+    ticket: number,
     { replace = false }: { replace?: boolean } = {}
-  ): Branch[] | null {
+  ): Branch[] | typeof BRANCH_READ_SET_ASIDE | null {
     if (generation !== this.loadGeneration || !this.hasProject(projectId)) return null;
+    const readKey = `branches:${projectId}`;
+    if (!replace) {
+      if (this.readOrder.overtaken(readKey, ticket)) return null;
+      if (this.readOrder.overtaken(`branch-writes:${projectId}`, ticket)) {
+        return BRANCH_READ_SET_ASIDE;
+      }
+    }
+    // Only a list that is applied counts as landed, so a read is refused
+    // only for a later-sent list the store really shows. A list set aside
+    // above leaves no mark: an older read still out is then set aside too,
+    // not refused, and its caller reads again (refreshProject relies on it).
+    this.readOrder.admit(readKey, ticket);
 
     const mergedBranches = replace
       ? branches
@@ -728,8 +847,30 @@ class ProjectsDataStore {
     return mergedBranches;
   }
 
-  private applyProjectRepos(projectId: string, repos: ProjectRepo[], generation: number): void {
+  /**
+   * Offer a fetched branch list (see offerProjectBranches), and have the
+   * list read again in the background when it is set aside. For the reads
+   * nothing awaits: hydration and the event-driven refetch. refreshProject,
+   * which callers do await, reads again itself.
+   */
+  private applyProjectBranches(
+    projectId: string,
+    branches: Branch[],
+    generation: number,
+    ticket: number
+  ): void {
+    const offered = this.offerProjectBranches(projectId, branches, generation, ticket);
+    if (offered === BRANCH_READ_SET_ASIDE) void this.refetchProjectBranches(projectId);
+  }
+
+  private applyProjectRepos(
+    projectId: string,
+    repos: ProjectRepo[],
+    generation: number,
+    ticket: number
+  ): void {
     if (generation !== this.loadGeneration || !this.hasProject(projectId)) return;
+    if (!this.readOrder.admit(`repos:${projectId}`, ticket)) return;
     this._reposByProject = new Map(this._reposByProject).set(projectId, repos);
     void repoBadgeStore.ensureForRepos(
       repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
@@ -1230,15 +1371,16 @@ class ProjectsDataStore {
     }
     this.branchRefetchInFlight.add(projectId);
     const generation = this.loadGeneration;
+    const ticket = this.readOrder.issue();
     try {
       const { data: branches, revalidating } = await commands.listBranchesForProject(projectId, {
         force: true,
       });
-      this.applyProjectBranches(projectId, branches, generation);
+      this.applyProjectBranches(projectId, branches, generation, ticket);
       if (revalidating) {
         revalidating
           .then((fresh) => {
-            this.applyProjectBranches(projectId, fresh, generation);
+            this.applyProjectBranches(projectId, fresh, generation, ticket);
           })
           .catch((e) => {
             console.error(

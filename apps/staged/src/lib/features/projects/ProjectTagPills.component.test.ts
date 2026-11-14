@@ -215,13 +215,25 @@ describe('ProjectTagPills', () => {
     expect(addTagButton(root).textContent).toContain('Tag');
   });
 
-  it('puts the icon group’s pill first, as the menus and the board do', async () => {
+  it('keeps the icon group’s pill at its stored place, as the menus and the board do', async () => {
     const state = tagState([
       { projectId: 'p1', tagId: 'doing' },
       { projectId: 'p1', tagId: 'p0' },
     ]);
-    // Make Priority the icon group, though it sorts second.
+    // Make Priority the icon group, though it sorts second: it stays second.
     state.groups = state.groups.map((g) => ({ ...g, isIconGroup: g.id === 'priority' }));
+    const { root } = await mountPills(state);
+
+    expect(pills(root).map((pill) => pill.textContent?.trim())).toEqual(['Doing', 'P0']);
+  });
+
+  it('follows a reorder of the groups', async () => {
+    const state = tagState([
+      { projectId: 'p1', tagId: 'doing' },
+      { projectId: 'p1', tagId: 'p0' },
+    ]);
+    // Priority moved above Status in Settings. Status still drives the icon.
+    state.groups = state.groups.map((g) => ({ ...g, position: g.id === 'priority' ? 0 : 1 }));
     const { root } = await mountPills(state);
 
     expect(pills(root).map((pill) => pill.textContent?.trim())).toEqual(['P0', 'Doing']);

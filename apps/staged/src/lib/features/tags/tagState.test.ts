@@ -7,7 +7,6 @@ import {
   currentIntent,
   effectiveProjectTagIds,
   groupTag,
-  iconGroupFirst,
   indexAssignments,
   indexTagCatalog,
   intentSlot,
@@ -97,6 +96,17 @@ describe('indexTagCatalog', () => {
     expect(catalog.tagsByGroup.get(null)!.map((t) => t.id)).toEqual(['infra', 'q4']);
     expect(catalog.iconGroup?.id).toBe('status');
     expect(catalog.tagsById.get('p1')?.groupId).toBe('priority');
+  });
+
+  it('keeps the icon group at its stored position, wherever that is', () => {
+    // Every surface that lists groups reads `groups`, so the icon group gets
+    // no special place: it is found, not moved.
+    const reordered = indexTagCatalog({
+      ...state(),
+      groups: [group('status', 1, { isIconGroup: true }), group('area', 2), group('priority', 0)],
+    });
+    expect(reordered.groups.map((g) => g.id)).toEqual(['priority', 'status', 'area']);
+    expect(reordered.iconGroup?.id).toBe('status');
   });
 
   it('lists the groups whose boards are pinned to the sidebar, in group order', () => {
@@ -386,26 +396,5 @@ describe('numberedName', () => {
     const name = numberedName(base, new Set([base]));
     expect(name).toBe(`${'x'.repeat(MAX_TAG_NAME_CHARS - 2)} 2`);
     expect(name).toHaveLength(MAX_TAG_NAME_CHARS);
-  });
-});
-
-describe('iconGroupFirst', () => {
-  const groups: TagGroup[] = ['a', 'b', 'c'].map((id, position) => ({
-    id,
-    name: id.toUpperCase(),
-    position,
-    isIconGroup: id === 'b',
-    showInSidebar: false,
-    createdAt: 0,
-    updatedAt: 0,
-  }));
-
-  it('puts the icon group first and keeps the rest in position order', () => {
-    expect(iconGroupFirst(groups, groups[1]).map((g) => g.id)).toEqual(['b', 'a', 'c']);
-  });
-
-  it('keeps position order when no group drives the icon', () => {
-    expect(iconGroupFirst(groups, null).map((g) => g.id)).toEqual(['a', 'b', 'c']);
-    expect(iconGroupFirst([], null)).toEqual([]);
   });
 });

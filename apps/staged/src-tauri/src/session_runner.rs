@@ -7454,6 +7454,7 @@ fn emit_detached_recovery_outcome(
         outcome.status.as_str(),
         outcome.error,
         Some(&outcome.reason),
+        None,
         Some(branch_id.clone()),
         Some(context.branch.project_id.clone()),
     );

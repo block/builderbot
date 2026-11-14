@@ -23,7 +23,7 @@
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { repoShortLabel } from '../../shared/repoShortLabel';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import TagIcon from '../tags/TagIcon.svelte';
   import { projectFiltersStore, type FilterKind } from './projectFilters.svelte';
@@ -150,7 +150,7 @@
       <DropdownMenu.Separator />
       <DropdownMenu.Label>Repo</DropdownMenu.Label>
       {#each projectFiltersStore.repoFilters as rf (rf.repo + '\t' + rf.subpath)}
-        {@const badge = repoBadgeStore.lookup(rf.repo, rf.subpath || undefined)}
+        {@const badge = repoShortLabel({ githubRepo: rf.repo, subpath: rf.subpath })}
         {@const filter = { repo: rf.repo, subpath: rf.subpath }}
         <DropdownMenu.CheckboxItem
           checked={projectFiltersStore.isFilterActive(filter)}

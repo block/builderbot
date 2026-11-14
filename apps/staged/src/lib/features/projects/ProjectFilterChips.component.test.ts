@@ -1,15 +1,18 @@
 // Mounts the real chip bar over the real projectFiltersStore and tagsStore,
-// with the backend commands and the other data stores mocked: tag chips list
-// the tags in use, in catalog order, with counts; clicking them filters; and a
-// deleted tag's filter neither filters nor keeps Clear up.
+// with the backend commands and the other data stores mocked: repo chips show
+// their badges' short names; tag chips list the tags in use, in catalog order,
+// with counts; clicking them filters; and a deleted tag's filter neither
+// filters nor keeps Clear up.
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, TagState } from '../../types';
 import { tagState, withTagAssigned } from '../tags/testStubs/tagFixtures';
 
-const { backend, projects } = vi.hoisted(() => ({
+const { backend, projects, badges } = vi.hoisted(() => ({
   backend: { state: null as unknown as TagState },
   projects: [] as Project[],
+  /** Badges by `githubRepo:subpath`. */
+  badges: new Map<string, { shortName: string; hue: number }>(),
 }));
 
 const commandsMock = vi.hoisted(() => ({
@@ -35,7 +38,12 @@ vi.mock('../../stores/projectsData.svelte', () => ({
 vi.mock('../../stores/projectState.svelte', () => ({
   projectStateStore: { isUnread: () => false },
 }));
-vi.mock('../../stores/repoBadges.svelte', () => ({ repoBadgeStore: { lookup: () => null } }));
+vi.mock('../../stores/repoBadges.svelte', () => ({
+  repoBadgeStore: {
+    lookup: (githubRepo: string, subpath: string | null | undefined) =>
+      badges.get(`${githubRepo}:${subpath ?? ''}`) ?? null,
+  },
+}));
 vi.mock('./projectStatus', () => ({
   getProjectStatus: () => ({ kind: 'idle', runningCount: 0, runActionPhase: null }),
 }));
@@ -47,7 +55,7 @@ import { tagsStore } from '../../stores/tags.svelte';
 import ProjectFilterChips from './ProjectFilterChips.svelte';
 import { projectFiltersStore } from './projectFilters.svelte';
 
-function project(id: string): Project {
+function project(id: string, overrides: Partial<Project> = {}): Project {
   return {
     id,
     name: `Project ${id}`,
@@ -56,6 +64,7 @@ function project(id: string): Project {
     subpath: null,
     createdAt: 1,
     updatedAt: 1,
+    ...overrides,
   };
 }
 
@@ -110,14 +119,32 @@ function tagChip(root: ParentNode, name: string): HTMLButtonElement {
   return found;
 }
 
+function repoChips(root: ParentNode): HTMLButtonElement[] {
+  return [...root.querySelectorAll<HTMLButtonElement>('.repo-filter')];
+}
+
 function clearChip(root: ParentNode): HTMLButtonElement | null {
   return root.querySelector<HTMLButtonElement>('.clear-chip');
 }
 
 const shown = () => projectFiltersStore.filteredProjects.map((p) => p.id);
 
+/** The chips ahead of the tags': the statuses, then one per repo. */
+const STATUS_AND_REPO_CHIPS = ['Unread 0', 'Running 0', 'bb 1', 'staged 1', 'block/goose 1'];
+
+// The same projects and badges for every test: the mocked data store isn't
+// reactive, so the filter store's repo list is whatever it first computed.
 beforeEach(() => {
-  projects.splice(0, projects.length, project('p1'), project('p2'), project('p3'));
+  projects.splice(
+    0,
+    projects.length,
+    project('p1', { githubRepo: 'block/builderbot', subpath: 'apps/staged' }),
+    project('p2', { githubRepo: 'block/builderbot' }),
+    project('p3', { githubRepo: 'block/goose' })
+  );
+  badges.clear();
+  badges.set('block/builderbot:', { shortName: 'bb', hue: 200 });
+  badges.set('block/builderbot:apps/staged', { shortName: 'staged', hue: 120 });
 });
 
 afterEach(() => {
@@ -127,11 +154,37 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
+describe('ProjectFilterChips repo chips', () => {
+  it('shows a badged repo’s short name, with the full path as its tooltip', async () => {
+    const root = await mountChips(tagState());
+
+    // Ordered by full path; a subpath has a short name of its own, and a repo
+    // without a badge keeps its path.
+    expect(chips(root)).toEqual(STATUS_AND_REPO_CHIPS);
+    const [bb, staged, goose] = repoChips(root);
+    expect(bb.title).toBe('block/builderbot');
+    expect(staged.title).toBe('block/builderbot/apps/staged');
+    expect(goose.querySelector<HTMLElement>('.repo-label')!.title).toBe('block/goose');
+  });
+
+  it('still filters on the full repo and subpath', async () => {
+    const root = await mountChips(tagState());
+
+    repoChips(root)[1].click();
+    await settle();
+
+    expect(projectFiltersStore.activeFilters).toEqual(
+      new Set(['repo:block/builderbot:apps/staged'])
+    );
+    expect(shown()).toEqual(['p1']);
+  });
+});
+
 describe('ProjectFilterChips tag chips', () => {
-  it('lists the tags in use after the status chips, in catalog order, with counts', async () => {
+  it('lists the tags in use after the repo chips, in catalog order, with counts', async () => {
     const root = await mountChips();
 
-    expect(chips(root)).toEqual(['Unread 0', 'Running 0', 'Doing 2', 'P0 1', 'q4 1']);
+    expect(chips(root)).toEqual([...STATUS_AND_REPO_CHIPS, 'Doing 2', 'P0 1', 'q4 1']);
     // The tooltip names the group, since two groups can share a tag name.
     expect(tagChip(root, 'Doing').title).toBe('Status: Doing');
     expect(tagChip(root, 'q4').title).toBe('q4');
@@ -189,7 +242,7 @@ describe('ProjectFilterChips tag chips', () => {
     deleted.assignments = deleted.assignments.filter((a) => a.tagId !== 'q4');
     await backendChanged(deleted);
 
-    expect(chips(root)).toEqual(['Unread 0', 'Running 0', 'Doing 2', 'P0 1']);
+    expect(chips(root)).toEqual([...STATUS_AND_REPO_CHIPS, 'Doing 2', 'P0 1']);
     expect(shown()).toEqual(['p1', 'p2', 'p3']);
     expect(projectFiltersStore.hasActiveFilters).toBe(false);
     expect(clearChip(root)).toBeNull();

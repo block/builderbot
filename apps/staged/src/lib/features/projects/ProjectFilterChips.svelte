@@ -1,7 +1,9 @@
 <!--
   ProjectFilterChips.svelte - Shared project-filter chip bar.
 
-  Unread/running status chips, one chip per repo, then one per tag in catalog
+  Unread/running status chips, one chip per repo (its badge's short name, as
+  the sidebar's Filter menu shows it, with the full path as its tooltip; the
+  full path itself for a repo without a badge), then one per tag in catalog
   order (in its own colour, like TagChip), reading and toggling
   projectFiltersStore directly so the landing page and the sidebar's Filter
   menu can never drift. Tag chips OR within a group and AND across groups and
@@ -13,7 +15,7 @@
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { badgeBg, badgeBgHover, badgeFg } from '../../shared/badgeColors';
   import { darkMode } from '../../stores/isDark.svelte';
-  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { repoFullName, repoShortLabel } from '../../shared/repoShortLabel';
   import TagIcon from '../tags/TagIcon.svelte';
   import { TAG_COLOR_VARS } from '../tags/tagColors';
   import { projectFiltersStore } from './projectFilters.svelte';
@@ -41,18 +43,26 @@
     <span class="filter-count">{projectFiltersStore.runningCount}</span>
   </button>
   {#each projectFiltersStore.repoFilters as rf}
-    {@const badge = repoBadgeStore.lookup(rf.repo, rf.subpath || undefined)}
+    {@const repo = { githubRepo: rf.repo, subpath: rf.subpath }}
+    {@const badge = repoShortLabel(repo)}
     {@const filter = { repo: rf.repo, subpath: rf.subpath }}
     {@const active = projectFiltersStore.isFilterActive(filter)}
     <button
       class="filter-chip repo-filter"
       class:active
+      title={badge ? repoFullName(repo) : undefined}
       onclick={(e: MouseEvent) => projectFiltersStore.toggleFilter(filter, e)}
       style={badge
         ? `--repo-bg: ${badgeBg(badge.hue, darkMode.value)}; --repo-fg: ${badgeFg(badge.hue, darkMode.value)}; --repo-bg-hover: ${badgeBgHover(badge.hue, darkMode.value)}`
         : ''}
     >
-      <RepoLabel githubRepo={rf.repo} subpath={rf.subpath || null} />
+      <!-- Badges only exist for a repo's githubRepo while filter keys use
+           headRepo ?? githubRepo, so a fork-backed repo keeps its path. -->
+      {#if badge}
+        {badge.shortName}
+      {:else}
+        <RepoLabel githubRepo={rf.repo} subpath={rf.subpath || null} />
+      {/if}
       <span class="filter-count">{rf.count}</span>
     </button>
   {/each}

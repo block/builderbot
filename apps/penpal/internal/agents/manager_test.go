@@ -43,7 +43,7 @@ func newTestManager(t *testing.T) (*Manager, *comments.Store) {
 	return m, cs
 }
 
-// E-PENPAL-AGENT-CLEANUP: verifies that after agent finishes, heartbeats and working are cleared.
+// E-PENPAL-AGENT-CLEANUP: verifies that after agent finishes, working indicators are cleared.
 // Uses a synthetic agent (via done channel) to simulate agent exit without spawning a real process.
 func TestAgentCleanupOnExit(t *testing.T) {
 	_, cs := newTestManager(t)
@@ -58,16 +58,11 @@ func TestAgentCleanupOnExit(t *testing.T) {
 
 	m := New(c, cs, 0)
 
-	// Pre-populate heartbeats and working indicators
-	cs.RecordHeartbeat("testproj", "file1.md")
-	cs.RecordHeartbeat("testproj", "file2.md")
+	// Pre-populate working indicators
 	cs.SetWorking("testproj", "file1.md", "thread-1", "")
 	cs.SetWorking("testproj", "file2.md", "thread-2", "")
 
 	// Verify they are active before cleanup
-	if !cs.IsAgentActive("testproj", "file1.md") {
-		t.Fatal("setup: expected file1.md heartbeat to be active")
-	}
 	if !cs.IsWorking("testproj", "file1.md", "thread-1") {
 		t.Fatal("setup: expected thread-1 to be working")
 	}
@@ -99,7 +94,6 @@ func TestAgentCleanupOnExit(t *testing.T) {
 	// This mirrors the logic in manager.go Start() exit goroutine.
 	go func() {
 		<-done
-		cs.ClearProjectHeartbeats("testproj")
 		cs.ClearProjectWorking("testproj")
 
 		m.mu.Lock()
@@ -128,14 +122,6 @@ func TestAgentCleanupOnExit(t *testing.T) {
 		// success
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for onChange callback")
-	}
-
-	// Verify heartbeats are cleared
-	if cs.IsAgentActive("testproj", "file1.md") {
-		t.Error("expected file1.md heartbeat to be cleared after agent exit")
-	}
-	if cs.IsAgentActive("testproj", "file2.md") {
-		t.Error("expected file2.md heartbeat to be cleared after agent exit")
 	}
 
 	// Verify working indicators are cleared

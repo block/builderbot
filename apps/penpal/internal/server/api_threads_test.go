@@ -69,10 +69,11 @@ func TestAPIThreads_CreateAndList(t *testing.T) {
 
 // E-PENPAL-API-ROUTES: verifies POST /api/threads/{id}/comments adds a reply.
 func TestAPIThreads_AddComment(t *testing.T) {
-	s, c, _ := testServer(t)
+	s, c, cs := testServer(t)
 
 	dir := t.TempDir()
 	seedProject(c, "test-proj", dir, nil)
+	token := attachSession(t, s, c, cs, "test-proj")
 
 	// Create thread
 	createBody, _ := json.Marshal(map[string]interface{}{
@@ -91,7 +92,7 @@ func TestAPIThreads_AddComment(t *testing.T) {
 	var thread comments.Thread
 	json.Unmarshal(rec.Body.Bytes(), &thread)
 
-	// Add a comment
+	// Add a comment (agent role requires session token)
 	commentBody, _ := json.Marshal(map[string]string{
 		"project": "test-proj",
 		"path":    "thoughts/plan.md",
@@ -99,7 +100,7 @@ func TestAPIThreads_AddComment(t *testing.T) {
 		"role":    "agent",
 		"body":    "Reply",
 	})
-	req = httptest.NewRequest(http.MethodPost, "/api/threads/"+thread.ID+"/comments", bytes.NewReader(commentBody))
+	req = httptest.NewRequest(http.MethodPost, "/api/threads/"+thread.ID+"/comments?session="+token, bytes.NewReader(commentBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
@@ -394,26 +395,6 @@ func TestAPIThreads_AgentWorkingFalseByDefault(t *testing.T) {
 	}
 }
 
-// E-PENPAL-HEARTBEAT: verifies heartbeat is recorded when agent=true query param is set on threads endpoint.
-func TestAPIThreads_HeartbeatRecordedOnAgentPoll(t *testing.T) {
-	s, c, cs := testServer(t)
-	dir := t.TempDir()
-	seedProject(c, "test-proj", dir, nil)
-
-	// Poll with agent=true
-	req := httptest.NewRequest(http.MethodGet, "/api/threads?project=test-proj&path=thoughts/plan.md&agent=true", nil)
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-
-	if !cs.IsAgentActive("test-proj", "thoughts/plan.md") {
-		t.Errorf("expected IsAgentActive=true after agent poll")
-	}
-}
-
 // E-PENPAL-API-ROUTES: verifies agentActive and workingThreads fields in reviews response.
 func TestAPIReviews_AgentActiveAndWorkingFields(t *testing.T) {
 	s, c, cs := testServer(t)
@@ -480,49 +461,4 @@ func TestAPIReviews_AgentActiveAndWorkingFields(t *testing.T) {
 	}
 }
 
-// E-PENPAL-HEARTBEAT: verifies heartbeat is recorded when agent=true is set on reviews endpoint.
-func TestAPIReviews_HeartbeatRecordedOnAgentPoll(t *testing.T) {
-	s, c, cs := testServer(t)
-	dir := t.TempDir()
-	seedProject(c, "test-proj", dir, nil)
 
-	// Create the actual source file
-	if err := os.MkdirAll(filepath.Join(dir, "thoughts"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "thoughts", "plan.md"), []byte("text"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a thread to put a file "in review"
-	createBody, _ := json.Marshal(map[string]interface{}{
-		"project": "test-proj",
-		"path":    "thoughts/plan.md",
-		"anchor":  map[string]string{"selectedText": "text"},
-		"author":  "user",
-		"role":    "human",
-		"body":    "Review this",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/threads", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("create thread: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Poll reviews with agent=true
-	req = httptest.NewRequest(http.MethodGet, "/api/reviews?project=test-proj&agent=true", nil)
-	rec = httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-
-	// Verify heartbeat was recorded for the file in review
-	if !cs.IsAgentActive("test-proj", "thoughts/plan.md") {
-		t.Errorf("expected IsAgentActive=true after agent poll on reviews")
-	}
-}

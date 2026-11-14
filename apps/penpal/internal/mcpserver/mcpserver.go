@@ -12,14 +12,15 @@ import (
 // protocol. It exposes comment and review tools so AI agents can interact
 // with penpal programmatically.
 // E-PENPAL-MCP-TRANSPORT: Streamable HTTP transport via mcp.NewStreamableHTTPHandler.
-func NewHandler(store *comments.Store, c *cache.Cache) http.Handler {
+// E-PENPAL-AGENT-SELF-ID: agentNameFunc derives the comment author from the session.
+func NewHandler(store *comments.Store, c *cache.Cache, agentNameFunc func(project string) string) http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "penpal",
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{
 		Instructions: "Penpal operates on markdown files for collaborative document review with humans. File paths are relative to the project root (e.g., thoughts/plans/foo.md). It is NOT for code review.\n\nWhen your reply asks for confirmation or presents options, include suggestedReplies (up to 3 short strings) so the human can respond with one click. Keep suggestions short (1-4 words). Only suggest replies that provide meaningful content the human would actually type — do NOT suggest generic responses like \"looks good\", \"yes\", \"no\", or \"needs changes\" that are redundant with the reply and resolve buttons.",
 	})
-	registerTools(server, store, c)
+	registerTools(server, store, c, agentNameFunc)
 	return mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return server
 	}, nil)

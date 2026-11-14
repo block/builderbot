@@ -77,11 +77,11 @@ func textResult(v any) (*mcp.CallToolResult, error) {
 
 // registerTools adds all penpal MCP tools to the server.
 // E-PENPAL-MCP-TOOLS: registers penpal_find_project, penpal_list_threads, penpal_read_thread, penpal_reply, penpal_create_thread, penpal_files_in_review, penpal_wait_for_changes.
-func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
+// E-PENPAL-AGENT-SELF-ID: agentNameFunc derives the comment author from the session.
+func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache, agentNameFunc func(project string) string) {
 	// penpal_list_threads
 	// E-PENPAL-MCP-TOOLS: penpal_list_threads lists threads by file or project-wide.
 	// E-PENPAL-MCP-WORKING: auto-sets working indicator for threads where last comment is from human.
-	// E-PENPAL-HEARTBEAT: records heartbeat on each tool call.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_list_threads",
 		Description: "List comment threads on documentation files. Paths are relative to the project root (e.g., thoughts/plans/foo.md). When path is omitted, returns all open threads across the project. Optionally filter by status (open/resolved).",
@@ -92,7 +92,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		if input.Path == "" {
 			// List threads across the entire project, filtered by status
-			store.RecordHeartbeat(input.Project, "")
 			status := input.Status
 			if status == "" {
 				status = "open"
@@ -101,23 +100,12 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			if err != nil {
 				return nil, nil, err
 			}
-			// Record heartbeat and set working for each thread awaiting response
-			seen := make(map[string]bool)
-			for _, t := range threads {
-				if !seen[t.FilePath] {
-					store.RecordHeartbeat(input.Project, t.FilePath)
-					seen[t.FilePath] = true
-				}
-				if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-					store.SetWorking(input.Project, t.FilePath, t.ID, t.Comments[len(t.Comments)-1].ID)
-				}
-			}
+			store.MarkThreadsRead(input.Project, threads)
 			res, err := textResult(threads)
 			return res, nil, err
 		}
 
 		// Load threads for a specific file
-		store.RecordHeartbeat(input.Project, input.Path)
 		fc, err := store.LoadForWorktree(input.Project, input.Path, input.Worktree)
 		if err != nil {
 			return nil, nil, err
@@ -128,10 +116,8 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			if input.Status == "" || t.Status == input.Status {
 				filtered = append(filtered, t)
 			}
-			if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-				store.SetWorking(input.Project, input.Path, t.ID, t.Comments[len(t.Comments)-1].ID)
-			}
 		}
+		store.MarkFileThreadsRead(input.Project, input.Path, fc.Threads)
 		res, err := textResult(filtered)
 		return res, nil, err
 	})
@@ -139,7 +125,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// penpal_read_thread
 	// E-PENPAL-MCP-TOOLS: penpal_read_thread returns full thread with all comments.
 	// E-PENPAL-MCP-WORKING: auto-sets working indicator when last comment is from human.
-	// E-PENPAL-HEARTBEAT: records heartbeat on each tool call.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_read_thread",
 		Description: "Read a full comment thread on a document. Path is relative to project root (e.g., thoughts/plans/foo.md). Returns the complete thread JSON with all comments.",
@@ -148,8 +133,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project, path, and threadId are all required")
 		}
 
-		store.RecordHeartbeat(input.Project, input.Path)
-
 		fc, err := store.LoadForWorktree(input.Project, input.Path, input.Worktree)
 		if err != nil {
 			return nil, nil, err
@@ -157,10 +140,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		for _, t := range fc.Threads {
 			if t.ID == input.ThreadID {
-				// Set working indicator if last comment is from a human
-				if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-					store.SetWorking(input.Project, input.Path, input.ThreadID, t.Comments[len(t.Comments)-1].ID)
-				}
+				store.MarkFileThreadsRead(input.Project, input.Path, []comments.Thread{t})
 				res, err := textResult(t)
 				return res, nil, err
 			}
@@ -179,28 +159,20 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project, path, threadId, and body are all required")
 		}
 
-		// E-PENPAL-MCP-WORKING: set InReplyTo and WorkingStartedAt from stored working entry.
-		afterID := store.WorkingAfterCommentID(input.Project, input.Path, input.ThreadID)
-		startedAt := store.WorkingStartedAt(input.Project, input.Path, input.ThreadID)
-
+		// Working indicator handling (InReplyTo, WorkingStartedAt, ClearWorking)
+		// is done automatically by AddCommentForWorktree for agent-role comments.
+		// E-PENPAL-AGENT-SELF-ID: derive author from session via agentNameFunc.
 		comment := comments.Comment{
-			Author:           "claude",
+			Author:           agentNameFunc(input.Project),
 			Role:             "agent",
 			Body:             input.Body,
 			SuggestedReplies: input.SuggestedReplies,
-			InReplyTo:        afterID,
-		}
-		if !startedAt.IsZero() {
-			comment.WorkingStartedAt = &startedAt
 		}
 		thread, err := store.AddCommentForWorktree(input.Project, input.Path, input.Worktree, input.ThreadID, comment)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		// Clear working AFTER writing the comment so the SSE broadcast
-		// triggers a fetchThreads that reads the updated file.
-		store.ClearWorking(input.Project, input.Path, input.ThreadID)
 		res, err := textResult(thread)
 		return res, nil, err
 	})
@@ -271,8 +243,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			anchor.StartLine = line
 		}
 
+		// E-PENPAL-AGENT-SELF-ID: derive author from session via agentNameFunc.
 		comment := comments.Comment{
-			Author:           "claude",
+			Author:           agentNameFunc(input.Project),
 			Role:             "agent",
 			Body:             input.Body,
 			SuggestedReplies: input.SuggestedReplies,
@@ -289,7 +262,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// penpal_files_in_review
 	// E-PENPAL-MCP-TOOLS: penpal_files_in_review lists files with open threads, enriched with oldest pending.
 	// E-PENPAL-MCP-WORKING: auto-sets working indicator for oldest pending thread.
-	// E-PENPAL-HEARTBEAT: records heartbeat for each file in review.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_files_in_review",
 		Description: "List all documentation files currently in review for a project. File paths are relative to the project root (e.g., thoughts/plans/foo.md). Records a heartbeat for each file to signal agent presence in the penpal UI. For each file, includes all open threads and the full content of the oldest pending thread (where the last comment is from a human). The working indicator is set for the oldest pending thread so the UI shows the agent is working on it.",
@@ -312,8 +284,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		enrichedFiles := make([]fileWithThreads, 0, len(files))
 		for _, f := range files {
-			store.RecordHeartbeat(input.Project, f.FilePath)
-
 			ef := fileWithThreads{
 				FilePath:    f.FilePath,
 				OpenThreads: f.OpenThreads,
@@ -339,8 +309,8 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 				if oldestPending != nil {
 					ef.OldestPending = oldestPending
-					store.SetWorking(input.Project, f.FilePath, oldestPending.ID, oldestPending.Comments[len(oldestPending.Comments)-1].ID)
 				}
+				store.MarkFileThreadsRead(input.Project, f.FilePath, fc.Threads)
 			}
 
 			enrichedFiles = append(enrichedFiles, ef)
@@ -352,9 +322,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 	// penpal_wait_for_changes
 	// E-PENPAL-MCP-TOOLS: penpal_wait_for_changes blocks via 30s long-poll for comment changes.
-	// E-PENPAL-CHANGE-SEQ: uses WaitForChangeSince to block until changeSeq advances.
-	// E-PENPAL-MCP-WORKING: refreshes working timestamps during 30s cycle to prevent expiry.
-	// E-PENPAL-HEARTBEAT: records heartbeat at start and after waking.
+	// E-PENPAL-CHANGE-SEQ: uses WaitAndEnrich to block, enrich, and refresh working timestamps.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_wait_for_changes",
 		Description: "Block until comment threads change for a project (new thread, reply, resolve, or reopen), or until timeout (30s). Returns the current files in review. Use this in a loop instead of polling penpal_files_in_review. Also records agent heartbeat. Pass the `seq` value from the previous response as `sinceSeq` to avoid missing changes between calls.",
@@ -363,103 +331,14 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project is required")
 		}
 
-		// Record heartbeat at start of wait
-		store.RecordHeartbeat(input.Project, "")
-
 		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
-		seq, waitErr := store.WaitForChangeSince(waitCtx, input.SinceSeq)
-		changed := waitErr == nil
-
-		// Record heartbeat after waking
-		store.RecordHeartbeat(input.Project, "")
-
-		files, err := store.ListFilesInReviewForWorktree(input.Project, input.Worktree)
+		result, err := store.WaitAndEnrich(waitCtx, input.Project, input.Worktree, input.SinceSeq)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		for _, f := range files {
-			store.RecordHeartbeat(input.Project, f.FilePath)
-		}
-
-		// When changed, enrich response with pending threads.
-		// Set working indicators first so the UI shows dots before the agent
-		// receives the response and potentially replies quickly.
-		if changed {
-			type fileWithThreads struct {
-				FilePath    string            `json:"filePath"`
-				OpenThreads int               `json:"openThreads"`
-				Threads     []comments.Thread `json:"threads,omitempty"`
-			}
-
-			// First pass: set working indicators for all threads awaiting a response
-			type pendingThread struct {
-				filePath string
-				thread   comments.Thread
-			}
-			var pending []pendingThread
-			for _, f := range files {
-				fc, loadErr := store.LoadForWorktree(input.Project, f.FilePath, input.Worktree)
-				if loadErr == nil {
-					for _, t := range fc.Threads {
-						if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-							lastCommentID := t.Comments[len(t.Comments)-1].ID
-							if store.WorkingAfterCommentID(input.Project, f.FilePath, t.ID) == lastCommentID {
-								store.RefreshWorkingTimestamp(input.Project, f.FilePath, t.ID)
-							} else {
-								store.SetWorking(input.Project, f.FilePath, t.ID, lastCommentID)
-							}
-							pending = append(pending, pendingThread{filePath: f.FilePath, thread: t})
-						}
-					}
-				}
-			}
-
-			// Second pass: build response with pending threads
-			pendingByFile := make(map[string][]comments.Thread)
-			for _, p := range pending {
-				pendingByFile[p.filePath] = append(pendingByFile[p.filePath], p.thread)
-			}
-			var enrichedFiles []fileWithThreads
-			for _, f := range files {
-				ef := fileWithThreads{
-					FilePath:    f.FilePath,
-					OpenThreads: f.OpenThreads,
-					Threads:     pendingByFile[f.FilePath],
-				}
-				enrichedFiles = append(enrichedFiles, ef)
-			}
-
-			result := map[string]any{
-				"changed": true,
-				"seq":     seq,
-				"files":   enrichedFiles,
-			}
-			res, err := textResult(result)
-			return res, nil, err
-		}
-
-		// Refresh working timestamps for threads still awaiting a response
-		// so they survive across 30s wait cycles. Use RefreshWorkingTimestamp
-		// to preserve the afterCommentID — the agent hasn't re-read these threads.
-		for _, f := range files {
-			fc, loadErr := store.LoadForWorktree(input.Project, f.FilePath, input.Worktree)
-			if loadErr == nil {
-				for _, t := range fc.Threads {
-					if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-						store.RefreshWorkingTimestamp(input.Project, f.FilePath, t.ID)
-					}
-				}
-			}
-		}
-
-		result := map[string]any{
-			"changed": false,
-			"seq":     seq,
-			"files":   files,
-		}
 		res, err := textResult(result)
 		return res, nil, err
 	})

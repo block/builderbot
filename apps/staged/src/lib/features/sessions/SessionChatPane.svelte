@@ -53,6 +53,7 @@
   import type {
     AcpConfigSelection,
     AcpConfigValueSelection,
+    BranchNote,
     Session,
     SessionBackgroundHoldPayload,
     SessionMessage,
@@ -71,6 +72,7 @@
     deleteImage,
     discoverAcpConfig,
     getAttachmentThumbnail,
+    getBranchNoteBySession,
     getSession,
     getSessionAcpMetadataMessages,
     getSessionBackgroundHold,
@@ -317,6 +319,10 @@
     branchId: string | null;
   };
 
+  /** Shown in the composer's place for a hidden child note's chat. */
+  const CHILD_NOTE_CHAT_READ_ONLY_NOTICE =
+    "This chat is read-only: its note is part of a project note and isn't shown in the branch's notes.";
+
   let {
     active,
     sessionId,
@@ -426,6 +432,15 @@
   /** The draft's quote blocks, each with the free text before it (see composerDraft.ts). */
   let draftQuotes = $state<DraftQuote[]>([]);
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
+  /**
+   * Whether the session's note is a child aggregated under a project note
+   * (`parentProjectNoteId` set). Such notes are hidden from the branch
+   * timeline and the project notes list, and the backend refuses new
+   * messages for their chats, so the composer gives way to a read-only
+   * notice. Looked up beside the session row; a failed lookup leaves the
+   * composer in place and the backend's refusal is shown on send.
+   */
+  let childNoteChat = $state(false);
   let queueActionIds = $state<Set<string>>(new Set());
   let copiedId = $state<number | string | null>(null);
   let expandedTools = $state<Set<string>>(new Set());
@@ -1445,6 +1460,7 @@
       hasOlderMessages = false;
       acpMetadataMessages = [];
       queuedMessages = [];
+      childNoteChat = false;
       // A failure line is about the session that was shown when it happened.
       sendError = null;
     }
@@ -1456,6 +1472,7 @@
     statusLoadedForSessionId = null;
     const statusVersionBeforeFetch = statusEventVersion;
     const id = sessionId;
+    void loadChatAccess(id);
     try {
       // Only the newest page of the transcript; older pages arrive through
       // `loadOlderMessages` as the user scrolls up.
@@ -1527,6 +1544,18 @@
       await tick();
       loadOlderMessagesIfUnscrollable();
     }
+  }
+
+  /** Resolve `childNoteChat` for session `id`; see its doc comment. */
+  async function loadChatAccess(id: string) {
+    let note: BranchNote | null = null;
+    try {
+      note = await getBranchNoteBySession(id);
+    } catch {
+      note = null;
+    }
+    if (closed || sessionId !== id) return;
+    childNoteChat = note?.parentProjectNoteId != null;
   }
 
   /**
@@ -1968,6 +1997,9 @@
       // pane no longer shows.
       return false;
     }
+    // The backend refuses these too; the composer and the Resume/follow-up
+    // buttons are already gone, so a stray call just does nothing.
+    if (childNoteChat) return false;
     if (!sendingLocked && sending) return false;
     if (!sendingLocked) sending = true;
     beginComposerAction();
@@ -3706,7 +3738,7 @@
           {/each}
         {/if}
 
-        {#if noteFollowupLabel}
+        {#if noteFollowupLabel && !childNoteChat}
           <div class="note-followup-row" in:messageSlide>
             <Button
               variant="outline"
@@ -3782,16 +3814,18 @@
           <Alert.Description>
             {sessionEndMessage(session)}
           </Alert.Description>
-          <Alert.Action>
-            <Button
-              variant="outline"
-              size="xs"
-              onclick={() => sendMessage('Continue where you left off.')}
-              disabled={sending}
-            >
-              {isRateLimited ? 'Resume now' : 'Resume'}
-            </Button>
-          </Alert.Action>
+          {#if !childNoteChat}
+            <Alert.Action>
+              <Button
+                variant="outline"
+                size="xs"
+                onclick={() => sendMessage('Continue where you left off.')}
+                disabled={sending}
+              >
+                {isRateLimited ? 'Resume now' : 'Resume'}
+              </Button>
+            </Alert.Action>
+          {/if}
         </Alert.Root>
       {:else if isReconcileCancelNotice(session.status, session.errorMessage)}
         <Alert.Root class="mt-3">
@@ -3809,7 +3843,14 @@
 
   <!-- Input area with queued messages and image previews -->
   <div class="input-wrapper">
-    {#if isPipelineRunning && grouped.length === 0}
+    {#if childNoteChat}
+      <!-- Stands in for the composer: this note is hidden from the branch's
+           notes, so its chat can be read but not written to. -->
+      <div class="read-only-notice" data-testid="read-only-chat-notice">
+        <Info size={14} class="shrink-0 text-[var(--text-muted)]" />
+        <span>{CHILD_NOTE_CHAT_READ_ONLY_NOTICE}</span>
+      </div>
+    {:else if isPipelineRunning && grouped.length === 0}
       <!-- Stands in for the composer, so it shows the composer's failure
            line too: a failed Stop has nowhere else to appear. -->
       <div class="pipeline-stop-area">
@@ -4592,6 +4633,23 @@
   /* Same chrome as .chat-composer: the error line (if any) above, the
      button right-aligned beneath it, and the same bottom inset, as it ends
      the dialog in the composer's place. */
+  /* The composer's slot, when the chat is read-only. */
+  .read-only-notice {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    padding-bottom: calc(10px + var(--dialog-safe-bottom, 0px));
+    padding-left: calc(14px + var(--dialog-safe-left, 0px));
+    padding-right: calc(14px + var(--dialog-safe-right, 0px));
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-chrome);
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.4;
+    flex-shrink: 0;
+  }
+
   .pipeline-stop-area {
     display: flex;
     flex-direction: column;

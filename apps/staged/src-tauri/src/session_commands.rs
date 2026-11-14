@@ -1527,6 +1527,7 @@ pub(crate) async fn resume_or_queue_session_for_store(
     branch_id: Option<String>,
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<ResumeSessionOutcome, String> {
+    ensure_session_chat_writable(&store, &session_id)?;
     let session = store
         .get_session(&session_id)
         .map_err(|e| e.to_string())?
@@ -2411,6 +2412,7 @@ pub(crate) async fn send_session_message_now_for_store(
     message: &str,
     image_ids: &[String],
 ) -> Result<ContinueOutcome, String> {
+    ensure_session_chat_writable(store, session_id)?;
     match route_continue_session(
         store,
         registry,
@@ -2808,6 +2810,32 @@ fn continue_branch_and_type(
     Ok((lookup(branch_id)?, None))
 }
 
+/// The error a user's chat message gets when its session's note is a child
+/// aggregated under a project note; see [`ensure_session_chat_writable`].
+pub(crate) const HIDDEN_CHILD_NOTE_CHAT_ERROR: &str =
+    "This chat is read-only: its note is part of \
+    a project note and is not shown in the branch's notes, so it can't take new messages.";
+
+/// Refuse a user's chat message for a session whose note is a child
+/// aggregated under a project note (`Note::parent_project_note_id`). Such
+/// notes are hidden from the branch timeline and the project notes list
+/// (see `Store::list_notes_for_branch`), so their chats are read-only: the
+/// project session that spawned them owns any follow-up. Gates the
+/// user-facing entry points only (resume, queue, send now, desktop and web);
+/// the project MCP server's `continue_repo_session` reaches
+/// `route_continue_session` directly and is unaffected.
+pub(crate) fn ensure_session_chat_writable(store: &Store, session_id: &str) -> Result<(), String> {
+    let note = store
+        .get_note_by_session(session_id)
+        .map_err(|e| e.to_string())?;
+    match note {
+        Some(note) if note.parent_project_note_id.is_some() => {
+            Err(HIDDEN_CHILD_NOTE_CHAT_ERROR.to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 #[tauri::command]
 pub fn queue_session_message(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2817,6 +2845,7 @@ pub fn queue_session_message(
     branch_id: Option<String>,
 ) -> Result<store::QueuedSessionMessage, String> {
     let store = get_store(&store)?;
+    ensure_session_chat_writable(&store, &session_id)?;
     store
         .add_queued_session_message(
             &session_id,
@@ -14965,6 +14994,83 @@ mod tests {
         assert_eq!(media.len(), 1, "{body}");
         assert!(Path::new(&media[0].target).starts_with(&temp_dir), "{body}");
         assert_eq!(std::fs::read(&media[0].target).unwrap(), PNG);
+    }
+
+    /// A child note's session (`parent_project_note_id` set) and a
+    /// standalone note's session, both finished, for the chat gate tests.
+    fn child_and_standalone_note_sessions(
+        store: &Store,
+        branch: &store::Branch,
+    ) -> (String, String) {
+        let parent = store::ProjectNote::new(&branch.project_id, "Parent", "aggregated");
+        store.create_project_note(&parent).unwrap();
+
+        let child_session = store::Session::new_queued("child").with_branch(&branch.id);
+        store.create_session(&child_session).unwrap();
+        let child = store::Note::new(&branch.id, "Child", "child body")
+            .with_session(&child_session.id)
+            .with_parent_project_note(&parent.id);
+        store.create_note(&child).unwrap();
+
+        let standalone_session = store::Session::new_queued("standalone").with_branch(&branch.id);
+        store.create_session(&standalone_session).unwrap();
+        let standalone = store::Note::new(&branch.id, "Standalone", "top-level body")
+            .with_session(&standalone_session.id);
+        store.create_note(&standalone).unwrap();
+
+        (child_session.id, standalone_session.id)
+    }
+
+    /// The chat of a note hidden from the branch timeline (a child aggregated
+    /// under a project note) is read-only; every other session's chat is not.
+    #[test]
+    fn hidden_child_note_chat_refuses_user_messages() {
+        let (store, branch) = setup_branch_store();
+        let (child_session_id, standalone_session_id) =
+            child_and_standalone_note_sessions(&store, &branch);
+
+        assert_eq!(
+            ensure_session_chat_writable(&store, &child_session_id),
+            Err(HIDDEN_CHILD_NOTE_CHAT_ERROR.to_string())
+        );
+        assert_eq!(
+            ensure_session_chat_writable(&store, &standalone_session_id),
+            Ok(())
+        );
+
+        // A session with no note at all (a commit session, say) is untouched.
+        let commit_session = store::Session::new_queued("commit").with_branch(&branch.id);
+        store.create_session(&commit_session).unwrap();
+        assert_eq!(
+            ensure_session_chat_writable(&store, &commit_session.id),
+            Ok(())
+        );
+    }
+
+    /// The gate sits in the shared body of `send_session_message_now`, ahead
+    /// of the routing on status, so a bypassed composer is refused with the
+    /// same error on both the desktop and the web path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_now_refuses_a_hidden_child_note_chat_before_routing() {
+        let (store, branch) = setup_branch_store();
+        let registry = test_registry();
+        let (child_session_id, _) = child_and_standalone_note_sessions(&store, &branch);
+
+        let err = send_session_message_now_for_store(
+            &store,
+            &registry,
+            &child_session_id,
+            "follow up",
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, HIDDEN_CHILD_NOTE_CHAT_ERROR);
+        // Nothing was queued or delivered on its behalf.
+        assert!(store
+            .list_queued_session_messages(&child_session_id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

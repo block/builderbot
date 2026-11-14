@@ -4548,7 +4548,7 @@ pub(crate) fn branch_worktree_operation_in_flight(branch_id: &str) -> bool {
         .contains_key(branch_id)
 }
 
-fn has_queued_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
+pub(crate) fn has_queued_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
     let queued = store
         .get_queued_sessions_for_branch(branch_id)
         .map_err(|e| e.to_string())?;

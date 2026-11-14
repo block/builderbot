@@ -159,6 +159,7 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
             pipeline,
             working_dir: ctx.working_dir,
             pre_head_sha: None,
+            capture_pre_head: false,
             provider: effective_provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,

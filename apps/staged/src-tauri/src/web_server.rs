@@ -4306,6 +4306,21 @@ pub(crate) async fn dispatch(
             .await?;
             Ok(serde_json::to_value(response).unwrap())
         }
+        "revert_commit" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let commit_sha: String = arg(&args, "commitSha")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
+            let response = crate::prs::revert_commit_for_branch(
+                store,
+                Arc::clone(session_registry),
+                app_handle.clone(),
+                branch_id,
+                commit_sha,
+                provider,
+            )?;
+            Ok(serde_json::to_value(response).unwrap())
+        }
         "get_pr_url" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
@@ -5268,6 +5283,7 @@ mod tests {
             "update_branch_workspace_status(",
             "update_workspace_status_by_workspace_name(",
             "_pipeline_for_branch(",
+            "revert_commit_for_branch(",
             "pull_or_queue_branch_for_branch(",
             "start_queued_session_now_for_branch(",
             "resume_session_for_store(",

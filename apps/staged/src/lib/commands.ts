@@ -2332,6 +2332,21 @@ export function squashCommits(
   });
 }
 
+/** Revert a completed commit by creating a signed-off revert commit.
+ *  Runs git revert directly and lets AI resolve conflicts if needed.
+ *  Returns the session ID so the frontend can track progress. */
+export function revertCommit(
+  branchId: string,
+  commitSha: string,
+  provider?: string
+): Promise<string> {
+  return invokeCommand('revert_commit', {
+    branchId,
+    commitSha,
+    provider: provider ?? null,
+  });
+}
+
 // =============================================================================
 // Doctor (Health Check)
 // =============================================================================

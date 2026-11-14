@@ -1,11 +1,11 @@
 /**
- * Pure helpers for moving tags in Settings › Tags: drag-and-drop, and the
- * row menu's Move up / Move down / Move to group.
+ * Pure helpers for moving tags and tag groups: drag-and-drop, and the menus'
+ * Move up / Move down / Move to group.
  *
  * A drag spans many renders, and the catalog can change under it (a
  * `tags-changed` refetch from another window), so a drop target names a
- * neighbouring tag rather than an index and is resolved against the catalog
- * as it is at drop time (the repoReorder pattern).
+ * neighbouring tag or group rather than an index and is resolved against the
+ * catalog as it is at drop time (the repoReorder pattern).
  */
 
 import type { Tag, TagGroup } from '../../types';
@@ -97,6 +97,38 @@ export function stepTarget(catalog: TagCatalog, tagId: string, step: -1 | 1): Ta
     anchorTagId: neighbour.id,
     place: step < 0 ? 'before' : 'after',
   };
+}
+
+/** Where a dragged group would land: beside another group. */
+export interface GroupDropTarget {
+  anchorGroupId: string;
+  place: 'before' | 'after';
+}
+
+/**
+ * Resolve dropping `groupId` on `target` to every group id in the new order,
+ * as `reorder_tag_groups` takes it. `groups` is in position order. Null when
+ * nothing would change: either group is gone, the anchor is the group
+ * itself, or the group would land where it already is.
+ */
+export function resolveGroupDrop(
+  groups: readonly TagGroup[],
+  groupId: string,
+  target: GroupDropTarget
+): string[] | null {
+  const ids = groups.map((group) => group.id);
+  const from = ids.indexOf(groupId);
+  if (from === -1) return null;
+
+  const order = ids.filter((id) => id !== groupId);
+  // The group itself is no longer in `order`, so dropping it on itself ends here too.
+  const anchor = order.indexOf(target.anchorGroupId);
+  if (anchor === -1) return null;
+  const index = target.place === 'before' ? anchor : anchor + 1;
+  if (index === from) return null;
+
+  order.splice(index, 0, groupId);
+  return order;
 }
 
 /** Group ids with `groupId` moved one step up (`-1`) or down (`1`), or null at that end. */

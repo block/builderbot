@@ -13,11 +13,15 @@
 
   A group's drag is made of pointer events (shared/pointerDrag), because the
   desktop build's native file-drop handler takes every HTML5 drag. The panel
-  resolves each point the pointer reaches from the sections' rects. Over a
-  section, the group lands above or below it. Between sections or below
-  them, where the drop line is drawn, it lands where the last section the
-  pointer crossed put that line. Outside the list it lands nowhere and the
-  line goes. Held near the top or bottom of the list, the group scrolls it.
+  resolves each point the pointer reaches from the sections' rects, by how
+  far down the list it is alone: the handle is at the list's left edge, and
+  a pointer that drifts off it is still dragging. Level with a section, the
+  group lands above or below it. Between two sections, where the drop line
+  is drawn, it lands between them. Below the last section it lands last, and
+  above the first, first. Clearly away from the list (see `DRAG_REACH`) it
+  lands nowhere and the line goes. Held near the top or bottom of the list,
+  or just past it, the group scrolls it. A chip with the group's name
+  follows the pointer.
 
   State and actions live in a TagsEditor (see tagsEditor.svelte.ts) that the
   sections and rows share.
@@ -77,8 +81,9 @@
     start: (groupId) => editor.groupDragStart(groupId),
     /**
      * The cursor says a drop is refused wherever it would leave the groups
-     * in their order: over the group's own section, over the half where it
-     * already is, in a gap with no line, and outside the list.
+     * in their order: level with the group's own section, with the half
+     * where it already is, in a gap with no line, and clearly away from the
+     * list.
      */
     move(point) {
       holdGroupAt(point);

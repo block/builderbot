@@ -6,7 +6,7 @@
  * The two are different kinds of drag. A tag's is an HTML5 drag. A group's
  * is made of pointer events (see shared/pointerDrag), so it carries no data
  * and the panel resolves each point the pointer reaches from the sections'
- * rects.
+ * rects, forgiving a pointer that strays a little off the list.
  *
  * A tag carries a type of its own and nothing else. Some engines only start
  * a drag that carries data, and this is data enough. It carries no
@@ -15,6 +15,12 @@
  * next blur would save that as a rename.
  */
 
+import {
+  dragPositionAlong,
+  spanAlong,
+  type DragBox,
+  type PointerDragPoint,
+} from '../../../shared/pointerDrag';
 import type { GroupDropTarget } from '../../tags/tagReorder';
 
 /** The drag data type a tag row carries its tag's id under. */
@@ -44,51 +50,63 @@ export function isTagDrag(dataTransfer: DataTransfer | null, started: boolean): 
   return types.length === 0 || types.includes(TAG_DRAG_TYPE);
 }
 
-/** The edges of a box in client coordinates, as `getBoundingClientRect` gives them. */
-type Box = Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>;
-
-function boxHolds(box: Box, point: { clientX: number; clientY: number }): boolean {
-  return (
-    point.clientX >= box.left &&
-    point.clientX < box.right &&
-    point.clientY >= box.top &&
-    point.clientY < box.bottom
-  );
-}
-
 /** A group's section in the list, and where it is on screen. */
 export interface GroupSectionBox {
   groupId: string;
-  rect: Box & Pick<DOMRect, 'height'>;
+  rect: Pick<DOMRect, 'top' | 'bottom' | 'height'>;
 }
 
 /**
  * Where a dragged group would land for a pointer at `point`, given the list
- * of sections, the sections in it, and `last`, where the pointer last put
- * it.
+ * of sections, the sections in it in order, and `last`, where the pointer
+ * last put it.
  *
- * Over a section, it lands beside that group: above it on the section's
- * upper half, below it on the lower. In the list but over no section, it
- * stays where it last was: the drop line is drawn in the gap between two
- * sections, which is neither of them, and the same goes for the ungrouped
- * tags and the space under them. Outside the list it lands nowhere. The
- * panel keeps each answer as the next `last`, so a pointer that comes back
- * over a gap has nowhere to land until it crosses a section.
+ * Only how far down the list the pointer is decides. A group dragged by its
+ * handle, which is at the list's left edge, drifts off that edge, and the
+ * sections stop short of a wide list's right: either way the group lands
+ * beside the section the pointer is level with, above it on the section's
+ * upper half and below it on the lower. Below the last section (over the
+ * ungrouped tags, say) it lands after the last group, and above the first,
+ * before it.
  *
- * The list scrolls, so a section can run past its edge: the list is asked
- * first, and a section counts only where it shows.
+ * The gap between two sections is where the drop line for that place is
+ * drawn, so a pointer in it lands the group there. That place has two
+ * names, below the one group and above the other. `last` is kept when it is
+ * either, so the line does not change hands, and the place is below the
+ * first group otherwise.
+ *
+ * The list scrolls, so a section can run past its edge. A pointer past
+ * either end of the list is taken to be at that end, and the group lands
+ * beside what shows there, which the list is scrolling on from.
+ *
+ * All of that holds within `DRAG_REACH` of the list, where there is always
+ * somewhere to land. Further out the pointer is clearly away and the group
+ * lands nowhere.
  */
 export function groupAtPoint(
-  point: { clientX: number; clientY: number },
-  list: Box,
+  point: PointerDragPoint,
+  list: DragBox,
   sections: readonly GroupSectionBox[],
   last: GroupDropTarget | null
 ): GroupDropTarget | null {
-  if (!boxHolds(list, point)) return null;
-  const over = sections.find((section) => boxHolds(section.rect, point));
-  if (!over) return last;
-  return {
-    anchorGroupId: over.groupId,
-    place: point.clientY < over.rect.top + over.rect.height / 2 ? 'before' : 'after',
-  };
+  const y = dragPositionAlong(point, list, 'y');
+  if (y === null) return null;
+  const hit = spanAlong(
+    y,
+    sections.map(({ rect }) => ({ start: rect.top, end: rect.bottom }))
+  );
+  if (!hit) return null;
+  const over = sections[hit.index];
+  if (!hit.gap) {
+    return {
+      anchorGroupId: over.groupId,
+      place: y < over.rect.top + over.rect.height / 2 ? 'before' : 'after',
+    };
+  }
+  const next = sections[hit.index + 1];
+  const named =
+    last?.place === 'after'
+      ? last.anchorGroupId === over.groupId
+      : last?.anchorGroupId === next.groupId;
+  return named && last ? last : { anchorGroupId: over.groupId, place: 'after' };
 }

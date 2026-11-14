@@ -14,8 +14,9 @@
   by its strip when collapsed. The drag is made of pointer events
   (shared/pointerDrag), not an HTML5 drag, which the desktop build's native
   file-drop handler would take. A line in the gap beside the column under
-  the pointer shows where it would land. The first column in the row has no
-  gap before it, so its line sits on its own edge. The header does not drag
+  the pointer shows where it would land, and a chip with the column's icon
+  and name follows the pointer. The first column in the row has no gap
+  before it, so its line sits on its own edge. The header does not drag
   while its name is being edited, so the pointer can select text in the
   field, and "No ‹group›" does not drag at all.
 -->
@@ -106,10 +107,12 @@
   let dropPlace = $derived(columnDrag.placeFor(column.key));
 
   // What the header and the strip hand the drag action. The board resolves
-  // every point, so the column only says which one is being dragged.
+  // every point, so the column only says which one is being dragged, and
+  // what the chip that follows the pointer shows: its icon and its name.
   let dragOptions = $derived<PointerDragOptions>({
     enabled: draggable,
     scroll: columnDrag.scroll,
+    image: (handle) => ({ label: column.name, icon: handle.querySelector('svg') }),
     start: () => columnDrag.start(column.key),
     move: (point) => columnDrag.move(point),
     drop: (point) => columnDrag.drop(point),

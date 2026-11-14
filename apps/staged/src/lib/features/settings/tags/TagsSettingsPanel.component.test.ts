@@ -61,7 +61,7 @@ vi.mock('../../../stores/projectsData.svelte', () => ({
 }));
 vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
-import { POINTER_DRAG_ATTRIBUTE } from '../../../shared/pointerDrag';
+import { DRAG_CHIP_CLASS, DRAG_REACH, POINTER_DRAG_ATTRIBUTE } from '../../../shared/pointerDrag';
 import { tagsStore } from '../../../stores/tags.svelte';
 import { TAG_DRAG_TYPE } from './tagSettingsDrag';
 import TagsSettingsPanel from './TagsSettingsPanel.svelte';
@@ -211,8 +211,27 @@ const IN_FIRST_GAP: Point = { clientX: 300, clientY: 148 };
 /** In the list, below every section a test lays out (three end at 424). */
 const BELOW_GROUPS: Point = { clientX: 300, clientY: 460 };
 
-/** Past the list's left edge, over the Settings sidebar. */
-const LEFT_OF_LIST: Point = { clientX: -20, clientY: 200 };
+/** In the list, over no section: between the second section (to 280) and a third (from 304). */
+const IN_SECOND_GAP: Point = { clientX: 300, clientY: 292 };
+
+/**
+ * Clearly left of the list, over the Settings sidebar: one px past the
+ * drag's reach, and level with the second section's lower half, where a
+ * pointer in reach would land a group below it.
+ */
+const AWAY_FROM_LIST: Point = { clientX: -1 - DRAG_REACH, clientY: 250 };
+
+/**
+ * A point as far down the list as the upper or lower half of a group's
+ * section, and `clientX` across the page: left of the list (which is 0 to
+ * 600 across) when negative, right of it past 600.
+ */
+function pointerLevelWith(groupId: string, half: 'upper' | 'lower', clientX: number): Point {
+  return { ...pointerOver(groupId, half), clientX };
+}
+
+/** The chip following the pointer, if a drag has one up. */
+const dragChip = () => document.querySelector<HTMLElement>(`.${DRAG_CHIP_CLASS}`);
 
 /**
  * A mouse's pointer event at `at`, as the engines send it: the primary
@@ -999,13 +1018,16 @@ describe('TagsSettingsPanel', () => {
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status', 'Area']);
     });
 
-    it('takes a release below the last group, where the last section put the line', async () => {
+    it('lands a group last for a release below the last group, whatever it crossed', async () => {
       const root = await mountPanel(threeGroups());
       layOutGroups(root);
 
-      dragGroupOver('status', 'area', 'lower');
+      // Straight from the handle to the space under Area: one move, over
+      // no section on the way.
+      pressGroup('status');
       movePointer(BELOW_GROUPS);
       expect(groupDropLines(root)).toEqual(['area:after']);
+      expect(dragMark()).toBe('active');
 
       await releasePointer(BELOW_GROUPS);
 
@@ -1013,45 +1035,56 @@ describe('TagsSettingsPanel', () => {
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
     });
 
-    it('has nowhere to land in a gap before a section has named a place', async () => {
+    it('lands a group in a gap it reaches without crossing a section', async () => {
       const root = await mountPanel(threeGroups());
       layOutGroups(root);
 
-      // Straight from the handle into the gap under Status.
-      pressGroup('status');
+      // Straight from Area's handle into the gap under Status: one move.
+      pressGroup('area');
       movePointer(IN_FIRST_GAP);
-      expect(draggedGroup(root)).toBe('status');
-      expect(groupDropLines(root)).toEqual([]);
-      expect(dragMark()).toBe('refused');
+      expect(draggedGroup(root)).toBe('area');
+      expect(groupDropLines(root)).toEqual(['status:after']);
+      expect(dragMark()).toBe('active');
 
       await releasePointer(IN_FIRST_GAP);
 
       expect(draggedGroup(root)).toBeNull();
-      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
-      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['status', 'area', 'priority']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Area', 'Priority']);
     });
 
-    it('forgets the line once the pointer leaves the list, until a section is crossed again', async () => {
+    it('does not carry a line from one gap to another', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      // Status held below Area, then moved to the gap under Priority in one
+      // move, over no section on the way.
+      dragGroupOver('status', 'area', 'lower');
+      expect(groupDropLines(root)).toEqual(['area:after']);
+      movePointer(IN_SECOND_GAP);
+
+      expect(groupDropLines(root)).toEqual(['priority:after']);
+    });
+
+    it('forgets the line once the pointer is clearly away from the list', async () => {
       const root = await mountPanel(threeGroups());
       layOutGroups(root);
 
       dragGroupOver('status', 'priority', 'lower');
       expect(groupDropLines(root)).toEqual(['priority:after']);
 
-      // Off the list, over the Settings sidebar: a release there does
+      // Well off the list, over the Settings sidebar: a release there does
       // nothing, so no line says otherwise.
-      movePointer(LEFT_OF_LIST);
+      movePointer(AWAY_FROM_LIST);
       expect(groupDropLines(root)).toEqual([]);
       expect(dragMark()).toBe('refused');
       // The group is still being dragged.
       expect(draggedGroup(root)).toBe('status');
 
-      // Back in through the gap: nowhere to land until a section says where.
+      // Back within reach, there is somewhere to land at once, with no
+      // section crossed on the way: the space under Area is a place of its
+      // own.
       movePointer(BELOW_GROUPS);
-      expect(groupDropLines(root)).toEqual([]);
-      expect(dragMark()).toBe('refused');
-
-      movePointer(pointerOver('area', 'lower'));
       expect(groupDropLines(root)).toEqual(['area:after']);
       expect(dragMark()).toBe('active');
       await releasePointer(BELOW_GROUPS);
@@ -1060,20 +1093,239 @@ describe('TagsSettingsPanel', () => {
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
     });
 
-    it('does nothing for a release outside the list', async () => {
+    it('does nothing for a release clearly away from the list', async () => {
       const root = await mountPanel(threeGroups());
       layOutGroups(root);
 
       // The last move was over a place that moves the group. The release is
-      // resolved at its own point.
+      // resolved at its own point, level with that place but out of reach.
       dragGroupOver('status', 'priority', 'lower');
-      await releasePointer(LEFT_OF_LIST);
+      await releasePointer(AWAY_FROM_LIST);
 
       expect(draggedGroup(root)).toBeNull();
       expect(groupDropLines(root)).toEqual([]);
       expect(dragMark()).toBeNull();
       expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
       expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    // The handle is at the list's left edge, so a pointer dragging a group
+    // down drifts off the list. Only how far down it is counts.
+
+    it.each([
+      ['just left of', -20],
+      ['as far left as the drag reaches of', -DRAG_REACH],
+      ['just right of', 620],
+      ['as far right as the drag reaches of', 599 + DRAG_REACH],
+    ])(
+      'keeps the line for a pointer that drifts %s the list, and lands there',
+      async (_drift, x) => {
+        const root = await mountPanel(threeGroups());
+        layOutGroups(root);
+
+        dragGroupOver('status', 'priority', 'lower');
+        movePointer(pointerLevelWith('area', 'lower', x));
+
+        expect(groupDropLines(root)).toEqual(['area:after']);
+        expect(dragMark()).toBe('active');
+
+        // The other half of the section is still the other side.
+        movePointer(pointerLevelWith('area', 'upper', x));
+        expect(groupDropLines(root)).toEqual(['area:before']);
+
+        await releasePointer(pointerLevelWith('area', 'lower', x));
+
+        expect(commandsMock.reorderTagGroups.mock.calls).toEqual([
+          [['priority', 'area', 'status']],
+        ]);
+        expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+      }
+    );
+
+    it('names a group from beside the list without the pointer having been in it', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      // Straight from the press to a point left of Area: one move.
+      pressGroup('status');
+      movePointer(pointerLevelWith('area', 'lower', -30));
+
+      expect(groupDropLines(root)).toEqual(['area:after']);
+      expect(dragMark()).toBe('active');
+    });
+
+    it('still refuses a drop that moves nothing, from beside the list', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pressGroup('status');
+      movePointer(pointerLevelWith('priority', 'upper', -30));
+
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+      await releasePointer(pointerLevelWith('priority', 'upper', -30));
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+    });
+
+    it('lands a group first when it is held above the first group, or just above the list', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+      // The first section starts 16px down the list, under its padding.
+      const inPadding = { clientX: 300, clientY: 8 };
+      const aboveTheList = { clientX: 300, clientY: -DRAG_REACH };
+
+      pressGroup('area');
+      movePointer(inPadding);
+      expect(groupDropLines(root)).toEqual(['status:before']);
+      expect(dragMark()).toBe('active');
+
+      movePointer(aboveTheList);
+      expect(groupDropLines(root)).toEqual(['status:before']);
+      expect(dragMark()).toBe('active');
+
+      await releasePointer(aboveTheList);
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['area', 'status', 'priority']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Area', 'Status', 'Priority']);
+    });
+
+    it('lands a group last when it is held just below the list', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+      // The list ends at 500, with nothing under Area (to 424) but the
+      // ungrouped tags.
+      const belowTheList = { clientX: 300, clientY: 499 + DRAG_REACH };
+
+      pressGroup('status');
+      movePointer(belowTheList);
+      expect(groupDropLines(root)).toEqual(['area:after']);
+      expect(dragMark()).toBe('active');
+
+      await releasePointer(belowTheList);
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+    });
+
+    it('lands nowhere once the pointer is past the list’s end by more than the reach', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pressGroup('status');
+      movePointer({ clientX: 300, clientY: 500 + DRAG_REACH });
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+      await releasePointer({ clientX: 300, clientY: 500 + DRAG_REACH });
+
+      pressGroup('area');
+      movePointer({ clientX: 300, clientY: -1 - DRAG_REACH });
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+
+      await releasePointer({ clientX: 300, clientY: -1 - DRAG_REACH });
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+    });
+
+    it('refuses the last group held below the groups, where it already is', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pressGroup('area');
+      movePointer(BELOW_GROUPS);
+
+      expect(groupDropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+    });
+
+    // The chip that follows the pointer: the group's name.
+
+    it('shows a chip with the group’s name while it is dragged', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pressGroup('priority');
+      flushSync();
+      expect(dragChip()).toBeNull();
+
+      movePointer(pointerOver('area', 'lower'));
+      const chip = dragChip()!;
+      expect(chip.textContent).toBe('Priority');
+      // Out of the panel, so it takes no room in the list and no events.
+      expect(root.contains(chip)).toBe(false);
+      expect(chip.style.position).toBe('fixed');
+      expect(chip.style.pointerEvents).toBe('none');
+
+      // It follows the pointer, and there is only ever one.
+      const placed = chip.style.transform;
+      movePointer(pointerOver('status', 'upper'));
+      expect(dragChip()).toBe(chip);
+      expect(chip.style.transform).not.toBe(placed);
+      expect(document.querySelectorAll(`.${DRAG_CHIP_CLASS}`)).toHaveLength(1);
+
+      await dropGroupOn('status', 'upper');
+      expect(dragChip()).toBeNull();
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status', 'Area']);
+    });
+
+    it('names the group as it is saved, not as its name field is being typed', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+      const name = root.querySelector<HTMLInputElement>(
+        `[data-tag-group="priority"] input[aria-label="Group name"]`
+      )!;
+      name.focus();
+      type(name, 'Urgen');
+
+      dragGroupOver('priority', 'area', 'lower');
+
+      expect(dragChip()!.textContent).toBe('Priority');
+    });
+
+    it('keeps the chip up where a drop is refused, and takes it down on that release', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      dragGroupOver('status', 'status', 'lower');
+      expect(dragMark()).toBe('refused');
+      expect(dragChip()).not.toBeNull();
+      movePointer(AWAY_FROM_LIST);
+      expect(dragChip()).not.toBeNull();
+
+      await releasePointer(AWAY_FROM_LIST);
+      expect(dragChip()).toBeNull();
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+    });
+
+    it('takes the chip down when Escape ends the drag', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      dragGroupOver('status', 'area', 'lower');
+      expect(dragChip()).not.toBeNull();
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      );
+      flushSync();
+
+      expect(dragChip()).toBeNull();
+      // The button is still down: a move does not bring it back.
+      movePointer(pointerOver('area', 'lower'));
+      expect(dragChip()).toBeNull();
+    });
+
+    it('takes the chip down when the window loses focus, or the panel goes', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      dragGroupOver('status', 'area', 'lower');
+      expect(dragChip()).not.toBeNull();
+      window.dispatchEvent(new FocusEvent('blur'));
+      expect(dragChip()).toBeNull();
+      await releasePointer(pointerOver('area', 'lower'));
+
+      dragGroupOver('status', 'area', 'lower');
+      expect(dragChip()).not.toBeNull();
+      unmount(component!);
+      component = null;
+      expect(dragChip()).toBeNull();
+      expect(dragMark()).toBeNull();
     });
 
     it('lands the group where it is released, over another section than the last move', async () => {
@@ -1094,7 +1346,7 @@ describe('TagsSettingsPanel', () => {
       // Above Priority is where Status already is: no line, and no write.
       dragGroupOver('status', 'priority', 'upper');
       expect(groupDropLines(root)).toEqual([]);
-      // Nor is there a line in the gap, where a release lands on the same place.
+      // Nor is there a line in the gap above it, which is the same place.
       movePointer(IN_FIRST_GAP);
       expect(groupDropLines(root)).toEqual([]);
       await dropGroupOn('priority', 'upper');
@@ -1117,7 +1369,7 @@ describe('TagsSettingsPanel', () => {
       expect(dragMark()).toBe('active');
 
       // Above Priority is where Status already is, and so is the gap above
-      // that, which keeps the place.
+      // that, which is the same place.
       movePointer(pointerOver('priority', 'upper'));
       expect(dragMark()).toBe('refused');
       movePointer(IN_FIRST_GAP);
@@ -1293,12 +1545,14 @@ describe('TagsSettingsPanel', () => {
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status']);
     });
 
-    it('scrolls the list while a group is held near its bottom, and the line follows', async () => {
-      const root = await mountPanel(threeGroups());
+    /**
+     * Lay out a 300px list of 120px sections 24px apart from 16, which
+     * scrolls: Priority, the second, spans 160 to 280, and Area starts at
+     * 304, past the list's bottom edge. Holds the frames the drag's scroll
+     * loop asks for until `runFrame`. The caller unstubs the globals.
+     */
+    function layOutScrollingList(root: ParentNode) {
       const list = root.querySelector<HTMLElement>('.panel-body')!;
-      // A 300px list of 120px sections 24px apart from 16, which scrolls:
-      // Priority, the second, spans 160 to 280, and Area starts at 304,
-      // past the list's bottom edge.
       let scrollTop = 0;
       Object.defineProperty(list, 'scrollTop', {
         configurable: true,
@@ -1317,7 +1571,6 @@ describe('TagsSettingsPanel', () => {
             120
           );
       }
-      // Hold the frames, as the drag's scroll loop asks for them.
       const frames = new Map<number, FrameRequestCallback>();
       let frameId = 0;
       vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -1331,6 +1584,12 @@ describe('TagsSettingsPanel', () => {
         for (const callback of due) callback(time);
         flushSync();
       };
+      return { scrolled: () => scrollTop, runFrame };
+    }
+
+    it('scrolls the list while a group is held near its bottom, and the line follows', async () => {
+      const root = await mountPanel(threeGroups());
+      const { scrolled, runFrame } = layOutScrollingList(root);
       try {
         // Status, held 20px short of the list's bottom edge, inside its 48px
         // scroll zone, having crossed Priority's lower half on the way.
@@ -1342,17 +1601,17 @@ describe('TagsSettingsPanel', () => {
 
         // The first frame only starts the clock.
         runFrame(0);
-        expect(scrollTop).toBe(0);
+        expect(scrolled()).toBe(0);
         // 28px into the zone is 525px a second: 52px in 100ms, and half a
         // pixel carried.
         runFrame(100);
-        expect(scrollTop).toBe(52);
+        expect(scrolled()).toBe(52);
         // The pointer has not moved. Area, now from 252 to 372, has come
         // under it, and its upper half is the same place as below Priority.
         expect(groupDropLines(root)).toEqual(['area:before']);
         // Another 53px, and the pointer is over Area's lower half.
         runFrame(200);
-        expect(scrollTop).toBe(105);
+        expect(scrolled()).toBe(105);
         expect(groupDropLines(root)).toEqual(['area:after']);
         expect(dragMark()).toBe('active');
 
@@ -1364,11 +1623,71 @@ describe('TagsSettingsPanel', () => {
 
         // The release ended the scrolling with the drag.
         runFrame(300);
-        expect(scrollTop).toBe(105);
+        expect(scrolled()).toBe(105);
       } finally {
         vi.unstubAllGlobals();
       }
     });
+
+    // The list scrolls for a pointer exactly where the panel still lands
+    // the group: never at full speed under a cursor that says not-allowed
+    // for being away from the list.
+
+    it('scrolls the list for a pointer just below it or beside it, with a line to land on', async () => {
+      const root = await mountPanel(threeGroups());
+      const { scrolled, runFrame } = layOutScrollingList(root);
+      try {
+        // Below the list's bottom edge (300) and left of its side, both
+        // within reach.
+        pressGroup('status');
+        movePointer({ clientX: -DRAG_REACH, clientY: 299 + DRAG_REACH });
+        // What shows at the list's last pixel is the gap under Priority,
+        // which is the place below it.
+        expect(groupDropLines(root)).toEqual(['priority:after']);
+        expect(dragMark()).toBe('active');
+
+        runFrame(0);
+        // Full speed past the edge: 90px in 100ms.
+        runFrame(100);
+        expect(scrolled()).toBe(90);
+        // Area, now from 214 to 334, is what shows at the list's end.
+        expect(groupDropLines(root)).toEqual(['area:after']);
+        expect(dragMark()).toBe('active');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it.each([
+      ['below it', { clientX: 300, clientY: 300 + DRAG_REACH }],
+      ['left of it', { clientX: -1 - DRAG_REACH, clientY: 280 }],
+      ['right of it', { clientX: 600 + DRAG_REACH, clientY: 280 }],
+    ])(
+      'does not scroll the list for a pointer clearly %s, where a drop is refused',
+      async (_where, away) => {
+        const root = await mountPanel(threeGroups());
+        const { scrolled, runFrame } = layOutScrollingList(root);
+        try {
+          pressGroup('status');
+          movePointer(away);
+          expect(groupDropLines(root)).toEqual([]);
+          expect(dragMark()).toBe('refused');
+
+          runFrame(0);
+          runFrame(100);
+          runFrame(200);
+          expect(scrolled()).toBe(0);
+          expect(dragMark()).toBe('refused');
+
+          // Back within reach the list scrolls, and soon has a place to land.
+          movePointer({ clientX: 300, clientY: 280 });
+          runFrame(300);
+          expect(scrolled()).toBeGreaterThan(0);
+        } finally {
+          vi.unstubAllGlobals();
+        }
+      }
+    );
 
     it('queues quick Move down presses, each from where the last left the group', async () => {
       const writes = holdReorders();

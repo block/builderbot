@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DRAG_CHIP_CLASS,
+  DRAG_CHIP_MARGIN,
+  DRAG_CHIP_OFFSET,
+  DRAG_REACH,
   POINTER_DRAG_ATTRIBUTE,
   pointerDrag,
   type PointerDragOptions,
@@ -773,6 +777,274 @@ describe('a native drag from the handle', () => {
   });
 });
 
+describe('the chip that follows the pointer', () => {
+  const chips = () => [...document.querySelectorAll<HTMLElement>(`.${DRAG_CHIP_CLASS}`)];
+  const chip = () => chips()[0];
+
+  /** An icon inside the handle, as a column's header has. */
+  function icon(): SVGSVGElement {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('style', 'color: red');
+    svg.append(document.createElementNS('http://www.w3.org/2000/svg', 'circle'));
+    handle.prepend(svg);
+    return svg;
+  }
+
+  const named = (overrides: Partial<PointerDragOptions> = {}) =>
+    attach({ image: () => ({ label: 'In progress' }), ...overrides });
+
+  it('is not there for a press, and is once the press is a drag', () => {
+    named();
+    press(100, 100);
+    expect(chips()).toEqual([]);
+    moveTo(102, 100);
+    expect(chips()).toEqual([]);
+    moveTo(110, 100);
+
+    expect(chips()).toHaveLength(1);
+    expect(chip().textContent).toBe('In progress');
+  });
+
+  it('is never there for a click', () => {
+    named();
+    press(100, 100);
+    release(100, 100);
+    click();
+    expect(chips()).toEqual([]);
+    expect(clicks).toHaveBeenCalledTimes(1);
+  });
+
+  it('is a child of the body, out of the page’s flow, deaf to the pointer and to readers', () => {
+    named();
+    startDrag();
+
+    expect(chip().parentElement).toBe(document.body);
+    expect(chip().style.position).toBe('fixed');
+    expect(chip().style.pointerEvents).toBe('none');
+    expect(chip().getAttribute('aria-hidden')).toBe('true');
+    // Nothing in it can take focus or a click either.
+    expect(chip().querySelector('button, input, a, [tabindex]')).toBeNull();
+  });
+
+  it('hangs below the pointer and to its left, and follows it', () => {
+    named();
+    startDrag();
+    // jsdom lays nothing out, so the chip has no size: its corner is its right edge.
+    expect(chip().style.transform).toBe(
+      `translate3d(${110 - DRAG_CHIP_OFFSET.x}px, ${100 + DRAG_CHIP_OFFSET.y}px, 0)`
+    );
+
+    moveTo(400, 250);
+    expect(chip().style.transform).toBe(
+      `translate3d(${400 - DRAG_CHIP_OFFSET.x}px, ${250 + DRAG_CHIP_OFFSET.y}px, 0)`
+    );
+    expect(chips()).toHaveLength(1);
+  });
+
+  it('is placed by its size, read once it is in the page, and kept in the window', () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(120);
+    const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(28);
+    named();
+    startDrag();
+    moveTo(400, 250);
+    expect(chip().style.transform).toBe(
+      `translate3d(${400 - DRAG_CHIP_OFFSET.x - 120}px, ${250 + DRAG_CHIP_OFFSET.y}px, 0)`
+    );
+
+    // At the window's left edge it slides right, not off the window.
+    moveTo(30, 250);
+    expect(chip().style.transform).toBe(
+      `translate3d(${DRAG_CHIP_MARGIN}px, ${250 + DRAG_CHIP_OFFSET.y}px, 0)`
+    );
+    // And up at its bottom edge.
+    moveTo(400, window.innerHeight - 2);
+    expect(chip().style.transform).toBe(
+      `translate3d(${400 - DRAG_CHIP_OFFSET.x - 120}px, ${window.innerHeight - DRAG_CHIP_MARGIN - 28}px, 0)`
+    );
+    width.mockRestore();
+    height.mockRestore();
+  });
+
+  it('leads the name with a copy of the icon, and leaves the handle its own', () => {
+    const svg = icon();
+    attach({ image: (node) => ({ label: 'Done', icon: node.querySelector('svg') }) });
+    startDrag();
+
+    const copy = chip().querySelector('svg')!;
+    expect(copy).not.toBe(svg);
+    expect(copy.getAttribute('style')).toBe('color: red');
+    expect(copy.querySelector('circle')).not.toBeNull();
+    expect(chip().firstElementChild).toBe(copy);
+    expect(chip().textContent).toBe('Done');
+    expect(handle.contains(svg)).toBe(true);
+  });
+
+  it('is given the handle to read the image from', () => {
+    const image = vi.fn(() => ({ label: 'Done' }));
+    attach({ image });
+    startDrag();
+    expect(image).toHaveBeenCalledExactlyOnceWith(handle);
+  });
+
+  it('shows a name as text, not as markup', () => {
+    attach({ image: () => ({ label: '<b>bold</b>' }) });
+    startDrag();
+    expect(chip().textContent).toBe('<b>bold</b>');
+    expect(chip().querySelector('b')).toBeNull();
+  });
+
+  it('is asked for once, as the drag starts, after the surface heard of it', () => {
+    const image = vi.fn(() => {
+      calls.push('image');
+      return { label: 'Done' };
+    });
+    attach({ image });
+    press(100, 100);
+    expect(image).not.toHaveBeenCalled();
+    moveTo(110, 100);
+    moveTo(120, 100);
+    release(120, 100);
+
+    expect(calls).toEqual([
+      'start 100,100',
+      'image',
+      'move 110,100',
+      'move 120,100',
+      'drop 120,100',
+    ]);
+  });
+
+  it('is not there without an image, or with none to show', () => {
+    attach();
+    startDrag();
+    expect(chips()).toEqual([]);
+    release(110, 100);
+    action.destroy?.();
+
+    attach({ image: () => null });
+    startDrag();
+    expect(chips()).toEqual([]);
+    expect(calls).toContain('move 110,100');
+  });
+
+  it('goes on the drop, before the surface hears of it', () => {
+    let chipsAtDrop = -1;
+    named({ drop: () => (chipsAtDrop = chips().length) });
+    startDrag();
+    release(300, 100);
+
+    expect(chipsAtDrop).toBe(0);
+    expect(chips()).toEqual([]);
+  });
+
+  it('goes on a drop the surface refuses', () => {
+    accepts = false;
+    named();
+    startDrag();
+    expect(chips()).toHaveLength(1);
+    release(110, 100);
+    expect(chips()).toEqual([]);
+  });
+
+  it.each([
+    ['Escape', () => void keydown('Escape')],
+    ['a pointercancel', () => void pointer('pointercancel', outside, 110, 100)],
+    [
+      'the handle losing the capture',
+      () => void pointer('lostpointercapture', handle, 110, 100, { bubbles: true }),
+    ],
+    ['the window losing focus', () => void window.dispatchEvent(new FocusEvent('blur'))],
+    ['a release the page never saw', () => void moveTo(120, 100, { buttons: 0 })],
+    [
+      'the handle being turned off',
+      (cancel: () => void) => action.update?.(surface({ enabled: false, cancel })),
+    ],
+    ['the handle unmounting', () => action.destroy?.()],
+    ['a new press', () => void press(100, 100)],
+  ])('goes when %s cancels the drag, before the surface hears of it', (_way, end) => {
+    let chipsAtCancel = -1;
+    const cancel = () => void (chipsAtCancel = chips().length);
+    named({ cancel });
+    startDrag();
+    expect(chips()).toHaveLength(1);
+
+    end(cancel);
+
+    expect(chipsAtCancel).toBe(0);
+    expect(chips()).toEqual([]);
+    // Nothing brings it back: not a move, nor the release still to come.
+    moveTo(130, 100);
+    release(130, 100);
+    expect(chips()).toEqual([]);
+  });
+
+  it('goes when a callback throws on the way out', () => {
+    named({
+      drop: () => {
+        throw new Error('drop failed');
+      },
+    });
+    startDrag();
+    // jsdom reports a listener's error instead of throwing it from dispatch.
+    const reported = vi.fn((event: ErrorEvent) => event.preventDefault());
+    window.addEventListener('error', reported);
+    release(110, 100);
+    window.removeEventListener('error', reported);
+
+    expect(reported).toHaveBeenCalledTimes(1);
+    expect(chips()).toEqual([]);
+  });
+
+  it('goes when the first move ends the drag by turning the handle off', () => {
+    named({
+      move: () => {
+        action.update?.(surface({ enabled: false }));
+        return true;
+      },
+    });
+    startDrag();
+    expect(chips()).toEqual([]);
+  });
+
+  it('is not put up when the start ends the drag', () => {
+    const image = vi.fn(() => ({ label: 'Done' }));
+    attach({
+      image,
+      start: () => action.update?.(surface({ enabled: false })),
+    });
+    startDrag();
+    expect(image).not.toHaveBeenCalled();
+    expect(chips()).toEqual([]);
+  });
+
+  it('is a new one for each drag, with that drag’s image', () => {
+    let name = 'Idea';
+    attach({ image: () => ({ label: name }) });
+    startDrag();
+    release(110, 100);
+    name = 'Done';
+    startDrag();
+
+    expect(chips()).toHaveLength(1);
+    expect(chip().textContent).toBe('Done');
+  });
+
+  it('stays where the pointer is while the container scrolls under it', () => {
+    const scroller = document.createElement('div');
+    document.body.append(scroller);
+    scroller.getBoundingClientRect = () => new DOMRect(100, 0, 400, 300);
+    named({ scroll: { container: () => scroller, axis: 'x' } });
+    press(300, 150);
+    moveTo(500, 150);
+    const placed = chip().style.transform;
+    runFrame(1000);
+    runFrame(1020);
+
+    expect(scroller.scrollLeft).toBe(18);
+    expect(chip().style.transform).toBe(placed);
+  });
+});
+
 describe('scrolling near an edge', () => {
   let scroller: HTMLDivElement;
 
@@ -891,22 +1163,80 @@ describe('scrolling near an edge', () => {
     expect(calls).toEqual(['move 300,300']);
   });
 
-  it('scrolls nothing while the pointer is beside the container, not over it', () => {
+  it('scrolls on for a pointer that strays off the container’s side, within reach', () => {
     across();
-    // Level with the end edge, but below the scroller.
-    dragAcrossTo(500, 320);
+    // Level with the end edge, and as far below the scroller as still counts.
+    dragAcrossTo(500, 299 + DRAG_REACH);
+    runFrame(1000);
+    runFrame(1020);
+    expect(scroller.scrollLeft).toBe(18);
+
+    // And as far above it.
+    moveTo(500, -DRAG_REACH);
+    runFrame(1040);
+    expect(scroller.scrollLeft).toBe(36);
+  });
+
+  it('scrolls nothing once the pointer is out of reach of the container’s side', () => {
+    across();
+    dragAcrossTo(500, 300 + DRAG_REACH);
     runFrame(1000);
     runFrame(1020);
     expect(scroller.scrollLeft).toBe(0);
 
-    // And above it, on the y axis's side.
-    moveTo(500, -1);
+    moveTo(500, -1 - DRAG_REACH);
     runFrame(1040);
     expect(scroller.scrollLeft).toBe(0);
 
-    moveTo(500, 299);
+    // Back within reach, it scrolls again.
+    moveTo(500, 299 + DRAG_REACH);
     runFrame(1060);
     expect(scroller.scrollLeft).toBe(18);
+  });
+
+  it('scrolls at full speed for a pointer past an end, within reach, and not beyond it', () => {
+    across();
+    dragAcrossTo(499 + DRAG_REACH);
+    runFrame(1000);
+    runFrame(1020);
+    expect(scroller.scrollLeft).toBe(18);
+
+    // Out of reach past the end: the surface has given the drag up there.
+    moveTo(500 + DRAG_REACH, 150);
+    runFrame(1040);
+    runFrame(1060);
+    expect(scroller.scrollLeft).toBe(18);
+
+    // The start edge the same.
+    moveTo(100 - DRAG_REACH, 150);
+    runFrame(1080);
+    expect(scroller.scrollLeft).toBe(0);
+    scroller.scrollLeft = 100;
+    moveTo(99 - DRAG_REACH, 150);
+    runFrame(1100);
+    expect(scroller.scrollLeft).toBe(100);
+  });
+
+  it('gives a list the same reach, off its sides and past its ends', () => {
+    attach({ scroll: { container: () => scroller, axis: 'y' } });
+    press(300, 150);
+    // Off the list's left side, level with its bottom edge.
+    moveTo(100 - DRAG_REACH, 300);
+    runFrame(1000);
+    runFrame(1020);
+    expect(scroller.scrollTop).toBe(18);
+
+    moveTo(99 - DRAG_REACH, 300);
+    runFrame(1040);
+    expect(scroller.scrollTop).toBe(18);
+
+    // Past its bottom end.
+    moveTo(300, 299 + DRAG_REACH);
+    runFrame(1060);
+    expect(scroller.scrollTop).toBe(36);
+    moveTo(300, 300 + DRAG_REACH);
+    runFrame(1080);
+    expect(scroller.scrollTop).toBe(36);
   });
 
   it('keeps the fraction of a pixel a slow frame leaves', () => {

@@ -25,12 +25,16 @@
 
   Where cards drag, a tag column drags too, by its header or its collapsed
   strip, and lands on the side of the column it is dropped on: the left half
-  before it, the right half after, and after "No ‹group›" on either. A line
-  in the gap shows where, and a release in the gap lands where the last
-  column the pointer crossed put the line. Outside the row there is no line
-  and a release does nothing. A drop that would leave the columns in their
-  order shows no line and writes nothing, and the cursor says it is refused.
-  Near either end of the row, the drag scrolls it sideways.
+  before it, the right half after, and after "No ‹group›" on either. Only
+  how far across the row the pointer is decides which column that is: a
+  header is at the row's top edge, and a pointer that drifts above it is
+  still dragging. A line in the gap shows where the column would land, and
+  a pointer in a gap lands the column there. Past the last column it lands
+  last. Clearly away from the row (see `DRAG_REACH`) there is no line and a
+  release does nothing. A drop that would leave the columns in their order
+  shows no line and writes nothing, and the cursor says it is refused. Near
+  either end of the row, or just past it, the drag scrolls it sideways. A
+  chip with the column's icon and name follows the pointer.
 
   The two drags are different kinds. A card's is an HTML5 drag. A column's
   is made of pointer events (shared/pointerDrag), because the desktop
@@ -93,7 +97,7 @@
   let dropKey = $state<string | null>(null);
   /** The column being dragged, if any. */
   let draggingColumnKey = $state<string | null>(null);
-  /** Where the dragged column would land: the last column it was over, and the side. */
+  /** Where the dragged column would land: beside a column, on one side of it. */
   let columnDrop = $state<ColumnDrop | null>(null);
   let activeIndex = $state(0);
 
@@ -255,8 +259,8 @@
     },
     /**
      * The cursor says a drop is refused wherever it would leave the columns
-     * in their order: over the column itself, over the half where it already
-     * is, in a gap with no line, and outside the row.
+     * in their order: level with the column itself, with the half where it
+     * already is, in a gap with no line, and clearly away from the row.
      */
     move(point) {
       setColumnDrop(columnDropAt(point));

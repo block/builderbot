@@ -14,8 +14,9 @@
   an HTML5 drag, which the desktop build's native file-drop handler would
   take. The panel resolves every point the pointer reaches, from the
   sections' rects, so the section only says which group is being dragged and
-  draws the line when the group would land beside it. A tag's drag is still
-  an HTML5 one, and is the rows' and the list's to take.
+  draws the line when the group would land beside it. A chip with the
+  group's name follows the pointer. A tag's drag is still an HTML5 one, and
+  is the rows' and the list's to take.
 
   Like a tag's name (TagRow), the group name keeps what's being typed while
   it has focus, whatever catalog echoes arrive meanwhile.
@@ -69,9 +70,11 @@
   let dropPlace = $derived(editor.groupDropPlaceFor(group.id));
 
   // What the handle hands the drag action. The panel resolves every point,
-  // so the section only says which group is being dragged.
+  // so the section only says which group is being dragged, and names it
+  // for the chip that follows the pointer.
   let dragOptions = $derived<PointerDragOptions>({
     scroll: groupDrag.scroll,
+    image: () => ({ label: group.name }),
     start: () => groupDrag.start(group.id),
     move: (point) => groupDrag.move(point),
     drop: (point) => groupDrag.drop(point),

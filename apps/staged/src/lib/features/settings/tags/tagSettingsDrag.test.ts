@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DRAG_REACH } from '../../../shared/pointerDrag';
 import {
   groupAtPoint,
   isTagDrag,
@@ -62,19 +63,20 @@ describe('isTagDrag', () => {
 });
 
 describe('groupAtPoint', () => {
-  // A list from 100 to 500 down and 0 to 600 across. Three 560px sections
-  // 24px apart, inset 16px: Status and Priority, 120px tall, and Area, which
-  // runs past the list's bottom edge, as when the list is longer than fits.
+  // A list from 100 to 500 down and 0 to 600 across. Three sections 24px
+  // apart, starting 16px down: Status and Priority, 120px tall, and Area,
+  // which runs past the list's bottom edge, as when the list is longer than
+  // fits.
   const list = { left: 0, right: 600, top: 100, bottom: 500 };
   const box = (groupId: string, top: number, height: number): GroupSectionBox => ({
     groupId,
-    rect: { left: 16, right: 576, top, bottom: top + height, height },
+    rect: { top, bottom: top + height, height },
   });
   const sections = [box('status', 116, 120), box('priority', 260, 120), box('area', 404, 200)];
   const at = (clientX: number, clientY: number) => ({ clientX, clientY });
   const last = { anchorGroupId: 'priority', place: 'after' } as const;
 
-  it('names the group under the pointer, and the side its half gives', () => {
+  it('names the group the pointer is level with, and the side its half gives', () => {
     expect(groupAtPoint(at(300, 270), list, sections, null)).toEqual({
       anchorGroupId: 'priority',
       place: 'before',
@@ -96,45 +98,149 @@ describe('groupAtPoint', () => {
     expect(groupAtPoint(at(300, 320), list, sections, null)?.place).toBe('after');
   });
 
-  it('takes a section from its top and left edges up to its bottom and right', () => {
+  it('takes a section from its top edge up to its bottom', () => {
     expect(groupAtPoint(at(16, 260), list, sections, null)?.anchorGroupId).toBe('priority');
     expect(groupAtPoint(at(575, 379), list, sections, null)?.anchorGroupId).toBe('priority');
-    // 380 is the first pixel of the gap.
-    expect(groupAtPoint(at(300, 380), list, sections, null)).toBeNull();
+    // 380 is the first pixel of the gap under it.
+    expect(groupAtPoint(at(300, 380), list, sections, null)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'after',
+    });
   });
 
-  it('keeps the last place in the gap between two sections', () => {
-    expect(groupAtPoint(at(300, 248), list, sections, last)).toBe(last);
-    expect(groupAtPoint(at(300, 392), list, sections, last)).toBe(last);
+  it('goes by how far down the list the pointer is, anywhere across it', () => {
+    // In the list's padding, and right of sections that stop short of a
+    // wide list's edge.
+    expect(groupAtPoint(at(1, 300), list, sections, last)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'before',
+    });
+    expect(groupAtPoint(at(599, 300), list, sections, last)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'before',
+    });
   });
 
-  it('keeps the last place beside a section, in the list’s padding', () => {
-    expect(groupAtPoint(at(8, 300), list, sections, last)).toBe(last);
-    expect(groupAtPoint(at(590, 300), list, sections, last)).toBe(last);
-  });
-
-  it('keeps the last place below the last section', () => {
-    const short = [box('status', 116, 120), box('priority', 260, 120)];
-    expect(groupAtPoint(at(300, 450), list, short, last)).toBe(last);
-  });
-
-  it('lands nowhere in the list before any section has been crossed', () => {
-    expect(groupAtPoint(at(300, 248), list, sections, null)).toBeNull();
+  // The handle a group is dragged by is at the list's left edge, so a
+  // pointer dragging straight down drifts off it.
+  it.each([
+    ['just left of', -20],
+    ['as far left as the reach of', -DRAG_REACH],
+    ['just right of', 620],
+    ['as far right as the reach of', 599 + DRAG_REACH],
+  ])('names the same group for a pointer that drifts %s the list', (_drift, clientX) => {
+    expect(groupAtPoint(at(clientX, 270), list, sections, null)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'before',
+    });
+    expect(groupAtPoint(at(clientX, 370), list, sections, last)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'after',
+    });
+    // And the gap under Priority is the place below it there, as in the list.
+    expect(groupAtPoint(at(clientX, 392), list, sections, null)).toEqual(last);
   });
 
   it.each([
-    ['above', at(300, 99)],
-    ['below', at(300, 500)],
-    ['left of', at(-1, 300)],
-    ['right of', at(600, 300)],
-  ])('lands nowhere %s the list, whatever the last place was', (_side, point) => {
+    ['above', at(300, 99 - DRAG_REACH)],
+    ['below', at(300, 500 + DRAG_REACH)],
+    ['left of', at(-1 - DRAG_REACH, 300)],
+    ['right of', at(600 + DRAG_REACH, 300)],
+  ])('lands nowhere clearly %s the list, whatever the last place was', (_side, point) => {
     expect(groupAtPoint(point, list, sections, last)).toBeNull();
   });
 
+  // The gap between two sections is where the line for that place is drawn.
+
+  it('lands below the group above a gap, with no section named yet', () => {
+    expect(groupAtPoint(at(300, 248), list, sections, null)).toEqual({
+      anchorGroupId: 'status',
+      place: 'after',
+    });
+    expect(groupAtPoint(at(300, 392), list, sections, null)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'after',
+    });
+  });
+
+  it('keeps either name the last place had for a gap: below the one group, above the other', () => {
+    // The gap from 380 to 404 is below Priority and above Area.
+    const belowPriority = { anchorGroupId: 'priority', place: 'after' } as const;
+    const aboveArea = { anchorGroupId: 'area', place: 'before' } as const;
+    expect(groupAtPoint(at(300, 392), list, sections, belowPriority)).toBe(belowPriority);
+    expect(groupAtPoint(at(300, 392), list, sections, aboveArea)).toBe(aboveArea);
+  });
+
+  it('does not keep a last place that is not the gap’s', () => {
+    // The far sides of the gap's two sections, and a place elsewhere.
+    for (const elsewhere of [
+      { anchorGroupId: 'priority', place: 'before' },
+      { anchorGroupId: 'area', place: 'after' },
+      { anchorGroupId: 'status', place: 'after' },
+    ] as const) {
+      expect(groupAtPoint(at(300, 392), list, sections, elsewhere)).toEqual({
+        anchorGroupId: 'priority',
+        place: 'after',
+      });
+    }
+  });
+
+  it('lands below the last group for a pointer under its section, in the list', () => {
+    // Two groups, then the ungrouped tags and empty list from 380 on.
+    const short = [box('status', 116, 120), box('priority', 260, 120)];
+    expect(groupAtPoint(at(300, 380), list, short, null)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'after',
+    });
+    expect(groupAtPoint(at(300, 499), list, short, last)).toEqual({
+      anchorGroupId: 'priority',
+      place: 'after',
+    });
+  });
+
+  it('lands above the first group for a pointer over the list’s padding above it', () => {
+    expect(groupAtPoint(at(300, 100), list, sections, last)).toEqual({
+      anchorGroupId: 'status',
+      place: 'before',
+    });
+    expect(groupAtPoint(at(300, 115), list, sections, null)).toEqual({
+      anchorGroupId: 'status',
+      place: 'before',
+    });
+  });
+
+  it('takes a pointer past the list’s end, within reach, to be at that end', () => {
+    // Above the list: its first pixel, which is above Status.
+    expect(groupAtPoint(at(300, 99), list, sections, last)).toEqual({
+      anchorGroupId: 'status',
+      place: 'before',
+    });
+    expect(groupAtPoint(at(300, 100 - DRAG_REACH), list, sections, last)).toEqual({
+      anchorGroupId: 'status',
+      place: 'before',
+    });
+    // Below it: Area spans 404 to 604 and the list ends at 500, which is in
+    // Area's upper half.
+    expect(groupAtPoint(at(300, 500), list, sections, last)).toEqual({
+      anchorGroupId: 'area',
+      place: 'before',
+    });
+    expect(groupAtPoint(at(300, 499 + DRAG_REACH), list, sections, null)).toEqual({
+      anchorGroupId: 'area',
+      place: 'before',
+    });
+  });
+
   it('does not count the part of a section that runs past the list’s edge', () => {
-    // Area spans 404 to 604, and the list ends at 500.
-    expect(groupAtPoint(at(300, 499), list, sections, null)?.anchorGroupId).toBe('area');
-    expect(groupAtPoint(at(300, 520), list, sections, last)).toBeNull();
+    // A fourth section from 628 on does not show in a list that ends at
+    // 500, though the pointer past the end is level with it.
+    const more = [...sections, box('later', 628, 120)];
+    expect(groupAtPoint(at(300, 540), list, more, null)).toEqual({
+      anchorGroupId: 'area',
+      place: 'before',
+    });
+    // Nor Area's lower half, which the same pointer is level with.
+    expect(groupAtPoint(at(300, 520), list, sections, null)?.place).toBe('before');
   });
 
   it('follows the sections as the list scrolls under a still pointer', () => {
@@ -150,5 +256,10 @@ describe('groupAtPoint', () => {
       anchorGroupId: 'area',
       place: 'after',
     });
+  });
+
+  it('lands nowhere in a list with no groups', () => {
+    expect(groupAtPoint(at(300, 300), list, [], null)).toBeNull();
+    expect(groupAtPoint(at(300, 300), list, [], last)).toBeNull();
   });
 });

@@ -618,3 +618,38 @@ mark.search-match-current {
 :root[data-pointer-drag='refused'] * {
   cursor: not-allowed !important;
 }
+
+/* The chip that follows a drag's pointer, naming what is dragged: an icon
+   and a name on an opaque ground, so nothing under it shows through the
+   name. The action makes it a child of the body, fixed at the window's
+   corner and deaf to the pointer, and moves it with a transform. Above
+   everything, dialogs and their menus included: Settings is one. */
+.pointer-drag-chip {
+  z-index: calc(var(--z-index-floating) + 1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  max-width: 220px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-emphasis);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-elevated);
+  color: var(--text-primary);
+  font-size: var(--size-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  will-change: transform;
+}
+
+.pointer-drag-chip > svg {
+  flex-shrink: 0;
+}
+
+.pointer-drag-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

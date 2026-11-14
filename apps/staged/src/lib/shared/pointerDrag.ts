@@ -9,6 +9,12 @@
  * The action knows nothing about what is dragged or where it may land. The
  * surface that owns the handle resolves each point the pointer reaches, from
  * element rects and its own rules, and says whether a drop there would act.
+ *
+ * What the action and every surface share is how far a drag reaches (see
+ * `DRAG_REACH`). A pointer that strays a little off the row or list it is
+ * dragging along is still dragging along it, and one clearly away is not.
+ * The surfaces resolve a point by that rule and the action scrolls by it, so
+ * a container never scrolls for a pointer the surface has given up on.
  */
 
 import type { ActionReturn } from 'svelte/action';
@@ -37,8 +43,8 @@ export const EDGE_SCROLL_ZONE = 48;
 /** The scroll speed at an edge and beyond it, in px per second. */
 export const EDGE_SCROLL_MAX_SPEED = 900;
 
-/** Where a container starts and ends along the axis it scrolls on. */
-export interface ScrollSpan {
+/** Where something starts and ends along one axis. */
+export interface AxisSpan {
   start: number;
   end: number;
 }
@@ -51,7 +57,7 @@ export interface ScrollSpan {
  * A zone is never deeper than a third of the container, so a short container
  * keeps a middle where nothing scrolls.
  */
-export function edgeScrollSpeed(position: number, span: ScrollSpan): number {
+export function edgeScrollSpeed(position: number, span: AxisSpan): number {
   const zone = Math.min(EDGE_SCROLL_ZONE, (span.end - span.start) / 3);
   if (!(zone > 0)) return 0;
   const intoStart = span.start + zone - position;
@@ -81,6 +87,132 @@ export function scrollStep(
   return { step, carry: exact - step };
 }
 
+/** The edges of a box in client coordinates, as `getBoundingClientRect` gives them. */
+export type DragBox = Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>;
+
+/**
+ * How far outside the row or list it is dragging along, in px, a pointer
+ * still counts as over it. A hand does not hold a straight line: a column
+ * dragged sideways by its header drifts above the row, and a group dragged
+ * down by its handle drifts off the list's side. Further out than this, the
+ * pointer is clearly somewhere else and a release there does nothing.
+ */
+export const DRAG_REACH = 64;
+
+/**
+ * Whether a drag's pointer is over `box` or near enough to count: inside it,
+ * or no more than `reach` px past any side.
+ */
+export function withinDragReach(
+  point: PointerDragPoint,
+  box: DragBox,
+  reach = DRAG_REACH
+): boolean {
+  return (
+    point.clientX >= box.left - reach &&
+    point.clientX < box.right + reach &&
+    point.clientY >= box.top - reach &&
+    point.clientY < box.bottom + reach
+  );
+}
+
+/**
+ * Where along `axis` a drag's pointer counts as being, for a row (`x`) or a
+ * list (`y`) that fills `box`. Null once the pointer is out of reach of the
+ * box, where the drag lands nowhere.
+ *
+ * Only the coordinate along the axis counts: one that strays off the other
+ * way, within reach, is where it would be had it not strayed. A pointer past
+ * either end of the box is at that end, since what runs past the box's edge
+ * (it may scroll) does not show.
+ */
+export function dragPositionAlong(
+  point: PointerDragPoint,
+  box: DragBox,
+  axis: 'x' | 'y',
+  reach = DRAG_REACH
+): number | null {
+  if (!withinDragReach(point, box, reach)) return null;
+  const [position, start, end] =
+    axis === 'x' ? [point.clientX, box.left, box.right] : [point.clientY, box.top, box.bottom];
+  return Math.min(Math.max(position, start), end);
+}
+
+/** Where a position along an axis falls among the items of a row or list. */
+export interface SpanHit {
+  /** The item the position is on. In a gap, the item before the gap. */
+  index: number;
+  /** In the gap after that item: on neither it nor the next. */
+  gap: boolean;
+}
+
+/**
+ * Where a position along an axis falls among `spans`, the items of a row or
+ * list in order along that axis: on the one that holds it, on the first for
+ * a position before them all, on the last for one past them all, and
+ * otherwise in the gap after one. Null only with no items.
+ */
+export function spanAlong(position: number, spans: readonly AxisSpan[]): SpanHit | null {
+  if (spans.length === 0) return null;
+  const final = spans.length - 1;
+  if (position < spans[0].start) return { index: 0, gap: false };
+  if (position >= spans[final].end) return { index: final, gap: false };
+  // The last item to start at or before the position holds it, or is the
+  // one the position's gap comes after.
+  let index = 0;
+  while (index < final && spans[index + 1].start <= position) index++;
+  return { index, gap: position >= spans[index].end };
+}
+
+/** What the chip that follows a drag's pointer shows. */
+export interface PointerDragImage {
+  /** The name of what is dragged. */
+  label: string;
+  /** An icon to lead the name with. The chip takes a copy of it. */
+  icon?: Element | null;
+}
+
+/** The class of the chip that follows a drag's pointer. Its look is in app.css. */
+export const DRAG_CHIP_CLASS = 'pointer-drag-chip';
+
+/** How far the chip's right edge sits left of the pointer, and its top below, in px. */
+export const DRAG_CHIP_OFFSET = { x: 8, y: 16 };
+
+/** The least room, in px, the chip keeps from the window's edges. */
+export const DRAG_CHIP_MARGIN = 4;
+
+/**
+ * Where the chip's top left corner goes, for a pointer at `point`, a chip of
+ * `chip`'s size and a window of `viewport`'s.
+ *
+ * The chip hangs below the pointer and to its left. Below, so it is clear of
+ * the pointer's own spot, of the name the pointer is over, and of the names
+ * level with it that a column's header passes. To the left, since a group's
+ * handle is at its section's left edge: the names and the drop line run to
+ * the right from there, and the chip is over neither.
+ *
+ * At the window's edge the chip slides to stay whole, rather than being cut
+ * off. The left and top edges win in a window too small for it.
+ */
+export function dragChipOrigin(
+  point: PointerDragPoint,
+  chip: { width: number; height: number },
+  viewport: { width: number; height: number }
+): { left: number; top: number } {
+  const left = point.clientX - DRAG_CHIP_OFFSET.x - chip.width;
+  const top = point.clientY + DRAG_CHIP_OFFSET.y;
+  return {
+    left: Math.max(
+      DRAG_CHIP_MARGIN,
+      Math.min(left, viewport.width - DRAG_CHIP_MARGIN - chip.width)
+    ),
+    top: Math.max(
+      DRAG_CHIP_MARGIN,
+      Math.min(top, viewport.height - DRAG_CHIP_MARGIN - chip.height)
+    ),
+  };
+}
+
 /** The container a drag scrolls when the pointer nears its edge. */
 export interface PointerDragScroll {
   /** The element that scrolls, read each frame. Null scrolls nothing. */
@@ -108,8 +240,19 @@ export interface PointerDragOptions {
   drop(point: PointerDragPoint): void;
   /** The drag ended without a release: nothing is to be written. */
   cancel(): void;
-  /** Scroll this container while the pointer is near its edge. */
+  /**
+   * Scroll this container while the pointer is near its edge. It scrolls
+   * only for a pointer within `DRAG_REACH` of it: the surface resolves its
+   * points by the same reach (see `dragPositionAlong`), so nothing scrolls
+   * where the surface says the drag lands nowhere.
+   */
   scroll?: PointerDragScroll;
+  /**
+   * What the chip that follows the pointer shows, asked once as the drag
+   * starts and given the handle. Without it, or with null, nothing follows
+   * the pointer.
+   */
+  image?(handle: HTMLElement): PointerDragImage | null;
 }
 
 /**
@@ -144,6 +287,11 @@ type Phase =
  * The click that a release sends after a drag is swallowed, so a handle that
  * is also a button does not act on being dragged.
  *
+ * Given an `image`, a small chip naming what is dragged follows the pointer
+ * (see `dragChipOrigin` for where). It is a child of the body, fixed and out
+ * of the page's flow, takes no pointer events, and goes when the drag ends,
+ * by a drop or by any cancel.
+ *
  * The handle itself needs `user-select: none`, so the press does not start a
  * text selection before it is a drag. The action refuses a native drag that
  * starts in the handle (of an image, a link or selected text), which would
@@ -166,6 +314,8 @@ export function pointerDrag(
   let startEdgeLive = false;
   let endEdgeLive = false;
   let clickGuardTimer: ReturnType<typeof setTimeout> | null = null;
+  let chip: HTMLElement | null = null;
+  let chipSize = { width: 0, height: 0 };
 
   const root = node.ownerDocument.documentElement;
   const enabled = () => options.enabled !== false;
@@ -180,6 +330,49 @@ export function pointerDrag(
     if (phase === 'dragging') {
       root.setAttribute(POINTER_DRAG_ATTRIBUTE, accepted ? 'active' : 'refused');
     }
+  }
+
+  // ── The chip ──
+
+  /**
+   * Put the chip up for the drag that just started, if the surface has an
+   * image for it. What must hold wherever the chip is styled from is set
+   * here: fixed, so it takes no room in the page, and deaf to the pointer,
+   * so what is under it still gets every event.
+   */
+  function showChip() {
+    const image = options.image?.(node);
+    if (!image) return;
+    const doc = node.ownerDocument;
+    chip = doc.createElement('div');
+    chip.className = DRAG_CHIP_CLASS;
+    chip.setAttribute('aria-hidden', 'true');
+    chip.style.position = 'fixed';
+    chip.style.left = '0';
+    chip.style.top = '0';
+    chip.style.pointerEvents = 'none';
+    if (image.icon) chip.append(image.icon.cloneNode(true));
+    const label = doc.createElement('span');
+    label.className = `${DRAG_CHIP_CLASS}-label`;
+    label.textContent = image.label;
+    chip.append(label);
+    doc.body.append(chip);
+    // Its size does not change during the drag, so it is read once.
+    chipSize = { width: chip.offsetWidth, height: chip.offsetHeight };
+    placeChip();
+  }
+
+  function placeChip() {
+    if (!chip) return;
+    const view = node.ownerDocument.defaultView;
+    const viewport = { width: view?.innerWidth ?? 0, height: view?.innerHeight ?? 0 };
+    const { left, top } = dragChipOrigin(last, chipSize, viewport);
+    chip.style.transform = `translate3d(${left}px, ${top}px, 0)`;
+  }
+
+  function removeChip() {
+    chip?.remove();
+    chip = null;
   }
 
   // ── Auto-scroll ──
@@ -201,11 +394,7 @@ export function pointerDrag(
     const box = container.getBoundingClientRect();
     const along = scroll.axis === 'x';
     const position = along ? last.clientX : last.clientY;
-    const across = along ? last.clientY : last.clientX;
     const span = along ? { start: box.left, end: box.right } : { start: box.top, end: box.bottom };
-    const inBand = along
-      ? across >= box.top && across < box.bottom
-      : across >= box.left && across < box.right;
 
     let speed = edgeScrollSpeed(position, span);
     // A press made inside an edge's zone (on a column half under the edge,
@@ -217,9 +406,10 @@ export function pointerDrag(
     const pressedAt = along ? pressed.clientX : pressed.clientY;
     if (speed < 0 && !startEdgeLive && position >= pressedAt) speed = 0;
     if (speed > 0 && !endEdgeLive && position <= pressedAt) speed = 0;
-    // Beside the container, not over it, the drag has left it: nothing there
-    // takes a drop, so nothing scrolls.
-    if (!inBand) speed = 0;
+    // Out of the container's reach the drag has left it: the surface lands
+    // it nowhere there, so nothing scrolls. Within reach it is still over
+    // the container, past an end or off to the side, and scrolls as if not.
+    if (!withinDragReach(last, box)) speed = 0;
 
     if (speed === 0) {
       carry = 0;
@@ -311,6 +501,7 @@ export function pointerDrag(
     // Only this handle's own mark: another handle's drag may be under way.
     if (phase === 'dragging') root.removeAttribute(POINTER_DRAG_ATTRIBUTE);
     phase = next;
+    removeChip();
     stopScrolling();
     releaseCapture();
     if (next === 'idle') unlisten();
@@ -345,6 +536,7 @@ export function pointerDrag(
     root.setAttribute(POINTER_DRAG_ATTRIBUTE, 'active');
     options.start(pressed);
     if (phase !== 'dragging') return;
+    showChip();
     issueMove();
     startScrolling();
   }
@@ -375,6 +567,7 @@ export function pointerDrag(
       if (pastDragThreshold(pressed, event)) beginDrag(event);
     } else if (phase === 'dragging') {
       last = pointOf(event);
+      placeChip();
       issueMove();
     }
   }

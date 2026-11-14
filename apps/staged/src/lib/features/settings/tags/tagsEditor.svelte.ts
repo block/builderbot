@@ -321,9 +321,9 @@ export class TagsEditor {
   }
 
   /**
-   * The group drag left the list: forget where it would have landed, so no
-   * line is drawn while it is held somewhere a release does nothing, and a
-   * drag that comes back lands nowhere until it crosses a section again.
+   * The pointer is clearly away from the list: forget where the group
+   * would have landed, so no line is drawn while it is held somewhere a
+   * release does nothing.
    */
   groupDragLeave(): void {
     this.groupDropTarget = null;

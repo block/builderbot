@@ -11,8 +11,14 @@
   a wrapper: a disabled button takes no pointer events, so one of its own
   would never show. A press on a disabled button lands on that wrapper, and
   TopBar's startDrag ignores the whole group, so it never drags the window.
+
+  The buttons are Back, Forward, Search in the markup in every layout, which
+  is the order they are tabbed through and read out in. The mobile layout
+  shows Forward last and only while there is somewhere forward to go (see the
+  styles), and hands on the focus of a Forward it hides (see the script).
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import Search from '@lucide/svelte/icons/search';
@@ -35,9 +41,33 @@
     const keys = viewport.showShortcutHints ? shortcutHint(shortcutId) : null;
     return keys ? `${name} (${keys})` : name;
   }
+
+  let groupEl = $state<HTMLElement | null>(null);
+  let forwardEl = $state<HTMLElement | null>(null);
+
+  // The mobile layout hides Forward while there is nothing forward (the
+  // styles below). Pressed from the keyboard for the last step forward, it
+  // would take the focus with it and leave it on the body, with the next Tab
+  // starting from the top of the page. So the focus moves to the group's
+  // first button that can take it: Back, which a step forward always leaves
+  // enabled, or Search where the history was cut down to one entry.
+  //
+  // Read before the DOM changes, while Forward still holds the focus, and
+  // moved after, once Back is enabled. Only this layout: elsewhere Forward
+  // stays where it is, disabled, as Back does at the first entry.
+  $effect.pre(() => {
+    if (!viewport.isMobile || navigation.canGoForward) return;
+    const active = document.activeElement;
+    if (!active || !forwardEl?.contains(active)) return;
+    void tick().then(() => {
+      // Somewhere else took the focus meanwhile: leave it there.
+      if (document.activeElement !== active && document.activeElement !== document.body) return;
+      groupEl?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    });
+  });
 </script>
 
-<div class="top-bar-nav" role="group" aria-label="History and search">
+<div bind:this={groupEl} class="top-bar-nav" role="group" aria-label="History and search">
   <span class="inline-flex" title={tooltip('Back', GO_BACK_SHORTCUT_ID)}>
     <Button
       variant="ghost"
@@ -51,7 +81,8 @@
     </Button>
   </span>
   <span
-    class="inline-flex"
+    bind:this={forwardEl}
+    class="forward inline-flex"
     class:nowhere-forward={!navigation.canGoForward}
     title={tooltip('Forward', GO_FORWARD_SHORTCUT_ID)}
   >
@@ -93,13 +124,24 @@
      as 375px. Three of them with gaps left the project view's centre title
      less room than it needs to show at all, so the group gives back what it
      can: no gaps, and no Forward while there is nothing forward to go to,
-     which is nearly always. Back and Search keep their places and their
-     size; Forward appears between them after a step Back. */
+     which is nearly always.
+
+     Forward is shown last here, after Search, so Back and Search are in the
+     same place whether it is there or not: it appears at the end of the
+     group after a step Back and goes from the end with the last step
+     forward. Between them it moved Search each time, into the spot a second
+     tap on Forward lands on. What follows the group (a route's own left
+     actions, the title) is what shifts instead. Only the visual order
+     changes; the markup stays Back, Forward, Search. */
   @media (max-width: 768px),
     (pointer: coarse) and (max-device-width: 500px),
     (pointer: coarse) and (max-device-height: 500px) {
     .top-bar-nav {
       gap: 0;
+    }
+
+    .forward {
+      order: 1;
     }
 
     .nowhere-forward {

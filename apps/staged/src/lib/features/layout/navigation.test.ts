@@ -28,7 +28,8 @@ let tagsStoreMock: {
 /** Whether the window has the mobile layout (no sidebar) as it opens. */
 let viewportMock: { isMobile: boolean };
 /** What the backend says about a diff entry a step is about to land on.
- *  By default: it is as it was opened. */
+ *  By default: it is as it was opened. That answer is a new route object,
+ *  never the one asked about, as the real refreshDiffRoute's always is. */
 let refreshDiffRoute: ReturnType<typeof vi.fn>;
 
 async function importNavigation() {
@@ -60,7 +61,10 @@ beforeEach(() => {
   pruneDeletedProjects = vi.fn().mockResolvedValue(undefined);
   tagsStoreMock = { loaded: false, catalog: { groupsById: new Map() } };
   viewportMock = { isMobile: false };
-  refreshDiffRoute = vi.fn(async (route: DiffDetailRoute) => ({ status: 'current', route }));
+  refreshDiffRoute = vi.fn(async (route: DiffDetailRoute) => ({
+    status: 'current',
+    route: { ...route },
+  }));
 
   vi.doMock('../../transport', () => ({
     getWindowLabel: () => windowLabel,
@@ -909,8 +913,9 @@ describe('history navigation', () => {
         'staged:diff-route-popped',
       ]);
 
+      // The diff as the backend has it now: an equal route, not the same one.
       await goBack();
-      expect(navigation.currentRoute).toBe(diffRoute);
+      expect(navigation.currentRoute).toEqual(diffRoute);
       await goBack();
       expect(navigation.currentRoute).toEqual(projectRoute('a'));
     });
@@ -1019,13 +1024,14 @@ describe('history navigation', () => {
       // b → the diff → b again: forward from the diff lands on b, which is
       // not what was under it.
       await goBack();
-      expect(navigation.currentRoute).toBe(diffRoute);
+      const stepped = navigation.currentRoute;
+      expect(stepped).toEqual(diffRoute);
       await goForward();
 
       expect(dispatchEvent).toHaveBeenCalledTimes(1);
       const event = dispatchEvent.mock.calls[0][0] as CustomEvent;
       expect(event.type).toBe('staged:diff-route-replaced');
-      expect(event.detail.route).toBe(diffRoute);
+      expect(event.detail.route).toBe(stepped);
     });
   });
 
@@ -1146,6 +1152,153 @@ describe('history navigation', () => {
       expect(navigation.currentRoute).toBe(third);
       closeDiffRouteIfCurrent(third);
       expect(navigation.currentRoute).toEqual(projectRoute('a'));
+    });
+
+    // Settings opened from a diff shares the diff's route object with the
+    // entry beneath it, and a diff route is the same as another only by
+    // identity. These hold the two entries to one route through a refresh.
+    describe('with Settings opened over the diff', () => {
+      /** a, the b1 diff over a, Settings over that diff, then b. */
+      async function diffUnderSettingsThenAway() {
+        const nav = await importNavigation();
+        nav.selectProject('a');
+        nav.openDiffRoute({ branchId: 'b1', projectId: 'a', commits: [commit('old')] as never });
+        const opened = nav.navigation.currentRoute as DiffDetailRoute;
+        nav.openSettings('general');
+        nav.selectProject('b');
+        dispatchEvent.mockClear();
+        refreshDiffRoute.mockClear();
+        return { ...nav, opened };
+      }
+
+      it('steps between the diff and Settings over it without asking or announcing', async () => {
+        const { selectProject, openDiffRoute, openSettings, closeSettings, navigation, ...nav } =
+          await importNavigation();
+        selectProject('a');
+        openDiffRoute({ branchId: 'b1', projectId: 'a' });
+        const diffRoute = navigation.currentRoute as DiffDetailRoute;
+        openSettings('general');
+        dispatchEvent.mockClear();
+
+        // Back onto the diff beneath: it never left the screen's location.
+        await expect(nav.goBack()).resolves.toBe(true);
+        expect(navigation.detailStack).toEqual([projectRoute('a'), diffRoute]);
+        expect(navigation.currentRoute).toBe(diffRoute);
+
+        // Forward to Settings over it again.
+        await expect(nav.goForward()).resolves.toBe(true);
+        expect(navigation.detailStack).toEqual([projectRoute('a'), diffRoute, settings('general')]);
+        expect(navigation.detailStack[1]).toBe(diffRoute);
+
+        expect(refreshDiffRoute).not.toHaveBeenCalled();
+        expect(dispatchEvent).not.toHaveBeenCalled();
+
+        // Closing Settings steps back onto the diff: no new entry, and
+        // Forward reopens Settings.
+        closeSettings();
+        expect(navigation.currentRoute).toBe(diffRoute);
+        expect(navigation.history.entries).toHaveLength(4);
+        expect(navigation.history.index).toBe(2);
+        expect(navigation.canGoForward).toBe(true);
+        expect(dispatchEvent).not.toHaveBeenCalled();
+      });
+
+      it("takes those steps in the caller's tick", async () => {
+        const { selectProject, openDiffRoute, openSettings, goBack, goForward, navigation } =
+          await importNavigation();
+        selectProject('a');
+        openDiffRoute({ branchId: 'b1', projectId: 'a' });
+        const diffRoute = navigation.currentRoute;
+        openSettings('general');
+
+        void goBack();
+        expect(navigation.currentRoute).toBe(diffRoute);
+        void goForward();
+        expect(navigation.currentRoute).toEqual(settings('general'));
+      });
+
+      it('brings the diff up to date in both entries when stepping onto Settings over it', async () => {
+        const { goBack, goForward, closeSettings, navigation, opened } =
+          await diffUnderSettingsThenAway();
+        refreshDiffRoute.mockImplementationOnce(async (route: DiffDetailRoute) => ({
+          status: 'current',
+          route: { ...route, commits: [commit('old'), commit('new')] },
+        }));
+
+        // Back from b onto Settings over the diff: the diff is not on screen,
+        // so it is asked about, once.
+        await expect(goBack()).resolves.toBe(true);
+        expect(refreshDiffRoute).toHaveBeenCalledTimes(1);
+        expect(refreshDiffRoute.mock.calls[0][0]).toBe(opened);
+        const refreshed = navigation.detailStack[1] as DiffDetailRoute;
+        expect(refreshed).not.toBe(opened);
+        expect(refreshed.commits).toEqual([commit('old'), commit('new')]);
+        expect(navigation.currentRoute).toEqual(settings('general'));
+        // The entry beneath holds the very same route, not a second copy.
+        const [, , beneath, over] = navigation.history.entries;
+        expect(over).toBe(navigation.detailStack);
+        expect(beneath).toHaveLength(2);
+        expect(beneath[1]).toBe(refreshed);
+        expect(navigation.history.entries).toHaveLength(5);
+        expect(navigation.history.index).toBe(3);
+        // The swap itself announced nothing.
+        expect(dispatchEvent).not.toHaveBeenCalled();
+
+        // Back onto the diff beneath, and Forward to Settings again: the
+        // diff is on screen throughout, so nothing is asked or announced.
+        await expect(goBack()).resolves.toBe(true);
+        expect(navigation.currentRoute).toBe(refreshed);
+        await expect(goForward()).resolves.toBe(true);
+        expect(navigation.currentRoute).toEqual(settings('general'));
+        expect(navigation.detailStack[1]).toBe(refreshed);
+        expect(refreshDiffRoute).toHaveBeenCalledTimes(1);
+        expect(dispatchEvent).not.toHaveBeenCalled();
+
+        // Closing Settings steps back rather than adding an entry.
+        closeSettings();
+        expect(navigation.currentRoute).toBe(refreshed);
+        expect(navigation.history.entries).toHaveLength(5);
+        expect(navigation.history.index).toBe(2);
+        expect(navigation.canGoForward).toBe(true);
+        expect(dispatchEvent).not.toHaveBeenCalled();
+        // And the next Back is the project under the diff, not Settings.
+        await expect(goBack()).resolves.toBe(true);
+        expect(navigation.detailStack).toEqual([projectRoute('a')]);
+        expect(eventTypes()).toEqual(['staged:diff-route-popped']);
+      });
+
+      it('brings the diff up to date in both entries when stepping onto the diff itself', async () => {
+        const { goBack, goForward, closeSettings, navigation, opened } =
+          await diffUnderSettingsThenAway();
+        // From b, Back three times: Settings, the diff beneath, then a.
+        await goBack();
+        await goBack();
+        await goBack();
+        expect(navigation.detailStack).toEqual([projectRoute('a')]);
+        const afterFirst = navigation.history.entries[2][1] as DiffDetailRoute;
+        expect(afterFirst).not.toBe(opened);
+        dispatchEvent.mockClear();
+        refreshDiffRoute.mockClear();
+
+        // Forward from a onto the diff: asked about again, and the Settings
+        // entry ahead of it follows.
+        await expect(goForward()).resolves.toBe(true);
+        expect(refreshDiffRoute).toHaveBeenCalledTimes(1);
+        expect(refreshDiffRoute.mock.calls[0][0]).toBe(afterFirst);
+        const shown = navigation.currentRoute as DiffDetailRoute;
+        expect(shown).not.toBe(afterFirst);
+        expect(navigation.history.entries[3][1]).toBe(shown);
+        expect(dispatchEvent).not.toHaveBeenCalled();
+
+        await expect(goForward()).resolves.toBe(true);
+        expect(navigation.currentRoute).toEqual(settings('general'));
+        expect(refreshDiffRoute).toHaveBeenCalledTimes(1);
+        expect(dispatchEvent).not.toHaveBeenCalled();
+        closeSettings();
+        expect(navigation.currentRoute).toBe(shown);
+        expect(navigation.history.index).toBe(2);
+        expect(dispatchEvent).not.toHaveBeenCalled();
+      });
     });
 
     it('steps over a diff whose branch is gone, and drops every entry for the branch', async () => {
@@ -1351,7 +1504,8 @@ describe('history navigation', () => {
 
       // Back from the b2 diff onto the b1 diff: somewhere to go, so it saves.
       await expect(goBack()).resolves.toBe(true);
-      expect(navigation.currentRoute).toBe(first);
+      const stepped = navigation.currentRoute;
+      expect(stepped).toEqual(first);
       expect(check).toHaveBeenCalledTimes(1);
       check.mockClear();
 
@@ -1361,7 +1515,7 @@ describe('history navigation', () => {
       await expect(goForward()).resolves.toBe(false);
 
       expect(check).not.toHaveBeenCalled();
-      expect(navigation.currentRoute).toBe(first);
+      expect(navigation.currentRoute).toBe(stepped);
       expect(navigation.canGoForward).toBe(false);
     });
   });

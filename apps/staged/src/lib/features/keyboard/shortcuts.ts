@@ -241,6 +241,51 @@ function applySavedBindingIfPresent(shortcut: Shortcut): void {
   shortcut.modifiers = cloneModifiers(saved.modifiers);
 }
 
+/** The pairs warnOfSavedBindingCollisions has reported, so a view that
+ *  registers its shortcuts on every mount says it once. */
+const reportedCollisions = new Set<string>();
+
+/**
+ * Warn in the console when `shortcut` and another registered shortcut answer
+ * to the same key press and a saved binding is why: one of the two has keys
+ * the user chose, which Keyboard settings checked against the shortcuts
+ * there were at the time. A shortcut added since (Back and Forward took ⌘[,
+ * ⌘] and ⌘→) can have those keys as its default. handleKeydown runs the
+ * first registered match and nothing else, so one of the two is silently
+ * dead. This only makes that diagnosable: nothing is rebound.
+ *
+ * Two defaults sharing a key are not reported: that is the app's own doing,
+ * and where it happens it is meant.
+ */
+function warnOfSavedBindingCollisions(shortcut: Shortcut): void {
+  let first: Shortcut | null = null;
+  for (const other of shortcuts.values()) {
+    if (other.id === shortcut.id) {
+      first ??= shortcut;
+      continue;
+    }
+    if (!savedBindings[shortcut.id] && !savedBindings[other.id]) continue;
+    const key = shortcut.keys.find((candidate) =>
+      other.keys.some(
+        (otherKey) =>
+          normalizeKey(otherKey) === normalizeKey(candidate) &&
+          modifiersCanOverlapForKey(candidate, shortcut.modifiers, other.modifiers)
+      )
+    );
+    if (key === undefined) continue;
+    const pair = [shortcut.id, other.id].sort().join('\n');
+    if (reportedCollisions.has(pair)) continue;
+    reportedCollisions.add(pair);
+    const winner = first ?? other;
+    const label = formatShortcutLabel({ keys: [key], modifiers: shortcut.modifiers });
+    console.warn(
+      `[Shortcuts] ${label} is bound to both "${shortcut.description}" (${shortcut.id}) and ` +
+        `"${other.description}" (${other.id}) because of a saved key binding. Only ` +
+        `"${winner.description}" runs. Rebind or reset one of them in Keyboard settings.`
+    );
+  }
+}
+
 async function persistSavedBindings(): Promise<void> {
   if (Object.keys(savedBindings).length === 0) {
     await deleteStoreValue(KEYBOARD_BINDINGS_STORE_KEY);
@@ -267,6 +312,10 @@ export async function initializeShortcutBindings(): Promise<void> {
   for (const shortcut of shortcuts.values()) {
     applySavedBindingIfPresent(shortcut);
   }
+  // The shortcuts registered before the saved bindings were known.
+  for (const shortcut of shortcuts.values()) {
+    warnOfSavedBindingCollisions(shortcut);
+  }
   notifyShortcutsChanged();
 }
 
@@ -287,6 +336,7 @@ export function registerShortcut(shortcut: Shortcut): () => void {
   };
   applySavedBindingIfPresent(registered);
   shortcuts.set(registered.id, registered);
+  warnOfSavedBindingCollisions(registered);
   notifyShortcutsChanged();
 
   return () => {

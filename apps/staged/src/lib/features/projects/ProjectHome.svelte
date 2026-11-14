@@ -849,7 +849,12 @@
         >
           <Plus size={12} />
         </span>
-        <span class="top-bar-action-label">Add Repo</span>
+        <span
+          class="top-bar-action-label"
+          class:narrow-window-hidden={selectedProjectTransferLabel !== null}
+        >
+          Add Repo
+        </span>
       </Button>
     </span>
 
@@ -859,6 +864,7 @@
         size="sm"
         class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground mobile:size-10 mobile:p-0"
         title={selectedProjectTransferLabel}
+        aria-label={selectedProjectTransferLabel}
         onclick={() => projectActions.requestTransferProject(selectedProject)}
         disabled={selectedProjectTransferring}
       >
@@ -871,7 +877,9 @@
             <Laptop size={13} />
           {/if}
         </span>
-        <span class="top-bar-action-label">{selectedProjectTransferLabel}</span>
+        <span class="top-bar-action-label narrow-window-hidden">
+          {selectedProjectTransferLabel}
+        </span>
       </Button>
     {/if}
 
@@ -1097,8 +1105,9 @@
     color: var(--ui-danger);
   }
 
-  /* On phones the pill shares the bar with the labelled Back and Add Repo
-     buttons, and its Resume is the only way to resume the workspace. To fit
+  /* On phones the pill shares the bar with the history and search buttons
+     and the labelled Add Repo, and its Resume is the only way to resume the
+     workspace. To fit
      it, "Suspended" is hidden visually (the pause icon shows the state and
      screen readers still read it), and Add Repo, disabled until the workspace
      is running, drops its label (its aria-label still names it). */
@@ -1117,6 +1126,23 @@
 
     .add-repo-action :global(.top-bar-action:disabled .top-bar-action-label) {
       display: none;
+    }
+
+    /* A narrow desktop window takes this layout too, with a mouse and, on a
+       Mac, the traffic lights' room ahead of the history and search buttons
+       (TopBar.svelte). Measured at the 375px minimum with that room, a
+       project that offers Transfer had its labelled Add Repo and Transfer
+       buttons run 70px past the window's edge, and 98px once Forward showed.
+       A mouse has a tooltip to name a button with, which a finger does not,
+       so there the two are their icons, which fits with 41px to spare while
+       Forward shows. Each keeps its name in its aria-label and its title.
+       Without Transfer the labelled Add Repo fits (33px to spare) and keeps
+       its label. Nested, so the layout's own query stays the one shared
+       form. */
+    @media (pointer: fine) {
+      .narrow-window-hidden {
+        display: none;
+      }
     }
   }
 

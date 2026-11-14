@@ -605,6 +605,41 @@ function forgetDiffs(gone: (route: DiffDetailRoute) => boolean): void {
 }
 
 /**
+ * Put `next` in the place of the diff route `stale`, in every history entry
+ * that holds it. For a diff brought up to date before a step lands on it
+ * (stepHistory), which is never the diff on screen.
+ *
+ * One diff route is shared by every entry built over it: Settings opened
+ * from a diff leaves `[project, diff]` and `[project, diff, settings]`
+ * holding the same object, and a diff route is the same as another only by
+ * identity (sameRoute). Swapping it in one entry alone made those two
+ * disagree: stepping between them announced a diff leaving the screen that
+ * never left it, and closing Settings added an entry where it should have
+ * stepped Back. So all of them get the one replacement.
+ *
+ * That replacement is made a state proxy here, once, before it goes into the
+ * entries. `navigation` proxies what it holds lazily and per holder, so a
+ * plain object put into two entries would be read back out of them as two
+ * different proxies, and no longer be identical to itself.
+ *
+ * The swap is one diff standing in for another: no diff event is fired, so a
+ * reference trail that led to the diff is still there to come back to.
+ */
+function replaceDiffRoute(stale: DiffDetailRoute, next: DiffDetailRoute): void {
+  const route = $state(next);
+  applyHistory(
+    rewriteEntries(
+      navigation.history,
+      (location) =>
+        location.includes(stale) ? location.map((r) => (r === stale ? route : r)) : location,
+      [rootRoute()],
+      sameLocation
+    ),
+    'silent'
+  );
+}
+
+/**
  * One step Back or Forward, for goBack / goForward. Does nothing, and
  * resolves false, when there is no entry that way, and when stepping would
  * pull the view out from under something:
@@ -625,10 +660,15 @@ function forgetDiffs(gone: (route: DiffDetailRoute) => boolean): void {
  * - When the entry the step would land on shows a diff, the backend is asked
  *   about it (refreshDiffRoute). A diff whose branch or review is gone is
  *   dropped, along with every other entry for that branch or review, and the
- *   step goes to the entry beyond it. Otherwise the entry is brought up to
- *   date with the branch, so the diff view opens on today's commits rather
- *   than the ones it was first opened with. This is the one case where a
- *   step from a view other than the diff is not taken in the caller's tick.
+ *   step goes to the entry beyond it. Otherwise the diff is brought up to
+ *   date with the branch, in every entry that shows it (replaceDiffRoute),
+ *   so the diff view opens on today's commits rather than the ones it was
+ *   first opened with. This is the one case where a step from a view other
+ *   than the diff is not taken in the caller's tick.
+ * - Not when the diff is already part of the view on screen: Settings over
+ *   the diff stepping Back onto it, or the diff stepping Forward to Settings
+ *   over it. The step leaves that route where it is, so nothing is asked
+ *   and the step is taken in the caller's tick.
  */
 async function stepHistory(
   step: (history: NavigationHistory<ViewLocation>) => NavigationHistory<ViewLocation>
@@ -645,23 +685,13 @@ async function stepHistory(
     if (ahead === from) return false;
     const target = currentEntry(ahead);
     const diff = target.find(isDiffRoute);
-    if (!diff) break;
+    if (!diff || navigation.detailStack.includes(diff)) break;
 
     const refreshed = await refreshDiffRoute(diff);
     if (navigation.history !== from || dialogOpen()) return false;
     if (refreshed.status === 'unknown') break;
     if (refreshed.status === 'current') {
-      const route = refreshed.route;
-      if (route === diff) break;
-      applyHistory(
-        rewriteEntries(
-          from,
-          (location) =>
-            location === target ? location.map((r) => (r === diff ? route : r)) : location,
-          [rootRoute()],
-          sameLocation
-        )
-      );
+      replaceDiffRoute(diff, refreshed.route);
       break;
     }
     // Gone: drop it and look at the entry that is now ahead.

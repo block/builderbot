@@ -1,4 +1,4 @@
-import { flushSync, mount, unmount } from 'svelte';
+import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The top bar's Back, Forward and Search buttons, with the history they read
@@ -62,6 +62,7 @@ function setPlatform(platform: string) {
 beforeEach(() => {
   world.reset();
   viewport.showShortcutHints = true;
+  viewport.isMobile = false;
   setPlatform('MacIntel');
   for (const spy of Object.values(spies)) spy.mockClear();
   const target = document.createElement('div');
@@ -229,6 +230,118 @@ describe('TopBarNavControls history buttons', () => {
 
     expect(spies.goBack).not.toHaveBeenCalled();
     expect(spies.goForward).not.toHaveBeenCalled();
+  });
+});
+
+// The mobile layout shows Forward last and hides it while there is nothing
+// forward, both in the component's styles, which jsdom does not apply. What
+// is covered here is what the script does about it: the markup's order, and
+// the focus of a Forward that is about to be hidden.
+describe('TopBarNavControls in the mobile layout', () => {
+  /** There is an entry each way, or only the ones named. */
+  function show({ back = true, forward = true } = {}) {
+    world.canGoBack = back;
+    world.canGoForward = forward;
+    flushSync();
+  }
+
+  /** The last step forward is taken: nothing is forward any more. */
+  async function takeLastStepForward({ back = true } = {}) {
+    world.canGoBack = back;
+    world.canGoForward = false;
+    flushSync();
+    await tick();
+  }
+
+  beforeEach(() => {
+    viewport.isMobile = true;
+    flushSync();
+  });
+
+  it('keeps Back, Forward, Search as the order they are tabbed and read in', () => {
+    show();
+
+    expect(buttons().map((el) => el.getAttribute('aria-label'))).toEqual([
+      'Back',
+      'Forward',
+      'Search projects',
+    ]);
+  });
+
+  it('marks Forward for the styles that place it last and hide it', () => {
+    const wrapper = () => button('Forward').parentElement!;
+    expect(wrapper().classList.contains('forward')).toBe(true);
+    expect(wrapper().classList.contains('nowhere-forward')).toBe(true);
+
+    show();
+
+    expect(wrapper().classList.contains('forward')).toBe(true);
+    expect(wrapper().classList.contains('nowhere-forward')).toBe(false);
+  });
+
+  it('moves the focus from a Forward that is hidden to Back', async () => {
+    show();
+    button('Forward').focus();
+    expect(document.activeElement).toBe(button('Forward'));
+
+    await takeLastStepForward();
+
+    expect(document.activeElement).toBe(button('Back'));
+  });
+
+  it('moves it to Back even where Back is only then enabled', async () => {
+    // At the first entry, Forward focused: the step forward enables Back in
+    // the same update that hides Forward.
+    show({ back: false });
+    button('Forward').focus();
+
+    await takeLastStepForward();
+
+    expect(document.activeElement).toBe(button('Back'));
+  });
+
+  it('moves it to Search where there is nothing back either', async () => {
+    // The history was cut down to the one entry on screen.
+    show();
+    button('Forward').focus();
+
+    await takeLastStepForward({ back: false });
+
+    expect(document.activeElement).toBe(button('Search projects'));
+  });
+
+  it('leaves the focus alone where Forward did not have it', async () => {
+    show();
+    button('Search projects').focus();
+
+    await takeLastStepForward();
+
+    expect(document.activeElement).toBe(button('Search projects'));
+  });
+
+  it('leaves the focus where something else took it meanwhile', async () => {
+    const field = document.createElement('input');
+    document.body.appendChild(field);
+    show();
+    button('Forward').focus();
+
+    world.canGoForward = false;
+    flushSync();
+    field.focus();
+    await tick();
+
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('does not move the focus in the desktop layout, where Forward stays in place', async () => {
+    viewport.isMobile = false;
+    show();
+    button('Forward').focus();
+
+    await takeLastStepForward();
+
+    expect(document.activeElement).not.toBe(button('Back'));
+    expect(document.activeElement).not.toBe(button('Search projects'));
   });
 });
 

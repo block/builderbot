@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DiffDetailRoute } from './navigation.svelte';
 
 // ── Mock plumbing ──
 
@@ -85,7 +86,7 @@ afterEach(() => {
 });
 
 describe('restoreInitialRoute', () => {
-  it('pushes the stored project before settling on an untouched Tauri stack', async () => {
+  it('opens on the stored project before settling on an untouched Tauri history', async () => {
     windowLabel = 'main';
     getStoreValue.mockResolvedValueOnce('p1');
     const { restoreInitialRoute, navigation } = await importNavigation();
@@ -95,12 +96,13 @@ describe('restoreInitialRoute', () => {
 
     expect(initPersistentStore).toHaveBeenCalledTimes(1);
     expect(getStoreValue).toHaveBeenCalledWith('last-viewed-project');
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-    ]);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
     expect(navigation.selectedProjectId).toBe('p1');
-    expect(navigation.canGoBack).toBe(true);
+    // The window opened on the project: the grid was never visited, so it is
+    // not a step Back.
+    expect(navigation.history.entries).toHaveLength(1);
+    expect(navigation.canGoBack).toBe(false);
+    expect(navigation.canGoForward).toBe(false);
     expect(navigation.initialRouteSettled).toBe(true);
   });
 
@@ -159,10 +161,7 @@ describe('restoreInitialRoute', () => {
     await restore;
 
     expect(getStoreValue).toHaveBeenCalledWith('last-viewed-project');
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-    ]);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
     expect(navigation.initialRouteSettled).toBe(true);
     expect(warn).not.toHaveBeenCalled();
   });
@@ -179,7 +178,7 @@ describe('restoreInitialRoute', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves a web-snapshot-seeded stack alone', async () => {
+  it('leaves a web-snapshot-seeded history alone', async () => {
     snapshotProjectId = 'p1';
     windowLabel = null;
     const { restoreInitialRoute, navigation } = await importNavigation();
@@ -188,10 +187,7 @@ describe('restoreInitialRoute', () => {
 
     expect(initPersistentStore).not.toHaveBeenCalled();
     expect(getStoreValue).not.toHaveBeenCalled();
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-    ]);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
     expect(navigation.initialRouteSettled).toBe(true);
   });
 
@@ -213,8 +209,8 @@ describe('restoreInitialRoute', () => {
 
   // A secondary window settles at the root before initNavigation reads its
   // seed. If the seed never lands the grid is all the window has, so the
-  // settle must have retained it: there is no Back affordance at the root to
-  // trigger a goHome that would.
+  // settle must have retained it: nothing at the root triggers a goHome that
+  // would.
   it.each([
     ['rejects', () => takeWindowSeed.mockRejectedValueOnce(new Error('no seed'))],
     ['is null', () => takeWindowSeed.mockResolvedValueOnce(null)],
@@ -258,7 +254,7 @@ describe('restoreInitialRoute', () => {
     expect(navigation.initialRouteSettled).toBe(true);
   });
 
-  it('hands a restored project to initNavigation as a seeded stack', async () => {
+  it('hands a restored project to initNavigation as a seeded history', async () => {
     getStoreValue.mockResolvedValueOnce('p1');
     projectsStoreMock.loaded = true;
     projectsStoreMock.projects = [{ id: 'p2' }];
@@ -267,7 +263,7 @@ describe('restoreInitialRoute', () => {
     await restoreInitialRoute();
     await initNavigation();
 
-    // Validation reused the pushed route rather than re-reading the store,
+    // Validation reused the restored route rather than re-reading the store,
     // and backed out because the project is gone.
     expect(getStoreValue).toHaveBeenCalledTimes(1);
     expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
@@ -281,22 +277,16 @@ describe('initial project restore', () => {
     windowLabel = 'main';
     let module = await importNavigation();
     expect(module.navigation.selectedProjectId).toBe('persisted');
-    expect(module.navigation.canGoBack).toBe(true);
-    expect(module.navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'persisted' },
-    ]);
+    expect(module.navigation.canGoBack).toBe(false);
+    expect(module.navigation.detailStack).toEqual([{ kind: 'project', projectId: 'persisted' }]);
     expect(module.navigation.currentRoute).toEqual({ kind: 'project', projectId: 'persisted' });
 
     vi.resetModules();
     windowLabel = null;
     module = await importNavigation();
     expect(module.navigation.selectedProjectId).toBe('persisted');
-    expect(module.navigation.canGoBack).toBe(true);
-    expect(module.navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'persisted' },
-    ]);
+    expect(module.navigation.canGoBack).toBe(false);
+    expect(module.navigation.detailStack).toEqual([{ kind: 'project', projectId: 'persisted' }]);
   });
 
   it('starts a secondary window empty instead of leaking the shared snapshot', async () => {
@@ -356,7 +346,7 @@ describe('persistLastProject', () => {
 });
 
 describe('initNavigation', () => {
-  it('leaves a seeded web stack untouched when the project still exists', async () => {
+  it('leaves a seeded web history untouched when the project still exists', async () => {
     snapshotProjectId = 'p1';
     projectsStoreMock.loaded = true;
     projectsStoreMock.projects = [{ id: 'p1' }];
@@ -366,14 +356,12 @@ describe('initNavigation', () => {
 
     expect(projectsStoreMock.whenLoaded).toHaveBeenCalledTimes(1);
     expect(projectsStoreMock.ensureLoaded).not.toHaveBeenCalled();
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-    ]);
-    expect(navigation.canGoBack).toBe(true);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
+    expect(navigation.history.entries).toHaveLength(1);
+    expect(navigation.canGoBack).toBe(false);
   });
 
-  it('resets a seeded stack and clears persistence when the restored project is gone', async () => {
+  it('resets a seeded history and clears persistence when the restored project is gone', async () => {
     snapshotProjectId = 'p1';
     projectsStoreMock.loaded = true;
     projectsStoreMock.projects = [{ id: 'p2' }];
@@ -383,6 +371,9 @@ describe('initNavigation', () => {
 
     expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
     expect(navigation.selectedProjectId).toBeNull();
+    // The missing project is not left behind as a step Back.
+    expect(navigation.history.entries).toEqual([[{ kind: 'projects' }]]);
+    expect(navigation.canGoBack).toBe(false);
     expect(setStoreValue).toHaveBeenCalledWith('last-viewed-project', null);
     expect(clearSnapshot).toHaveBeenCalledWith('staged:boot:last-project');
   });
@@ -401,9 +392,14 @@ describe('initNavigation', () => {
 
     expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
     expect(navigation.selectedProjectId).toBeNull();
+    // And the project the window opened on is still a step Back.
+    expect(navigation.history.entries).toEqual([
+      [{ kind: 'project', projectId: 'p1' }],
+      [{ kind: 'projects' }],
+    ]);
   });
 
-  it('pushes the stored project on a pristine Tauri stack', async () => {
+  it('opens on the stored project on a pristine Tauri history', async () => {
     snapshotProjectId = null;
     getStoreValue.mockResolvedValueOnce('p1');
     projectsStoreMock.loaded = true;
@@ -412,14 +408,12 @@ describe('initNavigation', () => {
 
     await initNavigation();
 
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-    ]);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
     expect(navigation.selectedProjectId).toBe('p1');
+    expect(navigation.canGoBack).toBe(false);
   });
 
-  it('clears a missing stored Tauri project even from a pristine stack', async () => {
+  it('clears a missing stored Tauri project even from a pristine history', async () => {
     getStoreValue.mockResolvedValueOnce('p1');
     projectsStoreMock.loaded = true;
     projectsStoreMock.projects = [{ id: 'p2' }];
@@ -444,14 +438,16 @@ describe('initNavigation', () => {
     selectProject('p2');
     await restore;
 
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p2' },
-    ]);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p2' }]);
     expect(navigation.selectedProjectId).toBe('p2');
+    // The stored project was not restored over, or under, where the user went.
+    expect(navigation.history.entries).toEqual([
+      [{ kind: 'projects' }],
+      [{ kind: 'project', projectId: 'p2' }],
+    ]);
   });
 
-  it('pushes a valid secondary-window seed after validation', async () => {
+  it('opens on a valid secondary-window seed after validation', async () => {
     windowLabel = 'win-2';
     takeWindowSeed.mockResolvedValueOnce('p1');
     projectsStoreMock.loaded = true;
@@ -460,17 +456,549 @@ describe('initNavigation', () => {
 
     await initNavigation();
 
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-    ]);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
     expect(navigation.selectedProjectId).toBe('p1');
+    expect(navigation.canGoBack).toBe(false);
+  });
+});
+
+// Back and Forward: the history of views the window has visited. The model
+// itself (entries, index, truncation) is covered in navigationHistory.test.ts;
+// here it is what each navigation does to it and what a step does to the view.
+describe('history navigation', () => {
+  const home = { kind: 'projects' };
+  const repos = { kind: 'repos' };
+  const projectRoute = (projectId: string) => ({ kind: 'project', projectId });
+  const settings = (section: string) => ({ kind: 'settings', section });
+
+  let dialogs: Array<{ getAttribute: (name: string) => string | null }>;
+  let dispatchEvent: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    dialogs = [];
+    dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent });
+    vi.stubGlobal('document', { querySelectorAll: () => dialogs });
+  });
+
+  it('starts with nothing to go back or forward to', async () => {
+    const { goBack, goForward, navigation } = await importNavigation();
+
+    expect(navigation.history.entries).toEqual([[home]]);
+    expect(navigation.canGoBack).toBe(false);
+    expect(navigation.canGoForward).toBe(false);
+
+    // A step with no entry that way does nothing.
+    await expect(goBack()).resolves.toBe(false);
+    await expect(goForward()).resolves.toBe(false);
+    expect(navigation.detailStack).toEqual([home]);
+  });
+
+  it('records each view visited, whatever it was opened from', async () => {
+    const { selectProject, showAllRepos, selectBoard, openSettings, goHome, navigation } =
+      await importNavigation();
+
+    selectProject('a');
+    selectProject('b');
+    showAllRepos();
+    selectBoard('g1');
+    openSettings('general');
+    goHome();
+
+    expect(navigation.history.entries).toEqual([
+      [home],
+      [projectRoute('a')],
+      [projectRoute('b')],
+      [repos],
+      [{ kind: 'board', groupId: 'g1' }],
+      [{ kind: 'board', groupId: 'g1' }, settings('general')],
+      [home],
+    ]);
+    expect(navigation.history.index).toBe(6);
+    expect(navigation.canGoBack).toBe(true);
+    expect(navigation.canGoForward).toBe(false);
+  });
+
+  it('steps back to the previous view, not up to the grid', async () => {
+    const { selectProject, showAllRepos, goBack, navigation } = await importNavigation();
+    selectProject('a');
+    selectProject('b');
+    showAllRepos();
+    selectProject('c');
+
+    await expect(goBack()).resolves.toBe(true);
+    expect(navigation.currentRoute).toEqual(repos);
+    expect(navigation.showReposList).toBe(true);
+
+    await goBack();
+    expect(navigation.currentRoute).toEqual(projectRoute('b'));
+    expect(navigation.selectedProjectId).toBe('b');
+
+    await goBack();
+    expect(navigation.currentRoute).toEqual(projectRoute('a'));
+
+    await goBack();
+    expect(navigation.currentRoute).toEqual(home);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.canGoBack).toBe(false);
+    expect(navigation.canGoForward).toBe(true);
+  });
+
+  it('steps forward again through the views it stepped back from', async () => {
+    const { selectProject, goBack, goForward, navigation } = await importNavigation();
+    selectProject('a');
+    selectProject('b');
+    await goBack();
+    await goBack();
+
+    await expect(goForward()).resolves.toBe(true);
+    expect(navigation.currentRoute).toEqual(projectRoute('a'));
+    expect(navigation.canGoBack).toBe(true);
+    expect(navigation.canGoForward).toBe(true);
+
+    await goForward();
+    expect(navigation.currentRoute).toEqual(projectRoute('b'));
+    expect(navigation.canGoForward).toBe(false);
+  });
+
+  it('drops the forward entries when going somewhere new after going back', async () => {
+    const { selectProject, goBack, goForward, navigation } = await importNavigation();
+    selectProject('a');
+    selectProject('b');
+    selectProject('c');
+    await goBack();
+    await goBack();
+
+    selectProject('d');
+
+    expect(navigation.history.entries).toEqual([[home], [projectRoute('a')], [projectRoute('d')]]);
+    expect(navigation.canGoForward).toBe(false);
+    await expect(goForward()).resolves.toBe(false);
+    expect(navigation.currentRoute).toEqual(projectRoute('d'));
+  });
+
+  it('adds no entry, and keeps the forward ones, for the view already on screen', async () => {
+    const { selectProject, goHome, goBack, navigation } = await importNavigation();
+    selectProject('a');
+    selectProject('b');
+    await goBack();
+
+    selectProject('a');
+
+    expect(navigation.history.entries).toEqual([[home], [projectRoute('a')], [projectRoute('b')]]);
+    expect(navigation.canGoForward).toBe(true);
+
+    await goBack();
+    goHome();
+    expect(navigation.history.entries).toHaveLength(3);
+    expect(navigation.canGoForward).toBe(true);
+  });
+
+  it('persists the project a step lands on, and none for the grid', async () => {
+    const { selectProject, showAllRepos, goBack, goForward } = await importNavigation();
+    selectProject('a');
+    selectProject('b');
+    showAllRepos();
+    setStoreValue.mockClear();
+
+    await goBack();
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'b');
+    await goBack();
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'a');
+    await goBack();
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
+    await goForward();
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'a');
+  });
+
+  it('asks the grid to restore to the project a step back left', async () => {
+    const { requestProjectsListRestore } = await import('../projects/projectsListViewState.svelte');
+    const { selectProject, goBack } = await importNavigation();
+    selectProject('a');
+
+    await goBack();
+
+    expect(requestProjectsListRestore).toHaveBeenCalledWith('a');
+  });
+
+  it('does not step while a dialog is open', async () => {
+    const { selectProject, goBack, goForward, navigation } = await importNavigation();
+    selectProject('a');
+    selectProject('b');
+    await goBack();
+    dialogs.push({ getAttribute: () => 'open' });
+
+    await expect(goBack()).resolves.toBe(false);
+    await expect(goForward()).resolves.toBe(false);
+    expect(navigation.currentRoute).toEqual(projectRoute('a'));
+
+    // One that is only animating out is not in the way.
+    dialogs = [{ getAttribute: () => 'closed' }];
+    await expect(goBack()).resolves.toBe(true);
+    expect(navigation.currentRoute).toEqual(home);
+  });
+
+  describe('Settings', () => {
+    it('is one entry however many sections are looked at', async () => {
+      const { selectProject, openSettings, goBack, goForward, navigation } =
+        await importNavigation();
+      selectProject('a');
+
+      openSettings('general');
+      openSettings('keyboard');
+      openSettings('doctor');
+
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [projectRoute('a')],
+        [projectRoute('a'), settings('doctor')],
+      ]);
+
+      // Back leaves Settings for the project it was opened from, and Forward
+      // reopens it on the section last looked at.
+      await goBack();
+      expect(navigation.activeView).toBe('workspace');
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      await goForward();
+      expect(navigation.activeView).toBe('settings');
+      expect(navigation.settingsSection).toBe('doctor');
+    });
+
+    it('keeps the entries either side when the section changes', async () => {
+      const { selectProject, openSettings, goBack, navigation } = await importNavigation();
+      openSettings('general');
+      selectProject('a');
+      await goBack();
+
+      openSettings('tags');
+
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [home, settings('tags')],
+        [projectRoute('a')],
+      ]);
+      expect(navigation.canGoBack).toBe(true);
+      expect(navigation.canGoForward).toBe(true);
+    });
+
+    it('closes with a step back to the view it was opened from', async () => {
+      const { selectProject, openSettings, closeSettings, navigation } = await importNavigation();
+      selectProject('a');
+      openSettings('general');
+
+      closeSettings();
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      // A step, not a new entry: Forward reopens Settings.
+      expect(navigation.history.entries).toHaveLength(3);
+      expect(navigation.history.index).toBe(1);
+      expect(navigation.canGoForward).toBe(true);
+    });
+
+    it('comes back over the view it was opened from when stepped back to', async () => {
+      const { selectProject, openSettings, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      openSettings('general');
+      selectProject('b');
+
+      await goBack();
+
+      expect(navigation.detailStack).toEqual([projectRoute('a'), settings('general')]);
+      expect(navigation.activeView).toBe('settings');
+      // The workspace under it is the project it was opened over, not b.
+      expect(navigation.selectedProjectId).toBe('a');
+      expect(navigation.projectLayer).toEqual(projectRoute('a'));
+    });
+  });
+
+  describe('the diff view', () => {
+    it('closes with a step back, announced as a pop', async () => {
+      const { selectProject, openDiffRoute, closeDiffRouteIfCurrent, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const diffRoute = navigation.currentRoute as DiffDetailRoute;
+
+      closeDiffRouteIfCurrent(diffRoute);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      expect(navigation.history.index).toBe(1);
+      expect(navigation.canGoForward).toBe(true);
+      expect(dispatchEvent).toHaveBeenCalledTimes(1);
+      const event = dispatchEvent.mock.calls[0][0] as CustomEvent;
+      expect(event.type).toBe('staged:diff-route-popped');
+      expect(event.detail.route).toBe(diffRoute);
+    });
+
+    it('ignores a close for a diff that is no longer the view on screen', async () => {
+      const { selectProject, openDiffRoute, closeDiffRouteIfCurrent, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const diffRoute = navigation.currentRoute as DiffDetailRoute;
+      selectProject('b');
+
+      closeDiffRouteIfCurrent(diffRoute);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      expect(navigation.history.index).toBe(3);
+    });
+
+    it('opens over its own project from another view, and closes onto that project', async () => {
+      const { selectProject, openDiffRoute, closeDiffRouteIfCurrent, goBack, navigation } =
+        await importNavigation();
+      selectProject('a');
+
+      openDiffRoute({ branchId: 'b9', projectId: 'b' });
+      const diffRoute = navigation.currentRoute as DiffDetailRoute;
+
+      // One entry for the diff over its project: b itself was not visited.
+      expect(navigation.detailStack).toEqual([projectRoute('b'), diffRoute]);
+      expect(navigation.history.entries).toHaveLength(3);
+      expect(navigation.selectedProjectId).toBe('b');
+      expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'b');
+
+      // Closing shows what was under the diff. The user didn't come from
+      // there, so it is a visit, and Back from it returns to the diff.
+      closeDiffRouteIfCurrent(diffRoute);
+      expect(navigation.detailStack).toEqual([projectRoute('b')]);
+      expect(navigation.history.entries).toHaveLength(4);
+      expect(dispatchEvent.mock.calls.map(([event]) => event.type)).toEqual([
+        'staged:diff-route-popped',
+      ]);
+
+      await goBack();
+      expect(navigation.currentRoute).toBe(diffRoute);
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+    });
+
+    it('takes the place of the diff on screen without a new entry or an announcement', async () => {
+      const { selectProject, openDiffRoute, navigation } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+
+      openDiffRoute({ branchId: 'b1', projectId: 'a', commitSha: 'abc' });
+
+      expect(navigation.history.entries).toHaveLength(3);
+      expect(navigation.currentRoute).toMatchObject({ kind: 'diff', commitSha: 'abc' });
+      expect(dispatchEvent).not.toHaveBeenCalled();
+    });
+
+    it('waits for the comment being typed to save before a step leaves it', async () => {
+      const { selectProject, openDiffRoute, registerDiffLeaveCheck, goBack, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const diffRoute = navigation.currentRoute;
+      let finishSave!: (saved: boolean) => void;
+      const check = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+      registerDiffLeaveCheck(check);
+
+      const stepping = goBack();
+      await vi.waitFor(() => expect(check).toHaveBeenCalledTimes(1));
+      // Still on the diff while the save runs.
+      expect(navigation.currentRoute).toBe(diffRoute);
+
+      finishSave(true);
+      await expect(stepping).resolves.toBe(true);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      // What was under the diff: a reference that led to it can come back.
+      expect(dispatchEvent.mock.calls.map(([event]) => event.type)).toEqual([
+        'staged:diff-route-popped',
+      ]);
+    });
+
+    it('stays on the diff when the comment could not be saved, or the save throws', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { selectProject, openDiffRoute, registerDiffLeaveCheck, goBack, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const diffRoute = navigation.currentRoute;
+
+      registerDiffLeaveCheck(vi.fn().mockResolvedValue(false));
+      await expect(goBack()).resolves.toBe(false);
+      expect(navigation.currentRoute).toBe(diffRoute);
+
+      registerDiffLeaveCheck(vi.fn().mockRejectedValue(new Error('save failed')));
+      await expect(goBack()).resolves.toBe(false);
+      expect(navigation.currentRoute).toBe(diffRoute);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(dispatchEvent).not.toHaveBeenCalled();
+    });
+
+    it('does not save for a step with nowhere to go', async () => {
+      const { selectProject, openDiffRoute, registerDiffLeaveCheck, goForward } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const check = vi.fn().mockResolvedValue(true);
+      registerDiffLeaveCheck(check);
+
+      await expect(goForward()).resolves.toBe(false);
+
+      expect(check).not.toHaveBeenCalled();
+    });
+
+    it('drops a step when the user navigated, or a dialog opened, during the save', async () => {
+      const { selectProject, openDiffRoute, registerDiffLeaveCheck, goBack, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      let finishSave!: (saved: boolean) => void;
+      registerDiffLeaveCheck(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+
+      let stepping = goBack();
+      selectProject('b');
+      finishSave(true);
+      await expect(stepping).resolves.toBe(false);
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+
+      openDiffRoute({ branchId: 'b2', projectId: 'b' });
+      const diffRoute = navigation.currentRoute;
+      stepping = goBack();
+      dialogs.push({ getAttribute: () => 'open' });
+      finishSave(true);
+      await expect(stepping).resolves.toBe(false);
+      expect(navigation.currentRoute).toBe(diffRoute);
+    });
+
+    it('announces a diff as replaced when a step lands somewhere other than under it', async () => {
+      const { selectProject, openDiffRoute, goBack, goForward, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const diffRoute = navigation.currentRoute;
+      selectProject('b');
+      dispatchEvent.mockClear();
+
+      // b → the diff → b again: forward from the diff lands on b, which is
+      // not what was under it.
+      await goBack();
+      expect(navigation.currentRoute).toBe(diffRoute);
+      await goForward();
+
+      expect(dispatchEvent).toHaveBeenCalledTimes(1);
+      const event = dispatchEvent.mock.calls[0][0] as CustomEvent;
+      expect(event.type).toBe('staged:diff-route-replaced');
+      expect(event.detail.route).toBe(diffRoute);
+    });
+  });
+
+  describe('projects that are gone', () => {
+    it('forgets a project wherever it sits in the history', async () => {
+      const { selectProject, openDiffRoute, openSettings, forgetProject, goBack, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openSettings('general');
+      selectProject('b');
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      selectProject('c');
+
+      forgetProject('a');
+
+      // Its own entries, Settings over it and the diff of its branch all go.
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [projectRoute('b')],
+        [projectRoute('c')],
+      ]);
+      expect(navigation.currentRoute).toEqual(projectRoute('c'));
+
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+    });
+
+    it('merges the entries a forgotten project sat between', async () => {
+      const { selectProject, goHome, forgetProject, navigation } = await importNavigation();
+      selectProject('a');
+      goHome();
+
+      forgetProject('a');
+
+      expect(navigation.history.entries).toEqual([[home]]);
+      expect(navigation.canGoBack).toBe(false);
+    });
+
+    it('lands on the nearest earlier entry when the project on screen is forgotten', async () => {
+      const { selectProject, forgetProject, navigation } = await importNavigation();
+      selectProject('a');
+      selectProject('b');
+
+      forgetProject('b');
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      expect(navigation.canGoForward).toBe(false);
+      expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'a');
+    });
+
+    it('lands on the grid when nothing earlier is left', async () => {
+      snapshotProjectId = 'a';
+      const { forgetProject, navigation } = await importNavigation();
+
+      forgetProject('a');
+
+      expect(navigation.history.entries).toEqual([[home]]);
+      expect(navigation.homeActive).toBe(true);
+      expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
+    });
+
+    it('steps over a project deleted in another window', async () => {
+      const { selectProject, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      selectProject('b');
+      selectProject('c');
+      // The list this window loaded no longer has b.
+      projectsStoreMock.loaded = true;
+      projectsStoreMock.projects = [{ id: 'a' }, { id: 'c' }];
+
+      await expect(goBack()).resolves.toBe(true);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [projectRoute('a')],
+        [projectRoute('c')],
+      ]);
+    });
+
+    it('steps over a project with a delete in flight', async () => {
+      const { selectProject, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      selectProject('b');
+      projectsStoreMock.loaded = true;
+      projectsStoreMock.projects = [{ id: 'a' }, { id: 'b' }];
+      deletingProjectIds.add('a');
+
+      await goBack();
+
+      expect(navigation.currentRoute).toEqual(home);
+    });
+
+    it('keeps every entry while the project list has not loaded', async () => {
+      const { selectProject, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      selectProject('b');
+      projectsStoreMock.loaded = false;
+      projectsStoreMock.projects = [];
+
+      await goBack();
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+    });
   });
 });
 
 describe('parked workspace', () => {
+  beforeEach(() => {
+    vi.stubGlobal('document', { querySelectorAll: () => [] });
+  });
+
   it('keeps the repos list as the workspace under settings and restores it on Back', async () => {
-    const { showAllRepos, openSettings, popDetailRoute, navigation } = await importNavigation();
+    const { showAllRepos, openSettings, goBack, navigation } = await importNavigation();
 
     showAllRepos();
     expect(navigation.showReposList).toBe(true);
@@ -484,15 +1012,15 @@ describe('parked workspace', () => {
     expect(navigation.showReposList).toBe(true);
     expect(navigation.selectedProjectId).toBeNull();
 
-    popDetailRoute();
+    await goBack();
     expect(navigation.workspaceParked).toBe(false);
     expect(navigation.showReposList).toBe(true);
   });
 
   it('keeps the project under a diff and settings and parks for both', async () => {
-    // Popping the diff route announces itself on `window` (node has none).
+    // Leaving the diff route announces itself on `window` (node has none).
     vi.stubGlobal('window', { dispatchEvent: vi.fn() });
-    const { selectProject, openDiffRoute, openSettings, popDetailRoute, navigation } =
+    const { selectProject, openDiffRoute, openSettings, goBack, navigation } =
       await importNavigation();
 
     selectProject('p1');
@@ -507,51 +1035,56 @@ describe('parked workspace', () => {
     expect(navigation.settingsSection).toBe('doctor');
     expect(navigation.selectedProjectId).toBe('p1');
 
-    popDetailRoute();
+    await goBack();
     expect(navigation.currentRoute.kind).toBe('diff');
     expect(navigation.workspaceParked).toBe(true);
 
-    popDetailRoute();
+    await goBack();
     expect(navigation.currentRoute).toEqual({ kind: 'project', projectId: 'p1' });
     expect(navigation.workspaceParked).toBe(false);
   });
 });
 
-// A project opened from over the workspace (the ⌘K palette is how) replaces
-// what the workspace was showing, as a sidebar switch would: Back goes home.
+// A project opened from over the workspace (the ⌘K palette is how) takes the
+// place of Settings or the diff view rather than opening under it, and Back
+// returns to them.
 describe('selectProject from Settings and the diff view', () => {
   const home = { kind: 'projects' };
   const projectRoute = (projectId: string) => ({ kind: 'project', projectId });
 
-  it('replaces the project under Settings instead of stacking on it', async () => {
-    const { selectProject, openSettings, popDetailRoute, navigation } = await importNavigation();
+  beforeEach(() => {
+    vi.stubGlobal('document', { querySelectorAll: () => [] });
+  });
+
+  it('leaves Settings for the project, and steps back to Settings where it was', async () => {
+    const { selectProject, openSettings, goBack, navigation } = await importNavigation();
     selectProject('a');
     openSettings('general');
 
     selectProject('b');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.detailStack).toEqual([projectRoute('b')]);
     expect(navigation.activeView).toBe('workspace');
     expect(navigation.workspaceParked).toBe(false);
     expect(navigation.selectedProjectId).toBe('b');
     expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'b');
 
-    popDetailRoute();
-    expect(navigation.currentRoute).toEqual(home);
+    await goBack();
+    expect(navigation.detailStack).toEqual([
+      projectRoute('a'),
+      { kind: 'settings', section: 'general' },
+    ]);
   });
 
   it('closes Settings onto the project underneath when that project is picked', async () => {
-    const { selectProject, openSettings, popDetailRoute, navigation } = await importNavigation();
+    const { selectProject, openSettings, navigation } = await importNavigation();
     selectProject('a');
     openSettings('keyboard');
 
     selectProject('a');
 
-    // Not [home, a, a], where the first Back would appear to do nothing.
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
-
-    popDetailRoute();
-    expect(navigation.currentRoute).toEqual(home);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
+    expect(navigation.activeView).toBe('workspace');
   });
 
   it('opens a project from Settings over home', async () => {
@@ -560,21 +1093,21 @@ describe('selectProject from Settings and the diff view', () => {
 
     selectProject('a');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
-  it('replaces the repos list under Settings, as a pick from that list does', async () => {
+  it('leaves the repos list under Settings for the project', async () => {
     const { selectProject, openSettings, showAllRepos, navigation } = await importNavigation();
     showAllRepos();
     openSettings('general');
 
     selectProject('b');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.detailStack).toEqual([projectRoute('b')]);
     expect(navigation.showReposList).toBe(false);
   });
 
-  it('replaces the project under a diff, and under Settings over a diff', async () => {
+  it('leaves a diff, and Settings over a diff, for the project', async () => {
     const dispatchEvent = vi.fn();
     vi.stubGlobal('window', { dispatchEvent });
     const { selectProject, openDiffRoute, openSettings, navigation } = await importNavigation();
@@ -582,13 +1115,13 @@ describe('selectProject from Settings and the diff view', () => {
     openDiffRoute({ branchId: 'b1', projectId: 'a' });
 
     selectProject('b');
-    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.detailStack).toEqual([projectRoute('b')]);
     expect(navigation.workspaceParked).toBe(false);
 
     openDiffRoute({ branchId: 'b2', projectId: 'b' });
     openSettings('doctor');
     selectProject('c');
-    expect(navigation.detailStack).toEqual([home, projectRoute('c')]);
+    expect(navigation.detailStack).toEqual([projectRoute('c')]);
     expect(navigation.activeView).toBe('workspace');
   });
 
@@ -612,16 +1145,39 @@ describe('selectProject from Settings and the diff view', () => {
     expect(dispatchEvent).toHaveBeenCalledTimes(1);
   });
 
-  it('still pushes from home and replaces from a project or the repos list', async () => {
+  it('announces a diff as replaced, not popped, by its own project being opened', async () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent });
+    const { selectProject, openDiffRoute } = await importNavigation();
+    selectProject('a');
+    openDiffRoute({ branchId: 'b1', projectId: 'a' });
+
+    // The view is now what was under the diff, but the user asked for the
+    // project, not to close the diff: a reference that led to it stays shut.
+    selectProject('a');
+
+    expect(dispatchEvent.mock.calls.map(([event]) => event.type)).toEqual([
+      'staged:diff-route-replaced',
+    ]);
+  });
+
+  it('is one workspace route whatever it is opened from', async () => {
     const { selectProject, showAllRepos, navigation } = await importNavigation();
 
     selectProject('a');
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
     selectProject('b');
-    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.detailStack).toEqual([projectRoute('b')]);
     showAllRepos();
     selectProject('c');
-    expect(navigation.detailStack).toEqual([home, projectRoute('b'), projectRoute('c')]);
+    expect(navigation.detailStack).toEqual([projectRoute('c')]);
+    expect(navigation.history.entries).toEqual([
+      [home],
+      [projectRoute('a')],
+      [projectRoute('b')],
+      [{ kind: 'repos' }],
+      [projectRoute('c')],
+    ]);
   });
 });
 
@@ -632,7 +1188,7 @@ describe('diffLeaveCheck', () => {
       selectProject,
       openDiffRoute,
       openSettings,
-      popDetailRoute,
+      closeSettings,
       registerDiffLeaveCheck,
       diffLeaveCheck,
     } = await importNavigation();
@@ -649,7 +1205,7 @@ describe('diffLeaveCheck', () => {
     // Settings over the diff: the diff view is not what would be left.
     openSettings('general');
     expect(diffLeaveCheck()).toBeNull();
-    popDetailRoute();
+    closeSettings();
     expect(diffLeaveCheck()).toBe(check);
   });
 
@@ -708,21 +1264,21 @@ describe('openProjectExternally', () => {
 
     await expect(openProjectExternally('a')).resolves.toBe('opened');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
     expect(setStoreValue).toHaveBeenCalledWith('last-viewed-project', 'a');
   });
 
-  it('replaces the project on screen, and the one under Settings', async () => {
+  it('opens over the project on screen, and from Settings over one', async () => {
     const { openProjectExternally, selectProject, openSettings, navigation } =
       await importNavigation();
     selectProject('a');
 
     await expect(openProjectExternally('b')).resolves.toBe('opened');
-    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.detailStack).toEqual([projectRoute('b')]);
 
     openSettings('general');
     await expect(openProjectExternally('a')).resolves.toBe('opened');
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   it('answers opened for the project already on screen without navigating', async () => {
@@ -744,7 +1300,7 @@ describe('openProjectExternally', () => {
 
     await expect(openProjectExternally('a')).resolves.toBe('opened');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   it('refuses while a dialog is open and leaves the route alone', async () => {
@@ -754,7 +1310,7 @@ describe('openProjectExternally', () => {
 
     await expect(openProjectExternally('b')).resolves.toBe('dialogOpen');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   it('counts a dialog with no data-state, as hand-rolled ones have none', async () => {
@@ -772,7 +1328,7 @@ describe('openProjectExternally', () => {
 
     await expect(openProjectExternally('a')).resolves.toBe('opened');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   it('looks for dialogs and alert dialogs', async () => {
@@ -808,7 +1364,7 @@ describe('openProjectExternally', () => {
     finishSave(true);
     await expect(opening).resolves.toBe('opened');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+    expect(navigation.detailStack).toEqual([projectRoute('b')]);
     expect(dispatchEvent).toHaveBeenCalledTimes(1);
     const event = dispatchEvent.mock.calls[0][0] as CustomEvent;
     expect(event.type).toBe('staged:diff-route-replaced');
@@ -831,7 +1387,7 @@ describe('openProjectExternally', () => {
     await expect(openProjectExternally('a')).resolves.toBe('opened');
 
     expect(check).toHaveBeenCalledTimes(1);
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   it('stays on the diff when the comment could not be saved', async () => {
@@ -935,7 +1491,7 @@ describe('openProjectExternally', () => {
     await expect(openProjectExternally('b')).resolves.toBe('projectNotFound');
     await expect(openProjectExternally('a')).resolves.toBe('projectNotFound');
 
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   it('answers not found ahead of an open dialog and without a diff save', async () => {
@@ -974,7 +1530,7 @@ describe('openProjectExternally', () => {
     await opening;
 
     expect(answer).toBe('opened');
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   it('opens the project when the list failed to load, as a window seed does', async () => {
@@ -985,7 +1541,7 @@ describe('openProjectExternally', () => {
     await expect(openProjectExternally('a')).resolves.toBe('opened');
 
     expect(projectsStoreMock.whenLoaded).toHaveBeenCalledTimes(1);
-    expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+    expect(navigation.detailStack).toEqual([projectRoute('a')]);
   });
 
   describe('with a stillWanted check', () => {
@@ -996,7 +1552,7 @@ describe('openProjectExternally', () => {
       await expect(openProjectExternally('a', stillWanted)).resolves.toBe('opened');
 
       expect(stillWanted).toHaveBeenCalledTimes(1);
-      expect(navigation.detailStack).toEqual([home, projectRoute('a')]);
+      expect(navigation.detailStack).toEqual([projectRoute('a')]);
     });
 
     it('leaves the window alone for a request withdrawn during the wait for the list', async () => {
@@ -1084,7 +1640,7 @@ describe('openProjectExternally', () => {
       await expect(openProjectExternally('b', stillWanted)).resolves.toBe('opened');
 
       expect(order).toEqual(['save', 'stillWanted']);
-      expect(navigation.detailStack).toEqual([home, projectRoute('b')]);
+      expect(navigation.detailStack).toEqual([projectRoute('b')]);
     });
 
     it('does not ask when there is nothing to navigate', async () => {
@@ -1247,14 +1803,14 @@ describe('workspace layers', () => {
     releaseBoardLayer('g1');
     expect(navigation.projectLayer).toBe(board);
 
-    // Another board replaces the route rather than stacking on it.
+    // Another board is the workspace route in its place, not over it.
     selectBoard('g2');
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['board']);
     expect(navigation.projectLayer).toEqual({ kind: 'board', groupId: 'g2' });
 
-    // A project opened from the board replaces it, as from the repos view.
+    // So is a project opened from the board, as from the repos view.
     selectProject('p1');
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'project']);
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['project']);
 
     selectBoard('g2');
     goHome();
@@ -1266,7 +1822,7 @@ describe('workspace layers', () => {
     expect(navigation.projectLayer).toBeNull();
   });
 
-  it('leaves a board that is no longer offered from wherever it sits in the stack', async () => {
+  it('leaves a board that is no longer offered, on screen, under settings or retained', async () => {
     const { restoreInitialRoute, selectBoard, openSettings, goHome, leaveBoard, navigation } =
       await importNavigation();
     await restoreInitialRoute();
@@ -1280,7 +1836,7 @@ describe('workspace layers', () => {
     expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
 
     // Under settings (where the unpinning was done): settings stays open,
-    // over the home grid, so Back lands on home.
+    // over the home grid, and the board is no longer a step Back.
     selectBoard('g1');
     openSettings('tags');
     leaveBoard('g1');
@@ -1288,8 +1844,12 @@ describe('workspace layers', () => {
     expect(navigation.currentRoute.kind).toBe('settings');
     expect(navigation.homeActive).toBe(true);
     expect(navigation.projectLayer).toBeNull();
+    expect(navigation.history.entries).toEqual([
+      [{ kind: 'projects' }],
+      [{ kind: 'projects' }, { kind: 'settings', section: 'tags' }],
+    ]);
 
-    // Retained under home: the layer is released, the stack untouched.
+    // Retained under home: the layer is released, the view untouched.
     goHome();
     selectBoard('g2');
     goHome();
@@ -1304,80 +1864,77 @@ describe('workspace layers', () => {
     expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g3' });
   });
 
-  it('keeps the stack bounded through board ↔ All repos ↔ board round trips', async () => {
+  it('keeps the history bounded through board ↔ All repos round trips', async () => {
+    const { MAX_HISTORY_ENTRIES } = await import('./navigationHistory');
     const { restoreInitialRoute, selectBoard, showAllRepos, selectProject, navigation } =
       await importNavigation();
     await restoreInitialRoute();
 
+    // Each is the whole workspace route, and each trip between them a visit.
     selectBoard('g1');
     showAllRepos();
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'repos']);
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['repos']);
     selectBoard('g1');
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
-    for (let i = 0; i < 5; i++) {
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['board']);
+    expect(navigation.history.entries).toHaveLength(4);
+
+    for (let i = 0; i < MAX_HISTORY_ENTRIES; i++) {
       showAllRepos();
       selectBoard('g1');
     }
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    expect(navigation.history.entries).toHaveLength(MAX_HISTORY_ENTRIES);
     expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g1' });
+    expect(navigation.canGoForward).toBe(false);
 
-    // A board picked from a project replaces it too; All repos over a
-    // project still stacks, so Back returns to the project.
-    selectProject('p1');
-    selectBoard('g2');
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects', 'board']);
+    // All repos opened from a project is the route in its place too.
     selectProject('p1');
     showAllRepos();
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual([
-      'projects',
-      'project',
-      'repos',
-    ]);
+    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['repos']);
+    expect(navigation.selectedProjectId).toBeNull();
   });
 
-  it('leaves every route of an unpinned board, landing on what was under it', async () => {
-    const { restoreInitialRoute, selectBoard, showAllRepos, leaveBoard, navigation } =
-      await importNavigation();
+  it('takes an unpinned board out of the history, landing where Back would', async () => {
+    vi.stubGlobal('document', { querySelectorAll: () => [] });
+    const {
+      restoreInitialRoute,
+      selectBoard,
+      showAllRepos,
+      selectProject,
+      leaveBoard,
+      goBack,
+      navigation,
+    } = await importNavigation();
     await restoreInitialRoute();
 
-    // After a round trip the on-screen board goes, even with its route
-    // present more than once (a stack from before the replace rules, say).
+    // Every entry for the board goes, and other groups' boards stay. The
+    // view on screen was the board, so the entry before it takes its place.
     selectBoard('g1');
     showAllRepos();
     selectBoard('g1');
+    selectBoard('g2');
+    await goBack();
     leaveBoard('g1');
-    expect(navigation.detailStack.map((route) => route.kind)).toEqual(['projects']);
-    expect(navigation.homeActive).toBe(true);
-    expect(navigation.projectLayer).toBeNull();
-
-    // Duplicates are all removed, and routes for other groups stay.
-    navigation.detailStack = [
-      { kind: 'projects' },
-      { kind: 'board', groupId: 'g1' },
-      { kind: 'repos' },
-      { kind: 'board', groupId: 'g1' },
-      { kind: 'board', groupId: 'g2' },
-    ];
-    leaveBoard('g1');
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'repos' },
-      { kind: 'board', groupId: 'g2' },
+    expect(navigation.history.entries).toEqual([
+      [{ kind: 'projects' }],
+      [{ kind: 'repos' }],
+      [{ kind: 'board', groupId: 'g2' }],
     ]);
-    expect(navigation.currentRoute).toEqual({ kind: 'board', groupId: 'g2' });
+    expect(navigation.currentRoute).toEqual({ kind: 'repos' });
+    expect(navigation.projectLayer).toEqual({ kind: 'repos' });
+    expect(navigation.canGoForward).toBe(true);
 
-    // A board over a project lands back on the project, which is persisted.
-    navigation.detailStack = [
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-      { kind: 'board', groupId: 'g1' },
-    ];
+    // A board ahead of the view on screen goes without moving it.
+    leaveBoard('g2');
+    expect(navigation.currentRoute).toEqual({ kind: 'repos' });
+    expect(navigation.canGoForward).toBe(false);
+
+    // A board opened from a project lands back on the project, which is
+    // persisted.
+    selectProject('p1');
+    selectBoard('g1');
     setStoreValue.mockClear();
     leaveBoard('g1');
-    expect(navigation.detailStack).toEqual([
-      { kind: 'projects' },
-      { kind: 'project', projectId: 'p1' },
-    ]);
+    expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
     expect(navigation.selectedProjectId).toBe('p1');
     expect(navigation.homeActive).toBe(false);
     expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
@@ -1391,8 +1948,9 @@ describe('workspace layers', () => {
       selectProject,
       goHome,
       openSettings,
+      closeSettings,
       openDiffRoute,
-      popDetailRoute,
+      closeDiffRouteIfCurrent,
       navigation,
     } = await importNavigation();
     await restoreInitialRoute();
@@ -1404,10 +1962,10 @@ describe('workspace layers', () => {
     expect(navigation.workspaceParked).toBe(true);
     expect(navigation.homeActive).toBe(true);
     expect(navigation.projectLayer).toBe(layer);
-    popDetailRoute();
+    closeSettings();
 
-    // A diff that names a project no longer mounts that project's view under
-    // it: the layers follow the base route, which is still home.
+    // A diff that takes another's place doesn't mount the project it names
+    // under it: the layers follow the base route, which is still home.
     openDiffRoute({ branchId: 'b1' });
     expect(navigation.homeActive).toBe(true);
     expect(navigation.projectLayer).toBe(layer);
@@ -1416,7 +1974,8 @@ describe('workspace layers', () => {
     expect(navigation.selectedProjectId).toBe('p2');
     expect(navigation.homeActive).toBe(true);
     expect(navigation.projectLayer).toBe(layer);
-    popDetailRoute();
+    closeDiffRouteIfCurrent(navigation.currentRoute as DiffDetailRoute);
+    expect(navigation.currentRoute).toEqual({ kind: 'projects' });
     expect(navigation.homeActive).toBe(true);
   });
 
@@ -1426,8 +1985,9 @@ describe('workspace layers', () => {
       restoreInitialRoute,
       selectProject,
       openSettings,
+      closeSettings,
       openDiffRoute,
-      popDetailRoute,
+      closeDiffRouteIfCurrent,
       navigation,
     } = await importNavigation();
     await restoreInitialRoute();
@@ -1438,8 +1998,9 @@ describe('workspace layers', () => {
     openSettings();
     expect(navigation.homeActive).toBe(false);
     expect(navigation.projectLayer).toBe(layer);
-    popDetailRoute();
-    popDetailRoute();
+    closeSettings();
+    closeDiffRouteIfCurrent(navigation.currentRoute as DiffDetailRoute);
+    expect(navigation.currentRoute).toEqual({ kind: 'project', projectId: 'p1' });
     expect(navigation.homeActive).toBe(false);
     expect(navigation.projectLayer).toBe(layer);
   });

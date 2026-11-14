@@ -180,6 +180,7 @@ let toastError: ReturnType<typeof vi.fn>;
 let selectProject: ReturnType<typeof vi.fn>;
 let goHome: ReturnType<typeof vi.fn>;
 let releaseProjectLayer: ReturnType<typeof vi.fn>;
+let forgetProject: ReturnType<typeof vi.fn>;
 let navigationState: {
   selectedProjectId: string | null;
   homeActive: boolean;
@@ -289,6 +290,7 @@ beforeEach(() => {
   selectProject = vi.fn();
   goHome = vi.fn();
   releaseProjectLayer = vi.fn();
+  forgetProject = vi.fn();
   navigationState = { selectedProjectId: null, homeActive: true, projectLayer: null };
   projectDeleteStarted = vi.fn();
   projectDeleteFailed = vi.fn();
@@ -334,6 +336,7 @@ beforeEach(() => {
     selectProject,
     goHome,
     releaseProjectLayer,
+    forgetProject,
   }));
   vi.doMock('../../stores/projectsData.svelte', () => ({
     projectsDataStore: {
@@ -813,6 +816,28 @@ describe('navigation on delete', () => {
     );
     expect(layerAtDelete).toBeNull();
     expect(navigationState.homeActive).toBe(true);
+  });
+
+  it('takes the project out of the history as the delete starts, after leaving it', async () => {
+    // Back and Forward must never land on a project that is going. The
+    // history drops it once the view on screen is another one, and before
+    // the backend call, so a slow delete leaves no window to step back in.
+    navigationState.selectedProjectId = 'p1';
+    navigationState.homeActive = false;
+    let forgottenBeforeDelete = false;
+    deleteProject.mockImplementation(async () => {
+      forgottenBeforeDelete = forgetProject.mock.calls.length === 1;
+    });
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project());
+
+    expect(forgetProject).toHaveBeenCalledTimes(1);
+    expect(forgetProject).toHaveBeenCalledWith('p1');
+    expect(goHome.mock.invocationCallOrder[0]).toBeLessThan(
+      forgetProject.mock.invocationCallOrder[0]
+    );
+    expect(forgottenBeforeDelete).toBe(true);
   });
 });
 

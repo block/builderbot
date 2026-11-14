@@ -25,6 +25,7 @@
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
   import {
+    forgetProject,
     goHome,
     onViewHidden,
     releaseProjectLayer,
@@ -518,10 +519,12 @@
   // The project this view shows is gone (deleted here or elsewhere). On
   // screen, leave for home; retained under home, just release the layer so it
   // unmounts rather than show a missing project — navigation must not jump.
+  // Either way it leaves the history, so Back and Forward don't return to it.
   $effect(() => {
     if (projectsDataStore.loaded && !loading && selectedProjectId && !selectedProject) {
       if (layer.active) goHome();
       else releaseProjectLayer(selectedProjectId);
+      forgetProject(selectedProjectId);
     }
   });
 

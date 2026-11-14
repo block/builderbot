@@ -12,6 +12,7 @@ import type { Branch, Project, ProjectRepo } from '../../types';
 
 const spies = vi.hoisted(() => ({
   selectProject: vi.fn(),
+  goHome: vi.fn(),
   ensureProjectsHydrated: vi.fn(async () => {}),
   whenLoaded: vi.fn(async () => {}),
   ensureIndexLoaded: vi.fn(),
@@ -62,6 +63,7 @@ vi.mock('../layout/navigation.svelte', async () => {
       },
     },
     selectProject: spies.selectProject,
+    goHome: spies.goHome,
     diffLeaveCheck: () => (world.currentRoute.kind === 'diff' ? world.diffLeaveCheck : null),
   };
 });
@@ -225,6 +227,11 @@ const badges = () =>
       [...el.querySelectorAll('.row-badges .palette-badge')].map((b) => b.textContent?.trim()),
     ])
   );
+/** The "All projects" button beside the field, when it is offered. */
+const homeButton = () =>
+  [...document.querySelectorAll<HTMLButtonElement>('[data-command-palette] button')].find(
+    (el) => el.textContent?.trim() === 'All projects'
+  ) ?? null;
 const liveRegion = () =>
   document.querySelector<HTMLElement>('[data-command-palette] [role="status"]');
 
@@ -374,6 +381,7 @@ beforeEach(() => {
   // The navigation the app's selectProject performs, as far as the palette
   // can see it.
   spies.selectProject.mockImplementation((id: string) => world.showProject(id));
+  spies.goHome.mockImplementation(() => world.showHome(world.selectedProjectId));
 
   const target = document.createElement('div');
   document.body.appendChild(target);
@@ -2002,6 +2010,153 @@ describe('CommandPalette over Settings and the diff view', () => {
 
     // In the same tick as the key, as from any other view.
     expect(spies.selectProject).toHaveBeenCalledWith('beta');
+  });
+});
+
+// No view is a step Back from the grid (Back is the history's), and the
+// mobile layout has no sidebar, so the palette is the way to the grid from
+// any view.
+describe('CommandPalette All projects', () => {
+  it('is not offered while the grid is the view on screen', async () => {
+    await openPalette();
+
+    expect(homeButton()).toBeNull();
+  });
+
+  it('is offered beside the field from a project, the repos list, Settings and the diff view', async () => {
+    world.showProject('alpha');
+    await openPalette();
+    expect(homeButton()).not.toBeNull();
+    expect(homeButton()!.title).toBe('Go to the projects grid');
+    expect(homeButton()!.disabled).toBe(false);
+
+    await change(() => (world.currentRoute = { kind: 'repos' }));
+    expect(homeButton()).not.toBeNull();
+
+    await change(() => world.showOverProject('settings', 'alpha'));
+    expect(homeButton()).not.toBeNull();
+
+    await change(() => world.showOverProject('diff', 'alpha'));
+    expect(homeButton()).not.toBeNull();
+  });
+
+  it('leaves focus in the field and the highlight on a row, as without it', async () => {
+    world.showProject('alpha');
+    await openPalette();
+
+    expect(document.activeElement).toBe(input());
+    expect(selectedIds()).toEqual(['beta']);
+  });
+
+  it('goes to the grid on a click, closes, and moves focus to the view that came up', async () => {
+    world.showProject('alpha');
+    const layer = workspaceLayer();
+    const before = pageControl('button', layer);
+    before.focus();
+    await openPalette();
+
+    await pressOn(homeButton()!);
+
+    expect(spies.goHome).toHaveBeenCalledTimes(1);
+    expect(spies.selectProject).not.toHaveBeenCalled();
+    expect(commandPalette.open).toBe(false);
+    await dialogGone();
+    expect(document.activeElement).toBe(layer);
+  });
+
+  it('is pressed by Enter when it has focus, rather than opening the highlighted row', async () => {
+    world.showProject('alpha');
+    const underneath = vi.fn();
+    window.addEventListener('keydown', underneath);
+    await openPalette();
+    homeButton()!.focus();
+
+    const event = await press('Enter');
+
+    // The key is left to the button (the browser turns it into the click
+    // jsdom doesn't), and kept from the views under the dialog.
+    expect(event.defaultPrevented).toBe(false);
+    expect(underneath).not.toHaveBeenCalled();
+    expect(spies.selectProject).not.toHaveBeenCalled();
+    expect(commandPalette.open).toBe(true);
+    expect(document.activeElement).toBe(homeButton());
+    window.removeEventListener('keydown', underneath);
+
+    homeButton()!.click();
+    await settle();
+
+    expect(spies.goHome).toHaveBeenCalledTimes(1);
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('is pressed by Space when it has focus, rather than typing into the field', async () => {
+    world.showProject('alpha');
+    await openPalette();
+    homeButton()!.focus();
+
+    const event = await press(' ');
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(homeButton());
+    expect(input().value).toBe('');
+  });
+
+  it('waits for the diff view to save what was typed into it before leaving', async () => {
+    world.showOverProject('diff', 'alpha');
+    let finishSave!: (saved: boolean) => void;
+    world.diffLeaveCheck = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+    await openPalette();
+
+    await pressOn(homeButton()!);
+
+    expect(world.diffLeaveCheck).toHaveBeenCalledTimes(1);
+    expect(spies.goHome).not.toHaveBeenCalled();
+    expect(commandPalette.open).toBe(true);
+    // The wait is announced and the palette holds still, with no row
+    // claiming it: the button is off, the field read-only, Enter opens
+    // nothing.
+    expect(liveRegion()?.textContent).toBe('Saving comment…');
+    expect(busyIds()).toEqual([]);
+    expect(homeButton()!.disabled).toBe(true);
+    expect(input().readOnly).toBe(true);
+    await press('Enter');
+    expect(spies.selectProject).not.toHaveBeenCalled();
+    expect(world.diffLeaveCheck).toHaveBeenCalledTimes(1);
+
+    finishSave(true);
+    await settle();
+
+    expect(spies.goHome).toHaveBeenCalledTimes(1);
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('stays on the diff and says so when the comment did not save', async () => {
+    world.showOverProject('diff', 'alpha');
+    world.diffLeaveCheck = vi.fn(async () => false);
+    await openPalette();
+
+    await pressOn(homeButton()!);
+
+    expect(spies.goHome).not.toHaveBeenCalled();
+    expect(world.currentRoute.kind).toBe('diff');
+    expect(spies.toastError).toHaveBeenCalledTimes(1);
+    expect(spies.toastError.mock.calls[0][0]).toBe('Comment not saved');
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('goes nowhere when the palette is dismissed while the save runs', async () => {
+    world.showOverProject('diff', 'alpha');
+    let finishSave!: (saved: boolean) => void;
+    world.diffLeaveCheck = vi.fn(() => new Promise<boolean>((resolve) => (finishSave = resolve)));
+    await openPalette();
+    await pressOn(homeButton()!);
+
+    await press('Escape');
+    finishSave(true);
+    await settle();
+
+    expect(spies.goHome).not.toHaveBeenCalled();
+    expect(spies.toastError).not.toHaveBeenCalled();
   });
 });
 

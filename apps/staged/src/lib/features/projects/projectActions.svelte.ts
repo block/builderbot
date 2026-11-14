@@ -28,6 +28,7 @@ import type {
 import { listenToEvent } from '../../transport';
 import { projectDisplayName } from '../../shared/utils';
 import {
+  forgetProject,
   goHome,
   navigation,
   releaseProjectLayer,
@@ -460,6 +461,10 @@ class ProjectActionsController {
     // goHome() just made home active is released too, and after
     // selectProject(next) the layer already names `next`, so it is a no-op.
     releaseProjectLayer(id);
+    // And drop it from the history, so Back and Forward never land on a
+    // project that is going. After the navigation above, like the release:
+    // by now the view on screen is another one.
+    forgetProject(id);
 
     // Its card or row, and its context menu with it, unmounts in the next
     // flush, and focus that was in either drops to <body>. focusIfDropped

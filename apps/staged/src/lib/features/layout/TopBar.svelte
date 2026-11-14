@@ -1,19 +1,19 @@
 <!--
   TopBar.svelte - Persistent app bar with drag region and route content
 
-  Provides a drag region for window movement while detail routes register the
-  page-specific title, status, navigation, and actions rendered inside it.
+  Provides a drag region for window movement. The history and search buttons
+  (TopBarNavControls) are the bar's own and sit at its left on every view,
+  after the room kept for the traffic lights; views register the
+  page-specific title, status, and actions rendered beside them.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import { getWindowSync } from '../../transport';
-  import { navigation, popDetailRoute } from './navigation.svelte';
   import { topBar } from './topBarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import { getTrafficLightSpacerWidth, watchWindowChrome } from '../../shared/windowChrome.svelte';
-  import { Button } from '$lib/components/ui/button';
   import { centerSlotRoom } from './topBarCenter';
+  import TopBarNavControls from './TopBarNavControls.svelte';
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
@@ -104,18 +104,7 @@
 >
   <div class="traffic-light-spacer" class:collapsed={trafficLightSpacerWidth === 0}></div>
   <div class="left-actions" use:besideCenter={'left'}>
-    {#if navigation.canGoBack}
-      <Button
-        variant="ghost"
-        size="sm"
-        class="top-bar-action h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
-        title={viewport.showShortcutHints ? 'Back (⌘← / Esc)' : 'Back'}
-        onclick={popDetailRoute}
-      >
-        <ArrowLeft size={14} />
-        <span class="top-bar-action-label">Back</span>
-      </Button>
-    {/if}
+    <TopBarNavControls />
 
     {#if topBar.leftActions}
       {@render topBar.leftActions()}

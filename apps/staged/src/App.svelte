@@ -50,8 +50,9 @@
     initNavigation,
     restoreInitialRoute,
     closeDiffRouteIfCurrent,
+    goBack,
+    goForward,
     openSettings,
-    popDetailRoute,
     selectPreviousProject,
     selectNextProject,
   } from './lib/features/layout/navigation.svelte';
@@ -253,12 +254,6 @@
     void commands.newWindow(navigation.selectedProjectId ?? null).catch((e) => {
       console.error('Failed to open new window:', e);
     });
-  }
-
-  function navigateBack(): boolean {
-    if (!navigation.canGoBack) return false;
-    popDetailRoute();
-    return true;
   }
 
   function isTextInputActive(): boolean {
@@ -524,13 +519,31 @@
             },
           ]
         : []),
+      // Back and Forward through the views visited, like the top bar's
+      // buttons (TopBarNavControls) and through the same two functions. ⌘←
+      // was already Back; ⌘[ and ⌘] are the browser pair, and ⌘→ completes
+      // the arrows. The keys are swallowed even when there is no entry that
+      // way: left to the webview they are its own page history, which in a
+      // browser tab would leave the app.
       {
         id: 'app-go-back',
         description: 'Back',
         category: 'app',
-        keys: ['ArrowLeft'],
+        keys: ['ArrowLeft', '['],
         modifiers: { meta: true },
-        handler: navigateBack,
+        handler: () => {
+          void goBack();
+        },
+      },
+      {
+        id: 'app-go-forward',
+        description: 'Forward',
+        category: 'app',
+        keys: ['ArrowRight', ']'],
+        modifiers: { meta: true },
+        handler: () => {
+          void goForward();
+        },
       },
       {
         id: 'app-delete-project',
@@ -784,7 +797,7 @@
   {:else if navigation.initialRouteSettled}
     <!-- Held back until the persisted route is in place (bounded by
          INITIAL_ROUTE_TIMEOUT_MS): the whole main, not just the workspace,
-         so the top bar's Back affordance doesn't flip in either. -->
+         so the top bar's title and actions don't flip in either. -->
     <main>
       <TopBar />
       <div class="content">

@@ -1,0 +1,232 @@
+import { flushSync, mount, unmount } from 'svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The top bar's Back, Forward and Search buttons, with the history they read
+// replaced by rune state the test owns (testStubs/historyWorld) and the real
+// shortcut registry and palette state behind Search. What is covered here is
+// the wiring: which button is enabled, what a press does, and what each is
+// called. The history itself is covered in navigationHistory.test.ts and
+// navigation.test.ts.
+
+const spies = vi.hoisted(() => ({
+  goBack: vi.fn(async () => true),
+  goForward: vi.fn(async () => true),
+}));
+
+vi.mock('./navigation.svelte', async () => {
+  const { world } = await import('./testStubs/historyWorld.svelte');
+  return {
+    navigation: {
+      get canGoBack() {
+        return world.canGoBack;
+      },
+      get canGoForward() {
+        return world.canGoForward;
+      },
+    },
+    goBack: spies.goBack,
+    goForward: spies.goForward,
+  };
+});
+
+import { viewport } from '../../shared/viewport.svelte';
+import {
+  closeCommandPalette,
+  commandPalette,
+  commandPaletteShortcut,
+} from '../commandPalette/paletteState.svelte';
+import { registerShortcuts } from '../keyboard/shortcuts';
+import TopBarNavControls from './TopBarNavControls.svelte';
+import { world } from './testStubs/historyWorld.svelte';
+
+let component: ReturnType<typeof mount> | null = null;
+
+const group = () => document.querySelector<HTMLElement>('[role="group"]')!;
+const buttons = () => [...group().querySelectorAll<HTMLButtonElement>('button')];
+const button = (label: string) => buttons().find((el) => el.getAttribute('aria-label') === label)!;
+/** The tooltip, which is on the button's wrapper (a disabled button takes
+ *  no pointer events, so one of its own would never show). */
+const tooltip = (label: string) => button(label).parentElement!.title;
+
+beforeEach(() => {
+  world.reset();
+  viewport.showShortcutHints = true;
+  for (const spy of Object.values(spies)) spy.mockClear();
+  const target = document.createElement('div');
+  document.body.appendChild(target);
+  component = mount(TopBarNavControls, { target });
+  flushSync();
+});
+
+afterEach(() => {
+  closeCommandPalette();
+  if (component) unmount(component);
+  component = null;
+  document.body.innerHTML = '';
+});
+
+describe('TopBarNavControls', () => {
+  it('is Back, Forward and Search, in that order, as one labelled group', () => {
+    expect(group().getAttribute('aria-label')).toBe('History and search');
+    expect(buttons().map((el) => el.getAttribute('aria-label'))).toEqual([
+      'Back',
+      'Forward',
+      'Search projects',
+    ]);
+    // Buttons, so a press on one never starts a window drag (TopBar's
+    // startDrag skips them).
+    expect(buttons().every((el) => el.closest('button, a, input, [role="button"]'))).toBe(true);
+  });
+
+  it('names each button with its shortcut in a tooltip', () => {
+    expect(tooltip('Back')).toBe('Back (⌘[)');
+    expect(tooltip('Forward')).toBe('Forward (⌘])');
+    expect(tooltip('Search projects')).toBe('Search projects (⌘K)');
+  });
+
+  it('leaves the shortcuts out where there is no keyboard to press them on', () => {
+    viewport.showShortcutHints = false;
+    flushSync();
+
+    expect(tooltip('Back')).toBe('Back');
+    expect(tooltip('Forward')).toBe('Forward');
+    expect(tooltip('Search projects')).toBe('Search projects');
+  });
+});
+
+describe('TopBarNavControls history buttons', () => {
+  it('disables both where the history has one entry', () => {
+    expect(button('Back').disabled).toBe(true);
+    expect(button('Forward').disabled).toBe(true);
+  });
+
+  it('enables Back alone once there is an earlier entry', () => {
+    world.canGoBack = true;
+    flushSync();
+
+    expect(button('Back').disabled).toBe(false);
+    expect(button('Forward').disabled).toBe(true);
+  });
+
+  it('enables Forward alone at the first entry of a longer history', () => {
+    world.canGoForward = true;
+    flushSync();
+
+    expect(button('Back').disabled).toBe(true);
+    expect(button('Forward').disabled).toBe(false);
+  });
+
+  it('follows the history as it changes: Forward goes when a new view is visited', () => {
+    world.canGoBack = true;
+    world.canGoForward = true;
+    flushSync();
+    expect(button('Back').disabled).toBe(false);
+    expect(button('Forward').disabled).toBe(false);
+
+    world.canGoForward = false;
+    flushSync();
+
+    expect(button('Back').disabled).toBe(false);
+    expect(button('Forward').disabled).toBe(true);
+  });
+
+  it('steps back on a press of Back, and only back', () => {
+    world.canGoBack = true;
+    world.canGoForward = true;
+    flushSync();
+
+    button('Back').click();
+
+    expect(spies.goBack).toHaveBeenCalledTimes(1);
+    expect(spies.goForward).not.toHaveBeenCalled();
+  });
+
+  it('steps forward on a press of Forward, and only forward', () => {
+    world.canGoBack = true;
+    world.canGoForward = true;
+    flushSync();
+
+    button('Forward').click();
+
+    expect(spies.goForward).toHaveBeenCalledTimes(1);
+    expect(spies.goBack).not.toHaveBeenCalled();
+  });
+
+  it('does nothing on a press of a disabled button', () => {
+    button('Back').click();
+    button('Forward').click();
+
+    expect(spies.goBack).not.toHaveBeenCalled();
+    expect(spies.goForward).not.toHaveBeenCalled();
+  });
+});
+
+describe('TopBarNavControls Search', () => {
+  let unregister: () => void;
+  let enabled: boolean;
+
+  beforeEach(() => {
+    enabled = true;
+    // The definition App.svelte registers, through the registry it uses.
+    unregister = registerShortcuts([commandPaletteShortcut(() => enabled)]);
+  });
+
+  afterEach(() => unregister());
+
+  it('is always enabled, and says it opens a dialog', () => {
+    expect(button('Search projects').disabled).toBe(false);
+    expect(button('Search projects').getAttribute('aria-haspopup')).toBe('dialog');
+  });
+
+  it('opens the palette, as ⌘K does', () => {
+    button('Search projects').click();
+
+    expect(commandPalette.open).toBe(true);
+    expect(spies.goBack).not.toHaveBeenCalled();
+    expect(spies.goForward).not.toHaveBeenCalled();
+  });
+
+  it('runs the handler registered for ⌘K rather than one of its own', () => {
+    unregister();
+    const handler = vi.fn();
+    unregister = registerShortcuts([{ ...commandPaletteShortcut(), handler }]);
+
+    button('Search projects').click();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('toggles like the key: a second press closes the palette', () => {
+    button('Search projects').click();
+    button('Search projects').click();
+
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('does not open over another dialog, as ⌘K does not', () => {
+    const other = document.createElement('div');
+    other.setAttribute('role', 'dialog');
+    document.body.appendChild(other);
+
+    button('Search projects').click();
+
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('does nothing where there is no workspace to search, as ⌘K does not', () => {
+    enabled = false;
+
+    button('Search projects').click();
+
+    expect(commandPalette.open).toBe(false);
+  });
+
+  it('does nothing where the shortcut is not registered', () => {
+    unregister();
+
+    button('Search projects').click();
+
+    expect(commandPalette.open).toBe(false);
+  });
+});

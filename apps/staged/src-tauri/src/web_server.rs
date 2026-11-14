@@ -5188,14 +5188,18 @@ mod tests {
     /// connection. Inline, that held the tokio worker that also services
     /// `/api/events`; the desktop commands moved to the blocking pool for the
     /// same scans. The project-note arm also used to carry its own copy of the
-    /// delete, which is what the second half rules out.
+    /// delete, which is what the second half rules out. The handoff may be a
+    /// direct `spawn_blocking` or one of the `blocking_json` helpers, which
+    /// wrap it (the same forms `blocking_guard_tests` accepts).
     #[test]
     fn web_note_delete_arms_run_under_spawn_blocking() {
         let source = include_str!("web_server.rs");
         for command in ["delete_note", "delete_project_note"] {
             let arm = dispatch_arm_body(source, command);
             assert!(
-                arm.contains("spawn_blocking("),
+                ["spawn_blocking(", "blocking_json(", "blocking_store_json("]
+                    .iter()
+                    .any(|handoff| arm.contains(handoff)),
                 "the web `{command}` arm must run its body on the blocking pool: {arm}"
             );
         }

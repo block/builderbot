@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use super::*;
+use crate::managed_acp_tools::cache::NPM_CACHE_MAX_BYTES;
 use crate::managed_acp_tools::install::{install_npm_tool, shim_contents, write_shim};
 use crate::managed_acp_tools::reconcile::finish_reconcile_at;
 use crate::managed_acp_tools::test_support::*;
@@ -199,7 +200,13 @@ async fn missing_native_binary_preserves_live_install_and_partial_reconcile_runt
             .await
             .unwrap();
         }
-        finish_reconcile_at(&root, MANAGED_TOOLS, vec![format!("{}: {error}", tool.id)]).await;
+        finish_reconcile_at(
+            &root,
+            MANAGED_TOOLS,
+            vec![format!("{}: {error}", tool.id)],
+            NPM_CACHE_MAX_BYTES,
+        )
+        .await;
 
         let state = read_state(&root);
         let record = state.last_reconcile.unwrap();

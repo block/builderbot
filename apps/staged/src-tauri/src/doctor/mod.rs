@@ -355,16 +355,21 @@ pub async fn run_doctor_fix(
     // check definition, so the npm-backed gate below can't see it — ensure the
     // managed runtime here, since the fix shells out to npm.
     if check_id == DEPRECATED_CLAUDE_ACP_CHECK_ID {
-        ensure_managed_node_runtime_for_fix().await?;
-        return run_deprecated_claude_acp_fix(fix_type, env_vars).await;
+        let npm_write_lock = Some(prepare_npm_fix(&check_id).await?);
+        let result = run_deprecated_claude_acp_fix(fix_type, env_vars).await;
+        return finish_npm_fix(npm_write_lock, result).await;
     }
     let npm_backed = doctor::agents::lookup_fix_command(&check_id, &fix_type)
         .as_deref()
         .is_some_and(crate::managed_acp_tools::is_npm_backed_command);
-    if npm_backed {
-        ensure_managed_node_runtime_for_fix().await?;
-    }
-    execute_fix_with_gateway_fallback(check_id, fix_type, None, npm_backed, env_vars).await
+    let npm_write_lock = if npm_backed {
+        Some(prepare_npm_fix(&check_id).await?)
+    } else {
+        None
+    };
+    let result =
+        execute_fix_with_gateway_fallback(check_id, fix_type, None, npm_backed, env_vars).await;
+    finish_npm_fix(npm_write_lock, result).await
 }
 
 /// The install id of the ACP bridge a doctor check fronts, for the two checks
@@ -436,6 +441,67 @@ async fn ensure_managed_node_runtime_for_fix() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Everything an npm-backed fix or update needs before its command runs:
+/// the managed Node.js runtime, then the lock that keeps the shared packages
+/// tree to one npm writer at a time (see
+/// [`crate::managed_acp_tools::lock_npm_writes`]). The fix's `npm install -g`
+/// writes the private prefix and its download cache, so without the lock it
+/// could overlap a bridge install or have the reconciler's cache prune land
+/// mid-install — in this or another Staged instance. The caller holds the
+/// returned guard until the command, gateway retry included, has finished,
+/// and then hands it to [`finish_npm_fix`].
+///
+/// The order is load-bearing: the runtime ensure takes the packages flock
+/// itself, so the lock is acquired only after it returns — nesting the two
+/// would deadlock. Fixes that go through the managed installer
+/// ([`install_managed_tool_logged`]) must not call this at all, since the
+/// installer takes the same locks.
+///
+/// Both steps can wait, unbounded and uncancellable, behind whatever holds
+/// the packages locks — on a fresh profile, the launch reconcile downloading
+/// Node and installing two bridges — while the UI shows only the fix button's
+/// spinner. The two info lines bracket that wait so a stuck spinner can be
+/// diagnosed from the log: a "waiting" line with no "acquired" line after it
+/// means the fix is still queued behind another npm writer.
+async fn prepare_npm_fix(check_id: &str) -> Result<crate::managed_acp_tools::NpmWriteLock, String> {
+    let started = std::time::Instant::now();
+    log::info!(
+        "[doctor fix {check_id}] waiting for the managed Node.js runtime and the npm write lock \
+         (queues behind any bridge install or other npm fix, in this or another Staged instance)"
+    );
+    ensure_managed_node_runtime_for_fix().await?;
+    let npm_write_lock = crate::managed_acp_tools::lock_npm_writes()
+        .await
+        .map_err(|error| error.to_string())?;
+    log::info!(
+        "[doctor fix {check_id}] acquired the npm write lock after {} ms",
+        started.elapsed().as_millis()
+    );
+    Ok(npm_write_lock)
+}
+
+/// Epilogue of an npm-backed fix or update: cap the private npm cache while
+/// the write lock from [`prepare_npm_fix`] still excludes every other Staged
+/// npm writer, then release the lock and hand back the fix's own `result`
+/// untouched.
+///
+/// The fix's `npm install -g` has just written that cache, and on a build
+/// that manages no bridges this is the only place it is ever capped — the
+/// reconciler runs no pass there (see `acp_tools_reconciler`). It runs after
+/// a failed fix as well as a successful one, since a failing install still
+/// downloads. The prune is best-effort and returns nothing, so it cannot
+/// turn a fix that worked into one that failed, or mask the error of one
+/// that did not. `None` is a fix that never touched npm: nothing to cap.
+async fn finish_npm_fix(
+    npm_write_lock: Option<crate::managed_acp_tools::NpmWriteLock>,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    if let Some(npm_write_lock) = npm_write_lock {
+        npm_write_lock.prune_npm_cache().await;
+    }
+    result
+}
+
 /// Run a source-aware update for a single readout (main CLI or ACP bridge).
 ///
 /// Unlike [`run_doctor_fix`], update commands (`UpdateMain`/`UpdateBridge`) are
@@ -483,17 +549,22 @@ pub async fn run_doctor_update(
         ));
     }
     // npm-backed updates run the managed npm into the private prefix, so the
-    // managed runtime must exist before the command does.
+    // managed runtime must exist before the command does — and the command
+    // runs under the npm write lock.
     let npm_backed = crate::managed_acp_tools::is_npm_backed_command(&expected);
-    if npm_backed {
-        ensure_managed_node_runtime_for_fix().await?;
-    }
+    let npm_write_lock = if npm_backed {
+        Some(prepare_npm_fix(&check_id).await?)
+    } else {
+        None
+    };
     // Run the backend-derived `expected`, not the frontend-supplied `command`.
     // They are equal past the guard above, but executing `expected` makes the
     // command that runs provably the one the backend derived — no dependence on
     // the equality check surviving future edits.
-    execute_fix_with_gateway_fallback(check_id, fix_type, Some(expected), npm_backed, env_vars)
-        .await
+    let result =
+        execute_fix_with_gateway_fallback(check_id, fix_type, Some(expected), npm_backed, env_vars)
+            .await;
+    finish_npm_fix(npm_write_lock, result).await
 }
 
 /// Re-run freshness and return the authoritative update command for the given

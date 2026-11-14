@@ -1,10 +1,11 @@
-//! Reconcile epilogue — prune stale ids, record the outcome, gate the Node
-//! prune.
+//! Reconcile epilogue — prune stale ids, record the outcome, cap the npm
+//! cache, gate the Node prune.
 
 use std::path::Path;
 
 use crate::managed_node;
 
+use super::cache::{prune_npm_cache_on_blocking_pool, NPM_CACHE_MAX_BYTES};
 use super::install::tool_install_lock;
 use super::{read_state, shim_bin_dir, tools_root, write_state, ManagedTool, ReconcileRecord};
 
@@ -13,26 +14,31 @@ use super::{read_state, shim_bin_dir, tools_root, write_state, ManagedTool, Reco
 mod tests;
 
 // =============================================================================
-// Reconcile epilogue — prune stale ids, record the outcome, gate the Node prune
+// Reconcile epilogue — prune stale ids, record the outcome, cap the npm cache,
+// gate the Node prune
 // =============================================================================
 
 /// Reconcile epilogue: drop installs for ids no longer in the managed set
 /// (their shims, tool dirs, and state entries), record the run's outcome in
-/// `state.json`, and — only when every managed bridge installed cleanly —
-/// prune superseded managed Node runtimes. Takes the install mutex and the
-/// cross-process flock so it cannot race an in-flight install in this or any
-/// other Staged process.
+/// `state.json`, wipe the private npm cache when it has outgrown its size cap
+/// (on every pass, failed or not), and — only when every managed bridge
+/// installed cleanly — prune superseded managed Node runtimes. Takes the
+/// install mutex and the cross-process flock so it cannot race an in-flight
+/// install in this or any other Staged process.
 pub(crate) async fn finish_reconcile(managed: &[ManagedTool], errors: Vec<String>) {
     let Some(packages_root) = crate::paths::packages_dir() else {
         return;
     };
-    finish_reconcile_at(&packages_root, managed, errors).await;
+    finish_reconcile_at(&packages_root, managed, errors, NPM_CACHE_MAX_BYTES).await;
 }
 
+/// [`finish_reconcile`] for a given packages root; `npm_cache_max_bytes` is
+/// the npm cache cap, a parameter so tests can exceed it with a few bytes.
 pub(super) async fn finish_reconcile_at(
     packages_root: &Path,
     managed: &[ManagedTool],
     errors: Vec<String>,
+    npm_cache_max_bytes: u64,
 ) {
     let all_installed = errors.is_empty();
     {
@@ -46,6 +52,14 @@ pub(super) async fn finish_reconcile_at(
         };
         prune_stale_managed_tools(packages_root, managed);
         record_reconcile(packages_root, errors);
+        // Cap the npm cache while the locks still exclude every Staged-spawned
+        // npm install. Deliberately not gated on `all_installed`: a bridge
+        // that fails every day would otherwise switch cleanup off while the
+        // cache keeps growing. It runs after the state write, so recording
+        // the outcome never waits on a multi-gigabyte delete, and on the
+        // blocking pool, so a panic in cleanup is logged instead of unwinding
+        // through the pass.
+        prune_npm_cache_on_blocking_pool(packages_root, npm_cache_max_bytes).await;
     }
     // Success-gated Node prune: `errors` empty means every managed bridge
     // reinstalled this run, so every shim now embeds the pinned runtime's

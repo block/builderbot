@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::cache::npm_cache_dir;
 use super::install::{node_binary, npm_entrypoint, package_dir, shim_contents, write_shim};
 use super::*;
 
@@ -177,4 +178,54 @@ pub(super) fn write_node_bump_leftovers(dir: &Path) -> (PathBuf, PathBuf, PathBu
     std::fs::create_dir_all(&pinned_dir).unwrap();
     std::fs::create_dir_all(&superseded_dir).unwrap();
     (packages_root, pinned_dir, superseded_dir)
+}
+
+/// `<packages>/npm-prefix/cache/_cacache` — npm's content store, the part of
+/// the private cache the size cap applies to.
+pub(super) fn cacache_dir(packages_root: &Path) -> PathBuf {
+    npm_cache_dir(packages_root).join("_cacache")
+}
+
+/// Write a `len`-byte file at `relative` inside the fixture `_cacache`,
+/// standing in for a cached tarball or package document.
+pub(super) fn write_cacache_file(packages_root: &Path, relative: &str, len: usize) -> PathBuf {
+    let path = cacache_dir(packages_root).join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, vec![b'x'; len]).unwrap();
+    path
+}
+
+/// A second open file description on `<packages>/.lock` — the same shape
+/// another Staged process's flock takes — for contending with the packages
+/// lock from inside one test process.
+pub(super) fn open_packages_lock_contender(packages_root: &Path) -> std::fs::File {
+    std::fs::create_dir_all(packages_root).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(packages_root.join(managed_node::PACKAGES_LOCK_FILENAME))
+        .unwrap()
+}
+
+/// One non-blocking attempt at the exclusive packages flock on `contender`.
+pub(super) fn try_packages_flock(contender: &std::fs::File) -> bool {
+    use std::os::unix::io::AsRawFd;
+    unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Take the packages flock on `contender`, retrying briefly instead of
+/// asserting a single non-blocking attempt: a child process forked by a
+/// concurrently-running test can hold a duplicate of a just-closed lock fd
+/// until its exec closes it (CLOEXEC), keeping the flock alive for a moment
+/// after its owner dropped it.
+pub(super) async fn acquire_packages_flock(contender: &std::fs::File) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !try_packages_flock(contender) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the packages lock was never released to the contender"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

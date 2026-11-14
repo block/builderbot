@@ -34,7 +34,7 @@ const UPSTREAM_NODE_DIST_BASE_URL: &str = "https://nodejs.org/dist";
 /// `https://nodejs.org/dist` (`<base>/<version>/<tarball>`).
 pub const NODE_DIST_URL_ENV: &str = "STAGED_NODE_DIST_URL";
 
-const PACKAGES_LOCK_FILENAME: &str = ".lock";
+pub(crate) const PACKAGES_LOCK_FILENAME: &str = ".lock";
 
 /// Hard cap on the compressed tarball; the largest pinned artifact today is
 /// ~55 MiB, so anything near this is a wrong or corrupted download.

@@ -24,13 +24,7 @@
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import {
-    forgetProject,
-    goHome,
-    onViewHidden,
-    releaseProjectLayer,
-    selectProject,
-  } from '../layout/navigation.svelte';
+  import { leaveGoneProject, onViewHidden, selectProject } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import ProjectSection from './ProjectSection.svelte';
@@ -86,7 +80,7 @@
   // The store's `loaded` only covers the project list, so wait for the
   // selected project's own branches too. Gated on the project still being in
   // the list: a stale or deleted id must not pin the view in loading forever,
-  // and the "selected project vanished → goHome()" effect below needs
+  // and the "selected project vanished → leaveGoneProject()" effect below needs
   // `loading` to clear so it can fire.
   let selectedProjectPending = $derived(
     !!selectedProjectId &&
@@ -516,15 +510,11 @@
     };
   });
 
-  // The project this view shows is gone (deleted here or elsewhere). On
-  // screen, leave for home; retained under home, just release the layer so it
-  // unmounts rather than show a missing project — navigation must not jump.
-  // Either way it leaves the history, so Back and Forward don't return to it.
+  // The project this view shows is gone (deleted here or elsewhere): leave
+  // it, on screen or retained under home (navigation.leaveGoneProject).
   $effect(() => {
     if (projectsDataStore.loaded && !loading && selectedProjectId && !selectedProject) {
-      if (layer.active) goHome();
-      else releaseProjectLayer(selectedProjectId);
-      forgetProject(selectedProjectId);
+      leaveGoneProject(selectedProjectId, layer.active);
     }
   });
 

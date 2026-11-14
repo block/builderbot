@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The top bar's Back, Forward and Search buttons, with the history they read
 // replaced by rune state the test owns (testStubs/historyWorld) and the real
-// shortcut registry and palette state behind Search. What is covered here is
-// the wiring: which button is enabled, what a press does, and what each is
-// called. The history itself is covered in navigationHistory.test.ts and
-// navigation.test.ts.
+// shortcut registry and palette state behind Search and the tooltips. What is
+// covered here is the wiring: which button is enabled, what a press does,
+// and what each is called. The history itself is covered in
+// navigationHistory.test.ts and navigation.test.ts.
 
 const spies = vi.hoisted(() => ({
   goBack: vi.fn(async () => true),
@@ -35,7 +35,12 @@ import {
   commandPalette,
   commandPaletteShortcut,
 } from '../commandPalette/paletteState.svelte';
-import { registerShortcuts } from '../keyboard/shortcuts';
+import {
+  registerShortcuts,
+  resetShortcutBinding,
+  updateShortcutBinding,
+} from '../keyboard/shortcuts';
+import { GO_BACK_SHORTCUT_ID, historyShortcuts } from './historyShortcuts';
 import TopBarNavControls from './TopBarNavControls.svelte';
 import { world } from './testStubs/historyWorld.svelte';
 
@@ -48,9 +53,16 @@ const button = (label: string) => buttons().find((el) => el.getAttribute('aria-l
  *  no pointer events, so one of its own would never show). */
 const tooltip = (label: string) => button(label).parentElement!.title;
 
+/** The registry reads the platform from the navigator: Command on a Mac,
+ *  Ctrl elsewhere. */
+function setPlatform(platform: string) {
+  Object.defineProperty(navigator, 'platform', { value: platform, configurable: true });
+}
+
 beforeEach(() => {
   world.reset();
   viewport.showShortcutHints = true;
+  setPlatform('MacIntel');
   for (const spy of Object.values(spies)) spy.mockClear();
   const target = document.createElement('div');
   document.body.appendChild(target);
@@ -78,10 +90,69 @@ describe('TopBarNavControls', () => {
     expect(buttons().every((el) => el.closest('button, a, input, [role="button"]'))).toBe(true);
   });
 
-  it('names each button with its shortcut in a tooltip', () => {
+  it('names each button alone while its shortcut is not registered', () => {
+    // App.svelte registers them once the saved bindings have loaded.
+    expect(tooltip('Back')).toBe('Back');
+    expect(tooltip('Forward')).toBe('Forward');
+    expect(tooltip('Search projects')).toBe('Search projects');
+  });
+});
+
+// The tooltips name the keys each shortcut is bound to in the registry, not
+// keys written into the component.
+describe('TopBarNavControls tooltips', () => {
+  let unregister: () => void;
+
+  beforeEach(() => {
+    // The definitions App.svelte registers, registered after the buttons
+    // mounted, as there.
+    unregister = registerShortcuts([...historyShortcuts(), commandPaletteShortcut()]);
+    flushSync();
+  });
+
+  afterEach(async () => {
+    await resetShortcutBinding(GO_BACK_SHORTCUT_ID);
+    unregister();
+  });
+
+  it('names each button with the keys its shortcut is bound to', () => {
     expect(tooltip('Back')).toBe('Back (⌘[)');
     expect(tooltip('Forward')).toBe('Forward (⌘])');
     expect(tooltip('Search projects')).toBe('Search projects (⌘K)');
+  });
+
+  it('names Ctrl where the registry maps the Command modifier to it', () => {
+    unregister();
+    setPlatform('Win32');
+    unregister = registerShortcuts([...historyShortcuts(), commandPaletteShortcut()]);
+    flushSync();
+
+    expect(tooltip('Back')).toBe('Back (Ctrl+[)');
+    expect(tooltip('Forward')).toBe('Forward (Ctrl+])');
+    expect(tooltip('Search projects')).toBe('Search projects (Ctrl+K)');
+  });
+
+  it('follows a rebind in Keyboard settings, and its reset', async () => {
+    await updateShortcutBinding(GO_BACK_SHORTCUT_ID, ['b'], { meta: true, shift: true });
+    flushSync();
+
+    expect(tooltip('Back')).toBe('Back (⇧⌘B)');
+    // The others are as they were.
+    expect(tooltip('Forward')).toBe('Forward (⌘])');
+
+    await resetShortcutBinding(GO_BACK_SHORTCUT_ID);
+    flushSync();
+
+    expect(tooltip('Back')).toBe('Back (⌘[)');
+  });
+
+  it('drops the keys when the shortcut is withdrawn', () => {
+    unregister();
+    flushSync();
+
+    expect(tooltip('Back')).toBe('Back');
+    expect(tooltip('Search projects')).toBe('Search projects');
+    unregister = () => {};
   });
 
   it('leaves the shortcuts out where there is no keyboard to press them on', () => {

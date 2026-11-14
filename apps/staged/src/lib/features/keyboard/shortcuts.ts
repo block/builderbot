@@ -42,11 +42,32 @@ type BindingMap = Record<string, ShortcutBinding>;
 const shortcuts: Map<string, Shortcut> = new Map();
 const defaultBindings: Map<string, ShortcutBinding> = new Map();
 
+/** Told whenever a shortcut is registered or withdrawn, or a binding changes. */
+const changeListeners = new Set<() => void>();
+
 let savedBindings: BindingMap = {};
 let bindingsLoaded = false;
 let listenerAttached = false;
 let suppressionDepth = 0;
 const SHIFT_TYPED_KEYS = new Set(['+', '_', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')']);
+
+function notifyShortcutsChanged(): void {
+  for (const listener of [...changeListeners]) listener();
+}
+
+/**
+ * Call `listener` whenever what the registry would answer changes: a
+ * shortcut is registered or withdrawn, or its keys are rebound, reset or
+ * loaded from the saved bindings. For UI that shows a shortcut's keys
+ * outside Keyboard settings (shortcutHints.svelte.ts). Returns the function
+ * that stops the calls.
+ */
+export function subscribeToShortcutChanges(listener: () => void): () => void {
+  changeListeners.add(listener);
+  return () => {
+    changeListeners.delete(listener);
+  };
+}
 
 function cloneModifiers(modifiers?: ShortcutModifiers): ShortcutModifiers | undefined {
   if (!modifiers) return undefined;
@@ -246,6 +267,7 @@ export async function initializeShortcutBindings(): Promise<void> {
   for (const shortcut of shortcuts.values()) {
     applySavedBindingIfPresent(shortcut);
   }
+  notifyShortcutsChanged();
 }
 
 export function registerShortcut(shortcut: Shortcut): () => void {
@@ -265,10 +287,12 @@ export function registerShortcut(shortcut: Shortcut): () => void {
   };
   applySavedBindingIfPresent(registered);
   shortcuts.set(registered.id, registered);
+  notifyShortcutsChanged();
 
   return () => {
     shortcuts.delete(registered.id);
     maybeDetachListener();
+    notifyShortcutsChanged();
   };
 }
 
@@ -301,6 +325,28 @@ export function getAllShortcuts(): Shortcut[] {
       }
       return a.category.localeCompare(b.category);
     });
+}
+
+/** The keys a registered shortcut is bound to now (the user's, when it has
+ *  been rebound), or null when no shortcut is registered under the id. */
+export function getShortcutBinding(id: string): ShortcutBinding | null {
+  const shortcut = shortcuts.get(id);
+  return shortcut ? cloneBinding(shortcut) : null;
+}
+
+/**
+ * A binding as one piece of text, for a tooltip: `⌘K` on macOS, `Ctrl+K`
+ * elsewhere. A shortcut with several keys is named by its first. Null for a
+ * binding with no keys.
+ */
+export function formatShortcutLabel(
+  binding: Pick<ShortcutBinding, 'keys' | 'modifiers'>
+): string | null {
+  const [first] = formatShortcutKeys(binding);
+  if (!first) return null;
+  return isMac()
+    ? `${first.modifiers.join('')}${first.key}`
+    : [...first.modifiers, first.key].join('+');
 }
 
 export function formatShortcutKeys(
@@ -396,6 +442,7 @@ export async function updateShortcutBinding(
     savedBindings[id] = cloneBinding(nextBinding);
   }
 
+  notifyShortcutsChanged();
   await persistSavedBindings();
   return true;
 }
@@ -408,6 +455,7 @@ export async function resetShortcutBinding(id: string): Promise<boolean> {
   shortcut.keys = [...defaultBinding.keys];
   shortcut.modifiers = cloneModifiers(defaultBinding.modifiers);
   delete savedBindings[id];
+  notifyShortcutsChanged();
   await persistSavedBindings();
   return true;
 }
@@ -421,6 +469,7 @@ export async function resetAllShortcutBindings(): Promise<void> {
   }
 
   savedBindings = {};
+  notifyShortcutsChanged();
   await persistSavedBindings();
 }
 

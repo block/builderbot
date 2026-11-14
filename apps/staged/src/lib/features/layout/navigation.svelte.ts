@@ -11,6 +11,11 @@
  * the grid only when that is where they came from. The grid is reached by
  * going to it (goHome), like any other view.
  *
+ * Back and Forward never land on something that is gone. Entries for deleted
+ * projects, unpinned boards and diffs of deleted branches or reviews are
+ * dropped before the step (stepHistory), and a diff entry is brought up to
+ * date with its branch before it is shown again (diffRouteRefresh.ts).
+ *
  * The other fields of `navigation` are still exposed for existing callers,
  * but they are synchronized from the current entry instead of owning
  * navigation.
@@ -35,6 +40,9 @@ import type { DiffScope } from '../../commands';
 import type { CommitTimelineItem } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
+import { tagsStore } from '../../stores/tags.svelte';
+import { viewport } from '../../shared/viewport.svelte';
+import { refreshDiffRoute } from './diffRouteRefresh';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
 import { useWorkspaceLayer } from './workspaceLayer';
 import {
@@ -110,10 +118,28 @@ function initialProjectId(): string | null {
   return readSnapshot<string>(SNAPSHOT_KEYS.lastProject);
 }
 
+/**
+ * The history of a window that opens on a project: restored from the last
+ * session, or seeded by the window that opened it.
+ *
+ * With a sidebar the project is the only entry. The grid was never visited,
+ * so it is not a step Back, and the sidebar's "All projects" is how it is
+ * reached. The mobile layout has no sidebar, so there the grid is put under
+ * the project and Back reaches it in one tap, as the labelled Back button
+ * that used to be in the bar's place did. The layout is read once, as the
+ * window opens: a history is not rewritten because the window was resized.
+ */
+function openingHistory(projectId: string): NavigationHistory<ViewLocation> {
+  const project: ViewLocation = [{ kind: 'project', projectId }];
+  if (!viewport.isMobile) return createHistory(project);
+  return { entries: [[rootRoute()], project], index: 1 };
+}
+
 const initialProject = initialProjectId();
-const initialLocation: ViewLocation = [
-  initialProject ? { kind: 'project', projectId: initialProject } : rootRoute(),
-];
+const initialHistory: NavigationHistory<ViewLocation> = initialProject
+  ? openingHistory(initialProject)
+  : createHistory([rootRoute()]);
+const initialLocation = currentEntry(initialHistory);
 
 /**
  * The non-home view the workspace's project layer holds: the last project,
@@ -133,14 +159,14 @@ export const navigation = $state({
   selectedProjectId: initialProject,
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
-  // The one history. It starts as the single location the window opens on,
-  // so a window that opens on a project has nothing to go Back to.
-  history: createHistory(initialLocation) as NavigationHistory<ViewLocation>,
+  // The one history. It starts at the location the window opens on, with
+  // nothing to go Back to (but see openingHistory for the mobile layout).
+  history: initialHistory,
   // The location on screen: the history's current entry.
   detailStack: initialLocation,
   currentRoute: initialLocation[initialLocation.length - 1],
   // Whether there is an earlier / a later history entry to step to.
-  canGoBack: false,
+  canGoBack: canGoBack(initialHistory),
   canGoForward: false,
   // Settings and the diff route render over the workspace, which stays mounted
   // underneath (App.svelte). The one predicate for "covered", so the gates on
@@ -388,6 +414,10 @@ function locationShowsProject(location: ViewLocation, gone: (projectId: string) 
   );
 }
 
+function isDiffRoute(route: DetailRoute): route is DiffDetailRoute {
+  return route.kind === 'diff';
+}
+
 /** Whether the window is still on the single root entry it started with:
  *  nothing restored or seeded, and the user hasn't navigated. */
 function atPristineRoot(): boolean {
@@ -395,12 +425,12 @@ function atPristineRoot(): boolean {
 }
 
 /**
- * Start the history over at one location. For the route the window opens on
- * (restored, seeded or corrected at startup), which is not a navigation:
- * nothing is persisted or announced, and there is nothing to go Back to.
+ * Start the history over. For the route the window opens on (restored,
+ * seeded or corrected at startup), which is not a navigation: nothing is
+ * persisted or announced.
  */
-function resetHistory(location: ViewLocation): void {
-  navigation.history = createHistory(location);
+function resetHistory(history: NavigationHistory<ViewLocation>): void {
+  navigation.history = history;
   syncNavigationState();
 }
 
@@ -508,6 +538,73 @@ export function forgetProject(projectId: string): void {
 }
 
 /**
+ * The project a mounted project view shows is gone: deleted in another
+ * window, or by anything else that didn't navigate away first. `onScreen`
+ * says whether that view is the one showing. If so the window goes to the
+ * grid; a view only retained under the grid has its layer released instead,
+ * so it unmounts rather than show a missing project, and the view on screen
+ * doesn't move. Either way the project leaves the history, so Back and
+ * Forward don't return to it.
+ */
+export function leaveGoneProject(projectId: string, onScreen: boolean): void {
+  if (onScreen) goHome();
+  else releaseProjectLayer(projectId);
+  forgetProject(projectId);
+}
+
+/**
+ * Take the boards `gone` says are no longer offered out of the history.
+ *
+ * An entry that is the board alone is dropped. One with something over the
+ * board (settings, where the unpinning most likely happened, or a diff)
+ * keeps that over the grid instead, so the user isn't thrown out of what
+ * they were doing. When the board itself is the view on screen, the nearest
+ * earlier entry takes its place, as Back would, or the grid when there is
+ * none. Whichever workspace route that leaves is what's persisted.
+ */
+function forgetBoards(gone: (groupId: string) => boolean): void {
+  applyHistory(
+    rewriteEntries(
+      navigation.history,
+      (location) => {
+        const rest = location.filter((route) => !(route.kind === 'board' && gone(route.groupId)));
+        if (rest.length === location.length) return location;
+        if (rest.length === 0) return null;
+        return [rootRoute(), ...rest];
+      },
+      [rootRoute()],
+      sameLocation
+    )
+  );
+}
+
+/** Whether the board is one the sidebar offers: its group exists and its
+ *  board is pinned, BoardView's rule for showing one. A tag catalog that has
+ *  not loaded refuses nothing. */
+function boardOffered(groupId: string): boolean {
+  if (!tagsStore.loaded) return true;
+  return !!tagsStore.catalog.groupsById.get(groupId)?.showInSidebar;
+}
+
+/** Drop the history entries showing a diff `gone` says can no longer be
+ *  shown, other than the one on screen (the diff view there is the user's
+ *  to close). */
+function forgetDiffs(gone: (route: DiffDetailRoute) => boolean): void {
+  const onScreen = navigation.detailStack;
+  applyHistory(
+    rewriteEntries(
+      navigation.history,
+      (location) =>
+        location !== onScreen && location.some((route) => isDiffRoute(route) && gone(route))
+          ? null
+          : location,
+      [rootRoute()],
+      sameLocation
+    )
+  );
+}
+
+/**
  * One step Back or Forward, for goBack / goForward. Does nothing, and
  * resolves false, when there is no entry that way, and when stepping would
  * pull the view out from under something:
@@ -515,13 +612,23 @@ export function forgetProject(projectId: string): void {
  * - A dialog is open. Navigating would unmount the view that owns it along
  *   with whatever was typed into it (the rule openProjectExternally follows).
  * - The diff view could not save the comment being typed, so the text is
- *   still there to retry. Like the diff view's own close and the ⌘K palette,
- *   the step waits for that save first, and is dropped if the user navigated
- *   or opened a dialog meanwhile.
+ *   still there to retry. Like the ⌘K palette, the step waits for that save
+ *   first, and is dropped if the user navigated or opened a dialog meanwhile.
  *
- * Entries for projects deleted in another window are dropped before the
- * step (this window's own deletes drop theirs at once, see forgetProject),
- * so a step never lands on a project that is gone.
+ * A step never lands on something that is gone. Before it is taken:
+ *
+ * - Entries for projects deleted in another window are dropped (this
+ *   window's own deletes drop theirs at once, see forgetProject), and so are
+ *   entries for boards that are no longer offered. A board unpinned while it
+ *   is mounted leaves through BoardView (leaveBoard); one that is only in
+ *   the history has nothing mounted to notice, so it is caught here.
+ * - When the entry the step would land on shows a diff, the backend is asked
+ *   about it (refreshDiffRoute). A diff whose branch or review is gone is
+ *   dropped, along with every other entry for that branch or review, and the
+ *   step goes to the entry beyond it. Otherwise the entry is brought up to
+ *   date with the branch, so the diff view opens on today's commits rather
+ *   than the ones it was first opened with. This is the one case where a
+ *   step from a view other than the diff is not taken in the caller's tick.
  */
 async function stepHistory(
   step: (history: NavigationHistory<ViewLocation>) => NavigationHistory<ViewLocation>
@@ -530,7 +637,44 @@ async function stepHistory(
   if (projectsDataStore.loaded) {
     forgetProjects((projectId) => !projectOpenable(projectId), navigation.detailStack);
   }
-  if (step(navigation.history) === navigation.history) return false;
+  forgetBoards((groupId) => !boardOffered(groupId));
+
+  for (;;) {
+    const from = navigation.history;
+    const ahead = step(from);
+    if (ahead === from) return false;
+    const target = currentEntry(ahead);
+    const diff = target.find(isDiffRoute);
+    if (!diff) break;
+
+    const refreshed = await refreshDiffRoute(diff);
+    if (navigation.history !== from || dialogOpen()) return false;
+    if (refreshed.status === 'unknown') break;
+    if (refreshed.status === 'current') {
+      const route = refreshed.route;
+      if (route === diff) break;
+      applyHistory(
+        rewriteEntries(
+          from,
+          (location) =>
+            location === target ? location.map((r) => (r === diff ? route : r)) : location,
+          [rootRoute()],
+          sameLocation
+        )
+      );
+      break;
+    }
+    // Gone: drop it and look at the entry that is now ahead.
+    const { branchId, reviewId } = diff;
+    forgetDiffs(
+      refreshed.what === 'branch'
+        ? (route) => route.branchId === branchId
+        : (route) => route.reviewId === reviewId
+    );
+    // Nothing was dropped, which cannot happen: the entry ahead holds the
+    // diff and is not the one on screen. Stop rather than ask again forever.
+    if (navigation.history === from) return false;
+  }
 
   const diffSaved = diffLeaveCheck();
   if (diffSaved) {
@@ -588,7 +732,8 @@ function persistLastProject(projectId: string | null): void {
  * share one init) and becomes the window's first history entry if the user
  * hasn't navigated meanwhile. It replaces the root entry rather than being
  * visited from it: the window opens on the project, and Back has nowhere to
- * go. Settles `navigation.initialRouteSettled` whatever happens.
+ * go (except in the mobile layout, see openingHistory). Settles
+ * `navigation.initialRouteSettled` whatever happens.
  *
  * Store init is awaited unbounded: `<main>` is also gated on
  * `preferences.loaded`, which waits on the same init promise, so settling
@@ -621,7 +766,7 @@ export async function restoreInitialRoute(): Promise<void> {
       // Swallow the late result; initNavigation re-reads it.
       read.catch(() => {});
     } else if (lastProjectId && atPristineRoot()) {
-      resetHistory([{ kind: 'project', projectId: lastProjectId }]);
+      resetHistory(openingHistory(lastProjectId));
     }
   } catch (e) {
     console.warn('[Navigation] Could not read the persisted route:', e);
@@ -654,7 +799,7 @@ export async function initNavigation(): Promise<void> {
     await projectsDataStore.whenLoaded();
     if (projectsDataStore.loaded && !projectsDataStore.projects.some((p) => p.id === seedProjectId))
       return;
-    resetHistory([{ kind: 'project', projectId: seedProjectId }]);
+    resetHistory(openingHistory(seedProjectId));
     return;
   }
 
@@ -681,7 +826,7 @@ export async function initNavigation(): Promise<void> {
     // Web: the seeded history is already right. Tauri: restore the route,
     // but only if the user hasn't navigated while we were validating.
     if (!seeded && atPristineRoot()) {
-      resetHistory([{ kind: 'project', projectId: lastProjectId }]);
+      resetHistory(openingHistory(lastProjectId));
     }
   } else if (
     (!seeded && atPristineRoot()) ||
@@ -690,7 +835,7 @@ export async function initNavigation(): Promise<void> {
     )
   ) {
     // Project was deleted — start over at home and clear the persisted values.
-    resetHistory([rootRoute()]);
+    resetHistory(createHistory([rootRoute()]));
     await setStoreValue(LAST_PROJECT_STORE_KEY, null);
     clearSnapshot(SNAPSHOT_KEYS.lastProject);
   }
@@ -714,33 +859,16 @@ export function selectBoard(groupId: string): void {
 /**
  * The board for `groupId` is no longer offered (its group deleted, or its
  * board unpinned, here or in another window). Take it out of the history,
- * so Back and Forward never land on it.
+ * so Back and Forward never land on it (forgetBoards says what becomes of
+ * each entry). A board only retained under home has no entry on screen; its
+ * layer is released so it unmounts rather than show a board nobody offers.
  *
- * An entry that is the board alone is dropped. One with something over the
- * board (settings, where the unpinning most likely happened, or a diff)
- * keeps that over the grid instead, so the user isn't thrown out of what
- * they were doing. When the board itself is the view on screen, the nearest
- * earlier entry takes its place, as Back would, or the grid when there is
- * none. Whichever workspace route that leaves is what's persisted. A board
- * only retained under home has no entry on screen; its layer is released so
- * it unmounts rather than show a board nobody offers.
+ * Called by the board's own view, which only notices while it is mounted.
+ * A board that is in the history and nowhere else is dropped by the next
+ * step (stepHistory).
  */
 export function leaveBoard(groupId: string): void {
-  applyHistory(
-    rewriteEntries(
-      navigation.history,
-      (location) => {
-        const rest = location.filter(
-          (route) => !(route.kind === 'board' && route.groupId === groupId)
-        );
-        if (rest.length === location.length) return location;
-        if (rest.length === 0) return null;
-        return [rootRoute(), ...rest];
-      },
-      [rootRoute()],
-      sameLocation
-    )
-  );
+  forgetBoards((id) => id === groupId);
   releaseBoardLayer(groupId);
 }
 
@@ -882,10 +1010,11 @@ export function closeDiffRouteIfCurrent(expectedRoute: DiffDetailRoute): void {
 // ── Leaving the diff view from outside it ──
 //
 // Comments typed into the diff view save as they are written, and the view's
-// own ways out (Escape, ⌘←, its close button) wait for the last save and stay
-// on the diff when it fails, so the text is still there to retry. A
-// navigation the diff view didn't start (the ⌘K palette opening a project)
-// has to make the same check, or a failed save would go with the view.
+// own ways out (Escape, its close button) wait for the last save and stay on
+// the diff when it fails, so the text is still there to retry. A navigation
+// the diff view didn't start (Back and Forward, the ⌘K palette opening a
+// project) has to make the same check, or a failed save would go with the
+// view.
 
 /** Resolves true once what is typed into the diff view is saved, false when
  *  a save failed and the view should stay. */

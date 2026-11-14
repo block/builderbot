@@ -20,6 +20,16 @@ let projectsStoreMock: {
 let deletingProjectIds: Set<string>;
 let takeWindowSeed: ReturnType<typeof vi.fn>;
 let pruneDeletedProjects: ReturnType<typeof vi.fn>;
+/** The tag catalog, as far as navigation reads it: which boards are pinned. */
+let tagsStoreMock: {
+  loaded: boolean;
+  catalog: { groupsById: Map<string, { showInSidebar: boolean }> };
+};
+/** Whether the window has the mobile layout (no sidebar) as it opens. */
+let viewportMock: { isMobile: boolean };
+/** What the backend says about a diff entry a step is about to land on.
+ *  By default: it is as it was opened. */
+let refreshDiffRoute: ReturnType<typeof vi.fn>;
 
 async function importNavigation() {
   return await import('./navigation.svelte');
@@ -48,6 +58,9 @@ beforeEach(() => {
   };
   takeWindowSeed = vi.fn().mockResolvedValue(null);
   pruneDeletedProjects = vi.fn().mockResolvedValue(undefined);
+  tagsStoreMock = { loaded: false, catalog: { groupsById: new Map() } };
+  viewportMock = { isMobile: false };
+  refreshDiffRoute = vi.fn(async (route: DiffDetailRoute) => ({ status: 'current', route }));
 
   vi.doMock('../../transport', () => ({
     getWindowLabel: () => windowLabel,
@@ -77,6 +90,9 @@ beforeEach(() => {
   vi.doMock('../projects/projectsListViewState.svelte', () => ({
     requestProjectsListRestore: vi.fn(),
   }));
+  vi.doMock('../../stores/tags.svelte', () => ({ tagsStore: tagsStoreMock }));
+  vi.doMock('../../shared/viewport.svelte', () => ({ viewport: viewportMock }));
+  vi.doMock('./diffRouteRefresh', () => ({ refreshDiffRoute }));
 });
 
 afterEach(() => {
@@ -459,6 +475,132 @@ describe('initNavigation', () => {
     expect(navigation.detailStack).toEqual([{ kind: 'project', projectId: 'p1' }]);
     expect(navigation.selectedProjectId).toBe('p1');
     expect(navigation.canGoBack).toBe(false);
+  });
+});
+
+// The mobile layout has no sidebar, so a window that opens on a project
+// there has the grid one step Back. With a sidebar (every test above) the
+// project is the only entry.
+describe('a window that opens on a project in the mobile layout', () => {
+  const home = { kind: 'projects' };
+  const p1 = { kind: 'project', projectId: 'p1' };
+
+  beforeEach(() => {
+    viewportMock.isMobile = true;
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    vi.stubGlobal('document', { querySelectorAll: () => [] });
+  });
+
+  it('puts the grid under a project restored from the store', async () => {
+    getStoreValue.mockResolvedValueOnce('p1');
+    const { restoreInitialRoute, goBack, goForward, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    // On the project, as on desktop, with the grid one step Back.
+    expect(navigation.detailStack).toEqual([p1]);
+    expect(navigation.selectedProjectId).toBe('p1');
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.history.entries).toEqual([[home], [p1]]);
+    expect(navigation.canGoBack).toBe(true);
+    expect(navigation.canGoForward).toBe(false);
+    // Opening is not a navigation: nothing was persisted.
+    expect(setStoreValue).not.toHaveBeenCalled();
+
+    await expect(goBack()).resolves.toBe(true);
+    expect(navigation.detailStack).toEqual([home]);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(true);
+    expect(navigation.canGoBack).toBe(false);
+    expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
+
+    await expect(goForward()).resolves.toBe(true);
+    expect(navigation.detailStack).toEqual([p1]);
+  });
+
+  it('puts the grid under a project seeded from the web snapshot', async () => {
+    snapshotProjectId = 'p1';
+    windowLabel = null;
+    projectsStoreMock.loaded = true;
+    projectsStoreMock.projects = [{ id: 'p1' }];
+    const { restoreInitialRoute, initNavigation, navigation } = await importNavigation();
+
+    // In place from the first frame, before anything is restored.
+    expect(navigation.detailStack).toEqual([p1]);
+    expect(navigation.history.entries).toEqual([[home], [p1]]);
+    expect(navigation.canGoBack).toBe(true);
+    // The grid has not been shown, so it is not mounted under the project.
+    expect(navigation.homeLayerRetained).toBe(false);
+
+    await restoreInitialRoute();
+    await initNavigation();
+
+    expect(navigation.history.entries).toEqual([[home], [p1]]);
+    expect(navigation.history.index).toBe(1);
+    expect(navigation.homeLayerRetained).toBe(false);
+  });
+
+  it('puts the grid under a project restored late, by initNavigation', async () => {
+    getStoreValue.mockResolvedValueOnce('p1');
+    projectsStoreMock.loaded = true;
+    projectsStoreMock.projects = [{ id: 'p1' }];
+    const { initNavigation, navigation } = await importNavigation();
+
+    await initNavigation();
+
+    expect(navigation.detailStack).toEqual([p1]);
+    expect(navigation.history.entries).toEqual([[home], [p1]]);
+    expect(navigation.canGoBack).toBe(true);
+  });
+
+  it('puts the grid under the project a narrow second window is seeded with', async () => {
+    windowLabel = 'win-2';
+    takeWindowSeed.mockResolvedValueOnce('p1');
+    projectsStoreMock.loaded = true;
+    projectsStoreMock.projects = [{ id: 'p1' }];
+    const { initNavigation, navigation } = await importNavigation();
+
+    await initNavigation();
+
+    expect(navigation.detailStack).toEqual([p1]);
+    expect(navigation.history.entries).toEqual([[home], [p1]]);
+  });
+
+  it('starts over at the grid alone when the restored project is gone', async () => {
+    snapshotProjectId = 'p1';
+    windowLabel = null;
+    projectsStoreMock.loaded = true;
+    projectsStoreMock.projects = [{ id: 'p2' }];
+    const { initNavigation, navigation } = await importNavigation();
+
+    await initNavigation();
+
+    expect(navigation.history.entries).toEqual([[home]]);
+    expect(navigation.canGoBack).toBe(false);
+    expect(navigation.canGoForward).toBe(false);
+  });
+
+  it('opens at the grid alone when there is no project to restore', async () => {
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(navigation.history.entries).toEqual([[home]]);
+    expect(navigation.canGoBack).toBe(false);
+  });
+
+  it('adds no grid for a project the user opens, only for the one the window opens on', async () => {
+    const { restoreInitialRoute, selectProject, navigation } = await importNavigation();
+    await restoreInitialRoute();
+
+    selectProject('p1');
+    selectProject('p2');
+
+    expect(navigation.history.entries).toEqual([
+      [home],
+      [p1],
+      [{ kind: 'project', projectId: 'p2' }],
+    ]);
   });
 });
 
@@ -887,6 +1029,486 @@ describe('history navigation', () => {
     });
   });
 
+  // A diff route is whatever its opener had on screen. Returned to through
+  // the history it may be long out of date, or of something deleted, so a
+  // step asks about the diff it is about to land on (diffRouteRefresh.ts,
+  // replaced here by `refreshDiffRoute`).
+  describe('stepping onto a diff entry', () => {
+    const commit = (sha: string) => ({ sha, subject: `commit ${sha}` });
+    const eventTypes = () => dispatchEvent.mock.calls.map(([event]) => event.type);
+
+    it('steps Back onto the diff, brought up to date with its branch', async () => {
+      const { selectProject, openDiffRoute, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({
+        branchId: 'b1',
+        projectId: 'a',
+        commits: [commit('old')] as never,
+        branchLabel: 'feature',
+      });
+      const opened = navigation.currentRoute as DiffDetailRoute;
+      selectProject('b');
+      dispatchEvent.mockClear();
+      setStoreValue.mockClear();
+      refreshDiffRoute.mockImplementationOnce(async (route: DiffDetailRoute) => ({
+        status: 'current',
+        route: { ...route, commits: [commit('old'), commit('new')], branchLabel: 'renamed' },
+      }));
+
+      await expect(goBack()).resolves.toBe(true);
+
+      // Asked about the entry as it was opened, and showing what came back.
+      expect(refreshDiffRoute).toHaveBeenCalledTimes(1);
+      expect(refreshDiffRoute.mock.calls[0][0]).toBe(opened);
+      const shown = navigation.currentRoute as DiffDetailRoute;
+      expect(shown.kind).toBe('diff');
+      expect(shown.branchId).toBe('b1');
+      expect(shown.commits).toEqual([commit('old'), commit('new')]);
+      expect(shown.branchLabel).toBe('renamed');
+      // Over its project, which is the window's project again.
+      expect(navigation.detailStack).toEqual([projectRoute('a'), shown]);
+      expect(navigation.workspaceParked).toBe(true);
+      expect(navigation.selectedProjectId).toBe('a');
+      expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', 'a');
+      // The history is the same three views, the diff entry updated in place.
+      expect(navigation.history.entries).toHaveLength(4);
+      expect(navigation.history.index).toBe(2);
+      expect(navigation.canGoForward).toBe(true);
+      // Arriving at a diff announces nothing: no diff left the screen.
+      expect(dispatchEvent).not.toHaveBeenCalled();
+    });
+
+    it('steps Forward onto the diff, brought up to date with its branch', async () => {
+      const { selectProject, openDiffRoute, goBack, goForward, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a', commits: [commit('old')] as never });
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      // Stepping Back to the project needed no answer about any diff.
+      expect(refreshDiffRoute).not.toHaveBeenCalled();
+      dispatchEvent.mockClear();
+      refreshDiffRoute.mockImplementationOnce(async (route: DiffDetailRoute) => ({
+        status: 'current',
+        route: { ...route, commits: [commit('rebased')] },
+      }));
+
+      await expect(goForward()).resolves.toBe(true);
+
+      const shown = navigation.currentRoute as DiffDetailRoute;
+      expect(shown.kind).toBe('diff');
+      expect(shown.commits).toEqual([commit('rebased')]);
+      expect(navigation.detailStack).toEqual([projectRoute('a'), shown]);
+      expect(navigation.canGoForward).toBe(false);
+      expect(dispatchEvent).not.toHaveBeenCalled();
+    });
+
+    it('leaves the diff it stepped onto as any diff is left', async () => {
+      const {
+        selectProject,
+        openDiffRoute,
+        closeDiffRouteIfCurrent,
+        goBack,
+        goForward,
+        navigation,
+      } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      selectProject('b');
+      refreshDiffRoute.mockImplementation(async (route: DiffDetailRoute) => ({
+        status: 'current',
+        route: { ...route },
+      }));
+
+      // Back onto the diff, then Back again to the project under it: a pop,
+      // so a reference that led to the diff can come back.
+      await goBack();
+      const first = navigation.currentRoute as DiffDetailRoute;
+      dispatchEvent.mockClear();
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      expect(eventTypes()).toEqual(['staged:diff-route-popped']);
+      expect((dispatchEvent.mock.calls[0][0] as CustomEvent).detail.route).toBe(first);
+
+      // Forward onto it again and on to b, which is not what was under it.
+      await goForward();
+      const second = navigation.currentRoute as DiffDetailRoute;
+      dispatchEvent.mockClear();
+      await goForward();
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      expect(eventTypes()).toEqual(['staged:diff-route-replaced']);
+      expect((dispatchEvent.mock.calls[0][0] as CustomEvent).detail.route).toBe(second);
+
+      // Its close button works on the entry that is on screen now.
+      await goBack();
+      const third = navigation.currentRoute as DiffDetailRoute;
+      closeDiffRouteIfCurrent(second);
+      expect(navigation.currentRoute).toBe(third);
+      closeDiffRouteIfCurrent(third);
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+    });
+
+    it('steps over a diff whose branch is gone, and drops every entry for the branch', async () => {
+      const { selectProject, openDiffRoute, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      selectProject('b');
+      openDiffRoute({ branchId: 'b1', projectId: 'a', commitSha: 'abc' });
+      selectProject('c');
+      openDiffRoute({ branchId: 'b2', projectId: 'c' });
+      const kept = navigation.currentRoute;
+      selectProject('d');
+      refreshDiffRoute.mockImplementation(async (route: DiffDetailRoute) =>
+        route.branchId === 'b1' ? { status: 'gone', what: 'branch' } : { status: 'current', route }
+      );
+      dispatchEvent.mockClear();
+
+      // d → the b2 diff, whose branch is still there.
+      await expect(goBack()).resolves.toBe(true);
+      expect(navigation.currentRoute).toBe(kept);
+      // → c, then the step that would land on the second b1 diff lands on b.
+      await goBack();
+      await expect(goBack()).resolves.toBe(true);
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      // Both b1 entries went on the one answer; the diff view never mounted.
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [projectRoute('a')],
+        [projectRoute('b')],
+        [projectRoute('c')],
+        [projectRoute('c'), kept],
+        [projectRoute('d')],
+      ]);
+      expect(refreshDiffRoute.mock.calls.filter(([route]) => route.branchId === 'b1')).toHaveLength(
+        1
+      );
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+    });
+
+    it('steps over a diff whose review is gone, keeping the other diffs of its branch', async () => {
+      const { selectProject, openDiffRoute, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const branchDiff = navigation.currentRoute;
+      selectProject('b');
+      openDiffRoute({ branchId: 'b1', projectId: 'a', reviewId: 'r1' });
+      selectProject('c');
+      refreshDiffRoute.mockImplementation(async (route: DiffDetailRoute) =>
+        route.reviewId === 'r1' ? { status: 'gone', what: 'review' } : { status: 'current', route }
+      );
+
+      await expect(goBack()).resolves.toBe(true);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [projectRoute('a')],
+        [projectRoute('a'), branchDiff],
+        [projectRoute('b')],
+        [projectRoute('c')],
+      ]);
+      await goBack();
+      expect(navigation.currentRoute).toBe(branchDiff);
+    });
+
+    it('goes nowhere when the diff that is gone was the only entry that way', async () => {
+      const { selectProject, openDiffRoute, goBack, goForward, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      await goBack();
+      expect(navigation.canGoForward).toBe(true);
+      refreshDiffRoute.mockResolvedValue({ status: 'gone', what: 'branch' });
+      setStoreValue.mockClear();
+
+      await expect(goForward()).resolves.toBe(false);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      expect(navigation.canGoForward).toBe(false);
+      expect(navigation.history.entries).toEqual([[home], [projectRoute('a')]]);
+      expect(setStoreValue).not.toHaveBeenCalled();
+    });
+
+    it('asks about each diff in turn until one can be shown', async () => {
+      const { selectProject, openDiffRoute, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const kept = navigation.currentRoute;
+      selectProject('b');
+      openDiffRoute({ branchId: 'b2', projectId: 'b' });
+      selectProject('c');
+      openDiffRoute({ branchId: 'b3', projectId: 'c' });
+      selectProject('d');
+      refreshDiffRoute.mockImplementation(async (route: DiffDetailRoute) =>
+        route.branchId === 'b3' ? { status: 'gone', what: 'branch' } : { status: 'current', route }
+      );
+
+      // d → (the b3 diff, gone) → c.
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('c'));
+      refreshDiffRoute.mockImplementation(async (route: DiffDetailRoute) =>
+        route.branchId === 'b2' ? { status: 'gone', what: 'branch' } : { status: 'current', route }
+      );
+      // c → (the b2 diff, gone) → b, and on to the b1 diff, which is fine.
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      await goBack();
+      expect(navigation.currentRoute).toBe(kept);
+    });
+
+    it('leaves the diff on screen in place when another entry for its branch is dropped', async () => {
+      const { selectProject, openDiffRoute, forgetProject, goBack, goForward, navigation } =
+        await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      selectProject('b');
+      openDiffRoute({ branchId: 'b1', projectId: 'a', commitSha: 'abc' });
+      const onScreen = navigation.currentRoute;
+      // With b gone the two b1 diffs are neighbours: Back from one is the other.
+      forgetProject('b');
+      expect(navigation.history.entries).toHaveLength(4);
+      refreshDiffRoute.mockResolvedValue({ status: 'gone', what: 'branch' });
+      dispatchEvent.mockClear();
+
+      await expect(goBack()).resolves.toBe(true);
+
+      // The earlier diff went and the step landed beyond it. The diff the
+      // user was on is the diff view's to close, so its entry stayed and the
+      // step left it as any step does: announced, here as a pop.
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [projectRoute('a')],
+        [projectRoute('a'), onScreen],
+      ]);
+      expect(eventTypes()).toEqual(['staged:diff-route-popped']);
+
+      // Stepping onto it again is what finds it gone.
+      await expect(goForward()).resolves.toBe(false);
+      expect(navigation.history.entries).toEqual([[home], [projectRoute('a')]]);
+    });
+
+    it('shows the diff as it was opened when the backend does not say', async () => {
+      const { selectProject, openDiffRoute, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const opened = navigation.currentRoute;
+      selectProject('b');
+      refreshDiffRoute.mockResolvedValueOnce({ status: 'unknown' });
+
+      await expect(goBack()).resolves.toBe(true);
+
+      expect(navigation.currentRoute).toBe(opened);
+    });
+
+    it('drops the step when the user navigated, or a dialog opened, while it asked', async () => {
+      const { selectProject, openDiffRoute, goBack, navigation } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      selectProject('b');
+      let answer!: (result: unknown) => void;
+      refreshDiffRoute.mockImplementation(
+        (route: DiffDetailRoute) =>
+          new Promise((resolve) => (answer = () => resolve({ status: 'current', route })))
+      );
+
+      let stepping = goBack();
+      // Still on b while the backend is asked.
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      selectProject('c');
+      answer(null);
+      await expect(stepping).resolves.toBe(false);
+      expect(navigation.currentRoute).toEqual(projectRoute('c'));
+
+      // c → b needs no answer; b → the diff does.
+      await goBack();
+      stepping = goBack();
+      dialogs.push({ getAttribute: () => 'open' });
+      answer(null);
+      await expect(stepping).resolves.toBe(false);
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+    });
+
+    it('does not save the comment on the diff being left when the step turns out to go nowhere', async () => {
+      const {
+        selectProject,
+        openDiffRoute,
+        forgetProject,
+        registerDiffLeaveCheck,
+        goBack,
+        goForward,
+        navigation,
+      } = await importNavigation();
+      selectProject('a');
+      openDiffRoute({ branchId: 'b1', projectId: 'a' });
+      const first = navigation.currentRoute;
+      selectProject('b');
+      openDiffRoute({ branchId: 'b2', projectId: 'a' });
+      forgetProject('b');
+      const check = vi.fn().mockResolvedValue(true);
+      registerDiffLeaveCheck(check);
+
+      // Back from the b2 diff onto the b1 diff: somewhere to go, so it saves.
+      await expect(goBack()).resolves.toBe(true);
+      expect(navigation.currentRoute).toBe(first);
+      expect(check).toHaveBeenCalledTimes(1);
+      check.mockClear();
+
+      // Forward again, but the b2 branch has gone meanwhile. Saving clears
+      // the editor, so a step that goes nowhere must not have asked for it.
+      refreshDiffRoute.mockResolvedValue({ status: 'gone', what: 'branch' });
+      await expect(goForward()).resolves.toBe(false);
+
+      expect(check).not.toHaveBeenCalled();
+      expect(navigation.currentRoute).toBe(first);
+      expect(navigation.canGoForward).toBe(false);
+    });
+  });
+
+  describe('boards that are no longer offered', () => {
+    const board = (groupId: string) => ({ kind: 'board', groupId });
+    /** The catalog loads with these boards pinned; any other is not offered. */
+    const pin = (...groupIds: string[]) => {
+      tagsStoreMock.loaded = true;
+      tagsStoreMock.catalog.groupsById = new Map(
+        groupIds.map((id) => [id, { showInSidebar: true }])
+      );
+    };
+
+    it('steps Back over a board that is in the history but neither on screen nor retained', async () => {
+      const { restoreInitialRoute, selectBoard, selectProject, goBack, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectBoard('g1');
+      selectBoard('g2');
+      selectProject('a');
+      // Only the project is mounted: g1 has no view to notice it is gone.
+      expect(navigation.projectLayer).toEqual(projectRoute('a'));
+      pin('g2');
+      const mounted: unknown[] = [];
+
+      await expect(goBack()).resolves.toBe(true);
+      mounted.push(navigation.projectLayer);
+      expect(navigation.currentRoute).toEqual(board('g2'));
+      // g1's entry went before the step, not on arrival at it.
+      expect(navigation.history.entries).toEqual([[home], [board('g2')], [projectRoute('a')]]);
+
+      await expect(goBack()).resolves.toBe(true);
+      mounted.push(navigation.projectLayer);
+      // One step from g2 to the view before the dead board.
+      expect(navigation.currentRoute).toEqual(home);
+      expect(navigation.canGoBack).toBe(false);
+      // The dead board was never the layer's view, so it never mounted.
+      expect(mounted).toEqual([board('g2'), board('g2')]);
+    });
+
+    it('steps Forward over a board that is neither on screen nor retained', async () => {
+      const { restoreInitialRoute, selectBoard, selectProject, goBack, goForward, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectProject('a');
+      selectBoard('g1');
+      selectProject('b');
+      await goBack();
+      await goBack();
+      await goBack();
+      // At the grid, with project a retained under it and g1 two steps ahead.
+      expect(navigation.currentRoute).toEqual(home);
+      await goForward();
+      expect(navigation.projectLayer).toEqual(projectRoute('a'));
+      pin();
+
+      await expect(goForward()).resolves.toBe(true);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      expect(navigation.projectLayer).toEqual(projectRoute('b'));
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [projectRoute('a')],
+        [projectRoute('b')],
+      ]);
+      expect(navigation.canGoForward).toBe(false);
+    });
+
+    it('goes nowhere when the dead board was the only entry that way', async () => {
+      const { restoreInitialRoute, selectBoard, goBack, goForward, selectProject, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectProject('a');
+      selectBoard('g1');
+      await goBack();
+      // On a with the board ahead. The board's layer was replaced by a's.
+      expect(navigation.projectLayer).toEqual(projectRoute('a'));
+      pin();
+
+      await expect(goForward()).resolves.toBe(false);
+
+      expect(navigation.currentRoute).toEqual(projectRoute('a'));
+      expect(navigation.canGoForward).toBe(false);
+      expect(navigation.history.entries).toEqual([[home], [projectRoute('a')]]);
+    });
+
+    it('keeps what was open over the board, over the grid instead', async () => {
+      const { restoreInitialRoute, selectBoard, openSettings, selectProject, goBack, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectBoard('g1');
+      openSettings('tags');
+      selectProject('a');
+      pin();
+
+      await expect(goBack()).resolves.toBe(true);
+
+      expect(navigation.detailStack).toEqual([home, settings('tags')]);
+      expect(navigation.history.entries).toEqual([
+        [home],
+        [home, settings('tags')],
+        [projectRoute('a')],
+      ]);
+    });
+
+    it('keeps every board while the tag catalog has not loaded', async () => {
+      const { restoreInitialRoute, selectBoard, selectProject, goBack, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectBoard('g1');
+      selectProject('a');
+      tagsStoreMock.loaded = false;
+
+      await goBack();
+
+      expect(navigation.currentRoute).toEqual(board('g1'));
+    });
+
+    it('keeps a board that is still pinned', async () => {
+      const { restoreInitialRoute, selectBoard, selectProject, goBack, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectBoard('g1');
+      selectProject('a');
+      pin('g1');
+
+      await goBack();
+
+      expect(navigation.currentRoute).toEqual(board('g1'));
+    });
+
+    it('drops a board whose group is still there but no longer pinned', async () => {
+      const { restoreInitialRoute, selectBoard, selectProject, goBack, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectBoard('g1');
+      selectProject('a');
+      tagsStoreMock.loaded = true;
+      tagsStoreMock.catalog.groupsById = new Map([['g1', { showInSidebar: false }]]);
+
+      await goBack();
+
+      expect(navigation.currentRoute).toEqual(home);
+    });
+  });
+
   describe('projects that are gone', () => {
     it('forgets a project wherever it sits in the history', async () => {
       const { selectProject, openDiffRoute, openSettings, forgetProject, goBack, navigation } =
@@ -944,6 +1566,91 @@ describe('history navigation', () => {
       expect(navigation.history.entries).toEqual([[home]]);
       expect(navigation.homeActive).toBe(true);
       expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
+    });
+
+    // What a mounted project view does when its project disappears from the
+    // list (ProjectHome's effect): a delete in another window, or anything
+    // else that didn't navigate away first.
+    it('leaves a project that disappeared while on screen for the grid, and forgets it', async () => {
+      const {
+        restoreInitialRoute,
+        selectProject,
+        leaveGoneProject,
+        goBack,
+        goForward,
+        navigation,
+      } = await importNavigation();
+      await restoreInitialRoute();
+      selectProject('a');
+      selectProject('b');
+      selectProject('a');
+
+      leaveGoneProject('a', true);
+
+      // On the grid, and a is nowhere in the history: Back goes to b.
+      expect(navigation.currentRoute).toEqual(home);
+      expect(navigation.homeActive).toBe(true);
+      expect(navigation.history.entries).toEqual([[home], [projectRoute('b')], [home]]);
+      expect(setStoreValue).toHaveBeenLastCalledWith('last-viewed-project', null);
+      await goBack();
+      expect(navigation.currentRoute).toEqual(projectRoute('b'));
+      await goBack();
+      expect(navigation.currentRoute).toEqual(home);
+      await expect(goBack()).resolves.toBe(false);
+      await goForward();
+      await goForward();
+      await expect(goForward()).resolves.toBe(false);
+      expect(navigation.currentRoute).toEqual(home);
+    });
+
+    it('leaves the grid alone in the history when the project was opened from it', async () => {
+      const { restoreInitialRoute, selectProject, leaveGoneProject, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectProject('a');
+
+      leaveGoneProject('a', true);
+
+      // home → a → home, minus a: one grid entry, not two to step between.
+      expect(navigation.history.entries).toEqual([[home]]);
+      expect(navigation.canGoBack).toBe(false);
+      expect(navigation.canGoForward).toBe(false);
+    });
+
+    it('releases a project that disappeared while retained under the grid, without moving', async () => {
+      const { restoreInitialRoute, selectProject, goHome, leaveGoneProject, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectProject('b');
+      selectProject('a');
+      goHome();
+      expect(navigation.projectLayer).toEqual(projectRoute('a'));
+      setStoreValue.mockClear();
+
+      leaveGoneProject('a', false);
+
+      // The view on screen did not change, the layer unmounts, and Back from
+      // the grid is b rather than the project that is gone.
+      expect(navigation.currentRoute).toEqual(home);
+      expect(navigation.projectLayer).toBeNull();
+      expect(navigation.history.entries).toEqual([[home], [projectRoute('b')], [home]]);
+      expect(navigation.history.index).toBe(2);
+      expect(setStoreValue).not.toHaveBeenCalled();
+    });
+
+    it('leaves a project that disappeared from under Settings or a diff', async () => {
+      const { restoreInitialRoute, selectProject, openSettings, leaveGoneProject, navigation } =
+        await importNavigation();
+      await restoreInitialRoute();
+      selectProject('a');
+      openSettings('general');
+
+      // The project view is parked under Settings, but it is still the
+      // workspace's view: its layer is the active one.
+      leaveGoneProject('a', true);
+
+      expect(navigation.detailStack).toEqual([home]);
+      expect(navigation.history.entries).toEqual([[home]]);
     });
 
     it('steps over a project deleted in another window', async () => {

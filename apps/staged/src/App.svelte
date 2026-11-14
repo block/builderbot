@@ -50,8 +50,6 @@
     initNavigation,
     restoreInitialRoute,
     closeDiffRouteIfCurrent,
-    goBack,
-    goForward,
     openSettings,
     selectPreviousProject,
     selectNextProject,
@@ -62,6 +60,7 @@
     triggerShortcut,
   } from './lib/features/keyboard/shortcuts';
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
+  import { historyShortcuts } from './lib/features/layout/historyShortcuts';
   import { applyWindowTitle, formatWindowTitle } from './lib/features/layout/windowTitle';
   import { projectFiltersStore } from './lib/features/projects/projectFilters.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
@@ -519,32 +518,10 @@
             },
           ]
         : []),
-      // Back and Forward through the views visited, like the top bar's
-      // buttons (TopBarNavControls) and through the same two functions. ⌘←
-      // was already Back; ⌘[ and ⌘] are the browser pair, and ⌘→ completes
-      // the arrows. The keys are swallowed even when there is no entry that
-      // way: left to the webview they are its own page history, which in a
-      // browser tab would leave the app.
-      {
-        id: 'app-go-back',
-        description: 'Back',
-        category: 'app',
-        keys: ['ArrowLeft', '['],
-        modifiers: { meta: true },
-        handler: () => {
-          void goBack();
-        },
-      },
-      {
-        id: 'app-go-forward',
-        description: 'Forward',
-        category: 'app',
-        keys: ['ArrowRight', ']'],
-        modifiers: { meta: true },
-        handler: () => {
-          void goForward();
-        },
-      },
+      // Back and Forward through the views visited (⌘[ / ⌘], ⌘← / ⌘→). The
+      // definitions, and why the keys are swallowed with nowhere to go, are
+      // historyShortcuts'.
+      ...historyShortcuts(),
       {
         id: 'app-delete-project',
         description: 'Remove current project',

@@ -24,10 +24,14 @@
     };
   });
 
+  // A press on the bar drags the window, except on a control. The history
+  // and search group counts as one whole: a disabled button takes no pointer
+  // events, so a press on it lands on the group, and Back pressed once more
+  // than there are entries must not start moving the window.
   function startDrag(e: PointerEvent) {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
-    const isInteractive = target.closest('button, a, input, [role="button"]');
+    const isInteractive = target.closest('button, a, input, [role="button"], .top-bar-nav');
     if (!isInteractive) {
       e.preventDefault();
       getWindowSync().startDragging();
@@ -37,7 +41,7 @@
   let hasTitle = $derived(
     !!topBar.title || !!topBar.subtitle || !!topBar.leading || !!topBar.badges
   );
-  let trafficLightSpacerWidth = $derived(getTrafficLightSpacerWidth(viewport.isMobile));
+  let trafficLightSpacerWidth = $derived(getTrafficLightSpacerWidth(viewport.hasCoarsePointer));
 
   // The desktop centre slot's room (see centerSlotRoom), measured whenever
   // the bar or anything beside the slot changes size. The left and right

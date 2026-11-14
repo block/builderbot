@@ -65,8 +65,19 @@ function registerTauriResizeListener() {
   });
 }
 
-export function getTrafficLightSpacerWidth(isMobile: boolean): number {
-  if (!isTauri || !windowChrome.isMac || isMobile || windowChrome.isFullscreen) return 0;
+/**
+ * The room to keep at the top bar's left for the macOS window controls: the
+ * desktop app's window on a Mac, unless it is fullscreen (the controls are
+ * hidden there). At any width: a window narrower than the mobile breakpoint
+ * takes the mobile layout but still has its traffic lights, and the bar's
+ * first buttons would sit under them.
+ *
+ * Nothing in a browser (web mode, the home-screen web app), which draws no
+ * controls over the page, and nothing on a touch device, whatever it says
+ * its platform is: an iPad reports itself as a Mac.
+ */
+export function getTrafficLightSpacerWidth(hasCoarsePointer: boolean): number {
+  if (!isTauri || !windowChrome.isMac || hasCoarsePointer || windowChrome.isFullscreen) return 0;
   return TRAFFIC_LIGHT_SPACER_WIDTH_PX;
 }
 

@@ -1,6 +1,7 @@
 <!--
   BoardColumn.svelte — one board column: its tag's icon, name and card count,
-  a ⋯ menu, and the cards. A drop zone while a card is dragged.
+  a ⋯ menu, and the cards. A drop zone while a card is dragged, and while a
+  column is: the board tells the two apart.
 
   Collapsed, it is a narrow strip with the name running down it and the
   count; clicking it expands the column, and a card dragged over it tints
@@ -8,7 +9,27 @@
   on a 40px strip). "Rename" in the menu edits the
   name in the header: Enter or leaving the field saves, Escape puts it back.
   "Move left" and "Move right" there are the board's to carry out.
+
+  With drag and drop on, a tag column drags among the others by its header,
+  or by its strip when collapsed. A line in the gap beside the column under
+  the pointer shows where it would land. The header does not drag while its
+  name is being edited, so the pointer can select text in the field, and
+  "No ‹group›" does not drag at all.
 -->
+<script module lang="ts">
+  /** What every column on a board shares for dragging columns, from ProjectsBoard. */
+  export interface BoardColumnDragHandlers {
+    /** Tag columns drag among the others. */
+    readonly enabled: boolean;
+    /** The column being dragged, if any. */
+    readonly draggingKey: string | null;
+    /** The side of a column the dragged one would land on, if it would land beside it. */
+    placeFor(columnKey: string): 'before' | 'after' | null;
+    start(columnKey: string, event: DragEvent): void;
+    end(): void;
+  }
+</script>
+
 <script lang="ts">
   import CircleDashed from '@lucide/svelte/icons/circle-dashed';
   import { tick } from 'svelte';
@@ -24,6 +45,7 @@
     column: BoardColumn;
     group: TagGroup;
     handlers: BoardCardHandlers;
+    columnDrag: BoardColumnDragHandlers;
     isVisible: (projectId: string) => boolean;
     /** A dragged card is over this column. */
     dropTarget: boolean;
@@ -45,6 +67,7 @@
     column,
     group,
     handlers,
+    columnDrag,
     isVisible,
     dropTarget,
     paged,
@@ -61,6 +84,14 @@
   let collapsed = $derived(column.collapsed && !paged);
   let renaming = $state(false);
   let nameInput = $state<HTMLInputElement | null>(null);
+  let draggable = $derived(columnDrag.enabled && column.tag !== null && !renaming);
+  let dropPlace = $derived(columnDrag.placeFor(column.key));
+
+  /** The header or strip itself: a selection dragged out of the name is text, not the column. */
+  function handleColumnDragStart(event: DragEvent) {
+    if (!draggable || event.target !== event.currentTarget) return;
+    columnDrag.start(column.key, event);
+  }
 
   async function startRename() {
     if (!column.tag) return;
@@ -103,6 +134,9 @@
   class:collapsed
   class:paged
   class:drop-target={dropTarget}
+  class:dragging={columnDrag.draggingKey === column.key}
+  class:drop-before={dropPlace === 'before'}
+  class:drop-after={dropPlace === 'after'}
   data-board-column={column.key}
   aria-label={`${column.name}, ${column.count} ${column.count === 1 ? 'project' : 'projects'}`}
   ondragover={onDragOver}
@@ -116,6 +150,9 @@
       class:drop-target={dropTarget}
       title={`Expand ${column.name}`}
       aria-label={`Expand ${column.name}`}
+      {draggable}
+      ondragstart={handleColumnDragStart}
+      ondragend={() => columnDrag.end()}
       onclick={() => onCollapse(false)}
     >
       {@render columnIcon()}
@@ -123,7 +160,17 @@
       <span class="column-count">{column.count}</span>
     </button>
   {:else}
-    <header class="board-column-head">
+    <!-- Dragging is the pointer's way to move a column. The ⋯ menu's Move
+         left and Move right are the keyboard's, so the header takes no role
+         or tab stop for it. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <header
+      class="board-column-head"
+      class:draggable
+      {draggable}
+      ondragstart={handleColumnDragStart}
+      ondragend={() => columnDrag.end()}
+    >
       {@render columnIcon()}
       {#if renaming && column.tag}
         <input
@@ -164,6 +211,7 @@
 
 <style>
   .board-column {
+    position: relative;
     flex: 0 0 272px;
     display: flex;
     flex-direction: column;
@@ -175,7 +223,35 @@
     background: color-mix(in srgb, var(--bg-primary) 45%, transparent);
     transition:
       border-color 0.1s ease,
-      background-color 0.1s ease;
+      background-color 0.1s ease,
+      opacity 0.15s ease;
+  }
+
+  .board-column.dragging {
+    opacity: 0.4;
+  }
+
+  /* Where a dragged column would land: a line midway across the gap to the
+     next column (the row's 12px, past this column's 1px border). The column
+     after one and the column before the next draw it in the same place. */
+  .board-column.drop-before::before,
+  .board-column.drop-after::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--ui-accent);
+    pointer-events: none;
+  }
+
+  .board-column.drop-before::before {
+    left: -8px;
+  }
+
+  .board-column.drop-after::after {
+    right: -8px;
   }
 
   .board-column.drop-target {
@@ -236,6 +312,17 @@
     min-width: 0;
     min-height: 26px;
     padding: 0 2px 0 4px;
+  }
+
+  /* A press on the name drags the column, not a selection of its text (as a
+     reorderable RepoCard). */
+  .board-column-head.draggable {
+    cursor: grab;
+    user-select: none;
+  }
+
+  .board-column-head.draggable:active {
+    cursor: grabbing;
   }
 
   .board-column-head :global(svg) {

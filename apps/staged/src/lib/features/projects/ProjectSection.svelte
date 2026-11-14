@@ -5,10 +5,11 @@
   controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { toast } from 'svelte-sonner';
   import { listenToEvent } from '../../transport';
   import FileText from '@lucide/svelte/icons/file-text';
+  import Pencil from '@lucide/svelte/icons/pencil';
   import type {
     AcpConfigSelection,
     ChildSessionInfo,
@@ -54,6 +55,7 @@
   import { projectDisplayName } from '../../shared/utils';
   import ProjectTagPills from './ProjectTagPills.svelte';
   import { Button } from '$lib/components/ui/button';
+  import Spinner from '../../shared/Spinner.svelte';
   import {
     navigation,
     onLayerActivated,
@@ -83,6 +85,7 @@
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     workspaceErrors?: Map<string, string>;
+    onRenameProject?: (projectId: string, name: string) => void | Promise<Project | void>;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void | Promise<void>;
     onMoveBranch?: (branchId: string, targetProjectId: string) => void | Promise<void>;
@@ -102,6 +105,7 @@
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     workspaceErrors = new Map(),
+    onRenameProject,
     onDeleteBranch,
     onRenameBranch,
     onMoveBranch,
@@ -128,6 +132,133 @@
         onProjectTitleElement?.(null);
       },
     };
+  }
+
+  // ── Inline project rename ──────────────────────────────────────────────
+  let editingProjectName = $state(false);
+  let projectNameDraft = $state('');
+  let renameProjectError = $state<string | null>(null);
+  let renameProjectSaving = $state(false);
+  // The trimmed draft whose save last failed. A blur with the same draft
+  // cancels instead of re-submitting, so the input losing focus after a
+  // failure cannot loop through refocus → blur → identical rename → toast.
+  let lastFailedProjectName = $state<string | null>(null);
+  let projectNameInput = $state<HTMLInputElement | null>(null);
+
+  async function focusProjectNameInput() {
+    await tick();
+    projectNameInput?.focus();
+    projectNameInput?.select();
+  }
+
+  async function startProjectRename() {
+    if (deleting || renameProjectSaving || !onRenameProject) return;
+    projectNameDraft = project.name;
+    renameProjectError = null;
+    lastFailedProjectName = null;
+    editingProjectName = true;
+    await focusProjectNameInput();
+  }
+
+  function cancelProjectRename() {
+    if (renameProjectSaving) return;
+    editingProjectName = false;
+    projectNameDraft = '';
+    renameProjectError = null;
+    lastFailedProjectName = null;
+    dismissRenameProjectToast();
+  }
+
+  // The failure toast is pinned (infinite duration) so it cannot outlive the
+  // error it describes: a successful retry or a cancel takes it down too.
+  function dismissRenameProjectToast() {
+    toast.dismiss(renameProjectToastId());
+  }
+
+  function renameProjectToastId() {
+    return `rename-project-${project.id}`;
+  }
+
+  // A delete starting while the editor is open disables the input, which
+  // blurs it. Close the editor instead of letting that blur rename a project
+  // that is being torn down.
+  $effect(() => {
+    if (deleting) untrack(cancelProjectRename);
+  });
+
+  /**
+   * Commit the draft. `source` decides what happens to a draft that cannot
+   * be saved: Enter keeps the user in the input to fix it, while blur (the
+   * user has moved on) cancels and restores the old name.
+   */
+  async function saveProjectRename(source: 'enter' | 'blur') {
+    if (!editingProjectName || renameProjectSaving || deleting) return;
+
+    const trimmed = projectNameDraft.trim();
+    if (!trimmed) {
+      if (source === 'blur') {
+        cancelProjectRename();
+        return;
+      }
+      renameProjectError = 'Project name is required';
+      await focusProjectNameInput();
+      return;
+    }
+
+    if (trimmed === project.name.trim()) {
+      cancelProjectRename();
+      return;
+    }
+
+    if (source === 'blur' && trimmed === lastFailedProjectName) {
+      // The failure toast is still up; leaving the field means give up, not
+      // retry the same name.
+      cancelProjectRename();
+      return;
+    }
+
+    if (!onRenameProject) return;
+    renameProjectSaving = true;
+    renameProjectError = null;
+    try {
+      await onRenameProject(project.id, trimmed);
+      editingProjectName = false;
+      projectNameDraft = '';
+      lastFailedProjectName = null;
+      dismissRenameProjectToast();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      renameProjectError = message;
+      lastFailedProjectName = trimmed;
+      toast.error('Unable to rename project', {
+        // One toast per project: a retry replaces the previous failure
+        // rather than stacking another infinite-duration toast.
+        id: renameProjectToastId(),
+        description: message,
+        duration: Infinity,
+      });
+      // Clear the saving flag before focusing: the input is disabled while
+      // saving, and focusProjectNameInput's tick() flushes that attribute
+      // before it tries to focus.
+      renameProjectSaving = false;
+      await focusProjectNameInput();
+      return;
+    } finally {
+      renameProjectSaving = false;
+    }
+  }
+
+  function handleProjectNameKeydown(e: KeyboardEvent) {
+    // An IME fires Enter to confirm a composition candidate; that is not a
+    // submit, and acting on it would save the half-composed name.
+    if (e.isComposing) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void saveProjectRename('enter');
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelProjectRename();
+    }
   }
 
   // ── Project session dialog ─────────────────────────────────────────────
@@ -933,10 +1064,54 @@
   <section class="project-overview-card">
     <div class="project-heading">
       <div class="project-title-row">
-        <h2 class="project-title" use:reportProjectTitleElement>{projectDisplayName(project)}</h2>
+        <!--
+          The heading stays mounted while editing so the element reported to
+          ProjectHome (which measures it to decide when the top bar shows the
+          project name) keeps a stable identity. The pencil is a sibling rather
+          than a child so the heading's accessible name is just the project name.
+        -->
+        <h2 class="project-title" class:editing={editingProjectName} use:reportProjectTitleElement>
+          {#if editingProjectName}
+            <span class="project-name-editor">
+              <input
+                bind:this={projectNameInput}
+                class="project-name-input"
+                class:error={!!renameProjectError}
+                bind:value={projectNameDraft}
+                disabled={renameProjectSaving || deleting}
+                aria-label="Project name"
+                aria-invalid={!!renameProjectError}
+                title={renameProjectError ?? 'Project name'}
+                onkeydown={handleProjectNameKeydown}
+                onblur={() => void saveProjectRename('blur')}
+              />
+              {#if renameProjectSaving}
+                <Spinner size={12} />
+              {/if}
+            </span>
+          {:else}
+            <span class="project-title-text" title={projectDisplayName(project)}
+              >{projectDisplayName(project)}</span
+            >
+          {/if}
+        </h2>
+        {#if !editingProjectName}
+          <button
+            class="rename-project-button"
+            onclick={() => void startProjectRename()}
+            disabled={deleting || renameProjectSaving || !onRenameProject}
+            title="Rename project"
+            aria-label="Rename project"
+          >
+            <Pencil size={14} />
+          </button>
+        {/if}
       </div>
       <ProjectTagPills {project} {branches} disabled={deleting} pickerRequest={tagPickerRequest} />
     </div>
+    {#if renameProjectError}
+      <span class="project-name-error" role="alert">{renameProjectError}</span>
+    {/if}
 
     {#if projectNotes.length > 0}
       {@const nowMs = minuteNow.now()}
@@ -1135,6 +1310,8 @@
     min-width: 0;
   }
 
+  /* The title sizes to its text with the pencil hugging it; a long title
+     wraps within its column. */
   .project-title-row {
     display: flex;
     align-items: center;
@@ -1143,7 +1320,11 @@
   }
 
   .project-title {
-    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    flex: 0 1 auto;
     min-width: 0;
     margin: 0;
     color: var(--text-primary);
@@ -1151,6 +1332,91 @@
     font-weight: 700;
     line-height: 1.2;
     overflow-wrap: anywhere;
+  }
+
+  /* While editing, the heading holds the input, which grows into the free
+     space up to the editor's cap. */
+  .project-title.editing {
+    flex: 1 1 auto;
+  }
+
+  .project-title-text {
+    min-width: 0;
+  }
+
+  /* Pull the pencil in from the row gap so it sits 4px after the title text,
+     as it did when it was the heading's last child. */
+  .rename-project-button {
+    margin-left: -8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background-color 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .rename-project-button:hover:not(:disabled) {
+    color: var(--text-primary);
+    background-color: var(--ui-selection);
+  }
+
+  .rename-project-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+
+  .project-name-editor {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 160px;
+    max-width: min(420px, 45vw);
+    flex: 1 1 auto;
+  }
+
+  .project-name-input {
+    width: 100%;
+    min-width: 0;
+    padding: 2px 8px;
+    border: 1px solid var(--border-emphasis);
+    border-radius: 6px;
+    outline: none;
+    background-color: var(--bg-primary);
+    color: inherit;
+    /* Inherit the heading's type so the editor matches the title it replaces,
+       including the narrow-viewport font-size override below. */
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+  }
+
+  .project-name-input:focus {
+    border-color: var(--ui-accent);
+  }
+
+  .project-name-input.error {
+    border-color: var(--ui-danger);
+  }
+
+  .project-name-input:disabled {
+    opacity: 0.65;
+  }
+
+  .project-name-error {
+    color: var(--ui-danger);
+    font-size: var(--size-xs);
+    font-weight: 500;
   }
 
   .notes-timeline {

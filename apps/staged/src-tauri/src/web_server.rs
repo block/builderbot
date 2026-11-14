@@ -1355,6 +1355,13 @@ pub(crate) async fn dispatch(
             .await?;
             Ok(Value::Null)
         }
+        "rename_project" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let name: String = arg(&args, "name")?;
+            let project = crate::project_commands::rename_project_impl(&store, &project_id, &name)?;
+            Ok(serde_json::to_value(project).unwrap())
+        }
         "set_primary_project_repo" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;

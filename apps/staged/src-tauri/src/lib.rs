@@ -671,6 +671,18 @@ fn create_project(
     Ok(project)
 }
 
+/// Rename a project in place. Only the stored name changes; see
+/// [`project_commands::rename_project_impl`].
+#[tauri::command(rename_all = "camelCase")]
+fn rename_project(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    name: String,
+) -> Result<store::Project, String> {
+    let store = get_store(&store)?;
+    project_commands::rename_project_impl(&store, &project_id, &name)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 fn list_project_repos(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2318,6 +2330,7 @@ pub fn run() {
             launch_resume::resume_interrupted_sessions,
             list_projects,
             create_project,
+            rename_project,
             list_project_repos,
             list_recent_repos,
             get_suggested_repos,

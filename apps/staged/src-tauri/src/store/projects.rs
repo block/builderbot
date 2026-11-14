@@ -115,6 +115,26 @@ impl Store {
         Ok(())
     }
 
+    /// Rename a project. Only the name column moves: the primary-repo
+    /// columns are rewritten by `update_project` and `location` by a transfer,
+    /// so a rename racing either must not carry a stale snapshot of them back
+    /// over the row. Nothing derived from the name at creation time (branch
+    /// names, worktrees, workspaces) is touched.
+    pub fn rename_project(&self, id: &str, name: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE projects SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name, now_timestamp(), id],
+        )?;
+        if updated == 0 {
+            return Err(StoreError(format!("Project not found: {id}")));
+        }
+        self.publish(StoreChange::Project {
+            project_id: Some(id.to_string()),
+        });
+        Ok(())
+    }
+
     /// Delete a project. Its `project_tags` rows go with it (FK cascade), so
     /// this publishes [`StoreChange::Tags`] as well.
     pub fn delete_project(&self, id: &str) -> Result<(), StoreError> {

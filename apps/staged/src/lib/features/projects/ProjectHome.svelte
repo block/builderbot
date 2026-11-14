@@ -540,6 +540,17 @@
     selectProject(project.id);
   }
 
+  // The backend's name write publishes on the store change feed, so the
+  // project-changed refetch makes the new name authoritative in this window
+  // and any peer. Painting it into the shared store first means the detail
+  // title, sidebar row and sticky top-bar echo don't wait out the feed's
+  // coalescing window.
+  async function handleRenameProject(projectId: string, name: string): Promise<Project> {
+    const project = await commands.renameProject(projectId, name);
+    projectsDataStore.projectRenamed(project.id, project.name);
+    return project;
+  }
+
   function handleDeleteCurrentProjectShortcut(event: Event) {
     if (
       !selectedProject ||
@@ -975,6 +986,7 @@
             {deletingBranches}
             {worktreeErrors}
             {workspaceErrors}
+            onRenameProject={handleRenameProject}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onRenameBranch={(branchId, branchName) =>
               handleRenameBranch(branchId, project.id, branchName)}

@@ -28,7 +28,7 @@
  * Authoritative freshness comes from the store change feed (project-changed,
  * branch-changed, repos-changed): every mutating backend store method
  * publishes, so a write in any window — or in the backend itself — refetches
- * here. The remaining imperative entry points (projectCreated,
+ * here. The remaining imperative entry points (projectCreated, projectRenamed,
  * setBranchesByProject, refreshProject) exist for immediacy: they paint the
  * local window's own mutation without waiting a coalescing window for the
  * echo; the event-driven refetch then confirms. Project tags are not here:
@@ -485,6 +485,16 @@ class ProjectsDataStore {
     // land on a view that treats it as un-hydrated and blanks for a beat.
     this.markProjectHydrated(project.id, this.loadGeneration);
     void this.hydrateProject(project.id);
+  }
+
+  /**
+   * Paint a project's new name at once — the detail-page title, sidebar row
+   * and sticky top-bar echo all read this list — ahead of the project-changed
+   * refetch that makes it authoritative. (The window title is derived from
+   * the sidebar filters, not the project name, so it is unaffected.)
+   */
+  projectRenamed(projectId: string, name: string): void {
+    this._projects = this._projects.map((p) => (p.id === projectId ? { ...p, name } : p));
   }
 
   /**

@@ -11,7 +11,7 @@
   The handle drags the group among the others, and the whole section is the
   drop zone: a group dropped on its upper half lands above it, on its lower
   half below. Only a drag that started on a group's handle counts, and it
-  carries a type of its own (see tagGroupDrag). A tag drag is the rows' and
+  carries a type of its own (see tagSettingsDrag). A tag drag is the rows' and
   the list's to take, and they in turn leave a group drag alone, so it
   reaches this section from anywhere inside it. Over a place that would
   leave the groups in their order, the cursor says the drop is refused.
@@ -32,7 +32,7 @@
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import type { Tag, TagGroup } from '../../../types';
   import { MAX_TAG_NAME_CHARS } from '../../tags/tagState';
-  import { writeTagGroupDrag } from './tagGroupDrag';
+  import { writeTagGroupDrag } from './tagSettingsDrag';
   import TagList from './TagList.svelte';
   import { groupMenuTriggerId, groupNameInputId, type TagsEditor } from './tagsEditor.svelte';
 

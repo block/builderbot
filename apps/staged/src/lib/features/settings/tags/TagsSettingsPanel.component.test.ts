@@ -62,7 +62,7 @@ vi.mock('../../../stores/projectsData.svelte', () => ({
 vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
 import { tagsStore } from '../../../stores/tags.svelte';
-import { TAG_GROUP_DRAG_TYPE } from './tagGroupDrag';
+import { TAG_DRAG_TYPE, TAG_GROUP_DRAG_TYPE } from './tagSettingsDrag';
 import TagsSettingsPanel from './TagsSettingsPanel.svelte';
 
 let component: ReturnType<typeof mount> | null = null;
@@ -595,6 +595,102 @@ describe('TagsSettingsPanel', () => {
       expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Done', 'Idea']);
     });
 
+    it('carries a dragged tag under its own type, with no text for a name field', async () => {
+      const root = await mountPanel(tagState());
+
+      const start = drag('dragstart', row('idea').querySelector('.drag-handle')!, 10, {});
+      expect(carried(start).types).toEqual([TAG_DRAG_TYPE]);
+      expect(carried(start).getData(TAG_DRAG_TYPE)).toBe('idea');
+      expect(carried(start).effectAllowed).toBe('move');
+
+      // A group's name field is in its header, which no row or list answers
+      // for. The panel takes nothing there, so the field's own handling
+      // stands, and the drag has no text for it to insert.
+      const field = section('priority').querySelector<HTMLInputElement>(
+        'input[aria-label="Group name"]'
+      )!;
+      const over = drag('dragover', field, 10, { [TAG_DRAG_TYPE]: 'idea' });
+      expect(over.defaultPrevented).toBe(false);
+      expect(carried(over).types).not.toContain('text/plain');
+      expect(drag('drop', field, 10, { [TAG_DRAG_TYPE]: 'idea' }).defaultPrevented).toBe(false);
+      await settle();
+
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority']);
+      expect(commandsMock.renameTagGroup).not.toHaveBeenCalled();
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    });
+
+    it('moves a tag that carries its type, within its group and to another', async () => {
+      const root = await mountPanel(tagState());
+      const data = { [TAG_DRAG_TYPE]: 'idea' };
+      const handle = () => row('idea').querySelector<HTMLElement>('.drag-handle')!;
+
+      // Below Done, in its own group.
+      drag('dragstart', handle(), 10, {});
+      const over = drag('dragover', row('done'), 10, data);
+      expect(over.defaultPrevented).toBe(true);
+      expect(carried(over).dropEffect).toBe('move');
+      flushSync();
+      expect(row('done').classList.contains('drop-after')).toBe(true);
+      expect(drag('drop', row('done'), 10, data).defaultPrevented).toBe(true);
+      drag('dragend', handle(), 10, {});
+      await settle();
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Doing', 'Done', 'Idea']);
+
+      // Above P1, a row of another group.
+      drag('dragstart', handle(), 10, {});
+      drag('dragover', row('p1'), -1, data);
+      flushSync();
+      expect(row('p1').classList.contains('drop-before')).toBe(true);
+      drag('drop', row('p1'), -1, data);
+      drag('dragend', handle(), 10, {});
+      await settle();
+      expect(scopeIds(tagsStore.snapshot, 'priority')).toEqual(['p0', 'idea', 'p1']);
+
+      // Onto the ungrouped list, past its rows: out of every group.
+      const ungrouped = root.querySelector<HTMLElement>('.ungrouped .tag-list')!;
+      drag('dragstart', handle(), 10, {});
+      expect(drag('dragover', ungrouped, 10, data).defaultPrevented).toBe(true);
+      drag('drop', ungrouped, 10, data);
+      await settle();
+
+      expect(commandsMock.moveTag.mock.calls).toEqual([
+        ['idea', 'status', 2],
+        ['idea', 'priority', 1],
+        ['idea', null, 2],
+      ]);
+      expect(scopeIds(tagsStore.snapshot, null)).toEqual(['q4', 'infra', 'idea']);
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+    });
+
+    it('leaves text and files alone, even after a tag drag that never ended', async () => {
+      const root = await mountPanel(tagState());
+
+      // A tag drag that got as far as a place it would move to, and whose
+      // source then left the page: no drop, and no dragend.
+      drag('dragstart', row('idea').querySelector('.drag-handle')!, 10, {});
+      drag('dragover', row('done'), 10, { [TAG_DRAG_TYPE]: 'idea' });
+      flushSync();
+      expect(row('done').classList.contains('drop-after')).toBe(true);
+
+      // Text and files dragged in after it are not that tag, on a row or on
+      // the rest of a list.
+      const list = section('priority').querySelector<HTMLElement>('.tag-list')!;
+      const foreign: Record<string, string>[] = [{ 'text/plain': 'Idea' }, { Files: '' }];
+      for (const data of foreign) {
+        for (const el of [row('p0'), list]) {
+          expect(drag('dragover', el, 10, data).defaultPrevented).toBe(false);
+          expect(drag('drop', el, 10, data).defaultPrevented).toBe(false);
+        }
+      }
+      await settle();
+
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Tag name').slice(0, 3)).toEqual(['Idea', 'Doing', 'Done']);
+      // The line stayed where the tag drag left it.
+      expect(row('done').classList.contains('drop-after')).toBe(true);
+    });
+
     it('asks first when projects already have a tag in the target group', async () => {
       await mountPanel(
         tagState([
@@ -753,6 +849,76 @@ describe('TagsSettingsPanel', () => {
 
       expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status', 'area']]]);
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status', 'Area']);
+    });
+
+    it('forgets the line once the drag leaves the list, until a section is crossed again', async () => {
+      const root = await mountPanel(threeGroups());
+      const body = root.querySelector<HTMLElement>('.panel-body')!;
+      /** A dragleave off `el`, saying what the drag moved on to. */
+      const leave = (el: HTMLElement, relatedTarget: EventTarget | null) =>
+        el.dispatchEvent(new MouseEvent('dragleave', { bubbles: true, relatedTarget }));
+
+      drag('dragstart', groupHandle('status'));
+      drag('dragover', section('priority'));
+      flushSync();
+      expect(section('priority').classList.contains('drop-after')).toBe(true);
+
+      // Off Priority and on to Area, or into the gap: still in the list.
+      leave(section('priority'), section('area'));
+      leave(section('priority'), body);
+      flushSync();
+      expect(section('priority').classList.contains('drop-after')).toBe(true);
+      expect(drag('dragover', body).defaultPrevented).toBe(true);
+
+      // Off the list, on to the rest of the page.
+      leave(section('priority'), document.body);
+      flushSync();
+      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
+      // The group is still being dragged.
+      expect(section('status').classList.contains('dragging')).toBe(true);
+
+      // Back in through the gap: nowhere to land until a section says where.
+      expect(drag('dragover', body).defaultPrevented).toBe(false);
+      expect(drag('drop', body).defaultPrevented).toBe(false);
+      await settle();
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+
+      drag('dragover', section('area'));
+      flushSync();
+      expect(section('area').classList.contains('drop-after')).toBe(true);
+      drag('drop', body);
+      await settle();
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+    });
+
+    it('forgets the line when a dragleave names nothing and the pointer is off the list', async () => {
+      const root = await mountPanel(threeGroups());
+      const body = root.querySelector<HTMLElement>('.panel-body')!;
+      // jsdom lays nothing out: give the list a box, 600 by 400 at the origin.
+      body.getBoundingClientRect = () =>
+        ({ left: 0, right: 600, top: 0, bottom: 400, width: 600, height: 400 }) as DOMRect;
+      const leave = (clientX: number, clientY: number) =>
+        section('priority').dispatchEvent(
+          new MouseEvent('dragleave', { bubbles: true, clientX, clientY })
+        );
+
+      drag('dragstart', groupHandle('status'));
+      drag('dragover', section('priority'));
+      flushSync();
+
+      // Not every engine says what a dragleave moved on to. Inside the box
+      // the drag is still over the list.
+      leave(300, 200);
+      flushSync();
+      expect(section('priority').classList.contains('drop-after')).toBe(true);
+
+      // Past its left edge, over the Settings sidebar.
+      leave(-20, 200);
+      flushSync();
+      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
+      expect(drag('dragover', body).defaultPrevented).toBe(false);
     });
 
     it('ignores a drop that would leave the groups in their order', async () => {

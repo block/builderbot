@@ -28,10 +28,10 @@
   before it, the right half after, and after "No ‹group›" on either. A line
   in the gap shows where, and the row takes a drop there too, landing where
   the last column the drag crossed put the line. A drop that would leave the
-  columns in their order shows no line and writes nothing. A card and a
-  column carry different drag types and keep separate state here, so each
-  drop reaches its own handler: a card's on the column, a column's on the
-  row.
+  columns in their order shows no line and writes nothing, and the cursor
+  says it is refused. A card and a column carry different drag types and
+  keep separate state here, so each drop reaches its own handler: a card's
+  on the column, a column's on the row.
 
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, or inside
@@ -42,6 +42,7 @@
   import { tick } from 'svelte';
   import type { Project, TagGroup } from '../../types';
   import { tagsStore } from '../../stores/tags.svelte';
+  import { dragStillInside } from '../../shared/dragStillInside';
   import { viewport } from '../../shared/viewport.svelte';
   import { pendingCatalogMoves } from '../tags/pendingCatalogMoves.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
@@ -59,7 +60,6 @@
   import {
     boardDragKind,
     columnDropSide,
-    dragStillInside,
     readColumnDrag,
     readProjectDrag,
     resolveBoardDrop,
@@ -236,8 +236,21 @@
   };
 
   /**
+   * What the cursor says over a place that takes a column drag: a drop that
+   * would leave the columns in their order is refused, as Settings › Tags
+   * refuses a group dropped where it is. Read after the dragover has set
+   * `columnDrop`. Only a drag that started here can be read ahead of its
+   * drop; another window's names its column on the drop alone, so it stays
+   * a move.
+   */
+  function columnDropEffect(): 'move' | 'none' {
+    return draggingColumnKey !== null && !columnDropWouldMove ? 'none' : 'move';
+  }
+
+  /**
    * Whose drag this is: a card's, a column's, or neither. Files and text
-   * dragged over the board are neither, and pass through.
+   * dragged over the board are neither, and pass through, even with a drag
+   * left over from before.
    */
   function dragKind(event: DragEvent): BoardDragKind | null {
     const started = draggingColumnKey !== null ? 'column' : draggingId !== null ? 'card' : null;
@@ -248,9 +261,11 @@
     if (!dragEnabled) return;
     const kind = dragKind(event);
     if (kind === 'column') {
+      // Taken even when the drop would not move the column, so the event
+      // stays the board's.
       event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
       setColumnDrop(columnDropAt(key, event));
+      if (event.dataTransfer) event.dataTransfer.dropEffect = columnDropEffect();
       return;
     }
     if (kind !== 'card') return;
@@ -314,12 +329,13 @@
   // The row of columns takes a column drag as well as each column. The line
   // is drawn in the gap between two columns, which is neither of them, so a
   // drag there (or below a short column, or over the + column) keeps the
-  // last column's line, and the drop lands on it.
+  // last column's line, and the drop lands on it. A column's own dragover
+  // bubbles here too, so the row gives the same answer the column gave.
 
   function handleRowDragOver(event: DragEvent) {
     if (!dragEnabled || columnDrop === null || dragKind(event) !== 'column') return;
     event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    if (event.dataTransfer) event.dataTransfer.dropEffect = columnDropEffect();
   }
 
   function handleRowDragLeave(event: DragEvent) {

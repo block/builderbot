@@ -12,9 +12,9 @@
  *
  * A tag drag and a group drag are separate gestures with separate state, and
  * at most one is live: a handler that sees its own drag id null leaves the
- * event alone, which is how a tag row ignores a group dragged across it. A
- * group drag also carries a type of its own, so text or files dragged over
- * the panel are not taken for one (see tagGroupDrag).
+ * event alone, which is how a tag row ignores a group dragged across it.
+ * Each drag also carries a type of its own, so text or files dragged over
+ * the panel are not taken for either (see tagSettingsDrag).
  *
  * Create one per mounted panel; its $derived fields belong to that
  * component.
@@ -38,7 +38,7 @@ import {
 } from '../../tags/tagReorder';
 import { numberedName, tagNameKey, type TagCatalog } from '../../tags/tagState';
 import { freeGroupName, type TagGroupTemplate } from '../../tags/tagTemplates';
-import { isTagGroupDrag } from './tagGroupDrag';
+import { isTagDrag, isTagGroupDrag } from './tagSettingsDrag';
 
 /** The name input of a tag row. */
 export function tagNameInputId(tagId: string): string {
@@ -225,6 +225,11 @@ export class TagsEditor {
     this.dropTarget = null;
   }
 
+  /** Whether a drag event belongs to the tag drag that started here. */
+  isTagDrag(event: DragEvent): boolean {
+    return isTagDrag(event.dataTransfer, this.dragTagId !== null);
+  }
+
   dragOver(target: TagDropTarget): void {
     if (this.dragTagId === null || sameTarget(this.dropTarget, target)) return;
     this.dropTarget = target;
@@ -315,6 +320,15 @@ export class TagsEditor {
     if (this.dragGroupId === null) return;
     if (current?.anchorGroupId === target.anchorGroupId && current.place === target.place) return;
     this.groupDropTarget = target;
+  }
+
+  /**
+   * The group drag left the panel: forget where it would have landed, so no
+   * line is drawn while it is held somewhere a release does nothing, and a
+   * drag that comes back lands nowhere until it crosses a section again.
+   */
+  groupDragLeave(): void {
+    this.groupDropTarget = null;
   }
 
   /** Drop the dragged group where the last dragover put it. */

@@ -223,6 +223,11 @@ function dragTypes(event: Event): readonly string[] {
   return (event as DragEvent).dataTransfer!.types;
 }
 
+/** What a dragover left the cursor saying: `none` is a refused drop. */
+function dropEffect(event: Event): string {
+  return (event as DragEvent).dataTransfer!.dropEffect;
+}
+
 /**
  * Lay the row of columns out, which jsdom does not: 272px columns 12px
  * apart from x = 0, 300px tall, in the order they are in when asked.
@@ -973,6 +978,7 @@ describe('ProjectsBoard column drag', () => {
 
     const over = dragColumnOver(root, 'idea', 'done', 'right');
     expect(over.defaultPrevented).toBe(true);
+    expect(dropEffect(over)).toBe('move');
     expect(dropLines(root)).toEqual(['done:after']);
     expect(column(root, 'idea').classList.contains('dragging')).toBe(true);
 
@@ -1029,21 +1035,54 @@ describe('ProjectsBoard column drag', () => {
     ['on the near side of the column after it', 'idea', 'doing', 'left'],
     ['on the near side of the column before it', 'doing', 'idea', 'right'],
     ['on "No ‹group›" when already first', 'idea', NO_TAG_COLUMN_KEY, 'right'],
-  ] as const)('shows no line and writes nothing for a drop %s', async (_case, key, onto, half) => {
+  ] as const)(
+    'shows no line, refuses the drop and writes nothing for a drop %s',
+    async (_case, key, onto, half) => {
+      const root = await mountBoard();
+      const row = layOutColumns(root);
+
+      const over = dragColumnOver(root, key, onto, half);
+
+      // The board still takes the event, so nothing under it does, and the
+      // cursor says the drop would not move the column.
+      expect(over.defaultPrevented).toBe(true);
+      expect(dropEffect(over)).toBe('none');
+      expect(dropLines(root)).toEqual([]);
+
+      // The gap beside it gives the same answer.
+      const inGap = dragEvent('dragover', { [COLUMN_DRAG_TYPE]: key }, { clientX: 846 });
+      row.dispatchEvent(inGap);
+      expect(inGap.defaultPrevented).toBe(true);
+      expect(dropEffect(inGap)).toBe('none');
+
+      await dropColumnOn(root, key, onto, half);
+
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+    }
+  );
+
+  it('says a drop moves again once the column is held over a half that moves it', async () => {
     const root = await mountBoard();
-    layOutColumns(root);
+    const row = layOutColumns(root);
 
-    const over = dragColumnOver(root, key, onto, half);
+    // Idea over its own left half, then over the far half of Doing.
+    expect(dropEffect(dragColumnOver(root, 'idea', 'idea', 'left'))).toBe('none');
+    const over = dragEvent(
+      'dragover',
+      { [COLUMN_DRAG_TYPE]: 'idea' },
+      pointerOver(root, 'doing', 'right')
+    );
+    column(root, 'doing').dispatchEvent(over);
+    flushSync();
 
-    // Still a drop the board takes, so the pointer doesn't flicker to
-    // "not allowed" on the way past.
-    expect(over.defaultPrevented).toBe(true);
-    expect(dropLines(root)).toEqual([]);
+    expect(dropEffect(over)).toBe('move');
+    expect(dropLines(root)).toEqual(['doing:after']);
 
-    await dropColumnOn(root, key, onto, half);
-
-    expect(commandsMock.moveTag).not.toHaveBeenCalled();
-    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+    // And in the gap, where that line is drawn.
+    const inGap = dragEvent('dragover', { [COLUMN_DRAG_TYPE]: 'idea' }, { clientX: 846 });
+    row.dispatchEvent(inGap);
+    expect(dropEffect(inGap)).toBe('move');
   });
 
   it.each([
@@ -1255,6 +1294,66 @@ describe('ProjectsBoard column drag', () => {
     expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
   });
 
+  it('ignores text and files dragged in after a column drag that never ended', async () => {
+    const root = await mountBoard();
+    const row = layOutColumns(root);
+
+    // A column drag that got as far as a place it would move to, and whose
+    // source then left the page: no drop, and no dragend.
+    dragColumnOver(root, 'idea', 'done', 'right');
+    expect(dropLines(root)).toEqual(['done:after']);
+
+    // What is dragged in after it is not that column, over a column or in
+    // the gap, even text naming one.
+    const foreign: Record<string, string>[] = [{ 'text/plain': 'idea' }, { Files: '' }];
+    for (const data of foreign) {
+      const at = pointerOver(root, 'doing', 'right');
+      const overColumn = dragEvent('dragover', data, at);
+      column(root, 'doing').dispatchEvent(overColumn);
+      const dropColumn = dragEvent('drop', data, at);
+      column(root, 'doing').dispatchEvent(dropColumn);
+      const overRow = dragEvent('dragover', data, { clientX: 846 });
+      row.dispatchEvent(overRow);
+      const dropRow = dragEvent('drop', data, { clientX: 846 });
+      row.dispatchEvent(dropRow);
+
+      for (const event of [overColumn, dropColumn, overRow, dropRow]) {
+        expect(event.defaultPrevented).toBe(false);
+      }
+    }
+    await settle();
+
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+    // The line stayed where the column drag left it.
+    expect(dropLines(root)).toEqual(['done:after']);
+  });
+
+  it('ignores text and files dragged in after a card drag that never ended', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // As above, for a card: picked up, and never dropped or ended.
+    card(root, 'p2').dispatchEvent(dragEvent('dragstart', {}));
+
+    const foreign: Record<string, string>[] = [{ 'text/plain': 'p2' }, { Files: '' }];
+    for (const data of foreign) {
+      const over = dragEvent('dragover', data);
+      column(root, 'doing').dispatchEvent(over);
+      const drop = dragEvent('drop', data);
+      column(root, 'doing').dispatchEvent(drop);
+
+      expect(over.defaultPrevented).toBe(false);
+      expect(drop.defaultPrevented).toBe(false);
+    }
+    await settle();
+
+    expect(column(root, 'doing').classList.contains('drop-target')).toBe(false);
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+  });
+
   it('does not take a card dropped in the gap as a column', async () => {
     const root = await mountBoard();
     const row = layOutColumns(root);
@@ -1397,6 +1496,9 @@ describe('ProjectsBoard column drag', () => {
     column(root, 'idea').dispatchEvent(over);
     flushSync();
     expect(over.defaultPrevented).toBe(true);
+    // The board can't tell ahead of the drop whether it would move, so it
+    // does not refuse it.
+    expect(dropEffect(over)).toBe('move');
     expect(dropLines(root)).toEqual([]);
 
     column(root, 'idea').dispatchEvent(

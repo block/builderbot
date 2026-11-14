@@ -5,7 +5,6 @@ import {
   boardDragKind,
   COLUMN_DRAG_TYPE,
   columnDropSide,
-  dragStillInside,
   PROJECT_DRAG_TYPE,
   readColumnDrag,
   readProjectDrag,
@@ -111,6 +110,14 @@ describe('boardDragKind', () => {
     expect(boardDragKind(dataTransfer({ [COLUMN_DRAG_TYPE]: 'doing' }), 'card')).toBe('column');
     expect(boardDragKind(dataTransfer({ [PROJECT_DRAG_TYPE]: 'p1' }), 'column')).toBe('card');
   });
+
+  it('is neither for text and files dragged after a drag that never ended', () => {
+    // The drag the board saw start speaks only for a drag with no types.
+    expect(boardDragKind(dataTransfer({ 'text/plain': 'doing' }), 'column')).toBeNull();
+    expect(boardDragKind(dataTransfer({ 'text/plain': 'p1' }), 'card')).toBeNull();
+    expect(boardDragKind(dataTransfer({ Files: '' }), 'column')).toBeNull();
+    expect(boardDragKind(dataTransfer({ Files: '' }), 'card')).toBeNull();
+  });
 });
 
 describe('columnDropSide', () => {
@@ -126,38 +133,6 @@ describe('columnDropSide', () => {
   it('is always after "No ‹group›", which stays first', () => {
     expect(columnDropSide(NO_TAG_COLUMN_KEY, rect, 100)).toBe('after');
     expect(columnDropSide(NO_TAG_COLUMN_KEY, rect, 371)).toBe('after');
-  });
-});
-
-describe('dragStillInside', () => {
-  // Enough of three elements: a container at (10, 20) to (110, 70), a child
-  // of it, and one outside it.
-  const child = {} as Node;
-  const outside = {} as Node;
-  const container = {
-    contains: (node: Node | null) => node === child || node === container,
-    getBoundingClientRect: () => ({ left: 10, right: 110, top: 20, bottom: 70 }) as DOMRect,
-  } as unknown as Element;
-
-  it('goes by what the drag moved on to, when the event says', () => {
-    // The pointer disagrees in each, and is not consulted.
-    expect(dragStillInside(container, { clientX: 0, clientY: 0, relatedTarget: child })).toBe(true);
-    expect(dragStillInside(container, { clientX: 0, clientY: 0, relatedTarget: container })).toBe(
-      true
-    );
-    expect(dragStillInside(container, { clientX: 50, clientY: 50, relatedTarget: outside })).toBe(
-      false
-    );
-  });
-
-  it('goes by the pointer when the event names nothing', () => {
-    const at = (clientX: number, clientY: number) => ({ clientX, clientY, relatedTarget: null });
-    expect(dragStillInside(container, at(10, 20))).toBe(true);
-    expect(dragStillInside(container, at(109, 69))).toBe(true);
-    expect(dragStillInside(container, at(9, 40))).toBe(false);
-    expect(dragStillInside(container, at(110, 40))).toBe(false);
-    expect(dragStillInside(container, at(50, 19))).toBe(false);
-    expect(dragStillInside(container, at(50, 70))).toBe(false);
   });
 });
 

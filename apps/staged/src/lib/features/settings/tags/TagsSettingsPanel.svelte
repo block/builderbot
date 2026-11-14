@@ -13,7 +13,8 @@
 
   Each group section takes a group dropped on it. The list also takes one
   dropped between sections or below them, where the drop line is drawn: it
-  lands where the last section it crossed put that line.
+  lands where the last section it crossed put that line. The line goes once
+  the drag leaves the list.
 
   State and actions live in a TagsEditor (see tagsEditor.svelte.ts) that the
   sections and rows share.
@@ -21,6 +22,7 @@
 <script lang="ts">
   import Info from '@lucide/svelte/icons/info';
   import Tags from '@lucide/svelte/icons/tags';
+  import { dragStillInside } from '../../../shared/dragStillInside';
   import { tagsStore } from '../../../stores/tags.svelte';
   import DeleteTagDialog from './DeleteTagDialog.svelte';
   import DeleteTagGroupDialog from './DeleteTagGroupDialog.svelte';
@@ -31,6 +33,8 @@
   import { TagsEditor } from './tagsEditor.svelte';
 
   const editor = new TagsEditor();
+
+  let body = $state<HTMLElement | null>(null);
 
   let catalog = $derived(editor.catalog);
 
@@ -48,6 +52,15 @@
     if (!editor.isGroupDrag(event) || !editor.groupDropWouldMove) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  }
+
+  // A dragleave bubbles from everything the drag crosses in the list. Only
+  // one that takes it out of the list forgets the target: over the sidebar
+  // or outside the window a release does nothing, so no line should say
+  // otherwise, and a drag that comes back has to cross a section again.
+  function handleGroupDragLeave(event: DragEvent) {
+    if (editor.groupDropTarget === null || !body || dragStillInside(body, event)) return;
+    editor.groupDragLeave();
   }
 
   function handleGroupDrop(event: DragEvent) {
@@ -76,9 +89,11 @@
   </div>
 
   <div
+    bind:this={body}
     class="panel-body"
     role="presentation"
     ondragover={handleGroupDragOver}
+    ondragleave={handleGroupDragLeave}
     ondrop={handleGroupDrop}
   >
     {#if !tagsStore.loaded}

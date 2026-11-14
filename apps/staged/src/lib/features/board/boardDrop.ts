@@ -73,9 +73,10 @@ export type BoardDragKind = 'card' | 'column';
 /**
  * Which kind of drag an event belongs to, or null for one that is not the
  * board's (files, text). The types the drag carries decide. `started`, the
- * kind the board saw start, speaks only for an engine that dropped them: it
- * can be stale, from a drag whose source left the page and whose dragend
- * never came.
+ * kind the board saw start, speaks only for a drag that carries no types at
+ * all, which is an engine that dropped them. It can be stale, from a drag
+ * whose source left the page and whose dragend never came, and text or files
+ * dragged over the board after that are neither a card nor a column.
  */
 export function boardDragKind(
   dataTransfer: DataTransfer | null,
@@ -84,7 +85,7 @@ export function boardDragKind(
   const types = dataTransfer?.types ?? [];
   if (types.includes(COLUMN_DRAG_TYPE)) return 'column';
   if (types.includes(PROJECT_DRAG_TYPE)) return 'card';
-  return started;
+  return types.length === 0 ? started : null;
 }
 
 /**
@@ -99,27 +100,6 @@ export function columnDropSide(
 ): 'before' | 'after' {
   if (columnKey === NO_TAG_COLUMN_KEY) return 'after';
   return clientX < rect.left + rect.width / 2 ? 'before' : 'after';
-}
-
-/**
- * Whether a drag that fired a dragleave is still over `container`: what it
- * moved on to (an element, when the event names one) is inside. Not every
- * engine fills in a dragleave's `relatedTarget`, so without one the pointer
- * decides.
- */
-export function dragStillInside(
-  container: Pick<Element, 'contains' | 'getBoundingClientRect'>,
-  event: Pick<DragEvent, 'relatedTarget' | 'clientX' | 'clientY'>
-): boolean {
-  const next = event.relatedTarget as Node | null;
-  if (next) return container.contains(next);
-  const box = container.getBoundingClientRect();
-  return (
-    event.clientX >= box.left &&
-    event.clientX < box.right &&
-    event.clientY >= box.top &&
-    event.clientY < box.bottom
-  );
 }
 
 /** The write a drop asks for: the project's tag in the group, or null to clear it. */

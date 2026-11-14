@@ -1272,6 +1272,21 @@ describe('writes sent without awaiting keep their send order', () => {
     ]);
   });
 
+  it('sends a project’s second rename only once the first has landed', async () => {
+    const { commands, sent } = await load();
+
+    void commands.renameProject('project-1', 'older');
+    void commands.renameProject('project-1', 'newer');
+    // Another project's rename waits for neither.
+    void commands.renameProject('project-2', 'other');
+    await flush();
+    expect(sent.map((call) => call.args.name)).toEqual(['older', 'other']);
+
+    sent[0].settle({});
+    await flush();
+    expect(sent.map((call) => call.args.name)).toEqual(['older', 'other', 'newer']);
+  });
+
   it('sends the next write after one that failed', async () => {
     vi.resetModules();
     const invokeCommand = vi

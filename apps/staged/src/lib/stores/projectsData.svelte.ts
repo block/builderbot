@@ -191,7 +191,8 @@ class ProjectsDataStore {
    * older response can land last. Keyed per list: `projects`,
    * `branches:<project>` and `repos:<project>`. `branch-writes:<project>`
    * records the view's own writes to a branch list (setBranchesByProject),
-   * which a branch read sent before them must not be applied over.
+   * which a branch read sent before them must not be applied over, and
+   * `project-writes` does the same for the project list (projectRenamed).
    */
   private readOrder = new LatestWins();
   private initialLoad: Promise<void> | null = null;
@@ -467,7 +468,7 @@ class ProjectsDataStore {
         commands.listProjectRepos(projectId, { force: true }),
       ]);
       if (generation !== this.loadGeneration) return false;
-      if (this.readOrder.admit('projects', ticket)) {
+      if (this.admitProjectList(ticket)) {
         this._projects = projectsResult.data;
       }
       let offered = this.offerProjectBranches(projectId, branchesResult.data, generation, ticket, {
@@ -537,7 +538,36 @@ class ProjectsDataStore {
    * the sidebar filters, not the project name, so it is unaffected.)
    */
   projectRenamed(projectId: string, name: string): void {
+    // A read of the project list still in flight was sent before this write
+    // and may have read the store before the rename. Mark the write so that
+    // read is not applied over it (see admitProjectList). Only a name that
+    // really changes counts, as in setBranchesByProject.
+    if (this._projects.some((p) => p.id === projectId && p.name !== name)) {
+      this.readOrder.wrote('project-writes');
+    }
     this._projects = this._projects.map((p) => (p.id === projectId ? { ...p, name } : p));
+  }
+
+  /**
+   * Whether a fetched project list may replace the one shown.
+   *
+   * Refused when a list sent after it has already landed. Set aside when the
+   * view's own rename (projectRenamed) landed while it was out: it may have
+   * read the store before the rename, and would put the old name back until
+   * the next list arrived. A list that is set aside is read again in the
+   * background, since it may be the only one carrying some other change.
+   *
+   * The checks run in that order and the list is recorded only when it is
+   * applied, as in offerProjectBranches, so a list that was set aside is
+   * never taken for one that landed.
+   */
+  private admitProjectList(ticket: number): boolean {
+    if (this.readOrder.overtaken('projects', ticket)) return false;
+    if (this.readOrder.overtaken('project-writes', ticket)) {
+      void this.revalidate({ force: true, soft: true });
+      return false;
+    }
+    return this.readOrder.admit('projects', ticket);
   }
 
   /**
@@ -655,9 +685,10 @@ class ProjectsDataStore {
     { scheduleHydration = true }: { scheduleHydration?: boolean } = {}
   ): void {
     if (generation !== this.loadGeneration) return;
-    // A list a refresh sent after this one has already landed (see
-    // readOrder): keep that list, and seed, prune and hydrate against it.
-    if (!this.readOrder.admit('projects', ticket)) projectList = this._projects;
+    // A list sent after this one has already landed, or the view's own
+    // rename has (see admitProjectList): keep the list shown, and seed, prune
+    // and hydrate against it.
+    if (!this.admitProjectList(ticket)) projectList = this._projects;
     const previousProjectIds = new Set(this._projects.map((project) => project.id));
     const newlySeenProjectIds = projectList
       .map((project) => project.id)

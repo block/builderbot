@@ -744,15 +744,21 @@ fn create_project_blocking(
 }
 
 /// Rename a project in place. Only the stored name changes; see
-/// [`project_commands::rename_project_impl`].
+/// [`project_commands::rename_project_impl`]. A store write and a read, run
+/// on the blocking pool so a wait on the store lock does not freeze the
+/// window.
 #[tauri::command(rename_all = "camelCase")]
-fn rename_project(
+async fn rename_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     name: String,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
-    project_commands::rename_project_impl(&store, &project_id, &name)
+    tauri::async_runtime::spawn_blocking(move || {
+        project_commands::rename_project_impl(&store, &project_id, &name)
+    })
+    .await
+    .map_err(|e| format!("rename_project task failed: {e}"))?
 }
 
 /// A store read, run on the blocking pool like [`list_projects`]: the

@@ -193,6 +193,9 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     ("util_commands.rs", "is_sq_available"),
     ("lib.rs", "create_project"),
     ("lib.rs", "pin_repo"),
+    // Arrived from main as a plain `fn` after the conversions: one store
+    // write and one read.
+    ("lib.rs", "rename_project"),
     // The deletes: a media scan per image, or a cascade over every message
     // of a session.
     ("note_commands.rs", "delete_note"),
@@ -461,6 +464,10 @@ const SYNCHRONOUS_COMMANDS: &[(&str, &str)] = &[
     ("actions/commands.rs", "get_running_branch_actions"),
     ("actions/commands.rs", "get_all_running_actions"),
     ("actions/commands.rs", "clear_action_execution"),
+    // The record of revealed windows, and the raise a loading window was
+    // owed: native window calls, which belong on the main thread, the PR
+    // poll focus hint and the record of used windows.
+    ("app_lifecycle/window_reveal.rs", "note_window_revealed"),
     // An environment variable.
     ("branches.rs", "get_blox_env"),
     // The pending connection requests, held in memory. An approval is only
@@ -482,6 +489,10 @@ const SYNCHRONOUS_COMMANDS: &[(&str, &str)] = &[
     ("pr_poll_scheduler.rs", "set_branch_pending"),
     ("pr_poll_scheduler.rs", "refresh_now"),
     ("pr_poll_scheduler.rs", "disconnect_client"),
+    // A window's project-open request, parked in memory: one read, and one
+    // answered through its channel.
+    ("project_open/commands.rs", "list_pending_project_opens"),
+    ("project_open/commands.rs", "answer_project_open"),
     // The transfer and preflight registries: a flag set, a list cloned.
     ("project_transfer/commands.rs", "cancel_project_transfer"),
     ("project_transfer/commands.rs", "list_transferring_projects"),

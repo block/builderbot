@@ -108,7 +108,8 @@ export const WEB_WRITE_ORDER_MAX_WAIT_MS = 30_000;
  * call site can have two of in flight, or sends without awaiting, are ordered
  * the same way: a repo badge's saves and its delete (`repo-badge:`), pinned
  * repo reorders (`pinned-repos`), a project note's read marks and its delete
- * (`project-note:`), and every tag write (`tags`).
+ * (`project-note:`), every tag write (`tags`), and a project's renames
+ * (`project:`).
  *
  * Only these wrappers are ordered. A command sent through another wrapper
  * while one of these is in flight is not held back for it.
@@ -314,8 +315,17 @@ export async function createProject(
   return project;
 }
 
+/**
+ * Sent behind the project's rename before it (see {@link writeOrder}): each
+ * rename carries the whole name, and the last one to land stays. The inline
+ * editor sends one at a time, but only while it stays mounted. Leaving the
+ * project and coming back while a rename is still out mounts a fresh editor,
+ * which can send a second.
+ */
 export async function renameProject(projectId: string, name: string): Promise<Project> {
-  const project = await invokeCommand<Project>('rename_project', { projectId, name });
+  const project = await writeOrder.run(`project:${projectId}`, () =>
+    invokeCommand<Project>('rename_project', { projectId, name })
+  );
   await invalidateCacheByCommand('list_projects');
   return project;
 }

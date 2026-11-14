@@ -979,6 +979,92 @@ describe('projectRenamed', () => {
 
     expect(store.projects).toEqual([project()]);
   });
+
+  function deferredList() {
+    let resolve!: (value: SwrResult<Project[]>) => void;
+    const promise = new Promise<SwrResult<Project[]>>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('reads the list again when a reload sent before the rename lands after it', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    // A reload is in flight, and read the store before the rename.
+    const stale = deferredList();
+    listProjects.mockReturnValueOnce(stale.promise);
+    void store.ensureLoaded();
+    await tick();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+
+    // The rename lands and the view paints it.
+    store.projectRenamed('p1', 'Alpha Prime');
+
+    const again = deferredList();
+    listProjects.mockReturnValueOnce(again.promise);
+    const beta = project({ id: 'p2', name: 'Beta' });
+    stale.resolve(swr([project(), beta]));
+    await vi.waitFor(() => {
+      expect(listProjects).toHaveBeenCalledTimes(3);
+    });
+
+    // The older list does not put the old name back. What else it carried is
+    // not lost: the list is read again, past any cached answer.
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(store.projects.map((p) => p.name)).toEqual(['Alpha Prime']);
+
+    again.resolve(swr([project({ name: 'Alpha Prime' }), beta]));
+    await vi.waitFor(() => {
+      expect(store.projects.map((p) => p.name)).toEqual(['Alpha Prime', 'Beta']);
+    });
+    expect(listProjects).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the new name when a refresh sent before the rename lands after it', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const stale = deferredList();
+    listProjects.mockReturnValueOnce(stale.promise);
+    const refresh = store.refreshProject('p1');
+
+    store.projectRenamed('p1', 'Alpha Prime');
+
+    const renamed = project({ name: 'Alpha Prime' });
+    listProjects.mockResolvedValue(swr([renamed]));
+    stale.resolve(swr([project()]));
+
+    // The refresh still applies its branches and repos.
+    expect(await refresh).toBe(true);
+    expect(store.projects).toEqual([renamed]);
+    await vi.waitFor(() => {
+      expect(listProjects).toHaveBeenCalledTimes(3);
+    });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(store.projects).toEqual([renamed]);
+  });
+
+  it('lets a list in flight apply after a rename that changed no name', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const inFlight = deferredList();
+    listProjects.mockReturnValueOnce(inFlight.promise);
+    void store.ensureLoaded();
+    await tick();
+
+    // The name is already the one shown, and the other project is unknown.
+    store.projectRenamed('p1', 'Alpha');
+    store.projectRenamed('p9', 'Ghost');
+
+    inFlight.resolve(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    await vi.waitFor(() => {
+      expect(store.projects.map((p) => p.name)).toEqual(['Alpha', 'Beta']);
+    });
+    expect(listProjects).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('setBranchesByProject', () => {

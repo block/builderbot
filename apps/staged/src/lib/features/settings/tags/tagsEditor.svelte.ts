@@ -3,11 +3,16 @@
  * rows so they don't thread a dozen callbacks through each other.
  *
  * Catalog writes go through tagActions, which queues them, awaits the
- * backend and then patches tagsStore. Tag moves (drag and the row menu) also
- * show at once, through pendingCatalogMoves: the editor's catalog is the
- * store's snapshot with the moves still in flight applied on top. Each move
- * is resolved against that catalog, so Move down pressed three times quickly
- * steps from where the last press left the tag.
+ * backend and then patches tagsStore. Reorders also show at once, through
+ * pendingCatalogMoves: tag moves and group reorders, by drag or from the
+ * menus. The editor's catalog is the store's snapshot with the reorders
+ * still in flight applied on top. Each one is resolved against that catalog,
+ * so Move down pressed three times quickly steps from where the last press
+ * left the tag or group.
+ *
+ * A tag drag and a group drag are separate gestures with separate state, and
+ * at most one is live: a handler that sees its own drag id null leaves the
+ * event alone, which is how a tag row ignores a group dragged across it.
  *
  * Create one per mounted panel; its $derived fields belong to that
  * component.
@@ -21,9 +26,11 @@ import { tagsStore } from '../../../stores/tags.svelte';
 import { pendingCatalogMoves } from '../../tags/pendingCatalogMoves.svelte';
 import { tagActions } from '../../tags/tagActions.svelte';
 import {
+  resolveGroupDrop,
   resolveTagDrop,
   stepTarget,
   steppedGroupOrder,
+  type GroupDropTarget,
   type ResolvedTagMove,
   type TagDropTarget,
 } from '../../tags/tagReorder';
@@ -70,6 +77,17 @@ export class TagsEditor {
     this.dragTagId !== null &&
       this.dropTarget !== null &&
       resolveTagDrop(this.catalog, this.dragTagId, this.dropTarget) !== null
+  );
+
+  /** The group being dragged, if a drag started on a group's handle. */
+  dragGroupId = $state<string | null>(null);
+  /** Where the dragged group would land. */
+  groupDropTarget = $state<GroupDropTarget | null>(null);
+  /** Whether dropping the group now would change anything. */
+  readonly groupDropWouldMove = $derived(
+    this.dragGroupId !== null &&
+      this.groupDropTarget !== null &&
+      resolveGroupDrop(this.catalog.groups, this.dragGroupId, this.groupDropTarget) !== null
   );
 
   // Each dialog's target outlives its close, so its text doesn't blank
@@ -198,6 +216,8 @@ export class TagsEditor {
   // ── Drag and drop ──
 
   dragStart(tagId: string): void {
+    // A group drag whose source left the page never got its dragend.
+    this.groupDragEnd();
     this.dragTagId = tagId;
     this.dropTarget = null;
   }
@@ -263,12 +283,52 @@ export class TagsEditor {
     void tagActions.setTagGroupSidebar(group, on);
   }
 
-  async moveGroup(group: TagGroup, step: -1 | 1): Promise<void> {
+  /** Move a group one step up (-1) or down (1). */
+  moveGroup(group: TagGroup, step: -1 | 1): void {
     const order = steppedGroupOrder(this.catalog.groups, group.id, step);
     if (!order) return;
-    if (await tagActions.reorderTagGroups(order)) {
-      await focusAfterRender(groupMenuTriggerId(group.id));
-    }
+    // As for a tag (see applyMove): the section moves at once, and WebKit
+    // drops focus from it, so the menu trigger takes it back.
+    void focusAfterRender(groupMenuTriggerId(group.id));
+    void pendingCatalogMoves.reorderGroups(order);
+  }
+
+  // ── Dragging groups ──
+
+  groupDragStart(groupId: string): void {
+    // A tag drag whose row left the page never got its dragend.
+    this.dragEnd();
+    this.dragGroupId = groupId;
+    this.groupDropTarget = null;
+  }
+
+  groupDragOver(target: GroupDropTarget): void {
+    const current = this.groupDropTarget;
+    if (this.dragGroupId === null) return;
+    if (current?.anchorGroupId === target.anchorGroupId && current.place === target.place) return;
+    this.groupDropTarget = target;
+  }
+
+  /** Drop the dragged group where the last dragover put it. */
+  groupDrop(): void {
+    const groupId = this.dragGroupId;
+    const target = this.groupDropTarget;
+    this.groupDragEnd();
+    if (groupId === null || target === null) return;
+    const order = resolveGroupDrop(this.catalog.groups, groupId, target);
+    if (order) void pendingCatalogMoves.reorderGroups(order);
+  }
+
+  groupDragEnd(): void {
+    this.dragGroupId = null;
+    this.groupDropTarget = null;
+  }
+
+  /** Where the drop indicator sits on a group, if the current drop would land beside it. */
+  groupDropPlaceFor(groupId: string): 'before' | 'after' | null {
+    const target = this.groupDropTarget;
+    if (!this.groupDropWouldMove || target?.anchorGroupId !== groupId) return null;
+    return target.place;
   }
 
   requestDeleteGroup(group: TagGroup): void {

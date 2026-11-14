@@ -5,8 +5,14 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DeleteTagGroupMode, NewTag, TagColor, TagState } from '../../../types';
-import { withTagMoved, withTagValue, withoutGroup, withoutTag } from '../../tags/tagCatalogPatches';
-import { scopeIds, tagState } from '../../tags/testStubs/tagFixtures';
+import {
+  withGroupOrder,
+  withTagMoved,
+  withTagValue,
+  withoutGroup,
+  withoutTag,
+} from '../../tags/tagCatalogPatches';
+import { group, scopeIds, tagState } from '../../tags/testStubs/tagFixtures';
 
 const { backend, toastError } = vi.hoisted(() => ({
   backend: { state: null as unknown as TagState },
@@ -41,7 +47,7 @@ const commandsMock = vi.hoisted(() => ({
   renameTagGroup: vi.fn(async () => {}),
   setIconTagGroup: vi.fn(async () => {}),
   setTagGroupSidebar: vi.fn(async (_groupId: string, _shown: boolean) => {}),
-  reorderTagGroups: vi.fn(async () => {}),
+  reorderTagGroups: vi.fn(async (_groupIds: string[]) => {}),
 }));
 
 vi.mock('../../../commands', () => commandsMock);
@@ -117,8 +123,29 @@ function button(root: ParentNode, text: string): HTMLButtonElement {
   return found;
 }
 
-function drag(eventName: string, el: HTMLElement) {
-  el.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, clientY: 10 }));
+/**
+ * Dispatch a drag event on `el` and return it. jsdom lays nothing out, so
+ * every rect is empty at the origin: the default `clientY` is the lower half
+ * of whatever is under it, and a negative one the upper half.
+ */
+function drag(eventName: string, el: HTMLElement, clientY = 10): MouseEvent {
+  const event = new MouseEvent(eventName, { bubbles: true, cancelable: true, clientY });
+  el.dispatchEvent(event);
+  return event;
+}
+
+/** A group's section, the drop zone for a dragged group. */
+function section(groupId: string): HTMLElement {
+  return document.querySelector<HTMLElement>(`[data-tag-group="${groupId}"]`)!;
+}
+
+function groupHandle(groupId: string): HTMLElement {
+  return section(groupId).querySelector<HTMLElement>('.group-head .drag-handle')!;
+}
+
+/** The group ids in position order. */
+function groupIds(state: TagState): string[] {
+  return [...state.groups].sort((a, b) => a.position - b.position).map((g) => g.id);
 }
 
 /** Focus a field and type `text` into it, as keystrokes would (no Enter). */
@@ -164,6 +191,9 @@ beforeEach(() => {
   // would; the catalog patches mirror the backend's rules.
   commandsMock.moveTag.mockImplementation(async (tagId, groupId, index) => {
     backend.state = withTagMoved(backend.state, { tagId, groupId, index });
+  });
+  commandsMock.reorderTagGroups.mockImplementation(async (ids) => {
+    backend.state = withGroupOrder(backend.state, ids);
   });
   commandsMock.deleteTagGroup.mockImplementation(async (groupId, mode) => {
     backend.state = withoutGroup(backend.state, groupId, mode);
@@ -588,6 +618,250 @@ describe('TagsSettingsPanel', () => {
       expect(commandsMock.moveTag).not.toHaveBeenCalled();
       expect(toastError).toHaveBeenCalledWith('Status already has a tag named “Done”', {
         description: 'Rename one of them first.',
+      });
+    });
+  });
+
+  describe('reordering groups', () => {
+    /** `tagState()` with a third group, Area, after Priority. */
+    function threeGroups(): TagState {
+      const state = tagState();
+      state.groups.push(group('area', 2, { name: 'Area' }));
+      return state;
+    }
+
+    /** Hold every reorder_tag_groups open; each entry settles one, in order. */
+    function holdReorders(): { land: () => void; fail: (e: Error) => void }[] {
+      const writes: { land: () => void; fail: (e: Error) => void }[] = [];
+      commandsMock.reorderTagGroups.mockImplementation(
+        (ids) =>
+          new Promise<void>((resolve, reject) => {
+            writes.push({
+              land: () => {
+                backend.state = withGroupOrder(backend.state, ids);
+                resolve();
+              },
+              fail: reject,
+            });
+          })
+      );
+      return writes;
+    }
+
+    async function moveDown(groupName: string) {
+      const trigger = document.querySelector<HTMLElement>(
+        `[aria-label="Actions for ${groupName}"]`
+      )!;
+      menuItem(await openMenu(trigger), 'Move down').click();
+      await settle();
+    }
+
+    it('reorders by drag from the group handle, showing the new order at once', async () => {
+      const writes = holdReorders();
+      const root = await mountPanel(tagState());
+
+      // Status over the lower half of Priority: the line goes below Priority.
+      drag('dragstart', groupHandle('status'));
+      drag('dragover', section('priority'));
+      flushSync();
+      expect(section('status').classList.contains('dragging')).toBe(true);
+      expect(section('priority').classList.contains('drop-after')).toBe(true);
+
+      drag('drop', section('priority'));
+      await settle();
+
+      // The write is still open, and the panel already shows the new order.
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status']]]);
+      expect(groupIds(tagsStore.snapshot)).toEqual(['status', 'priority']);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status']);
+      // Each group's tags went with it.
+      expect(nameInputs(root, 'Tag name').slice(0, 5)).toEqual([
+        'P0',
+        'P1',
+        'Idea',
+        'Doing',
+        'Done',
+      ]);
+      // The drop ended the drag.
+      expect(root.querySelector('.tag-group.dragging')).toBeNull();
+      expect(root.querySelector('.tag-group.drop-after')).toBeNull();
+
+      writes[0].land();
+      await settle();
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status']);
+      expect(groupIds(tagsStore.snapshot)).toEqual(['priority', 'status']);
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    });
+
+    it('lands a group above the one whose upper half it is dropped on', async () => {
+      const root = await mountPanel(threeGroups());
+
+      drag('dragstart', groupHandle('area'));
+      drag('dragover', section('status'), -1);
+      flushSync();
+      expect(section('status').classList.contains('drop-before')).toBe(true);
+      drag('drop', section('status'), -1);
+      await settle();
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['area', 'status', 'priority']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Area', 'Status', 'Priority']);
+    });
+
+    it('takes a drop in the gap between sections, where the line is drawn', async () => {
+      const root = await mountPanel(threeGroups());
+      const body = root.querySelector<HTMLElement>('.panel-body')!;
+
+      drag('dragstart', groupHandle('status'));
+      // Nothing to land on until a section has named a place.
+      expect(drag('dragover', body).defaultPrevented).toBe(false);
+
+      drag('dragover', section('priority'));
+      flushSync();
+      expect(drag('dragover', body).defaultPrevented).toBe(true);
+      expect(drag('drop', body).defaultPrevented).toBe(true);
+      await settle();
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status', 'area']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status', 'Area']);
+    });
+
+    it('ignores a drop that would leave the groups in their order', async () => {
+      const root = await mountPanel(threeGroups());
+      const body = root.querySelector<HTMLElement>('.panel-body')!;
+      drag('dragstart', groupHandle('status'));
+
+      // Above Priority is where Status already is: no line, and no write.
+      drag('dragover', section('priority'), -1);
+      flushSync();
+      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
+      // The gap takes nothing either, so the cursor says the drop is refused.
+      expect(drag('dragover', body).defaultPrevented).toBe(false);
+      drag('drop', section('priority'), -1);
+      await settle();
+
+      // Nor does a group dropped on itself move.
+      drag('dragstart', groupHandle('status'));
+      drag('dragover', section('status'));
+      flushSync();
+      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
+      drag('drop', section('status'));
+      await settle();
+
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('leaves a tag drag to the rows and lists', async () => {
+      const root = await mountPanel(tagState());
+
+      // A tag over a group's header is not a group drop.
+      drag('dragstart', row('idea').querySelector('.drag-handle')!);
+      const head = section('priority').querySelector<HTMLElement>('.group-head')!;
+      expect(drag('dragover', head).defaultPrevented).toBe(false);
+      expect(drag('drop', head).defaultPrevented).toBe(false);
+      flushSync();
+      expect(root.querySelector('.tag-group.drop-before, .tag-group.drop-after')).toBeNull();
+
+      // Dropped on the group's list, the tag joins the end of that group.
+      const list = section('priority').querySelector<HTMLElement>('.tag-list')!;
+      drag('dragover', list);
+      drag('drop', list);
+      await settle();
+
+      expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'priority', 2]]);
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority']);
+      expect(scopeIds(tagsStore.snapshot, 'priority')).toEqual(['p0', 'p1', 'idea']);
+    });
+
+    it('takes a group dragged across a tag row, without moving the tag', async () => {
+      const root = await mountPanel(tagState());
+
+      // Priority over a row in Status: the row passes the drag up to its
+      // section, whose upper half it is.
+      drag('dragstart', groupHandle('priority'));
+      drag('dragover', row('idea'), -1);
+      flushSync();
+      expect(row('idea').classList.contains('drop-before')).toBe(false);
+      expect(section('status').classList.contains('drop-before')).toBe(true);
+      drag('drop', row('idea'), -1);
+      await settle();
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status']]]);
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Status']);
+    });
+
+    it('starts each kind of drag clean of one of the other kind that never ended', async () => {
+      await mountPanel(tagState());
+
+      // A drag whose source leaves the page gets no dragend.
+      drag('dragstart', groupHandle('status'));
+      drag('dragstart', row('idea').querySelector('.drag-handle')!);
+      flushSync();
+      expect(section('status').classList.contains('dragging')).toBe(false);
+      expect(row('idea').classList.contains('dragging')).toBe(true);
+
+      drag('dragstart', groupHandle('status'));
+      flushSync();
+      expect(row('idea').classList.contains('dragging')).toBe(false);
+      expect(section('status').classList.contains('dragging')).toBe(true);
+
+      drag('dragend', groupHandle('status'));
+      flushSync();
+      expect(section('status').classList.contains('dragging')).toBe(false);
+    });
+
+    it('queues quick Move down presses, each from where the last left the group', async () => {
+      const writes = holdReorders();
+      const root = await mountPanel(threeGroups());
+
+      await moveDown('Status');
+      await moveDown('Status');
+
+      // Both presses show at once, and the backend sees them one at a time.
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'status', 'area']]]);
+
+      writes[0].land();
+      await settle();
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([
+        [['priority', 'status', 'area']],
+        [['priority', 'area', 'status']],
+      ]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+
+      writes[1].land();
+      await settle();
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+      expect(groupIds(tagsStore.snapshot)).toEqual(['priority', 'area', 'status']);
+
+      // Nowhere further down to go.
+      const trigger = document.querySelector<HTMLElement>('[aria-label="Actions for Status"]')!;
+      expect(menuItem(await openMenu(trigger), 'Move down').hasAttribute('data-disabled')).toBe(
+        true
+      );
+    });
+
+    it('puts the groups back when a reorder fails, and skips the one queued behind it', async () => {
+      const writes = holdReorders();
+      const root = await mountPanel(threeGroups());
+
+      drag('dragstart', groupHandle('status'));
+      drag('dragover', section('area'));
+      drag('drop', section('area'));
+      await settle();
+      await moveDown('Priority');
+      expect(nameInputs(root, 'Group name')).toEqual(['Area', 'Priority', 'Status']);
+
+      writes[0].fail(new Error('db locked'));
+      await settle();
+
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+      expect(toastError).toHaveBeenCalledTimes(1);
+      expect(toastError).toHaveBeenCalledWith('Unable to reorder groups', {
+        description: 'db locked',
       });
     });
   });

@@ -1,12 +1,18 @@
 <!--
-  TagGroupSection.svelte — one tag group in Settings › Tags: its name, which
-  renames in place, a ⋯ menu, and its tags in order (the board's column
-  order).
+  TagGroupSection.svelte — one tag group in Settings › Tags: a drag handle,
+  its name, which renames in place, a ⋯ menu, and its tags in order (the
+  board's column order).
 
   The menu renames, makes the group the project icon (its tag's icon then
   leads every sidebar row and grid card), pins the group's board to the
   projects sidebar (a row under the Projects heading opens it), moves the
   group up or down, and deletes it after asking what happens to its tags.
+
+  The handle drags the group among the others, and the whole section is the
+  drop zone: a group dropped on its upper half lands above it, on its lower
+  half below. Only a drag that started on a group's handle counts. A tag
+  drag is the rows' and the list's to take, and they in turn leave a group
+  drag alone, so it reaches this section from anywhere inside it.
 
   Like a tag's name (TagRow), the group name keeps what's being typed while
   it has focus, whatever catalog echoes arrive meanwhile.
@@ -16,6 +22,7 @@
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import GripVertical from '@lucide/svelte/icons/grip-vertical';
   import Pencil from '@lucide/svelte/icons/pencil';
   import SquareKanban from '@lucide/svelte/icons/square-kanban';
   import Star from '@lucide/svelte/icons/star';
@@ -35,6 +42,10 @@
   }
 
   let { editor, group, tags, canMoveUp, canMoveDown }: Props = $props();
+
+  let section = $state<HTMLElement | null>(null);
+  let head = $state<HTMLElement | null>(null);
+  let dropPlace = $derived(editor.groupDropPlaceFor(group.id));
 
   // "Rename" in the menu focuses the name once the menu has closed, rather
   // than letting the menu hand focus back to its trigger.
@@ -76,10 +87,63 @@
       input.select();
     }
   }
+
+  function handleDragStart(event: DragEvent) {
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      // Some engines only start a drag that carries data.
+      event.dataTransfer.setData('text/plain', group.name);
+      // The header, not the section: a group with many tags would hide the
+      // list it is dragged over.
+      if (head) event.dataTransfer.setDragImage(head, 16, head.offsetHeight / 2);
+    }
+    editor.groupDragStart(group.id);
+  }
+
+  function handleDragOver(event: DragEvent) {
+    // Only drags that started on a group's handle; tags, files and text pass
+    // through.
+    if (editor.dragGroupId === null || !section) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    const rect = section.getBoundingClientRect();
+    editor.groupDragOver({
+      anchorGroupId: group.id,
+      place: event.clientY < rect.top + rect.height / 2 ? 'before' : 'after',
+    });
+  }
+
+  function handleDrop(event: DragEvent) {
+    if (editor.dragGroupId === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    editor.groupDrop();
+  }
 </script>
 
-<section class="tag-group" aria-labelledby={groupNameInputId(group.id)}>
-  <header class="group-head">
+<section
+  bind:this={section}
+  class="tag-group"
+  class:dragging={editor.dragGroupId === group.id}
+  class:drop-before={dropPlace === 'before'}
+  class:drop-after={dropPlace === 'after'}
+  data-tag-group={group.id}
+  aria-labelledby={groupNameInputId(group.id)}
+  ondragover={handleDragOver}
+  ondrop={handleDrop}
+>
+  <header bind:this={head} class="group-head">
+    <span
+      class="drag-handle"
+      draggable="true"
+      title="Drag to reorder groups"
+      aria-hidden="true"
+      ondragstart={handleDragStart}
+      ondragend={() => editor.groupDragEnd()}
+    >
+      <GripVertical size={14} />
+    </span>
     <input
       id={groupNameInputId(group.id)}
       class="group-name"
@@ -134,11 +198,11 @@
           Show board in sidebar
         </DropdownMenu.CheckboxItem>
         <DropdownMenu.Separator />
-        <DropdownMenu.Item disabled={!canMoveUp} onSelect={() => void editor.moveGroup(group, -1)}>
+        <DropdownMenu.Item disabled={!canMoveUp} onSelect={() => editor.moveGroup(group, -1)}>
           <ArrowUp size={14} />
           Move up
         </DropdownMenu.Item>
-        <DropdownMenu.Item disabled={!canMoveDown} onSelect={() => void editor.moveGroup(group, 1)}>
+        <DropdownMenu.Item disabled={!canMoveDown} onSelect={() => editor.moveGroup(group, 1)}>
           <ArrowDown size={14} />
           Move down
         </DropdownMenu.Item>
@@ -162,9 +226,36 @@
 
 <style>
   .tag-group {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .tag-group.dragging {
+    opacity: 0.4;
+  }
+
+  /* The drop indicator: a line midway across the gap to the next section
+     (the panel body's 24px), where a tag row draws its own in the row gap. */
+  .tag-group.drop-before::before,
+  .tag-group.drop-after::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--ui-accent);
+    pointer-events: none;
+  }
+
+  .tag-group.drop-before::before {
+    top: -13px;
+  }
+
+  .tag-group.drop-after::after {
+    bottom: -13px;
   }
 
   .group-head {
@@ -172,6 +263,26 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+  }
+
+  /* The same handle a tag row has, in the same column. */
+  .drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 24px;
+    color: var(--text-faint);
+    cursor: grab;
+  }
+
+  .drag-handle:hover {
+    color: var(--text-muted);
+  }
+
+  .drag-handle:active {
+    cursor: grabbing;
   }
 
   /* Reads as the section heading; editable in place. */
@@ -234,6 +345,14 @@
   :global(.tag-group-menu-trigger[data-state='open']) {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* As on a tag row: no drag on a phone or a touch screen, where the ⋯
+     menu's Move up and Move down reorder instead. */
+  @media (max-width: 640px), (pointer: coarse) {
+    .drag-handle {
+      display: none;
+    }
   }
 
   @media (pointer: coarse) {

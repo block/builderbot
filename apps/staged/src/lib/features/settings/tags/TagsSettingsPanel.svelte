@@ -6,7 +6,14 @@
   tag order is the board's column order. One group can be the project icon:
   its tag's icon leads each sidebar row and grid card, and a project with no
   tag there shows its computed PR status. Tags drag to reorder or to move
-  between groups; each row's ⋯ menu does the same without a pointer.
+  between groups; each row's ⋯ menu does the same without a pointer. Groups
+  drag to reorder too, from the handle on their header, and their ⋯ menu
+  moves them up or down. The group order is the one every list of groups in
+  the app follows.
+
+  Each group section takes a group dropped on it. The list also takes one
+  dropped between sections or below them, where the drop line is drawn: it
+  lands where the last section it crossed put that line.
 
   State and actions live in a TagsEditor (see tagsEditor.svelte.ts) that the
   sections and rows share.
@@ -31,6 +38,22 @@
   let deleteGroup = $derived(editor.deleteGroupTarget);
   let move = $derived(editor.moveConfirmTarget);
   let moveTagName = $derived(move ? (catalog.tagsById.get(move.tagId)?.name ?? '') : '');
+
+  // A group dragged into the gap between two sections, or past the last one.
+  // The sections take their own events; these are the ones no section saw,
+  // and they keep the target the last section named. Nothing is accepted
+  // unless a drop would move the group, so the cursor says when it won't.
+  function handleGroupDragOver(event: DragEvent) {
+    if (!editor.groupDropWouldMove) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  }
+
+  function handleGroupDrop(event: DragEvent) {
+    if (!editor.groupDropWouldMove) return;
+    event.preventDefault();
+    editor.groupDrop();
+  }
 </script>
 
 <div class="tags-settings-panel">
@@ -40,7 +63,10 @@
         <Tags size={16} />
         Tags
       </h2>
-      <p>Group and label projects. A project has at most one tag from each group.</p>
+      <p>
+        Group and label projects. A project has at most one tag from each group. Groups appear in
+        this order across the app.
+      </p>
     </div>
     <NewTagGroupMenu
       disabled={editor.creatingGroup}
@@ -48,7 +74,12 @@
     />
   </div>
 
-  <div class="panel-body">
+  <div
+    class="panel-body"
+    role="presentation"
+    ondragover={handleGroupDragOver}
+    ondrop={handleGroupDrop}
+  >
     {#if !tagsStore.loaded}
       <p class="panel-note">Loading tags…</p>
     {:else}

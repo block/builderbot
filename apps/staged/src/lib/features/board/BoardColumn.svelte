@@ -1,7 +1,6 @@
 <!--
   BoardColumn.svelte — one board column: its tag's icon, name and card count,
-  a ⋯ menu, and the cards. A drop zone while a card is dragged, and while a
-  column is: the board tells the two apart.
+  a ⋯ menu, and the cards. A drop zone while a card is dragged.
 
   Collapsed, it is a narrow strip with the name running down it and the
   count; clicking it expands the column, and a card dragged over it tints
@@ -10,14 +9,19 @@
   name in the header: Enter or leaving the field saves, Escape puts it back.
   "Move left" and "Move right" there are the board's to carry out.
 
-  With drag and drop on, a tag column drags among the others by its header,
-  or by its strip when collapsed. A line in the gap beside the column under
+  With drag and drop on, a tag column drags among the others by its header
+  (its icon, name and count, not the ⋯ menu, which opens on the press), or
+  by its strip when collapsed. The drag is made of pointer events
+  (shared/pointerDrag), not an HTML5 drag, which the desktop build's native
+  file-drop handler would take. A line in the gap beside the column under
   the pointer shows where it would land. The first column in the row has no
   gap before it, so its line sits on its own edge. The header does not drag
   while its name is being edited, so the pointer can select text in the
   field, and "No ‹group›" does not drag at all.
 -->
 <script module lang="ts">
+  import type { PointerDragPoint, PointerDragScroll } from '../../shared/pointerDrag';
+
   /** What every column on a board shares for dragging columns, from ProjectsBoard. */
   export interface BoardColumnDragHandlers {
     /** Tag columns drag among the others. */
@@ -26,8 +30,16 @@
     readonly draggingKey: string | null;
     /** The side of a column the dragged one would land on, if it would land beside it. */
     placeFor(columnKey: string): 'before' | 'after' | null;
-    start(columnKey: string, event: DragEvent): void;
-    end(): void;
+    /** The row of columns, which a drag scrolls sideways near its edge. */
+    readonly scroll: PointerDragScroll;
+    /** A drag of this column began. `drop` or `cancel` always follows. */
+    start(columnKey: string): void;
+    /** The pointer is at `point`: whether a drop there would move the column. */
+    move(point: PointerDragPoint): boolean;
+    /** The column was released at `point`. */
+    drop(point: PointerDragPoint): void;
+    /** The drag ended without a release. */
+    cancel(): void;
   }
 </script>
 
@@ -35,6 +47,7 @@
   import CircleDashed from '@lucide/svelte/icons/circle-dashed';
   import { tick } from 'svelte';
   import type { TagGroup } from '../../types';
+  import { pointerDrag, type PointerDragOptions } from '../../shared/pointerDrag';
   import TagIcon from '../tags/TagIcon.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
   import { MAX_TAG_NAME_CHARS } from '../tags/tagState';
@@ -57,6 +70,7 @@
     /** Whether the column can move a step that way (never for "No ‹group›"). */
     canMoveLeft: boolean;
     canMoveRight: boolean;
+    /** A card's drag over the column, an HTML5 one. A column's drag sends none. */
     onDragOver: (event: DragEvent) => void;
     onDragLeave: (event: DragEvent) => void;
     onDrop: (event: DragEvent) => void;
@@ -91,11 +105,16 @@
   let draggable = $derived(columnDrag.enabled && column.tag !== null && !renaming);
   let dropPlace = $derived(columnDrag.placeFor(column.key));
 
-  /** The header or strip itself: a selection dragged out of the name is text, not the column. */
-  function handleColumnDragStart(event: DragEvent) {
-    if (!draggable || event.target !== event.currentTarget) return;
-    columnDrag.start(column.key, event);
-  }
+  // What the header and the strip hand the drag action. The board resolves
+  // every point, so the column only says which one is being dragged.
+  let dragOptions = $derived<PointerDragOptions>({
+    enabled: draggable,
+    scroll: columnDrag.scroll,
+    start: () => columnDrag.start(column.key),
+    move: (point) => columnDrag.move(point),
+    drop: (point) => columnDrag.drop(point),
+    cancel: () => columnDrag.cancel(),
+  });
 
   async function startRename() {
     if (!column.tag) return;
@@ -153,11 +172,10 @@
       type="button"
       class="collapsed-strip"
       class:drop-target={dropTarget}
+      class:draggable
       title={`Expand ${column.name}`}
       aria-label={`Expand ${column.name}`}
-      {draggable}
-      ondragstart={handleColumnDragStart}
-      ondragend={() => columnDrag.end()}
+      use:pointerDrag={dragOptions}
       onclick={() => onCollapse(false)}
     >
       {@render columnIcon()}
@@ -165,33 +183,29 @@
       <span class="column-count">{column.count}</span>
     </button>
   {:else}
-    <!-- Dragging is the pointer's way to move a column. The ⋯ menu's Move
-         left and Move right are the keyboard's, so the header takes no role
-         or tab stop for it. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <header
-      class="board-column-head"
-      class:draggable
-      {draggable}
-      ondragstart={handleColumnDragStart}
-      ondragend={() => columnDrag.end()}
-    >
-      {@render columnIcon()}
-      {#if renaming && column.tag}
-        <input
-          bind:this={nameInput}
-          class="column-name-input"
-          type="text"
-          aria-label="Tag name"
-          maxlength={MAX_TAG_NAME_CHARS}
-          value={column.tag.name}
-          onblur={(event) => void commitName(event.currentTarget)}
-          onkeydown={handleNameKeydown}
-        />
-      {:else}
-        <h3 class="column-name" title={column.name}>{column.name}</h3>
-      {/if}
-      <span class="column-count">{column.count}</span>
+    <header class="board-column-head">
+      <!-- Dragging is the pointer's way to move a column. The ⋯ menu's Move
+           left and Move right are the keyboard's, so the handle takes no
+           role or tab stop for it. The menu sits outside the handle: its
+           trigger opens on the press, before a press can become a drag. -->
+      <div class="board-column-handle" class:draggable use:pointerDrag={dragOptions}>
+        {@render columnIcon()}
+        {#if renaming && column.tag}
+          <input
+            bind:this={nameInput}
+            class="column-name-input"
+            type="text"
+            aria-label="Tag name"
+            maxlength={MAX_TAG_NAME_CHARS}
+            value={column.tag.name}
+            onblur={(event) => void commitName(event.currentTarget)}
+            onkeydown={handleNameKeydown}
+          />
+        {:else}
+          <h3 class="column-name" title={column.name}>{column.name}</h3>
+        {/if}
+        <span class="column-count">{column.count}</span>
+      </div>
       <BoardColumnMenu
         {column}
         canCollapse={!paged}
@@ -303,6 +317,12 @@
     background: var(--bg-hover);
   }
 
+  /* The press that drags the strip must not select its name on the way. */
+  .collapsed-strip.draggable {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   /* The drop feedback a card gets from the column's border, made visible on
      the strip: :hover doesn't apply during a drag, and the strip is the
      whole column. */
@@ -328,14 +348,26 @@
     padding: 0 2px 0 4px;
   }
 
-  /* A press on the name drags the column, not a selection of its text (as a
-     reorderable RepoCard). */
-  .board-column-head.draggable {
+  /* The part of the header a column drags by: everything but the ⋯ menu,
+     and as tall as the header, so the whole of it grabs. */
+  .board-column-handle {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    align-self: stretch;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  /* A press on the name drags the column, not a selection of its text. The
+     cursor during the drag is the root's (see app.css). */
+  .board-column-handle.draggable {
     cursor: grab;
+    -webkit-user-select: none;
     user-select: none;
   }
 
-  .board-column-head.draggable:active {
+  .board-column-handle.draggable:active {
     cursor: grabbing;
   }
 

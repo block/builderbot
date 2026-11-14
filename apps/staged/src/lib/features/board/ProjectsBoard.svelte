@@ -26,12 +26,17 @@
   Where cards drag, a tag column drags too, by its header or its collapsed
   strip, and lands on the side of the column it is dropped on: the left half
   before it, the right half after, and after "No ‹group›" on either. A line
-  in the gap shows where, and the row takes a drop there too, landing where
-  the last column the drag crossed put the line. A drop that would leave the
-  columns in their order shows no line and writes nothing, and the cursor
-  says it is refused. A card and a column carry different drag types and
-  keep separate state here, so each drop reaches its own handler: a card's
-  on the column, a column's on the row.
+  in the gap shows where, and a release in the gap lands where the last
+  column the pointer crossed put the line. Outside the row there is no line
+  and a release does nothing. A drop that would leave the columns in their
+  order shows no line and writes nothing, and the cursor says it is refused.
+  Near either end of the row, the drag scrolls it sideways.
+
+  The two drags are different kinds. A card's is an HTML5 drag. A column's
+  is made of pointer events (shared/pointerDrag), because the desktop
+  build's native file-drop handler answers every HTML5 drag itself and the
+  page never sees one as a drop. So a column drag carries no data: the board
+  resolves each point the pointer reaches from the columns' rects.
 
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, or inside
@@ -42,7 +47,7 @@
   import { tick } from 'svelte';
   import type { Project, TagGroup } from '../../types';
   import { tagsStore } from '../../stores/tags.svelte';
-  import { dragStillInside } from '../../shared/dragStillInside';
+  import type { PointerDragPoint } from '../../shared/pointerDrag';
   import { viewport } from '../../shared/viewport.svelte';
   import { pendingCatalogMoves } from '../tags/pendingCatalogMoves.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
@@ -58,14 +63,11 @@
   import { columnDropTarget, columnStepTarget, type ColumnDrop } from './boardColumnReorder';
   import { buildBoardColumns } from './boardColumns';
   import {
-    boardDragKind,
-    columnDropSide,
-    readColumnDrag,
+    columnAtPoint,
+    isCardDrag,
     readProjectDrag,
     resolveBoardDrop,
-    writeColumnDrag,
     writeProjectDrag,
-    type BoardDragKind,
   } from './boardDrop';
   import { columnPrefsFor } from './boardPrefs';
   import { revealOffset, SCROLL_FADE_WIDTH } from './boardScroll';
@@ -89,7 +91,7 @@
   let columnsEl = $state<HTMLElement | null>(null);
   let draggingId = $state<string | null>(null);
   let dropKey = $state<string | null>(null);
-  /** The column being dragged, if a drag started on one here. */
+  /** The column being dragged, if any. */
   let draggingColumnKey = $state<string | null>(null);
   /** Where the dragged column would land: the last column it was over, and the side. */
   let columnDrop = $state<ColumnDrop | null>(null);
@@ -183,8 +185,6 @@
     open: (projectId) => onOpen(projectId),
     startDrag(projectId, event) {
       if (!dragEnabled || !event.dataTransfer) return;
-      // A column drag whose column left the board never got its dragend.
-      columnDragHandlers.end();
       writeProjectDrag(event.dataTransfer, projectId);
       draggingId = projectId;
     },
@@ -201,8 +201,7 @@
 
   /**
    * Whether the dragged column would move if dropped where it is. The line
-   * shows only then, and only for a drag that started here: another
-   * window's drag names its column on the drop alone.
+   * shows only then.
    */
   let columnDropWouldMove = $derived(
     draggingColumnKey !== null &&
@@ -210,6 +209,32 @@
       columnMove(draggingColumnKey, columnDrop) !== null
   );
 
+  /**
+   * Where a column held at `point` would land (see `columnAtPoint`), from
+   * the row and the columns as they are laid out now. The drag scrolls the
+   * row, so the rects are read afresh each time.
+   */
+  function columnDropAt(point: PointerDragPoint): ColumnDrop | null {
+    if (!columnsEl) return null;
+    const columns = [...columnsEl.querySelectorAll<HTMLElement>('[data-board-column]')].map(
+      (el) => ({ key: el.dataset.boardColumn ?? '', rect: el.getBoundingClientRect() })
+    );
+    return columnAtPoint(point, columnsEl.getBoundingClientRect(), columns, columnDrop);
+  }
+
+  function setColumnDrop(drop: ColumnDrop | null) {
+    if (columnDrop?.columnKey === drop?.columnKey && columnDrop?.place === drop?.place) return;
+    columnDrop = drop;
+  }
+
+  function endColumnDrag() {
+    draggingColumnKey = null;
+    columnDrop = null;
+  }
+
+  // A column's drag, as the pointerDrag action on its header or strip
+  // reports it. The action follows every `start` with a `drop` or a
+  // `cancel`, so no column drag is ever left over.
   const columnDragHandlers: BoardColumnDragHandlers = {
     get enabled() {
       return dragEnabled;
@@ -221,54 +246,53 @@
       if (!columnDropWouldMove || columnDrop?.columnKey !== columnKey) return null;
       return columnDrop.place;
     },
-    start(columnKey, event) {
-      if (!dragEnabled || !event.dataTransfer) return;
+    scroll: { container: () => columnsEl, axis: 'x' },
+    start(columnKey) {
       // A card drag whose card left the board never got its dragend.
       handlers.endDrag();
-      writeColumnDrag(event.dataTransfer, columnKey);
       draggingColumnKey = columnKey;
       columnDrop = null;
     },
-    end() {
-      draggingColumnKey = null;
-      columnDrop = null;
+    /**
+     * The cursor says a drop is refused wherever it would leave the columns
+     * in their order: over the column itself, over the half where it already
+     * is, in a gap with no line, and outside the row.
+     */
+    move(point) {
+      setColumnDrop(columnDropAt(point));
+      return columnDropWouldMove;
     },
+    /**
+     * Drop the dragged column where the pointer was released, which is
+     * resolved as any other point. The pointer put the column there, so
+     * focus stays where it is.
+     */
+    drop(point) {
+      const key = draggingColumnKey;
+      const drop = columnDropAt(point);
+      endColumnDrag();
+      const move = key !== null && drop !== null ? columnMove(key, drop) : null;
+      if (!move) return;
+      void pendingCatalogMoves.moveTag({
+        tagId: move.tagId,
+        groupId: move.groupId,
+        index: move.index,
+      });
+    },
+    cancel: endColumnDrag,
   };
 
   /**
-   * What the cursor says over a place that takes a column drag: a drop that
-   * would leave the columns in their order is refused, as Settings › Tags
-   * refuses a group dropped where it is. Read after the dragover has set
-   * `columnDrop`. Only a drag that started here can be read ahead of its
-   * drop; another window's names its column on the drop alone, so it stays
-   * a move.
+   * Whether a drag event is a card's. Files and text dragged over the board
+   * are not, and pass through, even with a card drag left over from before.
+   * A column's drag is made of pointer events and sends no drag events.
    */
-  function columnDropEffect(): 'move' | 'none' {
-    return draggingColumnKey !== null && !columnDropWouldMove ? 'none' : 'move';
-  }
-
-  /**
-   * Whose drag this is: a card's, a column's, or neither. Files and text
-   * dragged over the board are neither, and pass through, even with a drag
-   * left over from before.
-   */
-  function dragKind(event: DragEvent): BoardDragKind | null {
-    const started = draggingColumnKey !== null ? 'column' : draggingId !== null ? 'card' : null;
-    return boardDragKind(event.dataTransfer, started);
+  function cardDrag(event: DragEvent): boolean {
+    return isCardDrag(event.dataTransfer, draggingId !== null);
   }
 
   function handleDragOver(key: string, event: DragEvent) {
-    if (!dragEnabled) return;
-    const kind = dragKind(event);
-    if (kind === 'column') {
-      // Taken even when the drop would not move the column, so the event
-      // stays the board's.
-      event.preventDefault();
-      setColumnDrop(columnDropAt(key, event));
-      if (event.dataTransfer) event.dataTransfer.dropEffect = columnDropEffect();
-      return;
-    }
-    if (kind !== 'card') return;
+    if (!dragEnabled || !cardDrag(event)) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     dropKey = key;
@@ -280,9 +304,8 @@
     if (dropKey === key) dropKey = null;
   }
 
-  /** A card's drop. A column's bubbles on to the row (see handleRowDrop). */
   function handleDrop(key: string, event: DragEvent) {
-    if (!dragEnabled || dragKind(event) !== 'card') return;
+    if (!dragEnabled || !cardDrag(event)) return;
     event.preventDefault();
     const projectId = readProjectDrag(event.dataTransfer, draggingId, new Set(projectsById.keys()));
     handlers.endDrag();
@@ -304,17 +327,6 @@
     setBoardColumnFlag(group.id, key, 'hidden', true, tagsStore.catalog);
   }
 
-  /** The drop a pointer over column `key` asks for: beside it, on the pointer's side. */
-  function columnDropAt(key: string, event: DragEvent): ColumnDrop {
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    return { columnKey: key, place: columnDropSide(key, rect, event.clientX) };
-  }
-
-  function setColumnDrop(drop: ColumnDrop) {
-    if (columnDrop?.columnKey === drop.columnKey && columnDrop.place === drop.place) return;
-    columnDrop = drop;
-  }
-
   /**
    * The tag move that drops column `key` on `drop`, read against the order
    * the board shows, or null when the columns would stay as they are.
@@ -324,43 +336,6 @@
     const catalog = pendingCatalogMoves.catalog;
     const target = columnDropTarget(catalog, group.id, columnPrefs.hidden, key, drop);
     return target && resolveTagDrop(catalog, key, target);
-  }
-
-  // The row of columns takes a column drag as well as each column. The line
-  // is drawn in the gap between two columns, which is neither of them, so a
-  // drag there (or below a short column, or over the + column) keeps the
-  // last column's line, and the drop lands on it. A column's own dragover
-  // bubbles here too, so the row gives the same answer the column gave.
-
-  function handleRowDragOver(event: DragEvent) {
-    if (!dragEnabled || columnDrop === null || dragKind(event) !== 'column') return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = columnDropEffect();
-  }
-
-  function handleRowDragLeave(event: DragEvent) {
-    if (columnDrop === null || !columnsEl || dragStillInside(columnsEl, event)) return;
-    columnDrop = null;
-  }
-
-  /**
-   * Drop the dragged column where the last dragover put it: every column
-   * drop ends here, over a column or between two. The pointer put the
-   * column there, so focus stays where it is.
-   */
-  function handleRowDrop(event: DragEvent) {
-    if (!dragEnabled || dragKind(event) !== 'column') return;
-    event.preventDefault();
-    const key = readColumnDrag(event.dataTransfer, draggingColumnKey);
-    const drop = columnDrop;
-    columnDragHandlers.end();
-    const move = key !== null && drop !== null ? columnMove(key, drop) : null;
-    if (!move) return;
-    void pendingCatalogMoves.moveTag({
-      tagId: move.tagId,
-      groupId: move.groupId,
-      index: move.index,
-    });
   }
 
   /** Where a step left (-1) or right (1) would put a column, or null at that end. */
@@ -479,9 +454,6 @@
         class:paged
         bind:this={columnsEl}
         onscroll={handleColumnsScroll}
-        ondragover={handleRowDragOver}
-        ondragleave={handleRowDragLeave}
-        ondrop={handleRowDrop}
         aria-label={`Projects by ${group.name}`}
         role="group"
       >

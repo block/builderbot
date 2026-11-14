@@ -862,7 +862,7 @@
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground mobile:size-10 mobile:p-0"
+        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
         title={selectedProjectTransferLabel}
         aria-label={selectedProjectTransferLabel}
         onclick={() => projectActions.requestTransferProject(selectedProject)}
@@ -877,7 +877,7 @@
             <Laptop size={13} />
           {/if}
         </span>
-        <span class="top-bar-action-label narrow-window-hidden">
+        <span class="top-bar-action-label desktop-only">
           {selectedProjectTransferLabel}
         </span>
       </Button>
@@ -1128,17 +1128,22 @@
       display: none;
     }
 
-    /* A narrow desktop window takes this layout too, with a mouse and, on a
-       Mac, the traffic lights' room ahead of the history and search buttons
-       (TopBar.svelte). Measured at the 375px minimum with that room, a
-       project that offers Transfer had its labelled Add Repo and Transfer
-       buttons run 70px past the window's edge, and 98px once Forward showed.
-       A mouse has a tooltip to name a button with, which a finger does not,
-       so there the two are their icons, which fits with 41px to spare while
-       Forward shows. Each keeps its name in its aria-label and its title.
-       Without Transfer the labelled Add Repo fits (33px to spare) and keeps
-       its label. Nested, so the layout's own query stays the one shared
-       form. */
+    /* Transfer is its icon in this whole layout: its label is `desktop-only`
+       (TopBar.svelte), as Remove Project's is, and its aria-label and title
+       name it. Measured on a 375px phone, the labelled Add Repo and Transfer
+       ran 24px past the screen's edge, and 68px once Forward showed, which
+       put Remove project off the bar. With Transfer an icon the labelled Add
+       Repo fits, with 15px to spare while Forward shows.
+
+       A narrow desktop window takes this layout too, with a mouse and, on a
+       Mac, 70px of room for the traffic lights ahead of the history and
+       search buttons (TopBar.svelte). That is more than the 15px, so there
+       Add Repo is its icon as well while Transfer is shown, which fits with
+       41px to spare while Forward shows. A mouse has a tooltip to name a
+       button with, which a finger does not, and Add Repo keeps its
+       aria-label. Without Transfer the labelled Add Repo fits (33px to
+       spare) and keeps its label. Nested, so the layout's own query stays
+       the one shared form. */
     @media (pointer: fine) {
       .narrow-window-hidden {
         display: none;

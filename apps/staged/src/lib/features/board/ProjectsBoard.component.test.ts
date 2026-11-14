@@ -1106,6 +1106,40 @@ describe('ProjectsBoard column drag', () => {
     }
   );
 
+  it('marks the first column in the row, whose drop line sits on its own edge', async () => {
+    const firstInRow = (root: ParentNode) =>
+      [...root.querySelectorAll<HTMLElement>('.board-column.first-in-row')].map(
+        (el) => el.dataset.boardColumn
+      );
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // "No ‹group›" is first while it shows, and never takes a line before it.
+    expect(firstInRow(root)).toEqual([NO_TAG_COLUMN_KEY]);
+
+    // Hidden, it leaves a tag column first, at the row's edge: the line
+    // before that column has no gap to sit in.
+    menuItem(await openColumnMenu(root, NO_TAG_COLUMN_KEY), 'Hide column').click();
+    await settle();
+    expect(columnKeys(root)).toEqual(['idea', 'doing', 'done']);
+    expect(firstInRow(root)).toEqual(['idea']);
+
+    dragColumnOver(root, 'done', 'idea', 'left');
+    expect(dropLines(root)).toEqual(['idea:before']);
+    expect(firstInRow(root)).toEqual(['idea']);
+
+    // A line before any other column keeps to the gap.
+    dragColumnOver(root, 'idea', 'done', 'left');
+    expect(dropLines(root)).toEqual(['done:before']);
+    expect(firstInRow(root)).toEqual(['idea']);
+    columnHandle(root, 'idea').dispatchEvent(dragEvent('dragend', {}));
+
+    // The mark follows the order: Done dropped first becomes the first.
+    await dragColumn(root, 'done', 'idea', 'left');
+    expect(columnKeys(root)).toEqual(['done', 'idea', 'doing']);
+    expect(firstInRow(root)).toEqual(['done']);
+  });
+
   it('still moves a card, even after a column drag that never ended', async () => {
     const root = await mountBoard();
     layOutColumns(root);

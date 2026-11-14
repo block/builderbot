@@ -10,9 +10,11 @@
 
   The handle drags the group among the others, and the whole section is the
   drop zone: a group dropped on its upper half lands above it, on its lower
-  half below. Only a drag that started on a group's handle counts. A tag
-  drag is the rows' and the list's to take, and they in turn leave a group
-  drag alone, so it reaches this section from anywhere inside it.
+  half below. Only a drag that started on a group's handle counts, and it
+  carries a type of its own (see tagGroupDrag). A tag drag is the rows' and
+  the list's to take, and they in turn leave a group drag alone, so it
+  reaches this section from anywhere inside it. Over a place that would
+  leave the groups in their order, the cursor says the drop is refused.
 
   Like a tag's name (TagRow), the group name keeps what's being typed while
   it has focus, whatever catalog echoes arrive meanwhile.
@@ -30,6 +32,7 @@
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import type { Tag, TagGroup } from '../../../types';
   import { MAX_TAG_NAME_CHARS } from '../../tags/tagState';
+  import { writeTagGroupDrag } from './tagGroupDrag';
   import TagList from './TagList.svelte';
   import { groupMenuTriggerId, groupNameInputId, type TagsEditor } from './tagsEditor.svelte';
 
@@ -90,9 +93,7 @@
 
   function handleDragStart(event: DragEvent) {
     if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move';
-      // Some engines only start a drag that carries data.
-      event.dataTransfer.setData('text/plain', group.name);
+      writeTagGroupDrag(event.dataTransfer, group.id);
       // The header, not the section: a group with many tags would hide the
       // list it is dragged over.
       if (head) event.dataTransfer.setDragImage(head, 16, head.offsetHeight / 2);
@@ -103,19 +104,26 @@
   function handleDragOver(event: DragEvent) {
     // Only drags that started on a group's handle; tags, files and text pass
     // through.
-    if (editor.dragGroupId === null || !section) return;
+    if (!editor.isGroupDrag(event) || !section) return;
+    // The section answers for every group drag over it, so none reaches the
+    // name fields or the panel body.
     event.preventDefault();
     event.stopPropagation();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     const rect = section.getBoundingClientRect();
     editor.groupDragOver({
       anchorGroupId: group.id,
       place: event.clientY < rect.top + rect.height / 2 ? 'before' : 'after',
     });
+    // As in the gap between sections (see TagsSettingsPanel): the cursor
+    // says when a drop won't move the group, which is over the group itself
+    // and over the half that is where it already is.
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = editor.groupDropWouldMove ? 'move' : 'none';
+    }
   }
 
   function handleDrop(event: DragEvent) {
-    if (editor.dragGroupId === null) return;
+    if (!editor.isGroupDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
     editor.groupDrop();

@@ -12,9 +12,10 @@
 
   With drag and drop on, a tag column drags among the others by its header,
   or by its strip when collapsed. A line in the gap beside the column under
-  the pointer shows where it would land. The header does not drag while its
-  name is being edited, so the pointer can select text in the field, and
-  "No ‹group›" does not drag at all.
+  the pointer shows where it would land. The first column in the row has no
+  gap before it, so its line sits on its own edge. The header does not drag
+  while its name is being edited, so the pointer can select text in the
+  field, and "No ‹group›" does not drag at all.
 -->
 <script module lang="ts">
   /** What every column on a board shares for dragging columns, from ProjectsBoard. */
@@ -51,6 +52,8 @@
     dropTarget: boolean;
     /** On the phone pager: full width, never collapsed. */
     paged: boolean;
+    /** First in the row of columns: nothing before it but the row's edge. */
+    first: boolean;
     /** Whether the column can move a step that way (never for "No ‹group›"). */
     canMoveLeft: boolean;
     canMoveRight: boolean;
@@ -71,6 +74,7 @@
     isVisible,
     dropTarget,
     paged,
+    first,
     canMoveLeft,
     canMoveRight,
     onDragOver,
@@ -133,6 +137,7 @@
   class="board-column"
   class:collapsed
   class:paged
+  class:first-in-row={first}
   class:drop-target={dropTarget}
   class:dragging={columnDrag.draggingKey === column.key}
   class:drop-before={dropPlace === 'before'}
@@ -248,6 +253,15 @@
 
   .board-column.drop-before::before {
     left: -8px;
+  }
+
+  /* The first column has no gap before it. It starts at the row's edge, and
+     the row scrolls, so it clips what is drawn past that edge: a line at
+     -8px would not show. This happens once "No ‹group›" is hidden and a tag
+     column is first. Its line sits on the column's own edge instead (-1px
+     is its border). */
+  .board-column.first-in-row.drop-before::before {
+    left: -1px;
   }
 
   .board-column.drop-after::after {

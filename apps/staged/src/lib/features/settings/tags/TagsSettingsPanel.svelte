@@ -43,14 +43,15 @@
   // The sections take their own events; these are the ones no section saw,
   // and they keep the target the last section named. Nothing is accepted
   // unless a drop would move the group, so the cursor says when it won't.
+  // Text and files are not a group, even with a group drag left over.
   function handleGroupDragOver(event: DragEvent) {
-    if (!editor.groupDropWouldMove) return;
+    if (!editor.isGroupDrag(event) || !editor.groupDropWouldMove) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
   }
 
   function handleGroupDrop(event: DragEvent) {
-    if (!editor.groupDropWouldMove) return;
+    if (!editor.isGroupDrag(event) || !editor.groupDropWouldMove) return;
     event.preventDefault();
     editor.groupDrop();
   }

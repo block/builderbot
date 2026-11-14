@@ -469,7 +469,7 @@
         aria-label={`Projects by ${group.name}`}
         role="group"
       >
-        {#each layout.columns as column (column.key)}
+        {#each layout.columns as column, i (column.key)}
           <BoardColumn
             {column}
             {group}
@@ -477,6 +477,7 @@
             columnDrag={columnDragHandlers}
             {isVisible}
             {paged}
+            first={i === 0}
             dropTarget={draggingId !== null && dropKey === column.key}
             canMoveLeft={columnStep(column.key, -1) !== null}
             canMoveRight={columnStep(column.key, 1) !== null}

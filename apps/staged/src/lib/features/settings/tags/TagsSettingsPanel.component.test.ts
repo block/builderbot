@@ -62,6 +62,7 @@ vi.mock('../../../stores/projectsData.svelte', () => ({
 vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
 import { tagsStore } from '../../../stores/tags.svelte';
+import { TAG_GROUP_DRAG_TYPE } from './tagGroupDrag';
 import TagsSettingsPanel from './TagsSettingsPanel.svelte';
 
 let component: ReturnType<typeof mount> | null = null;
@@ -127,11 +128,40 @@ function button(root: ParentNode, text: string): HTMLButtonElement {
  * Dispatch a drag event on `el` and return it. jsdom lays nothing out, so
  * every rect is empty at the origin: the default `clientY` is the lower half
  * of whatever is under it, and a negative one the upper half.
+ *
+ * jsdom has no DataTransfer either. Without `data` the event carries none,
+ * as from an engine that drops what a drag carries. With it, the event
+ * carries a stub holding those types.
  */
-function drag(eventName: string, el: HTMLElement, clientY = 10): MouseEvent {
+function drag(
+  eventName: string,
+  el: HTMLElement,
+  clientY = 10,
+  data?: Record<string, string>
+): MouseEvent {
   const event = new MouseEvent(eventName, { bubbles: true, cancelable: true, clientY });
+  if (data) {
+    const store = new Map(Object.entries(data));
+    Object.defineProperty(event, 'dataTransfer', {
+      value: {
+        effectAllowed: 'all',
+        dropEffect: 'none',
+        get types() {
+          return [...store.keys()];
+        },
+        setData: (key: string, value: string) => void store.set(key, value),
+        getData: (key: string) => store.get(key) ?? '',
+        setDragImage: () => {},
+      },
+    });
+  }
   el.dispatchEvent(event);
   return event;
+}
+
+/** The stub DataTransfer of an event `drag` sent with `data`. */
+function carried(event: Event): DataTransfer {
+  return (event as DragEvent).dataTransfer!;
 }
 
 /** A group's section, the drop zone for a dragged group. */
@@ -749,6 +779,90 @@ describe('TagsSettingsPanel', () => {
 
       expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
       expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('carries a dragged group under its own type, with no text for a name field', async () => {
+      const root = await mountPanel(tagState());
+
+      const start = drag('dragstart', groupHandle('priority'), 10, {});
+      expect(carried(start).types).toEqual([TAG_GROUP_DRAG_TYPE]);
+      expect(carried(start).getData(TAG_GROUP_DRAG_TYPE)).toBe('priority');
+      expect(carried(start).effectAllowed).toBe('move');
+
+      // The last group has nowhere to go below itself. Over an ungrouped
+      // tag's name the panel takes nothing, so the field's own handling
+      // stands, and the drag has no text for it to insert.
+      const field = row('q4').querySelector<HTMLInputElement>('input[aria-label="Tag name"]')!;
+      const over = drag('dragover', field, 10, { [TAG_GROUP_DRAG_TYPE]: 'priority' });
+      expect(over.defaultPrevented).toBe(false);
+      expect(carried(over).types).not.toContain('text/plain');
+      drag('drop', field, 10, { [TAG_GROUP_DRAG_TYPE]: 'priority' });
+      await settle();
+
+      expect(nameInputs(root, 'Tag name')).toContain('q4');
+      expect(commandsMock.updateTag).not.toHaveBeenCalled();
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+    });
+
+    it('says through the cursor when a drop on a section would not move the group', async () => {
+      const root = await mountPanel(threeGroups());
+      const data = { [TAG_GROUP_DRAG_TYPE]: 'status' };
+      drag('dragstart', groupHandle('status'), 10, {});
+
+      // Below Priority is a move.
+      const moving = drag('dragover', section('priority'), 10, data);
+      expect(moving.defaultPrevented).toBe(true);
+      expect(carried(moving).dropEffect).toBe('move');
+
+      // Above Priority is where Status already is. The section still takes
+      // the drag, so nothing under it does, and refuses the drop.
+      const inPlace = drag('dragover', section('priority'), -1, data);
+      expect(inPlace.defaultPrevented).toBe(true);
+      expect(carried(inPlace).dropEffect).toBe('none');
+
+      // So is the group's own section, either half.
+      for (const clientY of [-1, 10]) {
+        const onItself = drag('dragover', section('status'), clientY, data);
+        expect(onItself.defaultPrevented).toBe(true);
+        expect(carried(onItself).dropEffect).toBe('none');
+      }
+
+      // Back over a half that moves, the cursor says so again.
+      const again = drag('dragover', section('area'), 10, data);
+      expect(carried(again).dropEffect).toBe('move');
+      flushSync();
+      expect(section('area').classList.contains('drop-after')).toBe(true);
+
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    it('leaves text and files alone, even after a group drag that never ended', async () => {
+      const root = await mountPanel(threeGroups());
+      const body = root.querySelector<HTMLElement>('.panel-body')!;
+
+      // A group drag that got as far as a place it would move to, and whose
+      // source then left the page: no drop, and no dragend.
+      drag('dragstart', groupHandle('status'), 10, {});
+      drag('dragover', section('priority'), 10, { [TAG_GROUP_DRAG_TYPE]: 'status' });
+      flushSync();
+      expect(section('priority').classList.contains('drop-after')).toBe(true);
+
+      // Text and files dragged in after it are not that group, on a section
+      // or in the gap between two.
+      const foreign: Record<string, string>[] = [{ 'text/plain': 'Status' }, { Files: '' }];
+      for (const data of foreign) {
+        for (const el of [section('area'), body]) {
+          expect(drag('dragover', el, 10, data).defaultPrevented).toBe(false);
+          expect(drag('drop', el, 10, data).defaultPrevented).toBe(false);
+        }
+      }
+      await settle();
+
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+      // The line stayed where the group drag left it.
+      expect(section('priority').classList.contains('drop-after')).toBe(true);
     });
 
     it('leaves a tag drag to the rows and lists', async () => {

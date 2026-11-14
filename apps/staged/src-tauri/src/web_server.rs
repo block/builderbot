@@ -5,11 +5,20 @@
 //!
 //! - `POST /api/invoke/{command}` — dispatches to the same logic as Tauri commands
 //! - `GET  /api/events`           — WebSocket that broadcasts Tauri events as JSON
-//! - `POST /api/auth`             — accepts bearer token and sets session cookie
-//! - `GET  /*`                    — static files from `../dist` (the built Svelte frontend)
+//! - `GET  /*`                    — static files from the built Svelte frontend
+//!   (`STAGED_WEB_DIST`, else `dist/` located relative to the executable)
 //!
-//! All `/api/*` routes (except `/api/auth`) require authentication via either
-//! an `Authorization: Bearer <token>` header or a valid `staged_session` cookie.
+//! There is no authentication: anyone who can reach the port can run every
+//! command the desktop window can, including repo and branch actions. TLS
+//! protects the bytes in transit, not who sends them. The server only starts
+//! when `STAGED_WEB_SERVER=1` is set, and there is no CORS layer, so a page
+//! on another origin cannot drive it from a browser that can reach the host:
+//! both `just run-web` (dist served from this origin) and `just dev-web`
+//! (Vite proxies `/api` to it) are same-origin. CORS does not cover WebSocket
+//! handshakes, so `/api/events` additionally refuses an upgrade whose `Origin`
+//! names another origin (see [`ws_origin_allowed`]); without that, a page on
+//! any origin could read the event stream. Non-browser clients send no
+//! `Origin` and are not restricted — there is no authentication to enforce.
 //!
 //! # Handler futures must not own queue state
 //!
@@ -23,11 +32,6 @@
 //! spawns it and only awaits the handle; the source-text test
 //! `web_arms_that_write_running_rows_are_detached` keeps new arms honest.
 
-// The full implementation is preserved here but start() is currently stubbed out,
-// so most items appear unused to the compiler.
-#![allow(dead_code, unused_imports)]
-
-use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -36,18 +40,15 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade};
-use axum::http::StatusCode;
-use axum::middleware::{self, Next};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::serve::Listener;
 use axum::Router;
-use axum_extra::extract::cookie::{Cookie, CookieJar};
 use rand::RngExt;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::Value;
-use subtle::ConstantTimeEq;
 use tauri::Manager;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -55,7 +56,6 @@ use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
@@ -77,10 +77,6 @@ use crate::store::{self, Store};
 pub struct WebAppState {
     pub app_handle: tauri::AppHandle,
     pub event_tx: broadcast::Sender<WebEvent>,
-    /// Hex-encoded 256-bit token required to authenticate web clients.
-    pub auth_token: String,
-    /// Set of valid session IDs, one per authenticated client.
-    pub sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A serialized event for WebSocket broadcast.
@@ -164,6 +160,10 @@ fn broadcast_web_event<S: serde::Serialize>(
 // =============================================================================
 
 /// Generate a cryptographically random hex-encoded token (256-bit).
+///
+/// The web server itself is unauthenticated and no longer uses this, but the
+/// control server (`control_server::{grants, enrol, consent}`) mints its
+/// grant tokens, enrolment nonces and reconnect secrets through it.
 pub fn generate_token() -> String {
     let bytes: [u8; 32] = rand::rng().random();
     hex::encode(bytes)
@@ -171,6 +171,9 @@ pub fn generate_token() -> String {
 
 const CERT_PATH_ENV: &str = "STAGED_WEB_CERT_PATH";
 const KEY_PATH_ENV: &str = "STAGED_WEB_KEY_PATH";
+/// Directory holding the built frontend. Set by `just run-web`, whose release
+/// binary sits in an app bundle from which `dist/` cannot be found.
+const DIST_DIR_ENV: &str = "STAGED_WEB_DIST";
 
 fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
     let cert_path = std::env::var(CERT_PATH_ENV)
@@ -245,19 +248,65 @@ impl Listener for TlsListener {
     }
 }
 
+/// Where the built frontend lives. `STAGED_WEB_DIST` wins when set (used
+/// as given, even if it does not exist yet, so a bad value shows up as 404s
+/// from the path that was asked for rather than silently falling back);
+/// otherwise the first existing candidate relative to the executable or the
+/// cwd.
+fn resolve_dist_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os(DIST_DIR_ENV).filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .map(|p| {
+            let candidates = vec![
+                p.join("../dist"),          // exe next to a dist/ directory
+                p.join("../../../../dist"), // dev (target/debug -> src-tauri -> apps/staged -> dist)
+                PathBuf::from("../dist"),   // relative to cwd
+            ];
+            candidates
+                .into_iter()
+                .find(|c| c.exists())
+                .unwrap_or_else(|| PathBuf::from("../dist"))
+        })
+        .unwrap_or_else(|| PathBuf::from("../dist"))
+}
+
 /// Start the Axum web server in a background tokio task.
 ///
-/// Stubbed — logs a warning and returns. The full implementation (TLS listener,
-/// Axum router with static file serving) is intentionally disabled in this build.
-/// All route handlers, auth middleware, and the `dispatch()` match block are kept
-/// compiling so they stay in sync with the rest of the codebase.
-///
-/// TODO(web): restore full web server startup from the `mobile-web` branch.
-/// That restore should serve [`app_router`], which already composes the API
-/// routes, [`media_router`] (the frontend's `resolveStagedMediaUrl` emits
-/// `/api/media/...` in non-Tauri builds) and the static bundle.
-pub fn start(_state: WebAppState) {
-    log::warn!("Web server requested but this build has the web server stubbed out");
+/// This should be called from the Tauri `setup` hook after all managed state
+/// has been registered.
+pub fn start(state: WebAppState) {
+    tauri::async_runtime::spawn(async move {
+        let dist_dir = resolve_dist_dir();
+
+        let app = app_router(state, &dist_dir);
+
+        let addr = "0.0.0.0:5175";
+        let tls_acceptor = match load_tls_acceptor() {
+            Ok(acceptor) => acceptor,
+            Err(e) => {
+                log::error!("[web_server] {e}");
+                return;
+            }
+        };
+        log::info!(
+            "[web_server] starting HTTPS on {addr}, serving static files from {}",
+            dist_dir.display()
+        );
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[web_server] failed to bind {addr}: {e}");
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(TlsListener::new(listener, tls_acceptor), app).await {
+            log::error!("[web_server] server error: {e}");
+        }
+    });
 }
 
 /// The composed app: API routes, note media, and the built frontend from
@@ -267,7 +316,9 @@ pub fn start(_state: WebAppState) {
 /// and a base64-image-heavy one ~3×. The default predicate skips images and
 /// bodies under 32 bytes, so WebSocket upgrades and media are untouched.
 pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Router {
-    let media_routes = match media_router(state.clone()) {
+    // Note media is served from `/api/media/...`, which the frontend's
+    // `resolveStagedMediaUrl` emits in non-Tauri builds.
+    let media_routes = match media_router(&state) {
         Ok(router) => router,
         Err(e) => {
             log::warn!("[web_server] note media unavailable: {e}");
@@ -281,7 +332,6 @@ pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Rout
         .merge(media_routes)
         .fallback_service(ServeDir::new(dist_dir).append_index_html_on_directories(true))
         .layer(compression_layer())
-        .layer(CorsLayer::permissive())
 }
 
 /// Response compression for every route. tower-http's default predicate
@@ -325,25 +375,21 @@ where
     )
 }
 
-/// Kept ready for the mobile-web startup restore. The route and auth layer are
-/// exercised together by oneshot tests, without starting a listener.
-pub(crate) fn media_router(state: WebAppState) -> Result<Router, String> {
+/// Note and tool media routes, mounted by [`app_router`]. The routes are
+/// exercised by oneshot tests, without starting a listener.
+pub(crate) fn media_router(state: &WebAppState) -> Result<Router, String> {
     let store = get_store(
         state
             .app_handle
             .state::<Mutex<Option<Arc<Store>>>>()
             .inner(),
     )?;
-    Ok(media_router_for_store(
-        store,
-        state.auth_token,
-        state.sessions,
-    ))
+    Ok(media_router_for_store(store))
 }
 
 /// Tool and note media are user/agent-supplied bytes served from the app
 /// origin. Viewed top-level (e.g. "Open image in new tab") an SVG would run
-/// script with the session cookie in scope; `sandbox` puts it in an opaque
+/// script with this origin's `/api` routes in reach; `sandbox` puts it in an opaque
 /// origin with script disabled and `default-src 'none'` blocks its subresource
 /// loads, while `style-src 'unsafe-inline'` keeps its own `<style>` working.
 /// `<img>` rendering ignores response CSP, so this costs nothing there.
@@ -355,11 +401,7 @@ const UNTRUSTED_MEDIA_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'
 /// `sandbox` is dropped for it.
 const UNTRUSTED_PDF_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'";
 
-fn media_router_for_store(
-    store: Arc<Store>,
-    token: String,
-    sessions: Arc<Mutex<HashSet<String>>>,
-) -> Router {
+fn media_router_for_store(store: Arc<Store>) -> Router {
     Router::new()
         .route("/api/media/{file}", get(serve_media))
         .route(
@@ -368,19 +410,6 @@ fn media_router_for_store(
         )
         .route("/api/tool-bodies/{message_id}", get(serve_tool_call_body))
         .with_state(store)
-        .route_layer(middleware::from_fn(
-            move |jar: CookieJar, request: Request, next: Next| {
-                let token = token.clone();
-                let sessions = sessions.clone();
-                async move {
-                    if is_authenticated(&token, &sessions, &jar, request.headers()) {
-                        next.run(request).await
-                    } else {
-                        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
-                    }
-                }
-            },
-        ))
 }
 
 async fn serve_media(
@@ -546,95 +575,6 @@ async fn serve_tool_call_body(
 }
 
 // =============================================================================
-// Authentication
-// =============================================================================
-
-const SESSION_COOKIE_NAME: &str = "staged_session";
-const SESSION_MAX_AGE_DAYS: i64 = 7;
-
-/// Constant-time string comparison to prevent timing side-channel attacks.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
-
-/// Middleware that rejects unauthenticated requests to protected routes.
-///
-/// Accepts either:
-/// - `Authorization: Bearer <token>` header matching the server's auth token
-/// - `staged_session` cookie matching the server's session ID
-async fn require_auth(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    request: Request,
-    next: Next,
-) -> Response {
-    if is_authenticated(&state.auth_token, &state.sessions, &jar, request.headers()) {
-        next.run(request).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
-    }
-}
-
-fn is_authenticated(
-    token: &str,
-    sessions: &Mutex<HashSet<String>>,
-    jar: &CookieJar,
-    headers: &axum::http::HeaderMap,
-) -> bool {
-    if headers
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|value| constant_time_eq(value, token))
-    {
-        return true;
-    }
-    jar.get(SESSION_COOKIE_NAME).is_some_and(|cookie| {
-        sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|s| constant_time_eq(cookie.value(), s))
-    })
-}
-
-/// POST /api/auth — validate the bearer token and issue a session cookie.
-///
-/// Expects JSON body: `{ "token": "<auth_token>" }`
-async fn authenticate(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    Json(body): Json<Value>,
-) -> Response {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-
-    if !constant_time_eq(token, &state.auth_token) {
-        return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
-    }
-
-    // Generate a unique session ID for this client and register it.
-    let new_session_id = generate_token();
-    state
-        .sessions
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(new_session_id.clone());
-
-    let cookie = Cookie::build((SESSION_COOKIE_NAME, new_session_id))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .max_age(time::Duration::days(SESSION_MAX_AGE_DAYS))
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .build();
-
-    (jar.add(cookie), Json(serde_json::json!({ "ok": true }))).into_response()
-}
-
-// =============================================================================
 // WebSocket endpoint — /api/events
 // =============================================================================
 
@@ -646,11 +586,106 @@ struct EventsQuery {
 
 async fn ws_events(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    uri: Uri,
     Query(query): Query<EventsQuery>,
     State(state): State<WebAppState>,
 ) -> Response {
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    let host = request_authority(&headers, &uri);
+    let dev_origin = vite_dev_authority();
+    if !ws_origin_allowed(origin, host, dev_origin.as_deref()) {
+        log::warn!(
+            "[web_server] refusing /api/events upgrade from Origin {:?} (authority {:?})",
+            origin,
+            host
+        );
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let client_id = normalize_ws_client_id(query.client_id);
     ws.on_upgrade(move |socket| handle_ws(socket, state, client_id))
+}
+
+/// The authority the client addressed this request to: the `Host` header
+/// when present, else the request URI's authority.
+///
+/// An HTTP/1.1 handshake always carries `Host`. An HTTP/2 one does not: the
+/// server advertises `h2` over ALPN and axum enables the RFC 8441 extended
+/// CONNECT protocol, so Chrome and Firefox open the WebSocket on the page's
+/// existing h2 connection, where the authority travels in the `:authority`
+/// pseudo-header. The h2 crate maps that into the request URI and hyper does
+/// not synthesize a `Host` from it, so without the fallback every same-origin
+/// browser on h2 would be refused and sit in the client's reconnect loop.
+fn request_authority<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.authority().map(|a| a.as_str()))
+}
+
+/// Whether a WebSocket handshake with this `Origin` header and request
+/// authority (`Host`, or `:authority` on HTTP/2 — see [`request_authority`])
+/// may upgrade. `dev_origin` is the extra `host:port` authority the Vite dev
+/// server is reachable at, if any (see [`vite_dev_authority`]).
+///
+/// CORS never applies to WebSocket handshakes, so this is the only thing
+/// stopping a page on an arbitrary origin from opening
+/// `wss://<host>:5175/api/events` and reading every event. Browsers always
+/// send `Origin` on a handshake, and it is the one header a page cannot
+/// forge, so an `Origin` that is present must name this server's own origin
+/// exactly — host *and* port, since `evil.example:5175` and
+/// `evil.example:8080` are different origins and so are `host:5175` and
+/// `host:5176`. The scheme is ignored: the server only speaks TLS, so a
+/// matching authority is the same origin. A missing `Origin` is a
+/// non-browser client (curl, a script), which the server does not try to
+/// keep out: there is no authentication, and a browser page cannot omit the
+/// header, so letting it through costs nothing. A missing authority on the
+/// server side (no `Host` and no `:authority`) fails closed.
+///
+/// Comparing `Origin` against the request's *own* authority, rather than a
+/// fixed allow-list, is only sound because the server is TLS-only. A DNS
+/// rebinding attacker who points `evil.example` at this host would get a
+/// matching `Origin` and `Host` on both sides, but the TLS handshake fails
+/// first: the certificate does not cover `evil.example`. A plain-HTTP
+/// variant of this server has no such backstop and must not reuse this
+/// check as-is.
+///
+/// Under `just dev-web` the page lives on the Vite origin
+/// (`https://$STAGED_WEB_HOST:$VITE_PORT`) and reaches this server through
+/// Vite's `/api` proxy, which rewrites `Host` to `localhost:5175`
+/// (`changeOrigin: true`) but forwards the browser's `Origin` untouched — so
+/// `Origin` and `Host` never match there and the Vite authority is accepted
+/// as a second allowed value.
+fn ws_origin_allowed(origin: Option<&str>, host: Option<&str>, dev_origin: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    let Some(origin_authority) = origin_authority(origin) else {
+        // `Origin: null` (sandboxed iframe, file://) or garbage.
+        return false;
+    };
+    let same_authority = |candidate: Option<&str>| {
+        candidate.is_some_and(|c| c.trim().eq_ignore_ascii_case(origin_authority))
+    };
+    same_authority(host) || same_authority(dev_origin)
+}
+
+/// The `host[:port]` authority of an `Origin` header value such as
+/// `https://host:5175`, or `None` when it is not a `scheme://authority` form.
+fn origin_authority(origin: &str) -> Option<&str> {
+    let (_, rest) = origin.trim().split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    (!authority.is_empty()).then_some(authority)
+}
+
+/// The Vite dev server's `host:port` authority under `just dev-web`, which
+/// exports both `STAGED_WEB_HOST` and `VITE_PORT` into this process; `None`
+/// when either is unset (`just run-web`, plain `just dev`).
+fn vite_dev_authority() -> Option<String> {
+    let host = std::env::var("STAGED_WEB_HOST").ok()?;
+    let port = std::env::var("VITE_PORT").ok()?;
+    let (host, port) = (host.trim(), port.trim());
+    (!host.is_empty() && !port.is_empty()).then(|| format!("{host}:{port}"))
 }
 
 /// The scheduler client id a WS connection may claim, or `None` for "don't track
@@ -4686,8 +4721,10 @@ mod blocking_guard_tests;
 mod tests {
     use super::{
         broadcast_web_event, control_create_image_args, emit_to_all, event_gap_payload,
-        normalize_ws_client_id, web_caller_rejection, web_client_id, DispatchCaller, WebEvent,
+        normalize_ws_client_id, origin_authority, request_authority, web_caller_rejection,
+        web_client_id, ws_origin_allowed, DispatchCaller, WebEvent,
     };
+    use axum::http::{header, HeaderMap, Uri};
     use serde_json::{json, Value};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -4929,6 +4966,198 @@ mod tests {
     }
 
     #[test]
+    fn ws_origin_same_origin_is_allowed() {
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // Hosts are case-insensitive; browsers lowercase `Origin` but a client
+        // may not lowercase `Host`.
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            Some("Mac.Example.com:5175"),
+            None
+        ));
+        // Default port on both sides: neither header carries one.
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com"),
+            Some("mac.example.com"),
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_different_host_is_rejected() {
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example:5175"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // A host that merely contains ours is still another origin.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com.evil.example:5175"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // `Origin: null` (sandboxed iframe) and malformed values never match.
+        assert!(!ws_origin_allowed(
+            Some("null"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some(""),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // No authority to compare against at all (neither Host nor
+        // `:authority`): the handler must not fall open.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_h2_handshake_uses_uri_authority_when_host_is_absent() {
+        // RFC 8441 extended CONNECT over h2: no Host header, the authority is
+        // in `:authority`, which hyper exposes as the request URI's authority.
+        let headers = HeaderMap::new();
+        let uri = Uri::from_static("https://mac.example.com:5175/api/events?clientId=web-1");
+        let authority = request_authority(&headers, &uri);
+        assert_eq!(authority, Some("mac.example.com:5175"));
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            authority,
+            None
+        ));
+        // A same-origin page on h2 against the default port.
+        let uri = Uri::from_static("https://mac.example.com/api/events");
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com"),
+            request_authority(&headers, &uri),
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_h2_handshake_with_mismatched_uri_authority_is_rejected() {
+        let headers = HeaderMap::new();
+        let uri = Uri::from_static("https://mac.example.com:5175/api/events");
+        let authority = request_authority(&headers, &uri);
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example:5175"),
+            authority,
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5176"),
+            authority,
+            None
+        ));
+        // An origin-form request URI (HTTP/1.1 without Host) has no authority
+        // to fall back to, so the check fails closed.
+        let uri = Uri::from_static("/api/events");
+        assert_eq!(request_authority(&headers, &uri), None);
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            request_authority(&headers, &uri),
+            None
+        ));
+    }
+
+    #[test]
+    fn request_authority_prefers_host_header_over_uri() {
+        // HTTP/1.1: Host wins even if the request line carried an absolute URI.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "mac.example.com:5175".parse().unwrap());
+        let uri = Uri::from_static("https://other.example:5175/api/events");
+        assert_eq!(
+            request_authority(&headers, &uri),
+            Some("mac.example.com:5175")
+        );
+    }
+
+    #[test]
+    fn ws_origin_different_port_is_rejected() {
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5176"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        // An explicit port is not the same authority as an implied one.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com"),
+            Some("mac.example.com:5175"),
+            None
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:5175"),
+            Some("mac.example.com"),
+            None
+        ));
+    }
+
+    #[test]
+    fn ws_origin_absent_is_allowed() {
+        // Non-browser clients (curl, scripts) send no Origin.
+        assert!(ws_origin_allowed(None, Some("mac.example.com:5175"), None));
+        assert!(ws_origin_allowed(None, None, None));
+    }
+
+    #[test]
+    fn ws_origin_vite_dev_host_is_allowed_when_configured() {
+        // `just dev-web`: the page is on the Vite origin, and Vite's proxy
+        // rewrites Host to localhost:5175 while forwarding the browser's Origin.
+        assert!(ws_origin_allowed(
+            Some("https://mac.example.com:23456"),
+            Some("localhost:5175"),
+            Some("mac.example.com:23456")
+        ));
+        // The dev authority is exact too: another port on the dev host, or
+        // another host on the dev port, is not the Vite origin.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:23457"),
+            Some("localhost:5175"),
+            Some("mac.example.com:23456")
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example:23456"),
+            Some("localhost:5175"),
+            Some("mac.example.com:23456")
+        ));
+        // Without the dev authority configured the same handshake is refused.
+        assert!(!ws_origin_allowed(
+            Some("https://mac.example.com:23456"),
+            Some("localhost:5175"),
+            None
+        ));
+    }
+
+    #[test]
+    fn origin_authority_strips_scheme_and_anything_after_the_authority() {
+        assert_eq!(origin_authority("https://host:5175"), Some("host:5175"));
+        assert_eq!(origin_authority("http://host"), Some("host"));
+        assert_eq!(origin_authority(" https://host:5175 "), Some("host:5175"));
+        // Origins never carry a path, but a forged value must not smuggle one
+        // past the comparison.
+        assert_eq!(
+            origin_authority("https://host:5175/x?y#z"),
+            Some("host:5175")
+        );
+        assert_eq!(origin_authority("null"), None);
+        assert_eq!(origin_authority("https://"), None);
+        assert_eq!(origin_authority(""), None);
+    }
+
+    #[test]
     fn ws_client_id_drops_blank_and_reserved_ids() {
         // A normal web id (a UUID in practice) is trimmed and kept.
         assert_eq!(
@@ -5129,10 +5358,8 @@ mod tests {
     /// post-completion hooks ran — would flip no token and write no status, and
     /// `session_runner`'s queued follow-up would drain anyway.
     ///
-    /// Latent rather than live, since [`start`] is stubbed and nothing serves
-    /// this dispatcher in this build. That is precisely why it needs a test:
-    /// the arms are kept compiling to stay in sync for the day the server is
-    /// restored, and a dormant arm has no user to notice it diverging.
+    /// The web server only starts when explicitly opted in, so a drifted arm
+    /// has few users to notice it diverging — which is why it needs a test.
     ///
     /// Both transports now share one body; the behaviour it must have is pinned
     /// by
@@ -5699,13 +5926,10 @@ mod media_tests {
             &pdf,
         )
         .unwrap();
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions)
-            .layer(compression_layer());
+        let router = media_router_for_store(fixture.store.clone()).layer(compression_layer());
         let request = |uri: String, range: Option<&str>| {
             let mut request = axum::http::Request::builder()
                 .uri(uri)
-                .header("Authorization", "Bearer bearer-token")
                 .header("Accept-Encoding", "br, gzip");
             if let Some(range) = range {
                 request = request.header("Range", range);
@@ -5772,51 +5996,35 @@ mod media_tests {
     }
 
     #[tokio::test]
-    async fn media_route_requires_auth_and_streams_ranges() {
+    async fn media_route_streams_ranges() {
         let fixture = Fixture::new();
         std::fs::write(fixture.dir.path().join("shot.png"), PNG).unwrap();
         let outcome = fixture.ingest("", "![a](shot.png)");
         let id = outcome.kept_ids.iter().next().unwrap();
-        let store = fixture.store.clone();
-        let sessions = Arc::new(Mutex::new(HashSet::from(["session-token".into()])));
-        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let router = media_router_for_store(fixture.store.clone());
         let uri = format!("/api/media/{id}.png");
-        for (auth, expected) in [
-            (None, StatusCode::UNAUTHORIZED),
-            (Some("wrong"), StatusCode::UNAUTHORIZED),
-            (Some("session-token"), StatusCode::PARTIAL_CONTENT),
-        ] {
-            let mut request = axum::http::Request::builder()
-                .uri(&uri)
-                .header("Range", "bytes=2-5");
-            if let Some(auth) = auth {
-                request = request.header("Cookie", format!("staged_session={auth}"));
-            }
-            let response = router
-                .clone()
-                .oneshot(request.body(axum::body::Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), expected);
-            if expected == StatusCode::PARTIAL_CONTENT {
-                assert_eq!(response.headers()["content-type"], "image/png");
-                assert_eq!(response.headers()["accept-ranges"], "bytes");
-                assert_eq!(
-                    response.headers()["cache-control"],
-                    "private, max-age=31536000, immutable"
-                );
-                assert_eq!(
-                    axum::body::to_bytes(response.into_body(), 100)
-                        .await
-                        .unwrap()
-                        .as_ref(),
-                    &PNG[2..6]
-                );
-            }
-        }
         let request = axum::http::Request::builder()
             .uri(&uri)
-            .header("Authorization", "Bearer bearer-token")
+            .header("Range", "bytes=2-5")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            &PNG[2..6]
+        );
+        let request = axum::http::Request::builder()
+            .uri(&uri)
             .body(axum::body::Body::empty())
             .unwrap();
         let response = router.clone().oneshot(request).await.unwrap();
@@ -5842,17 +6050,18 @@ mod media_tests {
         // The cache policy covers every 2xx and the 304 a conditional
         // request gets back, but not a 416 (or 412), which describes the
         // request rather than the bytes and must not be stored for a year.
-        let bearer = |method: &str, headers: &[(&str, &str)]| {
-            let mut request = axum::http::Request::builder()
-                .method(method)
-                .uri(&uri)
-                .header("Authorization", "Bearer bearer-token");
+        let request_with = |method: &str, headers: &[(&str, &str)]| {
+            let mut request = axum::http::Request::builder().method(method).uri(&uri);
             for (name, value) in headers {
                 request = request.header(*name, *value);
             }
             request.body(axum::body::Body::empty()).unwrap()
         };
-        let response = router.clone().oneshot(bearer("HEAD", &[])).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(request_with("HEAD", &[]))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()["cache-control"],
@@ -5860,7 +6069,10 @@ mod media_tests {
         );
         let response = router
             .clone()
-            .oneshot(bearer("GET", &[("If-None-Match", etag.to_str().unwrap())]))
+            .oneshot(request_with(
+                "GET",
+                &[("If-None-Match", etag.to_str().unwrap())],
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
@@ -5871,7 +6083,7 @@ mod media_tests {
         let beyond_eof = format!("bytes={}-", PNG.len());
         let response = router
             .clone()
-            .oneshot(bearer("GET", &[("Range", beyond_eof.as_str())]))
+            .oneshot(request_with("GET", &[("Range", beyond_eof.as_str())]))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
@@ -5879,7 +6091,6 @@ mod media_tests {
 
         let request = axum::http::Request::builder()
             .uri("/api/media/not-a-media-id.png")
-            .header("Authorization", "Bearer bearer-token")
             .body(axum::body::Body::empty())
             .unwrap();
         assert_eq!(
@@ -5901,14 +6112,12 @@ mod media_tests {
         std::fs::write(fixture.dir.path().join("clip.mp4"), &mp4).unwrap();
         let outcome = fixture.ingest("", "![a](clip.mp4)");
         let id = outcome.kept_ids.iter().next().unwrap();
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions)
+        let router = media_router_for_store(fixture.store.clone())
             .route("/text", get(|| async { "x".repeat(100) }))
             .layer(compression_layer());
         let request = |uri: &str, headers: &[(&str, &str)]| {
             let mut request = axum::http::Request::builder()
                 .uri(uri)
-                .header("Authorization", "Bearer bearer-token")
                 .header("Accept-Encoding", "br, gzip");
             for (name, value) in headers {
                 request = request.header(*name, *value);
@@ -6022,24 +6231,17 @@ mod media_tests {
                 },
             )
             .unwrap();
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(store, "bearer-token".into(), sessions);
-        let get = |uri: String, auth: Option<&str>| {
-            let mut request = axum::http::Request::builder().uri(uri);
-            if let Some(auth) = auth {
-                request = request.header("Authorization", format!("Bearer {auth}"));
-            }
+        let router = media_router_for_store(store);
+        let get = |uri: String| {
+            let request = axum::http::Request::builder().uri(uri);
             router
                 .clone()
                 .oneshot(request.body(axum::body::Body::empty()).unwrap())
         };
 
-        let response = get(
-            format!("/api/tool-images/{id}/output/1"),
-            Some("bearer-token"),
-        )
-        .await
-        .unwrap();
+        let response = get(format!("/api/tool-images/{id}/output/1"))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "image/png");
         assert_eq!(
@@ -6061,12 +6263,9 @@ mod media_tests {
 
         // The SVG is still served with its own type (the `<img>` needs it),
         // only ever under the sandboxing policy.
-        let response = get(
-            format!("/api/tool-images/{id}/output/2"),
-            Some("bearer-token"),
-        )
-        .await
-        .unwrap();
+        let response = get(format!("/api/tool-images/{id}/output/2"))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "image/svg+xml");
         assert_eq!(
@@ -6081,13 +6280,6 @@ mod media_tests {
             SVG
         );
 
-        assert_eq!(
-            get(format!("/api/tool-images/{id}/output/1"), None)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
         for uri in [
             format!("/api/tool-images/{id}/output/0"),
             format!("/api/tool-images/{id}/output/3"),
@@ -6098,10 +6290,7 @@ mod media_tests {
             "/api/tool-images/not-an-id/output/1".to_string(),
         ] {
             assert_eq!(
-                get(uri.clone(), Some("bearer-token"))
-                    .await
-                    .unwrap()
-                    .status(),
+                get(uri.clone()).await.unwrap().status(),
                 StatusCode::NOT_FOUND,
                 "{uri}"
             );
@@ -6157,22 +6346,16 @@ mod media_tests {
             )
             .unwrap();
 
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(store, "bearer-token".into(), sessions);
-        let get = |uri: String, auth: Option<&str>| {
-            let mut request = axum::http::Request::builder().uri(uri);
-            if let Some(auth) = auth {
-                request = request.header("Authorization", format!("Bearer {auth}"));
-            }
+        let router = media_router_for_store(store);
+        let get = |uri: String| {
+            let request = axum::http::Request::builder().uri(uri);
             router
                 .clone()
                 .oneshot(request.body(axum::body::Body::empty()).unwrap())
         };
 
         // …and the route serves the bodies, images projected to refs.
-        let response = get(format!("/api/tool-bodies/{id}"), Some("bearer-token"))
-            .await
-            .unwrap();
+        let response = get(format!("/api/tool-bodies/{id}")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/json");
         assert_eq!(
@@ -6198,23 +6381,13 @@ mod media_tests {
             })
         );
 
-        assert_eq!(
-            get(format!("/api/tool-bodies/{id}"), None)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
         for uri in [
             format!("/api/tool-bodies/{in_flight_id}"),
             format!("/api/tool-bodies/{}", in_flight_id + 1),
             "/api/tool-bodies/not-an-id".to_string(),
         ] {
             assert_eq!(
-                get(uri.clone(), Some("bearer-token"))
-                    .await
-                    .unwrap()
-                    .status(),
+                get(uri.clone()).await.unwrap().status(),
                 StatusCode::NOT_FOUND,
                 "{uri}"
             );

@@ -2414,21 +2414,20 @@ pub fn run() {
                 project_transfer::prune_backups(transfer_store.as_deref());
             });
 
-            // Web server startup is stubbed out in this build.
-            // TODO(web): restore web server startup from the `mobile-web` branch.
+            // Start the Axum web server only when opted in via environment variable.
+            // Once enabled it binds 0.0.0.0:5175 with TLS and no authentication:
+            // anyone who can reach the port can run every command the desktop
+            // window can, including repo and branch actions. The only boundary
+            // is network reachability, so keep it off unless browser access from
+            // a trusted network is wanted.
             let web_server_enabled = std::env::var("STAGED_WEB_SERVER")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
 
             if web_server_enabled {
-                let auth_token = web_server::generate_token();
                 web_server::start(web_server::WebAppState {
                     app_handle: app.handle().clone(),
                     event_tx,
-                    auth_token,
-                    sessions: std::sync::Arc::new(std::sync::Mutex::new(
-                        std::collections::HashSet::new(),
-                    )),
                 });
             }
 

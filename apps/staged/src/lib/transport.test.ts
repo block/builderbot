@@ -115,6 +115,24 @@ describe('web transport', () => {
     });
   }
 
+  /**
+   * Replace the `beforeEach` mock of `prPollingService` with one whose
+   * `getPrPollClientId` is `clientId`. vitest batches consecutive queued
+   * `doMock`s: it resolves their paths in parallel and then applies them
+   * sequentially in queue order, so the installed version already guarantees
+   * that this later mock wins. The `doUnmock` in between splits the queue into
+   * groups that are applied one after another, which makes "this mock lands
+   * last" an ordering guarantee of our own rather than one that depends on
+   * vitest internals staying as they are.
+   */
+  function mockPrPollClientId(clientId: () => string): void {
+    vi.doUnmock('./services/prPollingService');
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: clientId,
+      replayPrPollInterestHints,
+    }));
+  }
+
   it('posts commands to the web invoke endpoint', async () => {
     const fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -358,12 +376,9 @@ describe('web transport', () => {
   });
 
   it('reports WebSocket setup failure to every listener waiting on the same connection', async () => {
-    vi.doMock('./services/prPollingService', () => ({
-      getPrPollClientId: () => {
-        throw new Error('client id unavailable');
-      },
-      replayPrPollInterestHints,
-    }));
+    mockPrPollClientId(() => {
+      throw new Error('client id unavailable');
+    });
     vi.stubGlobal('WebSocket', MockWebSocket);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -397,13 +412,10 @@ describe('web transport', () => {
 
   it('continues after WebSocket setup failure and does not report listeners that left', async () => {
     let fail = true;
-    vi.doMock('./services/prPollingService', () => ({
-      getPrPollClientId: () => {
-        if (fail) throw new Error('client id unavailable');
-        return 'web-client-1';
-      },
-      replayPrPollInterestHints,
-    }));
+    mockPrPollClientId(() => {
+      if (fail) throw new Error('client id unavailable');
+      return 'web-client-1';
+    });
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -443,13 +455,10 @@ describe('web transport', () => {
 
   it('keeps listeners without onRegistrationFailed registered across a WebSocket setup failure', async () => {
     let fail = true;
-    vi.doMock('./services/prPollingService', () => ({
-      getPrPollClientId: () => {
-        if (fail) throw new Error('client id unavailable');
-        return 'web-client-1';
-      },
-      replayPrPollInterestHints,
-    }));
+    mockPrPollClientId(() => {
+      if (fail) throw new Error('client id unavailable');
+      return 'web-client-1';
+    });
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});

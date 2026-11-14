@@ -266,7 +266,13 @@ just ci-local   # Pre-push hook when Staged changed: same checks, frontend and R
 
 # Maintenance
 just clean      # Remove build artifacts
+
+# Browser / phone access (opt-in HTTPS server on :5175)
+just dev-web    # Dev mode plus the web server; Vite proxies /api to it
+just run-web    # Release build serving the production bundle
 ```
+
+`dev-web` and `run-web` need `STAGED_WEB_CERT_PATH` and `STAGED_WEB_KEY_PATH` (PEM files) and, for `dev-web`, `STAGED_WEB_HOST`. The server is **unauthenticated** and binds `0.0.0.0:5175`: anyone who can reach the port can run every command the desktop window can, including repo actions. Only enable it on a network you trust.
 
 ## Architecture
 

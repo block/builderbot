@@ -302,8 +302,11 @@ third and fourth when the script has to be uploaded or an uncollected note is
 waiting), each a few seconds on a cold `sq blox` connection. That is the
 price of a session whose deliverable survives the laptop disconnecting. The
 draft adds none: the seed travels base64-encoded inside the clear command,
-and only a seed over 500 kB encoded (no stored note is that large) is
-appended in further commands. The seed is decoded into `.draft.md.seed`
+and only a seed over 100 kB encoded (a stored body over about 75 kB) is
+appended in further commands of that size. The bound is Linux's: a
+workstation refuses any single command argument of 131072 bytes or more,
+whatever its `ARG_MAX`, and macOS has no such per-argument limit, so only a
+Linux shell shows a chunk that is too large. The seed is decoded into `.draft.md.seed`
 beside the draft and renamed into place. A chunked seed that fails part-way
 leaves that temp file behind, so every clear script removes it along with
 the draft; otherwise the session directory could never be removed.

@@ -246,9 +246,13 @@ pub(crate) fn clear_unpublished_outbox(
     })
 }
 
-/// Largest base64 payload put on one command line, the same bound
-/// `session_commands::write_bytes_to_remote_with` uses to stay under ARG_MAX.
-const SEED_CHUNK_SIZE: usize = 500_000;
+/// Largest base64 payload put on one command line. The workstation runs each
+/// command as `sh -c <script>`, and Linux refuses any single argument of
+/// 131072 bytes or more ("Argument list too long"), whatever ARG_MAX is. This
+/// bound leaves the rest for the script's fixed text. macOS limits only the
+/// total, so a chunk that is too large fails on a workstation and on Linux
+/// CI, never on the laptop.
+const SEED_CHUNK_SIZE: usize = 100_000;
 
 /// The line the seeding clear prints when the outbox was emptied but the
 /// seed could not be written. It exits 0 either way, so a failed command
@@ -1335,6 +1339,40 @@ mod tests {
         assert!(!commands[1][2].contains("mv -f"));
         assert!(commands[2][2].contains("base64 -d >> \"$d/.draft.md.seed\""));
         assert!(commands[2][2].ends_with("mv -f \"$d/.draft.md.seed\" \"$d/draft.md\""));
+    }
+
+    /// Linux's `MAX_ARG_STRLEN`: one `execve` argument, its NUL included,
+    /// must be shorter than this. The workstations are Linux, the laptop
+    /// that runs these tests usually is not, so the bound is checked on the
+    /// commands themselves.
+    const LINUX_MAX_ARG_BYTES: usize = 131_072;
+
+    #[test]
+    fn every_seeding_command_fits_one_linux_argument() {
+        // A real session id is a UUID; the longest single-command seed is
+        // the one whose base64 is exactly the chunk size.
+        let session_id = "0a734c48-c0fc-409e-bacb-ed8afb83a442";
+        let largest_single = vec![b'x'; SEED_CHUNK_SIZE / 4 * 3];
+        let chunked = vec![b'x'; SEED_CHUNK_SIZE * 3];
+        for (seed, expected_commands) in [(&largest_single, 1), (&chunked, 5)] {
+            let log = RefCell::new(Vec::new());
+            let exec = collecting_exec("pending\n\n\n", &log);
+            assert_eq!(
+                clear_outbox_and_seed(&exec, session_id, Some(seed)).unwrap(),
+                DraftSeed::Seeded
+            );
+            let commands = log.borrow();
+            assert_eq!(commands.len(), expected_commands);
+            for command in commands.iter() {
+                for arg in command {
+                    assert!(
+                        arg.len() < LINUX_MAX_ARG_BYTES,
+                        "a {} byte argument does not fit one Linux argument",
+                        arg.len()
+                    );
+                }
+            }
+        }
     }
 
     /// `write_note` as a `tools/list` response lists it, wherever it sits

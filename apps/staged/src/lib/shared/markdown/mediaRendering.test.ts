@@ -56,14 +56,17 @@ describe('note media rendering', () => {
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(lookup).toHaveBeenCalledWith(id);
     expect(html).toContain('width="50" height="25"');
-    expect(html).toContain(`<video src="/api/media/${id}.mp4" controls`);
+    expect(html).toContain(`<video src="/api/media/${id}.mp4#t=0.001" controls`);
   });
 
   it.each(['mp4', 'mov', 'webm'])('renders %s with native controls only', (ext) => {
     const html = renderMarkdown(`![Recording](staged-media://${id}.${ext})`);
+    // The `#t=` fragment is the preview: WebKit shows no frame without it
+    // (videoPreview.ts). It rides on the web build's URL as on the desktop's.
     expect(html).toContain(
-      `<video src="/api/media/${id}.${ext}" controls preload="metadata" playsinline`
+      `<video src="/api/media/${id}.${ext}#t=0.001" controls preload="metadata" playsinline`
     );
+    expect(html).not.toContain('poster');
     expect(html).not.toContain('autoplay');
     // Full screen comes from the native controls; no Staged overlay sits on top.
     expect(html).not.toContain('<button');
@@ -122,10 +125,21 @@ describe('note media rendering', () => {
     expect(html).not.toContain('<img onerror=');
   });
 
+  it('adds the preview fragment to videos only', () => {
+    const html = renderMarkdown(`![a](staged-media://${id}.png)\n\n![b](staged-media://${id}.mp4)`);
+    expect(html).toContain(`<img src="/api/media/${id}.png" alt="a"`);
+    expect(html.match(/#t=/g)).toHaveLength(1);
+  });
+
+  // A reference is an id and an extension, nothing else: one that brings its
+  // own query or fragment is not media, with or without the preview fragment.
   it.each([
     `staged-media://bad.png`,
     `staged-media://${id}.svg`,
     `staged-media://${id}.png?x=1`,
+    `staged-media://${id}.mp4?x=1`,
+    `staged-media://${id}.mp4#t=5`,
+    `staged-media://${id}.mp4?x=1#t=5`,
     'javascript:alert(1)',
   ])('does not trust %s', (href) => {
     const html = renderMarkdown(`![Caption](${href})`);

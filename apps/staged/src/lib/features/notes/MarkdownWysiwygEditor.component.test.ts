@@ -80,7 +80,8 @@ describe('MarkdownWysiwygEditor with a copied note’s media', () => {
     const root = await mountEditor(copiedNote);
     await vi.waitFor(() => expect(root.querySelector('.ProseMirror')).not.toBeNull());
     const video = root.querySelector<HTMLVideoElement>('video');
-    expect(video?.getAttribute('src')).toBe(resolveStagedMediaUrl(VIDEO_ID, 'mp4'));
+    // The web build's URL, with the preview fragment (videoPreview.ts).
+    expect(video?.getAttribute('src')).toBe(`/api/media/${VIDEO_ID}.mp4#t=0.001`);
     expect(video?.hasAttribute('controls')).toBe(true);
     expect(video?.closest('figure.markdown-media-video')?.getAttribute('contenteditable')).toBe(
       'false'

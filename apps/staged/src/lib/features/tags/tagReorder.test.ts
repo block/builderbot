@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { TagState } from '../../types';
-import { resolveTagDrop, stepTarget, steppedGroupOrder } from './tagReorder';
+import { resolveGroupDrop, resolveTagDrop, stepTarget, steppedGroupOrder } from './tagReorder';
 import { indexTagCatalog } from './tagState';
-import { tag, tagState } from './testStubs/tagFixtures';
+import { group, tag, tagState } from './testStubs/tagFixtures';
 
 const catalog = indexTagCatalog(tagState());
 
@@ -182,5 +182,92 @@ describe('steppedGroupOrder', () => {
     expect(steppedGroupOrder(catalog.groups, 'status', -1)).toBeNull();
     expect(steppedGroupOrder(catalog.groups, 'priority', 1)).toBeNull();
     expect(steppedGroupOrder(catalog.groups, 'gone', 1)).toBeNull();
+  });
+});
+
+describe('resolveGroupDrop', () => {
+  // Status, Priority, Area, Team.
+  const groups = indexTagCatalog({
+    ...tagState(),
+    groups: [...tagState().groups, group('area', 2), group('team', 3)],
+  }).groups;
+
+  it('moves a group down, after its anchor', () => {
+    expect(resolveGroupDrop(groups, 'status', { anchorGroupId: 'area', place: 'after' })).toEqual([
+      'priority',
+      'area',
+      'status',
+      'team',
+    ]);
+  });
+
+  it('moves a group up, before its anchor', () => {
+    expect(
+      resolveGroupDrop(groups, 'team', { anchorGroupId: 'priority', place: 'before' })
+    ).toEqual(['status', 'team', 'priority', 'area']);
+  });
+
+  it('moves a group to either end', () => {
+    expect(resolveGroupDrop(groups, 'area', { anchorGroupId: 'status', place: 'before' })).toEqual([
+      'area',
+      'status',
+      'priority',
+      'team',
+    ]);
+    expect(resolveGroupDrop(groups, 'status', { anchorGroupId: 'team', place: 'after' })).toEqual([
+      'priority',
+      'area',
+      'team',
+      'status',
+    ]);
+  });
+
+  it('is a no-op when the group would land where it is', () => {
+    // Just below the group above it, or just above the group below it.
+    expect(
+      resolveGroupDrop(groups, 'priority', { anchorGroupId: 'status', place: 'after' })
+    ).toBeNull();
+    expect(
+      resolveGroupDrop(groups, 'priority', { anchorGroupId: 'area', place: 'before' })
+    ).toBeNull();
+  });
+
+  it('is a no-op when dropped on itself', () => {
+    expect(
+      resolveGroupDrop(groups, 'priority', { anchorGroupId: 'priority', place: 'before' })
+    ).toBeNull();
+    expect(
+      resolveGroupDrop(groups, 'priority', { anchorGroupId: 'priority', place: 'after' })
+    ).toBeNull();
+  });
+
+  it('is a no-op when the dragged group or the anchor was deleted mid-drag', () => {
+    expect(resolveGroupDrop(groups, 'gone', { anchorGroupId: 'area', place: 'after' })).toBeNull();
+    expect(
+      resolveGroupDrop(groups, 'status', { anchorGroupId: 'gone', place: 'after' })
+    ).toBeNull();
+    expect(resolveGroupDrop([], 'status', { anchorGroupId: 'area', place: 'after' })).toBeNull();
+  });
+
+  it('resolves against the list at drop time', () => {
+    // "priority" was deleted and "squad" created after the drag started: the
+    // order names every group there is now, and no other.
+    const changed = [...groups.filter((g) => g.id !== 'priority'), group('squad', 4)];
+    expect(resolveGroupDrop(changed, 'team', { anchorGroupId: 'status', place: 'after' })).toEqual([
+      'status',
+      'team',
+      'area',
+      'squad',
+    ]);
+    // "after status" was a move when the drag began, with Priority between them.
+    expect(
+      resolveGroupDrop(changed, 'area', { anchorGroupId: 'status', place: 'after' })
+    ).toBeNull();
+  });
+
+  it('leaves the groups it was given untouched', () => {
+    const before = groups.map((g) => g.id);
+    resolveGroupDrop(groups, 'status', { anchorGroupId: 'team', place: 'after' });
+    expect(groups.map((g) => g.id)).toEqual(before);
   });
 });

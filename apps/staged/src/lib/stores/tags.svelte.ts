@@ -102,8 +102,8 @@ class TagsStore {
 
   /**
    * The backend's snapshot as last applied or patched, without pending
-   * assignment writes. For editors that layer their own optimistic view over
-   * the catalog (Settings › Tags' drag reorder).
+   * assignment writes. For the optimistic view layered over the catalog
+   * (pendingCatalogMoves, behind Settings › Tags' reorders).
    */
   get snapshot(): TagState {
     return this._snapshot;

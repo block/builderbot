@@ -17,6 +17,31 @@
   the columns run past the window, a fade and chevron mark each side with
   more (BoardScrollEdges).
 
+  A tag column moves left or right from its ⋯ menu, which reorders the
+  group's tags. The move shows before its write lands (the column order is
+  read through pendingCatalogMoves), steps over hidden columns, and leaves
+  focus on the column's menu, with the column kept on screen, so it can be
+  repeated. "No ‹group›" is not a tag and stays first.
+
+  Where cards drag, a tag column drags too, by its header or its collapsed
+  strip, and lands on the side of the column it is dropped on: the left half
+  before it, the right half after, and after "No ‹group›" on either. Only
+  how far across the row the pointer is decides which column that is: a
+  header is at the row's top edge, and a pointer that drifts above it is
+  still dragging. A line in the gap shows where the column would land, and
+  a pointer in a gap lands the column there. Past the last column it lands
+  last. Clearly away from the row (see `DRAG_REACH`) there is no line and a
+  release does nothing. A drop that would leave the columns in their order
+  shows no line and writes nothing, and the cursor says it is refused. Near
+  either end of the row, or just past it, the drag scrolls it sideways. A
+  chip with the column's icon and name follows the pointer.
+
+  The two drags are different kinds. A card's is an HTML5 drag. A column's
+  is made of pointer events (shared/pointerDrag), because the desktop
+  build's native file-drop handler answers every HTML5 drag itself and the
+  page never sees one as a drop. So a column drag carries no data: the board
+  resolves each point the pointer reaches from the columns' rects.
+
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, or inside
   the project layer by a pinned board's view (BoardView), never as a layer
@@ -26,24 +51,30 @@
   import { tick } from 'svelte';
   import type { Project, TagGroup } from '../../types';
   import { tagsStore } from '../../stores/tags.svelte';
+  import type { PointerDragPoint } from '../../shared/pointerDrag';
   import { viewport } from '../../shared/viewport.svelte';
+  import { pendingCatalogMoves } from '../tags/pendingCatalogMoves.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
+  import { resolveTagDrop } from '../tags/tagReorder';
   import { projectActions } from '../projects/projectActions.svelte';
   import { focusIfDropped, neighbourAfterRemove } from '../projects/focusAfterRemove';
   import type { BoardCardHandlers } from './BoardCard.svelte';
   import BoardAddColumn from './BoardAddColumn.svelte';
-  import BoardColumn from './BoardColumn.svelte';
+  import BoardColumn, { type BoardColumnDragHandlers } from './BoardColumn.svelte';
   import BoardEmptyState from './BoardEmptyState.svelte';
   import BoardPhonePager from './BoardPhonePager.svelte';
   import BoardScrollEdges from './BoardScrollEdges.svelte';
+  import { columnDropTarget, columnStepTarget, type ColumnDrop } from './boardColumnReorder';
   import { buildBoardColumns } from './boardColumns';
   import {
-    PROJECT_DRAG_TYPE,
+    columnAtPoint,
+    isCardDrag,
     readProjectDrag,
     resolveBoardDrop,
     writeProjectDrag,
   } from './boardDrop';
   import { columnPrefsFor } from './boardPrefs';
+  import { revealOffset, SCROLL_FADE_WIDTH } from './boardScroll';
   import { boardViewPrefs, setBoardColumnFlag } from './boardViewPrefs.svelte';
 
   interface Props {
@@ -64,6 +95,10 @@
   let columnsEl = $state<HTMLElement | null>(null);
   let draggingId = $state<string | null>(null);
   let dropKey = $state<string | null>(null);
+  /** The column being dragged, if any. */
+  let draggingColumnKey = $state<string | null>(null);
+  /** Where the dragged column would land: beside a column, on one side of it. */
+  let columnDrop = $state<ColumnDrop | null>(null);
   let activeIndex = $state(0);
 
   let paged = $derived(viewport.isMobile);
@@ -74,16 +109,21 @@
     return searchRank === null || searchRank.has(projectId);
   }
 
+  // The columns come from the catalog with the reorders in flight applied,
+  // so a moved column shows at once and the next move steps from there.
+  let columnPrefs = $derived(
+    group ? columnPrefsFor(boardViewPrefs.columns, group.id, pendingCatalogMoves.catalog) : null
+  );
   let layout = $derived.by(() => {
-    if (!group) return null;
+    if (!group || !columnPrefs) return null;
     const groupId = group.id;
     return buildBoardColumns({
       group,
-      tags: tagsStore.tagsByGroup.get(groupId) ?? [],
+      tags: pendingCatalogMoves.catalog.tagsByGroup.get(groupId) ?? [],
       projects,
       groupTagIdOf: (projectId) => tagsStore.groupTagFor(projectId, groupId)?.id ?? null,
       isVisible,
-      prefs: columnPrefsFor(boardViewPrefs.columns, groupId, tagsStore.catalog),
+      prefs: columnPrefs,
     });
   });
   let activeKey = $derived(layout?.columns[activeIndex]?.key ?? null);
@@ -163,13 +203,100 @@
     moved: (projectId) => void focusCard(projectId),
   };
 
-  /** Only card drags count: files and text dragged over the board pass through. */
-  function isCardDrag(event: DragEvent): boolean {
-    return draggingId !== null || !!event.dataTransfer?.types.includes(PROJECT_DRAG_TYPE);
+  /**
+   * Whether the dragged column would move if dropped where it is. The line
+   * shows only then.
+   */
+  let columnDropWouldMove = $derived(
+    draggingColumnKey !== null &&
+      columnDrop !== null &&
+      columnMove(draggingColumnKey, columnDrop) !== null
+  );
+
+  /**
+   * Where a column held at `point` would land (see `columnAtPoint`), from
+   * the row and the columns as they are laid out now. The drag scrolls the
+   * row, so the rects are read afresh each time.
+   */
+  function columnDropAt(point: PointerDragPoint): ColumnDrop | null {
+    if (!columnsEl) return null;
+    const columns = [...columnsEl.querySelectorAll<HTMLElement>('[data-board-column]')].map(
+      (el) => ({ key: el.dataset.boardColumn ?? '', rect: el.getBoundingClientRect() })
+    );
+    return columnAtPoint(point, columnsEl.getBoundingClientRect(), columns, columnDrop);
+  }
+
+  function setColumnDrop(drop: ColumnDrop | null) {
+    if (columnDrop?.columnKey === drop?.columnKey && columnDrop?.place === drop?.place) return;
+    columnDrop = drop;
+  }
+
+  function endColumnDrag() {
+    draggingColumnKey = null;
+    columnDrop = null;
+  }
+
+  // A column's drag, as the pointerDrag action on its header or strip
+  // reports it. The action follows every `start` with a `drop` or a
+  // `cancel`, so no column drag is ever left over.
+  const columnDragHandlers: BoardColumnDragHandlers = {
+    get enabled() {
+      return dragEnabled;
+    },
+    get draggingKey() {
+      return draggingColumnKey;
+    },
+    placeFor(columnKey) {
+      if (!columnDropWouldMove || columnDrop?.columnKey !== columnKey) return null;
+      return columnDrop.place;
+    },
+    scroll: { container: () => columnsEl, axis: 'x' },
+    start(columnKey) {
+      // A card drag whose card left the board never got its dragend.
+      handlers.endDrag();
+      draggingColumnKey = columnKey;
+      columnDrop = null;
+    },
+    /**
+     * The cursor says a drop is refused wherever it would leave the columns
+     * in their order: level with the column itself, with the half where it
+     * already is, in a gap with no line, and clearly away from the row.
+     */
+    move(point) {
+      setColumnDrop(columnDropAt(point));
+      return columnDropWouldMove;
+    },
+    /**
+     * Drop the dragged column where the pointer was released, which is
+     * resolved as any other point. The pointer put the column there, so
+     * focus stays where it is.
+     */
+    drop(point) {
+      const key = draggingColumnKey;
+      const drop = columnDropAt(point);
+      endColumnDrag();
+      const move = key !== null && drop !== null ? columnMove(key, drop) : null;
+      if (!move) return;
+      void pendingCatalogMoves.moveTag({
+        tagId: move.tagId,
+        groupId: move.groupId,
+        index: move.index,
+      });
+    },
+    cancel: endColumnDrag,
+  };
+
+  /**
+   * Whether a drag event is a card's. Files and text dragged over the board
+   * are not, and pass through, even with a card drag left over from before.
+   * A column's drag is made of pointer events and sends no drag events.
+   */
+  function cardDrag(event: DragEvent): boolean {
+    return isCardDrag(event.dataTransfer, draggingId !== null);
   }
 
   function handleDragOver(key: string, event: DragEvent) {
-    if (!dragEnabled || !isCardDrag(event)) return;
+    if (!dragEnabled || !cardDrag(event)) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     dropKey = key;
@@ -182,7 +309,7 @@
   }
 
   function handleDrop(key: string, event: DragEvent) {
-    if (!dragEnabled || !isCardDrag(event)) return;
+    if (!dragEnabled || !cardDrag(event)) return;
     event.preventDefault();
     const projectId = readProjectDrag(event.dataTransfer, draggingId, new Set(projectsById.keys()));
     handlers.endDrag();
@@ -204,6 +331,80 @@
     setBoardColumnFlag(group.id, key, 'hidden', true, tagsStore.catalog);
   }
 
+  /**
+   * The tag move that drops column `key` on `drop`, read against the order
+   * the board shows, or null when the columns would stay as they are.
+   */
+  function columnMove(key: string, drop: ColumnDrop) {
+    if (!group || !columnPrefs) return null;
+    const catalog = pendingCatalogMoves.catalog;
+    const target = columnDropTarget(catalog, group.id, columnPrefs.hidden, key, drop);
+    return target && resolveTagDrop(catalog, key, target);
+  }
+
+  /** Where a step left (-1) or right (1) would put a column, or null at that end. */
+  function columnStep(key: string, step: -1 | 1) {
+    if (!group || !columnPrefs) return null;
+    return columnStepTarget(pendingCatalogMoves.catalog, group.id, columnPrefs.hidden, key, step);
+  }
+
+  /** Move a tag column past the nearest showing one on that side. */
+  function moveColumn(key: string, step: -1 | 1) {
+    const target = columnStep(key, step);
+    const move = target && resolveTagDrop(pendingCatalogMoves.catalog, key, target);
+    if (!move) return;
+    void focusColumnMenu(key);
+    void pendingCatalogMoves.moveTag({
+      tagId: move.tagId,
+      groupId: move.groupId,
+      index: move.index,
+    });
+  }
+
+  function columnElement(key: string): HTMLElement | null {
+    for (const el of columnsEl?.querySelectorAll<HTMLElement>('[data-board-column]') ?? []) {
+      if (el.dataset.boardColumn === key) return el;
+    }
+    return null;
+  }
+
+  function columnMenuTrigger(key: string): HTMLElement | null {
+    for (const el of columnsEl?.querySelectorAll<HTMLElement>('[data-board-column-menu]') ?? []) {
+      if (el.dataset.boardColumnMenu === key) return el;
+    }
+    return null;
+  }
+
+  /**
+   * Put focus back on the ⋯ menu of a column that just moved, so the move
+   * can be repeated from the keyboard, and keep the column on screen. The
+   * closing menu hands focus to its trigger, but the keyed list then moves
+   * the column and WebKit drops focus from a node that moves. The focus
+   * waits for a render, by which time the move is showing, and is checked
+   * once more on the next frame in case the menu closed after it.
+   */
+  async function focusColumnMenu(key: string) {
+    await tick();
+    columnMenuTrigger(key)?.focus({ preventScroll: true });
+    revealColumn(key);
+    requestAnimationFrame(() => focusIfDropped(() => columnMenuTrigger(key)));
+  }
+
+  /**
+   * Scroll the columns sideways, and only them, until a column is clear of
+   * the edge fades. On the phone pager that is the column's own page: the
+   * move changed which column sits at the scroll position.
+   */
+  function revealColumn(key: string) {
+    const column = columnElement(key);
+    if (!columnsEl || !column) return;
+    const box = columnsEl.getBoundingClientRect();
+    const fade = paged ? 0 : SCROLL_FADE_WIDTH;
+    const view = { left: box.left + fade, right: box.right - fade };
+    const offset = revealOffset(view, column.getBoundingClientRect());
+    if (offset !== 0) columnsEl.scrollLeft += offset;
+  }
+
   function showHiddenColumns() {
     if (!group || !layout) return;
     for (const column of layout.hidden) {
@@ -217,10 +418,7 @@
   }
 
   function pageTo(key: string) {
-    const column = [
-      ...(columnsEl?.querySelectorAll<HTMLElement>('[data-board-column]') ?? []),
-    ].find((el) => el.dataset.boardColumn === key);
-    column?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
+    columnElement(key)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
   }
 
   /** The card element for a project, for the home page's scroll restore. */
@@ -263,18 +461,23 @@
         aria-label={`Projects by ${group.name}`}
         role="group"
       >
-        {#each layout.columns as column (column.key)}
+        {#each layout.columns as column, i (column.key)}
           <BoardColumn
             {column}
             {group}
             {handlers}
+            columnDrag={columnDragHandlers}
             {isVisible}
             {paged}
+            first={i === 0}
             dropTarget={draggingId !== null && dropKey === column.key}
+            canMoveLeft={columnStep(column.key, -1) !== null}
+            canMoveRight={columnStep(column.key, 1) !== null}
             onDragOver={(event) => handleDragOver(column.key, event)}
             onDragLeave={(event) => handleDragLeave(column.key, event)}
             onDrop={(event) => handleDrop(column.key, event)}
             onCollapse={(collapsed) => setCollapsed(column.key, collapsed)}
+            onMove={(step) => moveColumn(column.key, step)}
             onHide={() => hideColumn(column.key)}
           />
         {/each}

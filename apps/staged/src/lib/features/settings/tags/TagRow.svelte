@@ -12,7 +12,9 @@
   writes before it settle), so a rename followed at once by a colour or icon
   pick keeps both. The handle drags the row to reorder it or move it to
   another group; the ⋯ menu does the same from the keyboard or a touch
-  screen.
+  screen. The drag carries a type of its own and no text (see
+  tagSettingsDrag), so a tag released over a group's name field, which no
+  row or list answers for, pastes nothing into it.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -32,6 +34,7 @@
   import { tagActions } from '../../tags/tagActions.svelte';
   import { MAX_TAG_NAME_CHARS } from '../../tags/tagState';
   import TagColorSwatches from './TagColorSwatches.svelte';
+  import { writeTagDrag } from './tagSettingsDrag';
   import { tagMenuTriggerId, tagNameInputId, type TagsEditor } from './tagsEditor.svelte';
 
   /** The icon picker's empty-search shortlist: statuses and priorities. */
@@ -105,9 +108,7 @@
 
   function handleDragStart(event: DragEvent) {
     if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move';
-      // Some engines only start a drag that carries data.
-      event.dataTransfer.setData('text/plain', tag.name);
+      writeTagDrag(event.dataTransfer, tag.id);
       if (row) event.dataTransfer.setDragImage(row, 16, row.offsetHeight / 2);
     }
     editor.dragStart(tag.id);
@@ -115,7 +116,7 @@
 
   function handleDragOver(event: DragEvent) {
     // Only drags that started on a tag row; files and text pass through.
-    if (editor.dragTagId === null || !row) return;
+    if (!editor.isTagDrag(event) || !row) return;
     event.preventDefault();
     event.stopPropagation();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
@@ -128,7 +129,7 @@
   }
 
   function handleDrop(event: DragEvent) {
-    if (editor.dragTagId === null) return;
+    if (!editor.isTagDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
     editor.drop();

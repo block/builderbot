@@ -35,14 +35,15 @@
   let dropAtEnd = $derived(editor.dropsAtEndOf(groupId));
 
   function handleDragOver(event: DragEvent) {
-    if (editor.dragTagId === null) return;
+    // Only drags that started on a tag row, as for the rows themselves.
+    if (!editor.isTagDrag(event)) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     editor.dragOver({ groupId, anchorTagId: null });
   }
 
   function handleDrop(event: DragEvent) {
-    if (editor.dragTagId === null) return;
+    if (!editor.isTagDrag(event)) return;
     event.preventDefault();
     editor.drop();
   }

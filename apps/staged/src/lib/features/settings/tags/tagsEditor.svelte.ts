@@ -3,14 +3,19 @@
  * rows so they don't thread a dozen callbacks through each other.
  *
  * Catalog writes go through tagActions, which queues them, awaits the
- * backend and then patches tagsStore. Tag moves (drag and the row menu) also
- * show at once: the editor's view of the catalog is the store's snapshot
- * with the moves still in flight applied on top, in order. Each move is
- * resolved against that view, so Move down pressed three times quickly
- * steps from where the last press left the tag, and leaves the list once its
- * write lands (the store then holds it). A failed move clears them all and
- * starts a new generation: the later ones were resolved against an order
- * that never happened, so the ones still queued are skipped, not sent.
+ * backend and then patches tagsStore. Reorders also show at once, through
+ * pendingCatalogMoves: tag moves and group reorders, by drag or from the
+ * menus. The editor's catalog is the store's snapshot with the reorders
+ * still in flight applied on top. Each one is resolved against that catalog,
+ * so Move down pressed three times quickly steps from where the last press
+ * left the tag or group.
+ *
+ * A tag drag and a group drag are separate gestures with separate state. A
+ * tag's is an HTML5 drag, which carries a type of its own, so text or files
+ * dragged over the panel are not taken for it (see tagSettingsDrag). A
+ * group's is made of pointer events (see shared/pointerDrag) and sends no
+ * drag events at all: the panel resolves each point the pointer reaches and
+ * tells the editor where the group would land.
  *
  * Create one per mounted panel; its $derived fields belong to that
  * component.
@@ -21,17 +26,20 @@ import { toast } from 'svelte-sonner';
 import type { DeleteTagGroupMode, Tag, TagGroup } from '../../../types';
 import { projectsDataStore } from '../../../stores/projectsData.svelte';
 import { tagsStore } from '../../../stores/tags.svelte';
+import { pendingCatalogMoves } from '../../tags/pendingCatalogMoves.svelte';
 import { tagActions } from '../../tags/tagActions.svelte';
-import { withTagMoved, type TagMove } from '../../tags/tagCatalogPatches';
 import {
+  resolveGroupDrop,
   resolveTagDrop,
   stepTarget,
   steppedGroupOrder,
+  type GroupDropTarget,
   type ResolvedTagMove,
   type TagDropTarget,
 } from '../../tags/tagReorder';
-import { indexTagCatalog, numberedName, tagNameKey, type TagCatalog } from '../../tags/tagState';
+import { numberedName, tagNameKey, type TagCatalog } from '../../tags/tagState';
 import { freeGroupName, type TagGroupTemplate } from '../../tags/tagTemplates';
+import { isTagDrag } from './tagSettingsDrag';
 
 /** The name input of a tag row. */
 export function tagNameInputId(tagId: string): string {
@@ -58,30 +66,11 @@ export const UNGROUPED_LABEL = 'Ungrouped';
 
 const NEW_TAG_NAME = 'New tag';
 
-/** A move in flight. The token finds it again once its write settles. */
-interface PendingMove {
-  token: number;
-  move: TagMove;
-}
-
 export class TagsEditor {
-  /**
-   * Moves whose writes are in flight, oldest first. Raw, and replaced
-   * wholesale: a deep `$state` proxy would hand back proxies, not the objects
-   * pushed in, and the list is only ever read as a whole.
-   */
-  private pendingMoves = $state.raw<readonly PendingMove[]>([]);
-  /** Bumped when a move fails; moves queued under an older one are skipped. */
-  private moveGeneration = 0;
-  private nextMoveToken = 0;
-
-  /** The store's snapshot with the pending moves applied on top. */
-  private readonly view = $derived(
-    this.pendingMoves.reduce((state, { move }) => withTagMoved(state, move), tagsStore.snapshot)
-  );
-
-  /** The catalog every section renders. */
-  readonly catalog: TagCatalog = $derived(indexTagCatalog(this.view));
+  /** The catalog every section renders, moves in flight included. */
+  get catalog(): TagCatalog {
+    return pendingCatalogMoves.catalog;
+  }
 
   /** The tag being dragged, if a drag started in this panel. */
   dragTagId = $state<string | null>(null);
@@ -92,6 +81,17 @@ export class TagsEditor {
     this.dragTagId !== null &&
       this.dropTarget !== null &&
       resolveTagDrop(this.catalog, this.dragTagId, this.dropTarget) !== null
+  );
+
+  /** The group being dragged by its handle, if any. */
+  dragGroupId = $state<string | null>(null);
+  /** Where the dragged group would land. */
+  groupDropTarget = $state<GroupDropTarget | null>(null);
+  /** Whether dropping the group now would change anything. */
+  readonly groupDropWouldMove = $derived(
+    this.dragGroupId !== null &&
+      this.groupDropTarget !== null &&
+      resolveGroupDrop(this.catalog.groups, this.dragGroupId, this.groupDropTarget) !== null
   );
 
   // Each dialog's target outlives its close, so its text doesn't blank
@@ -206,35 +206,14 @@ export class TagsEditor {
   }
 
   private async applyMove(move: ResolvedTagMove, refocus: boolean): Promise<void> {
-    const generation = this.moveGeneration;
-    const pending: PendingMove = {
-      token: this.nextMoveToken++,
-      move: { tagId: move.tagId, groupId: move.groupId, index: move.index },
-    };
-    this.pendingMoves = [...this.pendingMoves, pending];
     // WebKit drops focus from a node a keyed {#each} moves; put it back on
     // the row's menu so Move up / Move down can repeat from the keyboard.
+    // The focus waits for a render, by which time the move is showing.
     if (refocus) void focusAfterRender(tagMenuTriggerId(move.tagId));
-    // The bookkeeping runs inside tagActions' chain, so a failure is seen
-    // here before the next queued move asks whether it's still wanted.
-    await tagActions.moveTag(pending.move, {
-      stillWanted: () => this.moveGeneration === generation,
-      onSettled: (moved) => {
-        // An earlier move of this generation failed: the overlay already
-        // went, and this one was skipped.
-        if (this.moveGeneration !== generation) return;
-        if (moved) {
-          // Once it lands the store's own patch holds the move, so the
-          // overlay entry can go.
-          this.pendingMoves = this.pendingMoves.filter((m) => m.token !== pending.token);
-        } else {
-          // The failure's refetch brings server truth. The later moves were
-          // resolved against an order that never happened, so they go too,
-          // and the ones still queued see the new generation and aren't sent.
-          this.moveGeneration++;
-          this.pendingMoves = [];
-        }
-      },
+    await pendingCatalogMoves.moveTag({
+      tagId: move.tagId,
+      groupId: move.groupId,
+      index: move.index,
     });
   }
 
@@ -243,6 +222,11 @@ export class TagsEditor {
   dragStart(tagId: string): void {
     this.dragTagId = tagId;
     this.dropTarget = null;
+  }
+
+  /** Whether a drag event belongs to the tag drag that started here. */
+  isTagDrag(event: DragEvent): boolean {
+    return isTagDrag(event.dataTransfer, this.dragTagId !== null);
   }
 
   dragOver(target: TagDropTarget): void {
@@ -306,12 +290,71 @@ export class TagsEditor {
     void tagActions.setTagGroupSidebar(group, on);
   }
 
-  async moveGroup(group: TagGroup, step: -1 | 1): Promise<void> {
+  /** Move a group one step up (-1) or down (1). */
+  moveGroup(group: TagGroup, step: -1 | 1): void {
     const order = steppedGroupOrder(this.catalog.groups, group.id, step);
     if (!order) return;
-    if (await tagActions.reorderTagGroups(order)) {
-      await focusAfterRender(groupMenuTriggerId(group.id));
-    }
+    // As for a tag (see applyMove): the section moves at once, and WebKit
+    // drops focus from it, so the menu trigger takes it back.
+    void focusAfterRender(groupMenuTriggerId(group.id));
+    void pendingCatalogMoves.reorderGroups(order);
+  }
+
+  // ── Dragging groups ──
+  //
+  // The pointerDrag action on a group's handle follows every start with a
+  // drop or an end, so no group drag is ever left over.
+
+  groupDragStart(groupId: string): void {
+    // A tag drag whose row left the page never got its dragend.
+    this.dragEnd();
+    this.dragGroupId = groupId;
+    this.groupDropTarget = null;
+  }
+
+  /** The pointer is over a place that puts the group at `target`. */
+  groupDragOver(target: GroupDropTarget): void {
+    const current = this.groupDropTarget;
+    if (this.dragGroupId === null) return;
+    if (current?.anchorGroupId === target.anchorGroupId && current.place === target.place) return;
+    this.groupDropTarget = target;
+  }
+
+  /**
+   * The pointer is clearly away from the list: forget where the group
+   * would have landed, so no line is drawn while it is held somewhere a
+   * release does nothing.
+   */
+  groupDragLeave(): void {
+    this.groupDropTarget = null;
+  }
+
+  /**
+   * Drop the dragged group where the pointer last put it. Returns the
+   * group's id when the drop moved it, and null when it changed nothing.
+   */
+  groupDrop(): string | null {
+    const groupId = this.dragGroupId;
+    const target = this.groupDropTarget;
+    this.groupDragEnd();
+    if (groupId === null || target === null) return null;
+    const order = resolveGroupDrop(this.catalog.groups, groupId, target);
+    if (!order) return null;
+    void pendingCatalogMoves.reorderGroups(order);
+    return groupId;
+  }
+
+  /** The group drag ended, by a drop or without one. */
+  groupDragEnd(): void {
+    this.dragGroupId = null;
+    this.groupDropTarget = null;
+  }
+
+  /** Where the drop indicator sits on a group, if the current drop would land beside it. */
+  groupDropPlaceFor(groupId: string): 'before' | 'after' | null {
+    const target = this.groupDropTarget;
+    if (!this.groupDropWouldMove || target?.anchorGroupId !== groupId) return null;
+    return target.place;
   }
 
   requestDeleteGroup(group: TagGroup): void {

@@ -739,6 +739,39 @@ fn tag_state_is_sorted_and_serializes_camel_case() {
 }
 
 #[test]
+fn tag_state_breaks_position_and_creation_ties_by_id() {
+    let store = store();
+    // Every write keeps positions dense, so a tie only exists in rows written
+    // behind the store's back. Insert them out of id order, so that neither
+    // insertion order nor its reverse is the expected result.
+    {
+        let conn = store.conn.lock().unwrap();
+        for id in ["g-c", "g-a", "g-b"] {
+            conn.execute(
+                "INSERT INTO tag_groups (id, name, position, created_at, updated_at)
+                 VALUES (?1, ?1, 0, 0, 0)",
+                [id],
+            )
+            .unwrap();
+        }
+        for id in ["t-c", "t-a", "t-b"] {
+            conn.execute(
+                "INSERT INTO tags (id, group_id, name, color, position, created_at, updated_at)
+                 VALUES (?1, NULL, ?1, 'gray', 0, 0, 0)",
+                [id],
+            )
+            .unwrap();
+        }
+    }
+
+    let state = store.get_tag_state().unwrap();
+    let group_ids: Vec<&str> = state.groups.iter().map(|g| g.id.as_str()).collect();
+    let tag_ids: Vec<&str> = state.tags.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(group_ids, ["g-a", "g-b", "g-c"]);
+    assert_eq!(tag_ids, ["t-a", "t-b", "t-c"]);
+}
+
+#[test]
 fn wire_enums_use_the_command_spellings() {
     assert_eq!(
         serde_json::from_value::<DeleteTagGroupMode>(json!("ungroup")).unwrap(),

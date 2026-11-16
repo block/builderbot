@@ -37,9 +37,19 @@ export interface TagCatalog {
   sidebarGroups: TagGroup[];
 }
 
-/** Catalog order: by position, then creation (the backend's `ORDER BY`). */
-export function byPosition<T extends { position: number; createdAt: number }>(a: T, b: T): number {
-  return a.position - b.position || a.createdAt - b.createdAt;
+/**
+ * Catalog order: by position, then creation, then id (the backend's
+ * `ORDER BY`). The backend keeps positions dense, so the tie-breaks only
+ * decide the order of rows that broke that rule. Ids compare by code unit,
+ * which is how SQLite orders them, not by locale.
+ */
+export function byPosition<T extends { id: string; position: number; createdAt: number }>(
+  a: T,
+  b: T
+): number {
+  return (
+    a.position - b.position || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
 }
 
 /** Longest tag or group name, in characters (the backend rejects longer). */
@@ -96,19 +106,6 @@ export function indexTagCatalog(state: TagState): TagCatalog {
     iconGroup: groups.find((group) => group.isIconGroup) ?? null,
     sidebarGroups: groups.filter((group) => group.showInSidebar),
   };
-}
-
-/**
- * The groups with the icon group first, then the rest in position order: how
- * the header pills, the context menus and the board offer them, so the group
- * that shows on every row and card is the one nearest to hand.
- */
-export function iconGroupFirst(
-  groups: readonly TagGroup[],
-  iconGroup: TagGroup | null
-): TagGroup[] {
-  if (!iconGroup) return [...groups];
-  return [iconGroup, ...groups.filter((group) => group.id !== iconGroup.id)];
 }
 
 /** The server's assignments by project, with assignments to unknown tags dropped. */

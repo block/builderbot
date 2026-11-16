@@ -1,26 +1,56 @@
 <!--
-  TagGroupSection.svelte — one tag group in Settings › Tags: its name, which
-  renames in place, a ⋯ menu, and its tags in order (the board's column
-  order).
+  TagGroupSection.svelte — one tag group in Settings › Tags: a drag handle,
+  its name, which renames in place, a ⋯ menu, and its tags in order (the
+  board's column order).
 
   The menu renames, makes the group the project icon (its tag's icon then
   leads every sidebar row and grid card), pins the group's board to the
   projects sidebar (a row under the Projects heading opens it), moves the
   group up or down, and deletes it after asking what happens to its tags.
 
+  The handle drags the group among the others, and the whole section is the
+  drop zone: a group dropped on its upper half lands above it, on its lower
+  half below. The drag is made of pointer events (shared/pointerDrag), not
+  an HTML5 drag, which the desktop build's native file-drop handler would
+  take. The panel resolves every point the pointer reaches, from the
+  sections' rects, so the section only says which group is being dragged and
+  draws the line when the group would land beside it. A chip with the
+  group's name follows the pointer. A tag's drag is still an HTML5 one, and
+  is the rows' and the list's to take.
+
   Like a tag's name (TagRow), the group name keeps what's being typed while
   it has focus, whatever catalog echoes arrive meanwhile.
 -->
+<script module lang="ts">
+  import type { PointerDragPoint, PointerDragScroll } from '../../../shared/pointerDrag';
+
+  /** What every group section shares for dragging groups, from TagsSettingsPanel. */
+  export interface TagGroupDragHandlers {
+    /** The list of sections, which a drag scrolls near its top or bottom edge. */
+    readonly scroll: PointerDragScroll;
+    /** A drag of this group began. `drop` or `cancel` always follows. */
+    start(groupId: string): void;
+    /** The pointer is at `point`: whether a drop there would move the group. */
+    move(point: PointerDragPoint): boolean;
+    /** The group was released at `point`. */
+    drop(point: PointerDragPoint): void;
+    /** The drag ended without a release. */
+    cancel(): void;
+  }
+</script>
+
 <script lang="ts">
   import { untrack } from 'svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import GripVertical from '@lucide/svelte/icons/grip-vertical';
   import Pencil from '@lucide/svelte/icons/pencil';
   import SquareKanban from '@lucide/svelte/icons/square-kanban';
   import Star from '@lucide/svelte/icons/star';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { pointerDrag, type PointerDragOptions } from '../../../shared/pointerDrag';
   import type { Tag, TagGroup } from '../../../types';
   import { MAX_TAG_NAME_CHARS } from '../../tags/tagState';
   import TagList from './TagList.svelte';
@@ -30,11 +60,28 @@
     editor: TagsEditor;
     group: TagGroup;
     tags: Tag[];
+    /** The first group in the list: no section is above it. */
+    first: boolean;
     canMoveUp: boolean;
     canMoveDown: boolean;
+    groupDrag: TagGroupDragHandlers;
   }
 
-  let { editor, group, tags, canMoveUp, canMoveDown }: Props = $props();
+  let { editor, group, tags, first, canMoveUp, canMoveDown, groupDrag }: Props = $props();
+
+  let dropPlace = $derived(editor.groupDropPlaceFor(group.id));
+
+  // What the handle hands the drag action. The panel resolves every point,
+  // so the section only says which group is being dragged, and names it
+  // for the chip that follows the pointer.
+  let dragOptions = $derived<PointerDragOptions>({
+    scroll: groupDrag.scroll,
+    image: () => ({ label: group.name }),
+    start: () => groupDrag.start(group.id),
+    move: (point) => groupDrag.move(point),
+    drop: (point) => groupDrag.drop(point),
+    cancel: () => groupDrag.cancel(),
+  });
 
   // "Rename" in the menu focuses the name once the menu has closed, rather
   // than letting the menu hand focus back to its trigger.
@@ -78,8 +125,27 @@
   }
 </script>
 
-<section class="tag-group" aria-labelledby={groupNameInputId(group.id)}>
+<section
+  class="tag-group"
+  class:first-in-list={first}
+  class:dragging={editor.dragGroupId === group.id}
+  class:drop-before={dropPlace === 'before'}
+  class:drop-after={dropPlace === 'after'}
+  data-tag-group={group.id}
+  aria-labelledby={groupNameInputId(group.id)}
+>
   <header class="group-head">
+    <!-- Dragging is the pointer's way to move a group. The ⋯ menu's Move up
+         and Move down are the keyboard's, so the handle takes no role or tab
+         stop for it. -->
+    <span
+      class="drag-handle"
+      title="Drag to reorder groups"
+      aria-hidden="true"
+      use:pointerDrag={dragOptions}
+    >
+      <GripVertical size={14} />
+    </span>
     <input
       id={groupNameInputId(group.id)}
       class="group-name"
@@ -134,11 +200,11 @@
           Show board in sidebar
         </DropdownMenu.CheckboxItem>
         <DropdownMenu.Separator />
-        <DropdownMenu.Item disabled={!canMoveUp} onSelect={() => void editor.moveGroup(group, -1)}>
+        <DropdownMenu.Item disabled={!canMoveUp} onSelect={() => editor.moveGroup(group, -1)}>
           <ArrowUp size={14} />
           Move up
         </DropdownMenu.Item>
-        <DropdownMenu.Item disabled={!canMoveDown} onSelect={() => void editor.moveGroup(group, 1)}>
+        <DropdownMenu.Item disabled={!canMoveDown} onSelect={() => editor.moveGroup(group, 1)}>
           <ArrowDown size={14} />
           Move down
         </DropdownMenu.Item>
@@ -162,9 +228,45 @@
 
 <style>
   .tag-group {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .tag-group.dragging {
+    opacity: 0.4;
+  }
+
+  /* The drop indicator: a line midway across the gap to the next section
+     (the panel body's 24px), where a tag row draws its own in the row gap. */
+  .tag-group.drop-before::before,
+  .tag-group.drop-after::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--ui-accent);
+    pointer-events: none;
+  }
+
+  .tag-group.drop-before::before {
+    top: -13px;
+  }
+
+  /* The first group has no section above it, only the list's 16px of
+     padding, with the divider under the panel's intro at its top. A line at
+     -13px sits 3px under that divider and reads as part of it. The line
+     goes midway across the room it has instead: 7px clear of the divider
+     and 7px clear of the group. */
+  .tag-group.first-in-list.drop-before::before {
+    top: -9px;
+  }
+
+  .tag-group.drop-after::after {
+    bottom: -13px;
   }
 
   .group-head {
@@ -172,6 +274,30 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+  }
+
+  /* The same handle a tag row has, in the same column. The press that drags
+     it must not start a selection on the way, and the cursor during the
+     drag is the root's (see app.css). */
+  .drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 24px;
+    color: var(--text-faint);
+    cursor: grab;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .drag-handle:hover {
+    color: var(--text-muted);
+  }
+
+  .drag-handle:active {
+    cursor: grabbing;
   }
 
   /* Reads as the section heading; editable in place. */
@@ -234,6 +360,14 @@
   :global(.tag-group-menu-trigger[data-state='open']) {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* As on a tag row: no drag on a phone or a touch screen, where the ⋯
+     menu's Move up and Move down reorder instead. */
+  @media (max-width: 640px), (pointer: coarse) {
+    .drag-handle {
+      display: none;
+    }
   }
 
   @media (pointer: coarse) {

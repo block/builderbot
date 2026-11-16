@@ -140,25 +140,38 @@ afterEach(() => {
 });
 
 describe('ProjectTagMenuItems', () => {
-  it('lists the icon group first, then the other groups, then Tags, with current values', async () => {
+  it('lists the groups in their stored order, then Tags, with current values', async () => {
     const state = tagState([
       { projectId: 'p1', tagId: 'p0' },
       { projectId: 'p1', tagId: 'q4' },
     ]);
-    // Make Priority the icon group, though it sorts second.
+    // Make Priority the icon group, though it sorts second: it stays second.
     state.groups = state.groups.map((g) => ({ ...g, isIconGroup: g.id === 'priority' }));
     const menu = await openContextMenu(state);
 
     const triggers = subTriggers(menu);
     expect(triggers.map((t) => t.dataset.tagGroupTrigger)).toEqual([
+      'status',
+      'priority',
+      'ungrouped',
+    ]);
+    expect(triggers[0].textContent).toContain('None');
+    expect(triggers[1].textContent).toContain('P0');
+    // Tags counts the ungrouped tags the project carries.
+    expect(triggers[2].textContent).toContain('1');
+  });
+
+  it('follows a reorder of the groups', async () => {
+    const state = tagState();
+    // Priority moved above Status in Settings. Status still drives the icon.
+    state.groups = state.groups.map((g) => ({ ...g, position: g.id === 'priority' ? 0 : 1 }));
+    const menu = await openContextMenu(state);
+
+    expect(subTriggers(menu).map((t) => t.dataset.tagGroupTrigger)).toEqual([
       'priority',
       'status',
       'ungrouped',
     ]);
-    expect(triggers[0].textContent).toContain('P0');
-    expect(triggers[1].textContent).toContain('None');
-    // Tags counts the ungrouped tags the project carries.
-    expect(triggers[2].textContent).toContain('1');
   });
 
   it('sets a group’s tag from its radio submenu', async () => {

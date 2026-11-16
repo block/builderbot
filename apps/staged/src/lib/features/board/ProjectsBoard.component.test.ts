@@ -3,18 +3,28 @@
 // drop or a "Move to" ends in `set_project_group_tag` and moves the card at
 // once, and a collapsed column is saved to `projects-board-columns`. A card's
 // labels are the real ones, so its chips show which tags its column leaves
-// out. The last block puts the real projectFiltersStore in front of it, as
+// out. Moving a column from its menu ends in `move_tag`, through the real
+// pending overlay, so the board shows it before the write lands, and so
+// does dragging one by its header. A card's drag is an HTML5 one, driven
+// here with drag events. A column's is made of pointer events, through the
+// real pointerDrag action, at points taken from the columns' stubbed rects,
+// with the real chip following the pointer.
+// The last block puts the real projectFiltersStore in front of it, as
 // ProjectsList does, so the tag chips decide which cards it shows.
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, TagState } from '../../types';
-import { tagState, withGroupTag } from '../tags/testStubs/tagFixtures';
+import { withTagMoved } from '../tags/tagCatalogPatches';
+import { scopeIds, tagState, withGroupTag } from '../tags/testStubs/tagFixtures';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
+import { DRAG_CHIP_CLASS, DRAG_REACH, POINTER_DRAG_ATTRIBUTE } from '../../shared/pointerDrag';
+import { viewport } from '../../shared/viewport.svelte';
 
-const { backend, setStoreValue, openProject } = vi.hoisted(() => ({
+const { backend, setStoreValue, openProject, toastError } = vi.hoisted(() => ({
   backend: { state: null as unknown as TagState },
   setStoreValue: vi.fn(async (_key: string, _value: unknown) => {}),
   openProject: vi.fn(),
+  toastError: vi.fn(),
 }));
 
 const commandsMock = vi.hoisted(() => ({
@@ -22,6 +32,7 @@ const commandsMock = vi.hoisted(() => ({
   setProjectGroupTag: vi.fn(
     async (_projectId: string, _groupId: string, _tagId: string | null) => {}
   ),
+  moveTag: vi.fn(async (_tagId: string, _groupId: string | null, _index: number) => {}),
   createTagGroup: vi.fn(async (name: string) => ({
     id: 'new-group',
     name,
@@ -92,7 +103,7 @@ vi.mock(
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
 vi.mock('../layout/navigation.svelte', () => ({ openSettings: vi.fn() }));
-vi.mock('svelte-sonner', () => ({ toast: { error: vi.fn() } }));
+vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
 import { tagsStore } from '../../stores/tags.svelte';
 import { projectFiltersStore } from '../projects/projectFilters.svelte';
@@ -178,10 +189,23 @@ function chipsOn(root: ParentNode, projectId: string): string[] {
   );
 }
 
-/** A drag event carrying a stub DataTransfer (jsdom has neither). */
-function dragEvent(type: string, data: Record<string, string>): Event {
+/** A point in client coordinates. */
+interface Point {
+  clientX: number;
+  clientY: number;
+}
+
+/**
+ * A drag event carrying a stub DataTransfer (jsdom has neither), with the
+ * pointer at `at`.
+ */
+function dragEvent(type: string, data: Record<string, string>, at: Partial<Point> = {}): Event {
   const store = new Map(Object.entries(data));
   const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    clientX: { value: at.clientX ?? 0 },
+    clientY: { value: at.clientY ?? 0 },
+  });
   Object.defineProperty(event, 'dataTransfer', {
     value: {
       effectAllowed: 'all',
@@ -195,6 +219,144 @@ function dragEvent(type: string, data: Record<string, string>): Event {
     },
   });
   return event;
+}
+
+/**
+ * Lay the row of columns out, which jsdom does not: 272px columns 12px
+ * apart from x = 0, 300px tall, in the order they are in when asked.
+ */
+function layOutColumns(root: ParentNode): HTMLElement {
+  const row = root.querySelector<HTMLElement>('.board-columns')!;
+  const rect = (left: number, width: number) =>
+    ({ left, right: left + width, top: 0, bottom: 300, width, height: 300 }) as DOMRect;
+  row.getBoundingClientRect = () => rect(0, row.children.length * 284);
+  for (const child of row.children) {
+    child.getBoundingClientRect = () => rect([...row.children].indexOf(child) * 284, 272);
+  }
+  return row;
+}
+
+/** A point over the left or right half of a column (laid out by `layOutColumns`). */
+function pointerOver(root: ParentNode, key: string, half: 'left' | 'right'): Point {
+  const rect = column(root, key).getBoundingClientRect();
+  return { clientX: half === 'left' ? rect.left + 100 : rect.right - 100, clientY: 20 };
+}
+
+/**
+ * In the row, over no column: past Doing's right edge (840) and short of
+ * Done's left (852), with all four columns showing. The line for a column
+ * landing after Doing, or before Done, is drawn here.
+ */
+const IN_GAP: Point = { clientX: 846, clientY: 20 };
+
+/** The gap after column `key`, between it and the next (laid out by `layOutColumns`). */
+function gapAfter(root: ParentNode, key: string): Point {
+  return { clientX: column(root, key).getBoundingClientRect().right + 6, clientY: 20 };
+}
+
+/** Level with that gap, and clearly above the row: one px past the drag's reach. */
+const AWAY_FROM_ROW: Point = { clientX: 846, clientY: -1 - DRAG_REACH };
+
+/**
+ * A point as far across the row as the left or right half of a column, and
+ * `clientY` down the page: above the row (which is 0 to 300 down) when
+ * negative, below it past 300.
+ */
+function pointerLevelWith(
+  root: ParentNode,
+  key: string,
+  half: 'left' | 'right',
+  clientY: number
+): Point {
+  return { ...pointerOver(root, key, half), clientY };
+}
+
+/** The chip following the pointer, if a drag has one up. */
+const dragChip = () => document.querySelector<HTMLElement>(`.${DRAG_CHIP_CLASS}`);
+
+/** What a column drags by: its header's handle, or its strip when collapsed. */
+function columnHandle(root: ParentNode, key: string): HTMLElement {
+  return column(root, key).querySelector<HTMLElement>('.board-column-handle, .collapsed-strip')!;
+}
+
+/**
+ * A mouse's pointer event at `at`, as the engines send it: the primary
+ * button, down for all but the release.
+ */
+function pointerEvent(
+  type: string,
+  target: EventTarget,
+  at: Point,
+  init: PointerEventInit = {}
+): PointerEvent {
+  const event = new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    pointerId: 1,
+    pointerType: 'mouse',
+    isPrimary: true,
+    button: type === 'pointermove' ? -1 : 0,
+    buttons: type === 'pointerup' ? 0 : 1,
+    ...at,
+    ...init,
+  });
+  target.dispatchEvent(event);
+  return event;
+}
+
+/** Where a press on column `key`'s handle lands: near the column's left edge. */
+function pressPoint(root: ParentNode, key: string): Point {
+  return { clientX: column(root, key).getBoundingClientRect().left + 20, clientY: 20 };
+}
+
+/** Press column `key`'s handle. No drag yet: the pointer has to move first. */
+function pressColumn(root: ParentNode, key: string, init: PointerEventInit = {}) {
+  pointerEvent('pointerdown', columnHandle(root, key), pressPoint(root, key), init);
+}
+
+/** Move the pressed pointer to `at`. The drag listens on the window, whatever is under it. */
+function movePointer(at: Point) {
+  pointerEvent('pointermove', document.body, at);
+  flushSync();
+}
+
+/** Let the pointer go at `at`. */
+async function releasePointer(at: Point) {
+  pointerEvent('pointerup', document.body, at);
+  await settle();
+}
+
+/** Pick column `key` up by its handle and hold it over a half of column `onto`. */
+function dragColumnOver(root: ParentNode, key: string, onto: string, half: 'left' | 'right') {
+  pressColumn(root, key);
+  movePointer(pointerOver(root, onto, half));
+}
+
+/** Let go of the column being dragged over a half of column `onto`. */
+async function dropColumnOn(root: ParentNode, onto: string, half: 'left' | 'right') {
+  await releasePointer(pointerOver(root, onto, half));
+}
+
+/** Drag column `key` by its handle and drop it on a half of column `onto`. */
+async function dragColumn(root: ParentNode, key: string, onto: string, half: 'left' | 'right') {
+  dragColumnOver(root, key, onto, half);
+  await dropColumnOn(root, onto, half);
+}
+
+/**
+ * What the cursor says while a column is dragged, from the mark the drag
+ * leaves on the root: `active` where a release would move the column,
+ * `refused` where it would not, and null when nothing is being dragged.
+ */
+const dragMark = () => document.documentElement.getAttribute(POINTER_DRAG_ATTRIBUTE);
+
+/** Each column showing a drop line, as `key:side`. */
+function dropLines(root: ParentNode): string[] {
+  return [...root.querySelectorAll<HTMLElement>('[data-board-column]')].flatMap((el) =>
+    ['before', 'after']
+      .filter((side) => el.classList.contains(`drop-${side}`))
+      .map((side) => `${el.dataset.boardColumn}:${side}`)
+  );
 }
 
 function menuItem(content: ParentNode, text: string): HTMLElement {
@@ -230,6 +392,61 @@ async function openColumnMenu(root: ParentNode, key: string): Promise<HTMLElemen
   return menus[menus.length - 1];
 }
 
+function columnMenuTrigger(root: ParentNode, key: string): HTMLElement {
+  return column(root, key).querySelector<HTMLElement>('.board-column-menu-trigger')!;
+}
+
+/** Pick "Move left" or "Move right" from a column's menu. */
+async function moveColumn(root: ParentNode, key: string, item: 'Move left' | 'Move right') {
+  menuItem(await openColumnMenu(root, key), item).click();
+  await settle();
+}
+
+/** Whether a column's menu offers `item`, and whether it can be picked. */
+async function columnMenuItem(
+  root: ParentNode,
+  key: string,
+  item: string
+): Promise<'enabled' | 'disabled' | 'absent'> {
+  const content = await openColumnMenu(root, key);
+  const found = [...content.querySelectorAll<HTMLElement>('[role^="menuitem"]')].find((el) =>
+    el.textContent?.includes(item)
+  );
+  const state = !found ? 'absent' : found.hasAttribute('data-disabled') ? 'disabled' : 'enabled';
+  content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  return state;
+}
+
+/**
+ * Settles each `move_tag` a test held open. The pending overlay and the
+ * catalog write chain are module-scoped, so one left open (by a failed
+ * assertion, say) would hold up every later test's moves; afterEach runs
+ * whatever the test didn't.
+ */
+const openMoves = new Set<() => void>();
+
+/**
+ * Hold every `move_tag` open. Each entry of the result lands one, in call
+ * order, as the backend would.
+ */
+function holdMoves(): (() => void)[] {
+  const finishes: (() => void)[] = [];
+  commandsMock.moveTag.mockImplementation(
+    (tagId, groupId, index) =>
+      new Promise<void>((resolve) => {
+        const finish = () => {
+          if (!openMoves.delete(finish)) return;
+          backend.state = withTagMoved(backend.state, { tagId, groupId, index });
+          resolve();
+        };
+        openMoves.add(finish);
+        finishes.push(finish);
+      })
+  );
+  return finishes;
+}
+
 beforeAll(() => {
   window.matchMedia = ((query: string) => ({
     matches: false,
@@ -258,9 +475,16 @@ beforeEach(() => {
   commandsMock.setProjectGroupTag.mockImplementation(async (projectId, groupId, tagId) => {
     backend.state = withGroupTag(backend.state, projectId, groupId, tagId);
   });
+  commandsMock.moveTag.mockImplementation(async (tagId, groupId, index) => {
+    backend.state = withTagMoved(backend.state, { tagId, groupId, index });
+  });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  while (openMoves.size > 0) {
+    for (const settleMove of [...openMoves]) settleMove();
+    await settle();
+  }
   if (component) unmount(component);
   component = null;
   document.body.innerHTML = '';
@@ -544,6 +768,1400 @@ describe('ProjectsBoard', () => {
       expect.arrayContaining([expect.objectContaining({ name: 'Idea' })])
     );
     expect(setStoreValue).toHaveBeenCalledWith('projects-board-group', 'new-group');
+  });
+});
+
+describe('ProjectsBoard column moves', () => {
+  it('moves a column right from its menu, showing it before the write lands', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+
+    // The write is still open, and the board already shows the new order.
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+    expect(scopeIds(backend.state, 'status')).toEqual(['idea', 'doing', 'done']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    // The cards went with their column.
+    expect(cardsIn(root, 'idea')).toEqual(['p3']);
+
+    finishes[0]();
+    await settle();
+
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'idea', 'done']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    expect(commandsMock.moveTag).toHaveBeenCalledTimes(1);
+  });
+
+  it('moves a column left from its menu', async () => {
+    const root = await mountBoard();
+
+    await moveColumn(root, 'done', 'Move left');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 1]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done', 'doing']);
+  });
+
+  it.each([
+    ['idea', 'Move right'],
+    ['doing', 'Move left'],
+  ] as const)('returns focus to %s’s menu trigger after "%s"', async (key, item) => {
+    const root = await mountBoard();
+
+    await moveColumn(root, key, item);
+
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    expect(document.activeElement).toBe(columnMenuTrigger(root, key));
+  });
+
+  it('takes focus back on the next frame if it dropped once the move had rendered', async () => {
+    const root = await mountBoard();
+    const content = await openColumnMenu(root, 'idea');
+    // Hold the frames from here on, the board's recheck among them.
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => frames.push(callback));
+    try {
+      menuItem(content, 'Move right').click();
+      await settle();
+      const trigger = columnMenuTrigger(root, 'idea');
+      expect(document.activeElement).toBe(trigger);
+
+      // As when the menu closes late and WebKit drops focus from the column.
+      trigger.blur();
+      expect(document.activeElement).toBe(document.body);
+      for (const frame of frames.splice(0)) frame(0);
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
+  it('leaves focus the user has since put elsewhere where it is', async () => {
+    const root = await mountBoard();
+    const content = await openColumnMenu(root, 'idea');
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => frames.push(callback));
+    try {
+      menuItem(content, 'Move right').click();
+      await settle();
+
+      card(root, 'p1').focus();
+      for (const frame of frames.splice(0)) frame(0);
+      expect(document.activeElement).toBe(card(root, 'p1'));
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
+  it('turns a move off at the ends, and offers none on "No ‹group›"', async () => {
+    const root = await mountBoard();
+
+    // "No Status" is not a tag: it stays first, and the first tag column
+    // can't move past it.
+    expect(await columnMenuItem(root, NO_TAG_COLUMN_KEY, 'Move left')).toBe('absent');
+    expect(await columnMenuItem(root, NO_TAG_COLUMN_KEY, 'Move right')).toBe('absent');
+    expect(await columnMenuItem(root, 'idea', 'Move left')).toBe('disabled');
+    expect(await columnMenuItem(root, 'idea', 'Move right')).toBe('enabled');
+    expect(await columnMenuItem(root, 'doing', 'Move left')).toBe('enabled');
+    expect(await columnMenuItem(root, 'doing', 'Move right')).toBe('enabled');
+    expect(await columnMenuItem(root, 'done', 'Move left')).toBe('enabled');
+    expect(await columnMenuItem(root, 'done', 'Move right')).toBe('disabled');
+
+    // Picking a move that is off sends nothing.
+    await moveColumn(root, 'idea', 'Move left');
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+  });
+
+  it('follows the order a move in flight shows when turning moves off', async () => {
+    holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'doing', 'Move right');
+
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done', 'doing']);
+    expect(await columnMenuItem(root, 'doing', 'Move right')).toBe('disabled');
+    expect(await columnMenuItem(root, 'done', 'Move right')).toBe('enabled');
+  });
+
+  it('steps over a hidden column, taking the move past it', async () => {
+    boardViewPrefs.columns = { status: { collapsed: [], hidden: ['doing'] } };
+    const root = await mountBoard();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done']);
+
+    await moveColumn(root, 'idea', 'Move right');
+
+    // Past Done, the next column showing, not just past the hidden Doing.
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea']);
+  });
+
+  it('counts only showing columns as an end', async () => {
+    boardViewPrefs.columns = { status: { collapsed: [], hidden: ['idea', 'done'] } };
+    const root = await mountBoard();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing']);
+
+    // Idea and Done sit either side of Doing in the stored order, hidden.
+    expect(await columnMenuItem(root, 'doing', 'Move left')).toBe('disabled');
+    expect(await columnMenuItem(root, 'doing', 'Move right')).toBe('disabled');
+  });
+
+  it('steps over a collapsed column as over any showing one', async () => {
+    boardViewPrefs.columns = { status: { collapsed: ['doing'], hidden: [] } };
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+  });
+
+  it('queues quick presses, each from where the last left the column', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+    await moveColumn(root, 'idea', 'Move right');
+
+    // Both show at once, and the backend sees them one at a time, in order.
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+
+    finishes[0]();
+    await settle();
+    expect(commandsMock.moveTag.mock.calls).toEqual([
+      ['idea', 'status', 1],
+      ['idea', 'status', 2],
+    ]);
+    // The first write landing doesn't throw the second's move away.
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+
+    finishes[1]();
+    await settle();
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('resolves a move against the order the moves in flight show', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+    await moveColumn(root, 'done', 'Move left');
+
+    // Done steps past Idea, its neighbour as shown, to second. Against the
+    // stored order its neighbour is Doing, and it would land first.
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+
+    finishes[0]();
+    await settle();
+    expect(commandsMock.moveTag.mock.calls).toEqual([
+      ['idea', 'status', 1],
+      ['done', 'status', 1],
+    ]);
+
+    finishes[1]();
+    await settle();
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('puts the columns back when the write fails', async () => {
+    let fail: (error: Error) => void = () => {};
+    commandsMock.moveTag.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = (error) => {
+            openMoves.delete(unsettled);
+            reject(error);
+          };
+          const unsettled = () => fail(new Error('left open'));
+          openMoves.add(unsettled);
+        })
+    );
+    const root = await mountBoard();
+
+    await moveColumn(root, 'idea', 'Move right');
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+
+    fail(new Error('database is locked'));
+    await settle();
+
+    expect(toastError).toHaveBeenCalledWith('Unable to move tag', {
+      description: 'database is locked',
+    });
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+  });
+
+  it('scrolls a moved column back clear of the edge fade', async () => {
+    const root = await mountBoard();
+    const scroller = root.querySelector<HTMLElement>('.board-columns')!;
+    // An 800px row of 272px columns 12px apart, laid out in DOM order: Doing,
+    // the third, ends at 840, under the right fade (from 752).
+    let scrollLeft = 0;
+    Object.defineProperty(scroller, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => (scrollLeft = value),
+    });
+    const rect = (left: number, width: number) =>
+      ({ left, right: left + width, top: 0, bottom: 300, width, height: 300 }) as DOMRect;
+    scroller.getBoundingClientRect = () => rect(0, 800);
+    for (const child of scroller.children) {
+      child.getBoundingClientRect = () =>
+        rect([...scroller.children].indexOf(child) * 284 - scrollLeft, 272);
+    }
+
+    // Idea, the second column, is in full view where it starts.
+    await moveColumn(root, 'idea', 'Move right');
+
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    expect(scrollLeft).toBe(840 - 752);
+
+    // Back to second, it is in view again: the row stays where it is.
+    await moveColumn(root, 'idea', 'Move left');
+    expect(scrollLeft).toBe(840 - 752);
+  });
+});
+
+describe('ProjectsBoard column drag', () => {
+  it('drops a column after the one whose right half it lands on, before the write lands', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // A press alone is no drag: the pointer has to move first.
+    pressColumn(root, 'idea');
+    flushSync();
+    expect(dragMark()).toBeNull();
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(false);
+
+    movePointer(pointerOver(root, 'done', 'right'));
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['done:after']);
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(true);
+
+    await dropColumnOn(root, 'done', 'right');
+
+    // The write is still open, and the board already shows the new order.
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(scopeIds(backend.state, 'status')).toEqual(['idea', 'doing', 'done']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+    expect(cardsIn(root, 'idea')).toEqual(['p3']);
+    expect(dragMark()).toBeNull();
+    expect(dropLines(root)).toEqual([]);
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(false);
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+
+    finishes[0]();
+    await settle();
+
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+    expect(commandsMock.moveTag).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a column before the one whose left half it lands on', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'done', 'idea', 'left');
+    expect(dropLines(root)).toEqual(['idea:before']);
+    await dropColumnOn(root, 'idea', 'left');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+  });
+
+  it.each(['left', 'right'] as const)(
+    'puts a column dropped on the %s half of "No ‹group›" first, after it',
+    async (half) => {
+      const root = await mountBoard();
+      layOutColumns(root);
+
+      dragColumnOver(root, 'done', NO_TAG_COLUMN_KEY, half);
+      expect(dropLines(root)).toEqual([`${NO_TAG_COLUMN_KEY}:after`]);
+      await dropColumnOn(root, NO_TAG_COLUMN_KEY, half);
+
+      expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+    }
+  );
+
+  it.each([
+    ['on itself', 'doing', 'doing', 'left', 'idea'],
+    ['on the near side of the column after it', 'idea', 'doing', 'left', 'idea'],
+    ['on the near side of the column before it', 'doing', 'idea', 'right', 'idea'],
+    ['on "No ‹group›" when already first', 'idea', NO_TAG_COLUMN_KEY, 'right', NO_TAG_COLUMN_KEY],
+  ] as const)(
+    'shows no line, refuses the drop and writes nothing for a drop %s',
+    async (_case, key, onto, half, gapFollows) => {
+      const root = await mountBoard();
+      layOutColumns(root);
+
+      dragColumnOver(root, key, onto, half);
+
+      // The column is being dragged, and the cursor says a release here
+      // would not move it.
+      expect(column(root, key).classList.contains('dragging')).toBe(true);
+      expect(dragMark()).toBe('refused');
+      expect(dropLines(root)).toEqual([]);
+
+      // The gap that place's line would be drawn in is the same place.
+      movePointer(gapAfter(root, gapFollows));
+      expect(dragMark()).toBe('refused');
+      expect(dropLines(root)).toEqual([]);
+
+      await dropColumnOn(root, onto, half);
+
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+      expect(dragMark()).toBeNull();
+      expect(column(root, key).classList.contains('dragging')).toBe(false);
+    }
+  );
+
+  it('says a drop moves again once the column is held over a half that moves it', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // Idea over its own left half, then over the far half of Doing.
+    dragColumnOver(root, 'idea', 'idea', 'left');
+    expect(dragMark()).toBe('refused');
+    movePointer(pointerOver(root, 'doing', 'right'));
+
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['doing:after']);
+
+    // And in the gap, where that line is drawn.
+    movePointer(IN_GAP);
+    expect(dragMark()).toBe('active');
+
+    // Back over itself, it is refused again.
+    movePointer(pointerOver(root, 'idea', 'left'));
+    expect(dragMark()).toBe('refused');
+    expect(dropLines(root)).toEqual([]);
+  });
+
+  it('takes a release in the gap, where the line is drawn', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'doing', 'right');
+    expect(dropLines(root)).toEqual(['doing:after']);
+
+    // Off Doing and into the gap, where the line is drawn.
+    movePointer(IN_GAP);
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['doing:after']);
+
+    await releasePointer(IN_GAP);
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+    expect(dropLines(root)).toEqual([]);
+  });
+
+  it('forgets the line once the pointer is clearly away from the row', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'doing', 'right');
+    movePointer(AWAY_FROM_ROW);
+
+    expect(dropLines(root)).toEqual([]);
+    expect(dragMark()).toBe('refused');
+    // Still being dragged: only a release or a cancel ends that.
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(true);
+
+    // Back within reach, there is somewhere to land at once, with no
+    // column crossed on the way: the gap after Done is a place of its own.
+    movePointer(gapAfter(root, 'done'));
+    expect(dropLines(root)).toEqual(['done:after']);
+    expect(dragMark()).toBe('active');
+    await releasePointer(gapAfter(root, 'done'));
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('lands a column in a gap it reaches without crossing a column', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // Straight from the press into the gap after Idea: one move.
+    pressColumn(root, 'done');
+    movePointer(gapAfter(root, 'idea'));
+    expect(dropLines(root)).toEqual(['idea:after']);
+    expect(dragMark()).toBe('active');
+
+    await releasePointer(gapAfter(root, 'idea'));
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 1]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done', 'doing']);
+  });
+
+  it('does not carry a line from one gap to another', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // Done held after "No ‹group›", then moved to the gap after Idea in
+    // one move, over no column on the way.
+    dragColumnOver(root, 'done', NO_TAG_COLUMN_KEY, 'right');
+    expect(dropLines(root)).toEqual([`${NO_TAG_COLUMN_KEY}:after`]);
+    movePointer(gapAfter(root, 'idea'));
+
+    expect(dropLines(root)).toEqual(['idea:after']);
+  });
+
+  it('takes the line up again once the pointer is back level with a column', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'doing', 'right');
+    movePointer(AWAY_FROM_ROW);
+    movePointer(pointerOver(root, 'done', 'right'));
+
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['done:after']);
+  });
+
+  // A header is at the row's top edge, so a pointer dragging a column
+  // sideways drifts above the row. Only how far across it is counts.
+
+  it.each([
+    ['just above', -20],
+    ['as far above as the drag reaches', -DRAG_REACH],
+    ['just below', 320],
+    ['as far below as the drag reaches', 299 + DRAG_REACH],
+  ])('keeps the line for a pointer that drifts %s the row, and lands there', async (_drift, y) => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'doing', 'right');
+    movePointer(pointerLevelWith(root, 'done', 'right', y));
+
+    expect(dropLines(root)).toEqual(['done:after']);
+    expect(dragMark()).toBe('active');
+
+    // The other half of the column is still the other side.
+    movePointer(pointerLevelWith(root, 'done', 'left', y));
+    expect(dropLines(root)).toEqual(['done:before']);
+
+    await releasePointer(pointerLevelWith(root, 'done', 'right', y));
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('names a column from above the row without the pointer having been in it', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // Straight from the press to a point above Done: one move.
+    pressColumn(root, 'idea');
+    movePointer(pointerLevelWith(root, 'done', 'right', -30));
+
+    expect(dropLines(root)).toEqual(['done:after']);
+    expect(dragMark()).toBe('active');
+  });
+
+  it('still refuses a drop that moves nothing, from above the row', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    pressColumn(root, 'idea');
+    movePointer(pointerLevelWith(root, 'idea', 'right', -30));
+
+    expect(dropLines(root)).toEqual([]);
+    expect(dragMark()).toBe('refused');
+    await releasePointer(pointerLevelWith(root, 'idea', 'right', -30));
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+  });
+
+  it('lands a column last when it is held past the last column', async () => {
+    const root = await mountBoard();
+    const row = layOutColumns(root);
+    // Done, the last column, ends at 1124. The + column and the row's end
+    // (1420) are past it.
+    const overAddColumn = { clientX: 1200, clientY: 20 };
+    const pastTheRow = { clientX: row.getBoundingClientRect().right + DRAG_REACH - 1, clientY: 20 };
+
+    // Straight from the press: no column was crossed on the way.
+    pressColumn(root, 'idea');
+    movePointer(overAddColumn);
+    expect(dropLines(root)).toEqual(['done:after']);
+    expect(dragMark()).toBe('active');
+
+    movePointer(pastTheRow);
+    expect(dropLines(root)).toEqual(['done:after']);
+    expect(dragMark()).toBe('active');
+
+    await releasePointer(pastTheRow);
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('lands a column first when it is held past the row’s left end', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+    const pastTheRow = { clientX: -DRAG_REACH, clientY: 20 };
+
+    pressColumn(root, 'done');
+    movePointer(pastTheRow);
+    // "No ‹group›" is at that end, and a column only ever lands after it.
+    expect(dropLines(root)).toEqual([`${NO_TAG_COLUMN_KEY}:after`]);
+    expect(dragMark()).toBe('active');
+
+    await releasePointer(pastTheRow);
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+  });
+
+  it('lands nowhere once the pointer is past the row’s end by more than the reach', async () => {
+    const root = await mountBoard();
+    const row = layOutColumns(root);
+    const right = row.getBoundingClientRect().right;
+
+    pressColumn(root, 'idea');
+    movePointer({ clientX: right + DRAG_REACH, clientY: 20 });
+    expect(dropLines(root)).toEqual([]);
+    expect(dragMark()).toBe('refused');
+
+    movePointer({ clientX: -1 - DRAG_REACH, clientY: 20 });
+    expect(dropLines(root)).toEqual([]);
+    expect(dragMark()).toBe('refused');
+
+    await releasePointer({ clientX: -1 - DRAG_REACH, clientY: 20 });
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+  });
+
+  it('refuses the last column held past the end, where it already is', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    pressColumn(root, 'done');
+    movePointer({ clientX: 1200, clientY: 20 });
+
+    expect(dropLines(root)).toEqual([]);
+    expect(dragMark()).toBe('refused');
+  });
+
+  // The chip that follows the pointer: the column's icon and name.
+
+  it('shows a chip with the column’s icon and name while it is dragged', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    pressColumn(root, 'doing');
+    flushSync();
+    expect(dragChip()).toBeNull();
+
+    movePointer(pointerOver(root, 'done', 'right'));
+    const chip = dragChip()!;
+    expect(chip.textContent).toBe(column(root, 'doing').querySelector('.column-name')!.textContent);
+    // A copy of the header's icon, which stays in the header.
+    const icon = columnHandle(root, 'doing').querySelector('svg')!;
+    expect(chip.querySelector('svg')).not.toBeNull();
+    expect(chip.querySelector('svg')).not.toBe(icon);
+    expect(chip.querySelector('svg')!.outerHTML).toBe(icon.outerHTML);
+    // Out of the board, so it takes no room in the row and no events.
+    expect(root.contains(chip)).toBe(false);
+    expect(chip.style.position).toBe('fixed');
+    expect(chip.style.pointerEvents).toBe('none');
+
+    // It follows the pointer, and there is only ever one.
+    const placed = chip.style.transform;
+    movePointer(pointerOver(root, 'idea', 'left'));
+    expect(dragChip()).toBe(chip);
+    expect(chip.style.transform).not.toBe(placed);
+    expect(document.querySelectorAll(`.${DRAG_CHIP_CLASS}`)).toHaveLength(1);
+
+    await dropColumnOn(root, 'idea', 'left');
+    expect(dragChip()).toBeNull();
+  });
+
+  it('keeps the chip up where a drop is refused, and takes it down on that release', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'idea', 'left');
+    expect(dragMark()).toBe('refused');
+    expect(dragChip()).not.toBeNull();
+    movePointer(AWAY_FROM_ROW);
+    expect(dragChip()).not.toBeNull();
+
+    await releasePointer(AWAY_FROM_ROW);
+    expect(dragChip()).toBeNull();
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+  });
+
+  it('takes the chip down when Escape ends the drag', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'done', 'right');
+    expect(dragChip()).not.toBeNull();
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    );
+    flushSync();
+
+    expect(dragChip()).toBeNull();
+    // The button is still down: a move does not bring it back.
+    movePointer(pointerOver(root, 'done', 'right'));
+    expect(dragChip()).toBeNull();
+  });
+
+  it('takes the chip down when the window loses focus, or the board goes', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'done', 'right');
+    expect(dragChip()).not.toBeNull();
+    window.dispatchEvent(new FocusEvent('blur'));
+    expect(dragChip()).toBeNull();
+    await releasePointer(pointerOver(root, 'done', 'right'));
+
+    dragColumnOver(root, 'idea', 'done', 'right');
+    expect(dragChip()).not.toBeNull();
+    unmount(component!);
+    component = null;
+    expect(dragChip()).toBeNull();
+    expect(dragMark()).toBeNull();
+  });
+
+  // A release is resolved where it happens, not where the pointer last
+  // moved: the two need not be the same point.
+
+  it('writes nothing for a release clearly away from the row, with a line showing until then', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'done', 'right');
+    expect(dropLines(root)).toEqual(['done:after']);
+    await releasePointer(AWAY_FROM_ROW);
+
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+    expect(dropLines(root)).toEqual([]);
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(false);
+  });
+
+  it('lands the column where it is released, over another column than the last move', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'doing', 'right');
+    await dropColumnOn(root, 'done', 'right');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  it('writes nothing when Escape ends the drag', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'idea', 'done', 'right');
+    expect(dropLines(root)).toEqual(['done:after']);
+
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.body.dispatchEvent(escape);
+    flushSync();
+
+    // The drag took the key, and is over with the button still down.
+    expect(escape.defaultPrevented).toBe(true);
+    expect(dragMark()).toBeNull();
+    expect(dropLines(root)).toEqual([]);
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(false);
+
+    // Neither a move nor the release after it brings it back.
+    movePointer(pointerOver(root, 'done', 'right'));
+    expect(dropLines(root)).toEqual([]);
+    await dropColumnOn(root, 'done', 'right');
+
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+  });
+
+  it('marks the first column in the row, whose drop line sits on its own edge', async () => {
+    const firstInRow = (root: ParentNode) =>
+      [...root.querySelectorAll<HTMLElement>('.board-column.first-in-row')].map(
+        (el) => el.dataset.boardColumn
+      );
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // "No ‹group›" is first while it shows, and never takes a line before it.
+    expect(firstInRow(root)).toEqual([NO_TAG_COLUMN_KEY]);
+
+    // Hidden, it leaves a tag column first, at the row's edge: the line
+    // before that column has no gap to sit in.
+    menuItem(await openColumnMenu(root, NO_TAG_COLUMN_KEY), 'Hide column').click();
+    await settle();
+    expect(columnKeys(root)).toEqual(['idea', 'doing', 'done']);
+    expect(firstInRow(root)).toEqual(['idea']);
+
+    dragColumnOver(root, 'done', 'idea', 'left');
+    expect(dropLines(root)).toEqual(['idea:before']);
+    expect(firstInRow(root)).toEqual(['idea']);
+    await releasePointer(AWAY_FROM_ROW);
+
+    // A line before any other column keeps to the gap.
+    dragColumnOver(root, 'idea', 'done', 'left');
+    expect(dropLines(root)).toEqual(['done:before']);
+    expect(firstInRow(root)).toEqual(['idea']);
+    await releasePointer(AWAY_FROM_ROW);
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+
+    // The mark follows the order: Done dropped first becomes the first.
+    await dragColumn(root, 'done', 'idea', 'left');
+    expect(columnKeys(root)).toEqual(['done', 'idea', 'doing']);
+    expect(firstInRow(root)).toEqual(['done']);
+  });
+
+  it('moves a column, not a card, after a card drag that never ended', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // The card's dragend never comes (its card left the page, say).
+    card(root, 'p2').dispatchEvent(dragEvent('dragstart', {}));
+    column(root, 'doing').dispatchEvent(dragEvent('dragover', { [PROJECT_DRAG_TYPE]: 'p2' }));
+    flushSync();
+    expect(column(root, 'doing').classList.contains('drop-target')).toBe(true);
+
+    dragColumnOver(root, 'idea', 'doing', 'right');
+
+    expect(column(root, 'doing').classList.contains('drop-target')).toBe(false);
+    expect(card(root, 'p2').classList.contains('dragging')).toBe(false);
+    expect(dropLines(root)).toEqual(['doing:after']);
+
+    await dropColumnOn(root, 'doing', 'right');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+  });
+
+  it('ignores text and files dragged in after a card drag that never ended', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    // A card picked up, and never dropped or ended.
+    card(root, 'p2').dispatchEvent(dragEvent('dragstart', {}));
+
+    const foreign: Record<string, string>[] = [{ 'text/plain': 'p2' }, { Files: '' }];
+    for (const data of foreign) {
+      const over = dragEvent('dragover', data);
+      column(root, 'doing').dispatchEvent(over);
+      const drop = dragEvent('drop', data);
+      column(root, 'doing').dispatchEvent(drop);
+
+      expect(over.defaultPrevented).toBe(false);
+      expect(drop.defaultPrevented).toBe(false);
+    }
+    await settle();
+
+    expect(column(root, 'doing').classList.contains('drop-target')).toBe(false);
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+  });
+
+  it('takes no card dropped in the gap between columns, and no column from it', async () => {
+    const root = await mountBoard();
+    const row = layOutColumns(root);
+
+    card(root, 'p2').dispatchEvent(dragEvent('dragstart', {}));
+    const over = dragEvent('dragover', { [PROJECT_DRAG_TYPE]: 'p2' }, IN_GAP);
+    row.dispatchEvent(over);
+    row.dispatchEvent(dragEvent('drop', { [PROJECT_DRAG_TYPE]: 'p2' }, IN_GAP));
+    await settle();
+
+    expect(over.defaultPrevented).toBe(false);
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+  });
+
+  it('drags a collapsed column by its strip, and does not expand it for the release', async () => {
+    boardViewPrefs.columns = { status: { collapsed: ['done'], hidden: [] } };
+    const root = await mountBoard();
+    layOutColumns(root);
+    const strip = columnHandle(root, 'done');
+    expect(strip.classList.contains('collapsed-strip')).toBe(true);
+
+    dragColumnOver(root, 'done', 'idea', 'left');
+    expect(dropLines(root)).toEqual(['idea:before']);
+    // The release, and the click an engine sends straight after it.
+    pointerEvent('pointerup', document.body, pointerOver(root, 'idea', 'left'));
+    strip.click();
+    await settle();
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+    // Still collapsed where it landed: the click was the drag's, not a
+    // request to expand.
+    expect(columnHandle(root, 'done').classList.contains('collapsed-strip')).toBe(true);
+    expect(setStoreValue).not.toHaveBeenCalled();
+
+    // The next click is its own.
+    columnHandle(root, 'done').click();
+    await settle();
+    expect(columnHandle(root, 'done').classList.contains('collapsed-strip')).toBe(false);
+  });
+
+  it.each([
+    ['never moves', 0],
+    ['moves less than a drag takes', 2],
+  ])('still expands a collapsed column on a press that %s', async (_case, travel) => {
+    boardViewPrefs.columns = { status: { collapsed: ['done'], hidden: [] } };
+    const root = await mountBoard();
+    layOutColumns(root);
+    const strip = columnHandle(root, 'done');
+    const pressed = pressPoint(root, 'done');
+    const released = { ...pressed, clientX: pressed.clientX + travel };
+
+    pressColumn(root, 'done');
+    if (travel > 0) movePointer(released);
+    expect(dragMark()).toBeNull();
+    expect(column(root, 'done').classList.contains('dragging')).toBe(false);
+    pointerEvent('pointerup', document.body, released);
+    strip.click();
+    await settle();
+
+    expect(columnHandle(root, 'done').classList.contains('collapsed-strip')).toBe(false);
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+  });
+
+  it('does not drag by the ⋯ menu, which is not part of the handle', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+    const trigger = columnMenuTrigger(root, 'idea');
+    expect(columnHandle(root, 'idea').contains(trigger)).toBe(false);
+
+    pointerEvent('pointerdown', trigger, pressPoint(root, 'idea'));
+    movePointer(pointerOver(root, 'done', 'right'));
+
+    expect(dragMark()).toBeNull();
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(false);
+    await dropColumnOn(root, 'done', 'right');
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+  });
+
+  it('never drags "No ‹group›", by its header or its strip', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+    expect(columnHandle(root, 'idea').classList.contains('draggable')).toBe(true);
+    expect(columnHandle(root, NO_TAG_COLUMN_KEY).classList.contains('draggable')).toBe(false);
+
+    dragColumnOver(root, NO_TAG_COLUMN_KEY, 'done', 'right');
+    expect(dragMark()).toBeNull();
+    expect(dropLines(root)).toEqual([]);
+    expect(column(root, NO_TAG_COLUMN_KEY).classList.contains('dragging')).toBe(false);
+    await dropColumnOn(root, 'done', 'right');
+
+    menuItem(await openColumnMenu(root, NO_TAG_COLUMN_KEY), 'Collapse').click();
+    await settle();
+    const strip = columnHandle(root, NO_TAG_COLUMN_KEY);
+    expect(strip.classList.contains('collapsed-strip')).toBe(true);
+    expect(strip.classList.contains('draggable')).toBe(false);
+
+    dragColumnOver(root, NO_TAG_COLUMN_KEY, 'done', 'right');
+    expect(dragMark()).toBeNull();
+    expect(column(root, NO_TAG_COLUMN_KEY).classList.contains('dragging')).toBe(false);
+    await dropColumnOn(root, 'done', 'right');
+
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+  });
+
+  it('turns the header’s drag off while its name is being edited', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    menuItem(await openColumnMenu(root, 'doing'), 'Rename').click();
+    await settle();
+    const input = column(root, 'doing').querySelector<HTMLInputElement>('.column-name-input')!;
+    expect(document.activeElement).toBe(input);
+    expect(columnHandle(root, 'doing').contains(input)).toBe(true);
+    expect(columnHandle(root, 'doing').classList.contains('draggable')).toBe(false);
+
+    dragColumnOver(root, 'doing', 'idea', 'left');
+    expect(dragMark()).toBeNull();
+    expect(dropLines(root)).toEqual([]);
+    expect(column(root, 'doing').classList.contains('dragging')).toBe(false);
+    await dropColumnOn(root, 'idea', 'left');
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+
+    // The pointer can drag a selection of the field's text about.
+    const start = dragEvent('dragstart', { 'text/plain': 'Doing' });
+    input.dispatchEvent(start);
+    expect(start.defaultPrevented).toBe(false);
+
+    input.blur();
+    await settle();
+    expect(columnHandle(root, 'doing').classList.contains('draggable')).toBe(true);
+    await dragColumn(root, 'doing', 'idea', 'left');
+    expect(commandsMock.moveTag.mock.calls).toEqual([['doing', 'status', 0]]);
+  });
+
+  // After a card's drag, which is a native one, WebKit sees no release and
+  // takes the mouse button to be down. It sends the next press as a move
+  // that names the primary button, with a mousedown and no pointerdown. The
+  // first column drag after a card drag did nothing.
+
+  it('drags a column whose press the engine sent as a move, after a native drag', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    const handle = columnHandle(root, 'done');
+    pointerEvent('pointermove', handle, pressPoint(root, 'done'), { button: 0 });
+    handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    movePointer(pointerOver(root, 'idea', 'left'));
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['idea:before']);
+
+    // The click that the release sends comes in the same task, and goes to
+    // what the press and the release share: the row, or further out. It
+    // used to reach it. It is swallowed.
+    pointerEvent('pointerup', document.body, pointerOver(root, 'idea', 'left'));
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    root.querySelector('.board-columns')!.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    await settle();
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+  });
+
+  // WebKit sends that same move, with no mousedown, as the first move after
+  // another button is clicked while the primary one is held. It is not a
+  // press: a press made elsewhere, carried over a column's handle and
+  // right-clicked there, dragged the column.
+
+  it('does not drag a column from a move that only looks like a press', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    pointerEvent('pointermove', columnHandle(root, 'done'), pressPoint(root, 'done'), {
+      button: 0,
+    });
+    movePointer(pointerOver(root, 'idea', 'left'));
+    expect(dragMark()).toBeNull();
+    expect(dropLines(root)).toEqual([]);
+    await releasePointer(pointerOver(root, 'idea', 'left'));
+
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+  });
+
+  // A right click in the middle of a column drag is not the end of it.
+  // WebKit sends the click one of two ways. Where the context menu is
+  // prevented, and for a middle click, it is two moves that name the
+  // button, and the next move then looks like a press of the primary one.
+  // That move cancelled the drag. With the context menu left alone, the
+  // right button's release is a pointerup with the primary button still
+  // down. That dropped the column where it stood. A drag now prevents the
+  // menu, and takes only the primary button's release for its drop.
+
+  it.each([
+    ['as moves, the next one shaped like a press', 'moves'],
+    ['with its release a pointerup', 'release'],
+  ] as const)('keeps a column drag running through a right click sent %s', async (_name, sent) => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'done', 'doing', 'left');
+    expect(dropLines(root)).toEqual(['doing:before']);
+    const at = pointerOver(root, 'doing', 'left');
+    pointerEvent('pointermove', document.body, at, { button: 2, buttons: 3 });
+    document.body.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 2, buttons: 3 })
+    );
+    pointerEvent(sent === 'moves' ? 'pointermove' : 'pointerup', document.body, at, {
+      button: 2,
+      buttons: 1,
+    });
+    flushSync();
+    expect(dragMark()).toBe('active');
+    expect(dragChip()).not.toBeNull();
+    expect(dropLines(root)).toEqual(['doing:before']);
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+
+    // The first move after it: the one that names the primary button.
+    pointerEvent('pointermove', document.body, pointerOver(root, 'idea', 'left'), {
+      button: sent === 'moves' ? 0 : -1,
+    });
+    flushSync();
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['idea:before']);
+    await dropColumnOn(root, 'idea', 'left');
+
+    expect(dragChip()).toBeNull();
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+  });
+
+  // The press on a handle has no default action, so the engine starts no
+  // selection to extend as the pointer moves. WebKit put that selection,
+  // and focus with it, into a field the pointer passed: the Search field
+  // above the board.
+
+  it('cancels the default of a press on a column’s handle, and takes focus off a field', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+    const search = document.createElement('input');
+    document.body.append(search);
+    search.focus();
+    const mousedown = (target: Element) => {
+      const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    try {
+      pressColumn(root, 'done');
+      const name = column(root, 'done').querySelector('.column-name')!;
+      expect(mousedown(name).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(document.body);
+
+      // Focus is where the press left it through the drag and after the drop.
+      movePointer(pointerOver(root, 'idea', 'left'));
+      await dropColumnOn(root, 'idea', 'left');
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+      expect(document.activeElement).toBe(document.body);
+
+      // "No ‹group›" does not drag, so a press on its header is an
+      // ordinary one. So is one on a column's menu trigger, beside the
+      // handle, and on a card.
+      search.focus();
+      pressColumn(root, NO_TAG_COLUMN_KEY);
+      expect(mousedown(columnHandle(root, NO_TAG_COLUMN_KEY)).defaultPrevented).toBe(false);
+      const trigger = column(root, 'idea').querySelector('.board-column-menu-trigger')!;
+      expect(mousedown(trigger).defaultPrevented).toBe(false);
+      expect(mousedown(card(root, 'p1')).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(search);
+    } finally {
+      search.remove();
+    }
+  });
+
+  it('leaves a press in a column’s name field alone while the name is edited', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+    menuItem(await openColumnMenu(root, 'doing'), 'Rename').click();
+    await settle();
+    const input = column(root, 'doing').querySelector<HTMLInputElement>('.column-name-input')!;
+
+    // The field is inside the handle, which is off: the press places the
+    // caret and can select the name's text.
+    pointerEvent('pointerdown', input, pressPoint(root, 'doing'));
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+    input.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('refuses a native drag that starts in the handle, which would take the pointer', async () => {
+    const root = await mountBoard();
+
+    const start = dragEvent('dragstart', { 'text/plain': 'Doing' });
+    column(root, 'doing').querySelector('.column-name')!.dispatchEvent(start);
+    flushSync();
+
+    expect(start.defaultPrevented).toBe(true);
+    expect(column(root, 'doing').classList.contains('dragging')).toBe(false);
+
+    // A card is not in the handle, and still drags.
+    const cardStart = dragEvent('dragstart', {});
+    card(root, 'p1').dispatchEvent(cardStart);
+    expect(cardStart.defaultPrevented).toBe(false);
+  });
+
+  it('keeps a hidden column’s place among the columns a drag leaves alone', async () => {
+    boardViewPrefs.columns = { status: { collapsed: [], hidden: ['doing'] } };
+    const root = await mountBoard();
+    layOutColumns(root);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'done']);
+
+    // Done is already after Idea among those showing, with Doing hidden
+    // between them: nothing to move.
+    dragColumnOver(root, 'done', 'idea', 'right');
+    expect(dropLines(root)).toEqual([]);
+    expect(dragMark()).toBe('refused');
+    await dropColumnOn(root, 'idea', 'right');
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+
+    await dragColumn(root, 'idea', 'done', 'right');
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea']);
+  });
+
+  it('resolves a drop against the order the moves in flight show', async () => {
+    const finishes = holdMoves();
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    await moveColumn(root, 'idea', 'Move right');
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+
+    // Before Idea as shown is second. In the stored order Idea is still
+    // first, and the same drop would put Done first.
+    dragColumnOver(root, 'done', 'idea', 'left');
+    expect(dropLines(root)).toEqual(['idea:before']);
+    await dropColumnOn(root, 'idea', 'left');
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+
+    finishes[0]();
+    await settle();
+    expect(commandsMock.moveTag.mock.calls).toEqual([
+      ['idea', 'status', 1],
+      ['done', 'status', 1],
+    ]);
+
+    finishes[1]();
+    await settle();
+    expect(scopeIds(backend.state, 'status')).toEqual(['doing', 'done', 'idea']);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+  });
+
+  /**
+   * Lay out an 800px row of 272px columns 12px apart, which scrolls: Doing,
+   * the third, spans 568 to 840, and Done starts at 852, past the row's
+   * edge. Holds the frames the drag's scroll loop asks for until `runFrame`.
+   * The caller unstubs the globals.
+   */
+  function layOutScrollingRow(root: ParentNode) {
+    const row = root.querySelector<HTMLElement>('.board-columns')!;
+    let scrollLeft = 0;
+    Object.defineProperty(row, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => (scrollLeft = value),
+    });
+    const rect = (left: number, width: number) =>
+      ({ left, right: left + width, top: 0, bottom: 300, width, height: 300 }) as DOMRect;
+    row.getBoundingClientRect = () => rect(0, 800);
+    for (const child of row.children) {
+      child.getBoundingClientRect = () =>
+        rect([...row.children].indexOf(child) * 284 - scrollLeft, 272);
+    }
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.set(++frameId, callback);
+      return frameId;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => void frames.delete(id));
+    const runFrame = (time: number) => {
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(time);
+      flushSync();
+    };
+    return { scrolled: () => scrollLeft, runFrame };
+  }
+
+  it('scrolls the row while a column is held near its end, and the line follows', async () => {
+    const root = await mountBoard();
+    const { scrolled, runFrame } = layOutScrollingRow(root);
+    try {
+      // Idea, held 10px short of the row's right edge, inside its 48px
+      // scroll zone and over Doing's right half.
+      const held = { clientX: 790, clientY: 20 };
+      pressColumn(root, 'idea');
+      movePointer(held);
+      expect(dropLines(root)).toEqual(['doing:after']);
+
+      // The first frame only starts the clock.
+      runFrame(0);
+      expect(scrolled()).toBe(0);
+      // 38px into the zone is 712.5px a second: 71px in 100ms.
+      runFrame(100);
+      expect(scrolled()).toBe(71);
+      // The pointer has not moved. Done, now from 781, has come under it.
+      expect(dropLines(root)).toEqual(['done:before']);
+      expect(dragMark()).toBe('active');
+
+      await releasePointer(held);
+      expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'idea', 'done']);
+
+      // The release ended the scrolling with the drag.
+      runFrame(200);
+      expect(scrolled()).toBe(71);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // A wheel or trackpad scroll moves the columns under a held pointer that
+  // sends no move of its own. The line and the cursor have to follow, or
+  // they describe one place while the release lands in another.
+
+  it('follows the row as the wheel scrolls it under a held column', async () => {
+    const root = await mountBoard();
+    layOutScrollingRow(root);
+    try {
+      const row = root.querySelector<HTMLElement>('.board-columns')!;
+      const wheelTo = (scrollLeft: number) => {
+        row.scrollLeft = scrollLeft;
+        // As the engines send it: from the row, and it does not bubble.
+        row.dispatchEvent(new Event('scroll'));
+        flushSync();
+      };
+      // Idea, held over Doing's left half, which is where Idea already is.
+      // Clear of both scroll zones, so the drag scrolls nothing itself.
+      const held = { clientX: 620, clientY: 20 };
+      pressColumn(root, 'idea');
+      movePointer(held);
+      expect(dropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+
+      // Doing, now from 468 to 740, has its right half under the pointer.
+      wheelTo(100);
+      expect(dropLines(root)).toEqual(['doing:after']);
+      expect(dragMark()).toBe('active');
+
+      // Done, now from 452 to 724, has its right half under the pointer.
+      wheelTo(400);
+      expect(dropLines(root)).toEqual(['done:after']);
+
+      // And back to where the drag began.
+      wheelTo(0);
+      expect(dropLines(root)).toEqual([]);
+      expect(dragMark()).toBe('refused');
+
+      wheelTo(400);
+      await releasePointer(held);
+      expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 2]]);
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'doing', 'done', 'idea']);
+
+      // The drag is over: a scroll resolves nothing.
+      wheelTo(100);
+      expect(dropLines(root)).toEqual([]);
+      expect(dragMark()).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // The row scrolls for a pointer exactly where the board still lands the
+  // column: never at full speed under a cursor that says not-allowed for
+  // being away from the row.
+
+  it('scrolls the row for a pointer just past its end or above it, with a line to land on', async () => {
+    const root = await mountBoard();
+    const { scrolled, runFrame } = layOutScrollingRow(root);
+    try {
+      // Past the row's right edge (800) and above its top, both within reach.
+      pressColumn(root, 'idea');
+      movePointer({ clientX: 799 + DRAG_REACH, clientY: -DRAG_REACH });
+      // The row's last pixel is in Doing's right half.
+      expect(dropLines(root)).toEqual(['doing:after']);
+      expect(dragMark()).toBe('active');
+
+      runFrame(0);
+      // Full speed past the edge: 90px in 100ms.
+      runFrame(100);
+      expect(scrolled()).toBe(90);
+      // Done, now from 762, is what shows at the row's end.
+      expect(dropLines(root)).toEqual(['done:before']);
+      expect(dragMark()).toBe('active');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    ['past its end', { clientX: 800 + DRAG_REACH, clientY: 20 }],
+    ['above it', { clientX: 790, clientY: -1 - DRAG_REACH }],
+    ['below it', { clientX: 790, clientY: 300 + DRAG_REACH }],
+  ])(
+    'does not scroll the row for a pointer clearly %s, where a drop is refused',
+    async (_where, away) => {
+      const root = await mountBoard();
+      const { scrolled, runFrame } = layOutScrollingRow(root);
+      try {
+        pressColumn(root, 'idea');
+        movePointer(away);
+        expect(dropLines(root)).toEqual([]);
+        expect(dragMark()).toBe('refused');
+
+        runFrame(0);
+        runFrame(100);
+        runFrame(200);
+        expect(scrolled()).toBe(0);
+        expect(dragMark()).toBe('refused');
+
+        // Back within reach the row scrolls, and the cursor says so.
+        movePointer({ clientX: 790, clientY: 20 });
+        expect(dragMark()).toBe('active');
+        runFrame(300);
+        expect(scrolled()).toBeGreaterThan(0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    }
+  );
+
+  describe('where cards do not drag', () => {
+    let matchMedia: typeof window.matchMedia;
+
+    beforeEach(() => {
+      matchMedia = window.matchMedia;
+    });
+
+    afterEach(() => {
+      window.matchMedia = matchMedia;
+      viewport.hasCoarsePointer = false;
+    });
+
+    it('does not drag columns either, on a touch screen', async () => {
+      // The query too: a menu mounting re-reads the viewport from it.
+      window.matchMedia = ((query: string) => ({
+        ...matchMedia(query),
+        matches: query === '(pointer: coarse)',
+      })) as typeof window.matchMedia;
+      viewport.hasCoarsePointer = true;
+      const root = await mountBoard();
+      layOutColumns(root);
+      expect(columnHandle(root, 'idea').classList.contains('draggable')).toBe(false);
+
+      // Even with a mouse plugged in.
+      dragColumnOver(root, 'idea', 'done', 'right');
+      expect(dragMark()).toBeNull();
+      expect(dropLines(root)).toEqual([]);
+      expect(column(root, 'idea').classList.contains('dragging')).toBe(false);
+      await dropColumnOn(root, 'done', 'right');
+
+      expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    });
+  });
+
+  it('does not drag a column under a finger, where the pointer is otherwise fine', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    pressColumn(root, 'idea', { pointerType: 'touch' });
+    pointerEvent('pointermove', document.body, pointerOver(root, 'done', 'right'), {
+      pointerType: 'touch',
+    });
+    flushSync();
+
+    expect(dragMark()).toBeNull();
+    expect(column(root, 'idea').classList.contains('dragging')).toBe(false);
+    pointerEvent('pointerup', document.body, pointerOver(root, 'done', 'right'), {
+      pointerType: 'touch',
+    });
+    await settle();
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
   });
 });
 

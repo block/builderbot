@@ -2,11 +2,12 @@
   ProjectTagMenuItems.svelte — a project's tags in its context menu (sidebar
   rows and project grid cards).
 
-  One radio submenu per group, the icon group first and then group order,
-  each trigger showing the project's current value; the icon group's "None"
-  reads "Default", previewing the computed PR status it falls back to. Then a
-  "Tags" submenu: a checkbox per ungrouped tag, "New tag…" (a small dialog
-  that creates one and assigns it) and "Manage tags…" (Settings › Tags).
+  One radio submenu per group, in the order the groups have in Settings ›
+  Tags, each trigger showing the project's current value; the icon group's
+  "None" reads "Default", previewing the computed PR status it falls back to.
+  Then a "Tags" submenu: a checkbox per ungrouped tag, "New tag…" (a small
+  dialog that creates one and assigns it) and "Manage tags…" (Settings ›
+  Tags).
 
   A board card's menu leads with "Move to" (BoardMoveToMenu) before these,
   and passes the board's group as `omitGroupId` so the same choice isn't
@@ -30,7 +31,7 @@
   import TagIcon from '../tags/TagIcon.svelte';
   import { newTagDialog } from '../tags/newTagRequest.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
-  import { NO_TAG_MENU_VALUE, iconGroupFirst } from '../tags/tagState';
+  import { NO_TAG_MENU_VALUE } from '../tags/tagState';
   import ComputedProjectStatusIcon from './ComputedProjectStatusIcon.svelte';
   import { computedStatusLabel, resolveComputedProjectStatus } from './projectStatusDisplay';
 
@@ -42,11 +43,7 @@
 
   let { project, omitGroupId = null }: Props = $props();
 
-  let groups = $derived(
-    iconGroupFirst(tagsStore.groups, tagsStore.iconGroup).filter(
-      (group) => group.id !== omitGroupId
-    )
-  );
+  let groups = $derived(tagsStore.groups.filter((group) => group.id !== omitGroupId));
   let ungrouped = $derived(tagsStore.tagsByGroup.get(null) ?? []);
   let tagIds = $derived(tagsStore.tagIdsFor(project.id));
   let assignedUngrouped = $derived(ungrouped.filter((tag) => tagIds.has(tag.id)).length);

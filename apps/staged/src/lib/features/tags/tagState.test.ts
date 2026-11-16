@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { Tag, TagGroup, TagState } from '../../types';
 import {
   applyIntents,
+  byPosition,
   chipTags,
   currentIntent,
   effectiveProjectTagIds,
   groupTag,
-  iconGroupFirst,
   indexAssignments,
   indexTagCatalog,
   intentSlot,
@@ -98,6 +98,17 @@ describe('indexTagCatalog', () => {
     expect(catalog.tagsById.get('p1')?.groupId).toBe('priority');
   });
 
+  it('keeps the icon group at its stored position, wherever that is', () => {
+    // Every surface that lists groups reads `groups`, so the icon group gets
+    // no special place: it is found, not moved.
+    const reordered = indexTagCatalog({
+      ...state(),
+      groups: [group('status', 1, { isIconGroup: true }), group('area', 2), group('priority', 0)],
+    });
+    expect(reordered.groups.map((g) => g.id)).toEqual(['priority', 'status', 'area']);
+    expect(reordered.iconGroup?.id).toBe('status');
+  });
+
   it('lists the groups whose boards are pinned to the sidebar, in group order', () => {
     expect(catalog.sidebarGroups).toEqual([]);
     const base = state();
@@ -115,6 +126,24 @@ describe('indexTagCatalog', () => {
       assignments: [],
     });
     expect(tied.tagsByGroup.get(null)!.map((t) => t.id)).toEqual(['a', 'b']);
+  });
+
+  it('breaks position and creation ties by id, as the backend does', () => {
+    const tied = indexTagCatalog({
+      groups: [group('g-c', 0), group('g-a', 0), group('g-b', 0)],
+      tags: [tag('t-c', null, 0), tag('t-a', null, 0), tag('t-b', null, 0)],
+      assignments: [],
+    });
+    expect(tied.groups.map((g) => g.id)).toEqual(['g-a', 'g-b', 'g-c']);
+    expect(tied.tagsByGroup.get(null)!.map((t) => t.id)).toEqual(['t-a', 't-b', 't-c']);
+  });
+
+  it('compares ids by code unit, as SQLite compares text, not by locale', () => {
+    // A locale-aware compare puts "a" before "B"; SQLite's BINARY collation,
+    // and so the backend's `ORDER BY`, puts every capital first.
+    expect(byPosition(tag('B', null, 0), tag('a', null, 0))).toBeLessThan(0);
+    expect(byPosition(tag('a', null, 0), tag('B', null, 0))).toBeGreaterThan(0);
+    expect(byPosition(tag('a', null, 0), tag('a', null, 0))).toBe(0);
   });
 
   it('gives every group an entry and reports no icon group when none is flagged', () => {
@@ -367,26 +396,5 @@ describe('numberedName', () => {
     const name = numberedName(base, new Set([base]));
     expect(name).toBe(`${'x'.repeat(MAX_TAG_NAME_CHARS - 2)} 2`);
     expect(name).toHaveLength(MAX_TAG_NAME_CHARS);
-  });
-});
-
-describe('iconGroupFirst', () => {
-  const groups: TagGroup[] = ['a', 'b', 'c'].map((id, position) => ({
-    id,
-    name: id.toUpperCase(),
-    position,
-    isIconGroup: id === 'b',
-    showInSidebar: false,
-    createdAt: 0,
-    updatedAt: 0,
-  }));
-
-  it('puts the icon group first and keeps the rest in position order', () => {
-    expect(iconGroupFirst(groups, groups[1]).map((g) => g.id)).toEqual(['b', 'a', 'c']);
-  });
-
-  it('keeps position order when no group drives the icon', () => {
-    expect(iconGroupFirst(groups, null).map((g) => g.id)).toEqual(['a', 'b', 'c']);
-    expect(iconGroupFirst([], null)).toEqual([]);
   });
 });

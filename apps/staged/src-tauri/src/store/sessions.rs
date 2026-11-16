@@ -46,7 +46,72 @@ pub struct ChildSessionInfo {
     pub branch_id: String,
 }
 
+/// What a session's control credential is recorded as, in
+/// `sessions.started_by` and `projects.created_by`: this prefix and the
+/// session's id (`Actor::started_by` in `control_server`).
+const SESSION_ACTOR_PREFIX: &str = "session:";
+
+/// The session id a recorded actor names, when the actor is a session.
+/// `None` for a connected app (`app:<grant-id>`) and for anything else.
+pub fn session_actor_id(actor: &str) -> Option<&str> {
+    actor
+        .strip_prefix(SESSION_ACTOR_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
 impl Store {
+    /// The session at the top of the chain of sessions that started
+    /// `session_id`. Each step goes from a session to the one that started
+    /// it, which a row records in one of two places:
+    ///
+    /// - `started_by`, when it names a session (`session:<id>`): a start made
+    ///   through `stagedctl`.
+    /// - `parent_session_id`, when `started_by` names no session: a start
+    ///   made through an MCP tool, which is how a project session starts a
+    ///   repo session (`start_repo_session`) and a note session its diagram
+    ///   child.
+    ///
+    /// The top is the first session with neither: one the user started in
+    /// the app, or one a connected app started (`app:<grant-id>`) with no
+    /// parent session.
+    ///
+    /// A deleted session splits its chain, and the two links split it
+    /// differently. `started_by` is plain text and outlives the row it
+    /// names, so the walk ends at the missing id and the sessions that one
+    /// started still share it as their top. `parent_session_id` is a foreign
+    /// key that goes NULL when the parent is deleted (migration 0036), so
+    /// each child of a deleted parent becomes a top of its own.
+    ///
+    /// The walk is bounded: `None` when the top is more than `max_depth`
+    /// links up, which also covers a chain that loops. Each link is one
+    /// single-row read by primary key, all under one hold of the connection.
+    pub fn session_lineage_root(
+        &self,
+        session_id: &str,
+        max_depth: usize,
+    ) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut starter =
+            conn.prepare("SELECT started_by, parent_session_id FROM sessions WHERE id = ?1")?;
+        let mut current = session_id.to_string();
+        for _ in 0..=max_depth {
+            let links: Option<(Option<String>, Option<String>)> = starter
+                .query_row(params![current], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()?;
+            let (started_by, parent_session_id) = links.unwrap_or_default();
+            let started_from = started_by
+                .as_deref()
+                .and_then(session_actor_id)
+                .map(str::to_string)
+                .or(parent_session_id.filter(|id| !id.is_empty()));
+            match started_from {
+                Some(parent) => current = parent,
+                None => return Ok(Some(current)),
+            }
+        }
+        Ok(None)
+    }
+
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let provider_metadata_json = session

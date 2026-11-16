@@ -633,6 +633,61 @@ pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest,
     Ok(item.into())
 }
 
+/// [`get_pr_for_repo`] for a caller that must tell a pull request that does
+/// not exist from a lookup that failed. `Ok(None)` only when GitHub answered
+/// that the repository has no pull request with that number. A network
+/// failure, a rate limit or an expired login is an `Err`.
+pub fn find_pr_for_repo(
+    github_repo: &str,
+    pr_number: u64,
+) -> Result<Option<PullRequest>, GitError> {
+    match get_pr_for_repo(github_repo, pr_number) {
+        Ok(pr) => Ok(Some(pr)),
+        Err(e) if is_pull_request_not_found_error(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a failed `gh pr view` is GitHub saying the repository has no pull
+/// request with that number, in `gh`'s words for it:
+/// `GraphQL: Could not resolve to a PullRequest with the number of 7.`
+fn is_pull_request_not_found_error(err: &GitError) -> bool {
+    matches!(err, GitError::CommandFailed(msg) if msg.contains("Could not resolve to a PullRequest"))
+}
+
+/// Whether `branch_name` is a branch of `github_repo` on GitHub (no local
+/// clone needed).
+///
+/// Asks for the ref itself, which matches the whole name: the branches
+/// endpoint follows a renamed branch to its new name, and would answer for
+/// a name that no longer exists.
+pub fn branch_exists_for_repo(github_repo: &str, branch_name: &str) -> Result<bool, GitError> {
+    let endpoint = format!(
+        "repos/{github_repo}/git/ref/heads/{}",
+        encode_ref_for_api_path(branch_name)
+    );
+    match run_gh_global(&["api", &endpoint]) {
+        Ok(_) => Ok(true),
+        Err(GitError::CommandFailed(msg)) if is_github_not_found_error(&msg) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// A ref name as it goes into a GitHub API path: every byte that could end
+/// or change the path is percent-encoded, and `/` is kept, since a ref's
+/// slashes are path separators there too.
+fn encode_ref_for_api_path(ref_name: &str) -> String {
+    let mut encoded = String::with_capacity(ref_name.len());
+    for byte in ref_name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 /// Where a PR's head branch is and whether the PR is still open — the facts
 /// needed to decide whether a local branch should track that head.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -728,6 +783,35 @@ pub fn get_pr_for_branch_for_repo(
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
 
     Ok(items.into_iter().next().map(Into::into))
+}
+
+/// The open PRs whose head branch is named `branch_name`, newest first.
+///
+/// `--head` filters on the head ref name alone, so PRs opened from forks of
+/// `github_repo` under the same branch name are included, and on a popular
+/// name they outnumber the branch's own. Callers that mean the branch in
+/// `github_repo` compare [`PullRequest::head_repo`]. The limit is generous
+/// for the same reason [`PrListState::Open`]'s is.
+pub fn list_open_prs_for_branch_for_repo(
+    github_repo: &str,
+    branch_name: &str,
+) -> Result<Vec<PullRequest>, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "list",
+        "-R",
+        github_repo,
+        "--head",
+        branch_name,
+        "--state=open",
+        "--limit=50",
+        "--json=number,title,body,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+    ])?;
+
+    let items: Vec<GhPrListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
 }
 
 /// A pull request whose head branch has a given name, in whatever state it
@@ -3293,6 +3377,45 @@ mod tests {
         assert!(!is_gh_unavailable_error(&GitError::InvalidPath(
             "dial tcp".to_string()
         )));
+    }
+
+    /// Only GitHub saying "no such pull request" reads as a missing pull
+    /// request. Anything else is a lookup that failed, and says nothing
+    /// about whether the pull request exists.
+    #[test]
+    fn only_githubs_own_answer_means_a_pull_request_does_not_exist() {
+        assert!(is_pull_request_not_found_error(&GitError::CommandFailed(
+            "GraphQL: Could not resolve to a PullRequest with the number of 7. (repository.pullRequest)"
+                .to_string()
+        )));
+        for failed in [
+            "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com",
+            "Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout",
+            "GraphQL: API rate limit exceeded for user ID 1.",
+            "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+            "GraphQL: Could not resolve to a Repository with the name 'acme/widgets'. (repository)",
+            GH_NOT_AUTHENTICATED,
+        ] {
+            assert!(
+                !is_pull_request_not_found_error(&GitError::CommandFailed(failed.to_string())),
+                "{failed:?} is a failed lookup, not a missing pull request"
+            );
+        }
+        assert!(!is_pull_request_not_found_error(&GitError::InvalidUtf8));
+    }
+
+    #[test]
+    fn a_ref_name_is_encoded_for_an_api_path_with_its_slashes_kept() {
+        assert_eq!(encode_ref_for_api_path("main"), "main");
+        assert_eq!(
+            encode_ref_for_api_path("release/2.x_fix-1~a"),
+            "release/2.x_fix-1~a"
+        );
+        assert_eq!(
+            encode_ref_for_api_path("a#b%c&d=e+f"),
+            "a%23b%25c%26d%3De%2Bf"
+        );
+        assert_eq!(encode_ref_for_api_path("caf\u{e9}"), "caf%C3%A9");
     }
 
     fn check_run(

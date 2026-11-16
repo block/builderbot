@@ -898,6 +898,7 @@ pub(crate) fn preferences_store(
         .map_err(|e| format!("Failed to load preferences store: {e}"))
 }
 
+mod control_project_args;
 pub(crate) mod control_scope;
 pub(crate) use control_scope::SCOPE_DENIED_PREFIX;
 
@@ -962,17 +963,37 @@ fn web_caller_rejection(cmd: &str, caller: &DispatchCaller) -> Option<&'static s
     }
 }
 
+/// The project list as a control caller may see it: the projects within its
+/// reach, in the order the store listed them. Unconfined callers get the
+/// list unchanged.
+fn confine_projects(
+    mut projects: Vec<store::Project>,
+    reach: &control_scope::Reach,
+) -> Vec<store::Project> {
+    projects.retain(|project| reach.contains(&project.id));
+    projects
+}
+
+/// The active sessions as a control caller may see them: those of the
+/// projects within its reach. A session that belongs to no project is shown
+/// to unconfined callers only.
+fn confine_active_sessions(
+    mut sessions: Vec<crate::session_commands::ActiveSessionInfo>,
+    reach: &control_scope::Reach,
+) -> Vec<crate::session_commands::ActiveSessionInfo> {
+    sessions.retain(|session| reach.contains_optional(session.project_id.as_deref()));
+    sessions
+}
+
 /// The tag catalog as a control caller may see it: the shared groups and
-/// tags whole, and the per-project `assignments` confined to the caller's
-/// project when its credential is scoped to one, so a session learns which
-/// tags exist but not which other projects carry them. Unconfined callers
-/// get the state unchanged.
-fn confine_tag_state(mut state: store::TagState, caller: &DispatchCaller) -> store::TagState {
-    if let Some(project_id) = control_scope::project_filter(caller) {
-        state
-            .assignments
-            .retain(|assignment| assignment.project_id == project_id);
-    }
+/// tags whole, and the per-project `assignments` confined to the projects
+/// within the caller's reach, so a session learns which tags exist but not
+/// which other projects carry them. Unconfined callers get the state
+/// unchanged.
+fn confine_tag_state(mut state: store::TagState, reach: &control_scope::Reach) -> store::TagState {
+    state
+        .assignments
+        .retain(|assignment| reach.contains(&assignment.project_id));
     state
 }
 
@@ -1040,8 +1061,9 @@ pub(crate) async fn dispatch(
     let action_registry: &Arc<ActionRegistry> = &app_handle.state::<Arc<ActionRegistry>>();
     let pr_scheduler: &Arc<PrPollScheduler> = &app_handle.state::<Arc<PrPollScheduler>>();
 
-    // A control caller's grant confines it to one project (and maybe to
-    // reads); refused here, before any arm, so no arm has to remember to.
+    // A control caller's grant confines it to its own project and the ones
+    // it created (and maybe to reads); refused here, before any arm, so no
+    // arm has to remember to.
     if let DispatchCaller::Control(grant) = &caller {
         control_scope::check(command, &args, grant, store_mutex)?;
     }
@@ -1145,162 +1167,56 @@ pub(crate) async fn dispatch(
         // =====================================================================
         "list_projects" => {
             let store = get_store(store_mutex)?;
-            // A project-scoped control credential sees only its own project.
-            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
-            blocking_store_json(move || {
-                let mut projects = store.list_projects()?;
-                if let Some(project_id) = only_project {
-                    projects.retain(|project| project.id == project_id);
-                }
-                Ok(projects)
+            // A project-scoped control credential sees only its own project
+            // and the ones it created.
+            let caller = caller.clone();
+            blocking_json(move || -> Result<_, String> {
+                let projects = store.list_projects().map_err(|e| e.to_string())?;
+                let reach = control_scope::reach(&caller, &store)?;
+                Ok(confine_projects(projects, &reach))
             })
             .await
         }
         "create_project" => {
             let store = get_store(store_mutex)?;
-            let name: String = arg(&args, "name")?;
-            let github_repo: Option<String> = opt_arg(&args, "githubRepo")?;
-            let location: Option<String> = opt_arg(&args, "location")?;
-            let subpath: Option<String> = opt_arg(&args, "subpath")?;
-            let branch_name: Option<String> = opt_arg(&args, "branchName")?;
-            let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
-            let default_branch: Option<String> = opt_arg(&args, "defaultBranch")?;
-            let head_repo: Option<String> = opt_arg(&args, "headRepo")?;
-
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return Err("Project name is required".to_string());
-            }
-
-            let project_location = match location.as_deref() {
-                Some("remote") => crate::store::ProjectLocation::Remote,
-                _ => crate::store::ProjectLocation::Local,
+            let request = match &caller {
+                // A control caller has no form to check what it typed, so
+                // the checks run here, ahead of any write: the creator's
+                // limit, `sq` for a remote project, then the repository.
+                // The project records the caller as its creator, which is
+                // what keeps it within the caller's reach.
+                DispatchCaller::Control(grant) => {
+                    crate::project_commands::control_create_project_request(
+                        Arc::clone(&store),
+                        crate::project_commands::ProjectCreator::for_grant(grant),
+                        control_project_args::create_project(&args)?,
+                    )
+                    .await?
+                }
+                DispatchCaller::Web => crate::project_commands::CreateProjectRequest {
+                    name: arg(&args, "name")?,
+                    github_repo: opt_arg(&args, "githubRepo")?,
+                    location: opt_arg(&args, "location")?,
+                    subpath: opt_arg(&args, "subpath")?,
+                    branch_name: opt_arg(&args, "branchName")?,
+                    pr_number: opt_arg(&args, "prNumber")?,
+                    default_branch: opt_arg(&args, "defaultBranch")?,
+                    head_repo: opt_arg(&args, "headRepo")?,
+                    // The user's own project, like one made in the desktop
+                    // window: no creator, and the form writes the pull
+                    // request note itself.
+                    created_by: None,
+                    pr_note: None,
+                },
             };
-            let inferred_branch_name = branch_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| crate::branches::infer_prefixed_branch_name(trimmed));
-
-            let mut project = crate::store::Project::named(trimmed);
-            project.location = project_location;
-            if let Some(ref repo) = github_repo {
-                project = project.with_primary_repo(repo);
-            }
-            if let Some(ref sub) = subpath {
-                project = project.with_subpath(sub.clone());
-            }
-
-            // Without a prefetched default branch this asks `gh`, so it runs on
-            // the blocking pool, and before the first write so no await falls
-            // between the writes below (see the module docs).
-            let effective_base = match github_repo.clone() {
-                Some(repo) => Some(
-                    tauri::async_runtime::spawn_blocking(move || {
-                        crate::git::resolve_default_branch(default_branch, &repo)
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?,
-                ),
-                None => None,
-            };
-
-            store.create_project(&project).map_err(|e| e.to_string())?;
-
-            if let Ok(project_dir) = crate::git::project_worktree_root_for(&project.id) {
-                let _ = std::fs::create_dir_all(&project_dir);
-            }
-
-            if let Some(repo) = project.primary_repo() {
-                store
-                    .get_or_create_action_context(repo, project.subpath.as_deref())
-                    .map_err(|e| e.to_string())?;
-            }
-
-            if let Some(ref repo) = github_repo {
-                store
-                    .record_recent_repo(repo, subpath.clone())
-                    .map_err(|e| e.to_string())?;
-            }
-
-            if let (Some(repo), Some(effective_base)) = (github_repo, effective_base) {
-                let mut project_repo = crate::store::ProjectRepo::new(
-                    &project.id,
-                    &repo,
-                    &inferred_branch_name,
-                    subpath,
-                )
-                .primary();
-                project_repo.head_repo = head_repo;
-                store
-                    .create_project_repo(&project_repo)
-                    .map_err(|e| e.to_string())?;
-
-                match project.location {
-                    crate::store::ProjectLocation::Local => {
-                        let mut branch = crate::store::Branch::new(
-                            &project.id,
-                            &inferred_branch_name,
-                            &effective_base,
-                        )
-                        .with_project_repo(&project_repo.id);
-                        if let Some(pr) = pr_number {
-                            branch = branch.with_pr(pr);
-                        }
-                        store.create_branch(&branch).map_err(|e| e.to_string())?;
-
-                        // Fire-and-forget background setup
-                        let store_bg = Arc::clone(&store);
-                        let app_handle = app_handle.clone();
-                        let branch_id = branch.id.clone();
-                        let project_id = project.id.clone();
-                        tauri::async_runtime::spawn(async move {
-                            emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
-
-                            let store_clone = Arc::clone(&store_bg);
-                            let branch_id_clone = branch_id.clone();
-                            let app_handle_clone = app_handle.clone();
-                            let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                                crate::branches::setup_worktree_sync(
-                                    &store_clone,
-                                    &branch_id_clone,
-                                    &app_handle_clone,
-                                )
-                            })
-                            .await;
-
-                            match worktree_result {
-                                Ok(Ok(path)) => {
-                                    log::info!("[web_server] worktree ready at {path}");
-                                    emit_to_all(&app_handle, "project-setup-progress", project_id);
-                                }
-                                Ok(Err(e)) => log::warn!("[web_server] worktree setup failed: {e}"),
-                                Err(e) => log::warn!("[web_server] worktree task panicked: {e}"),
-                            }
-                        });
-                    }
-                    crate::store::ProjectLocation::Remote => {
-                        let workspace_name = crate::branches::infer_workspace_name(
-                            &project.id,
-                            &inferred_branch_name,
-                        );
-                        let mut branch = crate::store::Branch::new_remote(
-                            &project.id,
-                            &inferred_branch_name,
-                            &effective_base,
-                            &workspace_name,
-                        )
-                        .with_project_repo(&project_repo.id);
-                        if let Some(pr) = pr_number {
-                            branch = branch.with_pr(pr);
-                        }
-                        store.create_branch(&branch).map_err(|e| e.to_string())?;
-                    }
-                };
-            }
-
-            Ok(serde_json::to_value(project).unwrap())
+            // The desktop command's body: the rows, then the worktree and the
+            // repo's setup actions in the background. Blocking (the store,
+            // `gh`, and the `sq` probe), so it goes to the blocking pool.
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                crate::project_commands::create_project_and_setup(app_handle, store, request)
+            })
+            .await
         }
         "list_project_repos" => {
             let store = get_store(store_mutex)?;
@@ -1332,29 +1248,47 @@ pub(crate) async fn dispatch(
         }
         "add_project_repo" => {
             let store = get_store(store_mutex)?;
-            let project_id: String = arg(&args, "projectId")?;
-            let github_repo: String = arg(&args, "githubRepo")?;
-            let branch_name: Option<String> = opt_arg(&args, "branchName")?;
-            let subpath: Option<String> = opt_arg(&args, "subpath")?;
-            let set_as_primary: Option<bool> = opt_arg(&args, "setAsPrimary")?;
-            let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
-            let default_branch: Option<String> = opt_arg(&args, "defaultBranch")?;
-            let head_repo: Option<String> = opt_arg(&args, "headRepo")?;
+            let (project_id, request) = match &caller {
+                // As for `create_project`: a control caller's repository is
+                // checked here, and its branch must be free in the project.
+                DispatchCaller::Control(_) => {
+                    let (project_id, ask) = control_project_args::add_project_repo(&args)?;
+                    let request = crate::project_commands::control_add_repo_request(
+                        Arc::clone(&store),
+                        project_id.clone(),
+                        ask,
+                    )
+                    .await?;
+                    (project_id, request)
+                }
+                DispatchCaller::Web => (
+                    arg(&args, "projectId")?,
+                    crate::project_commands::AddProjectRepoRequest {
+                        github_repo: arg(&args, "githubRepo")?,
+                        branch_name: opt_arg(&args, "branchName")?,
+                        subpath: opt_arg(&args, "subpath")?,
+                        set_as_primary: opt_arg(&args, "setAsPrimary")?,
+                        reason: None,
+                        pr_number: opt_arg(&args, "prNumber")?,
+                        default_branch: opt_arg(&args, "defaultBranch")?,
+                        head_repo: opt_arg(&args, "headRepo")?,
+                        // The form writes the pull request note itself.
+                        pr_note: None,
+                        refuse_branch_in_use: false,
+                    },
+                ),
+            };
 
-            let repo = crate::project_commands::add_project_repo_impl(
-                Arc::clone(&store),
+            // The desktop command's body: the rows, then the worktree and
+            // setup actions, or the clone into the project's workspace, in
+            // the background.
+            let repo = crate::project_commands::add_project_repo_and_setup(
+                app_handle.clone(),
+                store,
                 project_id,
-                github_repo,
-                branch_name,
-                subpath,
-                set_as_primary,
-                None,
-                pr_number,
-                default_branch,
-                head_repo,
+                request,
             )
-            .await?
-            .repo;
+            .await?;
             Ok(serde_json::to_value(repo).unwrap())
         }
         "update_project_repo_branch_name" => {
@@ -1462,7 +1396,8 @@ pub(crate) async fn dispatch(
             let caller = caller.clone();
             blocking_json(move || -> Result<_, String> {
                 let state = store.get_tag_state().map_err(|e| e.to_string())?;
-                let state = confine_tag_state(state, &caller);
+                let reach = control_scope::reach(&caller, &store)?;
+                let state = confine_tag_state(state, &reach);
                 Ok(state)
             })
             .await
@@ -3733,16 +3668,14 @@ pub(crate) async fn dispatch(
         "get_active_sessions" => {
             let store = get_store(store_mutex)?;
             let registry = Arc::clone(session_registry);
-            // A project-scoped control credential sees only its own
-            // project's sessions.
-            let only_project = control_scope::project_filter(&caller).map(str::to_owned);
-            blocking_json(move || {
-                let mut sessions =
+            // A project-scoped control credential sees only the sessions of
+            // its own project and of the ones it created.
+            let caller = caller.clone();
+            blocking_json(move || -> Result<_, String> {
+                let sessions =
                     crate::session_commands::get_active_sessions_impl(&store, &registry)?;
-                if let Some(project_id) = only_project.as_deref() {
-                    sessions.retain(|session| session.project_id.as_deref() == Some(project_id));
-                }
-                Ok::<_, String>(sessions)
+                let reach = control_scope::reach(&caller, &store)?;
+                Ok(confine_active_sessions(sessions, &reach))
             })
             .await
         }
@@ -4784,6 +4717,7 @@ mod tests {
     #[test]
     fn get_tag_state_filters_assignments_for_a_scoped_caller() {
         use super::confine_tag_state;
+        use super::control_scope::reach;
         use crate::control_server::{Access, Actor, ControlGrant, Scope};
         use crate::store::{self, Store};
 
@@ -4832,7 +4766,7 @@ mod tests {
             branch_id: None,
             access: Access::ReadWrite,
         });
-        let confined = confine_tag_state(state.clone(), &scoped);
+        let confined = confine_tag_state(state.clone(), &reach(&scoped, &store).unwrap());
         assert_eq!(confined.groups.len(), 1);
         assert!(
             confined.tags.iter().any(|tag| tag.id == q4.id),
@@ -4848,19 +4782,41 @@ mod tests {
         );
 
         let all = DispatchCaller::Control(ControlGrant::test_all_projects());
-        assert_eq!(confine_tag_state(state.clone(), &all).assignments.len(), 3);
-        assert_eq!(
-            confine_tag_state(state.clone(), &DispatchCaller::Web)
-                .assignments
-                .len(),
-            3
-        );
+        for unconfined in [all, DispatchCaller::Web] {
+            let reach = reach(&unconfined, &store).unwrap();
+            assert_eq!(
+                confine_tag_state(state.clone(), &reach).assignments.len(),
+                3
+            );
+        }
 
         let arm = dispatch_arm_body(include_str!("web_server.rs"), "get_tag_state");
         assert!(
-            arm.contains("confine_tag_state(state, &caller)"),
+            arm.contains("control_scope::reach(&caller, &store)")
+                && arm.contains("confine_tag_state(state, &reach)"),
             "the get_tag_state arm must confine assignments for control callers: {arm}"
         );
+    }
+
+    /// The two listing arms have no identifier for the scope check to
+    /// compare, so each must filter its rows by the caller's reach. What the
+    /// helpers keep is tested in `control_scope.rs`.
+    #[test]
+    fn listing_arms_filter_their_rows_by_the_callers_reach() {
+        let source = include_str!("web_server.rs");
+        for (command, helper) in [
+            ("list_projects", "confine_projects(projects, &reach)"),
+            (
+                "get_active_sessions",
+                "confine_active_sessions(sessions, &reach)",
+            ),
+        ] {
+            let arm = dispatch_arm_body(source, command);
+            assert!(
+                arm.contains("control_scope::reach(&caller, &store)") && arm.contains(helper),
+                "the {command} arm must filter by the caller's reach: {arm}"
+            );
+        }
     }
 
     // -------------------------------------------------------------------
@@ -5216,6 +5172,178 @@ mod tests {
                 !arm.contains(inline),
                 "the web `delete_project_note` arm must not delete around the shared \
                  body (`{inline}`): {arm}"
+            );
+        }
+    }
+
+    /// The text of the Tauri command `name` in `lib.rs`: from its `fn` to the
+    /// next command's attribute.
+    fn tauri_command_source(name: &str) -> &'static str {
+        let lib = include_str!("lib.rs");
+        let marker = format!("fn {name}(");
+        let start = lib
+            .find(&marker)
+            .unwrap_or_else(|| panic!("lib.rs should define the `{name}` command"));
+        let rest = &lib[start..];
+        let end = rest.find("#[tauri::command").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Creating a project goes through one body from the desktop window, the
+    /// browser and the control server. The arm used to carry its own copy,
+    /// which had drifted: no duplicate-name check, no `sq` check before a
+    /// remote project, and a worktree with no setup actions after it.
+    #[test]
+    fn web_create_project_shares_the_tauri_body() {
+        let body = "project_commands::create_project_and_setup(";
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "create_project");
+        let command = tauri_command_source("create_project");
+        for (what, source) in [
+            ("web `create_project` arm", arm.as_str()),
+            ("`create_project` Tauri command", command),
+        ] {
+            assert!(
+                source.contains(body),
+                "the {what} must call the shared body: {source}"
+            );
+            for inline in [
+                ".create_project(",
+                ".create_project_repo(",
+                ".create_branch(",
+                "create_project_impl(",
+                "setup_worktree_sync(",
+                "claim_and_run_prerun_actions(",
+            ] {
+                assert!(
+                    !source.contains(inline),
+                    "the {what} must not create around the shared body (`{inline}`): {source}"
+                );
+            }
+        }
+    }
+
+    /// Adding a repo goes through one body too, setup included. The arm used
+    /// to stop at the rows, which left a local branch without a worktree or
+    /// its setup actions unless a window happened to be open, and a repo
+    /// joining a running workspace never cloned into it.
+    #[test]
+    fn web_add_project_repo_shares_the_tauri_body() {
+        let body = "project_commands::add_project_repo_and_setup(";
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "add_project_repo");
+        let command = tauri_command_source("add_project_repo");
+        for (what, source) in [
+            ("web `add_project_repo` arm", arm.as_str()),
+            ("`add_project_repo` Tauri command", command),
+        ] {
+            assert!(
+                source.contains(body),
+                "the {what} must call the shared body: {source}"
+            );
+            for inline in [
+                "add_project_repo_impl(",
+                "spawn_project_repo_setup(",
+                ".create_project_repo(",
+            ] {
+                assert!(
+                    !source.contains(inline),
+                    "the {what} must not add around the shared body (`{inline}`): {source}"
+                );
+            }
+        }
+    }
+
+    /// The control and web halves of a `dispatch` arm that branches on its
+    /// caller ahead of `body`, the shared call both halves feed.
+    fn caller_branches<'a>(arm: &'a str, control: &str, body: &str) -> (&'a str, &'a str) {
+        let control_at = arm
+            .find(control)
+            .unwrap_or_else(|| panic!("the arm should branch on `{control}`: {arm}"));
+        let web_at = arm
+            .find("DispatchCaller::Web =>")
+            .expect("the arm should have a web branch");
+        let body_at = arm.find(body).expect("the arm should call the shared body");
+        assert!(
+            control_at < web_at && web_at < body_at,
+            "the arm must settle its request before the shared body runs: {arm}"
+        );
+        (&arm[control_at..web_at], &arm[web_at..body_at])
+    }
+
+    /// A project made through the control server records who made it, and
+    /// its request is checked in the app first, since no form checked it.
+    /// A project made in the desktop window or a browser is the user's own:
+    /// it names no creator, so `projects.created_by` stays NULL and no
+    /// control credential reaches it by the creator rule.
+    #[test]
+    fn only_a_control_caller_creates_a_project_with_a_creator() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "create_project");
+        let (control, web) = caller_branches(
+            &arm,
+            "DispatchCaller::Control(grant) =>",
+            "project_commands::create_project_and_setup(",
+        );
+        for needed in [
+            "project_commands::control_create_project_request(",
+            "ProjectCreator::for_grant(grant)",
+            "control_project_args::create_project(&args)?",
+        ] {
+            assert!(
+                control.contains(needed),
+                "a control `create_project` must go through `{needed}`: {control}"
+            );
+        }
+        let command = tauri_command_source("create_project");
+        for (what, source) in [
+            ("web branch of the `create_project` arm", web),
+            ("`create_project` Tauri command", command),
+        ] {
+            assert!(
+                source.contains("created_by: None") && source.contains("pr_note: None"),
+                "the {what} must name no creator and write no note: {source}"
+            );
+            assert!(
+                !source.contains("ProjectCreator"),
+                "the {what} must not name a creator: {source}"
+            );
+        }
+    }
+
+    /// A control caller's repo is checked in the app before it is added. A
+    /// web caller's arguments come from a form that already checked them,
+    /// and go to the shared body as they are, as the desktop command's do.
+    #[test]
+    fn only_a_control_caller_has_its_added_repo_checked_in_the_app() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "add_project_repo");
+        let (control, web) = caller_branches(
+            &arm,
+            "DispatchCaller::Control(_) =>",
+            "project_commands::add_project_repo_and_setup(",
+        );
+        for needed in [
+            "control_project_args::add_project_repo(&args)?",
+            "project_commands::control_add_repo_request(",
+        ] {
+            assert!(
+                control.contains(needed),
+                "a control `add_project_repo` must go through `{needed}`: {control}"
+            );
+        }
+        let command = tauri_command_source("add_project_repo");
+        for (what, source) in [
+            ("web branch of the `add_project_repo` arm", web),
+            ("`add_project_repo` Tauri command", command),
+        ] {
+            assert!(
+                source.contains("reason: None") && source.contains("pr_note: None"),
+                "the {what} must pass no reason and write no note: {source}"
+            );
+            assert!(
+                source.contains("refuse_branch_in_use: false"),
+                "the {what} must not refuse a branch the form let the user pick: {source}"
+            );
+            assert!(
+                !source.contains("control_"),
+                "the {what} must not run the control checks: {source}"
             );
         }
     }

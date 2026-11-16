@@ -38,12 +38,15 @@
 //! carry `Authorization: Bearer <token>` naming a live [`ControlGrant`] in
 //! the [`ControlGrants`] registry; the grant rides into
 //! `web_server::dispatch` as `DispatchCaller::Control(grant)`, where a scope
-//! table confines it to its project (and, for a read-only grant, to reads)
-//! ahead of the arm table. Today's only grants are class A: a local session
-//! start mints a read-write grant scoped to the session's own project,
-//! delivered through an owner-only per-session file (see [`grants`]), and
-//! revokes it when the run ends. A same-user caller with no grant — a user
-//! shell, say — is refused `authorization_required` until it enrols: class
+//! table confines it to its reach (and, for a read-only grant, to reads)
+//! ahead of the arm table. A grant scoped to one project reaches that
+//! project and the projects its actor created through this server, which
+//! each record their creator. Class A: a local session start mints a
+//! read-write grant scoped to the session's own project, delivered through
+//! an owner-only per-session file (see [`grants`]), and revokes it when the
+//! run ends. The next run of the same session gets a fresh grant and still
+//! reaches what an earlier run created. A same-user caller with no grant —
+//! a user shell, say — is refused `authorization_required` until it enrols: class
 //! B, `stagedctl connect`, asks the user by name in a consent dialog and,
 //! once approved, holds a durable thirty-day grant it reconnects to with a
 //! proof of its secret ([`enrol`], [`consent`]). Both classes share the
@@ -64,11 +67,20 @@
 //! That includes the project-tag commands: assigning a project's tags, and
 //! the reversible catalog edits (create, rename, recolour, move, reorder,
 //! the icon and sidebar flags), each of which Settings › Tags undoes with
-//! one more edit. No deletes — `delete_tag` and `delete_tag_group` drop
-//! assignments on every project carrying the tag, which nothing in the UI
-//! undoes — no history rewrites, no `create_pr` / `push_branch`. Exposing a
-//! destructive verb reopens the auth design and must come with a
-//! [`PROTOCOL_VERSION`] bump.
+//! one more edit. It also includes creating a project and adding a repo to
+//! one (`create_project`, `add_project_repo`), which the user undoes in the
+//! app by deleting the project or removing the repo. Both do more than
+//! write rows: they clone the repo into a worktree and run its setup
+//! actions, or provision a remote workspace. A session already runs
+//! commands as the user, so that adds no reach to the machine, and a
+//! session may hold only a fixed number of created projects. A caller's
+//! request is checked in the app the way the desktop forms check theirs
+//! (`project_commands::control`). No deletes — `delete_project` and
+//! `remove_project_repo` stay off the table, and `delete_tag` and
+//! `delete_tag_group` drop assignments on every project carrying the tag,
+//! which nothing in the UI undoes — no history rewrites, no `create_pr` /
+//! `push_branch`. Exposing a destructive verb reopens the auth design and
+//! must come with a [`PROTOCOL_VERSION`] bump.
 //!
 //! One verb reaches past the data into the user's view: `open_project`
 //! raises a window and asks it to show a project (see
@@ -110,7 +122,7 @@ pub(crate) use grants::{
     session_grant_applies, Access, Actor, AuthorizationFailure, ControlGrant, SessionGrantRequest,
     SessionLease,
 };
-// Named outside this module only by web_server's tests.
+// Named outside this module only by tests (web_server, project_commands).
 #[allow(unused_imports)]
 pub(crate) use grants::Scope;
 
@@ -169,6 +181,9 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "list_branches_for_project",
     // project open
     "open_project",
+    // project create / project add-repo
+    "create_project",
+    "add_project_repo",
     // timeline show
     "get_branch_timeline",
     "get_project_timeline",
@@ -282,7 +297,8 @@ pub(crate) fn stagedctl_env(lease: Option<&SessionLease>) -> Vec<(String, String
 }
 
 /// Mint a class A credential for a session this instance is starting: a
-/// read-write grant confined to the session's project, written to
+/// read-write grant scoped to the session's project, which also reaches the
+/// projects the session created (see `web_server::control_scope`), written to
 /// `~/.staged/control/<pid>/sessions/<session_id>-<epoch>.json` for
 /// `STAGEDCTL_LOCK`.
 /// `None` when the control server is not up or the grants registry is not
@@ -1623,8 +1639,10 @@ mod tests {
     #[test]
     fn allowlist_is_exactly_the_command_table() {
         let expected = [
+            "add_project_repo",
             "cancel_session",
             "create_image",
+            "create_project",
             "create_tag",
             "create_tag_group",
             "get_active_sessions",

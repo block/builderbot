@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::models::*;
 use super::{
-    ChildSessionInfo, SessionPollRequest, Store, ToolCallBody, TranscriptWindow,
+    session_actor_id, ChildSessionInfo, SessionPollRequest, Store, ToolCallBody, TranscriptWindow,
     DEFERRED_TOOL_BODY_MIN_BYTES,
 };
 
@@ -58,6 +58,296 @@ fn test_project_unique_repo_with_no_subpath() {
     let p2 = Project::new("test-owner/test-repo");
     store.create_project(&p1).unwrap();
     assert!(store.create_project(&p2).is_err());
+}
+
+#[test]
+fn test_get_project_by_name_matches_the_stored_name_exactly() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::named("Fix login");
+    store.create_project(&project).unwrap();
+    store.create_project(&Project::named("Other")).unwrap();
+
+    let found = store.get_project_by_name("Fix login").unwrap().unwrap();
+    assert_eq!(found.id, project.id);
+
+    // The unique index compares names byte for byte, and so does the lookup.
+    assert!(store.get_project_by_name("fix login").unwrap().is_none());
+    assert!(store.get_project_by_name("Fix login ").unwrap().is_none());
+    assert!(store.get_project_by_name("Fix").unwrap().is_none());
+}
+
+#[test]
+fn test_project_created_by_round_trips_and_lists_by_creator() {
+    let store = Store::in_memory().unwrap();
+    // Created from the app's own UI: no creator.
+    let by_user = Project::named("By the user");
+    assert_eq!(by_user.created_by, None);
+    let mut first = Project::named("First").with_created_by("session:s1");
+    first.created_at = 1_000;
+    let mut second = Project::named("Second").with_created_by("session:s1");
+    second.created_at = 2_000;
+    let by_app = Project::named("By an app").with_created_by("app:g1");
+    for project in [&by_user, &first, &second, &by_app] {
+        store.create_project(project).unwrap();
+    }
+
+    // Every read of a project row carries the creator.
+    let fetched = store.get_project(&first.id).unwrap().unwrap();
+    assert_eq!(fetched.created_by.as_deref(), Some("session:s1"));
+    let by_name = store.get_project_by_name("By an app").unwrap().unwrap();
+    assert_eq!(by_name.created_by.as_deref(), Some("app:g1"));
+    let listed = store.list_projects().unwrap();
+    let creator_of = |id: &str| {
+        listed
+            .iter()
+            .find(|project| project.id == id)
+            .unwrap()
+            .created_by
+            .clone()
+    };
+    assert_eq!(creator_of(&by_user.id), None);
+    assert_eq!(creator_of(&second.id).as_deref(), Some("session:s1"));
+
+    // Listing by creator matches the whole actor string, newest first.
+    assert_eq!(
+        store.list_project_ids_created_by("session:s1").unwrap(),
+        vec![second.id.clone(), first.id.clone()]
+    );
+    assert_eq!(
+        store.list_project_ids_created_by("app:g1").unwrap(),
+        vec![by_app.id.clone()]
+    );
+    for stranger in ["session:s", "session:s11", "s1", "SESSION:S1", ""] {
+        assert!(
+            store
+                .list_project_ids_created_by(stranger)
+                .unwrap()
+                .is_empty(),
+            "{stranger:?} created nothing"
+        );
+    }
+
+    // Editing a project leaves its creator alone.
+    store
+        .update_project(&first.id, "Renamed", None, &ProjectLocation::Local, None)
+        .unwrap();
+    let renamed = store.get_project(&first.id).unwrap().unwrap();
+    assert_eq!(renamed.name, "Renamed");
+    assert_eq!(renamed.created_by.as_deref(), Some("session:s1"));
+
+    // A deleted project no longer counts against its creator.
+    store.delete_project(&second.id).unwrap();
+    assert_eq!(
+        store.list_project_ids_created_by("session:s1").unwrap(),
+        vec![first.id.clone()]
+    );
+}
+
+/// The per-creator count is what a shared creation limit is added up from:
+/// one row per actor in use, and nothing for projects made in the app.
+#[test]
+fn test_projects_are_counted_per_creator() {
+    let store = Store::in_memory().unwrap();
+    assert!(store.count_projects_by_creator().unwrap().is_empty());
+
+    store
+        .create_project(&Project::named("By the user"))
+        .unwrap();
+    for name in ["One", "Two", "Three"] {
+        store
+            .create_project(&Project::named(name).with_created_by("session:s1"))
+            .unwrap();
+    }
+    let by_other = Project::named("Other").with_created_by("session:s2");
+    store.create_project(&by_other).unwrap();
+    store
+        .create_project(&Project::named("By an app").with_created_by("app:g1"))
+        .unwrap();
+
+    assert_eq!(
+        store.count_projects_by_creator().unwrap(),
+        vec![
+            ("app:g1".to_string(), 1),
+            ("session:s1".to_string(), 3),
+            ("session:s2".to_string(), 1),
+        ]
+    );
+
+    // A deleted project leaves the count, and its creator when it was the
+    // last one.
+    store.delete_project(&by_other.id).unwrap();
+    assert_eq!(
+        store.count_projects_by_creator().unwrap(),
+        vec![("app:g1".to_string(), 1), ("session:s1".to_string(), 3)]
+    );
+}
+
+/// A session started by `parent`, written to the store.
+fn session_started_by(store: &Store, parent: Option<&str>) -> Session {
+    let mut session = Session::new_queued("work");
+    if let Some(parent) = parent {
+        session = session.with_started_by(parent);
+    }
+    store.create_session(&session).unwrap();
+    session
+}
+
+#[test]
+fn test_session_actor_id_reads_only_a_session_actor() {
+    assert_eq!(session_actor_id("session:s1"), Some("s1"));
+    for other in ["app:g1", "session:", "s1", "SESSION:s1", ""] {
+        assert_eq!(session_actor_id(other), None, "{other:?}");
+    }
+}
+
+/// The root of a chain is the first session not started by a session:
+/// started by the user, by a connected app, or no longer in the store.
+#[test]
+fn test_session_lineage_root_follows_started_by_to_the_top() {
+    let store = Store::in_memory().unwrap();
+    let by_user = session_started_by(&store, None);
+    let child = session_started_by(&store, Some(&format!("session:{}", by_user.id)));
+    let grandchild = session_started_by(&store, Some(&format!("session:{}", child.id)));
+    let by_app = session_started_by(&store, Some("app:g1"));
+    let under_app = session_started_by(&store, Some(&format!("session:{}", by_app.id)));
+    let orphan = session_started_by(&store, Some("session:gone"));
+
+    let root = |id: &str| store.session_lineage_root(id, 8).unwrap();
+    assert_eq!(root(&by_user.id), Some(by_user.id.clone()));
+    assert_eq!(root(&child.id), Some(by_user.id.clone()));
+    assert_eq!(root(&grandchild.id), Some(by_user.id.clone()));
+    // A connected app is not a session, so the session it started is a root.
+    assert_eq!(root(&by_app.id), Some(by_app.id.clone()));
+    assert_eq!(root(&under_app.id), Some(by_app.id.clone()));
+    // A starter whose row is gone ends the chain at its id, so every session
+    // it started still shares one root.
+    assert_eq!(root(&orphan.id), Some("gone".to_string()));
+    // So does a session the store has never held.
+    assert_eq!(root("unknown"), Some("unknown".to_string()));
+}
+
+/// A session started through an MCP tool has no `started_by`: its starter is
+/// in `parent_session_id`. The walk follows that link too, so a repo session
+/// a project session started with `start_repo_session` is in the project
+/// session's chain and not the root of a new one.
+#[test]
+fn test_session_lineage_root_follows_the_parent_session_when_started_by_names_none() {
+    let store = Store::in_memory().unwrap();
+    let by_user = session_started_by(&store, None);
+    // `stagedctl session start --project`, then `start_repo_session`, then
+    // `stagedctl session start` again.
+    let project_session = session_started_by(&store, Some(&format!("session:{}", by_user.id)));
+    let repo_session = Session::new_queued("repo work").with_parent_session(&project_session.id);
+    store.create_session(&repo_session).unwrap();
+    let below = session_started_by(&store, Some(&format!("session:{}", repo_session.id)));
+
+    let root = |id: &str| store.session_lineage_root(id, 8).unwrap();
+    for session in [&project_session, &repo_session, &below] {
+        assert_eq!(root(&session.id), Some(by_user.id.clone()));
+    }
+
+    // A `started_by` that names a session is the link taken, whatever the
+    // parent says.
+    let elsewhere = session_started_by(&store, None);
+    let both = Session::new_queued("both")
+        .with_started_by(&format!("session:{}", by_user.id))
+        .with_parent_session(&elsewhere.id);
+    store.create_session(&both).unwrap();
+    assert_eq!(root(&both.id), Some(by_user.id.clone()));
+
+    // One that names a connected app is no session, so the parent is.
+    let by_app_under_parent = Session::new_queued("app")
+        .with_started_by("app:g1")
+        .with_parent_session(&elsewhere.id);
+    store.create_session(&by_app_under_parent).unwrap();
+    assert_eq!(root(&by_app_under_parent.id), Some(elsewhere.id.clone()));
+
+    // Both kinds of link count toward the one bound: three links up.
+    assert_eq!(
+        store.session_lineage_root(&below.id, 3).unwrap(),
+        Some(by_user.id.clone())
+    );
+    assert_eq!(store.session_lineage_root(&below.id, 2).unwrap(), None);
+}
+
+/// Deleting a session in the middle of a chain splits it, and the two links
+/// split it differently. `started_by` still names the deleted session, so
+/// the sessions it started share its id as their root. `parent_session_id`
+/// goes NULL with the parent, so each of those children is a root.
+#[test]
+fn test_session_lineage_root_after_a_session_in_the_chain_is_deleted() {
+    let store = Store::in_memory().unwrap();
+    let by_user = session_started_by(&store, None);
+    let middle = session_started_by(&store, Some(&format!("session:{}", by_user.id)));
+    let by_stagedctl =
+        [(); 2].map(|_| session_started_by(&store, Some(&format!("session:{}", middle.id))));
+    let by_mcp = [(); 2].map(|_| {
+        let session = Session::new_queued("repo work").with_parent_session(&middle.id);
+        store.create_session(&session).unwrap();
+        session
+    });
+    let root = |id: &str| store.session_lineage_root(id, 8).unwrap();
+    for session in by_stagedctl.iter().chain(&by_mcp) {
+        assert_eq!(root(&session.id), Some(by_user.id.clone()));
+    }
+
+    store.delete_session(&middle.id).unwrap();
+
+    for session in &by_stagedctl {
+        assert_eq!(root(&session.id), Some(middle.id.clone()));
+    }
+    for session in &by_mcp {
+        assert_eq!(root(&session.id), Some(session.id.clone()));
+    }
+}
+
+/// The walk follows at most `max_depth` links, and says so when the top is
+/// further up instead of naming a session that is not the root.
+#[test]
+fn test_session_lineage_root_is_bounded() {
+    let store = Store::in_memory().unwrap();
+    let root = session_started_by(&store, None);
+    let mut chain = vec![root.id.clone()];
+    for _ in 0..4 {
+        let parent = format!("session:{}", chain.last().unwrap());
+        chain.push(session_started_by(&store, Some(&parent)).id);
+    }
+    let deepest = chain.last().unwrap();
+
+    // Four links up: within a bound of four, beyond a bound of three.
+    assert_eq!(
+        store.session_lineage_root(deepest, 4).unwrap(),
+        Some(root.id.clone())
+    );
+    assert_eq!(store.session_lineage_root(deepest, 3).unwrap(), None);
+    assert_eq!(
+        store.session_lineage_root(&root.id, 0).unwrap(),
+        Some(root.id.clone())
+    );
+    assert_eq!(store.session_lineage_root(&chain[1], 0).unwrap(), None);
+
+    // A chain that loops has no top, and the bound ends the walk.
+    let a = Session::new_queued("a");
+    let b = Session::new_queued("b").with_started_by(&format!("session:{}", a.id));
+    let a = a.with_started_by(&format!("session:{}", b.id));
+    store.create_session(&a).unwrap();
+    store.create_session(&b).unwrap();
+    assert_eq!(store.session_lineage_root(&a.id, 32).unwrap(), None);
+}
+
+#[test]
+fn test_project_created_by_is_left_off_the_wire_when_unset() {
+    let by_user = serde_json::to_value(Project::named("By the user")).unwrap();
+    assert!(
+        by_user.get("createdBy").is_none(),
+        "a UI-created project serializes as it did before the column: {by_user}"
+    );
+    let by_session =
+        serde_json::to_value(Project::named("Made").with_created_by("session:s1")).unwrap();
+    assert_eq!(by_session["createdBy"], "session:s1");
+    // And a payload without the field still reads.
+    let read: Project = serde_json::from_value(by_user).unwrap();
+    assert_eq!(read.created_by, None);
 }
 
 #[test]

@@ -22,10 +22,11 @@
 //! [`NONCE_TTL_MS`].
 //!
 //! **Who may enrol.** Only a caller outside every running session. A
-//! Staged-spawned session (class A) holds a bearer confined to its own
-//! project; letting it `connect` would let a prompt-injected agent ask the
-//! user for an all-projects grant under any name it likes, attributed only
-//! to a `node`/`claude` process. [`reject_spawned_session`] refuses every
+//! Staged-spawned session (class A) holds a bearer that covers its own
+//! project and the projects it created; letting it `connect` would let a
+//! prompt-injected agent ask the user for an all-projects grant under any
+//! name it likes, attributed only to a `node`/`claude` process.
+//! [`reject_spawned_session`] refuses every
 //! enrolment route before any request is parked or prompt shown when the
 //! caller is traceable to a running session, two ways: by *credential* (its
 //! bearer resolves to a session grant) and by *process* (the connecting
@@ -628,8 +629,9 @@ fn session_bearer(
 pub(crate) fn session_enrolment_refusal(session_id: &str) -> String {
     format!(
         "spawned sessions cannot request connected-app access: this credential belongs to \
-         Staged session {session_id} and is confined to that session's project; `stagedctl \
-         connect` and `disconnect` are for clients the user runs outside a session"
+         Staged session {session_id} and covers that session's project and the projects it \
+         created; `stagedctl connect` and `disconnect` are for clients the user runs outside a \
+         session"
     )
 }
 
@@ -639,9 +641,9 @@ pub(crate) fn session_enrolment_refusal(session_id: &str) -> String {
 pub(crate) fn session_process_refusal(session: &SpawnedSession) -> String {
     format!(
         "spawned sessions cannot request connected-app access: this process runs inside Staged \
-         session {} (its agent's process tree), whose own credential is confined to that \
-         session's project; `stagedctl connect` and `disconnect` are for clients the user runs \
-         outside a session",
+         session {} (its agent's process tree), whose own credential covers that session's \
+         project and the projects it created; `stagedctl connect` and `disconnect` are for \
+         clients the user runs outside a session",
         session.session_id
     )
 }
@@ -678,7 +680,8 @@ pub(crate) fn app_bearer_in_session_refusal(session: &SpawnedSession, client: &s
     format!(
         "spawned sessions cannot use connected-app credentials: this process runs inside Staged \
          session {} and presented the grant approved for {client:?}; use the session's own \
-         credential ($STAGEDCTL_LOCK), which is confined to the session's project",
+         credential ($STAGEDCTL_LOCK), which covers the session's project and the projects it \
+         created",
         session.session_id
     )
 }
@@ -1340,6 +1343,30 @@ mod tests {
         // there too), so an agent reads one explanation either way.
         let cli = include_str!("../../crates/stagedctl/src/commands.rs");
         assert!(cli.contains("spawned sessions cannot request connected-app access"));
+    }
+
+    #[test]
+    fn the_session_refusals_say_what_a_session_credential_covers() {
+        // A session reaches its own project and the projects it created
+        // (`control_scope`). A refusal that still called the credential
+        // confined to one project would tell an agent it cannot use
+        // `stagedctl project create`.
+        let session = SpawnedSession {
+            session_id: "s-3".to_string(),
+            epoch: 1,
+            project_id: "p".to_string(),
+        };
+        for text in [
+            session_enrolment_refusal("s-3"),
+            session_process_refusal(&session),
+            app_bearer_in_session_refusal(&session, "Claude Code"),
+        ] {
+            assert!(
+                text.contains("project and the projects it created"),
+                "{text}"
+            );
+            assert!(!text.contains("confined"), "{text}");
+        }
     }
 
     #[test]

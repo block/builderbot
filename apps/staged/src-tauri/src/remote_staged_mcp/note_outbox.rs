@@ -183,13 +183,18 @@ impl PublishedNoteStamp {
 /// `rejected` is the one published note the caller *has* read: a note its
 /// run collected and then turned down (a Pikchr block that does not parse).
 /// A marker that still belongs to that note is no reason to keep anything:
-/// the note is known bad, and not every later reader checks it (the next
-/// run's recovery does, see [`recover_uncollected_outbox`], but the detached
-/// sweep reads with any turn id and stores what it finds). So it is removed
-/// with the rest. The script recognises it by the `cksum` of
-/// `meta.json` and of `note.md`; a note published since has a different
-/// `writtenAt` or body and stays. A workstation without `cksum` matches
-/// nothing and keeps the note, which is the rule without `rejected`.
+/// the note is known bad and the run that read it has already spent its
+/// repair on it. So it is removed with the rest. The script recognises it by
+/// the `cksum` of `meta.json` and of `note.md`; a note published since has a
+/// different `writtenAt` or body and stays. A workstation without `cksum`
+/// matches nothing and keeps the note, which is the rule without `rejected`.
+///
+/// This removal used to be what kept such a note out of the store, when the
+/// detached sweep stored what it found unchecked. Every reader now runs the
+/// Pikchr check (the sweep parks the row, and the next run's recovery asks
+/// for a repair, see [`recover_uncollected_outbox`]), so a kept note would
+/// be turned down again, not stored. The removal is left as it was; taking
+/// it out is a separate cleanup.
 pub(crate) fn clear_unpublished_outbox_script(
     session_id: &str,
     rejected: Option<PublishedNoteStamp>,
@@ -274,6 +279,12 @@ pub(crate) enum DraftSeed {
     /// and there is no `draft.md`; `write_note` reports the missing draft
     /// by path and the agent writes the file.
     Failed(String),
+    /// The recovery turned down a published note
+    /// ([`OutboxRecovery::Rejected`]): `draft.md` is left as the earlier run
+    /// wrote it and nothing is seeded, so the agent repairs that file. When
+    /// the earlier run left no draft, the rejected body was put there
+    /// ([`reject_published_note_script`]).
+    Kept,
 }
 
 /// The run-start form of [`clear_outbox_script`]: one round trip that
@@ -378,6 +389,36 @@ pub(crate) fn clear_outbox_and_seed(
         }
     }
     Ok(DraftSeed::Seeded)
+}
+
+/// The run-start clear for a published note the recovery turned down
+/// ([`OutboxRecovery::Rejected`]): remove the publication and keep the draft
+/// it was published from.
+///
+/// Only `done`, `meta.json` and `note.md` go, the marker first, as
+/// `write_note` itself starts a rewrite: the run that is starting must not
+/// collect the old note as its own, and no later reader may find it.
+/// `draft.md` is not touched and nothing is seeded, so the agent repairs
+/// the text it wrote instead of writing the note again. If the earlier run
+/// left no draft at all, the rejected body becomes the draft, so the file
+/// the repair prompt names always exists. Always exits 0.
+pub(crate) fn reject_published_note_script(session_id: &str) -> String {
+    let dir = session_dir_expr(session_id);
+    let draft = crate::note_draft::REMOTE_DRAFT_FILE_NAME;
+    format!(
+        "d={dir}; rm -f \"$d/done\"; \
+         if [ ! -e \"$d/{draft}\" ]; then mv -f \"$d/note.md\" \"$d/{draft}\" 2>/dev/null; fi; \
+         rm -f \"$d/meta.json\" \"$d/note.md\"; exit 0"
+    )
+}
+
+/// Run [`reject_published_note_script`]. `Err` means the command could not
+/// be confirmed, so the publication may still be there.
+fn reject_published_note(exec: RemoteExec, session_id: &str) -> Result<(), String> {
+    validate_session_id(session_id)?;
+    exec(&["sh", "-c", &reject_published_note_script(session_id)])
+        .map(|_| ())
+        .map_err(|e| format!("failed to remove the rejected note from the remote note outbox: {e}"))
 }
 
 /// Print the outbox as four lines: the marker line, then `meta.json` and
@@ -742,19 +783,35 @@ pub(crate) struct RunStartRecovery {
     pub draft: DraftSeed,
 }
 
+/// A published note [`recover_uncollected_outbox`] found and did not store,
+/// because a Pikchr block in it does not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RejectedNote {
+    /// The title it was published under.
+    pub title: String,
+    /// The first block that does not parse. Its line number counts the
+    /// lines of the published body, which is the draft from its first
+    /// non-blank line.
+    pub error: crate::pikchr_validation::PikchrValidationError,
+}
+
 /// What [`recover_uncollected_outbox`] found at session start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OutboxRecovery {
     /// Nothing complete was waiting; whatever partial files were there are gone.
     Empty,
     /// A finished note from an earlier run was handed to `ingest`, then cleared.
     Ingested,
-    /// The outbox held something marked `done` that is not a note to store:
-    /// content the collector cannot turn into one (a file missing beside the
-    /// marker, a body the tool would reject), or a note with a Pikchr block
-    /// that does not parse. It was logged and cleared so the session is not
-    /// stuck on it forever.
+    /// The outbox held something marked `done` that the collector cannot
+    /// turn into a note (a file missing beside the marker, a body the tool
+    /// would reject). It was logged and cleared so the session is not stuck
+    /// on it forever.
     Discarded,
+    /// A finished note from an earlier run has a Pikchr block that does not
+    /// parse. It was not stored. Its publication was removed and its draft
+    /// kept ([`DraftSeed::Kept`]), and the run that is starting asks the
+    /// agent to repair the draft and publish it again.
+    Rejected(RejectedNote),
 }
 
 /// Session start: a `done` marker already in the outbox is a note the agent
@@ -771,19 +828,24 @@ pub(crate) enum OutboxRecovery {
 /// (a fresh note). A seed that fits one command line shares the clear's
 /// round trip ([`clear_outbox_and_seed`]).
 ///
-/// The waiting note is checked before it is handed over: no run is left to
-/// ask for a repair, so a note with a Pikchr block that does not parse is
-/// not stored. It is logged, cleared and reported as
-/// [`OutboxRecovery::Discarded`], which is what a takeover does with such a
-/// note (`session_runner::taken_over_note`), and the run that is starting
-/// has the agent write it again. This is the check that covers a note an
-/// earlier run rejected, had republished still broken, and then never read
-/// again: that note carries a new `writtenAt`, so the earlier run's guarded
-/// clear kept it as one nobody had read
+/// The waiting note is checked before it is handed over: a note with a
+/// Pikchr block that does not parse is not stored. It is reported as
+/// [`OutboxRecovery::Rejected`] with the parse error, and the run that is
+/// starting is the repair: its first prompt carries the correction
+/// (`session_runner`'s `first_turn_prompt`). So that the agent has
+/// something to repair, only the publication is removed
+/// ([`reject_published_note_script`]): `draft.md` stays as the earlier run
+/// wrote it, `seed` is not asked, and the result carries
+/// [`DraftSeed::Kept`]. This is where a row the detached sweep parked on a
+/// broken diagram ends up when the user resumes it, and it also covers a
+/// note an earlier run rejected, had republished still broken, and then
+/// never read again: that note carries a new `writtenAt`, so the earlier
+/// run's guarded clear kept it as one nobody had read
 /// ([`clear_unpublished_outbox_script`]).
 ///
 /// Two failures leave the outbox alone for the next attempt and are errors
-/// here: a workstation that could not be reached, and a waiting note that
+/// here: a workstation that could not be reached (at the read, the clear,
+/// or the removal of a rejected publication), and a waiting note that
 /// `ingest` reports it could not store (it returns `false`) — clearing after
 /// either would delete the only copy. Content the collector cannot turn into
 /// a note (a `done` marker beside a missing file, a body the tool would have
@@ -816,12 +878,20 @@ pub(crate) fn recover_uncollected_outbox(
                     log::warn!(
                         "Session {session_id}: the workstation outbox holds an uncollected \
                          note \"{}\" from an earlier run whose Pikchr block at line {} does \
-                         not parse ({}); discarding it instead of storing it",
+                         not parse ({}); not storing it, keeping its draft for this run to \
+                         repair",
                         submission.title,
                         pikchr_error.line_number,
                         pikchr_error.message
                     );
-                    OutboxRecovery::Discarded
+                    reject_published_note(exec, session_id)?;
+                    return Ok(RunStartRecovery {
+                        outbox: OutboxRecovery::Rejected(RejectedNote {
+                            title: submission.title,
+                            error: pikchr_error,
+                        }),
+                        draft: DraftSeed::Kept,
+                    });
                 }
                 None => {
                     log::warn!(
@@ -1460,21 +1530,31 @@ mod tests {
         assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));
     }
 
-    /// A waiting note is checked before it is stored: no run is left to ask
-    /// for a repair of a diagram that does not parse, so the note is
-    /// discarded like unusable content, and the draft is still put in its
-    /// run-start state. Before this check the note went to the hooks as it
-    /// was.
-    #[test]
-    fn session_start_discards_a_note_with_a_broken_pikchr_block_and_continues() {
-        let log = RefCell::new(Vec::new());
+    const BROKEN_PIKCHR_BODY: &str = "Body\n```pikchr\nboxx \"bad\"\n```";
+
+    /// What the collect script prints for a published note titled "Plan"
+    /// whose body is [`BROKEN_PIKCHR_BODY`].
+    fn broken_pikchr_output() -> String {
         let meta = r#"{"title":"Plan","turn":"earlier-run","writtenAt":7}"#;
-        let output = format!(
+        format!(
             "done\n{}\n{}\ndone\n",
             b64(meta.as_bytes()),
-            b64(b"Body\n```pikchr\nboxx \"bad\"\n```")
-        );
-        let exec = collecting_exec(&output, &log);
+            b64(BROKEN_PIKCHR_BODY.as_bytes())
+        )
+    }
+
+    /// A waiting note is checked before it is stored. One with a diagram
+    /// that does not parse is not handed to the hooks, and it is not thrown
+    /// away either: the recovery reports it with the parse error, removes
+    /// only its publication, and neither removes nor seeds the draft, so the
+    /// run that is starting can ask the agent to repair that file. Before
+    /// the check the note went to the hooks as it was; between the check
+    /// and this outcome it was cleared with its draft and the agent was told
+    /// nothing.
+    #[test]
+    fn session_start_rejects_a_note_with_a_broken_pikchr_block_and_keeps_its_draft() {
+        let log = RefCell::new(Vec::new());
+        let exec = collecting_exec(&broken_pikchr_output(), &log);
         let mut ingested = 0;
         let mut seed_asked = 0;
         let recovery = recover_uncollected_outbox(
@@ -1486,16 +1566,155 @@ mod tests {
             },
             &mut || {
                 seed_asked += 1;
-                None
+                Some(b"the stored body".to_vec())
             },
         )
         .unwrap();
-        assert_eq!(recovery.outbox, OutboxRecovery::Discarded);
+        let OutboxRecovery::Rejected(rejected) = &recovery.outbox else {
+            panic!("expected the note to be rejected: {recovery:?}");
+        };
+        assert_eq!(rejected.title, "Plan");
+        assert_eq!(rejected.error.line_number, 2, "{rejected:?}");
+        assert!(!rejected.error.message.is_empty(), "{rejected:?}");
+        assert_eq!(recovery.draft, DraftSeed::Kept);
         assert_eq!(ingested, 0, "a note that fails the check is not stored");
-        assert_eq!(seed_asked, 1);
+        assert_eq!(seed_asked, 0, "the kept draft is not overwritten by a seed");
         let commands = log.borrow();
-        assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
-        assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));
+        assert_eq!(commands.len(), 2, "collect, then the removal: {commands:?}");
+        let removal = &commands[1][2];
+        assert_eq!(removal, &reject_published_note_script("sess-1"));
+        // The publication goes, marker first. The draft is never removed.
+        let done = removal.find("rm -f \"$d/done\"").expect(removal);
+        let rest = removal
+            .find("rm -f \"$d/meta.json\" \"$d/note.md\"")
+            .expect(removal);
+        assert!(done < rest, "{removal}");
+        // The draft is named twice, as the test for a missing draft and as
+        // where the rejected body goes then; it is never removed, nothing
+        // is seeded, and the directory stays.
+        assert_eq!(removal.matches("draft.md").count(), 2, "{removal}");
+        assert!(removal.contains("if [ ! -e \"$d/draft.md\" ]"), "{removal}");
+        for absent in ["base64", "rmdir", ".seed"] {
+            assert!(!removal.contains(absent), "{absent}: {removal}");
+        }
+    }
+
+    /// The removal of a rejected publication is a round trip like the clear:
+    /// when it cannot be confirmed the recovery is an error, so the run is
+    /// unsettled and its end-of-run clear keeps whatever is there.
+    #[test]
+    fn session_start_reports_a_rejected_note_it_could_not_remove_as_unsettled() {
+        let log: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let output = broken_pikchr_output();
+        let exec = |args: &[&str]| -> Result<String, String> {
+            log.borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            if is_collect_script(args[2]) {
+                Ok(output.clone())
+            } else {
+                Err("workstation suspended".to_string())
+            }
+        };
+        let error = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |_| panic!("a rejected note is not stored"),
+            &mut || panic!("a rejected note's draft is not seeded"),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("rejected note") && error.contains("workstation suspended"),
+            "{error}"
+        );
+        assert_eq!(log.borrow().len(), 2);
+    }
+
+    /// The same recovery against a real shell, in the three states the
+    /// draft can be in beside a rejected publication.
+    #[test]
+    fn a_rejected_note_loses_its_publication_and_keeps_its_draft_against_a_local_shell() {
+        fn publish_broken(outbox: &std::path::Path, draft: Option<&str>) {
+            std::fs::create_dir_all(outbox).unwrap();
+            for (file, content) in [
+                ("note.md", BROKEN_PIKCHR_BODY),
+                (
+                    "meta.json",
+                    r#"{"title":"Plan","turn":"earlier-run","writtenAt":7}"#,
+                ),
+                ("done", "0123456789abcdef0123456789abcdef"),
+            ] {
+                std::fs::write(outbox.join(file), content).unwrap();
+            }
+            if let Some(draft) = draft {
+                std::fs::write(outbox.join("draft.md"), draft).unwrap();
+            }
+        }
+        fn recover(home: &std::path::Path) -> RunStartRecovery {
+            recover_uncollected_outbox(
+                &local_exec(home),
+                "sess-1",
+                &mut |_| panic!("a rejected note is not stored"),
+                &mut || panic!("a rejected note's draft is not seeded"),
+            )
+            .unwrap()
+        }
+        fn assert_rejected(home: &std::path::Path, recovery: &RunStartRecovery, draft: &str) {
+            let outbox = home.join(".staged/sessions/sess-1");
+            assert!(
+                matches!(
+                    &recovery.outbox,
+                    OutboxRecovery::Rejected(RejectedNote { title, error })
+                        if title == "Plan" && error.line_number == 2
+                ),
+                "{recovery:?}"
+            );
+            assert_eq!(recovery.draft, DraftSeed::Kept);
+            for file in ["done", "meta.json", "note.md"] {
+                assert!(!outbox.join(file).exists(), "{file} is removed");
+            }
+            assert_eq!(
+                std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+                draft
+            );
+            // The run that is starting cannot collect the old note as its
+            // own, and a second recovery finds nothing to reject.
+            assert_eq!(
+                collect(&local_exec(home), "sess-1", None).unwrap(),
+                OutboxState::Pending
+            );
+        }
+
+        // The draft the note was published from, with an indented first
+        // line and a trailing newline `write_note` trimmed off.
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let published_from = format!("\n{BROKEN_PIKCHR_BODY}\n");
+        publish_broken(&outbox, Some(&published_from));
+        assert_rejected(home.path(), &recover(home.path()), &published_from);
+
+        // A draft the lost run went on editing after it published (a repair
+        // turn that fixed the block and lost its connection before the
+        // call): the later text is what the agent finds.
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let edited_since = "Body\n```pikchr\nbox \"good\"\n```\n";
+        publish_broken(&outbox, Some(edited_since));
+        std::fs::write(outbox.join("unrelated"), "another tool's file").unwrap();
+        assert_rejected(home.path(), &recover(home.path()), edited_since);
+        assert!(outbox.join("unrelated").exists());
+
+        // No draft at all: the rejected body becomes the draft, so the file
+        // the repair prompt names exists.
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        publish_broken(&outbox, None);
+        assert_rejected(home.path(), &recover(home.path()), BROKEN_PIKCHR_BODY);
+
+        // The script alone on a workstation with no session directory: it
+        // exits 0 and creates nothing.
+        let home = tempfile::tempdir().unwrap();
+        local_exec(home.path())(&["sh", "-c", &reject_published_note_script("sess-1")]).unwrap();
+        assert!(!home.path().join(".staged").exists());
     }
 
     #[test]

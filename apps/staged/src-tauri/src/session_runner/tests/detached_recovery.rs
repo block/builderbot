@@ -56,7 +56,7 @@ pub(super) fn recording_exec<'a>(
 
 /// The production ingest, pointed at the local checkout so no workstation is
 /// consulted for media.
-fn ingest_locally<'a>(
+pub(super) fn ingest_locally<'a>(
     store: &'a Arc<Store>,
     session_id: &str,
 ) -> impl FnMut(NoteSubmission) -> bool + 'a {
@@ -221,7 +221,7 @@ fn a_sweep_that_cannot_reach_the_workstation_records_why() {
 
 /// A row the sweep (or a lost connection) parked as `detached` while the
 /// agent may still be writing: the state the re-poll acts on.
-fn detach_awaiting_note(store: &Arc<Store>, session_id: &str) {
+pub(super) fn detach_awaiting_note(store: &Arc<Store>, session_id: &str) {
     assert!(store
         .transition_from_running(
             session_id,
@@ -233,12 +233,16 @@ fn detach_awaiting_note(store: &Arc<Store>, session_id: &str) {
 }
 
 /// The row as a sweep reads it before polling.
-fn observed(store: &Arc<Store>, session_id: &str) -> ObservedDetachedRow {
+pub(super) fn observed(store: &Arc<Store>, session_id: &str) -> ObservedDetachedRow {
     ObservedDetachedRow::of(&store.get_session(session_id).unwrap().unwrap())
 }
 
 /// A sweep visit planned from a fresh read of the row.
-fn plan(store: &Arc<Store>, session_id: &str, past_window: bool) -> DetachedNotePollPlan {
+pub(super) fn plan(
+    store: &Arc<Store>,
+    session_id: &str,
+    past_window: bool,
+) -> DetachedNotePollPlan {
     DetachedNotePollPlan {
         observed: observed(store, session_id),
         past_window,
@@ -246,7 +250,7 @@ fn plan(store: &Arc<Store>, session_id: &str, past_window: bool) -> DetachedNote
     }
 }
 
-fn settled(poll: DetachedNotePoll) -> DetachedRecoveryOutcome {
+pub(super) fn settled(poll: DetachedNotePoll) -> DetachedRecoveryOutcome {
     match poll {
         DetachedNotePoll::Settled(outcome) => outcome,
         other => panic!("expected the poll to settle the row, got {other:?}"),
@@ -1688,7 +1692,7 @@ fn only_a_detached_row_can_be_finished_by_the_recovery_write() {
 /// End the running session as `completed`/`hold_stopped` with its note still
 /// empty, as a run does when the user stops the wait on background work
 /// before the agent called `write_note`.
-fn hold_stop_without_note(store: &Arc<Store>, session_id: &str) {
+pub(super) fn hold_stop_without_note(store: &Arc<Store>, session_id: &str) {
     assert!(store
         .transition_from_running(
             session_id,
@@ -1699,7 +1703,7 @@ fn hold_stop_without_note(store: &Arc<Store>, session_id: &str) {
         .unwrap());
 }
 
-fn hold_stopped_rows(store: &Arc<Store>) -> Vec<String> {
+pub(super) fn hold_stopped_rows(store: &Arc<Store>) -> Vec<String> {
     store
         .get_hold_stopped_sessions_awaiting_note(STORING_REMOTE_NOTE_SUFFIX)
         .unwrap()

@@ -2158,6 +2158,12 @@ pub fn start_session(
             // between the two round trips) is logged, not a reason to run
             // this turn on the `---` fallback. Unusable content is cleared
             // by the recovery itself, so no session is stuck on it.
+            //
+            // A waiting note with a Pikchr block that does not parse is not
+            // stored: the recovery keeps its draft and reports the note, and
+            // this run's first prompt asks for the repair
+            // (`first_turn_prompt`).
+            let mut note_rejected_at_run_start: Option<note_outbox::RejectedNote> = None;
             if let (true, Some(ws_name)) = (is_note_session, config.workspace_name.clone()) {
                 let session_id = config.session_id.clone();
                 let turn_id = uuid::Uuid::new_v4().simple().to_string();
@@ -2187,27 +2193,31 @@ pub fn start_session(
                     // (the outbox collectors read `note.md`, never the
                     // draft), and the usual outcome is the agent carrying on
                     // from its own earlier draft.
-                    let recovery_settled = remote_outbox_recovery_settled_for_run(
+                    //
+                    // A waiting note the recovery turned down is the other
+                    // case with no seed: its draft is kept as the earlier
+                    // run wrote it, for this run to repair.
+                    let recovery = note_outbox::recover_uncollected_outbox(
+                        &exec,
                         &session_id,
-                        note_outbox::recover_uncollected_outbox(
-                            &exec,
-                            &session_id,
-                            &mut |submission| {
-                                run_post_completion_hooks(
-                                    &session_id,
-                                    &working_dir,
-                                    None,
-                                    Some(&ws_name),
-                                    remote_working_dir.as_deref(),
-                                    &store_for_recovery,
-                                    0,
-                                    Some(submission),
-                                )
-                                .note_stored
-                            },
-                            &mut || remote_note_draft_seed(&store_for_recovery, &session_id),
-                        ),
+                        &mut |submission| {
+                            run_post_completion_hooks(
+                                &session_id,
+                                &working_dir,
+                                None,
+                                Some(&ws_name),
+                                remote_working_dir.as_deref(),
+                                &store_for_recovery,
+                                0,
+                                Some(submission),
+                            )
+                            .note_stored
+                        },
+                        &mut || remote_note_draft_seed(&store_for_recovery, &session_id),
                     );
+                    let rejected_note = note_rejected_by_recovery(&recovery);
+                    let recovery_settled =
+                        remote_outbox_recovery_settled_for_run(&session_id, recovery);
                     Ok::<_, String>((
                         remote_staged_mcp::stdio_mcp_server(
                             &staged_mcp,
@@ -2216,12 +2226,13 @@ pub fn start_session(
                         ),
                         recovery_settled,
                         crate::note_draft::remote_draft_path(&staged_mcp.home, &session_id),
+                        rejected_note,
                     ))
                 })
                 .await
                 .map_err(|e| format!("Staged MCP on Blox setup task failed: {e}"))?;
                 match prepared {
-                    Ok((server, recovery_settled, draft_path)) => {
+                    Ok((server, recovery_settled, draft_path, rejected_note)) => {
                         log::info!(
                             "Session {}: Staged MCP on Blox attached (turn {turn_id}); note \
                              draft at {draft_path}",
@@ -2231,6 +2242,7 @@ pub fn start_session(
                         let _ = remote_note_turn.set(turn_id);
                         let _ = remote_note_draft.set(draft_path);
                         remote_outbox_recovery_settled.set(recovery_settled);
+                        note_rejected_at_run_start = rejected_note;
                     }
                     Err(e) => {
                         log::warn!(
@@ -2255,7 +2267,11 @@ pub fn start_session(
             // note run without one says so up front, so the first turn can
             // deliver through the `---` fallback and the single follow-up is
             // not spent on it.
-            let write_note_tool_attached = note_draft_path().is_some();
+            //
+            // A run whose start-of-run recovery turned down an earlier run's
+            // published note gets the repair request appended instead.
+            let first_turn_draft_path = note_draft_path();
+            let write_note_tool_attached = first_turn_draft_path.is_some();
             if is_note_session && !write_note_tool_attached {
                 log::warn!(
                     "Session {}: no write_note tool attached; telling the agent to deliver the \
@@ -2263,10 +2279,22 @@ pub fn start_session(
                     config.session_id
                 );
             }
+            if let Some(rejected) = &note_rejected_at_run_start {
+                log::warn!(
+                    "Session {}: asking the agent to repair the Pikchr block at line {} of the \
+                     note \"{}\" an earlier run published, in its draft",
+                    config.session_id,
+                    rejected.error.line_number,
+                    rejected.title
+                );
+            }
             let mut prompt = first_turn_prompt(
                 attachments.prompt(&config.prompt),
                 is_note_session,
                 write_note_tool_attached,
+                note_rejected_at_run_start
+                    .as_ref()
+                    .zip(first_turn_draft_path.as_deref()),
             );
             let mut agent_session_id = config.agent_session_id.clone();
             let mut repair_attempts = 0;
@@ -3844,15 +3872,52 @@ fn attached_note_draft_path(
 /// the `---` fallback instead of spending the single follow-up to learn
 /// how. The notice also says where the suggested next steps go
 /// ([`note_separator_fallback_next_steps`]), which the built prompt
-/// describes only as `write_note` arguments. Every other run gets the
-/// prompt unchanged.
+/// describes only as `write_note` arguments.
+///
+/// A note run with the tool whose start-of-run recovery turned down an
+/// earlier run's published note (`rejected_note`: the note and this run's
+/// draft path; see `note_outbox::OutboxRecovery::Rejected`) gets the repair
+/// request appended instead: a short notice of what Staged found, then the
+/// correction a live run sends for a submitted note
+/// ([`build_pikchr_correction_prompt`]), which points at the block's line in
+/// the draft. The recovery kept that draft, so the agent edits the text it
+/// wrote and publishes it again. Without this the note was removed and the
+/// agent, told nothing, wrote it again from memory.
+///
+/// Either addition goes to the agent only: the stored first user message is
+/// the prompt as built. Every other run gets the prompt unchanged.
 fn first_turn_prompt(
     prompt: String,
     is_note_session: bool,
     write_note_tool_attached: bool,
+    rejected_note: Option<(&note_outbox::RejectedNote, &str)>,
 ) -> String {
-    if !is_note_session || write_note_tool_attached {
+    if !is_note_session {
         return prompt;
+    }
+    if write_note_tool_attached {
+        let Some((rejected, draft_path)) = rejected_note else {
+            return prompt;
+        };
+        let correction = build_pikchr_correction_prompt(
+            &rejected.error,
+            PikchrErrorOrigin::SubmittedNote,
+            true,
+            Some(draft_path),
+        );
+        return format!(
+            "{prompt}\n\n\
+<action>\n\
+Before this run started, Staged found the note an earlier run of this session published, \
+\"{title}\", still waiting on the workstation. It was not stored, because one of its diagrams \
+does not parse; the details follow. Your draft file was left as that run wrote it, so repair \
+it there instead of writing the note again. If the message above also asks for changes to the \
+note, make those too: \"change nothing else\" below does not rule them out.\n\
+</action>\n\
+\n\
+{correction}",
+            title = rejected.title
+        );
     }
     let next_steps = note_separator_fallback_next_steps();
     format!(
@@ -4054,7 +4119,9 @@ note draft file, use its contents as the body. Do not create commits or change o
 /// unsettled. A draft seed that failed is different. By then the outbox was
 /// read, any waiting note ingested and the files removed, so the run is
 /// settled and only the agent's starting point is affected: it finds no
-/// draft, and `write_note` names the path to write.
+/// draft, and `write_note` names the path to write. A waiting note that was
+/// turned down for a broken Pikchr block is settled too: its publication was
+/// removed, and the draft that was kept is never collected.
 fn remote_outbox_recovery_settled_for_run(
     session_id: &str,
     recovery: Result<note_outbox::RunStartRecovery, String>,
@@ -4079,6 +4146,24 @@ fn remote_outbox_recovery_settled_for_run(
             );
             false
         }
+    }
+}
+
+/// The published note the start-of-run outbox recovery turned down for a
+/// Pikchr block that does not parse, for the run's first prompt
+/// ([`first_turn_prompt`]); `None` for every other recovery. Such a recovery
+/// is settled like any other that saw the outbox through
+/// ([`remote_outbox_recovery_settled_for_run`]): the publication is gone,
+/// and only the draft was kept.
+fn note_rejected_by_recovery(
+    recovery: &Result<note_outbox::RunStartRecovery, String>,
+) -> Option<note_outbox::RejectedNote> {
+    match recovery {
+        Ok(note_outbox::RunStartRecovery {
+            outbox: note_outbox::OutboxRecovery::Rejected(rejected),
+            ..
+        }) => Some(rejected.clone()),
+        _ => None,
     }
 }
 
@@ -4707,10 +4792,10 @@ struct RunEndForOutbox {
 ///   ([`RunEndOutboxClear::ClearUnlessRepublished`]). That recovery checks
 ///   the Pikchr blocks of whatever it finds, so a note the stamp does not
 ///   recognise (a repair turn's republish that is still broken) is not
-///   stored either. The stamp is kept beside that check because the
-///   detached sweep reads the outbox with any turn id and does not check: a
-///   rejected note left behind could reach it through a later run that
-///   could not settle its recovery and then lost its agent.
+///   stored either: the recovery keeps its draft and the next run opens
+///   with the repair request. The detached sweep checks too, so the stamp
+///   is no longer what keeps a rejected note out of the store. It is left
+///   in place, and taking it out is a separate cleanup.
 fn remote_outbox_clear_at_run_end(
     outbox_use: RemoteOutboxUse,
     completion_reason: &CompletionReason,
@@ -7487,6 +7572,13 @@ struct DetachedRecoveryOutcome {
 /// resumed meanwhile belongs to its new run, and `None` is returned so the
 /// caller emits nothing for it.
 ///
+/// A found note is checked before it goes anywhere: one with a Pikchr block
+/// that does not parse is not handed to `ingest`. No run is left to ask for
+/// a repair, so the row stays `detached` with
+/// [`detached_note_rejected_message`] and the outbox and the draft stay on
+/// the workstation, where a resume's start-of-run recovery turns the note
+/// into a repair request (`note_outbox::OutboxRecovery::Rejected`).
+///
 /// The row is written `completed` only after `ingest` reports the note
 /// stored, and the outbox is cleared only then: a note the hooks could not
 /// store stays on the workstation for a resume, and the row says so
@@ -7528,7 +7620,16 @@ fn finalize_detached_remote_note_session(
                 submission.title
             );
             let title = submission.title.clone();
-            if ingest(submission) {
+            if let Some(pikchr_error) = swept_note_pikchr_error(&submission) {
+                log::warn!(
+                    "Recovered detached remote session {session_id}: note \"{title}\" has a \
+                     Pikchr block at line {} that does not parse ({}); not storing it, leaving \
+                     it and its draft on the workstation for a resume to repair",
+                    pikchr_error.line_number,
+                    pikchr_error.message
+                );
+                RemoteNoteParkedState::Detached.note_rejected(ws_name, &title, &pikchr_error)
+            } else if ingest(submission) {
                 if let Err(e) = note_outbox::clear_outbox(exec, session_id) {
                     log::warn!(
                         "Recovered detached remote session {session_id}: failed to clear the \
@@ -7708,6 +7809,51 @@ fn detached_note_unstored_message(ws_name: &str, title: &str) -> String {
     )
 }
 
+/// The `error_message` of a `detached` row whose finished note the sweep
+/// found and did not store, because a Pikchr block in it does not parse
+/// (`error` is the first such block). Without a marker tail, so the row is
+/// not polled again. The outbox and the draft are kept: a Resume's
+/// start-of-run recovery finds the note, and its first prompt asks the agent
+/// to repair the draft (`note_outbox::OutboxRecovery::Rejected`).
+fn detached_note_rejected_message(
+    ws_name: &str,
+    title: &str,
+    error: &crate::pikchr_validation::PikchrValidationError,
+) -> String {
+    format!(
+        "Staged lost this session while the agent was running on {ws_name}; {}",
+        swept_note_rejected_detail(title, error)
+    )
+}
+
+/// What the sweep says about a found note it did not store for a Pikchr
+/// block that does not parse; the end of both parked states' messages
+/// ([`detached_note_rejected_message`],
+/// [`hold_stopped_note_rejected_message`]).
+fn swept_note_rejected_detail(
+    title: &str,
+    error: &crate::pikchr_validation::PikchrValidationError,
+) -> String {
+    format!(
+        "its note \"{title}\" is complete on the workstation, but the Pikchr block at line {} \
+         does not parse ({}), so the note was not stored. Resume to have the agent fix the \
+         diagram in its draft.",
+        error.line_number, error.message
+    )
+}
+
+/// The first Pikchr block of a note the sweep found that does not parse.
+/// Both sweep paths ask before they claim or store anything
+/// ([`finalize_detached_remote_note_session`],
+/// [`poll_detached_remote_note_session_once`]).
+fn swept_note_pikchr_error(
+    submission: &NoteSubmission,
+) -> Option<crate::pikchr_validation::PikchrValidationError> {
+    crate::pikchr_validation::validate_pikchr_blocks(&submission.body)
+        .into_iter()
+        .next()
+}
+
 /// The parked state a remote note row waits in while the sweep polls its
 /// workstation outbox. Both are rows whose turn is over on this side while
 /// the agent may still be writing on the workstation (Blox keeps the turn
@@ -7801,6 +7947,22 @@ impl RemoteNoteParkedState {
         self.parked_with(Some(message))
     }
 
+    /// The row when its found note has a Pikchr block that does not parse:
+    /// the note is not stored, and the outbox and the draft are kept for a
+    /// Resume to repair.
+    fn note_rejected(
+        self,
+        ws_name: &str,
+        title: &str,
+        error: &crate::pikchr_validation::PikchrValidationError,
+    ) -> DetachedRecoveryOutcome {
+        let message = match self {
+            Self::Detached => detached_note_rejected_message(ws_name, title, error),
+            Self::HoldStopped => hold_stopped_note_rejected_message(ws_name, title, error),
+        };
+        self.parked_with(Some(message))
+    }
+
     /// The row when the poll window ran out with no note on the workstation.
     fn expired(self, ws_name: &str) -> DetachedRecoveryOutcome {
         let message = match self {
@@ -7876,6 +8038,22 @@ fn hold_stopped_note_unstored_message(ws_name: &str, title: &str) -> String {
         "{}; its note \"{title}\" is complete on the workstation but could not be stored \
          here. Resume to collect it again.",
         hold_stopped_note_preamble(ws_name)
+    )
+}
+
+/// The message of a `completed`/`hold_stopped` row whose late note was found
+/// and not stored, because a Pikchr block in it does not parse. No marker
+/// tail, so the row is settled and drops out of the poll. The outbox and
+/// the draft are kept, and a Resume's first prompt asks for the repair.
+fn hold_stopped_note_rejected_message(
+    ws_name: &str,
+    title: &str,
+    error: &crate::pikchr_validation::PikchrValidationError,
+) -> String {
+    format!(
+        "{}; {}",
+        hold_stopped_note_preamble(ws_name),
+        swept_note_rejected_detail(title, error)
     )
 }
 
@@ -7980,7 +8158,8 @@ impl ObservedDetachedRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetachedNotePollAction {
     /// Not a row the sweep polls: another state, or a settled message (an
-    /// expired window, a known-bad note, a row from before polling existed).
+    /// expired window, a known-bad note, a note the sweep found and turned
+    /// down, a row from before polling existed).
     Skip,
     /// Inside the window: read the outbox.
     Poll,
@@ -8193,7 +8372,7 @@ fn poll_detached_remote_note_sessions(store: &Arc<Store>, app_handle: &AppHandle
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DetachedNotePollVisit {
     /// The row was settled: completed from its note, or left `detached` with
-    /// a new message (expired, unreachable, note unstored).
+    /// a new message (expired, unreachable, note unstored, note rejected).
     outcome: Option<DetachedRecoveryOutcome>,
     /// The outbox could not be read this visit.
     unreachable: bool,
@@ -8343,7 +8522,13 @@ enum DetachedNotePoll {
 /// hooks report the note stored: a note that could not be stored leaves the
 /// row `detached` with [`detached_note_unstored_message`] and the outbox
 /// intact, so a resume collects it — the same direction
-/// [`finalize_detached_remote_note_session`] fails in. No note yet, or no
+/// [`finalize_detached_remote_note_session`] fails in.
+///
+/// The note is checked before the claim: one with a Pikchr block that does
+/// not parse is never claimed or handed to `ingest`. The row is settled in
+/// its parked state with [`RemoteNoteParkedState::note_rejected`], through
+/// the same guarded write, and the outbox and the draft are kept for a
+/// resume to repair. No note yet, or no
 /// answer from the workstation, writes nothing: the row keeps its marker and
 /// `updated_at`, and the caller decides what the next tick does.
 fn poll_detached_remote_note_session_once(
@@ -8358,6 +8543,26 @@ fn poll_detached_remote_note_session_once(
     let label = parked.label();
     match note_outbox::collect_classified(exec, session_id, None) {
         Ok(OutboxState::Delivered(submission)) => {
+            if let Some(pikchr_error) = swept_note_pikchr_error(&submission) {
+                let outcome = parked.note_rejected(ws_name, &submission.title, &pikchr_error);
+                if observed.settle(store, session_id, &outcome).is_none() {
+                    log::info!(
+                        "{label} {session_id}: the workstation note has a Pikchr block that \
+                         does not parse, and another instance or a resume took the row first; \
+                         leaving it to them"
+                    );
+                    return DetachedNotePoll::Taken;
+                }
+                log::warn!(
+                    "{label} {session_id}: note \"{}\" has a Pikchr block at line {} that does \
+                     not parse ({}); not storing it, leaving it and its draft on the \
+                     workstation for a resume to repair",
+                    submission.title,
+                    pikchr_error.line_number,
+                    pikchr_error.message
+                );
+                return DetachedNotePoll::Settled(outcome);
+            }
             let claim = parked.storing_claim(ws_name);
             let Some(claim_stamp) = observed.settle(store, session_id, &claim) else {
                 log::info!(
@@ -9718,6 +9923,7 @@ mod tests {
     mod detached_turn_pickup;
     mod note_completion;
     mod note_draft;
+    mod swept_note_pikchr;
     mod taken_over_note;
     mod unread_run_end;
     use super::*;

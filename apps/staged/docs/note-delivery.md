@@ -117,6 +117,11 @@ What the file holds at run start depends on the stored note
   top of the draft as body text, so the seed must not strip one either: a
   body that opens with `# Section` comes back from a seed, an untouched
   republish and the store with that heading in place.
+- **Repair of a waiting note** (remote only): when the start-of-run
+  recovery finds a published note with a Pikchr block that does not parse,
+  the draft that note was published from is neither removed nor seeded
+  over, and the run opens with the repair request (_A waiting note with a
+  broken diagram_ below).
 
 When the run is over the local draft is removed. The remote draft is removed
 with the outbox and kept in the states that keep the outbox (below).
@@ -270,13 +275,14 @@ At remote note session start, the session runner:
    (`meta.json` that does not parse, a body that is not valid base64, a title
    the tool would reject) is logged, cleared and skipped, because nothing
    will ever make it ingestible. A waiting note is checked before it is
-   handed to the hooks: one with a Pikchr block that does not parse is
-   logged, cleared and not stored (`OutboxRecovery::Discarded`), which is
-   what a takeover does with such a note, and the run that is starting has
-   the agent write it again. No run is left to ask for a repair of it, and
-   this is the read that would otherwise store a note an earlier run had
-   rejected, had republished still broken, and then never read again (see
-   _Clear unless republished_ under _Collector_). Either way the server is
+   handed to the hooks: one with a Pikchr block that does not parse is not
+   stored. It is reported as `OutboxRecovery::Rejected` with the parse
+   error, and the run that is starting is the repair (see _A waiting note
+   with a broken diagram_ below). This is where a row the detached sweep
+   parked on a broken diagram ends up when the user resumes it, and it is
+   the read that would otherwise store a note an earlier run had rejected,
+   had republished still broken, and then never read again (see _Clear
+   unless republished_ under _Collector_). Either way the server is
    still attached and
    the run starts: a recovery failure must not cost the session its tool.
    The command that empties the outbox also puts `draft.md` in its
@@ -310,6 +316,38 @@ Linux shell shows a chunk that is too large. The seed is decoded into `.draft.md
 beside the draft and renamed into place. A chunked seed that fails part-way
 leaves that temp file behind, so every clear script removes it along with
 the draft; otherwise the session directory could never be removed.
+
+**A waiting note with a broken diagram.** The recovery does not store such
+a note, and it does not throw it away either. It used to clear the note
+with its draft and tell the agent nothing, so the agent wrote the note
+again from memory. Now:
+
+- one command removes the publication only
+  (`reject_published_note_script`): `done` first, then `meta.json` and
+  `note.md`. The run that is starting must not collect the old note as its
+  own, and no later reader may find it;
+- `draft.md` is not touched and the seed is not asked for
+  (`DraftSeed::Kept`), so the file is as the earlier run left it. That is
+  normally the text the note was published from. It can also be later text,
+  when a repair turn fixed the block and lost its connection before it
+  called `write_note`. When the earlier run left no draft at all, the same
+  command moves the rejected body into `draft.md`, so the file the prompt
+  names exists;
+- the rejected note (`RejectedNote`: its title and the first block that
+  does not parse) is carried to the run's first prompt. `first_turn_prompt`
+  appends a short notice of what Staged found and then the correction a
+  live run sends for a submitted note, which names the draft file and the
+  block's line in it and asks for an edit there and another `write_note`
+  call. Like the no-tool notice, this goes to the agent only, and the stored
+  first user message is the prompt as built;
+- the run counts as settled for the end-of-run clear, as after any
+  recovery that saw the outbox through. The kept draft therefore follows
+  the usual policy: it goes with the outbox when the run ends in a state
+  that clears it.
+
+If the removal command cannot be confirmed, the recovery is an error like
+any other failed clear: the run is unsettled, nothing is appended to the
+prompt, and the note stays for the next attempt.
 
 **The session directory exists from run start.** Before the draft file,
 the directory was created by the first `write_note` call. Now the run-start
@@ -533,11 +571,13 @@ removes a published note it has dealt with:
   that republished the same body is still a different note. A note the run
   read and found valid is never treated as rejected. The stamp cannot
   recognise a repair turn's republish that is still broken; that note stays
-  as unread, and the next run's start-of-run recovery checks it and discards
-  it (above). The stamp is kept beside that check, because the detached
-  sweep reads the outbox with any turn id and stores what it finds
-  unchecked: a rejected note left on the workstation could reach it through
-  a later run whose recovery did not settle and whose agent was then lost.
+  as unread, and the next run's start-of-run recovery checks it, does not
+  store it, and has the agent repair its draft (above). The stamp used to
+  be what kept a rejected note away from the detached sweep, which stored
+  what it found unchecked. The sweep checks now (_Polling a detached row_),
+  so a rejected note left on the workstation would be turned down again,
+  not stored. The stamp clear is left as it was; removing it is a separate
+  cleanup.
 - **Keep.** Five states leave the outbox and the draft untouched:
   - a run that never attached the Staged MCP on Blox, which has no outbox;
   - a lost connection with _no_ note found, because the agent may still
@@ -915,10 +955,9 @@ over and one read is conclusive:
   waits for a Resume.
 
 The failed ending reads the outbox instead of parking the row for the
-detached sweep. The sweep stores what it finds with no Pikchr check, its
-message says the agent may still be running when it has in fact answered,
-and it would replace the `remote_agent_lost` reason on a row that
-published nothing.
+detached sweep. The sweep's message says the agent may still be running
+when it has in fact answered, and it would replace the `remote_agent_lost`
+reason on a row that published nothing.
 
 A reattached turn that was stopped, or that the agent cancelled on its
 own, is not read. Its end-of-run clear follows the rule in _Collector_, so
@@ -972,8 +1011,8 @@ minute later. The 60 s sweep therefore keeps reading the outbox of every
   one `ws exec` read plus local writes) the claimant is taken to have died
   between its claim and its `completed` write, and the row is polled again
   rather than parked forever. A detached row with neither tail (an expired
-  window, an unreachable workstation, a known-bad note, a row written before
-  polling existed) is never polled.
+  window, an unreachable workstation, a known-bad note, a note the sweep
+  turned down, a row written before polling existed) is never polled.
 - **For how long.** 30 minutes (`DETACHED_NOTE_POLL_WINDOW`) from the row's
   `updated_at`, i.e. from the detaching write (or from a stale claim, which
   restamps it). Polls that find nothing write nothing to the row, so the
@@ -1017,6 +1056,22 @@ minute later. The 60 s sweep therefore keeps reading the outbox of every
   way: toward a `detached` row with the note still on the workstation,
   never toward a `completed` row with no note, and never toward two
   instances ingesting one note.
+- **Checked before it is claimed or stored.** Both sweep paths run the
+  Pikchr check on a found note first (`swept_note_pikchr_error`): the
+  startup recovery of a dead owner's row before it calls the hooks, and the
+  poll before its storing claim. The sweep was the one reader that did not
+  check, so a parked row whose agent had published a broken diagram was
+  completed with that note within a minute. No run is left to ask for a
+  repair, so a note with a block that does not parse is not stored. The row
+  stays `error` / `detached` and gets `detached_note_rejected_message`
+  through the same guarded write: "…its note "<title>" is complete on the
+  workstation, but the Pikchr block at line N does not parse (…), so the
+  note was not stored. Resume to have the agent fix the diagram in its
+  draft." The message has no marker tail, so the row is not polled again
+  and the chat pane shows it as written. The outbox and the draft are left
+  on the workstation, because the Resume is the repair: its start-of-run
+  recovery finds the note, keeps the draft and opens the run with the
+  correction (_A waiting note with a broken diagram_).
 - **How many at once.** Each poll is a `ws exec` round trip on its own
   thread, at most `DETACHED_NOTE_POLL_MAX_CONCURRENT` (2) in flight across
   polls and startup collections, served oldest-unpolled first across ticks,
@@ -1084,7 +1139,14 @@ ones (`RemoteNoteParkedState::HoldStopped`), with these differences:
   `updated_at` is in milliseconds, so without that guard a claim read
   before another instance's could land on the stored row if the whole store
   took under a millisecond. A note that cannot be stored leaves
-  `hold_stopped_note_unstored_message` and the outbox for a Resume. This is the one place an `error_message` is written on a
+  `hold_stopped_note_unstored_message` and the outbox for a Resume. A late
+  note with a Pikchr block that does not parse is not claimed or stored
+  either: the row gets `hold_stopped_note_rejected_message`, which settles
+  it, and the outbox and the draft stay for a Resume to repair, also past
+  the window. The row is `completed`, so the chat pane does not show that
+  message: the note stays empty, the hold-stopped copy and its Resume
+  button stay, and the reason is in the log and in the agent's first prompt
+  after the Resume. This is the one place an `error_message` is written on a
   completed row; the chat pane shows a completed row's message only for
   `error` / `cancelled` rows, so the marker is invisible there, the
   child-session status a project agent reads (`repo_session_payload`) omits
@@ -1220,6 +1282,18 @@ them by accident:
   Clearing at the end whatever the run had read was what the first version
   did: a run that reattached after its proxy died stored an empty note and
   then deleted the published one.
+- **A broken diagram found without a run is repaired by a Resume, not
+  stored and not deleted.** The sweep and the start-of-run recovery read a
+  published note when no run is left to ask for a repair. Storing it anyway
+  (what the sweep did) put a note with an unrendered diagram in the store
+  with nobody told. Deleting it (what the recovery did) cost the whole note:
+  the agent rewrote it from memory. So the sweep parks the row and keeps the
+  outbox and the draft, and the Resume's recovery turns the note into a
+  repair request against the kept draft. The two changes only work as a
+  pair. The check in the sweep alone would have sent the user to a Resume
+  that deleted the note. A run that loses its agent, or takes over a turn,
+  and then finds a broken note still clears it and asks for the note to be
+  written again; that path was not changed.
 - **Detached polling window.** 30 minutes from the detaching write, with
   one last poll before expiring. Shorter windows miss the agent finishing a
   long turn (Blox keeps the turn alive); longer ones keep spending `ws exec`
@@ -1369,6 +1443,22 @@ appeared in the workstation outbox; completing the session` and the note
    run's log shows `uncollected note … from an earlier run; ingesting it
 before this run starts`, the note row fills in before the new turn, and
    `~/.staged/sessions/<session-id>/` is gone afterwards.
+   Broken diagram: have the agent publish a note with a `pikchr` block that
+   does not parse and reach the detached sweep as above (or write such a
+   note by hand, step 5, into the outbox of a detached row, with a
+   `draft.md` beside it). The next sweep tick logs `has a Pikchr block at
+line N that does not parse … not storing it`, the note row stays empty,
+   and the chat pane shows "…its note "<title>" is complete on the
+   workstation, but the Pikchr block at line N does not parse (…), so the
+   note was not stored. Resume to have the agent fix the diagram in its
+   draft." with a Resume button. On the workstation `done`, `meta.json`,
+   `note.md` and `draft.md` are all still there. Press Resume: the log shows
+   `not storing it, keeping its draft for this run to repair` and `asking
+the agent to repair the Pikchr block at line N`, the outbox files are
+   gone while `draft.md` is unchanged, the agent edits the block in the
+   draft and calls `write_note`, and the note row fills in with the repaired
+   diagram. The chat shows only the resume message the user sent, not the
+   appended correction. This check has not been run against a workstation.
    Auth check: sign the remote agent out and start a remote note session;
    the row must end `crashed` with the auth message, not `detached`, and the
    log must show no `Detached remote session` polling for it.
@@ -1451,7 +1541,11 @@ and creates none, an amending run seeds it for branch and project notes, a
 body that opens with `# Section` survives seed, untouched republish and
 store twice over, the
 draft is removed at run end, a remote run start costs the same two commands
-with or without a seed, a failed seed leaves the recovery settled, the
+with or without a seed, a failed seed leaves the recovery settled and so
+does a rejected waiting note, only a rejected recovery carries a note to
+the first prompt, a run whose recovery rejected a note opens with the
+prompt as built, a notice and the unchanged submitted-note correction for
+this run's draft, the
 follow-up and Pikchr repair prompts name the
 draft, an error found in the reply makes no claim about the draft, a run
 without the tool is pointed at the `---` format and never asked to call
@@ -1475,7 +1569,10 @@ a whole rewrite made to land between the script's two file reads never
 collected as one note, two `write_note` calls writing different tokens,
 transport vs content failures,
 per-turn collection into the slot, start-of-run recovery that discards
-unusable content and a note with a broken Pikchr block, `write_note` run as a subprocess with fake JSON-RPC
+unusable content, and that rejects a note with a broken Pikchr block
+without storing it, removing only its publication and keeping the draft
+(recorded commands, a removal that cannot be confirmed, and a local `sh`
+run with the draft as published, edited since, and missing), `write_note` run as a subprocess with fake JSON-RPC
 including a rewrite blocked between its renames and a call with no
 `draft.md`, the clear removing `draft.md`, the seed riding the recovery's
 clear command and a seed too large for one command, a failed seed reported
@@ -1509,6 +1606,14 @@ interrupt counts only when the agent was silent throughout; the Stop copy
 promises no note; the crashed row's innermost sentence; the timeline flag;
 frontend marker parity for both suffixes, the Stop marker and the
 unread-outbox marker),
+`session_runner::tests::swept_note_pikchr` (neither sweep path stores a
+note with a broken diagram: the startup recovery and the poll leave the row
+`detached` with the rejected message and no marker, a stale storing claim
+is checked too, a resumed row is not overwritten, a hold-stopped row is
+settled in place and keeps its outbox inside and past the window; and,
+against a real shell, the sweep leaves the outbox and the draft, the
+Resume's recovery keeps the draft and opens the run with the correction,
+and the note republished from the repaired draft is the one stored),
 `remote_staged_mcp::note_outbox::tests` (a probe reports the note already
 collected as pending until its stamp or content changes; `FileCksum`
 agrees with the `cksum` command; against a real shell the guarded clear
@@ -1519,8 +1624,8 @@ republished or never-rejected note stays; a completed run whose last read
 failed is parked for the sweep with the turn-ended wording, which then
 stores the note, or settles from a second read that went through; a valid
 note the hooks never ran for is kept; a still-broken note a repair turn
-republished survives the guarded clear and is discarded, not stored, by
-the next run's recovery; a Stop during the second read ends the run as
+republished survives the guarded clear and is rejected, not stored, by
+the next run's recovery, with its draft kept; a Stop during the second read ends the run as
 stopped whatever the read returned, and a quit there does not),
 `session_runner::tests::taken_over_note` (the takeover endings,
 including a dead owner's turn answered as cancelled: a valid published

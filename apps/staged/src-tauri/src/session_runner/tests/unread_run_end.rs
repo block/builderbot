@@ -595,7 +595,9 @@ fn a_second_read_that_goes_through_decides_the_completed_run() {
 /// leaves a note with a new `writtenAt`: the guarded clear keeps it as one
 /// nobody has read, and the next Resume's start-of-run recovery used to
 /// store it with no Pikchr check. The recovery now checks the note it finds
-/// and discards one that does not pass. Against a real shell.
+/// and does not store one that fails: it reports the note as rejected,
+/// removes its publication and keeps the draft, for the run that is
+/// starting to repair. Against a real shell.
 #[test]
 fn a_still_broken_note_the_repair_turn_republished_is_never_stored_unchecked() {
     const STILL_BROKEN: &str = "Body, second try\n```pikchr\nboxx \"still bad\"\n```";
@@ -628,13 +630,25 @@ fn a_still_broken_note_the_repair_turn_republished_is_never_stored_unchecked() {
         // The Resume: the recovery finds the note, checks it, and does not
         // hand it to the hooks.
         let (recovery, ingested) = recovered_by_the_next_run(home.path());
-        assert_eq!(recovery, OutboxRecovery::Discarded, "{republished:?}");
+        assert!(
+            matches!(
+                &recovery,
+                OutboxRecovery::Rejected(rejected)
+                    if rejected.title == "Plan" && rejected.error.line_number == 2
+            ),
+            "{republished:?}: {recovery:?}"
+        );
         assert_eq!(ingested, Vec::<String>::new(), "{republished:?}");
-        // Discarded means cleared: the run that is starting does not trip
-        // over it, and nothing later reads it.
-        for file in ["done", "note.md", "meta.json", "draft.md"] {
+        // Rejected means the publication is gone: the run that is starting
+        // does not trip over it, and nothing later reads it. The draft it
+        // was published from stays for the repair.
+        for file in ["done", "note.md", "meta.json"] {
             assert!(!outbox.join(file).exists(), "{file} is gone");
         }
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+            republished
+        );
     }
 }
 

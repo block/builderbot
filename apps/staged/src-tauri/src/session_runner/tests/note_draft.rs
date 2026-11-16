@@ -43,6 +43,17 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// A published note the start-of-run recovery turned down.
+fn rejected_note() -> note_outbox::RejectedNote {
+    note_outbox::RejectedNote {
+        title: "Plan".to_string(),
+        error: crate::pikchr_validation::PikchrValidationError {
+            line_number: 12,
+            message: "syntax error near boxx".to_string(),
+        },
+    }
+}
+
 /// Records every workstation command; the collect script reads `collect_output`.
 fn recording_exec<'a>(
     collect_output: &'a str,
@@ -257,17 +268,19 @@ fn a_failed_draft_seed_leaves_the_recovery_settled() {
         DraftSeed::Absent,
         DraftSeed::Seeded,
         DraftSeed::Failed("no space left on device".to_string()),
+        DraftSeed::Kept,
     ] {
         for outbox in [
             OutboxRecovery::Empty,
             OutboxRecovery::Ingested,
             OutboxRecovery::Discarded,
+            OutboxRecovery::Rejected(rejected_note()),
         ] {
             assert!(
                 remote_outbox_recovery_settled_for_run(
                     "sess-1",
                     Ok(RunStartRecovery {
-                        outbox,
+                        outbox: outbox.clone(),
                         draft: draft.clone()
                     })
                 ),
@@ -657,7 +670,7 @@ fn a_note_run_without_the_tool_is_told_so_in_its_first_prompt() {
 
     let followup = note_write_followup_prompt(None);
     for draft in [local_without_tool, remote_without_tool] {
-        let prompt = first_turn_prompt(built.to_string(), true, draft.is_some());
+        let prompt = first_turn_prompt(built.to_string(), true, draft.is_some(), None);
         let notice = prompt
             .strip_prefix(built)
             .expect("the built prompt is kept, with the notice after it");
@@ -690,13 +703,16 @@ fn a_note_run_without_the_tool_is_told_so_in_its_first_prompt() {
     assert_eq!(remote_with_tool.as_deref(), Some(remote_draft));
     for draft in [local_with_tool, remote_with_tool] {
         assert_eq!(
-            first_turn_prompt(built.to_string(), true, draft.is_some()),
+            first_turn_prompt(built.to_string(), true, draft.is_some(), None),
             built
         );
     }
 
     // A session that writes no note never has the tool and gets no notice.
-    assert_eq!(first_turn_prompt(built.to_string(), false, false), built);
+    assert_eq!(
+        first_turn_prompt(built.to_string(), false, false, None),
+        built
+    );
 }
 
 /// The instructions of a note session describe the suggested next steps
@@ -716,7 +732,7 @@ fn the_no_tool_prompts_show_a_next_steps_block_the_fallback_parses() {
     );
 
     let built = "<action>\nWrite the note in your draft file, then call `write_note`.\n</action>";
-    let notice = first_turn_prompt(built.to_string(), true, false);
+    let notice = first_turn_prompt(built.to_string(), true, false, None);
     let followup = note_write_followup_prompt(None);
     let next_steps = note_separator_fallback_next_steps();
     for prompt in [&notice, &followup] {
@@ -762,9 +778,99 @@ fn the_no_tool_prompts_show_a_next_steps_block_the_fallback_parses() {
     assert!(!repair.contains("suggested-next-steps"), "{repair}");
 
     // A run with the tool attached is never shown the block.
-    assert_eq!(first_turn_prompt(built.to_string(), true, true), built);
+    assert_eq!(
+        first_turn_prompt(built.to_string(), true, true, None),
+        built
+    );
     assert!(
         !note_write_followup_prompt(Some("/tmp/draft.md")).contains("```suggested-next-steps"),
         "the follow-up of a run with the tool asks for the argument"
+    );
+}
+
+/// A run whose start-of-run recovery turned down an earlier run's published
+/// note opens with the repair request: the prompt as built, a notice of what
+/// Staged found, then the correction a live run sends for a submitted note,
+/// pointing at the block's line in this run's draft. The recovery kept that
+/// draft, so the agent is asked to edit it, not to write the note again.
+#[test]
+fn a_run_whose_recovery_rejected_a_note_opens_with_the_repair_request() {
+    let built = "Continue.";
+    let draft = "/home/u/.staged/sessions/sess-1/draft.md";
+    let rejected = rejected_note();
+
+    let prompt = first_turn_prompt(built.to_string(), true, true, Some((&rejected, draft)));
+    let added = prompt
+        .strip_prefix(built)
+        .expect("the built prompt is kept, with the repair request after it");
+    let correction = build_pikchr_correction_prompt(
+        &rejected.error,
+        PikchrErrorOrigin::SubmittedNote,
+        true,
+        Some(draft),
+    );
+    let notice = added
+        .strip_suffix(correction.as_str())
+        .expect("the request ends with the submitted-note correction, unchanged");
+    assert!(notice.starts_with("\n\n<action>\n"), "{notice}");
+    assert!(notice.ends_with("\n</action>\n\n"), "{notice}");
+    for said in [
+        "an earlier run of this session published, \"Plan\"",
+        "It was not stored",
+        "Your draft file was left as that run wrote it",
+        "instead of writing the note again",
+    ] {
+        assert!(notice.contains(said), "{said}: {notice}");
+    }
+    // The correction is the one that may say what the draft holds: the
+    // file, the line in it, the parser's message and the call to make.
+    for said in [
+        "Your draft file `/home/u/.staged/sessions/sess-1/draft.md` holds the note you saved",
+        "starting at line 12 of the note body in that file",
+        "syntax error near boxx",
+        "call `write_note` again",
+    ] {
+        assert!(correction.contains(said), "{said}: {correction}");
+    }
+
+    // Only a note run with the tool is asked for the repair. The recovery
+    // runs only once the Staged MCP on Blox is installed, so the other two
+    // states do not occur; they keep their own prompt all the same.
+    assert_eq!(
+        first_turn_prompt(built.to_string(), false, false, Some((&rejected, draft))),
+        built
+    );
+    assert_eq!(
+        first_turn_prompt(built.to_string(), true, false, Some((&rejected, draft))),
+        first_turn_prompt(built.to_string(), true, false, None)
+    );
+}
+
+/// Which recoveries hand the first prompt a note to repair, and that such a
+/// recovery still counts as having settled the outbox for the end-of-run
+/// clear.
+#[test]
+fn only_a_rejected_recovery_carries_a_note_to_the_first_prompt() {
+    let rejected = Ok(RunStartRecovery {
+        outbox: OutboxRecovery::Rejected(rejected_note()),
+        draft: DraftSeed::Kept,
+    });
+    assert_eq!(note_rejected_by_recovery(&rejected), Some(rejected_note()));
+    assert!(remote_outbox_recovery_settled_for_run("sess-1", rejected));
+
+    for outbox in [
+        OutboxRecovery::Empty,
+        OutboxRecovery::Ingested,
+        OutboxRecovery::Discarded,
+    ] {
+        let recovery = Ok(RunStartRecovery {
+            outbox,
+            draft: DraftSeed::Absent,
+        });
+        assert_eq!(note_rejected_by_recovery(&recovery), None, "{recovery:?}");
+    }
+    assert_eq!(
+        note_rejected_by_recovery(&Err("workstation suspended".to_string())),
+        None
     );
 }

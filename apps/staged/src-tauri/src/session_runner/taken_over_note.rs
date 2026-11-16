@@ -210,8 +210,8 @@ impl TakenOverNote {
     /// - An outbox that could not be read: the run fails with its own error
     ///   too. It is not parked for the sweep as a completed turn is: the
     ///   failure names why the agent was lost, which a polling message would
-    ///   replace, and the sweep stores what it finds without the Pikchr
-    ///   check. The outbox was not read, so the end-of-run clear removes
+    ///   replace, and whose text says the agent may still be running when it
+    ///   has answered. The outbox was not read, so the end-of-run clear removes
     ///   only an unpublished one and a published note waits for a Resume.
     pub(super) fn run_end_of_failed_turn(self, takeover: &str, error: &str) -> TakenOverRunEnd {
         match self {

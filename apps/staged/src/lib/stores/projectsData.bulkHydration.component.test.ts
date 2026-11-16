@@ -445,8 +445,8 @@ describe('bulk hydration: load generation', () => {
     const sweep = store.ensureProjectsHydrated();
     await settle();
 
-    // A project write somewhere: the list reloads under a new generation.
-    emit('project-changed', { projectId: 'p1' });
+    // The change feed lost track: the list reloads under a new generation.
+    emit('project-changed', { projectId: null });
     await settle();
     stale.resolve(swr(branchesOf('stale')));
     await sweep;
@@ -473,7 +473,7 @@ describe('bulk hydration: load generation', () => {
     const sweep = store.ensureProjectsHydrated();
     await settle();
 
-    emit('project-changed', { projectId: 'p1' });
+    emit('project-changed', { projectId: null });
     await settle();
     // The reload's own background hydration: a second bulk read.
     idle.run();
@@ -755,7 +755,7 @@ describe('bulk hydration: cached reads (web)', () => {
     store.startListeners();
     await store.ensureProjectsHydrated();
 
-    emit('project-changed', { projectId: 'p1' });
+    emit('project-changed', { projectId: null });
     await settle();
     fresh.resolve(branchesOf('late'));
     freshRepos.resolve(reposOf('late'));
@@ -810,14 +810,17 @@ describe('bulk hydration: cached reads (web)', () => {
 });
 
 describe('bulk hydration: reloads', () => {
-  it('rehydrates every project with one bulk read after a project write', async () => {
+  it('rehydrates every project with one bulk read after a hard reload', async () => {
     const { store, idle } = await loadedStore();
     store.startListeners();
     await store.ensureProjectsHydrated();
     listBranchesByProject.mockResolvedValue(swr(branchesOf('reloaded')));
     listProjectReposByProject.mockResolvedValue(swr(reposOf('reloaded')));
 
-    emit('project-changed', { projectId: 'p2' });
+    // An event that names no project is the hard reload (the feed's lag
+    // recovery). One that names its project refetches that project alone:
+    // see projectsData.projectChanged.component.test.ts.
+    emit('project-changed', { projectId: null });
     await settle();
     // Painted views keep what they show until the idle step refreshes it.
     expect(branchNames(store).p1).toBe('bulk');
@@ -844,9 +847,9 @@ describe('bulk hydration: reloads', () => {
     store.startListeners();
     await store.ensureProjectsHydrated();
 
-    emit('project-changed', { projectId: 'p1' });
+    emit('project-changed', { projectId: null });
     await settle();
-    emit('project-changed', { projectId: 'p2' });
+    emit('project-changed', { projectId: null });
     await settle();
     idle.run();
     await settle();
@@ -862,7 +865,7 @@ describe('bulk hydration: reloads', () => {
     store.startListeners();
     await store.ensureProjectsHydrated();
 
-    emit('project-changed', { projectId: 'p1' });
+    emit('project-changed', { projectId: null });
     await settle();
     // The selected project and one more are read before the idle step runs.
     await store.hydrateProject('p1');

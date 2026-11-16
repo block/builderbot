@@ -127,8 +127,8 @@ pub enum StoreChange {
     Repos { github_repo: Option<String> },
     /// Tag groups, tags, or project tag assignments changed. No ids: the
     /// whole `TagState` is small enough to refetch every time. Deliberately
-    /// not [`StoreChange::Project`], whose event hard-reloads the project
-    /// list and restarts hydration for every project.
+    /// not [`StoreChange::Project`], whose event reloads the project list
+    /// and refetches the branches and repos of the project it names.
     Tags,
 }
 

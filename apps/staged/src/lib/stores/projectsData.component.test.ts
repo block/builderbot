@@ -633,7 +633,7 @@ describe('hydration readiness', () => {
     expect(store.isProjectHydrated('p1')).toBe(true);
   });
 
-  it('runs the queued follow-up hard when a project-changed reload overlaps a soft re-entry', async () => {
+  it('runs the queued follow-up hard when a hard reload overlaps a soft re-entry', async () => {
     freezeBackgroundHydration();
     const store = await importStore();
     store.startListeners();
@@ -646,8 +646,9 @@ describe('hydration readiness', () => {
       })
     );
     await store.ensureLoaded();
-    // Queued behind the soft re-entry: forced and hard.
-    emit('project-changed', { projectId: 'p1' });
+    // Queued behind the soft re-entry: forced and hard, as the event names
+    // no project (the change feed's lag recovery).
+    emit('project-changed', { projectId: null });
 
     let resolveBranches!: (value: SwrResult<Branch[]>) => void;
     let resolveRepos!: (value: SwrResult<ProjectRepo[]>) => void;
@@ -2033,7 +2034,8 @@ describe('project-delete lifecycle', () => {
     });
 
     // Fetched before the backend delete — applying it would resurrect p2,
-    // but the post-delete reload's generation bump discards it.
+    // but it was sent before the post-delete reload, whose list has landed,
+    // so it is refused.
     resolveFresh([project(), beta]);
     await tick();
 

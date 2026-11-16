@@ -6,8 +6,8 @@
  * snapshot — small enough to refetch on every `tags-changed` — plus an
  * overlay of pending assignment writes, so a pick repaints every surface at
  * once. Tags live apart from the project list on purpose: a tag write
- * publishes `tags-changed`, never `project-changed`, whose hard reload
- * restarts every project's branch and repo hydration.
+ * publishes `tags-changed`, never `project-changed`, which reloads the
+ * project list and refetches the project's branches and repos.
  *
  * Freshness is a seq-guarded snapshot. Each `get_tag_state` request takes
  * the next `fetchSeq`, and its response applies only when it is newer than

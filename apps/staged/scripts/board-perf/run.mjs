@@ -383,7 +383,9 @@ async function runOnce(browser, n, view) {
     cdp,
     label('project-changed (any project write)'),
     () => emit(page, 'project-changed', { projectId: project.id }),
-    // The reload this starts is paced by idle time, so allow for longer gaps.
+    // A hard reload is paced by idle time, so allow for longer gaps. The
+    // targeted reload a named project starts is not, and keeps the same
+    // window so the rows stay comparable.
     { quiet: 2000 }
   );
 

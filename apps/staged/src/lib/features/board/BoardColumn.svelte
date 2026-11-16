@@ -319,8 +319,9 @@
   }
 
   /* The drop feedback a card gets from the column's border, made visible on
-     the strip: :hover doesn't apply during a drag, and the strip is the
-     whole column. */
+     the strip, which is the whole column. No :hover competes with it: the
+     board takes the pointer off its contents while a card is in hand
+     (ProjectsBoard). */
   .collapsed-strip.drop-target {
     background: color-mix(in srgb, var(--ui-accent) 14%, transparent);
     color: var(--ui-accent);

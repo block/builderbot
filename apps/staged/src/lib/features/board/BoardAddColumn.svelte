@@ -134,8 +134,7 @@
     color: var(--text-primary);
   }
 
-  /* A card can't be dropped here. Over the hover styles, which a card
-     dragged across the + sets off too. */
+  /* A card can't be dropped here. */
   .refusing .add-trigger {
     border-color: var(--ui-danger);
     background: var(--ui-danger-bg);

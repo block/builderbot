@@ -1,12 +1,15 @@
 // The card drag gesture against a real DOM: which presses become drags, how
-// a drag ends, and that a drag never leaves a click behind to open the card.
-// Then what the pointer is over, and the scrolling under a card held at the
-// board's side, a frame at a time with the frames run by hand.
+// a drag ends, and that a drag never leaves a click behind to open the card,
+// nor eats one that isn't its own. Then what the pointer is over, and the
+// scrolling under a card held at the board's side, a frame at a time with
+// the frames run by hand.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createCardDrag,
   createEdgeScroll,
   DRAG_START_DISTANCE,
+  dropTargetAcross,
+  dropTargetAt,
   dropTargetOf,
   type CardDrag,
   type CardDragHandlers,
@@ -186,6 +189,55 @@ describe('createCardDrag', () => {
     expect(handlers.end).toHaveBeenCalledWith(null);
   });
 
+  it('leaves a keyboard click alone after a release it never saw', async () => {
+    card.dispatchEvent(pointer('pointerdown', 10, 10));
+    window.dispatchEvent(pointer('pointermove', 60, 10));
+    // Let go outside the window: no pointerup, and no click, is coming.
+    window.dispatchEvent(pointer('pointermove', 80, 10, { buttons: 0 }));
+    await nextTask();
+
+    // Enter on the focused card, with no press before it.
+    card.click();
+    expect(clicked).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a keyboard click alone while a called-off drag’s button is still down', async () => {
+    for (const callOff of [
+      () => window.dispatchEvent(new Event('blur')),
+      () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+      () => drag.cancel(),
+    ]) {
+      clicked.mockClear();
+      card.dispatchEvent(pointer('pointerdown', 10, 10));
+      window.dispatchEvent(pointer('pointermove', 60, 10));
+      callOff();
+
+      // The release may be a long time coming, or never seen: a click
+      // before it is somebody else's.
+      card.click();
+      expect(clicked).toHaveBeenCalledTimes(1);
+      await nextTask();
+      card.click();
+      expect(clicked).toHaveBeenCalledTimes(2);
+
+      // The release's own click, when it does come, still opens nothing.
+      window.dispatchEvent(pointer('pointerup', 60, 10));
+      card.click();
+      expect(clicked).toHaveBeenCalledTimes(2);
+      await nextTask();
+    }
+  });
+
+  it('forgets a called-off drag’s click when its pointer is lost', async () => {
+    card.dispatchEvent(pointer('pointerdown', 10, 10));
+    window.dispatchEvent(pointer('pointermove', 60, 10));
+    window.dispatchEvent(new Event('blur'));
+    window.dispatchEvent(pointer('pointercancel', 60, 10));
+
+    card.click();
+    expect(clicked).toHaveBeenCalledTimes(1);
+  });
+
   it('follows the page scrolling under a held card', () => {
     card.dispatchEvent(pointer('pointerdown', 10, 10));
     window.dispatchEvent(pointer('pointermove', 60, 10));
@@ -285,10 +337,112 @@ describe('dropTargetOf', () => {
   });
 });
 
+describe('dropTargetAcross', () => {
+  /** Three 100px-wide zones, 10px apart, from x = 20: done, "No ‹group›", the + column. */
+  function board(): HTMLElement {
+    const el = document.createElement('div');
+    el.innerHTML = `
+      <section data-board-column="done"></section>
+      <section data-board-column="__none__"></section>
+      <div data-board-no-drop></div>`;
+    [...el.children].forEach((zone, i) => {
+      const left = 20 + i * 110;
+      zone.getBoundingClientRect = () =>
+        ({ left, right: left + 100, top: 0, bottom: 40 }) as DOMRect;
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  it('names the column or + column whose width the pointer is within', () => {
+    const el = board();
+    expect(dropTargetAcross(20, el)).toEqual({ kind: 'column', key: 'done' });
+    expect(dropTargetAcross(119, el)).toEqual({ kind: 'column', key: 'done' });
+    expect(dropTargetAcross(180, el)).toEqual({ kind: 'column', key: '__none__' });
+    expect(dropTargetAcross(300, el)).toEqual({ kind: 'add-column' });
+  });
+
+  it('is nothing before the first column, in a gap, or past the last', () => {
+    const el = board();
+    expect(dropTargetAcross(19, el)).toBeNull();
+    expect(dropTargetAcross(120, el)).toBeNull();
+    expect(dropTargetAcross(125, el)).toBeNull();
+    expect(dropTargetAcross(340, el)).toBeNull();
+  });
+});
+
+describe('dropTargetAt', () => {
+  let under: Element | null;
+
+  /**
+   * A frame holding a board of two 100px columns, done from x = 0 and doing
+   * from x = 110, and a chevron laid over the board's side.
+   */
+  function frame(): { frame: HTMLElement; board: HTMLElement } {
+    const el = document.createElement('div');
+    el.innerHTML = `
+      <div id="board">
+        <section data-board-column="done"><button id="card">Card</button></section>
+        <section data-board-column="doing"></section>
+      </div>
+      <button id="chevron">›</button>`;
+    const board = el.querySelector<HTMLElement>('#board')!;
+    [...board.children].forEach((zone, i) => {
+      const left = i * 110;
+      zone.getBoundingClientRect = () =>
+        ({ left, right: left + 100, top: 0, bottom: 40 }) as DOMRect;
+    });
+    document.body.appendChild(el);
+    return { frame: el, board };
+  }
+
+  beforeEach(() => {
+    under = null;
+    document.elementFromPoint = () => under;
+  });
+
+  afterEach(() => {
+    delete (document as Partial<Document>).elementFromPoint;
+  });
+
+  it('names the column the pointer is on, wherever the pointer is across it', () => {
+    const { frame: el, board } = frame();
+    under = el.querySelector('#card');
+    // The element decides: a card of done, though x is in line with doing.
+    expect(dropTargetAt({ x: 150, y: 10 }, board, el)).toEqual({ kind: 'column', key: 'done' });
+  });
+
+  it('names the column in line with the pointer under a short column', () => {
+    const { frame: el, board } = frame();
+    // Below doing's last card there is only the board itself.
+    under = board;
+    expect(dropTargetAt({ x: 150, y: 300 }, board, el)).toEqual({ kind: 'column', key: 'doing' });
+    expect(dropTargetAt({ x: 50, y: 300 }, board, el)).toEqual({ kind: 'column', key: 'done' });
+    // The gap between the two is still no column's.
+    expect(dropTargetAt({ x: 105, y: 300 }, board, el)).toBeNull();
+  });
+
+  it('names the column under what the frame lays over the board', () => {
+    const { frame: el, board } = frame();
+    under = el.querySelector('#chevron');
+    expect(dropTargetAt({ x: 190, y: 20 }, board, el)).toEqual({ kind: 'column', key: 'doing' });
+    // Without a frame, only the board's own space counts.
+    expect(dropTargetAt({ x: 190, y: 20 }, board)).toBeNull();
+  });
+
+  it('is nothing off the board, or where something else covers it', () => {
+    const { frame: el, board } = frame();
+    // A dialog over the board, in line with a column.
+    under = document.body;
+    expect(dropTargetAt({ x: 150, y: 20 }, board, el)).toBeNull();
+    under = null;
+    expect(dropTargetAt({ x: 150, y: 20 }, board, el)).toBeNull();
+  });
+});
+
 describe('createEdgeScroll', () => {
   let frames: FrameRequestCallback[];
   let point: DragPoint | null;
-  let scrolled: ReturnType<typeof vi.fn<() => void>>;
 
   /** An 800px-wide view, 400px tall, over 2000px of columns. */
   function scroller(): HTMLElement {
@@ -315,12 +469,11 @@ describe('createEdgeScroll', () => {
   }
 
   function edgeScroll(el: HTMLElement) {
-    return createEdgeScroll({ scroller: () => el, point: () => point, scrolled });
+    return createEdgeScroll({ scroller: () => el, point: () => point });
   }
 
   beforeEach(() => {
     frames = [];
-    scrolled = vi.fn<() => void>();
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
       frames.push(callback)
     );
@@ -344,7 +497,6 @@ describe('createEdgeScroll', () => {
     expect(el.scrollLeft).toBe(DRAG_SCROLL_MAX_SPEED / 100);
     frame(1020);
     expect(el.scrollLeft).toBe(DRAG_SCROLL_MAX_SPEED / 50);
-    expect(scrolled).toHaveBeenCalledTimes(2);
 
     point = { x: 0, y: 300 };
     frame(1030);

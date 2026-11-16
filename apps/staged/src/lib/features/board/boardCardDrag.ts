@@ -13,9 +13,10 @@
  * otherwise end in (a card released over itself) is swallowed, so dragging a
  * card never opens it.
  *
- * Also here: reading what the pointer is over off the board's markup, and
- * scrolling the columns under a card held at the board's side, which a
- * native drag would have done for itself.
+ * Also here: reading what the pointer is over off the board's markup and,
+ * over the board's empty space, off where its columns lie; and scrolling the
+ * columns under a card held at the board's side, which a native drag would
+ * have done for itself.
  */
 
 import { edgeScrollVelocity, overflowEdges } from './boardScroll';
@@ -50,6 +51,13 @@ export interface CardDrag {
 /** What a dragged card is over: a column, or the trailing + column. */
 export type BoardDropTarget = { kind: 'column'; key: string } | { kind: 'add-column' };
 
+const DROP_ZONES = '[data-board-column], [data-board-no-drop]';
+
+function targetOfZone(zone: HTMLElement): BoardDropTarget {
+  const key = zone.dataset.boardColumn;
+  return key === undefined ? { kind: 'add-column' } : { kind: 'column', key };
+}
+
 /**
  * The drop target `element` belongs to, by the board's own markers: a
  * column's `data-board-column`, or `data-board-no-drop` on what takes no
@@ -57,10 +65,39 @@ export type BoardDropTarget = { kind: 'column'; key: string } | { kind: 'add-col
  */
 export function dropTargetOf(element: Element | null, board: Element): BoardDropTarget | null {
   if (!element || !board.contains(element)) return null;
-  const zone = element.closest<HTMLElement>('[data-board-column], [data-board-no-drop]');
+  const zone = element.closest<HTMLElement>(DROP_ZONES);
   if (!zone || !board.contains(zone)) return null;
-  const key = zone.dataset.boardColumn;
-  return key === undefined ? { kind: 'add-column' } : { kind: 'column', key };
+  return targetOfZone(zone);
+}
+
+/**
+ * The drop target of `board` whose width `x` falls in, however far down the
+ * board the pointer is. Null in the gaps between columns and past the last.
+ */
+export function dropTargetAcross(x: number, board: Element): BoardDropTarget | null {
+  for (const zone of board.querySelectorAll<HTMLElement>(DROP_ZONES)) {
+    const box = zone.getBoundingClientRect();
+    if (x >= box.left && x < box.right) return targetOfZone(zone);
+  }
+  return null;
+}
+
+/**
+ * What a card held at `point` is over. On a column or the + column, that
+ * (dropTargetOf). On the board's own empty space, the one `point` is in line
+ * with (dropTargetAcross): columns are only as tall as their cards, so the
+ * space under a short one is no column's, and neither is what `frame` lays
+ * over the columns (the scroll edges' chevrons); `frame` holds `board` and
+ * those. Null off the board, and where something else is over it.
+ */
+export function dropTargetAt(
+  point: DragPoint,
+  board: Element,
+  frame: Element = board
+): BoardDropTarget | null {
+  const element = document.elementFromPoint(point.x, point.y);
+  if (!element || !frame.contains(element)) return null;
+  return dropTargetOf(element, board) ?? dropTargetAcross(point.x, board);
 }
 
 function pointOf(event: PointerEvent): DragPoint {
@@ -68,32 +105,34 @@ function pointOf(event: PointerEvent): DragPoint {
 }
 
 /**
- * Swallow the click the press in progress ends in. `released` says the
- * pointer is already up, so the click, if there is one, comes within this
- * task; otherwise the wait runs until the press ends, or a new one starts.
+ * Swallow the click the press in progress ends in. A click follows its
+ * pointerup within the task, so a click is swallowed for that long and no
+ * longer: any other click (a key on a focused button, `click()`) is not the
+ * drag's, and is left alone however long the release takes to come, or if it
+ * never does. `released` says the pointer is up already; otherwise the wait
+ * is for the press to end, or for a new one to start.
  */
 function swallowPressClick(released: boolean): void {
   const swallow = (event: Event) => {
     event.preventDefault();
     event.stopPropagation();
-    done();
+    disarm();
   };
-  const done = () => {
-    window.removeEventListener('click', swallow, true);
-    window.removeEventListener('pointerup', soon, true);
-    window.removeEventListener('pointercancel', soon, true);
-    window.removeEventListener('pointerdown', done, true);
+  const disarm = () => window.removeEventListener('click', swallow, true);
+  const arm = () => {
+    forget();
+    window.addEventListener('click', swallow, true);
+    setTimeout(disarm, 0);
   };
-  // A click follows its pointerup within the task.
-  const soon = () => setTimeout(done, 0);
-  window.addEventListener('click', swallow, true);
-  if (released) {
-    soon();
-  } else {
-    window.addEventListener('pointerup', soon, true);
-    window.addEventListener('pointercancel', soon, true);
-    window.addEventListener('pointerdown', done, true);
-  }
+  const forget = () => {
+    window.removeEventListener('pointerup', arm, true);
+    window.removeEventListener('pointercancel', forget, true);
+    window.removeEventListener('pointerdown', forget, true);
+  };
+  if (released) return arm();
+  window.addEventListener('pointerup', arm, true);
+  window.addEventListener('pointercancel', forget, true);
+  window.addEventListener('pointerdown', forget, true);
 }
 
 export function createCardDrag(handlers: CardDragHandlers): CardDrag {
@@ -108,8 +147,9 @@ export function createCardDrag(handlers: CardDragHandlers): CardDrag {
 
   function onMove(event: PointerEvent) {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
-    // The release happened where the page couldn't see it.
-    if (event.buttons === 0) return finish(null, false);
+    // The release happened where the page couldn't see it: the press is
+    // over, with no pointerup still to come.
+    if (event.buttons === 0) return finish(null, true);
     const point = pointOf(event);
     gesture.last = point;
     if (!gesture.dragging) {
@@ -169,7 +209,12 @@ export function createCardDrag(handlers: CardDragHandlers): CardDrag {
     window.removeEventListener('blur', onBlur);
   }
 
-  /** End the gesture: a drop at `point`, or called off with null. */
+  /**
+   * End the gesture: a drop at `point`, or called off with null. `released`
+   * says the press is over too; a drag called off with the button still down
+   * (Escape, the window losing focus) has its release, and the click that
+   * may end in, yet to come.
+   */
   function finish(point: DragPoint | null, released: boolean) {
     if (!gesture) return;
     const wasDragging = gesture.dragging;
@@ -217,8 +262,8 @@ const MAX_FRAME_MS = 50;
  * Scroll `scroller` sideways while a dragged card is held near one of its
  * sides (edgeScrollVelocity), a frame at a time for as long as it stays there
  * and there is more to show. `point` is where the card is, null once it is
- * let go; `scrolled` is told after each step, since what is under a still
- * pointer has changed.
+ * let go. What is under a still pointer changes with each step; the drag
+ * hears that as it hears any scroll (CardDragHandlers.move).
  *
  * It scrolls whole pixels and carries the rest over: a scroller rounds a
  * fraction of a pixel away, which would read as having reached the end.
@@ -226,7 +271,6 @@ const MAX_FRAME_MS = 50;
 export function createEdgeScroll(options: {
   scroller: () => HTMLElement | null;
   point: () => DragPoint | null;
-  scrolled: () => void;
 }): EdgeScroll {
   let frame = 0;
   let frameAt: number | null = null;
@@ -250,7 +294,6 @@ export function createEdgeScroll(options: {
     if (whole !== 0) {
       owed -= whole;
       el.scrollLeft += whole;
-      options.scrolled();
     }
     frame = requestAnimationFrame(step);
   }

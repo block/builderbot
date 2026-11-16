@@ -31,7 +31,17 @@
   replyDrafts.editLiveQuoteReply) rather than adding another, and closing
   works as above. Reopened, the field also has a Remove button, which takes
   the block out of the draft; a new reply's field has nothing to press, as
-  before.
+  before. Selecting exactly the passage a block already quotes and pressing
+  Reply reopens that block the same way (`existingQuote`), instead of
+  putting a second block on the same words. A block that leaves the draft
+  from elsewhere while its field is open takes the field with it
+  (`closeQuote`).
+
+  A field opened by a key press on a mark gives focus back to that quote's
+  mark when a key closes it: the mark as the note has it then, since the
+  marks are rebuilt whenever the note re-renders. When the mark is gone
+  (Remove, or the passage no longer in the note) the dialog (`sheetHost`)
+  takes focus, so the keyboard is not left on an element that has gone.
 
   Rendered inside the note's scroll container (`scrollEl`, which must be
   positioned), so the button scrolls with the text it belongs to. While the
@@ -72,7 +82,7 @@
   import type { LiveQuoteReply } from '../sessions/replyDrafts';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { viewport } from '../../shared/viewport.svelte';
-  import { quoteHighlightRange } from './noteQuoteHighlights';
+  import { quoteHighlightRange, quoteHighlightStop } from './noteQuoteHighlights';
   import { captureQuoteAnchor } from './noteQuoteLocation';
   import { quoteFromSelection, replyButtonOffset, type NoteSelectionQuote } from './noteSelection';
 
@@ -87,7 +97,11 @@
     chatOpen: boolean;
     /** The chat composer shows the draft beside the note: quotes go straight into it. */
     chatVisible: boolean;
-    /** On a phone the reply field is a sheet in this element (the dialog) rather than a popover. */
+    /**
+     * The dialog around the note. On a phone the reply field is a sheet in
+     * it rather than a popover; at any size it takes focus when a closing
+     * field has no mark to give it back to.
+     */
     sheetHost?: HTMLElement | null;
     /** On a phone the Reply button is docked in this element (above the note's bottom bar). */
     dockHost?: HTMLElement | null;
@@ -101,6 +115,8 @@
     onReply: (quote: NewDraftQuote) => LiveQuoteReply;
     /** Chat hidden: keep the reply of a block already in the draft current as it is edited here. */
     onEdit?: (quote: DraftQuote) => LiveQuoteReply;
+    /** Chat hidden: the block already quoting exactly the passage `quote` was selected at, if any. */
+    existingQuote?: (quote: NewDraftQuote) => DraftQuote | null;
     /** The quotes the note marks in its text (NoteQuoteHighlights). */
     markedQuoteIds?: readonly string[];
     /** The block the open field writes the reply of, or null with no field open. */
@@ -120,6 +136,7 @@
     onAdd,
     onReply,
     onEdit,
+    existingQuote,
     markedQuoteIds = [],
     onActiveQuoteChange,
   }: Props = $props();
@@ -148,8 +165,8 @@
   let activeQuoteId = $state<string | null>(null);
   /** The field was opened on a block already in the draft (`editQuote`), not by a selection. */
   let editing = $state(false);
-  /** The mark a key press opened the field from, which takes focus back as it closes. */
-  let focusReturn: HTMLElement | null = null;
+  /** A key press on the block's mark opened the field: the mark takes focus back as a key closes it. */
+  let openedByKey = false;
   let replyEl = $state<HTMLTextAreaElement | null>(null);
   let buttonEl = $state<HTMLElement | null>(null);
   let dockButtonEl = $state<HTMLElement | null>(null);
@@ -416,6 +433,11 @@
       ? captureQuoteAnchor(contentEl, current.range, current.quote)
       : null;
     if (quoteAnchor) quote.anchor = quoteAnchor;
+    // The passage already has a block: its reply is reopened, rather than a
+    // second block put on the same words, of which the note could only ever
+    // reopen one. (With the chat visible `onAdd` sees to the same.)
+    const existing = chatVisible ? null : (existingQuote?.(quote) ?? null);
+    if (existing && editQuote(existing, current.range)) return;
     if (chatVisible) {
       adding = true;
       let added = false;
@@ -446,12 +468,12 @@
 
   /**
    * Reopen the field on a block already in the draft, by its marked passage
-   * (`range`), with the reply written so far. `stop` is the mark a key
-   * press came from, which gets focus back when a key closes the field.
-   * Returns whether it opened: not while the note is hidden or a block is
-   * still being added, or when the passage has no place on screen.
+   * (`range`), with the reply written so far. `byKey` when a key press on
+   * the mark asked for it: the mark gets focus back when a key closes the
+   * field. Returns whether it opened: not while the note is hidden or a
+   * block is still being added, or when the passage has no place on screen.
    */
-  export function editQuote(quote: DraftQuote, range: Range, stop: HTMLElement | null = null) {
+  export function editQuote(quote: DraftQuote, range: Range, byKey = false) {
     if (!enabled || !scrollEl || !onEdit || adding) return false;
     // Another field's reply is written before this one opens.
     closeReply(false);
@@ -464,7 +486,7 @@
     live = onEdit(quote);
     activeQuoteId = quote.id;
     editing = true;
-    focusReturn = stop;
+    openedByKey = byKey;
     // The button the popover hangs from is mounted before the popover opens.
     flushSync();
     open = true;
@@ -476,15 +498,35 @@
   }
 
   /**
+   * The block the open field writes to has left the draft (removed in the
+   * composer, or sent, from somewhere else): the field closes, rather than
+   * go on saying the reply is kept while nothing typed in it is.
+   */
+  export function closeQuote(quoteId: string) {
+    if (open && activeQuoteId === quoteId) closeReply(false, false, true);
+  }
+
+  /** Whether focus is in the open field (its input or its Remove button). */
+  function fieldHasFocus(): boolean {
+    const active = document.activeElement;
+    return !!active && !!replyEl?.parentElement?.contains(active);
+  }
+
+  /**
    * Close the field. The block stays in the draft with the reply typed so
    * far (`finish` writes what is still pending). `clearPageSelection` when
    * the user's own action closed it; a pointer press elsewhere may be the
    * start of the next selection, which is left alone. `byKey` when a key in
    * the field closed it: a field a key press opened from a mark then gives
-   * focus back to that mark.
+   * focus back to that mark. `gone` when the block has left the draft, or is
+   * leaving it, and its mark with it: focus in the field then goes to the
+   * dialog.
    */
-  function closeReply(clearPageSelection: boolean, byKey = false) {
+  function closeReply(clearPageSelection: boolean, byKey = false, gone = false) {
     if (!open) return;
+    // Read before anything below moves focus or unmounts the field.
+    const toMark = byKey && openedByKey && !gone;
+    const moveFocus = toMark || (gone && fieldHasFocus());
     // The sheet unmounting with focus in it would leave the dialog's focus
     // trap to pick a control (its header's first button); the dialog itself
     // takes focus instead, as it does when a tap on the scrim dismisses.
@@ -496,16 +538,21 @@
     live = null;
     if (pending) void pending.finish();
     reply = '';
+    const quoteId = activeQuoteId;
     activeQuoteId = null;
     editing = false;
-    const stop = focusReturn;
-    focusReturn = null;
+    openedByKey = false;
     if (clearPageSelection) finishSelection();
     else clearSelectionState();
-    if (byKey && stop) {
-      // Once the field is closed: its popover holds focus inside it until then.
+    if (moveFocus) {
+      // Once the field is closed: its popover holds focus inside it until
+      // then. The mark is looked up now, not kept from when the field
+      // opened: the note's marks are rebuilt on every render and every
+      // change of the draft's quotes, which leaves an element kept from
+      // before out of the document. Failing a mark, the dialog.
       void tick().then(() => {
-        if (stop.isConnected) stop.focus({ preventScroll: true });
+        const stop = toMark && contentEl && quoteId ? quoteHighlightStop(contentEl, quoteId) : null;
+        (stop ?? sheetHost)?.focus({ preventScroll: true });
       });
     }
   }
@@ -517,7 +564,7 @@
     // Removed rather than finished: what was typed goes with the block.
     live = null;
     void pending.remove();
-    closeReply(true);
+    closeReply(true, false, true);
   }
 
   function handleOpenChange(next: boolean) {

@@ -18,6 +18,11 @@
  * one under the quote's headings, then the one nearest where the selection
  * began. A quote stored without an anchor has its headings to go by, and
  * otherwise its first occurrence.
+ *
+ * The surroundings also tell a passage that was rewritten away from the same
+ * few words standing somewhere else: a short quote none of whose occurrences
+ * has enough of its surroundings is not found at all (see
+ * `CORROBORATED_QUOTE_LENGTH`).
  */
 
 import type { DraftQuote, QuoteAnchor } from '../sessions/composerDraft';
@@ -31,6 +36,29 @@ export const ANCHOR_CONTEXT_LENGTH = 32;
  * up to tell them apart (each lookup walks the note's headings).
  */
 const HEADING_CHECK_LIMIT = 64;
+
+/**
+ * A quote shorter than this (in squeezed characters, about six words) is
+ * only found where the note still has some of the text that stood around it
+ * (`MIN_SHARED_CONTEXT`). Where no occurrence does, the passage it was
+ * selected from has been rewritten, and the words elsewhere are some other
+ * "the cache": marking them would offer the reply from a passage it was
+ * never written to. A quote this long found word for word is taken to be
+ * the passage itself, moved or with new neighbours.
+ */
+export const CORROBORATED_QUOTE_LENGTH = ANCHOR_CONTEXT_LENGTH;
+
+/**
+ * How many characters of its anchor's surroundings, before and after
+ * together, an occurrence of a short quote must share to be the passage
+ * that was quoted. More than one: unrelated occurrences share a few by
+ * chance (the "e" of a "the" before each, the first letter of the next
+ * word), so one character proves nothing. Fewer than a side's worth: text
+ * edited right up against the passage on one side leaves the other to go
+ * by. An anchor holding less than this (the quote was nearly the whole
+ * note) is asked for all it holds.
+ */
+export const MIN_SHARED_CONTEXT = 8;
 
 const WHITESPACE = /\s/;
 
@@ -191,8 +219,9 @@ export function positionInIndex(
 
 /**
  * Where a quote's passage is in the indexed note; null when its text is no
- * longer there (the note was rewritten), which leaves the quote unmarked
- * and otherwise as it was.
+ * longer there (the note was rewritten), or is a short quote's and only
+ * stands where too little of the quote's surroundings does, which leaves
+ * the quote unmarked and otherwise as it was.
  */
 export function locateQuote(
   index: NoteTextIndex,
@@ -208,10 +237,14 @@ export function locateQuote(
   for (const needle of needles) {
     let candidates = occurrences(index.text, needle);
     if (candidates.length === 0) continue;
-    if (candidates.length > 1 && anchor) {
-      candidates = best(candidates, (start) =>
-        contextScore(index.text, start, start + needle.length, anchor)
-      );
+    if (anchor) {
+      const score = (start: number) =>
+        contextScore(index.text, start, start + needle.length, anchor);
+      candidates = best(candidates, score);
+      // Not the passage that was quoted, however many occurrences there are
+      // and wherever they sit (see `CORROBORATED_QUOTE_LENGTH`).
+      const needed = Math.min(MIN_SHARED_CONTEXT, anchor.prefix.length + anchor.suffix.length);
+      if (needle.length < CORROBORATED_QUOTE_LENGTH && score(candidates[0]) < needed) continue;
     }
     if (candidates.length > 1 && candidates.length <= HEADING_CHECK_LIMIT) {
       const under = candidates.filter((start) =>
@@ -228,4 +261,32 @@ export function locateQuote(
     return { start: candidates[0], end: candidates[0] + needle.length };
   }
   return null;
+}
+
+/**
+ * The quote, of `quotes`, whose passage in the note rendered in `root` is
+ * exactly the one `passage` was just selected at: the same first and last
+ * character, as the quotes are located now rather than by the offsets they
+ * were stored with, which an edit earlier in the note moves. `passage`'s
+ * anchor must be fresh (`captureQuoteAnchor` against `root` as it is). The
+ * newest of several, the one a press on their shared mark opens; null when
+ * no quote is there, or the passage has no anchor.
+ */
+export function quoteAtPassage<Q extends Pick<DraftQuote, 'quote' | 'headings' | 'anchor'>>(
+  root: Element,
+  quotes: readonly Q[],
+  passage: Pick<DraftQuote, 'quote' | 'anchor'>,
+  options: HeadingPathOptions = {}
+): Q | null {
+  const anchor = passage.anchor;
+  if (!anchor || quotes.length === 0) return null;
+  const start = anchor.offset;
+  const end = start + (anchor.text ?? squeezeText(passage.quote)).length;
+  const index = buildNoteTextIndex(root);
+  let found: Q | null = null;
+  for (const quote of quotes) {
+    const span = locateQuote(index, quote, options);
+    if (span && span.start === start && span.end === end) found = quote;
+  }
+  return found;
 }

@@ -4,6 +4,7 @@ import { clearHighlights, highlightMatches } from '../../shared/textHighlight';
 import {
   applyQuoteHighlights,
   clearQuoteHighlights,
+  highlightNoteMatches,
   quoteHighlightElements,
   quoteHighlightRange,
   quoteHighlightStop,
@@ -287,6 +288,59 @@ describe('clearQuoteHighlights', () => {
     clearHighlights(root);
     applyQuoteHighlights(root, [quote('a', 'Ship behind a flag.')]);
     expect(marked('a')).toEqual(['Ship behind a flag.']);
+  });
+});
+
+describe('highlightNoteMatches', () => {
+  const quotes = [quote('q', 'cache first.')];
+
+  it('finds a match that runs across the edge of a mark', () => {
+    const rendered = root.innerHTML;
+    applyQuoteHighlights(root, quotes);
+    expect(marked('q')).toEqual(['cache first.']);
+    // What a search over the marked note sees: the list item's text in two
+    // pieces, cut where the mark begins, and no "the cache" in either.
+    expect(root.querySelector('li')!.childNodes).toHaveLength(2);
+
+    const found = highlightNoteMatches(root, root, 'the cache');
+
+    // The sentence under each heading, and the list item's own.
+    expect(found.total).toBe(3);
+    expect(found.elements.map((match) => match.textContent)).toEqual([
+      'The cache',
+      'the cache',
+      'the cache',
+    ]);
+    expect(found.elements[1].closest('li')).not.toBeNull();
+    // Only the first is the current match, as for any new search.
+    expect(found.elements.map((el) => el.classList.contains('search-match-current'))).toEqual([
+      true,
+      false,
+      false,
+    ]);
+
+    // The marks go back around and inside the matches, which stay put.
+    applyQuoteHighlights(root, quotes);
+    expect(found.elements.every((match) => match.isConnected)).toBe(true);
+    expect(marked('q')).toEqual(['cache', ' first.']);
+    expect(found.elements[1].querySelector('.note-quote-highlight')!.textContent).toBe('cache');
+    expect(quoteIdAtTarget(root, found.elements[1].querySelector('.note-quote-highlight'))).toBe(
+      'q'
+    );
+
+    // The next search starts from whole text again, whatever the last left.
+    const next = highlightNoteMatches(root, root, 'cache first');
+    expect(next.total).toBe(2);
+    expect(found.elements.some((match) => match.isConnected)).toBe(false);
+
+    // And an emptied search leaves the note as it was rendered.
+    expect(highlightNoteMatches(root, root, '  ')).toEqual({ total: 0, elements: [] });
+    expect(root.innerHTML).toBe(rendered);
+    expect(root.querySelector('li')!.childNodes).toHaveLength(1);
+  });
+
+  it('searches a container whose note is not rendered', () => {
+    expect(highlightNoteMatches(root, undefined, 'canary').total).toBe(1);
   });
 });
 

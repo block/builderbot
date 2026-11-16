@@ -5,8 +5,11 @@ import {
   ANCHOR_CONTEXT_LENGTH,
   buildNoteTextIndex,
   captureQuoteAnchor,
+  CORROBORATED_QUOTE_LENGTH,
   locateQuote,
+  MIN_SHARED_CONTEXT,
   positionInIndex,
+  quoteAtPassage,
   squeezeText,
   type NoteTextSpan,
 } from './noteQuoteLocation';
@@ -262,5 +265,122 @@ describe('locateQuote', () => {
 
     render('');
     expect(locate(quote, anchor)).toBeNull();
+  });
+
+  it('does not take a short quote for the same words elsewhere once its passage is rewritten', () => {
+    const quote = 'cache';
+    const anchor = captureQuoteAnchor(root, rangeOfText('p', quote), quote)!;
+    expect(located(locate(quote, anchor))).toBe('cache');
+
+    // The sentence it came from is rewritten. "cache" still stands in three
+    // other places, two of them after a "the", as the quoted one was, and
+    // before a word starting with the same letter: a few characters of the
+    // old surroundings by chance, and not the passage that was replied to.
+    root.querySelector('p')!.textContent = 'Entries expire after an hour.';
+    const text = buildNoteTextIndex(root).text;
+    expect(text.split('cache').length - 1).toBe(3);
+    expect(text).toContain('thecachefirst.');
+
+    expect(locate(quote, anchor)).toBeNull();
+    // A single occurrence left is no better founded than several.
+    render('<p>Entries expire. Warm the cache first.</p>');
+    expect(locate(quote, anchor)).toBeNull();
+    // Without an anchor there is nothing to hold an occurrence to, as before.
+    expect(located(locate(quote))).toBe('cache');
+  });
+
+  it('still finds a short quote whose neighbouring text changed on one side only', () => {
+    const quote = 'cache';
+    const anchor = captureQuoteAnchor(root, rangeOfText('p', quote), quote)!;
+
+    // New words right up against it, before...
+    const sentence = root.querySelector('p')!;
+    sentence.innerHTML = 'Every regional cache is <strong>invalidated</strong> on every write.';
+    let span = locate(quote, anchor)!;
+    expect(buildNoteTextIndex(root).text.slice(span.end, span.end + 13)).toBe('isinvalidated');
+
+    // ...or after.
+    sentence.textContent = 'The cache was dropped.';
+    span = locate(quote, anchor)!;
+    const text = buildNoteTextIndex(root).text;
+    expect(text.slice(span.start - 15, span.end + 3)).toBe('ArchitectureThecachewas');
+  });
+
+  it('takes a long quote wherever it stands word for word, surroundings or not', () => {
+    const quote = 'The cache is invalidated on every write.';
+    expect(squeezeText(quote).length).toBeGreaterThanOrEqual(CORROBORATED_QUOTE_LENGTH);
+    const anchor = captureQuoteAnchor(
+      root,
+      rangeOf(textIn('p'), 0, textIn('p', 4), ' write.'.length),
+      quote
+    )!;
+
+    // The sentence moved to a note that shares nothing else with the old one.
+    render('<h2>Notes</h2><p>Unrelated. The cache is invalidated on every write. More.</p>');
+
+    expect(located(locate(quote, anchor))).toBe('Thecacheisinvalidatedoneverywrite.');
+  });
+
+  it('holds a quote of nearly the whole note to what little surrounds it', () => {
+    render('<p>Hi. Short note. Bye</p>');
+    const text = textIn('p');
+    const quote = 'Short note.';
+    const anchor = captureQuoteAnchor(root, rangeOf(text, 4, text, 15), quote)!;
+    expect(anchor.prefix.length + anchor.suffix.length).toBeLessThan(MIN_SHARED_CONTEXT);
+
+    expect(located(locate(quote, anchor))).toBe('Shortnote.');
+    render('<p>Oh! Short note. Yes</p>');
+    expect(locate(quote, anchor)).toBeNull();
+  });
+});
+
+describe('quoteAtPassage', () => {
+  const sentence = 'Reads go to the cache first.';
+
+  function selected(selector: string, needle: string) {
+    const anchor = captureQuoteAnchor(root, rangeOfText(selector, needle), needle)!;
+    return { quote: needle, headings: [] as string[], anchor };
+  }
+
+  it('is the quote already written to exactly the selected passage', () => {
+    const inList = { id: 'list', ...selected('ul', sentence) };
+    const underRollout = { id: 'rollout', ...selected('p:last-of-type', sentence) };
+    const quotes = [inList, underRollout];
+
+    expect(quoteAtPassage(root, quotes, selected('ul', sentence))?.id).toBe('list');
+    expect(quoteAtPassage(root, quotes, selected('p:last-of-type', sentence))?.id).toBe('rollout');
+  });
+
+  it('is null for a passage inside, around or beside a quote, and for one with no anchor', () => {
+    const quotes = [{ id: 'list', ...selected('ul', sentence) }];
+
+    expect(quoteAtPassage(root, quotes, selected('ul', 'the cache'))).toBeNull();
+    expect(quoteAtPassage(root, quotes, selected('ul', 'Reads go to the cache'))).toBeNull();
+    expect(quoteAtPassage(root, quotes, selected('p:last-of-type', sentence))).toBeNull();
+    expect(quoteAtPassage(root, quotes, { quote: sentence })).toBeNull();
+    expect(quoteAtPassage(root, [], selected('ul', sentence))).toBeNull();
+  });
+
+  it('goes by where the quote is now, not the offset it was stored with', () => {
+    const stored = { id: 'rollout', ...selected('p:last-of-type', sentence) };
+    // Stored before quotes carried an anchor: found by its text and headings.
+    const old = { id: 'old', quote: 'Ship behind a flag.', headings: ['Rollout plan', 'Rollout'] };
+
+    // Text added above moves both passages down the note.
+    root.querySelector('p')!.textContent += ' And on every restart, too.';
+    const again = selected('p:last-of-type', sentence);
+    expect(again.anchor.offset).toBeGreaterThan(stored.anchor.offset);
+
+    expect(quoteAtPassage(root, [old, stored], again)?.id).toBe('rollout');
+    expect(
+      quoteAtPassage(root, [old, stored], selected('p:last-of-type', 'Ship behind a flag.'))?.id
+    ).toBe('old');
+  });
+
+  it('is the newest of several quotes on the same words, as a press on their mark is', () => {
+    const first = { id: 'first', ...selected('ul', sentence) };
+    const second = { id: 'second', ...selected('ul', sentence) };
+
+    expect(quoteAtPassage(root, [first, second], selected('ul', sentence))?.id).toBe('second');
   });
 });

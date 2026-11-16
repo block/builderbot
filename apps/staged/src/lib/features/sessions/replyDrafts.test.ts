@@ -566,19 +566,46 @@ describe('replyDraftPresence', () => {
     await settle();
     const block = { id: 'live', before: '', quote: 'x', headings: [], reply: '' };
 
-    replyDraftPresence.preview('shown', {
-      value: 'x',
-      structured: { version: 1, quotes: [block], text: '' },
-    });
+    replyDraftPresence.preview('shown', { quotes: [block], text: '' });
     expect(replyDraftPresence.quotes('shown')).toEqual([block]);
     expect(replyDraftPresence.summary('shown')).toEqual({ quotes: 1, hasText: false });
     expect(store.has(replyDraftKey('shown'))).toBe(false);
 
     // The block removed in the composer, leaving plain text; then nothing.
-    replyDraftPresence.preview('shown', 'Just text now.');
+    replyDraftPresence.preview('shown', { quotes: [], text: 'Just text now.' });
     expect(replyDraftPresence.quotes('shown')).toEqual([]);
     expect(replyDraftPresence.has('shown')).toBe(true);
-    replyDraftPresence.preview('shown', '');
+    replyDraftPresence.preview('shown', { quotes: [], text: '' });
     expect(replyDraftPresence.has('shown')).toBe(false);
+  });
+
+  it('keeps the same summary and quotes while a draft changes nothing they say', async () => {
+    replyDraftPresence.start();
+    await settle();
+    const block = { id: 'typed', before: '', quote: 'x', headings: ['H'], reply: 'Why?' };
+
+    replyDraftPresence.preview('typing', { quotes: [block], text: 'So' });
+    const summary = replyDraftPresence.summary('typing');
+    const quotes = replyDraftPresence.quotes('typing');
+    // Copies, not the composer's own blocks, which it goes on editing.
+    expect(quotes).toEqual([block]);
+    expect(quotes[0]).not.toBe(block);
+    expect(quotes[0].headings).not.toBe(block.headings);
+
+    // Each keystroke in the main input reports the draft again: a reader of
+    // the summary or the quotes has nothing new to read, and is given the
+    // same objects, so it is not re-run.
+    replyDraftPresence.preview('typing', { quotes: [{ ...block }], text: 'So far' });
+    expect(replyDraftPresence.summary('typing')).toBe(summary);
+    expect(replyDraftPresence.quotes('typing')).toBe(quotes);
+
+    // What they say changing replaces them.
+    replyDraftPresence.preview('typing', {
+      quotes: [{ ...block, reply: '' }],
+      text: '',
+    });
+    expect(replyDraftPresence.summary('typing')).toEqual({ quotes: 1, hasText: false });
+    expect(replyDraftPresence.summary('typing')).not.toBe(summary);
+    expect(replyDraftPresence.quotes('typing')).not.toBe(quotes);
   });
 });

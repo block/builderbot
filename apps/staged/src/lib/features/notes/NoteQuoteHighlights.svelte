@@ -6,9 +6,10 @@
   highlight spans (see noteQuoteHighlights.ts) and keeps them in step with
   the draft's quotes (`quotes`) and with the note's markup, which is rebuilt
   from scratch on every render (`renderKey` is what it was rendered from) and
-  flattened wherever a find-in-note match is cleared (`refreshKey`). A quote
-  leaving the draft — removed, or sent — loses its mark; one the note no
-  longer holds the text of never gets one.
+  has its marks taken out for each find-in-note pass, which searches whole
+  text and leaves the marks to be put back around its matches (`refreshKey`).
+  A quote leaving the draft — removed, or sent — loses its mark; one the
+  note no longer holds the text of never gets one.
 
   Pressing a mark, or Enter or Space on its keyboard stop, asks for that
   quote's reply to be reopened (`onActivate`, with the passage's range to
@@ -44,7 +45,7 @@
     ignoreHeading?: (heading: Element) => boolean;
     /** The quotes that are marked in the note, after each pass. */
     onMarked?: (quoteIds: string[]) => void;
-    /** A mark was pressed; `stop` is the element to return focus to, for a key press. */
+    /** A mark was pressed; `stop` is the quote's keyboard stop, when a key press on it did. */
     onActivate: (quoteId: string, range: Range, stop: HTMLElement | null) => void;
   }
 

@@ -71,7 +71,7 @@
   import PooledSessionChatPane from '../sessions/PooledSessionChatPane.svelte';
   import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
   import InContentSearch from '../../shared/InContentSearch.svelte';
-  import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
+  import { clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
   import { scrollRangeEndIntoView } from './noteSelection';
@@ -102,6 +102,7 @@
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
   import NoteReplyQuotes from './NoteReplyQuotes.svelte';
+  import { highlightNoteMatches } from './noteQuoteHighlights';
   import { replyDraftPresence } from '../sessions/replyDrafts';
   import { formatReplyDraftLabel } from './replyDraftLabel';
   import { isSessionActive } from '../../shared/sessionStatus';
@@ -679,21 +680,18 @@
   function performSearch(query: string) {
     if (!contentEl) return;
 
-    // Clear previous highlights. A match cleared from around a quote's mark
-    // takes the mark with it, so the marks are put back afterwards.
-    clearHighlights(contentEl);
+    // Clear the previous highlights and highlight the new matches (none for
+    // an empty query), over the note without its quotes' marks, so a match
+    // can run across the edge of one. The marks are put back afterwards,
+    // around and inside the matches. The note element is read untracked:
+    // this runs in the search box's effect, which a new render of the note
+    // must not re-run.
+    const noteEl = untrack(() => markdownEl);
+    const result = highlightNoteMatches(contentEl, noteEl, query);
     refreshQuoteMarks();
-    matchElements = [];
-    matchCount = 0;
-    currentMatchIndex = 0;
-
-    // If query is empty, nothing to highlight
-    if (!query.trim()) return;
-
-    // Highlight matches
-    const result = highlightMatches(contentEl, query, currentMatchIndex);
     matchElements = result.elements;
     matchCount = result.total;
+    currentMatchIndex = 0;
 
     // Scroll to first match if any
     if (matchElements.length > 0) {

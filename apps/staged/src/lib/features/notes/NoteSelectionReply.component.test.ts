@@ -45,7 +45,10 @@ function liveReply(id = 'new-quote'): Live {
 }
 
 /** The component's exports, as NoteModal calls them. */
-type Reply = { editQuote(quote: DraftQuote, range: Range, stop?: HTMLElement | null): boolean };
+type Reply = {
+  editQuote(quote: DraftQuote, range: Range, byKey?: boolean): boolean;
+  closeQuote(quoteId: string): void;
+};
 
 /** Where the fixture's passage sits in its note (noteQuoteLocation). */
 const PASSAGE_ANCHOR = { prefix: 'RolloutplanArchitecture', suffix: '', offset: 23 };
@@ -70,6 +73,40 @@ function removeButton(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>('.selection-reply-remove');
 }
 
+/**
+ * Mark the fixture's passage as the note does for `existing`
+ * (noteQuoteHighlights): one span, which is the quote's keyboard stop.
+ */
+function markPassage(): HTMLElement {
+  const paragraph = contentEl.querySelector('#flow-p')!;
+  const stop = document.createElement('span');
+  stop.className = 'note-quote-highlight';
+  stop.setAttribute('data-quote-ids', existing.id);
+  stop.setAttribute('data-quote-id', existing.id);
+  stop.setAttribute('role', 'button');
+  stop.tabIndex = 0;
+  stop.append(...paragraph.childNodes);
+  paragraph.append(stop);
+  return stop;
+}
+
+/** The dialog around the note: focusable, as bits-ui's focus scope makes its content. */
+function dialogHost(): HTMLElement {
+  const dialog = document.createElement('div');
+  dialog.tabIndex = -1;
+  document.body.append(dialog);
+  dialogs.push(dialog);
+  return dialog;
+}
+const dialogs: HTMLElement[] = [];
+
+function pressKey(el: Element, name: string): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true });
+  el.dispatchEvent(event);
+  flushSync();
+  return event;
+}
+
 function render(
   overrides: Partial<{
     enabled: boolean;
@@ -79,6 +116,7 @@ function render(
     dockHost: HTMLElement | null;
     onDockedChange: (docked: boolean) => void;
     markedQuoteIds: string[];
+    existingQuote: (quote: NewDraftQuote) => DraftQuote | null;
   }> = {}
 ) {
   host = document.createElement('div');
@@ -113,6 +151,7 @@ function render(
     onAdd,
     onReply,
     onEdit,
+    existingQuote: undefined as ((quote: NewDraftQuote) => DraftQuote | null) | undefined,
     markedQuoteIds: [] as string[],
     onActiveQuoteChange,
     ...overrides,
@@ -222,6 +261,7 @@ afterEach(() => {
   if (component) unmount(component);
   component = null;
   host.remove();
+  for (const dialog of dialogs.splice(0)) dialog.remove();
   document.getSelection()?.removeAllRanges();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -287,6 +327,21 @@ describe('NoteSelectionReply with the chat beside the note', () => {
     expect(field()).toBeNull();
     expect(button()).toBeNull();
     expect(document.getSelection()?.isCollapsed).toBe(true);
+  });
+
+  it('leaves a passage that is already quoted to `onAdd`, which has the composer', async () => {
+    const existingQuote = vi.fn((_quote: NewDraftQuote) => existing as DraftQuote | null);
+    const { onAdd, onEdit } = render({ chatVisible: true, chatOpen: true, existingQuote });
+    selectPassage();
+    settle();
+
+    click(button()!);
+    await flushAsync();
+
+    expect(existingQuote).not.toHaveBeenCalled();
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(field()).toBeNull();
   });
 
   it('keeps the button for another try when the block could not be added', async () => {
@@ -508,15 +563,11 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
 
   it('gives focus back to the mark a key press came from when a key closes the field', async () => {
     const { reply } = render();
-    const stop = document.createElement('span');
-    stop.tabIndex = 0;
-    contentEl.querySelector('#flow-p')!.prepend(stop);
+    const stop = markPassage();
 
-    reply.editQuote(existing, passageRange(), stop);
+    reply.editQuote(existing, passageRange(), true);
     flushSync();
-    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-    field()!.dispatchEvent(escape);
-    flushSync();
+    const escape = pressKey(field()!, 'Escape');
 
     expect(escape.defaultPrevented).toBe(true);
     expect(field()).toBeNull();
@@ -525,13 +576,47 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(document.activeElement).toBe(stop);
   });
 
+  it('gives focus to the mark as the note has it now, when the note re-rendered under the field', async () => {
+    const { reply } = render();
+    const opened = markPassage();
+    opened.focus();
+    reply.editQuote(existing, passageRange(), true);
+    flushSync();
+
+    // An agent edited the note while the reply was being typed: `{@html}`
+    // replaced every node, and the note marked the passage again.
+    contentEl.innerHTML = contentEl.innerHTML.replace(/<\/?span[^>]*>/g, '');
+    expect(opened.isConnected).toBe(false);
+    const rebuilt = markPassage();
+
+    pressKey(field()!, 'Enter');
+    await flushAsync();
+
+    expect(field()).toBeNull();
+    expect(document.activeElement).toBe(rebuilt);
+  });
+
+  it('gives focus to the dialog when the mark a key press came from is gone', async () => {
+    const dialog = dialogHost();
+    const { reply } = render({ sheetHost: dialog });
+    markPassage();
+    reply.editQuote(existing, passageRange(), true);
+    flushSync();
+
+    // The passage was edited out of the note: nothing is marked any more.
+    contentEl.querySelector('#flow-p')!.textContent = 'Rewritten.';
+
+    pressKey(field()!, 'Escape');
+    await flushAsync();
+
+    expect(document.activeElement).toBe(dialog);
+  });
+
   it('leaves focus alone when something other than a key closes the field', async () => {
     const { reply, props } = render();
-    const stop = document.createElement('span');
-    stop.tabIndex = 0;
-    contentEl.querySelector('#flow-p')!.prepend(stop);
+    const stop = markPassage();
 
-    reply.editQuote(existing, passageRange(), stop);
+    reply.editQuote(existing, passageRange(), true);
     flushSync();
     props.chatOpen = true;
     flushSync();
@@ -539,6 +624,112 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
 
     expect(field()).toBeNull();
     expect(document.activeElement).not.toBe(stop);
+  });
+
+  it('leaves focus alone when a key closes a field a pointer press opened', async () => {
+    const dialog = dialogHost();
+    const { reply } = render({ sheetHost: dialog });
+    const stop = markPassage();
+
+    reply.editQuote(existing, passageRange());
+    flushSync();
+    pressKey(field()!, 'Enter');
+    await flushAsync();
+
+    expect(field()).toBeNull();
+    expect(document.activeElement).not.toBe(stop);
+    expect(document.activeElement).not.toBe(dialog);
+  });
+
+  it('gives focus to the dialog after Remove, whose mark goes with the block', async () => {
+    const dialog = dialogHost();
+    const { reply, editLive } = render({ sheetHost: dialog });
+    const stop = markPassage();
+    reply.editQuote(existing, passageRange(), true);
+    flushSync();
+    field()!.focus();
+
+    click(removeButton()!);
+    await flushAsync();
+
+    expect(editLive.remove).toHaveBeenCalledTimes(1);
+    expect(field()).toBeNull();
+    // Not the mark, which is about to go, and not nowhere.
+    expect(document.activeElement).not.toBe(stop);
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it('closes when its block leaves the draft from elsewhere, and only then', async () => {
+    const dialog = dialogHost();
+    const { reply, editLive, onActiveQuoteChange } = render({ sheetHost: dialog });
+    reply.editQuote(existing, passageRange());
+    flushSync();
+    field()!.focus();
+
+    // Some other block went: nothing to do with this field.
+    reply.closeQuote('another');
+    flushSync();
+    expect(field()).not.toBeNull();
+
+    reply.closeQuote(existing.id);
+    flushSync();
+    await flushAsync();
+
+    expect(field()).toBeNull();
+    expect(button()).toBeNull();
+    expect(onActiveQuoteChange).toHaveBeenLastCalledWith(null);
+    // The block is gone, so there is nothing to remove; what was pending is
+    // flushed as for any close (and lands nowhere).
+    expect(editLive.remove).not.toHaveBeenCalled();
+    expect(editLive.finish).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(dialog);
+
+    // Nothing open: nothing to close.
+    reply.closeQuote(existing.id);
+    flushSync();
+    expect(editLive.finish).toHaveBeenCalledTimes(1);
+  });
+
+  it('reopens the block a selection already has, instead of replying to it twice', () => {
+    const existingQuote = vi.fn((_quote: NewDraftQuote) => existing as DraftQuote | null);
+    const { onReply, onEdit, editLive } = render({ existingQuote });
+    selectPassage();
+    settle();
+
+    click(button()!);
+
+    // Asked with the passage as it was selected, anchor and all.
+    expect(existingQuote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        quote: 'The cache is invalidated on every write.',
+        anchor: PASSAGE_ANCHOR,
+      })
+    );
+    expect(onReply).not.toHaveBeenCalled();
+    expect(onEdit).toHaveBeenCalledWith(existing);
+    expect(field()!.value).toBe('Why on every write?');
+    expect(removeButton()).not.toBeNull();
+
+    pressKey(field()!, 'Enter');
+    expect(editLive.finish).toHaveBeenCalledTimes(1);
+    expect(field()).toBeNull();
+    // The selection it was reopened from goes with the field, as for a new reply.
+    expect(document.getSelection()!.isCollapsed).toBe(true);
+  });
+
+  it('adds a block as before for a selection no block has', () => {
+    const existingQuote = vi.fn((_quote: NewDraftQuote) => null);
+    const { onReply, onEdit } = render({ existingQuote });
+    selectPassage(4, 9);
+    settle();
+
+    click(button()!);
+
+    expect(existingQuote).toHaveBeenCalledTimes(1);
+    expect(onReply).toHaveBeenCalledTimes(1);
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(field()!.value).toBe('');
+    expect(removeButton()).toBeNull();
   });
 
   it('closes, keeping the edit, when the chat opens', () => {

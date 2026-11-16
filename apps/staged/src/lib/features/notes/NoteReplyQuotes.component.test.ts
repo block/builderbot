@@ -21,8 +21,9 @@ vi.mock('../../shared/persistentStore', () => ({
 vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
 import NoteReplyQuotes from './NoteReplyQuotes.svelte';
-import { QUOTE_HIGHLIGHT_CLASS } from './noteQuoteHighlights';
+import { highlightNoteMatches, QUOTE_HIGHLIGHT_CLASS } from './noteQuoteHighlights';
 import { saveDraft } from '../../shared/draftCache';
+import { setStoreValue } from '../../shared/persistentStore';
 import { clearHighlights, highlightMatches } from '../../shared/textHighlight';
 import { viewport } from '../../shared/viewport.svelte';
 import { composerDraftContent, type ComposerDraft } from '../sessions/composerDraft';
@@ -62,8 +63,14 @@ let contentEl: HTMLElement;
 let unregister: (() => void) | null = null;
 let sessionCount = 0;
 
+let dialog: HTMLElement;
+
 function render(overrides: Partial<{ chatOpen: boolean; chatVisible: boolean }> = {}) {
   host = document.createElement('div');
+  // The dialog around the note: focusable, as bits-ui's focus scope makes it.
+  dialog = document.createElement('div');
+  dialog.tabIndex = -1;
+  host.appendChild(dialog);
   scrollEl = document.createElement('div');
   scrollEl.style.position = 'relative';
   contentEl = document.createElement('div');
@@ -83,6 +90,7 @@ function render(overrides: Partial<{ chatOpen: boolean; chatVisible: boolean }> 
     enabled: true,
     chatOpen: false,
     chatVisible: false,
+    sheetHost: dialog,
     ignoreHeading: (heading: Element) => heading.tagName === 'H1',
     ...overrides,
   });
@@ -302,6 +310,45 @@ describe('NoteReplyQuotes marks', () => {
     );
   });
 
+  it('lets a find-in-note match run across the edge of a mark', async () => {
+    const { props } = render();
+    const text = contentEl.querySelector('#flow-p')!.textContent!;
+    const from = text.indexOf('cache is');
+    await replyTo('#flow-p', 'Which cache?', from, from + 'cache is'.length);
+    expect(markedText()).toBe('cache is');
+
+    // A search as NoteModal runs one: over the note without its marks, which
+    // it then has put back (`refreshKey`).
+    let pass = 0;
+    const search = (query: string) => {
+      const found = highlightNoteMatches(scrollEl, contentEl, query);
+      props.refreshKey = ++pass;
+      flushSync();
+      return found;
+    };
+
+    // "The cache" begins before the mark and ends inside it.
+    const found = search('the cache');
+    expect(found.total).toBe(2);
+    expect(found.elements.every((element) => element.isConnected)).toBe(true);
+    expect(found.elements[0].closest('#flow-p')).not.toBeNull();
+    expect(markedText()).toBe('cache is');
+    // The piece of the mark inside the match still reopens the reply.
+    click(found.elements[0].querySelector(`.${QUOTE_HIGHLIGHT_CLASS}`)!);
+    expect(field()!.value).toBe('Which cache?');
+    key(field()!, 'Escape');
+    await drain();
+
+    // Typing on: each search starts from whole text again.
+    expect(search('the cache is invalidated').total).toBe(1);
+    expect(markedText()).toBe('cache is');
+
+    search('');
+    expect(contentEl.querySelector('mark')).toBeNull();
+    expect(markedText()).toBe('cache is');
+    expect(contentEl.querySelector('#flow-p')!.childNodes).toHaveLength(3);
+  });
+
   it('drops the mark when the reply is sent and the draft cleared', async () => {
     const { sessionId } = render();
     await replyTo('#flow-p', 'Why?');
@@ -314,6 +361,37 @@ describe('NoteReplyQuotes marks', () => {
     expect(contentEl.querySelector('#flow-p')!.textContent).toBe(
       'The cache is invalidated on every write.'
     );
+  });
+
+  it('does not mark the same few words elsewhere once the quoted passage is rewritten', async () => {
+    const { sessionId, props } = render();
+    await replyTo('#flow-p', 'Which cache?', 0, 'The cache is'.length);
+    expect(markedText()).toBe('The cache is');
+    expect(contentEl.querySelector('#flow-p .note-quote-highlight')).not.toBeNull();
+
+    // An agent rewrites the sentence. "The cache is" still stands under
+    // Rollout, where the reply was never written.
+    const rewritten = NOTE_HTML.replace(
+      'The cache is invalidated on every write.',
+      'Entries expire after an hour.'
+    );
+    expect(rewritten).toContain('The cache is warmed');
+    contentEl.innerHTML = rewritten;
+    props.renderKey = rewritten;
+    flushSync();
+
+    expect(marks()).toHaveLength(0);
+    // The block is the user's to keep or remove, in the composer.
+    expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual([
+      'Which cache?',
+    ]);
+
+    // The sentence comes back: so does its mark.
+    contentEl.innerHTML = NOTE_HTML;
+    props.renderKey = `${NOTE_HTML} `;
+    flushSync();
+    expect(markedText()).toBe('The cache is');
+    expect(contentEl.querySelector('#flow-p .note-quote-highlight')).not.toBeNull();
   });
 
   it('leaves a quote the note no longer holds unmarked, and in the draft', async () => {
@@ -421,6 +499,178 @@ describe('NoteReplyQuotes pressing a mark', () => {
     }
   });
 
+  it('gives focus back to the quote’s mark when the note re-rendered under the open field', async () => {
+    const { props } = render();
+    await replyTo('#flow-p', 'Why?');
+    const opened = marks()[0];
+    opened.focus();
+    key(opened, 'Enter');
+    expect(field()!.value).toBe('Why?');
+
+    // An agent edits the note meanwhile: every node is replaced, and the
+    // passage is marked again in the new markup.
+    contentEl.innerHTML = NOTE_HTML;
+    props.renderKey = `${NOTE_HTML} `;
+    flushSync();
+    expect(opened.isConnected).toBe(false);
+    expect(field()!.value).toBe('Why?');
+
+    key(field()!, 'Escape');
+    await drain();
+
+    expect(field()).toBeNull();
+    const rebuilt = marks()[0];
+    expect(rebuilt).not.toBe(opened);
+    expect(rebuilt.getAttribute('role')).toBe('button');
+    expect(document.activeElement).toBe(rebuilt);
+  });
+
+  it('gives focus to the dialog after Remove, when the mark goes', async () => {
+    render();
+    await replyTo('#flow-p', 'Why?');
+    const stop = marks()[0];
+    stop.focus();
+    key(stop, 'Enter');
+    field()!.focus();
+
+    click(document.querySelector('.selection-reply-remove')!);
+    await drain();
+
+    expect(field()).toBeNull();
+    expect(marks()).toHaveLength(0);
+    expect(stop.isConnected).toBe(false);
+    // Not left on an element that has gone.
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it('reopens on the reply just typed when the mark is pressed before the write has landed', async () => {
+    const { sessionId } = render();
+    await replyTo('#flow-p', 'Why?');
+    const stop = marks()[0];
+    stop.focus();
+
+    // Enter opens the field, Enter closes it, Enter opens it again: focus
+    // goes back to the mark in between, and nothing waits for the draft.
+    key(stop, 'Enter');
+    type('Why? Batch them.');
+    key(field()!, 'Enter');
+    expect(field()).toBeNull();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(document.activeElement).toBe(marks()[0]);
+    // The draft still shows the reply from before.
+    expect(replyDraftPresence.quotes(sessionId)[0].reply).toBe('Why?');
+
+    key(marks()[0], 'Enter');
+    expect(field()!.value).toBe('Why? Batch them.');
+
+    // What is typed next builds on it, and that is what the draft ends with.
+    type('Why? Batch them. Per tenant.');
+    key(field()!, 'Enter');
+    await drain();
+    expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual([
+      'Why? Batch them. Per tenant.',
+    ]);
+
+    // Once the draft has caught up it is what the field opens on again.
+    await storeDraft(sessionId, {
+      quotes: (await loadReplyDraft(sessionId)).quotes.map((quote) => ({
+        ...quote,
+        reply: 'Rewritten in the composer.',
+      })),
+      text: '',
+    });
+    click(marks()[0]);
+    expect(field()!.value).toBe('Rewritten in the composer.');
+  });
+
+  it('keeps the reply just typed when the field is reopened and closed again untouched', async () => {
+    const { sessionId } = render();
+    await replyTo('#flow-p', 'Why?');
+
+    click(marks()[0]);
+    type('Why? Batch them.');
+    key(field()!, 'Escape');
+    click(marks()[0]);
+    expect(field()!.value).toBe('Why? Batch them.');
+    key(field()!, 'Escape');
+    await drain();
+
+    expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual([
+      'Why? Batch them.',
+    ]);
+    click(marks()[0]);
+    expect(field()!.value).toBe('Why? Batch them.');
+  });
+
+  it('reopens on what the draft has when the reply typed could not be saved', async () => {
+    const { sessionId } = render();
+    await replyTo('#flow-p', 'Why?');
+
+    click(marks()[0]);
+    type('Why? Lost.');
+    vi.mocked(setStoreValue).mockRejectedValue(new Error('store unavailable'));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      key(field()!, 'Escape');
+      await drain();
+      expect(toastError).toHaveBeenCalledWith('Could not save your reply draft');
+    } finally {
+      vi.mocked(setStoreValue).mockImplementation(async (storeKey: string, value: unknown) => {
+        store.set(storeKey, value);
+      });
+      consoleError.mockRestore();
+    }
+
+    expect((await loadReplyDraft(sessionId)).quotes[0].reply).toBe('Why?');
+    click(marks()[0]);
+    expect(field()!.value).toBe('Why?');
+  });
+
+  it('closes the field when its block leaves the draft from elsewhere', async () => {
+    const { sessionId } = render();
+    await replyTo('#flow-p', 'Why?');
+    await replyTo('#again-p', 'Which flag?', 0, 'Ship behind a flag.'.length);
+    const [first, second] = (await loadReplyDraft(sessionId)).quotes;
+
+    click(contentEl.querySelector('#flow-p .note-quote-highlight')!);
+    field()!.focus();
+    expect(field()!.value).toBe('Why?');
+
+    // Another block removed in another window: this field is not its.
+    await storeDraft(sessionId, { quotes: [first], text: '' });
+    expect(field()).not.toBeNull();
+    expect(second.reply).toBe('Which flag?');
+
+    // The draft sent from another window, this block with it.
+    await replyDraftWriter.clearNow(replyDraftKey(sessionId));
+    await drain();
+
+    expect(field()).toBeNull();
+    expect(marks()).toHaveLength(0);
+    expect(document.activeElement).toBe(dialog);
+    // Closing wrote nothing back: the draft stays sent.
+    expect((await loadReplyDraft(sessionId)).quotes).toHaveLength(0);
+    expect(replyDraftPresence.has(sessionId)).toBe(false);
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it('keeps a new reply’s field open while its block is still on its way into the draft', async () => {
+    const { sessionId } = render();
+    select('#flow-p');
+    click(button()!);
+    // Nothing has landed yet: the draft does not show the block.
+    expect(replyDraftPresence.quotes(sessionId)).toHaveLength(0);
+    expect(field()).not.toBeNull();
+
+    type('Why?');
+    await drain(400);
+
+    expect(field()!.value).toBe('Why?');
+    expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual(['Why?']);
+  });
+
   it('leaves a drag across a mark to select text for a quote of its own', async () => {
     render();
     await replyTo('#flow-p', 'Why?');
@@ -496,5 +746,81 @@ describe('NoteReplyQuotes pressing a mark', () => {
 
     expect(composer.focusQuoteReply).toHaveBeenCalledWith(quote.id);
     expect(field()).toBeNull();
+  });
+});
+
+describe('NoteReplyQuotes replying to a passage that is already quoted', () => {
+  it('reopens that reply rather than adding a second block on the same words', async () => {
+    const { sessionId } = render();
+    await replyTo('#flow-p', 'Why on every write?');
+
+    // The same passage selected again, inside its mark.
+    select('#flow-p .note-quote-highlight');
+    click(button()!);
+
+    expect(field()!.value).toBe('Why on every write?');
+    expect(document.querySelector('.selection-reply-remove')).not.toBeNull();
+    type('Why on every write? Batch them.');
+    key(field()!, 'Enter');
+    await drain();
+
+    const draft = await loadReplyDraft(sessionId);
+    expect(draft.quotes.map((quote) => quote.reply)).toEqual(['Why on every write? Batch them.']);
+    expect(marks().some((mark) => mark.classList.contains('is-overlap'))).toBe(false);
+  });
+
+  it('still adds a block for a passage inside one that is quoted, or the same words elsewhere', async () => {
+    const { sessionId } = render();
+    await replyTo('#flow-p', 'Why?');
+    const text = contentEl.querySelector('#again-p')!.textContent!;
+    const from = text.indexOf('The cache is');
+    await replyTo('#again-p', 'Warmed how?', from, from + 'The cache is'.length);
+
+    // "The cache is" under Architecture: inside the first quote, and the
+    // same words as the second, but neither's passage.
+    select('#flow-p .note-quote-highlight', 0, 'The cache is'.length);
+    click(button()!);
+    expect(field()!.value).toBe('');
+    type('Which cache?');
+    key(field()!, 'Enter');
+    await drain();
+
+    expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual([
+      'Why?',
+      'Warmed how?',
+      'Which cache?',
+    ]);
+  });
+
+  it('with the chat beside the note, puts the caret in the block the passage already has', async () => {
+    const { sessionId, props } = render();
+    await replyTo('#flow-p', 'Why?');
+    const [quote] = (await loadReplyDraft(sessionId)).quotes;
+
+    const composer: ReplyComposerTarget = {
+      addQuote: vi.fn(),
+      setQuoteReply: vi.fn(),
+      removeQuote: vi.fn(),
+      focusQuoteReply: vi.fn(),
+    };
+    unregister = registerReplyComposer(sessionId, composer);
+    props.chatOpen = true;
+    props.chatVisible = true;
+    flushSync();
+
+    select('#flow-p .note-quote-highlight');
+    click(button()!);
+    await drain();
+
+    expect(composer.addQuote).not.toHaveBeenCalled();
+    expect(composer.focusQuoteReply).toHaveBeenCalledWith(quote.id);
+    // The selection is dealt with: the button goes, as after an add.
+    expect(button()).toBeNull();
+
+    // Any other passage is added to the composer, as before.
+    select('#again-p', 0, 'Ship behind a flag.'.length);
+    click(button()!);
+    await drain();
+    expect(composer.addQuote).toHaveBeenCalledTimes(1);
   });
 });

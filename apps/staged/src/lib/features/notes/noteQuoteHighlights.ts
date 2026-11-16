@@ -19,8 +19,17 @@
  * The spans live in markup the note renders with `{@html}`, so they are
  * gone whenever the note is rendered again, and `applyQuoteHighlights` is
  * run again then. A quote whose text the note no longer holds gets no span.
+ *
+ * Find-in-note shares the markup: it runs over the note with the spans
+ * taken out (`highlightNoteMatches`), and the spans go back in around and
+ * inside its matches.
  */
 
+import {
+  clearHighlights,
+  highlightMatches,
+  type HighlightResult,
+} from '../../shared/textHighlight';
 import type { DraftQuote } from '../sessions/composerDraft';
 import {
   buildNoteTextIndex,
@@ -248,6 +257,27 @@ export function clearQuoteHighlights(root: HTMLElement): void {
     joinText(children[children.length - 1], after);
     joinText(before, children[0]);
   }
+}
+
+/**
+ * Find-in-note for a note that may hold marks: clear the last search's
+ * matches from `container` and highlight `query`'s (none for a blank one).
+ * The marks are taken out of `noteEl` first. A match is found within one
+ * text node, and a mark's edge cuts the text in two there, so with the
+ * marks in place "the cat" would not be found where "cat sat" is quoted.
+ *
+ * The caller has the marks put back afterwards (`applyQuoteHighlights`, by
+ * way of NoteQuoteHighlights' `refreshKey`): they wrap the text inside the
+ * matches too, so the returned elements stay in the note as they are.
+ */
+export function highlightNoteMatches(
+  container: HTMLElement,
+  noteEl: HTMLElement | null | undefined,
+  query: string
+): HighlightResult {
+  clearHighlights(container);
+  if (noteEl) clearQuoteHighlights(noteEl);
+  return highlightMatches(container, query, 0);
 }
 
 /** The spans marking a quote, in document order. */

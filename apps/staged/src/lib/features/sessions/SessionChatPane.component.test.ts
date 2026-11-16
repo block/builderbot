@@ -601,4 +601,85 @@ describe('SessionChatPane quoted replies', () => {
 
     unmount(pane);
   });
+
+  /** A pane in an element of its own, so two on one session can be told apart. */
+  function mountPaneIn(sessionId: string) {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const props = reactiveProps({ active: true, sessionId, hashtagItems: [] });
+    const pane = mount(SessionChatPane, { target, props });
+    const quoteCountIn = () =>
+      Number(target.querySelector<HTMLElement>('[data-testid="prompt-input"]')!.dataset.quoteCount);
+    return { pane, target, quoteCountIn };
+  }
+
+  it('settles when two composers on one session hold different quote blocks', async () => {
+    // Regression: each pane's save effect told the presence tracker its own
+    // draft, and the tracker read its quotes while writing them, so the
+    // effect came to depend on what the other pane wrote. Two dialogs on one
+    // session whose blocks differed then re-ran each other without end
+    // (effect_update_depth_exceeded).
+    const errors: unknown[] = [];
+    const onError = (event: ErrorEvent) => {
+      errors.push(event.error ?? event.message);
+      event.preventDefault();
+    };
+    window.addEventListener('error', onError);
+    const first = mountPaneIn('session-two');
+    const second = mountPaneIn('session-two');
+    try {
+      flushSync();
+      await settle();
+      const removed = await addQuoteToReplyDraft('session-two', { ...quote, quote: 'First.' });
+      const kept = await addQuoteToReplyDraft('session-two', { ...quote, quote: 'Second.' });
+      await settle();
+      expect([first.quoteCountIn(), second.quoteCountIn()]).toEqual([2, 2]);
+      writer.scheduleSave.mockClear();
+
+      // One composer's X: its copy of the draft now has a block fewer than
+      // the other's, and both copies still hold a block.
+      first.target.querySelector<HTMLElement>(`[data-testid="remove-quote-${removed}"]`)!.click();
+      expect(() => flushSync()).not.toThrow();
+      await settle();
+
+      expect(errors).toEqual([]);
+      expect([first.quoteCountIn(), second.quoteCountIn()]).toEqual([1, 2]);
+      // Only the pane that changed saved, and once.
+      const saves = writer.scheduleSave.mock.calls.filter(
+        ([key]) => key === replyKey('session-two')
+      );
+      expect(saves).toHaveLength(1);
+      expect(composerDraftFromContent(saves[0][1]).quotes.map((q) => q.id)).toEqual([kept]);
+      // The note marks from the draft that changed last.
+      expect(replyDraftPresence.quotes('session-two').map((q) => q.id)).toEqual([kept]);
+    } finally {
+      window.removeEventListener('error', onError);
+      unmount(first.pane);
+      unmount(second.pane);
+    }
+  });
+
+  it('does not save again when the draft is changed from outside the pane', async () => {
+    // Regression, same cause: a change to the session's quotes from anywhere
+    // else (another client's write, a hydrate) re-ran the save effect, which
+    // put this pane's copy back and scheduled a save of it.
+    const { pane } = mountPane('session-outside');
+    flushSync();
+    await settle();
+    await addQuoteToReplyDraft('session-outside', quote);
+    await settle();
+    writer.scheduleSave.mockClear();
+
+    replyDraftPresence.preview('session-outside', {
+      quotes: [{ id: 'theirs', before: '', ...quote, reply: 'Written elsewhere.' }],
+      text: '',
+    });
+    flushSync();
+    await settle();
+
+    expect(writer.scheduleSave).not.toHaveBeenCalled();
+    expect(replyDraftPresence.quotes('session-outside').map((q) => q.id)).toEqual(['theirs']);
+
+    unmount(pane);
+  });
 });

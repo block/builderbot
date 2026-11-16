@@ -16,6 +16,7 @@
  * stored draft without racing a pane's debounced save of the same key.
  */
 
+import { untrack } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import {
   createDraftWriteScheduler,
@@ -29,6 +30,7 @@ import {
 import { getStoreValue, listenToStoreChanges, listStoreKeys } from '../../shared/persistentStore';
 import {
   appendDraftQuote,
+  cloneComposerDraft,
   composerDraftContent,
   composerDraftFromContent,
   composerDraftsEqual,
@@ -354,6 +356,10 @@ function sameQuotes(a: readonly DraftQuote[], b: readonly DraftQuote[]): boolean
   return composerDraftsEqual({ quotes: [...a], text: '' }, { quotes: [...b], text: '' });
 }
 
+function sameSummary(a: ComposerDraftSummary | undefined, b: ComposerDraftSummary): boolean {
+  return !!a && a.quotes === b.quotes && a.hasText === b.hasText;
+}
+
 /**
  * The sessions whose reply draft holds anything, with what it holds, kept
  * current from this client's own writes (`subscribeDraftWrites`) and every
@@ -362,6 +368,12 @@ function sameQuotes(a: readonly DraftQuote[], b: readonly DraftQuote[]): boolean
  * the passages the draft quotes. A composer showing a draft reports it as it
  * changes (`preview`), ahead of its debounced write. `start()` once the
  * persistent store is up.
+ *
+ * Writing here never subscribes the writer: what a write compares against is
+ * read untracked, so an effect that reports a draft is not re-run by the
+ * next report of the same session's, from another composer or another
+ * client. And a write that changes nothing a reader sees re-runs no reader:
+ * the summary and the quotes are replaced only when they differ.
  */
 class ReplyDraftPresence {
   private sessions = new SvelteMap<string, ComposerDraftSummary>();
@@ -395,9 +407,12 @@ class ReplyDraftPresence {
    * The draft a composer is showing for `sessionId`, as it stands now: what
    * its next write will store. Lets a quote added to, or taken out of, an
    * open composer show in the note at once rather than a debounce later.
+   * The draft itself, not its stored form, which every keystroke would have
+   * to be parsed back out of; nothing of it is kept but copies.
    */
-  preview(sessionId: string, content: string | DraftContent): void {
-    this.set(sessionId, typeof content === 'string' ? { value: content } : content);
+  preview(sessionId: string, draft: ComposerDraft): void {
+    this.touchedDuringHydrate?.add(sessionId);
+    this.apply(sessionId, draft);
   }
 
   start(): void {
@@ -428,15 +443,25 @@ class ReplyDraftPresence {
   }
 
   private apply(sessionId: string, draft: ComposerDraft | null) {
-    const summary = draft ? summarizeComposerDraft(draft) : null;
-    if (summary) this.sessions.set(sessionId, summary);
-    else this.sessions.delete(sessionId);
-    const quotes = draft?.quotes ?? [];
-    if (quotes.length === 0) {
-      this.sessionQuotes.delete(sessionId);
-    } else if (!sameQuotes(this.sessionQuotes.get(sessionId) ?? NO_QUOTES, quotes)) {
-      this.sessionQuotes.set(sessionId, quotes);
-    }
+    // Untracked: see the class comment.
+    untrack(() => {
+      const summary = draft ? summarizeComposerDraft(draft) : null;
+      if (!summary) {
+        this.sessions.delete(sessionId);
+      } else if (!sameSummary(this.sessions.get(sessionId), summary)) {
+        this.sessions.set(sessionId, summary);
+      }
+      const quotes = draft?.quotes ?? [];
+      if (quotes.length === 0) {
+        this.sessionQuotes.delete(sessionId);
+      } else if (!sameQuotes(this.sessionQuotes.get(sessionId) ?? NO_QUOTES, quotes)) {
+        // Copies: a composer's own draft is live state it goes on editing.
+        this.sessionQuotes.set(
+          sessionId,
+          cloneComposerDraft({ quotes: [...quotes], text: '' }).quotes
+        );
+      }
+    });
   }
 
   private async hydrate(): Promise<void> {

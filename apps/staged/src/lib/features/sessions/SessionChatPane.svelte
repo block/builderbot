@@ -1238,8 +1238,11 @@
     }
     // What the write below will store, told at once to whatever shows the
     // draft elsewhere: the note marks a quoted passage as its block lands
-    // here, and unmarks it as the block goes, not a debounce later.
-    replyDraftPresence.preview(id, content);
+    // here, and unmarks it as the block goes, not a debounce later. Telling
+    // it subscribes this effect to nothing (see ReplyDraftPresence): another
+    // composer on this session, or another client, reporting a different
+    // draft must not re-run this one's save.
+    replyDraftPresence.preview(id, currentDraft());
     replyDraftWriter.scheduleSave(replyDraftKey(id), content);
   });
 

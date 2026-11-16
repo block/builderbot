@@ -15,10 +15,21 @@
     lands in its reply there; otherwise the reply field reopens by the
     passage with what was written, to edit or remove.
 
+  The two meet where a selection is exactly a passage that is already
+  quoted: Reply then goes back to that block's reply, as a press on its mark
+  does, rather than adding a second block on the same words.
+
+  The draft is read through `replyDraftPresence`, which follows writes as
+  they land. Two things keep the field honest about that: a reply typed in
+  the field is remembered here until the draft shows it (`heldReplies`), so
+  a field closed and reopened at once still holds it; and a block that
+  leaves the draft while its field is open closes the field.
+
   Rendered inside the note's scroll container, as NoteSelectionReply must
   be. A draft write that fails is reported in a toast.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { toast } from 'svelte-sonner';
   import type { DraftQuote, NewDraftQuote } from '../sessions/composerDraft';
   import {
@@ -30,6 +41,7 @@
     type LiveQuoteReply,
   } from '../sessions/replyDrafts';
   import NoteQuoteHighlights from './NoteQuoteHighlights.svelte';
+  import { quoteAtPassage } from './noteQuoteLocation';
   import NoteSelectionReply from './NoteSelectionReply.svelte';
 
   interface Props {
@@ -49,7 +61,11 @@
     chatOpen: boolean;
     /** The chat composer shows the draft beside the note. */
     chatVisible: boolean;
-    /** On a phone, where the reply sheet and the docked Reply button go (see NoteSelectionReply). */
+    /**
+     * The dialog around the note: a phone's reply sheet goes in it, and it
+     * takes focus from a closing field with no mark to give it to. And on a
+     * phone, where the docked Reply button goes (see NoteSelectionReply).
+     */
     sheetHost?: HTMLElement | null;
     dockHost?: HTMLElement | null;
     onDockedChange?: (docked: boolean) => void;
@@ -80,13 +96,93 @@
   let selectionReply = $state<ReturnType<typeof NoteSelectionReply>>();
 
   /**
+   * A reply as the note's field last held it, for a block whose draft may
+   * not show it yet. The draft's write is queued behind a read of the store
+   * and is not waited for when the field closes, so a mark pressed straight
+   * away (Enter, then Enter: focus is back on the mark) would reopen on the
+   * reply from before, and what is typed next would be written over the
+   * newer text.
+   */
+  type HeldReply = {
+    reply: string;
+    /**
+     * Set once the field's writes have ended: what the draft showed for the
+     * block then (`reply` undefined for no block). From there the draft is
+     * the newer of the two as soon as it shows anything else.
+     */
+    writtenOver?: { reply: string | undefined };
+  };
+  const heldReplies = new Map<string, HeldReply>();
+
+  function draftReply(quoteId: string): string | undefined {
+    return quotes.find((quote) => quote.id === quoteId)?.reply;
+  }
+
+  /** `quote` with the reply its field last held, where the draft is yet to show it. */
+  function withHeldReply(quote: DraftQuote): DraftQuote {
+    const held = heldReplies.get(quote.id);
+    return held && held.reply !== quote.reply ? { ...quote, reply: held.reply } : quote;
+  }
+
+  // A held reply is let go once the draft shows it, or has moved on since
+  // the field's writes ended.
+  $effect(() => {
+    // Read whether or not anything is held now, so the effect runs again
+    // for a reply held later.
+    const shownQuotes = quotes;
+    for (const [quoteId, held] of heldReplies) {
+      const shown = shownQuotes.find((quote) => quote.id === quoteId)?.reply;
+      if (shown === held.reply || (held.writtenOver && held.writtenOver.reply !== shown)) {
+        heldReplies.delete(quoteId);
+      }
+    }
+  });
+
+  /**
+   * The block the open field writes to has left the draft: removed in the
+   * composer or sent, by another window or another client. The field
+   * closes: left open it would say the reply is kept in the draft, while
+   * what is typed goes nowhere. Only a block the draft has shown, which a
+   * new reply's is not until its add lands.
+   */
+  let shownActiveQuoteId: string | null = null;
+  $effect(() => {
+    const quoteId = activeQuoteId;
+    if (quoteId === null) {
+      shownActiveQuoteId = null;
+    } else if (quotes.some((quote) => quote.id === quoteId)) {
+      shownActiveQuoteId = quoteId;
+    } else if (shownActiveQuoteId === quoteId) {
+      shownActiveQuoteId = null;
+      untrack(() => selectionReply?.closeQuote(quoteId));
+    }
+  });
+
+  /**
+   * The block already quoting exactly the passage `quote` was just selected
+   * at, if there is one: the passage is then replied to there (see the
+   * header).
+   */
+  function existingQuoteFor(quote: NewDraftQuote): DraftQuote | null {
+    if (!contentEl) return null;
+    const existing = quoteAtPassage(contentEl, quotes, quote, { ignore: ignoreHeading });
+    return existing ? withHeldReply(existing) : null;
+  }
+
+  /**
    * With the composer showing beside the note, a selected passage goes
    * straight into it as a quote block and the caret lands in the block's
-   * reply. Returns whether it was added: on failure the Reply button stays
-   * for another try.
+   * reply; in the block it already has, when the passage is quoted already.
+   * Returns whether the selection is dealt with: on failure the Reply
+   * button stays for another try.
    */
   async function handleQuoteAdd(quote: NewDraftQuote): Promise<boolean> {
     const sid = sessionId;
+    const existing = existingQuoteFor(quote);
+    if (existing) {
+      focusReplyDraftQuote(sid, existing.id);
+      return true;
+    }
     let id: string;
     try {
       id = await addQuoteToReplyDraft(sid, quote);
@@ -118,20 +214,37 @@
     return reporting(editLiveQuoteReply(sessionId, quote.id, quote.reply));
   }
 
-  /** `live`, telling the user when the draft couldn't be written. */
+  /**
+   * `live`, telling the user when the draft couldn't be written, and
+   * holding the reply typed into it until the draft shows it (`heldReplies`).
+   */
   function reporting(live: LiveQuoteReply): LiveQuoteReply {
+    const quoteId = live.id;
     return {
-      id: live.id,
-      setReply: live.setReply,
+      id: quoteId,
+      setReply: (reply) => {
+        heldReplies.set(quoteId, { reply });
+        live.setReply(reply);
+      },
       finish: async () => {
+        // Whatever this field, or one opened on the block before it, typed.
+        const held = heldReplies.get(quoteId);
         try {
           await live.finish();
         } catch (error) {
           console.error('Failed to save the reply draft', error);
           toast.error('Could not save your reply draft');
+          // Not kept after all: the field reopens on what the draft has.
+          if (held && heldReplies.get(quoteId) === held) heldReplies.delete(quoteId);
+          return;
         }
+        if (!held || heldReplies.get(quoteId) !== held) return;
+        const shown = draftReply(quoteId);
+        if (shown === held.reply) heldReplies.delete(quoteId);
+        else held.writtenOver = { reply: shown };
       },
       remove: async () => {
+        heldReplies.delete(quoteId);
         try {
           await live.remove();
         } catch (error) {
@@ -142,7 +255,10 @@
     };
   }
 
-  /** A marked passage was pressed: back to its reply, wherever that is written. */
+  /**
+   * A marked passage was pressed (`stop` is its keyboard stop, for a key
+   * press): back to its reply, wherever that is written.
+   */
   function handleMarkActivate(quoteId: string, range: Range, stop: HTMLElement | null) {
     const quote = quotes.find((candidate) => candidate.id === quoteId);
     if (!quote) return;
@@ -150,7 +266,7 @@
       focusReplyDraftQuote(sessionId, quoteId);
       return;
     }
-    selectionReply?.editQuote(quote, range, stop);
+    selectionReply?.editQuote(withHeldReply(quote), range, stop !== null);
   }
 </script>
 
@@ -178,6 +294,7 @@
   onAdd={handleQuoteAdd}
   onReply={handleQuoteReply}
   onEdit={handleQuoteEdit}
+  existingQuote={existingQuoteFor}
   {markedQuoteIds}
   onActiveQuoteChange={(quoteId) => (activeQuoteId = quoteId)}
 />

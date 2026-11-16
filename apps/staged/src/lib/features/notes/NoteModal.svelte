@@ -30,7 +30,8 @@
   block is removed or the draft is sent. Pressing a mark goes back to its
   reply: with the chat beside the note the caret lands in the block's reply
   in the composer, otherwise the reply field reopens by the passage with
-  what was written, to edit or remove.
+  what was written, to edit; closed on an empty reply, the field takes the
+  block out of the draft and the mark goes.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';

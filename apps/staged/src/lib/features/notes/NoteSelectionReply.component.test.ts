@@ -18,8 +18,11 @@ import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 // captured quote has to survive that. On a phone the button is docked above
 // the bottom bar instead of beside the selection, and the field is a sheet.
 // The same field reopens on a block already in the draft (`editQuote`, from
-// the passage the note marks for it), holding its reply, with a Remove
-// button, and typing there edits that block (`onEdit`) rather than adding one.
+// the passage the note marks for it), holding its reply, and typing there
+// edits that block (`onEdit`) rather than adding one. The field is the
+// reply input and nothing else: a field that closes on an empty reply takes
+// its block out of the draft (`discard`), however it closes, which is how a
+// quote is deleted; all but a block reopened with no reply and not typed in.
 
 const SETTLE_MS = 150;
 const TOUCH_SETTLE_MS = 350;
@@ -35,7 +38,7 @@ type Live = {
   id: string;
   setReply: Mock<LiveQuoteReply['setReply']>;
   finish: Mock<LiveQuoteReply['finish']>;
-  remove: Mock<LiveQuoteReply['remove']>;
+  discard: Mock<LiveQuoteReply['discard']>;
 };
 
 function liveReply(id = 'new-quote'): Live {
@@ -43,7 +46,7 @@ function liveReply(id = 'new-quote'): Live {
     id,
     setReply: vi.fn<LiveQuoteReply['setReply']>(),
     finish: vi.fn<LiveQuoteReply['finish']>(async () => {}),
-    remove: vi.fn<LiveQuoteReply['remove']>(async () => {}),
+    discard: vi.fn<LiveQuoteReply['discard']>(async () => {}),
   };
 }
 
@@ -70,10 +73,6 @@ function passageRange(): Range {
   const range = document.createRange();
   range.selectNodeContents(contentEl.querySelector('#flow-p')!);
   return range;
-}
-
-function removeButton(): HTMLButtonElement | null {
-  return document.querySelector<HTMLButtonElement>('.selection-reply-remove');
 }
 
 /**
@@ -195,6 +194,14 @@ function field(): HTMLTextAreaElement | null {
   return document.querySelector<HTMLTextAreaElement>('.selection-reply-input');
 }
 
+/** Type in the open field, as the user would: `value` is what it then holds. */
+function typeReply(value: string) {
+  const input = field()!;
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  flushSync();
+}
+
 /** The reply field beside the passage (not the sheet a phone has instead). */
 function popover(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-slot="popover-content"]');
@@ -208,7 +215,6 @@ function dockButton(): HTMLButtonElement | null {
 function phoneHosts() {
   viewport.hasCoarsePointer = true;
   viewport.sheetMenus = true;
-  viewport.showShortcutHints = false;
   const sheetHost = document.createElement('div');
   // Focusable, as bits-ui's focus scope makes the dialog's content.
   sheetHost.tabIndex = -1;
@@ -262,7 +268,6 @@ beforeEach(() => {
   );
   viewport.hasCoarsePointer = false;
   viewport.sheetMenus = false;
-  viewport.showShortcutHints = true;
 });
 
 afterEach(() => {
@@ -393,6 +398,7 @@ describe('NoteSelectionReply reply field', () => {
     flushSync();
     expect(enter.defaultPrevented).toBe(true);
     expect(live.finish).toHaveBeenCalledTimes(1);
+    expect(live.discard).not.toHaveBeenCalled();
     expect(field()).toBeNull();
     expect(button()).toBeNull();
     expect(document.getSelection()?.isCollapsed).toBe(true);
@@ -427,7 +433,7 @@ describe('NoteSelectionReply reply field', () => {
     expect(field()).toBeNull();
   });
 
-  it('holds the reply and its status line, without repeating the passage it sits beside', () => {
+  it('is the reply input and nothing else, without repeating the passage it sits beside', () => {
     render();
     selectPassage();
     settle();
@@ -436,14 +442,9 @@ describe('NoteSelectionReply reply field', () => {
     const content = popover()!;
     expect(content.querySelector('.quote-excerpt')).toBeNull();
     expect(content.querySelector('blockquote')).toBeNull();
-    expect(content.textContent).not.toContain('The cache is invalidated on every write.');
-    // Nor the heading path, which was there to place the quote.
-    expect(content.textContent).not.toContain('Architecture');
-    // The reply comes first, then the status line.
-    expect(content.firstElementChild).toBe(field());
-    expect(content.querySelector('.selection-reply-status')!.textContent).toContain(
-      'Kept in your reply draft'
-    );
+    // No quote, no heading path, no status line: no text of its own at all.
+    expect(content.textContent!.trim()).toBe('');
+    expect([...content.children]).toEqual([field()]);
   });
 
   it('is named for assistive technology, with no quote in it to go by', () => {
@@ -475,6 +476,7 @@ describe('NoteSelectionReply reply field', () => {
 
     expect(enter.defaultPrevented).toBe(false);
     expect(live.finish).not.toHaveBeenCalled();
+    expect(live.discard).not.toHaveBeenCalled();
     expect(field()).not.toBeNull();
   });
 
@@ -483,7 +485,7 @@ describe('NoteSelectionReply reply field', () => {
     selectPassage();
     settle();
     click(button()!);
-    expect(field()).not.toBeNull();
+    typeReply('Why?');
 
     props.chatOpen = true;
     props.chatVisible = true;
@@ -523,6 +525,7 @@ describe('NoteSelectionReply reply field', () => {
     selectPassage();
     settle();
     click(button()!);
+    typeReply('Why?');
 
     // Inertia from the scroll before the selection: not a scroll away.
     scrollEl.dispatchEvent(new Event('wheel', { bubbles: true }));
@@ -542,6 +545,7 @@ describe('NoteSelectionReply reply field', () => {
     selectPassage();
     settle();
     click(button()!);
+    typeReply('Why?');
 
     unmount(component!);
     component = null;
@@ -578,41 +582,23 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     );
     flushSync();
     expect(editLive.finish).toHaveBeenCalledTimes(1);
-    expect(editLive.remove).not.toHaveBeenCalled();
+    expect(editLive.discard).not.toHaveBeenCalled();
     expect(field()).toBeNull();
     expect(button()).toBeNull();
     expect(onActiveQuoteChange).toHaveBeenLastCalledWith(null);
   });
 
-  it('removes the block from its Remove button, without writing what was typed', () => {
-    const { reply, editLive } = render();
-    reply.editQuote(existing, passageRange());
-    flushSync();
-
-    const input = field()!;
-    input.value = 'Never mind';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    click(removeButton()!);
-
-    expect(editLive.remove).toHaveBeenCalledTimes(1);
-    expect(editLive.finish).not.toHaveBeenCalled();
-    expect(field()).toBeNull();
-    expect(button()).toBeNull();
-  });
-
-  it('holds the reply, the status line and Remove, without repeating the marked passage', () => {
+  it('is the reply input and nothing else, as for a new reply: no status line, no Remove', () => {
     const { reply } = render();
     reply.editQuote(existing, passageRange());
     flushSync();
 
     const content = popover()!;
     expect(content.querySelector('.quote-excerpt')).toBeNull();
-    expect(content.textContent).not.toContain('The cache is invalidated on every write.');
-    expect(content.textContent).not.toContain('Architecture');
-    expect(content.firstElementChild).toBe(field());
+    expect(content.textContent!.trim()).toBe('');
+    expect([...content.children]).toEqual([field()]);
+    expect(content.querySelectorAll('button')).toHaveLength(0);
     expect(field()!.value).toBe('Why on every write?');
-    expect(content.querySelector('.selection-reply-status')).not.toBeNull();
-    expect(content.contains(removeButton())).toBe(true);
     // Named, as a new reply's field is.
     expect(content.getAttribute('role')).toBe('dialog');
     expect(content.getAttribute('aria-label')).toBe('Reply to the selected text');
@@ -634,31 +620,20 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(button()).not.toBeNull();
   });
 
-  it("has no Remove button in a new reply's field", () => {
-    const { live } = render();
-    selectPassage();
-    settle();
-    click(button()!);
-
-    expect(field()).not.toBeNull();
-    expect(removeButton()).toBeNull();
-    expect(live.remove).not.toHaveBeenCalled();
-  });
-
   it("writes an open field's reply before reopening on another block", () => {
     const { reply, live, onEdit } = render();
     selectPassage();
     settle();
     click(button()!);
-    expect(field()!.value).toBe('');
+    typeReply('And the readers?');
 
     reply.editQuote(existing, passageRange());
     flushSync();
 
     expect(live.finish).toHaveBeenCalledTimes(1);
+    expect(live.discard).not.toHaveBeenCalled();
     expect(onEdit).toHaveBeenCalledTimes(1);
     expect(field()!.value).toBe('Why on every write?');
-    expect(removeButton()).not.toBeNull();
   });
 
   it('gives focus back to the mark a key press came from when a key closes the field', async () => {
@@ -741,24 +716,6 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(document.activeElement).not.toBe(dialog);
   });
 
-  it('gives focus to the dialog after Remove, whose mark goes with the block', async () => {
-    const dialog = dialogHost();
-    const { reply, editLive } = render({ sheetHost: dialog });
-    const stop = markPassage();
-    reply.editQuote(existing, passageRange(), true);
-    flushSync();
-    field()!.focus();
-
-    click(removeButton()!);
-    await flushAsync();
-
-    expect(editLive.remove).toHaveBeenCalledTimes(1);
-    expect(field()).toBeNull();
-    // Not the mark, which is about to go, and not nowhere.
-    expect(document.activeElement).not.toBe(stop);
-    expect(document.activeElement).toBe(dialog);
-  });
-
   it('closes when its block leaves the draft from elsewhere, and only then', async () => {
     const dialog = dialogHost();
     const { reply, editLive, onActiveQuoteChange } = render({ sheetHost: dialog });
@@ -778,9 +735,9 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(field()).toBeNull();
     expect(button()).toBeNull();
     expect(onActiveQuoteChange).toHaveBeenLastCalledWith(null);
-    // The block is gone, so there is nothing to remove; what was pending is
+    // The block is gone, so there is nothing to delete; what was pending is
     // flushed as for any close (and lands nowhere).
-    expect(editLive.remove).not.toHaveBeenCalled();
+    expect(editLive.discard).not.toHaveBeenCalled();
     expect(editLive.finish).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(dialog);
 
@@ -808,7 +765,6 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(onReply).not.toHaveBeenCalled();
     expect(onEdit).toHaveBeenCalledWith(existing);
     expect(field()!.value).toBe('Why on every write?');
-    expect(removeButton()).not.toBeNull();
     // The button that was pressed goes under the field it reopened.
     expect(button()).toBeNull();
 
@@ -831,7 +787,6 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(onReply).toHaveBeenCalledTimes(1);
     expect(onEdit).not.toHaveBeenCalled();
     expect(field()!.value).toBe('');
-    expect(removeButton()).toBeNull();
   });
 
   it('closes, keeping the edit, when the chat opens', () => {
@@ -843,6 +798,7 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     flushSync();
 
     expect(editLive.finish).toHaveBeenCalledTimes(1);
+    expect(editLive.discard).not.toHaveBeenCalled();
     expect(field()).toBeNull();
   });
 
@@ -869,17 +825,329 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
       expect(document.activeElement).toBe(field());
       expect(field()!.value).toBe('Why on every write?');
       expect(dockButton()).toBeNull();
-      // The sheet may lie over the passage, so it still shows what is quoted.
-      expect(sheet!.querySelector('.quote-text')!.textContent).toContain(
+      // The sheet may lie over the passage, so it still shows what is quoted:
+      // that and the input, with no status line and no Remove.
+      const panel = sheet!.querySelector('.selection-reply-panel')!;
+      expect(panel.querySelector('.quote-text')!.textContent).toContain(
         'The cache is invalidated on every write.'
       );
+      expect(panel.lastElementChild).toBe(field());
+      expect(panel.children).toHaveLength(2);
+      expect(sheet!.querySelectorAll('button')).toHaveLength(0);
 
-      click(removeButton()!);
-      expect(editLive.remove).toHaveBeenCalledTimes(1);
+      // Deleted as beside the passage: by emptying the reply and closing.
+      typeReply('');
+      pressKey(field()!, 'Enter');
+      expect(editLive.discard).toHaveBeenCalledTimes(1);
+      expect(editLive.finish).not.toHaveBeenCalled();
       expect(hosts.sheetHost.querySelector('.selection-reply-sheet')).toBeNull();
     } finally {
       hosts.cleanup();
     }
+  });
+});
+
+describe('NoteSelectionReply closed on an empty reply', () => {
+  type Fixture = ReturnType<typeof render>;
+
+  /** A block that was put in the draft with no reply (in the chat composer, say). */
+  const unanswered: DraftQuote = { ...existing, reply: '' };
+
+  function openNew(fixture: Fixture) {
+    selectPassage();
+    settle();
+    click(button()!);
+    expect(field()).not.toBeNull();
+    return fixture;
+  }
+
+  function reopen(fixture: Fixture, quote = existing) {
+    expect(fixture.reply.editQuote(quote, passageRange())).toBe(true);
+    flushSync();
+    expect(field()!.value).toBe(quote.reply);
+    return fixture;
+  }
+
+  /** A mouse press on the page outside the field, which bits-ui acts on 10ms later. */
+  function pressElsewhere() {
+    document.body.dispatchEvent(
+      new (window.PointerEvent ?? MouseEvent)('pointerdown', {
+        bubbles: true,
+        pointerType: 'mouse',
+        button: 0,
+        clientX: 600,
+        clientY: 600,
+      } as never)
+    );
+    vi.advanceTimersByTime(20);
+    flushSync();
+  }
+
+  /** Every way an open field closes while its block is still in the draft. */
+  const routes: Array<[string, (fixture: Fixture) => void]> = [
+    ['Enter', () => pressKey(field()!, 'Enter')],
+    ['Escape', () => pressKey(field()!, 'Escape')],
+    ['a press elsewhere', () => pressElsewhere()],
+    [
+      'scrolling the note',
+      () => {
+        settle(WHEEL_GRACE_MS);
+        scrollEl.dispatchEvent(new Event('wheel', { bubbles: true }));
+        flushSync();
+      },
+    ],
+    [
+      'the chat opening',
+      ({ props }) => {
+        props.chatOpen = true;
+        flushSync();
+      },
+    ],
+    [
+      'the note closing',
+      () => {
+        unmount(component!);
+        component = null;
+      },
+    ],
+  ];
+
+  describe.each(routes)('by %s', (_route, close) => {
+    it('leaves nothing of a new selection that was not replied to', () => {
+      const fixture = openNew(render());
+
+      close(fixture);
+
+      expect(fixture.live.discard).toHaveBeenCalledTimes(1);
+      expect(fixture.live.finish).not.toHaveBeenCalled();
+      expect(field()).toBeNull();
+    });
+
+    it('deletes a reopened quote whose reply was cleared', () => {
+      const fixture = reopen(render());
+      typeReply('');
+
+      close(fixture);
+
+      expect(fixture.editLive.setReply).toHaveBeenLastCalledWith('');
+      expect(fixture.editLive.discard).toHaveBeenCalledTimes(1);
+      expect(fixture.editLive.finish).not.toHaveBeenCalled();
+      expect(field()).toBeNull();
+    });
+
+    it('keeps a reopened quote that had no reply and was not typed in', () => {
+      const fixture = reopen(render(), unanswered);
+
+      close(fixture);
+
+      expect(fixture.editLive.discard).not.toHaveBeenCalled();
+      expect(fixture.editLive.finish).toHaveBeenCalledTimes(1);
+      expect(field()).toBeNull();
+    });
+
+    it('keeps a new reply that is not empty', () => {
+      const fixture = openNew(render());
+      typeReply('Why on every write?');
+
+      close(fixture);
+
+      expect(fixture.live.discard).not.toHaveBeenCalled();
+      expect(fixture.live.finish).toHaveBeenCalledTimes(1);
+      expect(field()).toBeNull();
+    });
+
+    it('keeps a reopened reply that is not empty', () => {
+      const fixture = reopen(render());
+      typeReply('Why on every write? Batch them.');
+
+      close(fixture);
+
+      expect(fixture.editLive.discard).not.toHaveBeenCalled();
+      expect(fixture.editLive.finish).toHaveBeenCalledTimes(1);
+      expect(field()).toBeNull();
+    });
+  });
+
+  it('by a tap on the scrim of a phone’s sheet, for a new selection and a cleared reply alike', () => {
+    const hosts = phoneHosts();
+    try {
+      const { live, editLive, reply } = render(hosts);
+      const tapScrim = () => {
+        const scrim = hosts.sheetHost.querySelector<HTMLElement>('.selection-reply-scrim')!;
+        press(scrim, 'touch');
+        click(scrim);
+      };
+
+      selectPassage();
+      settle(TOUCH_SETTLE_MS);
+      click(dockButton()!);
+      tapScrim();
+      expect(live.discard).toHaveBeenCalledTimes(1);
+      expect(live.finish).not.toHaveBeenCalled();
+      expect(hosts.sheetHost.querySelector('.selection-reply-sheet')).toBeNull();
+
+      reply.editQuote(existing, passageRange());
+      flushSync();
+      typeReply('');
+      tapScrim();
+      expect(editLive.discard).toHaveBeenCalledTimes(1);
+      expect(editLive.finish).not.toHaveBeenCalled();
+
+      // And the block that came with no reply is left as it was.
+      reply.editQuote(unanswered, passageRange());
+      flushSync();
+      tapScrim();
+      expect(editLive.discard).toHaveBeenCalledTimes(1);
+      expect(editLive.finish).toHaveBeenCalledTimes(1);
+    } finally {
+      hosts.cleanup();
+    }
+  });
+
+  it('as another mark reopens the field, which then holds that block’s reply', () => {
+    const fixture = openNew(render());
+
+    fixture.reply.editQuote(existing, passageRange());
+    flushSync();
+
+    expect(fixture.live.discard).toHaveBeenCalledTimes(1);
+    expect(fixture.live.finish).not.toHaveBeenCalled();
+    expect(fixture.onEdit).toHaveBeenCalledWith(existing);
+    expect(field()!.value).toBe('Why on every write?');
+  });
+
+  it('counts a reply of nothing but whitespace as empty', () => {
+    const { live } = openNew(render());
+    typeReply('  \n\t ');
+
+    pressKey(field()!, 'Enter');
+
+    expect(live.discard).toHaveBeenCalledTimes(1);
+    expect(live.finish).not.toHaveBeenCalled();
+  });
+
+  it('deletes a new reply that was typed and then cleared', () => {
+    const { live } = openNew(render());
+    typeReply('Why?');
+    typeReply('');
+
+    pressKey(field()!, 'Escape');
+
+    expect(live.discard).toHaveBeenCalledTimes(1);
+    expect(live.finish).not.toHaveBeenCalled();
+  });
+
+  it('deletes a quote reopened with no reply once it has been typed in', () => {
+    const { editLive } = reopen(render(), unanswered);
+    typeReply('W');
+    typeReply('');
+
+    pressKey(field()!, 'Enter');
+
+    expect(editLive.discard).toHaveBeenCalledTimes(1);
+    expect(editLive.finish).not.toHaveBeenCalled();
+  });
+
+  it('keeps a block reopened by selecting its passage again, with no reply and not typed in', () => {
+    const { editLive, onReply } = render({ existingQuote: () => unanswered });
+    selectPassage();
+    settle();
+    click(button()!);
+    expect(onReply).not.toHaveBeenCalled();
+
+    pressKey(field()!, 'Escape');
+
+    expect(editLive.discard).not.toHaveBeenCalled();
+    expect(editLive.finish).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts each field afresh: typing in one does not count for the next', () => {
+    const { reply, editLive } = openNew(render());
+    typeReply('Why?');
+    pressKey(field()!, 'Enter');
+
+    reply.editQuote(unanswered, passageRange());
+    flushSync();
+    pressKey(field()!, 'Enter');
+
+    expect(editLive.discard).not.toHaveBeenCalled();
+    expect(editLive.finish).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives focus to the dialog, not to the mark that is going, when a key closes the field', async () => {
+    const dialog = dialogHost();
+    const { reply, editLive } = render({ sheetHost: dialog });
+    const stop = markPassage();
+    reply.editQuote(existing, passageRange(), true);
+    flushSync();
+    field()!.focus();
+    typeReply('');
+
+    pressKey(field()!, 'Enter');
+    await flushAsync();
+
+    expect(editLive.discard).toHaveBeenCalledTimes(1);
+    expect(field()).toBeNull();
+    // Not the mark, which is about to go, and not nowhere.
+    expect(document.activeElement).not.toBe(stop);
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it('gives focus to the dialog when a new reply is closed unwritten', async () => {
+    const dialog = dialogHost();
+    openNew(render({ sheetHost: dialog }));
+    field()!.focus();
+
+    pressKey(field()!, 'Escape');
+    await flushAsync();
+
+    expect(field()).toBeNull();
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it('gives focus back to the mark of a quote that is kept with no reply', async () => {
+    const dialog = dialogHost();
+    const { reply } = render({ sheetHost: dialog });
+    const stop = markPassage();
+    reply.editQuote(unanswered, passageRange(), true);
+    flushSync();
+    field()!.focus();
+
+    pressKey(field()!, 'Escape');
+    await flushAsync();
+
+    expect(document.activeElement).toBe(stop);
+  });
+
+  it('leaves focus in a field that another mark opened as this one closed', async () => {
+    const dialog = dialogHost();
+    const fixture = openNew(render({ sheetHost: dialog }));
+    field()!.focus();
+
+    fixture.reply.editQuote(existing, passageRange());
+    flushSync();
+    field()!.focus();
+    await flushAsync();
+
+    expect(fixture.live.discard).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(field());
+  });
+
+  it('leaves focus where it went when the chat opening closed the field', async () => {
+    const dialog = dialogHost();
+    const composer = document.createElement('textarea');
+    dialog.append(composer);
+    const { props, live } = openNew(render({ sheetHost: dialog }));
+    field()!.focus();
+
+    props.chatOpen = true;
+    flushSync();
+    // The chat's composer takes focus as it mounts.
+    composer.focus();
+    await flushAsync();
+
+    expect(live.discard).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(composer);
   });
 });
 
@@ -986,7 +1254,6 @@ describe('NoteSelectionReply by touch', () => {
       expect(sheet).not.toBeNull();
       expect(popover()).toBeNull();
       expect(document.activeElement).toBe(field());
-      expect(sheet!.textContent).not.toContain('Esc');
       // The sheet lies over the note and may cover the passage: unlike the
       // popover it shows the quote, under its heading path.
       expect(sheet!.getAttribute('aria-label')).toBe('Reply to the selected text');
@@ -994,12 +1261,17 @@ describe('NoteSelectionReply by touch', () => {
         'The cache is invalidated on every write.'
       );
       expect(sheet!.querySelector('.quote-path')!.textContent).toContain('Architecture');
+      // The quote and the input, and nothing to press but the scrim.
+      expect(sheet!.querySelector('.selection-reply-panel')!.children).toHaveLength(2);
+      expect(sheet!.querySelectorAll('button')).toHaveLength(0);
+      typeReply('Why?');
 
       const scrim = sheet!.querySelector<HTMLElement>('.selection-reply-scrim')!;
       press(scrim, 'touch');
       click(scrim);
 
       expect(live.finish).toHaveBeenCalledTimes(1);
+      expect(live.discard).not.toHaveBeenCalled();
       expect(hosts.sheetHost.querySelector('.selection-reply-sheet')).toBeNull();
     } finally {
       hosts.cleanup();
@@ -1035,6 +1307,7 @@ describe('NoteSelectionReply by touch', () => {
       settle(TOUCH_SETTLE_MS);
       click(dockButton()!);
       expect(hosts.sheetHost.querySelector('.selection-reply-sheet')).not.toBeNull();
+      typeReply('Why?');
 
       // Over the note, not beside it: `chatVisible` stays false on a phone.
       props.chatOpen = true;

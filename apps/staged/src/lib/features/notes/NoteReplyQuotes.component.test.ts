@@ -46,6 +46,8 @@ import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 // block instead.
 
 const SETTLE_MS = 150;
+/** How long after the field opens a wheel on the note is taken for a scroll away. */
+const WHEEL_GRACE_MS = 300;
 
 const NOTE_HTML = `
   <h1 id="title">Rollout plan</h1>
@@ -174,6 +176,45 @@ async function replyTo(selector: string, reply: string, from = 0, to?: number) {
   await drain();
 }
 
+/** A mouse press on the page outside the open field, which bits-ui acts on 10ms later. */
+function pressElsewhere() {
+  headerButton.dispatchEvent(
+    new (window.PointerEvent ?? MouseEvent)('pointerdown', {
+      bubbles: true,
+      pointerType: 'mouse',
+      button: 0,
+      clientX: 600,
+      clientY: 600,
+    } as never)
+  );
+  vi.advanceTimersByTime(20);
+  flushSync();
+}
+
+type Rendered = ReturnType<typeof render>;
+
+/** Every way the open reply field closes with the note still showing. */
+const closingRoutes: Array<[string, (rendered: Rendered) => void]> = [
+  ['Enter', () => key(field()!, 'Enter')],
+  ['Escape', () => key(field()!, 'Escape')],
+  ['a press elsewhere', () => pressElsewhere()],
+  [
+    'scrolling the note',
+    () => {
+      vi.advanceTimersByTime(WHEEL_GRACE_MS);
+      scrollEl.dispatchEvent(new Event('wheel', { bubbles: true }));
+      flushSync();
+    },
+  ],
+  [
+    'the chat opening over the note',
+    ({ props }) => {
+      props.chatOpen = true;
+      flushSync();
+    },
+  ],
+];
+
 /** A draft put in the store by something other than this note view. */
 async function storeDraft(sessionId: string, draft: ComposerDraft) {
   await saveDraft(replyDraftKey(sessionId), composerDraftContent(draft));
@@ -202,7 +243,6 @@ beforeEach(() => {
   );
   viewport.hasCoarsePointer = false;
   viewport.sheetMenus = false;
-  viewport.showShortcutHints = true;
 });
 
 afterEach(() => {
@@ -595,24 +635,204 @@ describe('NoteReplyQuotes pressing a mark', () => {
     ]);
   });
 
-  it('removes the block, and its mark, from the reopened field', async () => {
+  it.each(closingRoutes)(
+    'deletes the block, and its mark, when the reopened field is emptied and closed by %s',
+    async (_route, close) => {
+      const rendered = render();
+      const { sessionId } = rendered;
+      await replyTo('#flow-p', 'Why?');
+      await replyTo('#again-p', 'Which flag?', 0, 'Ship behind a flag.'.length);
+      expect((await loadReplyDraft(sessionId)).quotes).toHaveLength(2);
+
+      click(contentEl.querySelector('#flow-p .note-quote-highlight')!);
+      expect(field()!.value).toBe('Why?');
+      type('');
+      close(rendered);
+      await drain(400);
+
+      expect(field()).toBeNull();
+      expect(contentEl.querySelector('#flow-p .note-quote-highlight')).toBeNull();
+      // The other quote keeps its block and its mark.
+      expect(markedText()).toBe('Ship behind a flag.');
+      expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual([
+        'Which flag?',
+      ]);
+      expect(toastError).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(closingRoutes)(
+    'leaves no block and no mark for a selection replied to with nothing, closed by %s',
+    async (_route, close) => {
+      const rendered = render();
+      const { sessionId } = rendered;
+      select('#flow-p');
+      click(button()!);
+      // The block is in the draft, and marked, while its field is open.
+      await drain();
+      expect(replyDraftPresence.quotes(sessionId)).toHaveLength(1);
+      expect(markedText()).toBe('The cache is invalidated on every write.');
+
+      close(rendered);
+      await drain(400);
+
+      expect(field()).toBeNull();
+      expect(marks()).toHaveLength(0);
+      expect((await loadReplyDraft(sessionId)).quotes).toEqual([]);
+      expect(replyDraftPresence.has(sessionId)).toBe(false);
+      expect(toastError).not.toHaveBeenCalled();
+    }
+  );
+
+  it('leaves nothing behind when the field is closed before its block has even landed', async () => {
     const { sessionId } = render();
-    await replyTo('#flow-p', 'Why?');
-    await replyTo('#again-p', 'Which flag?', 0, 'Ship behind a flag.'.length);
-    expect((await loadReplyDraft(sessionId)).quotes).toHaveLength(2);
+    select('#flow-p');
+    click(button()!);
+    expect(replyDraftPresence.quotes(sessionId)).toHaveLength(0);
 
-    click(contentEl.querySelector('#flow-p .note-quote-highlight')!);
-    click(document.querySelector('.selection-reply-remove')!);
+    key(field()!, 'Escape');
+    await drain(400);
+
+    expect(marks()).toHaveLength(0);
+    expect((await loadReplyDraft(sessionId)).quotes).toEqual([]);
+    expect(replyDraftPresence.has(sessionId)).toBe(false);
+  });
+
+  it('leaves nothing behind when the note closes on a field nothing was typed in', async () => {
+    const { sessionId } = render();
+    select('#flow-p');
+    click(button()!);
     await drain();
+    expect((await loadReplyDraft(sessionId)).quotes).toHaveLength(1);
 
-    expect(field()).toBeNull();
-    expect(contentEl.querySelector('#flow-p .note-quote-highlight')).toBeNull();
-    // The other quote keeps its block and its mark.
-    expect(markedText()).toBe('Ship behind a flag.');
+    unmount(component!);
+    component = null;
+    await drain(400);
+
+    expect((await loadReplyDraft(sessionId)).quotes).toEqual([]);
+    expect(replyDraftPresence.has(sessionId)).toBe(false);
+  });
+
+  it.each(closingRoutes)(
+    'keeps a block that came with no reply and was not typed in, closed by %s',
+    async (_route, close) => {
+      const rendered = render();
+      const { sessionId } = rendered;
+      // Quoted in the chat composer and left for later.
+      const unanswered = {
+        id: 'from-composer',
+        before: '',
+        quote: 'The cache is invalidated on every write.',
+        headings: ['Architecture'],
+        reply: '',
+      };
+      await storeDraft(sessionId, { quotes: [unanswered], text: '' });
+      expect(markedText()).toBe('The cache is invalidated on every write.');
+
+      click(marks()[0]);
+      expect(field()!.value).toBe('');
+      close(rendered);
+      await drain(400);
+
+      expect(field()).toBeNull();
+      expect(markedText()).toBe('The cache is invalidated on every write.');
+      expect((await loadReplyDraft(sessionId)).quotes).toEqual([unanswered]);
+    }
+  );
+
+  it('deletes a block that came with no reply once the user has typed in it and left it empty', async () => {
+    const { sessionId } = render();
+    await storeDraft(sessionId, {
+      quotes: [
+        {
+          id: 'from-composer',
+          before: '',
+          quote: 'The cache is invalidated on every write.',
+          headings: ['Architecture'],
+          reply: '',
+        },
+      ],
+      text: 'And a closing thought.',
+    });
+
+    click(marks()[0]);
+    type('W');
+    type(' ');
+    key(field()!, 'Enter');
+    await drain(400);
+
+    expect(marks()).toHaveLength(0);
+    // The quote goes; the text around it is the user's and stays.
+    expect(await loadReplyDraft(sessionId)).toEqual({ quotes: [], text: 'And a closing thought.' });
+  });
+
+  it('keeps a reply that is not empty, however the field closes', async () => {
+    const rendered = render();
+    const { sessionId } = rendered;
+    await replyTo('#flow-p', 'Why?');
+
+    for (const [route, close] of closingRoutes) {
+      click(marks()[0]);
+      type(`Why? (${route})`);
+      close(rendered);
+      await drain(400);
+      // The chat is closed again for the next way out.
+      rendered.props.chatOpen = false;
+      flushSync();
+
+      expect(field()).toBeNull();
+      expect(markedText()).toBe('The cache is invalidated on every write.');
+      expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual([
+        `Why? (${route})`,
+      ]);
+    }
+  });
+
+  it('does not let a write still waiting on its pause bring a deleted quote back', async () => {
+    const { sessionId } = render();
+    const held = () => (component as unknown as { heldReplyCount(): number }).heldReplyCount();
+    await replyTo('#flow-p', 'Why?');
+
+    click(marks()[0]);
+    type('Why? Batch them.');
+    // Written after a pause; then more is typed, cleared, and the field
+    // closed inside the next pause.
+    await drain(400);
+    type('Why? Batch them, or');
+    type('');
+    key(field()!, 'Enter');
+    await drain(400);
+    await drain(400);
+
+    expect(marks()).toHaveLength(0);
+    expect((await loadReplyDraft(sessionId)).quotes).toEqual([]);
+    expect(replyDraftPresence.has(sessionId)).toBe(false);
+    expect(held()).toBe(0);
+  });
+
+  it('does not delete a block given a reply elsewhere while its empty field was open', async () => {
+    const { sessionId } = render();
+    select('#flow-p');
+    click(button()!);
+    await drain();
+    const [added] = (await loadReplyDraft(sessionId)).quotes;
+    expect(added.reply).toBe('');
+
+    // The reply is typed into the block in another window's composer.
+    await storeDraft(sessionId, {
+      quotes: [{ ...added, reply: 'Answered in the chat.' }],
+      text: '',
+    });
+    key(field()!, 'Escape');
+    await drain(400);
+
     expect((await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply)).toEqual([
-      'Which flag?',
+      'Answered in the chat.',
     ]);
-    expect(toastError).not.toHaveBeenCalled();
+    // Still marked, and its field reopens on that reply.
+    expect(markedText()).toBe('The cache is invalidated on every write.');
+    click(marks()[0]);
+    expect(field()!.value).toBe('Answered in the chat.');
   });
 
   it('opens from the keyboard, and gives focus back to the mark when a key closes it', async () => {
@@ -660,7 +880,7 @@ describe('NoteReplyQuotes pressing a mark', () => {
     expect(document.activeElement).toBe(rebuilt);
   });
 
-  it('gives focus to the dialog after Remove, when the mark goes', async () => {
+  it('gives focus to the dialog when a key closes the field on an emptied reply, and the mark goes', async () => {
     render();
     await replyTo('#flow-p', 'Why?');
     const stop = marks()[0];
@@ -668,7 +888,8 @@ describe('NoteReplyQuotes pressing a mark', () => {
     key(stop, 'Enter');
     field()!.focus();
 
-    click(document.querySelector('.selection-reply-remove')!);
+    type('');
+    key(field()!, 'Enter');
     await drain();
 
     expect(field()).toBeNull();
@@ -932,7 +1153,6 @@ describe('NoteReplyQuotes replying to a passage that is already quoted', () => {
     click(button()!);
 
     expect(field()!.value).toBe('Why on every write?');
-    expect(document.querySelector('.selection-reply-remove')).not.toBeNull();
     type('Why on every write? Batch them.');
     key(field()!, 'Enter');
     await drain();

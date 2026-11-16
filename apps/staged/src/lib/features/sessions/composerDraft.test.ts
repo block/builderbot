@@ -112,6 +112,22 @@ describe('removeDraftQuote', () => {
 
     expect(removeDraftQuote(draft, 'missing')).toBe(draft);
   });
+
+  it('with a condition, removes the block only where it holds of the block as the draft has it', () => {
+    const draft = review();
+    const asked: string[] = [];
+    const never = (quote: { id: string }) => {
+      asked.push(quote.id);
+      return false;
+    };
+
+    expect(removeDraftQuote(draft, 'q1', never)).toBe(draft);
+    expect(asked).toEqual(['q1']);
+    expect(removeDraftQuote(draft, 'q1', () => true)).toEqual(removeDraftQuote(draft, 'q1'));
+    // Not asked about a block that is not there.
+    expect(removeDraftQuote(draft, 'missing', never)).toBe(draft);
+    expect(asked).toEqual(['q1']);
+  });
 });
 
 describe('takeDraftQuote and restoreDraftQuote', () => {

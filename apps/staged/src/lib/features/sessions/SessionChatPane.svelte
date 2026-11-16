@@ -1258,7 +1258,8 @@
         receiveDraftEdit(id, (draft) => appendDraftQuote(draft, quote, quoteId)),
       setQuoteReply: (quoteId, reply) =>
         receiveDraftEdit(id, (draft) => setDraftQuoteReply(draft, quoteId, reply)),
-      removeQuote: (quoteId) => receiveDraftEdit(id, (draft) => removeDraftQuote(draft, quoteId)),
+      removeQuote: (quoteId, when) =>
+        receiveDraftEdit(id, (draft) => removeDraftQuote(draft, quoteId, when)),
       focusQuoteReply: (quoteId) => whenDraftLoaded(id, () => focusDraftQuoteReply(quoteId)),
     });
     return () => {

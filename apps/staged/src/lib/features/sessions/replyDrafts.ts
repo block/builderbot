@@ -8,8 +8,9 @@
  * typed in the note), and the note's row and bottom bar mark the draft while
  * it holds anything (`replyDraftPresence`). The note also marks each quoted
  * passage in its text (`replyDraftPresence.quotes`), and a marked passage
- * reopens its reply for editing (`editLiveQuoteReply`) or removal
- * (`removeQuoteFromReplyDraft`).
+ * reopens its reply for editing (`editLiveQuoteReply`). A reply field that
+ * closes on an empty reply takes its block out of the draft
+ * (`LiveQuoteReply.discard`).
  *
  * Every reply-draft write goes through the one `replyDraftWriter`, whichever
  * pane makes it, so a quote added while no composer is open can amend the
@@ -72,8 +73,12 @@ export type ReplyComposerTarget = {
   addQuote(quote: NewDraftQuote, id: string): void;
   /** Replace the reply of the quote with this id; nothing if it has been removed. */
   setQuoteReply(id: string, reply: string): void;
-  /** Take the quote with this id out of the draft; nothing if it has gone already. */
-  removeQuote(id: string): void;
+  /**
+   * Take the quote with this id out of the draft; nothing if it has gone
+   * already, or if `when` is given and does not hold of the block as the
+   * composer has it.
+   */
+  removeQuote(id: string, when?: (quote: DraftQuote) => boolean): void;
   /** Put the caret in that quote's reply input, if the block is shown. */
   focusQuoteReply(id: string): void;
 };
@@ -155,15 +160,21 @@ export function setReplyDraftQuoteReply(
 /**
  * Take a quote block out of the draft, wherever the draft is (see
  * `addQuoteToReplyDraft`). The free text around it stays, as when the
- * composer removes one. Rejects when the stored draft couldn't be written.
+ * composer removes one. With `when`, only a block it holds of as the draft
+ * has it at the removal, not as the caller last saw it. Rejects when the
+ * stored draft couldn't be written.
  */
-export function removeQuoteFromReplyDraft(sessionId: string, id: string): Promise<void> {
+export function removeQuoteFromReplyDraft(
+  sessionId: string,
+  id: string,
+  when?: (quote: DraftQuote) => boolean
+): Promise<void> {
   const live = liveComposers(sessionId);
   if (live.length > 0) {
-    for (const composer of live) composer.removeQuote(id);
+    for (const composer of live) composer.removeQuote(id, when);
     return Promise.resolve();
   }
-  return amendStoredReplyDraft(sessionId, (draft) => removeDraftQuote(draft, id));
+  return amendStoredReplyDraft(sessionId, (draft) => removeDraftQuote(draft, id, when));
 }
 
 /**
@@ -214,17 +225,22 @@ export type LiveQuoteReply = {
    */
   finish(): Promise<void>;
   /**
-   * Take the block out of the draft instead, with whatever was typed.
-   * Nothing typed afterwards is written. Rejects when the draft couldn't be
-   * written.
+   * The field closed on an empty reply: take the block out of the draft
+   * instead, with whatever was typed and not yet written. Nothing typed
+   * afterwards is written. A block whose reply in the draft is not this
+   * field's doing stays: it is removed only while that reply is empty, or
+   * is the one this field opened on or last wrote, so a reply given to the
+   * block meanwhile in a composer, or by another client, is not deleted
+   * with it. Rejects when the draft couldn't be written.
    */
-  remove(): Promise<void>;
+  discard(): Promise<void>;
 };
 
 /**
  * Add a quote to a session's reply draft and keep its reply up to date as it
  * is typed, so the field it is typed in has nothing to confirm: dismissing
- * the field (`finish`) just writes what is left. The block goes into the
+ * the field just writes what is left (`finish`), or takes the block out
+ * again when nothing was written in it (`discard`). The block goes into the
  * draft at once, with the reply it starts with (usually none), and each
  * pause in typing writes the reply so far through the shared writer — into
  * the composer, if one has opened the chat meanwhile, by the id the block
@@ -264,6 +280,15 @@ export function editLiveQuoteReply(
 }
 
 /**
+ * Where the live writes to each block have got to, by session and block. A
+ * field reopened on a block while the field before it is still writing
+ * queues behind those writes: its `discard` goes by the reply the draft
+ * holds, which must not be one the earlier field is about to replace, or
+ * the block would stay and that later write would land in it.
+ */
+const liveWrites = new Map<string, Promise<void>>();
+
+/**
  * The writer behind both: `add` puts the block in the draft first (with the
  * reply it is given), or is null for a block that is already there.
  */
@@ -274,23 +299,45 @@ function liveQuoteReply(
   add: ((reply: string) => Promise<unknown>) | null,
   delayMs: number
 ): LiveQuoteReply {
+  const writesKey = `${sessionId}\n${id}`;
   let latest = initialReply;
+  /** The reply the draft holds for the block, as far as this field's writes go. */
+  let written = initialReply;
   let added = add === null;
-  let removed = false;
+  let discarded = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   // Every write after the add, in order; a rejection anywhere is picked up
   // by `finish`, which retries from what is known to have landed.
-  let chain: Promise<void> = add
-    ? add(initialReply).then(() => {
-        added = true;
-      })
-    : Promise.resolve();
-  chain.catch(() => {});
+  let chain: Promise<void> = Promise.resolve();
+
+  /** `next` is where this block's writes have got to (see `liveWrites`). */
+  function follow(next: Promise<void>) {
+    chain = next;
+    liveWrites.set(writesKey, next);
+    const settled = () => {
+      if (liveWrites.get(writesKey) === next) liveWrites.delete(writesKey);
+    };
+    next.then(settled, settled);
+  }
+
+  follow(
+    add
+      ? add(initialReply).then(() => {
+          added = true;
+        })
+      : // Behind whatever a field on this block before this one is yet to write.
+        (liveWrites.get(writesKey) ?? Promise.resolve()).catch(() => {})
+  );
 
   function write() {
     const reply = latest;
-    chain = chain.then(() => setReplyDraftQuoteReply(sessionId, id, reply));
-    chain.catch(() => {});
+    follow(
+      chain
+        .then(() => setReplyDraftQuoteReply(sessionId, id, reply))
+        .then(() => {
+          written = reply;
+        })
+    );
   }
 
   function cancelTimer(): boolean {
@@ -303,7 +350,7 @@ function liveQuoteReply(
   return {
     id,
     setReply(reply) {
-      if (removed || reply === latest) return;
+      if (discarded || reply === latest) return;
       latest = reply;
       cancelTimer();
       timer = setTimeout(() => {
@@ -312,7 +359,7 @@ function liveQuoteReply(
       }, delayMs);
     },
     async finish() {
-      if (removed) return;
+      if (discarded) return;
       if (cancelTimer()) write();
       try {
         await chain;
@@ -320,7 +367,7 @@ function liveQuoteReply(
       } catch {
         // Retried below from whatever did land.
       }
-      if (removed) return;
+      if (discarded) return;
       if (added) {
         await setReplyDraftQuoteReply(sessionId, id, latest);
       } else if (add) {
@@ -328,12 +375,24 @@ function liveQuoteReply(
         added = true;
       }
     },
-    async remove() {
-      removed = true;
+    async discard() {
+      if (discarded) return;
+      discarded = true;
+      // What was typed and not yet written goes with the block.
       cancelTimer();
-      // After the writes already queued, so none of them lands on top.
-      await chain.catch(() => {});
-      await removeQuoteFromReplyDraft(sessionId, id);
+      // After the writes already queued, so none of them lands on top, and
+      // judged on the draft as it is then (see LiveQuoteReply.discard).
+      const removal = chain
+        .catch(() => {})
+        .then(() =>
+          removeQuoteFromReplyDraft(
+            sessionId,
+            id,
+            (quote) => quote.reply.trim() === '' || quote.reply === written
+          )
+        );
+      follow(removal);
+      await removal;
     },
   };
 }

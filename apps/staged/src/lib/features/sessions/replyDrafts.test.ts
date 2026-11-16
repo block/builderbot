@@ -252,12 +252,34 @@ describe('removeQuoteFromReplyDraft', () => {
 
     await removeQuoteFromReplyDraft('x2', 'q');
 
-    expect(older.removeQuote).toHaveBeenCalledWith('q');
-    expect(newer.removeQuote).toHaveBeenCalledWith('q');
+    expect(older.removeQuote).toHaveBeenCalledWith('q', undefined);
+    expect(newer.removeQuote).toHaveBeenCalledWith('q', undefined);
     expect(store.has(replyDraftKey('x2'))).toBe(false);
 
     unregisterOlder();
     unregisterNewer();
+  });
+
+  it('with a condition, removes only a block it holds of as the stored draft has it', async () => {
+    const answered = await addQuoteToReplyDraft('x3', quote);
+    const unanswered = await addQuoteToReplyDraft('x3', { ...quote, reply: '' });
+    const empty = (q: { reply: string }) => q.reply === '';
+
+    await removeQuoteFromReplyDraft('x3', answered, empty);
+    await removeQuoteFromReplyDraft('x3', unanswered, empty);
+
+    expect((await loadReplyDraft('x3')).quotes.map((q) => q.id)).toEqual([answered]);
+  });
+
+  it('hands the condition to every open composer, which has the block to ask it of', async () => {
+    const composer = fakeComposer();
+    const unregister = registerReplyComposer('x4', composer);
+    const empty = (q: { reply: string }) => q.reply === '';
+
+    await removeQuoteFromReplyDraft('x4', 'q', empty);
+
+    expect(composer.removeQuote).toHaveBeenCalledWith('q', empty);
+    unregister();
   });
 });
 
@@ -317,19 +339,107 @@ describe('editLiveQuoteReply', () => {
     expect((await loadReplyDraft('e3')).quotes).toEqual([]);
   });
 
-  it('removes its block, dropping what was typed and not yet written', async () => {
+  it('discards its block, with what was typed and not yet written', async () => {
     const id = await addQuoteToReplyDraft('e4', quote);
     await addQuoteToReplyDraft('e4', { ...quote, reply: 'Other.' }, 'other');
     const live = editLiveQuoteReply('e4', id, 'Why?', 100);
 
-    live.setReply('About to go');
-    await live.remove();
-    // Nothing typed, or finished, after the removal brings it back.
+    // Cleared, and closed before the pause that would have written it: the
+    // draft still holds the reply the field opened on.
+    live.setReply('');
+    await live.discard();
+    // Nothing typed, or finished, after the removal brings it back; nor
+    // does the write that was pending.
     live.setReply('Too late');
     await live.finish();
     await vi.runAllTimersAsync();
 
     expect((await loadReplyDraft('e4')).quotes.map((q) => q.id)).toEqual(['other']);
+  });
+
+  it('discards a block that holds a reply it wrote itself before the field was cleared', async () => {
+    const id = await addQuoteToReplyDraft('e6', quote);
+    const live = editLiveQuoteReply('e6', id, 'Why?', 100);
+    live.setReply('Why so often?');
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.runAllTimersAsync();
+    expect((await loadReplyDraft('e6')).quotes[0].reply).toBe('Why so often?');
+
+    live.setReply('');
+    await live.discard();
+
+    expect((await loadReplyDraft('e6')).quotes).toEqual([]);
+  });
+
+  it('discards a block whose cleared reply was already written', async () => {
+    const id = await addQuoteToReplyDraft('e7', quote);
+    const live = editLiveQuoteReply('e7', id, 'Why?', 100);
+    live.setReply('  ');
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.runAllTimersAsync();
+    expect((await loadReplyDraft('e7')).quotes[0].reply).toBe('  ');
+
+    await live.discard();
+
+    expect((await loadReplyDraft('e7')).quotes).toEqual([]);
+  });
+
+  it('does not discard a block given a reply elsewhere while its field was open', async () => {
+    const id = await addQuoteToReplyDraft('e8', { ...quote, reply: '' });
+    const live = editLiveQuoteReply('e8', id, '', 100);
+    // Typed into the block in a composer, or by another client, meanwhile.
+    await setReplyDraftQuoteReply('e8', id, 'Answered in the chat.');
+
+    await live.discard();
+
+    expect((await loadReplyDraft('e8')).quotes.map((q) => [q.id, q.reply])).toEqual([
+      [id, 'Answered in the chat.'],
+    ]);
+  });
+
+  it('does not discard a block whose reply was changed elsewhere from the one it opened on', async () => {
+    const id = await addQuoteToReplyDraft('e9', quote);
+    const live = editLiveQuoteReply('e9', id, 'Why?', 100);
+    live.setReply('');
+    await setReplyDraftQuoteReply('e9', id, 'Why? I see now: the readers.');
+
+    await live.discard();
+
+    expect((await loadReplyDraft('e9')).quotes[0].reply).toBe('Why? I see now: the readers.');
+  });
+
+  it('discards behind the writes of a field that was on the block just before', async () => {
+    const id = await addQuoteToReplyDraft('e10', quote);
+    const first = editLiveQuoteReply('e10', id, 'Why?', 100);
+    first.setReply('Why so');
+    // The store is slow to take the first field's write.
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    vi.mocked(setStoreValue).mockImplementationOnce(async (key: string, value: unknown) => {
+      await slow;
+      store.set(key, value);
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+      // More is typed and the field closes: that write waits on the slow one.
+      first.setReply('Why so often?');
+      const finished = first.finish();
+
+      // Reopened at once on what was typed, cleared and closed again.
+      const second = editLiveQuoteReply('e10', id, 'Why so often?', 100);
+      second.setReply('');
+      const discarded = second.discard();
+      release();
+      await finished;
+      await discarded;
+      await vi.runAllTimersAsync();
+    } finally {
+      // Never left holding the shared writer's queue, whatever failed above.
+      release();
+    }
+
+    // Gone, and the first field's last write has not put it back.
+    expect((await loadReplyDraft('e10')).quotes).toEqual([]);
   });
 
   it('retries from finish when its write failed', async () => {
@@ -383,14 +493,36 @@ describe('startLiveQuoteReply', () => {
     expect(draft.quotes[0].id).toBe(live.id);
   });
 
-  it('removes the block it added, even before the add has landed', async () => {
+  it('discards the block it added, even before the add has landed', async () => {
     const live = startLiveQuoteReply('l5', { ...quote, reply: '' }, 100);
     live.setReply('Second thoughts');
-    await live.remove();
+    live.setReply('');
+    await live.discard();
     await vi.runAllTimersAsync();
 
     expect((await loadReplyDraft('l5')).quotes).toEqual([]);
     expect(replyDraftPresence.quotes('l5')).toEqual([]);
+  });
+
+  it('does not discard the block it added once a composer holds a reply to it', async () => {
+    const live = startLiveQuoteReply('l6', { ...quote, reply: '' }, 100);
+    await vi.runAllTimersAsync();
+    // The chat opens with the block, and the reply is typed there.
+    const composer = fakeComposer();
+    const unregister = registerReplyComposer('l6', composer);
+
+    await live.discard();
+
+    // The composer is asked to remove the block only while its reply is
+    // still the empty one the field left it with.
+    expect(composer.removeQuote).toHaveBeenCalledTimes(1);
+    const [id, when] = composer.removeQuote.mock.calls[0];
+    expect(id).toBe(live.id);
+    const block = { id: live.id, before: '', quote: quote.quote, headings: quote.headings };
+    expect(when!({ ...block, reply: '' })).toBe(true);
+    expect(when!({ ...block, reply: ' \n' })).toBe(true);
+    expect(when!({ ...block, reply: 'Typed in the chat.' })).toBe(false);
+    unregister();
   });
 
   it('keeps one block when the chat opens mid-reply, finishing into its composer', async () => {

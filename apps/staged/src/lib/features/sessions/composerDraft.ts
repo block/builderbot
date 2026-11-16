@@ -160,10 +160,17 @@ export function appendDraftQuote(
 
 /**
  * Remove a quote block. The free text on either side of it is the user's own
- * and stays: the text before it joins the text after it.
+ * and stays: the text before it joins the text after it. With `when`, only a
+ * block it holds of as this draft has it: whoever asked went by what the
+ * draft held earlier, and the block may have changed since.
  */
-export function removeDraftQuote(draft: ComposerDraft, id: string): ComposerDraft {
-  return takeDraftQuote(draft, id)?.draft ?? draft;
+export function removeDraftQuote(
+  draft: ComposerDraft,
+  id: string,
+  when?: (quote: DraftQuote) => boolean
+): ComposerDraft {
+  const taken = takeDraftQuote(draft, id);
+  return taken && (!when || when(taken.removed.quote)) ? taken.draft : draft;
 }
 
 /**

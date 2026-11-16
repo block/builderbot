@@ -306,7 +306,7 @@ describe('SessionChatPane quoted replies', () => {
     unmount(pane);
   });
 
-  it('tells the note at once which passages the open composer quotes, and drops one the note removes', async () => {
+  it('tells the note at once which passages the open composer quotes, and drops one the note discards', async () => {
     const { pane } = mountPane('session-marks');
     flushSync();
     await settle();
@@ -318,8 +318,17 @@ describe('SessionChatPane quoted replies', () => {
     // Ahead of the debounced write: the note marks from this.
     expect(replyDraftPresence.quotes('session-marks').map((q) => q.id)).toEqual([first, second]);
 
-    // The note's reply field removing a block it reopened.
-    await removeQuoteFromReplyDraft('session-marks', first);
+    // The note's reply field closed on an empty reply, on a block whose
+    // reply here is not the field's: asked of the block as the composer has
+    // it, and it stays.
+    const untouched = (q: { reply: string }) => q.reply.trim() === '';
+    await removeQuoteFromReplyDraft('session-marks', first, untouched);
+    await settle();
+    expect(quoteCount()).toBe(2);
+
+    // And on a block that still holds what the field last wrote: it goes.
+    const fieldsOwn = (q: { reply: string }) => untouched(q) || q.reply === 'Which one?';
+    await removeQuoteFromReplyDraft('session-marks', first, fieldsOwn);
     await settle();
 
     expect(quoteCount()).toBe(1);

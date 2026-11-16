@@ -13,7 +13,9 @@
     as long as its block is in the draft, and pressing a mark goes back to
     its reply. Beside the note the composer has the block, so the caret
     lands in its reply there; otherwise the reply field reopens by the
-    passage with what was written, to edit or remove.
+    passage with what was written, to edit. A field closed on an empty
+    reply takes its block out of the draft, and the mark with it: that is
+    how a quote is deleted from the note.
 
   The two meet where a selection is exactly a passage that is already
   quoted: Reply then goes back to that block's reply, as a press on its mark
@@ -150,9 +152,8 @@
   /**
    * The block the open field writes to has left the draft: removed in the
    * composer or sent, by another window or another client. The field
-   * closes: left open it would say the reply is kept in the draft, while
-   * what is typed goes nowhere. Only a block the draft has shown, which a
-   * new reply's is not until its add lands.
+   * closes: left open it would take a reply that goes nowhere. Only a block
+   * the draft has shown, which a new reply's is not until its add lands.
    */
   let shownActiveQuoteId: string | null = null;
   $effect(() => {
@@ -254,10 +255,11 @@
         if (shown === undefined || shown === held.reply) heldReplies.delete(quoteId);
         else held.writtenOver = { reply: shown };
       },
-      remove: async () => {
+      discard: async () => {
+        // Nothing of it is left to show: the block is going.
         heldReplies.delete(quoteId);
         try {
-          await live.remove();
+          await live.discard();
         } catch (error) {
           console.error('Failed to remove the quote from the reply draft', error);
           toast.error('Could not remove the quote from your reply draft');

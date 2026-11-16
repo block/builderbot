@@ -204,4 +204,59 @@ mod tests {
         }
         assert_eq!(range_slice(0, "bytes=0-"), None);
     }
+
+    /// The index holds no more than `MAX_INDEXED_FILES` entries. One past
+    /// that it starts over: what it forgot is found through the store again,
+    /// at the cost of one lookup each.
+    #[test]
+    fn the_index_starts_over_at_its_cap_and_finds_forgotten_files_again() {
+        use crate::note_media::tests::Fixture;
+        use std::sync::atomic::Ordering;
+        let fixture = Fixture::new();
+        let (first, _) = fixture.video(64);
+        let (second, _) = fixture.video(128);
+        assert_ne!(first, second);
+        let index = MediaIndex::default();
+        let (store, asked) = fixture.store_source();
+        let entries = || index.files.read().unwrap().len();
+
+        let first_found = index.locate(&first, &*store).unwrap();
+        assert_eq!((entries(), asked.load(Ordering::SeqCst)), (1, 1));
+
+        // One short of the cap: nothing is forgotten yet.
+        {
+            let mut files = index.files.write().unwrap();
+            for n in files.len()..MAX_INDEXED_FILES - 1 {
+                let entry = (PathBuf::from(format!("/nowhere/{n}")), String::new());
+                files.insert(format!("filler-{n}"), entry);
+            }
+        }
+        let second_found = index.locate(&second, &*store).unwrap();
+        assert_eq!(entries(), MAX_INDEXED_FILES);
+        assert_eq!(index.locate(&first, &*store).unwrap(), first_found);
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+
+        // At the cap, the next new file empties it and goes in alone.
+        index
+            .files
+            .write()
+            .unwrap()
+            .remove(&second)
+            .expect("the second video was indexed");
+        index.files.write().unwrap().insert(
+            "filler-last".into(),
+            (PathBuf::from("/nowhere"), String::new()),
+        );
+        assert_eq!(entries(), MAX_INDEXED_FILES);
+        assert_eq!(index.locate(&second, &*store).unwrap(), second_found);
+        assert_eq!((entries(), asked.load(Ordering::SeqCst)), (1, 3));
+
+        // The first video was forgotten with the rest: one more lookup finds
+        // it where it was, and after that it is indexed again.
+        assert_eq!(index.locate(&first, &*store).unwrap(), first_found);
+        assert_eq!((entries(), asked.load(Ordering::SeqCst)), (2, 4));
+        assert_eq!(index.locate(&first, &*store).unwrap(), first_found);
+        assert_eq!(index.locate(&second, &*store).unwrap(), second_found);
+        assert_eq!((entries(), asked.load(Ordering::SeqCst)), (2, 4));
+    }
 }

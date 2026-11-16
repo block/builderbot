@@ -874,6 +874,63 @@ fn desktop_protocol_asks_the_store_once_per_file_and_answers_while_it_is_held() 
     assert_eq!(asked.load(Ordering::SeqCst), 2);
 }
 
+/// A branch that moves to another project takes its media along: the rows
+/// get the new project and the files its `images/` directory. The index
+/// still holds the old path, finds nothing there, and asks the store once
+/// more for the new one.
+#[test]
+fn desktop_media_index_follows_a_file_that_moved_with_its_project() {
+    use std::sync::atomic::Ordering;
+    use tauri::http::{Request, StatusCode};
+    let f = Fixture::new();
+    let (file, mp4) = f.video(4096);
+    let (id, _) = file.split_once('.').unwrap();
+    let index = serving::MediaIndex::default();
+    let (store, asked) = f.store_source();
+    let get = || {
+        Request::builder()
+            .uri(format!("staged-media://localhost/{file}"))
+            .header("Range", "bytes=100-199")
+            .body(vec![])
+            .unwrap()
+    };
+    let path_in = |project: &str| crate::store::images::image_file_path(project, id, "clip.mp4");
+    let old_path = path_in(&f.project.id).unwrap();
+    assert_eq!(
+        index.locate(&file, &*store).unwrap().0,
+        old_path,
+        "the fixture's video is not where this test moves it from"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+
+    // What `move_branch` does for a branch's media: rows, then files.
+    let destination = Project::new("test/note-media-destination");
+    f.store.create_project(&destination).unwrap();
+    f.store
+        .hold_connection()
+        .execute(
+            "UPDATE images SET project_id = ?1 WHERE branch_id = ?2",
+            rusqlite::params![destination.id, f.branch.id],
+        )
+        .unwrap();
+    let new_path = path_in(&destination.id).unwrap();
+    assert_ne!(new_path, old_path);
+    std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+    std::fs::rename(&old_path, &new_path).unwrap();
+
+    let response = serving::response(&index, &*store, get());
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.body(), &mp4[100..200]);
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    assert_eq!(index.locate(&file, &*store).unwrap().0, new_path);
+    // And the new path is remembered like the old one was.
+    let response = serving::response(&index, &*store, get());
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+
+    std::fs::remove_file(new_path).unwrap();
+}
+
 #[test]
 fn copied_chat_media_is_owned_by_the_note_and_original_survives_cleanup() {
     let f = Fixture::new();

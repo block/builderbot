@@ -193,8 +193,125 @@ describe('the script seek for a preview the fragment did not paint', () => {
     expect(clip.seeks).toEqual([0.05, 0.001]);
   });
 
+  /** The reader presses play: `paused` flips at once, the event follows. */
+  function pressPlay(clip: Scripted) {
+    clip.state.paused = false;
+    clip.video.dispatchEvent(new Event('play'));
+  }
+
+  // While a later time is tried the video really is there, so a play then
+  // would skip the opening of the clip.
+  describe('a play pressed while a later time is being tried', () => {
+    it('starts from the beginning', async () => {
+      const clip = mountVideo();
+      fragmentSeek(clip);
+      await grace();
+      expect(clip.seeks).toEqual([0.05]);
+
+      pressPlay(clip);
+      expect(clip.seeks).toEqual([0.05, 0.001]);
+
+      // And the video is the reader's from then on.
+      clip.seeked();
+      clip.presentFrame();
+      await grace();
+      await grace();
+      expect(clip.seeks).toEqual([0.05, 0.001]);
+    });
+
+    it('starts from the beginning from the last time tried too', async () => {
+      const clip = mountVideo();
+      fragmentSeek(clip);
+      for (let i = 0; i < 5; i++) {
+        await grace();
+        clip.seeked();
+      }
+      expect(clip.seeks).toEqual([0.05, 0.1, 0.25, 0.5, 1]);
+
+      pressPlay(clip);
+      expect(clip.seeks).toEqual([0.05, 0.1, 0.25, 0.5, 1, 0.001]);
+      await grace();
+      await grace();
+      expect(clip.seeks).toHaveLength(6);
+    });
+
+    it('starts from the beginning while the seek to that time is still running', async () => {
+      const clip = mountVideo();
+      fragmentSeek(clip);
+      await grace();
+      clip.state.seeking = true;
+
+      pressPlay(clip);
+      expect(clip.seeks).toEqual([0.05, 0.001]);
+    });
+
+    it('starts from the beginning when the play event is late', async () => {
+      const clip = mountVideo();
+      fragmentSeek(clip);
+      await grace();
+      clip.seeked();
+      // Playing, a little way in, and no event yet when the next check runs.
+      clip.state.paused = false;
+      clip.state.time = 0.05 + 0.2;
+      await grace();
+      expect(clip.seeks).toEqual([0.05, 0.001]);
+
+      clip.video.dispatchEvent(new Event('play'));
+      await grace();
+      expect(clip.seeks).toEqual([0.05, 0.001]);
+    });
+
+    it('leaves a reader who scrubbed first where they scrubbed to', async () => {
+      const clip = mountVideo();
+      fragmentSeek(clip);
+      await grace();
+      clip.state.time = 42;
+
+      pressPlay(clip);
+      await grace();
+      await grace();
+      expect(clip.seeks).toEqual([0.05]);
+    });
+  });
+
+  it('does not move a play pressed at the start, before any later time', async () => {
+    const clip = mountVideo();
+    fragmentSeek(clip);
+    pressPlay(clip);
+    await grace();
+    await grace();
+    expect(clip.seeks).toEqual([]);
+  });
+
+  it('does not move a play pressed after it has finished', async () => {
+    const clip = mountVideo();
+    fragmentSeek(clip);
+    await grace();
+    clip.seeked();
+    clip.presentFrame();
+    await grace();
+    expect(clip.seeks).toEqual([0.05, 0.001]);
+
+    // Back on the time that was tried, by the reader's own hand.
+    clip.state.time = 0.05;
+    pressPlay(clip);
+    expect(clip.seeks).toEqual([0.05, 0.001]);
+  });
+
+  // A video moved off a failed stream is resumed where it was
+  // (videoStream.test.ts); that frame is its picture, not the clip's start.
+  it('leaves a video that was resumed further in alone', async () => {
+    const clip = mountVideo();
+    clip.state.time = 42;
+    clip.seeked();
+    for (let i = 0; i < 3; i++) {
+      await grace();
+      clip.seeked();
+    }
+    expect(clip.seeks).toEqual([]);
+  });
+
   it.each([
-    ['pressed play', (clip: Scripted) => void (clip.state.paused = false)],
     ['moved the timeline', (clip: Scripted) => void (clip.state.time = 42)],
     ['is still scrubbing', (clip: Scripted) => void (clip.state.seeking = true)],
     ['closed the note', (clip: Scripted) => clip.video.remove()],

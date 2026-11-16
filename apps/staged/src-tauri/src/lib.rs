@@ -1778,13 +1778,18 @@ pub fn run() {
     // files through one index, so the store is asked once per file. The
     // listener is bound here, ahead of the builder, because its address goes
     // to the page in an initialization script, and windows are built before
-    // `setup` runs; it starts answering in `setup`.
+    // `setup` runs; it starts answering in `setup`. The script names the
+    // address only to the app's own pages, whose origin the config decides.
+    let context = tauri::generate_context!();
     let media_index = Arc::new(note_media::serving::MediaIndex::default());
     let media_stream = note_media::stream::MediaStream::bind();
     let protocol_index = Arc::clone(&media_index);
 
     tauri::Builder::default()
-        .plugin(note_media::stream::plugin(media_stream.as_ref().ok()))
+        .plugin(note_media::stream::plugin(
+            media_stream.as_ref().ok(),
+            &note_media::stream::page_origins(context.config()),
+        ))
         .register_asynchronous_uri_scheme_protocol(
             "staged-media",
             move |context, request, responder| {
@@ -1818,19 +1823,11 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(move |app| {
-            // Reported here because the logger is not up when it is bound.
-            match media_stream {
-                Ok(stream) => {
-                    let store = media_store_source(app.handle().clone());
-                    if let Err(e) = stream.serve(media_index, store) {
-                        // The page already has the address. Its videos fail
-                        // to load from it and fall back to the protocol one
-                        // by one.
-                        log::warn!("[media stream] could not start: {e}");
-                    }
-                }
-                Err(e) => log::warn!("[media stream] unavailable, video uses staged-media: {e}"),
-            }
+            note_media::stream::start(
+                media_stream,
+                media_index,
+                media_store_source(app.handle().clone()),
+            );
 
             // Start capturing home's shell env before anything can ask for a
             // worktree's: the ACP tools reconciler started below, doctor and
@@ -2631,7 +2628,7 @@ pub fn run() {
             // stagedctl on PATH (Settings action)
             stagedctl_link::commands::link_stagedctl_on_path,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             // Now that window close is intercepted, the only producers are our

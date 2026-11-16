@@ -4,8 +4,10 @@
  * `resolveStagedVideoSrc` is where the viewer (`mediaRendering.ts`) and the
  * editor (`wysiwygMedia.ts`) get a `<video src>`: the served URL
  * (`resolveStagedVideoUrl`, the desktop app's loopback stream when it has
- * one) with the preview fragment below. A `<video>` whose stream fails to
- * load is put back on the `staged-media` protocol, see `leaveFailedStream`.
+ * one) with the preview fragment below. It also starts the document-wide
+ * watch over note videos, which paints the preview and does the page's part
+ * for that stream (`videoStream.ts`): a video whose stream fails is put back
+ * on the `staged-media` protocol, and the stream's address stays in the page.
  *
  * WebKit (the desktop WKWebView, Safari, every iOS browser) decodes nothing
  * for `preload="metadata"`, so a note video is an empty box until played.
@@ -26,7 +28,13 @@
  * server, and the script seeks are ordinary ranged reads. Both were measured
  * in a WKWebView; jsdom has no media pipeline to show either.
  */
-import { protocolUrlForStreamedVideo, resolveStagedVideoUrl } from './mediaUrl';
+import { resolveStagedVideoUrl } from './mediaUrl';
+import {
+  keepStreamAddressInApp,
+  leaveFailedStream,
+  leaveStalledStream,
+  resumeAfterLeavingStream,
+} from './videoStream';
 
 /**
  * Start time of the media fragment, in seconds. Small enough to be the first
@@ -42,6 +50,12 @@ const RETRY_TIMES = [0.05, 0.1, 0.25, 0.5, 1];
  * to 20 ms; a wrong "nothing shown" under load only costs two extra seeks.
  */
 const PAINT_GRACE_MS = 250;
+
+/**
+ * How far past one of the times above a video can have played by the time
+ * its `play` event is handled, in seconds.
+ */
+const PLAY_DRIFT = 0.5;
 
 /** `src` for a note `<video>`: the served URL, with the preview fragment. */
 export function resolveStagedVideoSrc(id: string, ext: string): string {
@@ -84,29 +98,28 @@ function watchNoteVideos() {
       },
       true
     );
-  onNoteVideo('loadedmetadata', (video) => void paintBlankPreview(video));
+  onNoteVideo('loadedmetadata', (video) => {
+    // First: a video resumed after leaving the stream is not at the start,
+    // and the preview below then leaves it alone.
+    resumeAfterLeavingStream(video);
+    void paintBlankPreview(video);
+  });
   onNoteVideo('error', leaveFailedStream);
-}
-
-/**
- * The desktop app streams video from a loopback listener, and tells the page
- * its address before knowing that it will keep answering. A video that fails
- * to load from there is loaded over the `staged-media` protocol instead,
- * which is slower to seek but needs nothing beyond the app itself. Once: the
- * protocol URL is not a stream URL, so a clip WebKit cannot play at all
- * fails a second time and stays failed.
- */
-function leaveFailedStream(video: HTMLVideoElement) {
-  const fallback = protocolUrlForStreamedVideo(video.currentSrc || video.src);
-  if (fallback) video.src = fallback;
+  onNoteVideo('stalled', leaveStalledStream);
+  keepStreamAddressInApp();
 }
 
 /**
  * Step 2 above. Runs from `loadedmetadata`, which is before the fragment's
- * seek, so a frame that seek presents is not missed. Once a later time has
- * painted, the video is put back on the fragment's time: WebKit keeps the
- * painted frame up, and playback and the timeline still start at the
- * beginning.
+ * seek has finished, so a frame that seek presents is not missed. Once a
+ * later time has painted, the video is put back on the fragment's time:
+ * WebKit keeps the painted frame up, and playback and the timeline still
+ * start at the beginning.
+ *
+ * While it tries the later times the video really is at one of them. A
+ * reader who presses play then (or Space in the editor) must still get the
+ * clip from its start, so for as long as this runs a `play` on one of its own
+ * times goes back there first.
  */
 async function paintBlankPreview(video: HTMLVideoElement) {
   if (typeof video.requestVideoFrameCallback !== 'function') return;
@@ -117,23 +130,44 @@ async function paintBlankPreview(video: HTMLVideoElement) {
   const src = video.currentSrc;
   await once(video, 'seeked');
   const start = video.currentTime;
+  // Only a video at the start of its clip is waiting for a preview. One that
+  // was resumed further in shows the frame it was resumed on.
+  if (!(start < RETRY_TIMES[0])) return;
   let at = start;
-  for (const time of [...RETRY_TIMES, null]) {
-    await paintGrace();
-    // Played, scrubbed, reloaded or removed: the video is the reader's now.
-    const untouched =
-      video.isConnected &&
-      video.paused &&
-      !video.seeking &&
-      video.currentSrc === src &&
-      Math.abs(video.currentTime - at) < 0.001;
-    if (!untouched) return;
-    if (painted || time === null || !(time < video.duration)) break;
-    at = time;
-    video.currentTime = time;
-    await once(video, 'seeked');
+  let playing = false;
+  const playFromStart = () => {
+    if (playing) return;
+    playing = true;
+    const ahead = video.currentTime - at;
+    // Still on this helper's time, give or take what has played since. A
+    // reader who scrubbed first is somewhere else and stays there.
+    if (at !== start && video.currentSrc === src && ahead > -0.001 && ahead < PLAY_DRIFT) {
+      video.currentTime = start;
+    }
+  };
+  video.addEventListener('play', playFromStart);
+  try {
+    for (const time of [...RETRY_TIMES, null]) {
+      await paintGrace();
+      // The `play` event may still be on its way.
+      if (!video.paused) playFromStart();
+      // Played, scrubbed, reloaded or removed: the video is the reader's now.
+      const untouched =
+        !playing &&
+        video.isConnected &&
+        !video.seeking &&
+        video.currentSrc === src &&
+        Math.abs(video.currentTime - at) < 0.001;
+      if (!untouched) return;
+      if (painted || time === null || !(time < video.duration)) break;
+      at = time;
+      video.currentTime = time;
+      await once(video, 'seeked');
+    }
+    if (at !== start) video.currentTime = start;
+  } finally {
+    video.removeEventListener('play', playFromStart);
   }
-  if (at !== start) video.currentTime = start;
 }
 
 /** A hidden page presents no frames, so the wait only starts once it shows. */

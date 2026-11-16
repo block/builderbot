@@ -216,7 +216,14 @@ export function amendStoredReplyDraft(
 export type LiveQuoteReply = {
   /** The block's id in the draft. */
   id: string;
-  /** The reply as typed so far; written to the draft after a pause. */
+  /**
+   * The reply as typed so far; written to the draft after a pause. Not an
+   * empty one (nothing, or only whitespace): that waits for the field to
+   * close, which takes the block out (`discard`) or, failing that, writes
+   * it (`finish`). A field emptied and then cut off before it closes (the
+   * page reloaded, the app quit) so leaves the block with the reply it last
+   * had, not as an empty block nothing in the note would delete.
+   */
   setReply(reply: string): void;
   /**
    * The field closed: write whatever is still pending. Resolves once the
@@ -242,7 +249,8 @@ export type LiveQuoteReply = {
  * the field just writes what is left (`finish`), or takes the block out
  * again when nothing was written in it (`discard`). The block goes into the
  * draft at once, with the reply it starts with (usually none), and each
- * pause in typing writes the reply so far through the shared writer — into
+ * pause in typing writes the reply so far (unless it is empty: see
+ * `LiveQuoteReply.setReply`) through the shared writer — into
  * the composer, if one has opened the chat meanwhile, by the id the block
  * was added under, so the block is never added twice.
  *
@@ -305,6 +313,8 @@ function liveQuoteReply(
   let written = initialReply;
   let added = add === null;
   let discarded = false;
+  /** `latest` is yet to be handed to a write: by `timer`, or at the close when it is empty. */
+  let unwritten = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   // Every write after the add, in order; a rejection anywhere is picked up
   // by `finish`, which retries from what is known to have landed.
@@ -331,6 +341,7 @@ function liveQuoteReply(
 
   function write() {
     const reply = latest;
+    unwritten = false;
     follow(
       chain
         .then(() => setReplyDraftQuoteReply(sessionId, id, reply))
@@ -340,11 +351,9 @@ function liveQuoteReply(
     );
   }
 
-  function cancelTimer(): boolean {
-    if (!timer) return false;
-    clearTimeout(timer);
+  function cancelTimer() {
+    if (timer) clearTimeout(timer);
     timer = null;
-    return true;
   }
 
   return {
@@ -352,7 +361,10 @@ function liveQuoteReply(
     setReply(reply) {
       if (discarded || reply === latest) return;
       latest = reply;
+      unwritten = true;
       cancelTimer();
+      // An empty reply is the close's to deal with (see LiveQuoteReply.setReply).
+      if (reply.trim() === '') return;
       timer = setTimeout(() => {
         timer = null;
         write();
@@ -360,7 +372,8 @@ function liveQuoteReply(
     },
     async finish() {
       if (discarded) return;
-      if (cancelTimer()) write();
+      cancelTimer();
+      if (unwritten) write();
       try {
         await chain;
         return;

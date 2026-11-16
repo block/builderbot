@@ -1016,6 +1016,34 @@ describe('NoteSelectionReply closed on an empty reply', () => {
     expect(field()!.value).toBe('Why on every write?');
   });
 
+  it('as its own mark is pressed, which opens no field on the block that goes with it', () => {
+    const fixture = reopen(render());
+    typeReply('');
+
+    expect(fixture.reply.editQuote(existing, passageRange())).toBe(false);
+    flushSync();
+
+    expect(fixture.editLive.discard).toHaveBeenCalledTimes(1);
+    expect(fixture.editLive.finish).not.toHaveBeenCalled();
+    expect(fixture.onEdit).toHaveBeenCalledTimes(1);
+    expect(field()).toBeNull();
+  });
+
+  it('reopens from its own mark when the block stays: a reply in it, or none and untouched', () => {
+    const fixture = reopen(render());
+    expect(fixture.reply.editQuote(existing, passageRange())).toBe(true);
+    flushSync();
+    expect(field()!.value).toBe('Why on every write?');
+
+    expect(fixture.reply.editQuote(unanswered, passageRange())).toBe(true);
+    flushSync();
+    expect(fixture.reply.editQuote(unanswered, passageRange())).toBe(true);
+    flushSync();
+
+    expect(field()!.value).toBe('');
+    expect(fixture.editLive.discard).not.toHaveBeenCalled();
+  });
+
   it('counts a reply of nothing but whitespace as empty', () => {
     const { live } = openNew(render());
     typeReply('  \n\t ');

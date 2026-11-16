@@ -1143,6 +1143,383 @@ describe('NoteReplyQuotes pressing a mark', () => {
   });
 });
 
+// A press on a mark while a field left empty is open. The press closes the
+// field (bits-ui, 10ms after the pointer goes down), the field's quote
+// leaves the draft, and every mark is rebuilt, all before the button comes
+// up: on a new span, for which a browser sends no click. jsdom makes no
+// click out of a press either way, so these tests send what the browser was
+// seen to send (pointer-down on the old span, pointer-up on the new one, no
+// click) rather than a press through a real pointer.
+describe('NoteReplyQuotes pressing a mark while a field left empty is open', () => {
+  const flowMark = () => contentEl.querySelector<HTMLElement>('#flow-p .note-quote-highlight');
+  const flagMark = () => contentEl.querySelector<HTMLElement>('#again-p .note-quote-highlight');
+  const replies = async (sessionId: string) =>
+    (await loadReplyDraft(sessionId)).quotes.map((quote) => quote.reply);
+
+  /** One event of a mouse press, on the element under the pointer then. */
+  function pointer(
+    type: 'pointerdown' | 'pointerup' | 'pointercancel',
+    el: Element,
+    at: { clientX: number; clientY: number } = { clientX: 300, clientY: 300 }
+  ): Event {
+    const event = new (window.PointerEvent ?? MouseEvent)(type, {
+      bubbles: true,
+      cancelable: true,
+      pointerType: 'mouse',
+      pointerId: 1,
+      button: 0,
+      ...at,
+    } as never);
+    el.dispatchEvent(event);
+    flushSync();
+    return event;
+  }
+
+  /** The pointer goes down on `el`, and stays down while the open field closes on it. */
+  function pressDown(el: Element) {
+    pointer('pointerdown', el);
+    vi.advanceTimersByTime(20);
+    flushSync();
+  }
+
+  /** Two quotes with replies, on `#flow-p` and on the first sentence of `#again-p`. */
+  async function twoQuotes() {
+    const rendered = render();
+    await replyTo('#flow-p', 'Why?');
+    await replyTo('#again-p', 'Which flag?', 0, 'Ship behind a flag.'.length);
+    return rendered;
+  }
+
+  /** The ways a field is left open and empty, and the replies the draft keeps once it closes. */
+  const emptyFields: Array<[string, () => Promise<void>, string[]]> = [
+    [
+      'a reply that was cleared',
+      async () => {
+        click(flowMark()!);
+        type('');
+      },
+      ['Which flag?'],
+    ],
+    [
+      'a new reply nothing was typed in',
+      async () => {
+        select('#link-p', 0, 'Reads go through'.length);
+        click(button()!);
+        await drain();
+        expect(markedText()).toContain('Reads go through');
+      },
+      ['Why?', 'Which flag?'],
+    ],
+  ];
+
+  it.each(emptyFields)(
+    'deletes the quote of %s and opens the pressed mark’s field, in the one press',
+    async (_field, leaveEmpty, kept) => {
+      const { sessionId } = await twoQuotes();
+      await leaveEmpty();
+      expect(field()!.value).toBe('');
+
+      const pressed = flagMark()!;
+      pressDown(pressed);
+      expect(field()).toBeNull();
+      // The quote goes and the marks are rebuilt, under a button still down.
+      await drain();
+      expect(pressed.isConnected).toBe(false);
+      expect(field()).toBeNull();
+
+      // The button comes up on the same quote's new span, and no click follows.
+      pointer('pointerup', flagMark()!);
+
+      expect(field()!.value).toBe('Which flag?');
+      expect(flagMark()!.classList.contains('is-active')).toBe(true);
+      await drain(400);
+      expect(field()!.value).toBe('Which flag?');
+      expect(markedText()).not.toContain('Reads go through');
+      expect(await replies(sessionId)).toEqual(kept);
+      expect(toastError).not.toHaveBeenCalled();
+    }
+  );
+
+  it('opens the pressed mark’s field from the click when the button is up before the field has closed', async () => {
+    const { sessionId } = await twoQuotes();
+    click(flowMark()!);
+    type('');
+
+    // Down, up and click on a span that is still where it was.
+    const pressed = flagMark()!;
+    pointer('pointerdown', pressed);
+    pointer('pointerup', pressed);
+    expect(field()!.value).toBe('');
+    click(pressed);
+
+    expect(field()!.value).toBe('Which flag?');
+    await drain(400);
+    expect(field()!.value).toBe('Which flag?');
+    expect(flowMark()).toBeNull();
+    expect(await replies(sessionId)).toEqual(['Which flag?']);
+  });
+
+  it('answers the press once when a click does follow the pointer-up', async () => {
+    await twoQuotes();
+    click(flowMark()!);
+    type('');
+    pressDown(flagMark()!);
+    await drain();
+    pointer('pointerup', flagMark()!);
+    const input = field()!;
+
+    // Sent by an engine that does make a click of such a press.
+    click(flagMark()!);
+
+    // The same field, not one closed and opened again.
+    expect(field()).toBe(input);
+    expect(input.isConnected).toBe(true);
+
+    // The next press is a press of its own.
+    key(input, 'Escape');
+    await drain();
+    const next = flagMark()!;
+    pointer('pointerdown', next);
+    pointer('pointerup', next);
+    click(next);
+    expect(field()!.value).toBe('Which flag?');
+  });
+
+  it('takes a click with no press of its own, well after an answered press, as a new one', async () => {
+    await twoQuotes();
+    click(flowMark()!);
+    type('');
+    pressDown(flagMark()!);
+    await drain();
+    const up = pointer('pointerup', flagMark()!);
+    expect(field()!.value).toBe('Which flag?');
+    key(field()!, 'Escape');
+    await drain();
+    expect(field()).toBeNull();
+
+    // As a screen reader presses the mark: a click, and no pointer event.
+    const later = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 });
+    Object.defineProperty(later, 'timeStamp', { value: up.timeStamp + 2000 });
+    flagMark()!.dispatchEvent(later);
+    flushSync();
+
+    expect(field()!.value).toBe('Which flag?');
+  });
+
+  it('opens nothing when the button comes up anywhere but on the pressed quote, where it went down', async () => {
+    const rendered = await twoQuotes();
+    await replyTo('#link-p', 'Which reads?', 0, 'Reads go through'.length);
+    const linkMark = () => contentEl.querySelector<HTMLElement>('#link-p .note-quote-highlight');
+
+    const comingUp: Array<[string, () => void]> = [
+      ['on another quote’s mark', () => pointer('pointerup', linkMark()!)],
+      [
+        'on text that is not marked',
+        () => pointer('pointerup', contentEl.querySelector('#title')!),
+      ],
+      ['outside the note', () => pointer('pointerup', headerButton)],
+      [
+        'on the pressed quote after a drag',
+        () => pointer('pointerup', flagMark()!, { clientX: 340, clientY: 300 }),
+      ],
+      [
+        'on the pressed quote with text selected',
+        () => {
+          const text = flagMark()!.firstChild!;
+          const range = document.createRange();
+          range.setStart(text, 0);
+          range.setEnd(text, 4);
+          const selection = document.getSelection()!;
+          selection.removeAllRanges();
+          selection.addRange(range);
+          expect(selection.isCollapsed).toBe(false);
+          pointer('pointerup', flagMark()!);
+          selection.removeAllRanges();
+        },
+      ],
+      [
+        'after the press was cancelled',
+        () => {
+          pointer('pointercancel', flagMark()!);
+          pointer('pointerup', flagMark()!);
+        },
+      ],
+    ];
+    for (const [where, up] of comingUp) {
+      // Each round deletes a quote: put it back first.
+      if (!flowMark()) await replyTo('#flow-p', 'Why?');
+      click(flowMark()!);
+      type('');
+      pressDown(flagMark()!);
+      await drain();
+      expect(flowMark(), where).toBeNull();
+
+      up();
+
+      expect(field(), where).toBeNull();
+      // A pointer-up with no press before it is nothing either.
+      pointer('pointerup', flagMark()!);
+      expect(field(), where).toBeNull();
+    }
+    expect(await replies(rendered.sessionId)).toEqual(['Which flag?', 'Which reads?']);
+  });
+
+  it('leaves a press on a mark that stays where it is to the browser’s click', async () => {
+    await twoQuotes();
+    const pressed = flagMark()!;
+
+    pointer('pointerdown', pressed);
+    pointer('pointerup', pressed);
+
+    expect(field()).toBeNull();
+    click(pressed);
+    expect(field()!.value).toBe('Which flag?');
+  });
+
+  it.each([
+    [
+      'the click lands before the field has closed',
+      (own: HTMLElement) => {
+        pointer('pointerdown', own);
+        pointer('pointerup', own);
+        click(own);
+      },
+    ],
+    [
+      'the click lands after the field closed and before the quote has gone',
+      (own: HTMLElement) => {
+        pressDown(own);
+        expect(field()).toBeNull();
+        expect(own.isConnected).toBe(true);
+        pointer('pointerup', own);
+        click(own);
+      },
+    ],
+    [
+      'the button comes up after the quote has gone',
+      async (own: HTMLElement) => {
+        pressDown(own);
+        await drain();
+        expect(own.isConnected).toBe(false);
+        pointer('pointerup', contentEl.querySelector('#flow-p')!);
+      },
+    ],
+  ])(
+    'does not reopen a field on the quote being deleted when its own mark is pressed and %s',
+    async (_when, press) => {
+      const { sessionId } = await twoQuotes();
+      click(flowMark()!);
+      type('');
+
+      await press(flowMark()!);
+
+      expect(field()).toBeNull();
+      await drain(400);
+      expect(field()).toBeNull();
+      expect(flowMark()).toBeNull();
+      expect(await replies(sessionId)).toEqual(['Which flag?']);
+      expect(toastError).not.toHaveBeenCalled();
+    }
+  );
+
+  it('opens the other mark’s field from the keyboard, and keeps it open as the first quote goes', async () => {
+    const { sessionId } = await twoQuotes();
+    click(flowMark()!);
+    type('');
+    const stop = flagMark()!;
+    expect(stop.getAttribute('role')).toBe('button');
+
+    key(stop, 'Enter');
+
+    expect(field()!.value).toBe('Which flag?');
+    await drain(400);
+    // Through the marks being rebuilt as the first quote left the draft.
+    expect(stop.isConnected).toBe(false);
+    expect(field()!.value).toBe('Which flag?');
+    expect(flagMark()!.classList.contains('is-active')).toBe(true);
+    expect(flowMark()).toBeNull();
+    expect(await replies(sessionId)).toEqual(['Which flag?']);
+  });
+
+  it.each([
+    ['with its field still open', () => {}],
+    ['after Enter closed its field, before the quote has gone', () => key(field()!, 'Enter')],
+  ])(
+    'does not reopen a field from the keyboard on the quote being deleted, %s',
+    async (_when, before) => {
+      const { sessionId } = await twoQuotes();
+      click(flowMark()!);
+      type('');
+      before();
+      const stop = flowMark()!;
+      expect(stop.isConnected).toBe(true);
+
+      key(stop, 'Enter');
+
+      expect(field()).toBeNull();
+      await drain(400);
+      expect(field()).toBeNull();
+      expect(flowMark()).toBeNull();
+      expect(await replies(sessionId)).toEqual(['Which flag?']);
+    }
+  );
+
+  it('opens a mark from the keyboard once the quote deleted before it has gone', async () => {
+    await twoQuotes();
+    click(flowMark()!);
+    type('');
+    key(field()!, 'Escape');
+    await drain(400);
+    expect(flowMark()).toBeNull();
+
+    const stop = flagMark()!;
+    stop.focus();
+    key(stop, ' ');
+
+    expect(field()!.value).toBe('Which flag?');
+  });
+
+  it('gives a passage a new block when Reply is pressed on it while its old one is being deleted', async () => {
+    const { sessionId } = await twoQuotes();
+    click(flowMark()!);
+    type('');
+    key(field()!, 'Escape');
+    expect(flowMark()).not.toBeNull();
+
+    // The same passage, selected and replied to before the removal lands.
+    select('#flow-p .note-quote-highlight');
+    click(button()!);
+    expect(field()!.value).toBe('');
+    type('Why, again?');
+    key(field()!, 'Enter');
+    await drain(400);
+
+    expect(markedText()).toContain('The cache is invalidated on every write.');
+    expect(await replies(sessionId)).toEqual(['Which flag?', 'Why, again?']);
+  });
+
+  it('goes back to a mark again once a delete was declined for a reply given elsewhere', async () => {
+    const { sessionId } = await twoQuotes();
+    const [first] = (await loadReplyDraft(sessionId)).quotes;
+    click(flowMark()!);
+    type('');
+    // Answered in another window while the field here stood empty.
+    await storeDraft(sessionId, {
+      quotes: (await loadReplyDraft(sessionId)).quotes.map((quote) =>
+        quote.id === first.id ? { ...quote, reply: 'Answered in the chat.' } : quote
+      ),
+      text: '',
+    });
+    key(field()!, 'Escape');
+    await drain(400);
+    expect(await replies(sessionId)).toEqual(['Answered in the chat.', 'Which flag?']);
+
+    click(flowMark()!);
+
+    expect(field()!.value).toBe('Answered in the chat.');
+  });
+});
+
 describe('NoteReplyQuotes replying to a passage that is already quoted', () => {
   it('reopens that reply rather than adding a second block on the same words', async () => {
     const { sessionId } = render();

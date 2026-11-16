@@ -19,8 +19,14 @@
   open; its mark stays lit, as a hovered one's does, across all its pieces.
 
   Every pass replaces all the spans, so what the old ones held is put on the
-  new: the lit state of the open and the hovered quote, and keyboard focus
-  when a quote's stop had it.
+  new: the lit state of the open and the hovered quote, keyboard focus when
+  a quote's stop had it, and a press that was under way. A browser sends a
+  click only when the button comes up on the element it went down on, or on
+  one still in the page around both; a span replaced between the two gets
+  none. That happens when the press itself closes a reply field left empty:
+  the field's quote leaves the draft a moment later and the marks are
+  rebuilt under the pointer. So a press whose span has gone is answered as
+  the button comes up, on the same quote's new span.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -67,6 +73,10 @@
 
   const ACTIVE_CLASS = 'is-active';
   const HOVERED_CLASS = 'is-hovered';
+  /** How far the pointer may travel between going down and coming up and still be a press, not a drag. */
+  const PRESS_SLOP_PX = 4;
+  /** How soon after a press was answered a click is taken for that same press. */
+  const ANSWERED_CLICK_MS = 500;
 
   /** The quote the pointer is over, whose mark is lit. */
   let hoveredQuoteId: string | null = null;
@@ -151,14 +161,71 @@
     hoveredQuoteId = null;
     setQuoteHighlightState(el, HOVERED_CLASS, null);
 
+    /** A drag across marked text selected it, for a quote of its own: no press. */
+    const selectedText = () => {
+      const selection = document.getSelection();
+      return !!selection && !selection.isCollapsed;
+    };
+
+    /**
+     * The press under way on a mark, from the pointer going down to its
+     * coming up: the quote, the span pressed, and where.
+     */
+    let press: { quoteId: string; span: Node; pointerId: number; x: number; y: number } | null =
+      null;
+    /** When that press was answered as the pointer came up, ahead of any click. */
+    let answeredAt: number | null = null;
+
+    // On the document, so every press starts from nothing: one that ended
+    // outside the note is not left to be matched with a later pointer-up.
+    const handlePointerDown = (event: PointerEvent) => {
+      press = null;
+      answeredAt = null;
+      if (event.button !== 0 || !(event.target instanceof Node)) return;
+      const quoteId = quoteIdAtTarget(el, event.target);
+      if (!quoteId) return;
+      press = {
+        quoteId,
+        span: event.target,
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+      };
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      const pressed = press;
+      press = null;
+      if (!pressed || event.pointerId !== pressed.pointerId || event.button !== 0) return;
+      // The span is where it was: the browser's click follows.
+      if (pressed.span.isConnected) return;
+      // Replaced under the pointer, and no click will come (see the header).
+      // Only the same quote, where the pointer went down: the press is not
+      // passed on to whatever else the new marks put there, and a quote
+      // that left the draft meanwhile has no mark to come up on.
+      if (quoteIdAtTarget(el, event.target) !== pressed.quoteId) return;
+      if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > PRESS_SLOP_PX) return;
+      if (selectedText()) return;
+      answeredAt = event.timeStamp;
+      activate(el, pressed.quoteId, null);
+    };
+
+    const handlePointerCancel = () => {
+      press = null;
+    };
+
     const handleClick = (event: MouseEvent) => {
+      // An engine that does send a click for a press answered already. Not
+      // a click of its own some time later, which has no pointer-down to
+      // start it afresh when a screen reader makes it.
+      const sincePress = answeredAt === null ? null : event.timeStamp - answeredAt;
+      answeredAt = null;
+      if (sincePress !== null && sincePress < ANSWERED_CLICK_MS) return;
       // The second click of a double-click selects a word; it reopens nothing.
       if (event.defaultPrevented || event.button !== 0 || event.detail > 1) return;
       const quoteId = quoteIdAtTarget(el, event.target);
       if (!quoteId) return;
-      // A drag across marked text selected it, for a quote of its own.
-      const selection = document.getSelection();
-      if (selection && !selection.isCollapsed) return;
+      if (selectedText()) return;
       activate(el, quoteId, null);
     };
 
@@ -194,6 +261,10 @@
       if (event.relatedTarget) focusedQuoteId = null;
     };
 
+    const doc = el.ownerDocument;
+    doc.addEventListener('pointerdown', handlePointerDown, true);
+    doc.addEventListener('pointerup', handlePointerUp, true);
+    doc.addEventListener('pointercancel', handlePointerCancel, true);
     el.addEventListener('click', handleClick);
     el.addEventListener('keydown', handleKeydown);
     el.addEventListener('pointerover', handlePointerOver);
@@ -201,6 +272,9 @@
     el.addEventListener('focusin', handleFocusIn);
     el.addEventListener('focusout', handleFocusOut);
     return () => {
+      doc.removeEventListener('pointerdown', handlePointerDown, true);
+      doc.removeEventListener('pointerup', handlePointerUp, true);
+      doc.removeEventListener('pointercancel', handlePointerCancel, true);
       el.removeEventListener('click', handleClick);
       el.removeEventListener('keydown', handleKeydown);
       el.removeEventListener('pointerover', handlePointerOver);

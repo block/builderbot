@@ -25,7 +25,10 @@
   they land. Two things keep the field honest about that: a reply typed in
   the field is remembered here until the draft shows it (`heldReplies`), so
   a field closed and reopened at once still holds it; and a block that
-  leaves the draft while its field is open closes the field.
+  leaves the draft while its field is open closes the field. A block on its
+  way out, its field closed empty and the removal not yet landed, is still
+  marked for those few milliseconds; a press on its mark then, or a Reply to
+  its passage, does not go back to it (`leavingQuoteIds`).
 
   Rendered inside the note's scroll container, as NoteSelectionReply must
   be. A draft write that fails is reported in a toast.
@@ -120,6 +123,12 @@
    */
   const heldReplies = new Map<string, HeldReply>();
 
+  /**
+   * The blocks a field closed empty on, until the draft has answered: the
+   * block is gone, or was kept for a reply given to it elsewhere.
+   */
+  const leavingQuoteIds = new Set<string>();
+
   /** How many replies are held. For tests. */
   export function heldReplyCount(): number {
     return heldReplies.size;
@@ -176,7 +185,7 @@
   function existingQuoteFor(quote: NewDraftQuote): DraftQuote | null {
     if (!contentEl) return null;
     const existing = quoteAtPassage(contentEl, quotes, quote, { ignore: ignoreHeading });
-    return existing ? withHeldReply(existing) : null;
+    return existing && !leavingQuoteIds.has(existing.id) ? withHeldReply(existing) : null;
   }
 
   /**
@@ -258,11 +267,14 @@
       discard: async () => {
         // Nothing of it is left to show: the block is going.
         heldReplies.delete(quoteId);
+        leavingQuoteIds.add(quoteId);
         try {
           await live.discard();
         } catch (error) {
           console.error('Failed to remove the quote from the reply draft', error);
           toast.error('Could not remove the quote from your reply draft');
+        } finally {
+          leavingQuoteIds.delete(quoteId);
         }
       },
     };
@@ -274,7 +286,9 @@
    */
   function handleMarkActivate(quoteId: string, range: Range, stop: HTMLElement | null) {
     const quote = quotes.find((candidate) => candidate.id === quoteId);
-    if (!quote) return;
+    // Not a block on its way out of the draft: its field would open and
+    // close again as the removal lands.
+    if (!quote || leavingQuoteIds.has(quoteId)) return;
     if (chatVisible) {
       focusReplyDraftQuote(sessionId, quoteId);
       return;

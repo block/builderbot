@@ -371,17 +371,54 @@ describe('editLiveQuoteReply', () => {
     expect((await loadReplyDraft('e6')).quotes).toEqual([]);
   });
 
-  it('discards a block whose cleared reply was already written', async () => {
-    const id = await addQuoteToReplyDraft('e7', quote);
-    const live = editLiveQuoteReply('e7', id, 'Why?', 100);
-    live.setReply('  ');
+  it.each([
+    ['nothing', ''],
+    ['only whitespace', '  \n'],
+  ])(
+    'does not write a reply cleared to %s before the field closes, and still discards the block',
+    async (_what, cleared) => {
+      const id = await addQuoteToReplyDraft('e7', quote);
+      vi.mocked(setStoreValue).mockClear();
+      const live = editLiveQuoteReply('e7', id, 'Why?', 100);
+      live.setReply(cleared);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.runAllTimersAsync();
+      // A field cut off here (the page reloaded) leaves the block as it was,
+      // not as an empty block.
+      expect(setStoreValue).not.toHaveBeenCalled();
+      expect((await loadReplyDraft('e7')).quotes[0].reply).toBe('Why?');
+
+      await live.discard();
+
+      expect((await loadReplyDraft('e7')).quotes).toEqual([]);
+    }
+  );
+
+  it('drops a write still waiting on its pause when the reply is then cleared', async () => {
+    const id = await addQuoteToReplyDraft('e7b', quote);
+    const live = editLiveQuoteReply('e7b', id, 'Why?', 100);
+    live.setReply('Why so often?');
+    await vi.advanceTimersByTimeAsync(50);
+    live.setReply('');
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.runAllTimersAsync();
+
+    expect((await loadReplyDraft('e7b')).quotes[0].reply).toBe('Why?');
+
+    // Typed again: written after its pause, as any reply is.
+    live.setReply('Because.');
     await vi.advanceTimersByTimeAsync(100);
     await vi.runAllTimersAsync();
-    expect((await loadReplyDraft('e7')).quotes[0].reply).toBe('  ');
+    expect((await loadReplyDraft('e7b')).quotes[0].reply).toBe('Because.');
+  });
 
-    await live.discard();
+  it('writes a cleared reply when the field finishes on it instead of discarding', async () => {
+    const id = await addQuoteToReplyDraft('e7c', quote);
+    const live = editLiveQuoteReply('e7c', id, 'Why?', 100);
+    live.setReply('');
+    await live.finish();
 
-    expect((await loadReplyDraft('e7')).quotes).toEqual([]);
+    expect((await loadReplyDraft('e7c')).quotes.map((q) => [q.id, q.reply])).toEqual([[id, '']]);
   });
 
   it('does not discard a block given a reply elsewhere while its field was open', async () => {
@@ -491,6 +528,18 @@ describe('startLiveQuoteReply', () => {
     expect(draft.quotes[0].reply).toBe('Why not?');
     // The id it reports is the block's, known before the add has landed.
     expect(draft.quotes[0].id).toBe(live.id);
+  });
+
+  it('keeps the reply last written when a new reply is cleared and the field never closes', async () => {
+    const live = startLiveQuoteReply('l4', { ...quote, reply: '' }, 100);
+    live.setReply('Why');
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.runAllTimersAsync();
+    live.setReply('');
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.runAllTimersAsync();
+
+    expect((await loadReplyDraft('l4')).quotes.map((q) => q.reply)).toEqual(['Why']);
   });
 
   it('discards the block it added, even before the add has landed', async () => {

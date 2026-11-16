@@ -30,7 +30,10 @@
   reply is how its quote is deleted from the note. One block is left alone:
   a block that had no reply when its mark opened the field, and was not
   typed in. It was put in the draft like that elsewhere (in the chat
-  composer, say), and looking at it is not deleting it.
+  composer, say), and looking at it is not deleting it. A reply emptied in
+  an open field is not written until the field closes (replyDrafts'
+  `setReply`), so a field cut off first, by a reload, leaves the block with
+  the reply it last had rather than as such an empty block.
 
   Each selection makes one block, so a review of the whole note builds up
   one selection at a time. The block carries where it was selected
@@ -491,12 +494,18 @@
    * (`range`), with the reply written so far. `byKey` when a key press on
    * the mark asked for it: the mark gets focus back when a key closes the
    * field. Returns whether it opened: not while the note is hidden or a
-   * block is still being added, or when the passage has no place on screen.
+   * block is still being added, when the passage has no place on screen, or
+   * when the field already open on this block closes empty here, which
+   * deletes the block.
    */
   export function editQuote(quote: DraftQuote, range: Range, byKey = false) {
     if (!enabled || !scrollEl || !onEdit || adding) return false;
+    // The open field is this block's own and closes empty: the block goes
+    // with it, and a field opened on it now would close again at once.
+    const going = open && activeQuoteId === quote.id && closesEmpty();
     // Another field's reply is written before this one opens.
     closeReply(false);
+    if (going) return false;
     clearTimeout(settleTimer);
     const at = anchorFor(range, scrollEl);
     if (!at && !sheetMode) return false;

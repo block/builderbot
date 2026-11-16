@@ -2,8 +2,8 @@
 //!
 //! An `#[ignore]`d test, so it never runs in CI. It creates a throwaway
 //! SQLite database per dataset size inside `STAGED_BOARD_BENCH_DIR` (which
-//! must not be under `~/.staged`), seeds it through the real `Store` write
-//! methods, then times the reads the frontend issues to fill the board:
+//! must not lead into `~/.staged`, through `..` or a symlink either), seeds
+//! it through the real `Store` write methods, then times the reads the frontend issues to fill the board:
 //! `list_projects`, `get_tag_state`, `get_all_repo_badges`, and the branch
 //! and repo lists of every project. Those lists are timed both ways the app
 //! can ask for them: the two all-projects commands it hydrates with
@@ -311,17 +311,236 @@ fn bench_dir() -> PathBuf {
         std::env::var("STAGED_BOARD_BENCH_DIR")
             .expect("set STAGED_BOARD_BENCH_DIR to a throwaway directory"),
     );
-    // Resolve a relative path first: the checkout itself can sit under the
-    // data directory, and a relative path would otherwise pass the check.
-    let dir = std::path::absolute(&dir).expect("an absolute STAGED_BOARD_BENCH_DIR");
     let real_data = crate::paths::data_dir().expect("home directory");
-    assert!(
-        !dir.starts_with(&real_data),
-        "STAGED_BOARD_BENCH_DIR must not be inside {}",
-        real_data.display()
-    );
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    guarded_bench_dir(&dir, &real_data).unwrap_or_else(|refusal| panic!("{refusal}"))
+}
+
+/// Create the benchmark directory and return its real path, or refuse it
+/// when that path is inside `data_dir`. The benchmark deletes and rewrites
+/// `data-<n>.db` files in it, so the check is made on where the path really
+/// leads, not on how it is spelled: a relative path, a `..` that climbs back
+/// in, and a symlink into the data directory are all resolved first.
+///
+/// Checked before anything is created, so a refused path leaves the data
+/// directory untouched, and once more on the created directory's canonical
+/// path, in case the path changed under the check.
+fn guarded_bench_dir(dir: &Path, data_dir: &Path) -> Result<PathBuf, String> {
+    // Resolved the same way as the benchmark directory, so a symlink on the
+    // way to the data directory does not hide it, whether or not the data
+    // directory exists yet.
+    let real_data_dir = resolve_without_creating(data_dir)?;
+    let refuse_inside_data_dir = |path: &Path| {
+        if path.starts_with(&real_data_dir) {
+            Err(format!(
+                "STAGED_BOARD_BENCH_DIR must not be inside {}: {} resolves to {}",
+                data_dir.display(),
+                dir.display(),
+                path.display()
+            ))
+        } else {
+            Ok(())
+        }
+    };
+
+    let resolved = resolve_without_creating(dir)?;
+    refuse_inside_data_dir(&resolved)?;
+    std::fs::create_dir_all(&resolved)
+        .map_err(|e| format!("cannot create {}: {e}", resolved.display()))?;
+    let created = resolved
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", resolved.display()))?;
+    refuse_inside_data_dir(&created)?;
+    Ok(created)
+}
+
+/// Where `path` leads, without creating any of it: the part that exists is
+/// canonicalized, which follows its symlinks and its `..`, and the part that
+/// does not exist yet is applied to that by name, where a `..` can only step
+/// back out of a directory that is not there to be a symlink.
+fn resolve_without_creating(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    let absolute = std::path::absolute(path)
+        .map_err(|e| format!("cannot make {} absolute: {e}", path.display()))?;
+    let components: Vec<Component> = absolute.components().collect();
+    // The longest leading run of components that exists.
+    let mut existing = components.len();
+    let mut resolved = loop {
+        let prefix: PathBuf = components[..existing].iter().collect();
+        match prefix.canonicalize() {
+            Ok(real) => break real,
+            Err(_) if existing > 1 => existing -= 1,
+            Err(e) => return Err(format!("cannot resolve {}: {e}", absolute.display())),
+        }
+    };
+    for component in &components[existing..] {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    /// A stand-in home: `data` plays `~/.staged`, and everything else in the
+    /// temporary directory is outside it. Canonical, as macOS hands out
+    /// temporary directories behind a symlink.
+    fn sandbox() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let data = root.join("data");
+        std::fs::create_dir(&data).unwrap();
+        (temp, root, data)
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_directory_outside_the_data_directory_is_created_and_returned() {
+        let (_temp, root, data) = sandbox();
+
+        let dir = guarded_bench_dir(&root.join("bench/run-1"), &data).unwrap();
+
+        assert_eq!(dir, root.join("bench/run-1"));
+        assert!(dir.is_dir());
+        assert!(entries(&data).is_empty());
+    }
+
+    #[test]
+    fn a_directory_inside_the_data_directory_is_refused_and_not_created() {
+        let (_temp, _root, data) = sandbox();
+
+        let refusal = guarded_bench_dir(&data.join("bench"), &data).unwrap_err();
+
+        assert!(refusal.contains("must not be inside"), "{refusal}");
+        assert!(entries(&data).is_empty());
+        // The data directory itself is refused too.
+        assert!(guarded_bench_dir(&data, &data).is_err());
+    }
+
+    /// `std::path::absolute` keeps `..`, so this path does not start with
+    /// the data directory as written, and it leads straight into it.
+    #[test]
+    fn a_parent_reference_that_climbs_into_the_data_directory_is_refused() {
+        let (_temp, root, data) = sandbox();
+        std::fs::create_dir(root.join("elsewhere")).unwrap();
+
+        // Through a directory that exists, and through one that does not.
+        for detour in ["elsewhere/../data/bench", "missing/../data/bench"] {
+            let path = root.join(detour);
+            assert!(!path.starts_with(&data), "the spelling hides it: {detour}");
+
+            let refusal = guarded_bench_dir(&path, &data).unwrap_err();
+
+            assert!(refusal.contains("must not be inside"), "{refusal}");
+        }
+        assert!(entries(&data).is_empty());
+        assert!(!root.join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_the_data_directory_is_refused() {
+        let (_temp, root, data) = sandbox();
+        std::os::unix::fs::symlink(&data, root.join("link")).unwrap();
+
+        // The link itself, and a directory yet to be made behind it.
+        for path in [root.join("link"), root.join("link/bench")] {
+            let refusal = guarded_bench_dir(&path, &data).unwrap_err();
+
+            assert!(refusal.contains("must not be inside"), "{refusal}");
+        }
+        assert!(entries(&data).is_empty());
+    }
+
+    /// The data directory may itself be reached through a symlink, as a
+    /// home directory on another volume is.
+    #[cfg(unix)]
+    #[test]
+    fn a_data_directory_behind_a_symlink_is_still_guarded() {
+        let (_temp, root, data) = sandbox();
+        std::os::unix::fs::symlink(&data, root.join("home-link")).unwrap();
+        let spelled = root.join("home-link");
+
+        assert!(guarded_bench_dir(&data.join("bench"), &spelled).is_err());
+        assert!(guarded_bench_dir(&spelled.join("bench"), &spelled).is_err());
+        assert!(entries(&data).is_empty());
+    }
+
+    /// A data directory that has not been made yet cannot be canonicalized,
+    /// and a benchmark directory inside it would be the first thing in it.
+    #[cfg(unix)]
+    #[test]
+    fn a_data_directory_yet_to_be_made_is_guarded_through_a_symlink() {
+        let (_temp, root, _data) = sandbox();
+        std::fs::create_dir(root.join("volume")).unwrap();
+        std::os::unix::fs::symlink(root.join("volume"), root.join("home")).unwrap();
+        let spelled = root.join("home/.staged");
+
+        for path in [spelled.join("bench"), root.join("volume/.staged/bench")] {
+            let refusal = guarded_bench_dir(&path, &spelled).unwrap_err();
+
+            assert!(refusal.contains("must not be inside"), "{refusal}");
+        }
+        assert!(!root.join("volume/.staged").exists());
+        // Beside it is still outside it.
+        let dir = guarded_bench_dir(&root.join("home/bench"), &spelled).unwrap();
+        assert_eq!(dir, root.join("volume/bench"));
+    }
+
+    /// A symlink whose target is yet to be made resolves to nothing, so the
+    /// check cannot see where it leads. Creating the directory fails on the
+    /// link, and nothing is made behind it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_into_the_data_directory_creates_nothing() {
+        let (_temp, root, data) = sandbox();
+        std::os::unix::fs::symlink(data.join("bench"), root.join("link")).unwrap();
+
+        for path in [root.join("link"), root.join("link/run-1")] {
+            let refusal = guarded_bench_dir(&path, &data).unwrap_err();
+
+            assert!(refusal.contains("cannot create"), "{refusal}");
+        }
+        assert!(entries(&data).is_empty());
+    }
+
+    #[test]
+    fn a_parent_reference_that_stays_outside_is_resolved() {
+        let (_temp, root, data) = sandbox();
+
+        let dir = guarded_bench_dir(&root.join("a/b/../bench"), &data).unwrap();
+
+        assert_eq!(dir, root.join("a/bench"));
+        assert!(!root.join("a/b").exists());
+    }
+
+    #[test]
+    fn a_relative_path_is_resolved_against_the_working_directory() {
+        let (_temp, _root, data) = sandbox();
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+
+        // Not created: only where it leads is asked.
+        let resolved = resolve_without_creating(Path::new("bench-dir-that-is-not-there")).unwrap();
+
+        assert_eq!(resolved, cwd.join("bench-dir-that-is-not-there"));
+        assert!(!resolved.exists());
+        let _ = data;
+    }
 }
 
 #[test]

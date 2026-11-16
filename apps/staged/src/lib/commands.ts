@@ -357,11 +357,15 @@ export function listProjectRepos(
  * Every project's repo list in one reply, keyed by project id: what
  * {@link listProjectRepos} returns for each project. For hydrating many
  * projects at once, where one reply per project means one pass over every
- * mounted card per project. A project the backend did not hold is absent.
+ * mounted card per project. A project the backend did not hold, or could
+ * not read, is absent.
  *
- * Cached on the web like the per-project list, under one argless key that
- * every invalidation of a project's repo list also drops (see
- * `ALL_PROJECTS_COMMAND` in cache.ts).
+ * Cached on the web like the per-project list, under one argless key. An
+ * invalidation of one project's repo list takes that project out of the
+ * cached reply and keeps the rest, so a cached reply can also lack a project
+ * the backend holds; a wider invalidation drops it (see
+ * `ALL_PROJECTS_COMMAND` in cache.ts). Either way the caller reads a project
+ * the reply lacks on its own.
  */
 export function listProjectReposByProject(
   options: ForceRefreshOptions = {}

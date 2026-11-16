@@ -11,7 +11,8 @@ Measures how the project grid and the kanban board cope with many projects, in t
   app-level work.
 
 Nothing here starts Staged or touches its data under `~/.staged`. The Rust test refuses to run
-unless `STAGED_BOARD_BENCH_DIR` is set, and asserts that it is not inside `~/.staged`. Replies in
+unless `STAGED_BOARD_BENCH_DIR` is set, and refuses a directory that leads into `~/.staged`,
+whether it is spelled that way, climbs in through `..`, or gets there through a symlink. Replies in
 the browser carry no backend latency, so the frontend numbers are the frontend's own main-thread
 work: a floor for the real app, not an estimate of it.
 

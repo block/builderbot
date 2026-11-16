@@ -13,6 +13,12 @@
 //! pass. The reads are therefore not one snapshot: a project deleted partway
 //! through is listed with whatever it had left, which the frontend drops
 //! with the project when its `project-changed` reload lands.
+//!
+//! A project whose own read fails is left out of the reply, and the failure
+//! logged: one unreadable project must not cost every other project its
+//! lists. The frontend reads a project the reply lacks on its own, with the
+//! per-project command, which then reports that project's error for that
+//! project alone. Only a failure to list the projects fails the reply.
 
 use std::collections::BTreeMap;
 
@@ -22,33 +28,59 @@ use crate::BranchWithWorkdir;
 
 /// Every project's branches, as `list_branches_for_project` lists them. A
 /// project with no branches is listed with an empty list, so a project that
-/// is absent is one the store did not hold when this ran.
+/// is absent is one the store did not hold when this ran, or one whose
+/// branches could not be read.
 pub(crate) fn list_branches_by_project_impl(
     store: &Store,
 ) -> Result<BTreeMap<String, Vec<BranchWithWorkdir>>, String> {
     let projects = store.list_projects().map_err(|e| e.to_string())?;
-    let mut by_project = BTreeMap::new();
-    for project in projects {
-        let branches = project_branches_with_workdirs(store, &project.id)?;
-        by_project.insert(project.id, branches);
-    }
-    Ok(by_project)
+    Ok(lists_by_project(
+        projects.into_iter().map(|project| project.id),
+        "branches",
+        |project_id| project_branches_with_workdirs(store, project_id),
+    ))
 }
 
 /// Every project's repos, as `list_project_repos` lists them: primary first.
-/// A project with no repos is listed with an empty list.
+/// A project with no repos is listed with an empty list, and one whose repos
+/// could not be read is absent.
 pub(crate) fn list_project_repos_by_project_impl(
     store: &Store,
 ) -> Result<BTreeMap<String, Vec<ProjectRepo>>, String> {
     let projects = store.list_projects().map_err(|e| e.to_string())?;
+    Ok(lists_by_project(
+        projects.into_iter().map(|project| project.id),
+        "repos",
+        |project_id| {
+            store
+                .list_project_repos(project_id)
+                .map_err(|e| e.to_string())
+        },
+    ))
+}
+
+/// One list per project, keyed by project id. A project whose `read` fails
+/// is logged and left out, so the rest of the reply still stands (see the
+/// module docs).
+fn lists_by_project<T>(
+    project_ids: impl IntoIterator<Item = String>,
+    what: &str,
+    read: impl Fn(&str) -> Result<Vec<T>, String>,
+) -> BTreeMap<String, Vec<T>> {
     let mut by_project = BTreeMap::new();
-    for project in projects {
-        let repos = store
-            .list_project_repos(&project.id)
-            .map_err(|e| e.to_string())?;
-        by_project.insert(project.id, repos);
+    for project_id in project_ids {
+        match read(&project_id) {
+            Ok(list) => {
+                by_project.insert(project_id, list);
+            }
+            Err(error) => {
+                log::warn!(
+                    "Leaving project '{project_id}' out of the all-projects {what} list: {error}"
+                );
+            }
+        }
     }
-    Ok(by_project)
+    by_project
 }
 
 #[cfg(test)]
@@ -188,5 +220,87 @@ mod tests {
         let repos = list_project_repos_by_project_impl(&store).unwrap();
         assert_eq!(branches.keys().collect::<Vec<_>>(), vec![&kept.id]);
         assert_eq!(repos.keys().collect::<Vec<_>>(), vec![&kept.id]);
+    }
+
+    /// One project's failed read leaves that project out, and no other: the
+    /// frontend reads an absent project on its own, so the failure costs one
+    /// project its lists, not all of them.
+    #[test]
+    fn a_project_whose_read_fails_is_left_out_and_the_rest_are_listed() {
+        let ids = ["alpha", "broken", "gamma"].map(String::from);
+
+        let listed = lists_by_project(ids, "branches", |project_id| {
+            if project_id == "broken" {
+                Err("database disk image is malformed".to_string())
+            } else {
+                Ok(vec![format!("{project_id}-branch")])
+            }
+        });
+
+        assert_eq!(
+            listed.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["alpha", "gamma"]
+        );
+        assert_eq!(listed["alpha"], vec!["alpha-branch".to_string()]);
+        assert_eq!(listed["gamma"], vec!["gamma-branch".to_string()]);
+    }
+
+    /// Every read failing is still a reply, an empty one: each project is
+    /// then read on its own and reports its own error.
+    #[test]
+    fn every_read_failing_lists_no_project() {
+        let ids = ["alpha", "beta"].map(String::from);
+
+        let listed = lists_by_project(ids, "repos", |_| {
+            Err::<Vec<String>, _>("locked".to_string())
+        });
+
+        assert!(listed.is_empty());
+    }
+
+    /// The same through the store: a branch row that cannot be decoded fails
+    /// its own project's read, as the per-project command reports, and the
+    /// all-projects list carries every other project.
+    #[test]
+    fn a_project_with_an_unreadable_branch_is_left_out_of_the_branch_list() {
+        let store = Store::in_memory().unwrap();
+        let healthy = project(&store, "healthy");
+        let broken = project(&store, "broken");
+        let kept = Branch::new(&healthy.id, "feature", "main");
+        store.create_branch(&kept).unwrap();
+        let unreadable = Branch::new(&broken.id, "feature", "main");
+        store.create_branch(&unreadable).unwrap();
+        store
+            .hold_connection()
+            .execute(
+                "UPDATE branches SET pr_number = 'not a number' WHERE id = ?1",
+                [&unreadable.id],
+            )
+            .unwrap();
+        assert!(list_branches_for_project_impl(&store, &broken.id).is_err());
+
+        let branches = list_branches_by_project_impl(&store).unwrap();
+        let repos = list_project_repos_by_project_impl(&store).unwrap();
+
+        assert_eq!(branches.keys().collect::<Vec<_>>(), vec![&healthy.id]);
+        assert_eq!(branches[&healthy.id][0].id, kept.id);
+        // Its repos read fine, so the repo list still carries it.
+        assert_eq!(repos.len(), 2);
+        assert!(repos.contains_key(&broken.id));
+    }
+
+    /// A store that cannot list its projects fails the reply: there is no
+    /// project to key a partial one by.
+    #[test]
+    fn a_store_that_cannot_list_projects_fails_the_reply() {
+        let store = Store::in_memory().unwrap();
+        project(&store, "alpha");
+        store
+            .hold_connection()
+            .execute_batch("ALTER TABLE projects RENAME TO projects_moved")
+            .unwrap();
+
+        assert!(list_branches_by_project_impl(&store).is_err());
+        assert!(list_project_repos_by_project_impl(&store).is_err());
     }
 }

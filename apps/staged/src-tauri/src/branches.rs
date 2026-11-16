@@ -4112,6 +4112,64 @@ mod tests {
         assert_eq!(error, "Project not found: no-such-project");
     }
 
+    /// What the web and control `list_branches_for_project` arm returns: it
+    /// calls this body directly (`web_project_list_arms_share_the_tauri_bodies`
+    /// pins that), where it used to build the rows itself without commit
+    /// counts. So a `stagedctl` or web caller now gets `commitCount` on every
+    /// branch, as the desktop command always sent. Unlike the desktop
+    /// command, the arm keeps answering an unknown project with an empty
+    /// list: a control caller is scoped before it gets here, and the web
+    /// client reads a project it has just seen deleted.
+    #[test]
+    fn the_shared_branch_list_counts_commits_and_lists_nothing_for_an_unknown_project() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let committed = store::Branch::new(&project.id, "committed", "main");
+        store.create_branch(&committed).unwrap();
+        store
+            .create_workdir(
+                &store::Workdir::new(&project.id, "/tmp/wt/committed").with_branch(&committed.id),
+            )
+            .unwrap();
+        store
+            .create_commit(&store::Commit::new_with_sha(&committed.id, "abc123"))
+            .unwrap();
+        let fresh = store::Branch::new(&project.id, "fresh", "main");
+        store.create_branch(&fresh).unwrap();
+
+        let listed = project_branches_with_workdirs(&store, &project.id).unwrap();
+
+        assert_eq!(
+            listed
+                .iter()
+                .map(|branch| (branch.id.as_str(), branch.commit_count))
+                .collect::<Vec<_>>(),
+            vec![
+                (committed.id.as_str(), Some(1)),
+                (fresh.id.as_str(), Some(0))
+            ]
+        );
+        assert_eq!(
+            listed[0].worktree_path.as_deref(),
+            Some("/tmp/wt/committed")
+        );
+        // On the wire the count is `commitCount`, present even when zero.
+        let wire = serde_json::to_value(&listed).unwrap();
+        assert_eq!(wire[0]["commitCount"], 1);
+        assert_eq!(wire[1]["commitCount"], 0);
+        // The same rows the desktop command returns for a project it knows.
+        assert_eq!(
+            wire,
+            serde_json::to_value(list_branches_for_project_impl(&store, &project.id).unwrap())
+                .unwrap()
+        );
+
+        assert!(project_branches_with_workdirs(&store, "no-such-project")
+            .unwrap()
+            .is_empty());
+    }
+
     /// A shared workstation outlives a teardown that leaves another branch
     /// on it, and goes when every branch using it does.
     #[test]

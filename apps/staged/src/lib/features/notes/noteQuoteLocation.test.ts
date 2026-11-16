@@ -334,6 +334,47 @@ describe('locateQuote', () => {
     expect(locate('plan', word)).toBeNull();
   });
 
+  it('keeps a quote at the note’s start where it stands when the same words are put above it', () => {
+    const quote = 'The cache';
+    const body =
+      '<p>The cache is invalidated on every write to the primary store.</p><p>Reads go to it first.</p>';
+    render(body);
+    const anchor = captureQuoteAnchor(root, rangeOfText('p', quote), quote)!;
+    expect(anchor).toMatchObject({ prefix: '', offset: 0 });
+    expect(anchor.suffix).toHaveLength(ANCHOR_CONTEXT_LENGTH);
+
+    // A paragraph beginning with the same words now opens the note. It is at
+    // the edge the quote was at and has nothing else of the quote's; the
+    // quoted passage has everything that followed it.
+    render(`<p>The cache team owns this.</p>${body}`);
+    const at = buildNoteTextIndex(root).text.indexOf('Thecacheisinvalidated');
+    expect(at).toBeGreaterThan(0);
+    expect(locate(quote, anchor)).toEqual({ start: at, end: at + 'Thecache'.length });
+  });
+
+  it('keeps a quote at the note’s end where it stands when the same words are appended', () => {
+    const quote = 'Does this look right?';
+    const body =
+      '<h1>Plan</h1><p>Ship the cache behind a flag by Friday.</p><p>Does this look right?</p>';
+    render(body);
+    const anchor = captureQuoteAnchor(root, rangeOfText('p:last-of-type', quote), quote)!;
+    expect(anchor.suffix).toBe('');
+    expect(anchor.prefix).toHaveLength(ANCHOR_CONTEXT_LENGTH);
+
+    // A section ending with the same sentence is appended. Its sentence is
+    // at the note's end now, behind a full stop as the quoted one was.
+    render(`${body}<h2>Update</h2><p>The flag is on for staff. Does this look right?</p>`);
+    const index = buildNoteTextIndex(root);
+    const at = index.text.indexOf('Doesthislookright?');
+    expect(index.text.indexOf('Doesthislookright?', at + 1)).toBeGreaterThan(at);
+    const span = locate(quote, anchor, ['Plan'])!;
+    expect(span).toEqual({ start: at, end: at + 'Doesthislookright?'.length });
+    // Still under the heading it was quoted under, not the new section's.
+    expect(index.nodes[positionInIndex(index, span.start).node].parentElement).toBe(
+      root.querySelector('p:nth-of-type(2)')
+    );
+  });
+
   it('takes a short quote’s only occurrence when it stands under the quote’s headings', () => {
     const quote = 'invalidated';
     const anchor = captureQuoteAnchor(root, rangeOfText('strong', quote), quote)!;
@@ -356,6 +397,62 @@ describe('locateQuote', () => {
     root.querySelector('p:last-of-type')!.textContent = 'Nothing is invalidated before the switch.';
     expect(buildNoteTextIndex(root).text.split(quote).length - 1).toBe(1);
     expect(locate(quote, anchor, headings)).toBeNull();
+  });
+
+  it('does not take a short quote’s only occurrence inside a longer word', () => {
+    const headings = ['Rollout plan', 'Architecture'];
+    const sentence = root.querySelector('p')!;
+    const item = root.querySelector('li')!;
+
+    // The sentence's last word. The sentence is rewritten away, and the
+    // only "write" left in the note is the end of a "rewrite" in its section.
+    const write = captureQuoteAnchor(root, rangeOfText('p', 'write'), 'write')!;
+    sentence.textContent = 'Entries expire after an hour.';
+    item.textContent = 'Readers rewrite nothing.';
+    expect(buildNoteTextIndex(root).text.split('write').length - 1).toBe(1);
+    expect(locate('write', write, headings)).toBeNull();
+    // The word on its own there is taken, as before.
+    item.textContent = 'Readers write nothing.';
+    expect(located(locate('write', write, headings))).toBe('write');
+
+    // Two words whose letters, with the space left out, stand inside a third.
+    render('<h2>Access</h2><p>Keys live on a shared host.</p><p>Tokens are personal.</p>');
+    const onA = captureQuoteAnchor(root, rangeOfText('p', 'on a'), 'on a')!;
+    expect(located(locate('on a', onA, ['Access']))).toBe('ona');
+    root.querySelector('p')!.textContent = 'Keys were moved to the vault.';
+    expect(buildNoteTextIndex(root).text.split('ona').length - 1).toBe(1);
+    expect(locate('on a', onA, ['Access'])).toBeNull();
+  });
+
+  it('reads a word through inline markup and ends it at a block’s edge', () => {
+    const headings = ['Rollout plan', 'Architecture'];
+    const sentence = root.querySelector('p')!;
+    const list = root.querySelector('ul')!;
+    const write = captureQuoteAnchor(root, rangeOfText('p', 'write'), 'write')!;
+    sentence.textContent = 'Entries expire after an hour.';
+
+    // One word, part of it emphasised: the quote's letters are still inside it.
+    list.innerHTML = '<li>Readers <em>re</em>write nothing.</li>';
+    expect(locate('write', write, headings)).toBeNull();
+    list.innerHTML = '<li>Readers re<code>write</code>s nothing.</li>';
+    expect(locate('write', write, headings)).toBeNull();
+    // A word of its own in inline markup, with the words around it in other nodes.
+    list.innerHTML = '<li>Readers <code>write</code> nothing.</li>';
+    expect(located(locate('write', write, headings))).toBe('write');
+    // Blocks and line breaks end a word, with or without whitespace between them.
+    list.innerHTML = '<li>Readers</li><li>write<br>nothing</li>';
+    expect(located(locate('write', write, headings))).toBe('write');
+    // Only letters and digits make a word: a hyphen beside the quote ends one.
+    list.innerHTML = '<li>Readers re-write nothing.</li>';
+    expect(located(locate('write', write, headings))).toBe('write');
+
+    // A quote beginning with punctuation is not inside the word before it.
+    render('<h2>Steps</h2><p>Warm the cache, then flip the switch.</p>');
+    const flip = captureQuoteAnchor(root, rangeOfText('p', ', then flip'), ', then flip')!;
+    root.querySelector('p')!.textContent = 'Fill it, then flip over.';
+    expect(located(locate(', then flip', flip, ['Steps']))).toBe(',thenflip');
+    // With nothing of its surroundings left: it is the fallback that took it.
+    expect(locate(', then flip', flip)).toBeNull();
   });
 
   it('takes a long quote wherever it stands word for word, surroundings or not', () => {

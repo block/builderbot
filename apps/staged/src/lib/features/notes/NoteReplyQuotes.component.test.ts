@@ -64,19 +64,23 @@ let unregister: (() => void) | null = null;
 let sessionCount = 0;
 
 let dialog: HTMLElement;
+let headerButton: HTMLButtonElement;
 
 function render(overrides: Partial<{ chatOpen: boolean; chatVisible: boolean }> = {}) {
   host = document.createElement('div');
-  // The dialog around the note: focusable, as bits-ui's focus scope makes it.
+  // The dialog, focusable as bits-ui's focus scope makes it, holding the
+  // note and its header as NoteModal's does.
   dialog = document.createElement('div');
   dialog.tabIndex = -1;
   host.appendChild(dialog);
+  headerButton = document.createElement('button');
+  dialog.appendChild(headerButton);
   scrollEl = document.createElement('div');
   scrollEl.style.position = 'relative';
   contentEl = document.createElement('div');
   contentEl.innerHTML = NOTE_HTML;
   scrollEl.appendChild(contentEl);
-  host.appendChild(scrollEl);
+  dialog.appendChild(scrollEl);
   document.body.appendChild(host);
 
   // Its own draft each time: the presence tracker outlives a test.
@@ -402,6 +406,15 @@ describe('NoteReplyQuotes marks', () => {
     expect(focused()).toBe(marks()[0]);
     expect(focused().isConnected).toBe(true);
 
+    // Focus resting on the dialog around the note is where a removed stop
+    // can leave it: nothing else took it, so it is still the mark's.
+    contentEl.innerHTML = NOTE_HTML;
+    dialog.focus();
+    props.renderKey = NOTE_HTML;
+    flushSync();
+    expect(focused()).toBe(marks()[0]);
+    expect(focused().getAttribute('data-quote-id')).toBe(first.getAttribute('data-quote-id'));
+
     // Another quote re-marks the note too, and its own mark takes nothing.
     await replyTo('#again-p', 'Which flag?', 0, 'Ship behind a flag.'.length);
     marks()[0].focus();
@@ -424,15 +437,16 @@ describe('NoteReplyQuotes marks', () => {
     flushSync();
     expect(document.activeElement).toBe(dialog);
 
-    // ...or went somewhere of its own after the mark was taken out.
+    // ...or went somewhere of its own, outside the note, after the mark was
+    // taken out.
     marks()[0].focus();
     contentEl.innerHTML = NOTE_HTML;
-    dialog.focus();
+    headerButton.focus();
     props.renderKey = NOTE_HTML;
     flushSync();
-    expect(document.activeElement).toBe(dialog);
+    expect(document.activeElement).toBe(headerButton);
     // And is not brought back by a later pass.
-    dialog.blur();
+    headerButton.blur();
     props.refreshKey = 1;
     flushSync();
     expect(document.activeElement).toBe(document.body);

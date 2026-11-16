@@ -24,7 +24,8 @@
  * has enough of its surroundings is not found at all (see
  * `CORROBORATED_QUOTE_LENGTH`). Two things stand in for surroundings an edit
  * beside the passage took away: the note's edge, for a passage that began or
- * ended near it, and the quote's headings, for words the note holds once.
+ * ended near it, and the quote's headings, for whole words the note holds
+ * once.
  */
 
 import type { DraftQuote, QuoteAnchor } from '../sessions/composerDraft';
@@ -63,15 +64,20 @@ export const CORROBORATED_QUOTE_LENGTH = ANCHOR_CONTEXT_LENGTH;
  * The note's edge is surroundings too. A side of the anchor shorter than
  * `ANCHOR_CONTEXT_LENGTH` ran out at the note's start or end, and an
  * occurrence that far from the same edge, with all of that side matching,
- * counts as sharing a whole side (`sideScore`): a title is still the title
- * when the sentence after it is reworded.
+ * counts as sharing this much there (`sideScore`): a title is still the
+ * title when the sentence after it is reworded. Enough to be found by, and
+ * no more: the edge is not text that matched, so an occurrence with more of
+ * the quote's real surroundings than this is taken ahead of it.
  *
  * Failing all of that, an occurrence is still taken when it is the only one
  * in the note and stands under the quote's headings, of which there must be
  * some: the section says where the passage was, and with one place left in
  * the note holding its words there is nothing to mistake it for. With no
  * heading to place it by, a lone occurrence is no better founded than
- * several.
+ * several. The occurrence must be whole words (`cutsWord`): the search
+ * leaves whitespace out and knows nothing of words, so the one place left
+ * may be the inside of a longer word, "write" in "rewrite" or "on a" in
+ * "personal", which is not the quote's words at all.
  */
 export const MIN_SHARED_CONTEXT = 8;
 
@@ -171,13 +177,16 @@ function occurrences(text: string, needle: string): number[] {
 
 /**
  * What one side of an occurrence counts for: the `shared` characters of the
- * `held` the anchor has on that side, or a whole side's worth when the anchor
- * ran out at the note's edge there and the occurrence, with `room` characters
- * of the note on that side, does too, behind the same text.
+ * `held` the anchor has on that side, and no less than `MIN_SHARED_CONTEXT`
+ * when the anchor ran out at the note's edge there and the occurrence, with
+ * `room` characters of the note on that side, does too, behind the same
+ * text. The edge makes up for surroundings an edit took away; it does not
+ * outrank surroundings that are still there, or the same words put at that
+ * edge later would be taken ahead of the passage standing as it was quoted.
  */
 function sideScore(shared: number, held: number, room: number): number {
   const atSameEdge = held < ANCHOR_CONTEXT_LENGTH && shared === held && room === held;
-  return atSameEdge ? ANCHOR_CONTEXT_LENGTH : shared;
+  return atSameEdge ? Math.max(shared, MIN_SHARED_CONTEXT) : shared;
 }
 
 /** How much of an anchor's surroundings an occurrence at `[start, end)` shares. */
@@ -247,6 +256,71 @@ export function positionInIndex(
 }
 
 /**
+ * Elements that text runs through without a break: letters on either side
+ * of one's edge read as one word. Any other element's edge ends a word.
+ */
+const INLINE_TAGS = new Set(
+  'A ABBR B BDI BDO CITE CODE DEL DFN EM I INS KBD MARK Q S SAMP SMALL SPAN STRONG SUB SUP TIME U VAR'.split(
+    ' '
+  )
+);
+
+const WORD_CHARACTER = /[\p{L}\p{N}]/u;
+
+/**
+ * The character the note has next to the one at `offset` of `node`, before
+ * it (`step` -1) or after (1), as the text nodes hold it, whitespace
+ * included. Null where nothing runs on from that side: at the note's edge,
+ * and at the edge of anything but inline markup (a block, a table cell, a
+ * line break).
+ */
+function characterBeside(root: Element, node: Text, offset: number, step: -1 | 1): string | null {
+  const within = node.data[offset + step];
+  if (within !== undefined) return within;
+  const walker = root.ownerDocument.createTreeWalker(
+    root,
+    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT
+  );
+  walker.currentNode = node;
+  const advance = () => (step < 0 ? walker.previousNode() : walker.nextNode());
+  for (let next = advance(); next; next = advance()) {
+    if (next.nodeType === Node.ELEMENT_NODE) {
+      // Passed on the way: an element opening between the two, or one with
+      // no text of its own (the root too, going back from its first text).
+      if (!INLINE_TAGS.has((next as Element).tagName)) return null;
+      continue;
+    }
+    const data = (next as Text).data;
+    if (!data) continue;
+    // And the elements left to get from one text node to the other.
+    for (const [from, to] of [
+      [node, next],
+      [next, node],
+    ]) {
+      for (let el = from.parentElement; el && !el.contains(to); el = el.parentElement) {
+        if (!INLINE_TAGS.has(el.tagName)) return null;
+      }
+    }
+    return step < 0 ? data[data.length - 1] : data[0];
+  }
+  return null;
+}
+
+/**
+ * Whether a passage's edge at the index's character `at`, its first
+ * (`step` -1) or last (1), falls inside a word: that character and the
+ * note's next one on that side are both letters or digits.
+ */
+function cutsWord(index: NoteTextIndex, at: number, step: -1 | 1): boolean {
+  const { node, offset } = positionInIndex(index, at);
+  const text = index.nodes[node];
+  const beside = characterBeside(index.root, text, offset, step);
+  return (
+    beside !== null && WORD_CHARACTER.test(beside) && WORD_CHARACTER.test(text.data[offset] ?? '')
+  );
+}
+
+/**
  * Where a quote's passage is in the indexed note; null when its text is no
  * longer there (the note was rewritten), or is a short quote's and only
  * stands where too little of the quote's surroundings does, which leaves
@@ -279,9 +353,14 @@ export function locateQuote(
       const needed = Math.min(MIN_SHARED_CONTEXT, anchor.prefix.length + anchor.suffix.length);
       if (needle.length < CORROBORATED_QUOTE_LENGTH && score(candidates[0]) < needed) {
         // Not the passage that was quoted, wherever the occurrences sit,
-        // unless there is one only and it is in the quote's section (see
-        // `MIN_SHARED_CONTEXT`).
-        const sole = found.length === 1 && quote.headings.length > 0 && underHeadings(found[0]);
+        // unless there is one only, of whole words, and it is in the
+        // quote's section (see `MIN_SHARED_CONTEXT`).
+        const sole =
+          found.length === 1 &&
+          quote.headings.length > 0 &&
+          !cutsWord(index, found[0], -1) &&
+          !cutsWord(index, found[0] + needle.length - 1, 1) &&
+          underHeadings(found[0]);
         if (!sole) continue;
       }
     }

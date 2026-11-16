@@ -2,6 +2,11 @@
   BoardAddColumn.svelte — the trailing + column: adds a tag to the board's
   group, which becomes a new column. The tag gets an automatic colour and no
   icon; both can be changed from the column menu or Settings › Tags.
+
+  It holds no cards, so it takes none: a card dragged over it is refused, and
+  it says so (`refusing`) rather than looking like somewhere to drop. Like a
+  column it is as tall as the board, though only the + shows of it, and it
+  refuses a card anywhere down that height, which is what it tints to say so.
 -->
 <script lang="ts">
   import Plus from '@lucide/svelte/icons/plus';
@@ -15,9 +20,11 @@
     group: TagGroup;
     /** On the phone pager: full width. */
     paged: boolean;
+    /** A dragged card is over this column, which can't take it. */
+    refusing?: boolean;
   }
 
-  let { group, paged }: Props = $props();
+  let { group, paged, refusing = false }: Props = $props();
 
   let adding = $state(false);
   let saving = $state(false);
@@ -61,7 +68,7 @@
   }
 </script>
 
-<div class="board-add-column" class:paged>
+<div class="board-add-column" class:paged class:refusing data-board-no-drop>
   {#if adding}
     <form class="add-form" onsubmit={create} onfocusout={handleFocusOut}>
       <input
@@ -94,9 +101,16 @@
 </div>
 
 <style>
+  /* As tall as the board (ProjectsBoard stretches it), with the + or the
+     form at its top. */
   .board-add-column {
     flex: 0 0 auto;
     display: flex;
+    align-items: flex-start;
+    border-radius: 10px;
+    transition:
+      background-color 0.1s ease,
+      box-shadow 0.1s ease;
   }
 
   .board-add-column.paged {
@@ -127,6 +141,23 @@
   .add-trigger:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* A card can't be dropped here: the whole height that refuses it says so,
+     as the whole height of a column says it would take it. */
+  .board-add-column.refusing {
+    background: var(--ui-danger-bg);
+    box-shadow: inset 0 0 0 1px var(--ui-danger);
+  }
+
+  .refusing .add-trigger {
+    border-color: transparent;
+    background: transparent;
+    color: var(--ui-danger);
+  }
+
+  .refusing .add-form {
+    background: transparent;
   }
 
   .add-form {

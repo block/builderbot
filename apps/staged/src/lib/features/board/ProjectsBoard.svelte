@@ -6,16 +6,32 @@
   It shows the grid's projects (the filter chips, tag chips included, narrow
   them) in the grid's newest-first order, and a search hides cards rather
   than unmounting them, as in the grid. Moving a card between columns changes
-  the project's tag in the group: by drag and drop with a fine pointer on
-  desktop, else by "Move to" in the card's context menu. Both are optimistic,
-  so the card moves at once, and focus follows it to its new column. A move
-  the tag chips rule out (onto Done with only In progress's chip on) takes
-  the card off the board, and focus goes to its neighbour instead. Collapsed
-  and hidden columns are remembered per group (boardViewPrefs). When every
-  showing card is in a hidden column (a tag chip for a hidden column's tag,
-  say), the board says so over the columns, with a way to show them. When
-  the columns run past the window, a fade and chevron mark each side with
-  more (BoardScrollEdges).
+  the project's tag in the group: by dragging it with a fine pointer on
+  desktop, else by "Move to" in the card's context menu. Both are the same
+  optimistic write (tagActions.setProjectGroupTag), so the card moves at
+  once, and goes back with a toast if the write fails; focus follows it to
+  its new column. A move the tag chips rule out (onto Done with only In
+  progress's chip on) takes the card off the board, and focus goes to its
+  neighbour instead.
+
+  The columns are all as tall as the board, which is at least as tall as the
+  tallest of them and reaches the bottom of the page it is on: a column with
+  one card is as much to aim at as one with twenty.
+
+  While a card is dragged (boardCardDrag) a copy of it follows the pointer
+  and the column it is in line with is marked as the drop target, anywhere
+  down the column's height; the gap between two columns is the nearer one's,
+  and the page's margin under the board is the board. "No ‹group›" clears
+  the tag and a collapsed column takes the card like any other; the card's
+  own column changes nothing, and the + column refuses it, with a no-entry
+  cursor. Nothing on the board answers the pointer while a card is in hand.
+  A card held near either side scrolls the columns that way.
+
+  Collapsed and hidden columns are remembered per group (boardViewPrefs).
+  When every showing card is in a hidden column (a tag chip for a hidden
+  column's tag, say), the board says so over the columns, with a way to show
+  them. When the columns run past the window, a fade and chevron mark each
+  side with more (BoardScrollEdges).
 
   A tag column moves left or right from its ⋯ menu, which reorders the
   group's tags. The move shows before its write lands (the column order is
@@ -36,11 +52,12 @@
   either end of the row, or just past it, the drag scrolls it sideways. A
   chip with the column's icon and name follows the pointer.
 
-  The two drags are different kinds. A card's is an HTML5 drag. A column's
-  is made of pointer events (shared/pointerDrag), because the desktop
-  build's native file-drop handler answers every HTML5 drag itself and the
-  page never sees one as a drop. So a column drag carries no data: the board
-  resolves each point the pointer reaches from the columns' rects.
+  Both drags are made of pointer events (boardCardDrag for a card,
+  shared/pointerDrag for a column), because the desktop build's native
+  file-drop handler answers every HTML5 drag itself and the page never sees
+  one as a drop. So neither carries data: the board reads what a card is
+  over from the element under the pointer, and resolves each point a column
+  reaches from the columns' rects.
 
   On a phone the columns are full-width pages swiped sideways, under
   BoardPhonePager. Mounted inside the home layer like the grid, or inside
@@ -48,8 +65,9 @@
   of its own.
 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { Project, TagGroup } from '../../types';
+  import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { tagsStore } from '../../stores/tags.svelte';
   import type { PointerDragPoint } from '../../shared/pointerDrag';
   import { viewport } from '../../shared/viewport.svelte';
@@ -61,18 +79,20 @@
   import type { BoardCardHandlers } from './BoardCard.svelte';
   import BoardAddColumn from './BoardAddColumn.svelte';
   import BoardColumn, { type BoardColumnDragHandlers } from './BoardColumn.svelte';
+  import BoardDragGhost from './BoardDragGhost.svelte';
   import BoardEmptyState from './BoardEmptyState.svelte';
   import BoardPhonePager from './BoardPhonePager.svelte';
   import BoardScrollEdges from './BoardScrollEdges.svelte';
+  import {
+    createCardDrag,
+    createEdgeScroll,
+    dropTargetAt,
+    type BoardDropTarget,
+    type DragPoint,
+  } from './boardCardDrag';
   import { columnDropTarget, columnStepTarget, type ColumnDrop } from './boardColumnReorder';
   import { buildBoardColumns } from './boardColumns';
-  import {
-    columnAtPoint,
-    isCardDrag,
-    readProjectDrag,
-    resolveBoardDrop,
-    writeProjectDrag,
-  } from './boardDrop';
+  import { columnAtPoint, judgeBoardDrop, type BoardDropVerdict } from './boardDrop';
   import { columnPrefsFor } from './boardPrefs';
   import { revealOffset, SCROLL_FADE_WIDTH } from './boardScroll';
   import { boardViewPrefs, setBoardColumnFlag } from './boardViewPrefs.svelte';
@@ -92,14 +112,30 @@
   let { group, projects, searchRank, onOpen, groupPicker = true }: Props = $props();
 
   let boardEl = $state<HTMLElement | null>(null);
+  /** The columns' scroller. */
   let columnsEl = $state<HTMLElement | null>(null);
-  let draggingId = $state<string | null>(null);
-  let dropKey = $state<string | null>(null);
   /** The column being dragged, if any. */
   let draggingColumnKey = $state<string | null>(null);
   /** Where the dragged column would land: beside a column, on one side of it. */
   let columnDrop = $state<ColumnDrop | null>(null);
+  /** What holds the scroller and lays the scroll edges over it. */
+  let frameEl = $state<HTMLElement | null>(null);
   let activeIndex = $state(0);
+
+  /** A card in hand. */
+  interface CardInHand {
+    projectId: string;
+    /** The card's element, copied for the ghost. */
+    card: HTMLElement;
+    width: number;
+    /** From the card's top-left corner to where it was grabbed. */
+    grab: DragPoint;
+    point: DragPoint;
+    /** What the pointer is over. */
+    target: BoardDropTarget | null;
+  }
+  let drag = $state.raw<CardInHand | null>(null);
+  let draggingId = $derived(drag?.projectId ?? null);
 
   let paged = $derived(viewport.isMobile);
   let dragEnabled = $derived(!paged && !viewport.hasCoarsePointer);
@@ -127,6 +163,23 @@
     });
   });
   let activeKey = $derived(layout?.columns[activeIndex]?.key ?? null);
+
+  // The column the dragged card is in now, and what letting go of it would
+  // do: both read live, so a tag deleted or a card moved mid-drag (another
+  // window, an agent) changes the answer before the drop, not after.
+  let homeKey = $derived(
+    draggingId === null
+      ? null
+      : (layout?.columns.find((column) => column.projects.some(({ id }) => id === draggingId))
+          ?.key ?? null)
+  );
+  let verdict = $derived<BoardDropVerdict>(
+    drag && group
+      ? judgeBoardDrop(drag.target, homeKey, group.id, tagsStore.catalog)
+      : { kind: 'none' }
+  );
+  let dropKey = $derived(verdict.kind === 'move' ? verdict.key : null);
+  let refused = $derived(verdict.kind === 'refused');
   // Nothing on the board, but matches behind hidden columns.
   let allMatchesHidden = $derived(
     !!layout && layout.hiddenCount > 0 && layout.columns.every((column) => column.count === 0)
@@ -179,22 +232,95 @@
     renderedCardIds = shownCardIds();
   });
 
-  const handlers: BoardCardHandlers = {
-    get dragEnabled() {
-      return dragEnabled;
+  function targetAt(point: DragPoint): BoardDropTarget | null {
+    return columnsEl ? dropTargetAt(point, columnsEl) : null;
+  }
+
+  const cardDrag = createCardDrag({
+    begin(projectId, card, press) {
+      // A project on its way out keeps its tags: its card stays put.
+      if (!dragEnabled || !group || !projectsById.has(projectId)) return false;
+      if (projectsDataStore.isProjectDeleting(projectId)) return false;
+      const box = card.getBoundingClientRect();
+      drag = {
+        projectId,
+        card,
+        width: box.width,
+        grab: { x: press.x - box.left, y: press.y - box.top },
+        point: press,
+        target: null,
+      };
+      return true;
     },
+    move(point) {
+      if (!drag) return;
+      drag = { ...drag, point, target: targetAt(point) };
+      edgeScroll.follow();
+    },
+    end(point) {
+      if (!drag) return;
+      const { projectId } = drag;
+      // Judged where it was let go, against the board as it is now.
+      const outcome =
+        point && group
+          ? judgeBoardDrop(targetAt(point), homeKey, group.id, tagsStore.catalog)
+          : null;
+      drag = null;
+      const project = projectsById.get(projectId);
+      // Anywhere but another column, its own included, the card goes back:
+      // nothing is written and focus stays where it was.
+      if (outcome?.kind !== 'move' || !project) return;
+      void tagActions.setProjectGroupTag(project, outcome.write.groupId, outcome.write.tagId);
+      void focusCard(projectId);
+    },
+  });
+
+  // A card held near a side of the board scrolls the columns that way. The
+  // drag hears the scroll, and reads again what is under the still pointer.
+  const edgeScroll = createEdgeScroll({
+    scroller: () => columnsEl,
+    point: () => drag?.point ?? null,
+  });
+
+  // The drag owns the cursor and keeps the pointer from selecting text on
+  // its way across the page.
+  $effect(() => {
+    if (draggingId === null) return;
+    const style = document.body.style;
+    const before = {
+      cursor: style.cursor,
+      userSelect: style.getPropertyValue('user-select'),
+      webkitUserSelect: style.getPropertyValue('-webkit-user-select'),
+    };
+    style.cursor = refused ? 'not-allowed' : 'grabbing';
+    style.setProperty('user-select', 'none');
+    style.setProperty('-webkit-user-select', 'none');
+    return () => {
+      style.cursor = before.cursor;
+      style.setProperty('user-select', before.userSelect);
+      style.setProperty('-webkit-user-select', before.webkitUserSelect);
+    };
+  });
+
+  // The card in hand left the board (deleted, filtered out), or the board
+  // stopped taking drags (the window narrowed to the phone layout).
+  $effect(() => {
+    if (draggingId === null) return;
+    if (!dragEnabled || !group || !projectsById.has(draggingId)) untrack(() => cardDrag.cancel());
+  });
+
+  $effect(() => () => {
+    cardDrag.cancel();
+    edgeScroll.stop();
+  });
+
+  const handlers: BoardCardHandlers = {
     get draggingId() {
       return draggingId;
     },
     open: (projectId) => onOpen(projectId),
-    startDrag(projectId, event) {
-      if (!dragEnabled || !event.dataTransfer) return;
-      writeProjectDrag(event.dataTransfer, projectId);
-      draggingId = projectId;
-    },
-    endDrag() {
-      draggingId = null;
-      dropKey = null;
+    press(projectId, event) {
+      if (dragEnabled) cardDrag.press(projectId, event);
     },
     remove(project) {
       const focusAfterRemove = neighbourAfterRemove(shownCardIds(), project.id, cardElement);
@@ -252,8 +378,8 @@
     },
     scroll: { container: () => columnsEl, axis: 'x' },
     start(columnKey) {
-      // A card drag whose card left the board never got its dragend.
-      handlers.endDrag();
+      // One drag at a time: a card still in hand is put back.
+      cardDrag.cancel();
       draggingColumnKey = columnKey;
       columnDrop = null;
     },
@@ -285,41 +411,6 @@
     },
     cancel: endColumnDrag,
   };
-
-  /**
-   * Whether a drag event is a card's. Files and text dragged over the board
-   * are not, and pass through, even with a card drag left over from before.
-   * A column's drag is made of pointer events and sends no drag events.
-   */
-  function cardDrag(event: DragEvent): boolean {
-    return isCardDrag(event.dataTransfer, draggingId !== null);
-  }
-
-  function handleDragOver(key: string, event: DragEvent) {
-    if (!dragEnabled || !cardDrag(event)) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-    dropKey = key;
-  }
-
-  function handleDragLeave(key: string, event: DragEvent) {
-    const next = event.relatedTarget;
-    if (next instanceof Node && (event.currentTarget as Node).contains(next)) return;
-    if (dropKey === key) dropKey = null;
-  }
-
-  function handleDrop(key: string, event: DragEvent) {
-    if (!dragEnabled || !cardDrag(event)) return;
-    event.preventDefault();
-    const projectId = readProjectDrag(event.dataTransfer, draggingId, new Set(projectsById.keys()));
-    handlers.endDrag();
-    if (!projectId || !group) return;
-    const write = resolveBoardDrop(key, group.id, tagsStore.catalog);
-    const project = projectsById.get(projectId);
-    if (!write || !project) return;
-    void tagActions.setProjectGroupTag(project, write.groupId, write.tagId);
-    void focusCard(projectId);
-  }
 
   function setCollapsed(key: string, collapsed: boolean) {
     if (!group) return;
@@ -427,7 +518,13 @@
   }
 </script>
 
-<div class="projects-board" class:paged bind:this={boardEl}>
+<div
+  class="projects-board"
+  class:paged
+  class:dragging={draggingId !== null}
+  class:drag-refused={refused}
+  bind:this={boardEl}
+>
   {#if !tagsStore.loaded}
     <div class="board-state">Loading tags…</div>
   {:else if !group || !layout}
@@ -470,30 +567,60 @@
             {isVisible}
             {paged}
             first={i === 0}
-            dropTarget={draggingId !== null && dropKey === column.key}
+            dropTarget={dropKey === column.key}
             canMoveLeft={columnStep(column.key, -1) !== null}
             canMoveRight={columnStep(column.key, 1) !== null}
-            onDragOver={(event) => handleDragOver(column.key, event)}
-            onDragLeave={(event) => handleDragLeave(column.key, event)}
-            onDrop={(event) => handleDrop(column.key, event)}
             onCollapse={(collapsed) => setCollapsed(column.key, collapsed)}
             onMove={(step) => moveColumn(column.key, step)}
             onHide={() => hideColumn(column.key)}
           />
         {/each}
-        <BoardAddColumn {group} {paged} />
+        <BoardAddColumn {group} {paged} refusing={refused && drag?.target?.kind === 'add-column'} />
       </div>
       <BoardScrollEdges scroller={columnsEl} enabled={!paged} />
     </div>
   {/if}
 </div>
 
+{#if drag}
+  <BoardDragGhost
+    source={drag.card}
+    width={drag.width}
+    x={drag.point.x - drag.grab.x}
+    y={drag.point.y - drag.grab.y}
+    {refused}
+  />
+{/if}
+
 <style>
+  /* Takes what is left of the page under it (the page's content is a
+     column of at least the window's height), and never less than its
+     columns need. */
   .projects-board {
+    flex: 1 0 auto;
     display: flex;
     flex-direction: column;
     gap: 10px;
     min-width: 0;
+  }
+
+  /* A drag owns the cursor over everything on the board, the cards and
+     buttons with one of their own included. Nothing on the board answers the
+     pointer meanwhile, so a card carried over it sets off no hover styles
+     and no tooltips: only the columns' scroller is left to be under the
+     pointer, and the drop target is read off where the columns lie in it
+     (dropTargetAt). */
+  .projects-board.dragging :global(*) {
+    cursor: grabbing !important;
+    pointer-events: none !important;
+  }
+
+  .projects-board.dragging .board-columns {
+    pointer-events: auto !important;
+  }
+
+  .projects-board.drag-refused :global(*) {
+    cursor: not-allowed !important;
   }
 
   .board-state {
@@ -527,15 +654,25 @@
     text-decoration: underline;
   }
 
-  /* Positions BoardScrollEdges' fades over the scroller's sides. */
+  /* Positions BoardScrollEdges' fades over the scroller's sides, and hands
+     the board's height on to the scroller. */
   .board-columns-frame {
     position: relative;
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
   }
 
+  /* Every column is as tall as the scroller, which is as tall as the board:
+     a column's box is where a dragged card can be dropped on it, and what
+     lights up when one is over it. The scroller scrolls sideways only, so
+     it never shrinks under its columns' height to scroll them down: the
+     page does that. */
   .board-columns {
+    flex: 1 0 auto;
     display: flex;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 12px;
     min-width: 0;
     overflow-x: auto;

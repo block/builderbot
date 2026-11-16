@@ -7,21 +7,20 @@
   project; the context menu is the grid card's, plus "Move to" for the
   board's group.
 
-  With drag and drop on (a fine pointer, desktop layout) the card drags to
-  another column. A search hides the card rather than unmounting it.
+  With a fine pointer on the desktop layout, a press that travels drags the
+  card to another column (boardCardDrag); one that doesn't is still a click.
+  A search hides the card rather than unmounting it.
 -->
 <script module lang="ts">
   import type { Project } from '../../types';
 
   /** What every card on a board shares, from ProjectsBoard. */
   export interface BoardCardHandlers {
-    /** Cards drag between columns. */
-    readonly dragEnabled: boolean;
     /** The card being dragged, if any. */
     readonly draggingId: string | null;
     open(projectId: string): void;
-    startDrag(projectId: string, event: DragEvent): void;
-    endDrag(): void;
+    /** A pointer went down on a card: the start of a click, or of a drag. */
+    press(projectId: string, event: PointerEvent): void;
     remove(project: Project): void;
     /** A "Move to" pick changed the card's column. */
     moved(projectId: string): void;
@@ -71,9 +70,8 @@
         class="board-card"
         class:dragging={handlers.draggingId === project.id}
         data-board-card={project.id}
-        draggable={handlers.dragEnabled}
-        ondragstart={(event) => handlers.startDrag(project.id, event)}
-        ondragend={() => handlers.endDrag()}
+        onpointerdown={(event) => handlers.press(project.id, event)}
+        ondragstart={(event) => event.preventDefault()}
         onclick={() => handlers.open(project.id)}
       >
         <ProjectCardStatusIndicator projectId={project.id} {status} />
@@ -146,6 +144,7 @@
     background-color: var(--bg-hover);
   }
 
+  /* Left behind while its copy is in hand (BoardDragGhost). */
   .board-card.dragging {
     opacity: 0.4;
   }

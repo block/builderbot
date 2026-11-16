@@ -1852,7 +1852,7 @@ pub async fn list_branches_for_project(
 
 /// The body of [`list_branches_for_project`]: store reads only, each taking
 /// and releasing the store lock on its own.
-fn list_branches_for_project_impl(
+pub(crate) fn list_branches_for_project_impl(
     store: &Store,
     project_id: &str,
 ) -> Result<Vec<BranchWithWorkdir>, String> {

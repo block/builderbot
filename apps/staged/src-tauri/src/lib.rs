@@ -67,6 +67,8 @@ pub mod web_server;
 pub mod window_commands;
 
 #[cfg(test)]
+mod board_load_bench;
+#[cfg(test)]
 pub mod test_utils;
 
 use serde::Serialize;

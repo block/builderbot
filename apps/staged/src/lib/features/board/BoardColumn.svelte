@@ -1,7 +1,9 @@
 <!--
   BoardColumn.svelte — one board column: its tag's icon, name and card count,
-  a ⋯ menu, and the cards. The board marks it as the drop target while a
-  dragged card is over it.
+  a ⋯ menu, and the cards. The board stretches it to its own height, however
+  few cards it holds, and marks it as the drop target while a dragged card
+  is over it: the column's box is both what takes the card and what lights
+  up.
 
   Collapsed, it is a narrow strip with the name running down it and the
   count; clicking it expands the column, and a card dragged over it tints
@@ -290,7 +292,6 @@
   .board-column.collapsed {
     flex-basis: 40px;
     padding: 4px;
-    align-self: stretch;
   }
 
   .collapsed-strip {
@@ -408,12 +409,10 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Tall enough to drop on when empty. */
   .board-column-cards {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    min-height: 48px;
   }
 
   .column-empty {

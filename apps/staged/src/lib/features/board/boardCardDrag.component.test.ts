@@ -1,6 +1,7 @@
 // The card drag gesture against a real DOM: which presses become drags, how
 // a drag ends, and that a drag never leaves a click behind to open the card,
-// nor eats one that isn't its own. Then what the pointer is over, and the
+// nor eats one that isn't its own. Then what the pointer is over, read off
+// where the columns lie (jsdom lays nothing out, so each test says), and the
 // scrolling under a card held at the board's side, a frame at a time with
 // the frames run by hand.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +11,6 @@ import {
   DRAG_START_DISTANCE,
   dropTargetAcross,
   dropTargetAt,
-  dropTargetOf,
   type CardDrag,
   type CardDragHandlers,
   type DragPoint,
@@ -293,50 +293,6 @@ describe('createCardDrag', () => {
   });
 });
 
-describe('dropTargetOf', () => {
-  function board(): HTMLElement {
-    const el = document.createElement('div');
-    el.innerHTML = `
-      <section data-board-column="done"><button id="card">Card</button></section>
-      <section data-board-column="__none__"><p id="empty">No projects</p></section>
-      <div data-board-no-drop><button id="add">+</button></div>
-      <span id="gap"></span>`;
-    document.body.appendChild(el);
-    return el;
-  }
-
-  it('names the column an element is in', () => {
-    const el = board();
-    expect(dropTargetOf(el.querySelector('#card'), el)).toEqual({ kind: 'column', key: 'done' });
-    expect(dropTargetOf(el.querySelector('#empty'), el)).toEqual({
-      kind: 'column',
-      key: '__none__',
-    });
-    expect(dropTargetOf(el.querySelector('[data-board-column="done"]'), el)).toEqual({
-      kind: 'column',
-      key: 'done',
-    });
-  });
-
-  it('names the + column, which takes no cards', () => {
-    const el = board();
-    expect(dropTargetOf(el.querySelector('#add'), el)).toEqual({ kind: 'add-column' });
-  });
-
-  it('is nothing between columns, off the board, or over nothing', () => {
-    const el = board();
-    const outside = document.createElement('section');
-    outside.dataset.boardColumn = 'done';
-    document.body.appendChild(outside);
-
-    expect(dropTargetOf(el.querySelector('#gap'), el)).toBeNull();
-    expect(dropTargetOf(el, el)).toBeNull();
-    // Another board's column is not this board's.
-    expect(dropTargetOf(outside, el)).toBeNull();
-    expect(dropTargetOf(null, el)).toBeNull();
-  });
-});
-
 describe('dropTargetAcross', () => {
   /** Three 100px-wide zones, 10px apart, from x = 20: done, "No ‹group›", the + column. */
   function board(): HTMLElement {
@@ -348,7 +304,7 @@ describe('dropTargetAcross', () => {
     [...el.children].forEach((zone, i) => {
       const left = 20 + i * 110;
       zone.getBoundingClientRect = () =>
-        ({ left, right: left + 100, top: 0, bottom: 40 }) as DOMRect;
+        ({ left, right: left + 100, top: 0, bottom: 400 }) as DOMRect;
     });
     document.body.appendChild(el);
     return el;
@@ -362,12 +318,34 @@ describe('dropTargetAcross', () => {
     expect(dropTargetAcross(300, el)).toEqual({ kind: 'add-column' });
   });
 
-  it('is nothing before the first column, in a gap, or past the last', () => {
+  it('gives the gap between two to the nearer, so a card crossing it is never over neither', () => {
+    const el = board();
+    // Done ends at 120 and "No ‹group›" starts at 130.
+    expect(dropTargetAcross(120, el)).toEqual({ kind: 'column', key: 'done' });
+    expect(dropTargetAcross(124, el)).toEqual({ kind: 'column', key: 'done' });
+    expect(dropTargetAcross(126, el)).toEqual({ kind: 'column', key: '__none__' });
+    expect(dropTargetAcross(129, el)).toEqual({ kind: 'column', key: '__none__' });
+    // Dead centre goes to the earlier one.
+    expect(dropTargetAcross(125, el)).toEqual({ kind: 'column', key: 'done' });
+    for (let x = 20; x < 340; x++) expect(dropTargetAcross(x, el)).not.toBeNull();
+  });
+
+  it('gives the gap before the + column to the nearer too: the + refuses from halfway', () => {
+    const el = board();
+    // "No ‹group›" ends at 230 and the + column starts at 240.
+    expect(dropTargetAcross(233, el)).toEqual({ kind: 'column', key: '__none__' });
+    expect(dropTargetAcross(237, el)).toEqual({ kind: 'add-column' });
+  });
+
+  it('is nothing before the first column or past the last', () => {
     const el = board();
     expect(dropTargetAcross(19, el)).toBeNull();
-    expect(dropTargetAcross(120, el)).toBeNull();
-    expect(dropTargetAcross(125, el)).toBeNull();
     expect(dropTargetAcross(340, el)).toBeNull();
+    expect(dropTargetAcross(900, el)).toBeNull();
+  });
+
+  it('is nothing on a board with no columns', () => {
+    expect(dropTargetAcross(50, document.createElement('div'))).toBeNull();
   });
 });
 
@@ -375,25 +353,32 @@ describe('dropTargetAt', () => {
   let under: Element | null;
 
   /**
-   * A frame holding a board of two 100px columns, done from x = 0 and doing
-   * from x = 110, and a chevron laid over the board's side.
+   * A page holding a toolbar and, under it, a board from x = 0 to 300 and
+   * y = 100 to 500: two 100px columns as tall as it, done from x = 0 and
+   * doing from x = 110, then a + column from x = 220 to 260. Doing holds one
+   * card, at its top. A dialog lies outside the page, as a portal's would.
    */
-  function frame(): { frame: HTMLElement; board: HTMLElement } {
+  function page(): { page: HTMLElement; board: HTMLElement; dialog: HTMLElement } {
     const el = document.createElement('div');
     el.innerHTML = `
-      <div id="board">
-        <section data-board-column="done"><button id="card">Card</button></section>
-        <section data-board-column="doing"></section>
-      </div>
-      <button id="chevron">›</button>`;
+      <div id="toolbar"></div>
+      <div id="frame">
+        <div id="board">
+          <section data-board-column="done"></section>
+          <section data-board-column="doing"><button id="card">Card</button></section>
+          <div data-board-no-drop></div>
+        </div>
+      </div>`;
     const board = el.querySelector<HTMLElement>('#board')!;
+    board.getBoundingClientRect = () => ({ left: 0, right: 300, top: 100, bottom: 500 }) as DOMRect;
     [...board.children].forEach((zone, i) => {
       const left = i * 110;
-      zone.getBoundingClientRect = () =>
-        ({ left, right: left + 100, top: 0, bottom: 40 }) as DOMRect;
+      const right = left + (i === 2 ? 40 : 100);
+      zone.getBoundingClientRect = () => ({ left, right, top: 100, bottom: 500 }) as DOMRect;
     });
-    document.body.appendChild(el);
-    return { frame: el, board };
+    const dialog = document.createElement('div');
+    document.body.append(el, dialog);
+    return { page: el, board, dialog };
   }
 
   beforeEach(() => {
@@ -405,38 +390,78 @@ describe('dropTargetAt', () => {
     delete (document as Partial<Document>).elementFromPoint;
   });
 
-  it('names the column the pointer is on, wherever the pointer is across it', () => {
-    const { frame: el, board } = frame();
-    under = el.querySelector('#card');
-    // The element decides: a card of done, though x is in line with doing.
-    expect(dropTargetAt({ x: 150, y: 10 }, board, el)).toEqual({ kind: 'column', key: 'done' });
-  });
-
-  it('names the column in line with the pointer under a short column', () => {
-    const { frame: el, board } = frame();
-    // Below doing's last card there is only the board itself.
+  it('names the column the pointer is in line with, anywhere down the board', () => {
+    const { board } = page();
+    // With a card in hand, the board itself is all the pointer is ever over.
     under = board;
-    expect(dropTargetAt({ x: 150, y: 300 }, board, el)).toEqual({ kind: 'column', key: 'doing' });
-    expect(dropTargetAt({ x: 50, y: 300 }, board, el)).toEqual({ kind: 'column', key: 'done' });
-    // The gap between the two is still no column's.
-    expect(dropTargetAt({ x: 105, y: 300 }, board, el)).toBeNull();
+    expect(dropTargetAt({ x: 150, y: 110 }, board)).toEqual({ kind: 'column', key: 'doing' });
+    // Far below doing's one card, at the foot of the board.
+    expect(dropTargetAt({ x: 150, y: 499 }, board)).toEqual({ kind: 'column', key: 'doing' });
+    expect(dropTargetAt({ x: 50, y: 499 }, board)).toEqual({ kind: 'column', key: 'done' });
+    expect(dropTargetAt({ x: 240, y: 499 }, board)).toEqual({ kind: 'add-column' });
+    // In the gap between done and doing, the nearer.
+    expect(dropTargetAt({ x: 103, y: 300 }, board)).toEqual({ kind: 'column', key: 'done' });
+    expect(dropTargetAt({ x: 107, y: 300 }, board)).toEqual({ kind: 'column', key: 'doing' });
   });
 
-  it('names the column under what the frame lays over the board', () => {
-    const { frame: el, board } = frame();
-    under = el.querySelector('#chevron');
-    expect(dropTargetAt({ x: 190, y: 20 }, board, el)).toEqual({ kind: 'column', key: 'doing' });
-    // Without a frame, only the board's own space counts.
-    expect(dropTargetAt({ x: 190, y: 20 }, board)).toBeNull();
+  it('goes by where the pointer is, not by which part of the board is under it', () => {
+    const { board } = page();
+    // As a drag begins the board's contents still take the pointer: on
+    // doing's card or on done's own box, x decides all the same.
+    under = board.querySelector('#card');
+    expect(dropTargetAt({ x: 150, y: 110 }, board)).toEqual({ kind: 'column', key: 'doing' });
+    under = board.querySelector('[data-board-column="done"]');
+    expect(dropTargetAt({ x: 150, y: 110 }, board)).toEqual({ kind: 'column', key: 'doing' });
   });
 
-  it('is nothing off the board, or where something else covers it', () => {
-    const { frame: el, board } = frame();
-    // A dialog over the board, in line with a column.
+  it('takes the bare page under the board for the board, down to the bottom of the window', () => {
+    const { page: el, board } = page();
+    // The board's frame, the page and the body show through below it.
+    for (const bare of [board.parentElement!, el, document.body]) {
+      under = bare;
+      expect(dropTargetAt({ x: 150, y: 500 }, board)).toEqual({ kind: 'column', key: 'doing' });
+      expect(dropTargetAt({ x: 150, y: 760 }, board)).toEqual({ kind: 'column', key: 'doing' });
+      expect(dropTargetAt({ x: 240, y: 760 }, board)).toEqual({ kind: 'add-column' });
+    }
+  });
+
+  it('is nothing on the page above or beside the board', () => {
+    const { page: el, board } = page();
+    under = el;
+    // Above the board in line with a column, and level with it past its side.
+    expect(dropTargetAt({ x: 150, y: 99 }, board)).toBeNull();
+    expect(dropTargetAt({ x: 320, y: 300 }, board)).toBeNull();
+    // Under the board, but past its sides: a column scrolled out of them is out of reach.
+    expect(dropTargetAt({ x: -1, y: 600 }, board)).toBeNull();
+    expect(dropTargetAt({ x: 300, y: 600 }, board)).toBeNull();
+    // Under the board and inside it, but past the + column.
+    expect(dropTargetAt({ x: 280, y: 600 }, board)).toBeNull();
+  });
+
+  it('keeps to the board’s sides when its columns run past them', () => {
+    const { board } = page();
+    // 100px of columns scrolled out to the left: done is at -100–0 now.
+    [...board.children].forEach((zone, i) => {
+      const left = i * 110 - 100;
+      zone.getBoundingClientRect = () =>
+        ({ left, right: left + 100, top: 100, bottom: 500 }) as DOMRect;
+    });
     under = document.body;
-    expect(dropTargetAt({ x: 150, y: 20 }, board, el)).toBeNull();
+    expect(dropTargetAt({ x: -50, y: 600 }, board)).toBeNull();
+    expect(dropTargetAt({ x: 50, y: 600 }, board)).toEqual({ kind: 'column', key: 'doing' });
+  });
+
+  it('is nothing off the window, or where something else is over the board or the page', () => {
+    const { page: el, board, dialog } = page();
+    // A dialog over the board, and over the page under it, in line with a column.
+    under = dialog;
+    expect(dropTargetAt({ x: 150, y: 300 }, board)).toBeNull();
+    expect(dropTargetAt({ x: 150, y: 600 }, board)).toBeNull();
+    // The toolbar is on the page, but it is not what the board sits in.
+    under = el.querySelector('#toolbar');
+    expect(dropTargetAt({ x: 150, y: 600 }, board)).toBeNull();
     under = null;
-    expect(dropTargetAt({ x: 150, y: 20 }, board, el)).toBeNull();
+    expect(dropTargetAt({ x: 150, y: 300 }, board)).toBeNull();
   });
 });
 

@@ -14,14 +14,18 @@
   progress's chip on) takes the card off the board, and focus goes to its
   neighbour instead.
 
+  The columns are all as tall as the board, which is at least as tall as the
+  tallest of them and reaches the bottom of the page it is on: a column with
+  one card is as much to aim at as one with twenty.
+
   While a card is dragged (boardCardDrag) a copy of it follows the pointer
-  and the column under it is marked as the drop target: the column the
-  pointer is in line with, when it is over the empty space under a shorter
-  one. "No ‹group›" clears the tag and a collapsed column takes the card like
-  any other; the card's own column changes nothing, and the + column refuses
-  it, with a no-entry cursor. Nothing on the board answers the pointer while
-  a card is in hand. A card held near either side scrolls the columns that
-  way.
+  and the column it is in line with is marked as the drop target, anywhere
+  down the column's height; the gap between two columns is the nearer one's,
+  and the page's margin under the board is the board. "No ‹group›" clears
+  the tag and a collapsed column takes the card like any other; the card's
+  own column changes nothing, and the + column refuses it, with a no-entry
+  cursor. Nothing on the board answers the pointer while a card is in hand.
+  A card held near either side scrolls the columns that way.
 
   Collapsed and hidden columns are remembered per group (boardViewPrefs).
   When every showing card is in a hidden column (a tag chip for a hidden
@@ -229,8 +233,7 @@
   });
 
   function targetAt(point: DragPoint): BoardDropTarget | null {
-    if (!columnsEl) return null;
-    return dropTargetAt(point, columnsEl, frameEl ?? columnsEl);
+    return columnsEl ? dropTargetAt(point, columnsEl) : null;
   }
 
   const cardDrag = createCardDrag({
@@ -546,7 +549,7 @@
         </button>
       </p>
     {/if}
-    <div class="board-columns-frame" bind:this={frameEl}>
+    <div class="board-columns-frame">
       <div
         class="board-columns"
         class:paged
@@ -590,7 +593,11 @@
 {/if}
 
 <style>
+  /* Takes what is left of the page under it (the page's content is a
+     column of at least the window's height), and never less than its
+     columns need. */
   .projects-board {
+    flex: 1 0 auto;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -601,7 +608,7 @@
      buttons with one of their own included. Nothing on the board answers the
      pointer meanwhile, so a card carried over it sets off no hover styles
      and no tooltips: only the columns' scroller is left to be under the
-     pointer, and the drop target is read off where the columns lie
+     pointer, and the drop target is read off where the columns lie in it
      (dropTargetAt). */
   .projects-board.dragging :global(*) {
     cursor: grabbing !important;
@@ -647,15 +654,25 @@
     text-decoration: underline;
   }
 
-  /* Positions BoardScrollEdges' fades over the scroller's sides. */
+  /* Positions BoardScrollEdges' fades over the scroller's sides, and hands
+     the board's height on to the scroller. */
   .board-columns-frame {
     position: relative;
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
   }
 
+  /* Every column is as tall as the scroller, which is as tall as the board:
+     a column's box is where a dragged card can be dropped on it, and what
+     lights up when one is over it. The scroller scrolls sideways only, so
+     it never shrinks under its columns' height to scroll them down: the
+     page does that. */
   .board-columns {
+    flex: 1 0 auto;
     display: flex;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 12px;
     min-width: 0;
     overflow-x: auto;

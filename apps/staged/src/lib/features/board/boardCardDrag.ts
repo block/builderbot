@@ -13,10 +13,9 @@
  * otherwise end in (a card released over itself) is swallowed, so dragging a
  * card never opens it.
  *
- * Also here: reading what the pointer is over off the board's markup and,
- * over the board's empty space, off where its columns lie; and scrolling the
- * columns under a card held at the board's side, which a native drag would
- * have done for itself.
+ * Also here: reading what the pointer is over off where the board's columns
+ * lie; and scrolling the columns under a card held at the board's side,
+ * which a native drag would have done for itself.
  */
 
 import { edgeScrollVelocity, overflowEdges } from './boardScroll';
@@ -51,6 +50,12 @@ export interface CardDrag {
 /** What a dragged card is over: a column, or the trailing + column. */
 export type BoardDropTarget = { kind: 'column'; key: string } | { kind: 'add-column' };
 
+/**
+ * The board's own markers for what a card can be held over: a column's
+ * `data-board-column`, and `data-board-no-drop` on what takes no cards (the
+ * + column). Each is as tall as the board, so its box is all of where it
+ * receives, and what the board lights up.
+ */
 const DROP_ZONES = '[data-board-column], [data-board-no-drop]';
 
 function targetOfZone(zone: HTMLElement): BoardDropTarget {
@@ -59,45 +64,53 @@ function targetOfZone(zone: HTMLElement): BoardDropTarget {
 }
 
 /**
- * The drop target `element` belongs to, by the board's own markers: a
- * column's `data-board-column`, or `data-board-no-drop` on what takes no
- * cards (the + column). Null outside `board`.
- */
-export function dropTargetOf(element: Element | null, board: Element): BoardDropTarget | null {
-  if (!element || !board.contains(element)) return null;
-  const zone = element.closest<HTMLElement>(DROP_ZONES);
-  if (!zone || !board.contains(zone)) return null;
-  return targetOfZone(zone);
-}
-
-/**
- * The drop target of `board` whose width `x` falls in, however far down the
- * board the pointer is. Null in the gaps between columns and past the last.
+ * The drop target of `board` that `x` is in line with: the column or +
+ * column whose width it falls in, and in the gap between two, the nearer
+ * (the earlier, dead centre), so a card crossing from one to the next is
+ * never over neither. Null before the first and past the last.
  */
 export function dropTargetAcross(x: number, board: Element): BoardDropTarget | null {
+  let nearest: HTMLElement | null = null;
+  let nearestAway = Infinity;
+  let left = Infinity;
+  let right = -Infinity;
   for (const zone of board.querySelectorAll<HTMLElement>(DROP_ZONES)) {
     const box = zone.getBoundingClientRect();
-    if (x >= box.left && x < box.right) return targetOfZone(zone);
+    left = Math.min(left, box.left);
+    right = Math.max(right, box.right);
+    const away = Math.max(box.left - x, x - box.right, 0);
+    if (away < nearestAway) {
+      nearest = zone;
+      nearestAway = away;
+    }
   }
-  return null;
+  return nearest && x >= left && x < right ? targetOfZone(nearest) : null;
 }
 
 /**
- * What a card held at `point` is over. On a column or the + column, that
- * (dropTargetOf). On the board's own empty space, the one `point` is in line
- * with (dropTargetAcross): columns are only as tall as their cards, so the
- * space under a short one is no column's, and neither is what `frame` lays
- * over the columns (the scroll edges' chevrons); `frame` holds `board` and
- * those. Null off the board, and where something else is over it.
+ * What a card held at `point` is over: the column or + column of `board`,
+ * the columns' scroller, that it is in line with (dropTargetAcross), however
+ * far down the board it is held. Which element of the board is under the
+ * pointer doesn't come into it: while a card is in hand that is only ever
+ * the scroller itself (ProjectsBoard takes the pointer off everything in
+ * it), and the columns fill its height, so where they lie says it all.
+ *
+ * The bare page under the board counts as the board, down to the bottom of
+ * the window: a card let go in the margin below a column lands in it. Null
+ * beside or above the board, off the window, and where something else (a
+ * dialog, a menu) is over the board or the page.
  */
-export function dropTargetAt(
-  point: DragPoint,
-  board: Element,
-  frame: Element = board
-): BoardDropTarget | null {
-  const element = document.elementFromPoint(point.x, point.y);
-  if (!element || !frame.contains(element)) return null;
-  return dropTargetOf(element, board) ?? dropTargetAcross(point.x, board);
+export function dropTargetAt(point: DragPoint, board: Element): BoardDropTarget | null {
+  const under = document.elementFromPoint(point.x, point.y);
+  if (!under) return null;
+  const box = board.getBoundingClientRect();
+  // The page shows through as the elements the board sits in.
+  const onBoard = board.contains(under);
+  const onPageBelow = under.contains(board) && point.y >= box.bottom;
+  if (!onBoard && !onPageBelow) return null;
+  // Columns scrolled out of the board's sides are out of reach.
+  if (point.x < box.left || point.x >= box.right) return null;
+  return dropTargetAcross(point.x, board);
 }
 
 function pointOf(event: PointerEvent): DragPoint {

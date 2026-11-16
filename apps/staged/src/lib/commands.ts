@@ -541,8 +541,9 @@ export function getProjectSearchIndex(): Promise<import('./types').ProjectSearch
 
 /**
  * When each project last saw activity, for sorting by "Last updated". One row
- * per project that has a note, project note, review or commit; a project
- * without any is absent, and the caller falls back to its creation time. Like
+ * per project that has a note, project note, review or commit, not counting
+ * those a session has started and not finished; a project without any is
+ * absent, and the caller falls back to its creation time. Like
  * the search index, it is read uncached and refetched on the change feed.
  */
 export function getProjectActivity(): Promise<import('./types').ProjectActivity[]> {

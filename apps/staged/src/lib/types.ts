@@ -724,7 +724,8 @@ export interface ProjectSearchItem {
 
 /**
  * When a project last saw activity: its latest note, project-note, review or
- * commit timestamp. Derived on read, never stored.
+ * commit timestamp. A session starting is not activity: the row it writes
+ * counts once the session has finished it. Derived on read, never stored.
  */
 export interface ProjectActivity {
   projectId: string;

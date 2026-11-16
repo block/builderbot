@@ -1,13 +1,18 @@
-//! Per-project last activity: when work last started, changed or finished in
-//! each project.
+//! Per-project last activity: when work last landed in each project.
 //!
-//! Derived on every read from the timestamps the notes, reviews and commits
-//! already carry, so nothing is stored and nothing can drift. The frontend
-//! sorts projects by it ("Last updated") and floors it at the project's own
-//! creation time, which it already has.
+//! Derived on every read from the timestamps the notes, reviews, comments
+//! and commits already carry, so nothing is stored and nothing can drift.
+//! The frontend sorts projects by it ("Last updated") and floors it at the
+//! project's own creation time, which it already has.
 //!
-//! The read scans the four tables once, a cost of the same order as the
-//! search index read, and the frontend asks for it only while a sort uses it.
+//! A session starting is not activity. Staged writes the session's note,
+//! review or commit row when the session is queued or started, and that row
+//! is left out until the session has put something in it. See
+//! [`ACTIVITY_QUERY`] for how such a row is told apart.
+//!
+//! The read scans the four tables once, and the comments of the reviews
+//! still in flight. That is a cost of the same order as the search index
+//! read, and the frontend asks for it only while a sort uses it.
 
 use serde::Serialize;
 
@@ -19,18 +24,46 @@ use super::{Store, StoreError};
 pub struct ProjectActivity {
     pub project_id: String,
     /// The latest timestamp across the project's notes, project notes,
-    /// reviews and commits, in milliseconds since the epoch.
+    /// reviews and commits that count (see [`ACTIVITY_QUERY`]), in
+    /// milliseconds since the epoch.
     pub last_activity_at: i64,
 }
 
-/// One row per project that has at least one item, with the latest timestamp
-/// across them.
+/// One row per project that has at least one item that counts, with the
+/// latest timestamp across them.
 ///
-/// Each item counts from the moment its row is written, which for a session
-/// is when it starts: Staged creates the note, review or pending commit then.
-/// A note or review counts again when it completes. `completed_at` is read
-/// beside `updated_at` because completing a note stamps only `completed_at`.
-/// A commit has no `completed_at`; its `updated_at` moves when its SHA lands.
+/// A row that a session only started does not count. Every such row is
+/// written, and may be stamped again, before the session has produced
+/// anything: when it is queued, when it is claimed
+/// (`mark_session_artifact_started`), and for a review when the branch tip is
+/// filled in (`update_review_commit_sha`). These columns tell it apart:
+///
+/// - **Notes and project notes:** `session_id` set and `completed_at` unset.
+///   Every write that puts a title or body in a note, and the session
+///   finishing without one, stamps `completed_at`.
+/// - **Reviews:** the same test. The session finishing stamps `completed_at`.
+/// - **Commits:** `sha` unset. A pending commit has no SHA until the git
+///   commit lands.
+///
+/// Everything else counts as it did:
+///
+/// - A note or review a session has finished counts from `completed_at` and
+///   from `updated_at`, whichever is later. `completed_at` is read because
+///   completing a note stamps only that. `updated_at` moves on a later
+///   revision, edit, comment or file marked reviewed.
+/// - A note or review with no session counts from `updated_at`. No session
+///   start wrote it: it is a note the user saved, or the review the diff
+///   viewer creates on the first comment or file marked reviewed.
+/// - A commit with a SHA counts from `updated_at`, which moves when the SHA
+///   lands and when a rebase remaps it.
+///
+/// A review whose session is still running is left out as a row, because its
+/// `updated_at` is stamped by the start and cannot say what else moved it.
+/// Its comments carry their own timestamps, so a comment added to or deleted
+/// from it still counts, from the comment's `created_at` and `deleted_at`.
+/// The writes that stamp only the review's `updated_at` (a file marked or
+/// unmarked reviewed, a reference file, a comment edited or restored) wait
+/// there for the session to finish.
 ///
 /// Branch items reach a project through `branches.project_id`, the branch's
 /// current project, so they follow a branch that moves.
@@ -41,21 +74,32 @@ const ACTIVITY_QUERY: &str = "
     SELECT project_id, MAX(at) FROM (
         SELECT project_id, MAX(updated_at, IFNULL(completed_at, 0)) AS at
           FROM project_notes
+         WHERE session_id IS NULL OR completed_at IS NOT NULL
         UNION ALL
         SELECT b.project_id, MAX(n.updated_at, IFNULL(n.completed_at, 0))
           FROM notes n JOIN branches b ON b.id = n.branch_id
+         WHERE n.session_id IS NULL OR n.completed_at IS NOT NULL
         UNION ALL
         SELECT b.project_id, MAX(r.updated_at, IFNULL(r.completed_at, 0))
           FROM reviews r JOIN branches b ON b.id = r.branch_id
+         WHERE r.session_id IS NULL OR r.completed_at IS NOT NULL
+        UNION ALL
+        SELECT b.project_id, MAX(c.created_at, IFNULL(c.deleted_at, 0))
+          FROM comments c
+          JOIN reviews r ON r.id = c.review_id
+          JOIN branches b ON b.id = r.branch_id
+         WHERE r.session_id IS NOT NULL AND r.completed_at IS NULL
         UNION ALL
         SELECT b.project_id, c.updated_at
           FROM commits c JOIN branches b ON b.id = c.branch_id
+         WHERE c.sha IS NOT NULL
     ) GROUP BY project_id";
 
 impl Store {
     /// When each project last saw activity, in no particular order. A project
-    /// with no note, project note, review or commit has no row. Read in one
-    /// statement, so the four sources agree.
+    /// with no note, project note, review or commit that counts has no row,
+    /// which includes one whose only items are sessions still running. Read
+    /// in one statement, so the sources agree.
     pub fn list_project_activity(&self) -> Result<Vec<ProjectActivity>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(ACTIVITY_QUERY)?;
@@ -74,8 +118,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::store::models::{Branch, Commit, Note, Project, ProjectNote, ProjectRepo, Review};
-    use crate::store::{BranchMove, RepoPlacement, ReviewScope};
+    use crate::git::Span;
+    use crate::store::models::{
+        Branch, Comment, Commit, Note, Project, ProjectNote, ProjectRepo, Review,
+    };
+    use crate::store::{now_timestamp, BranchMove, RepoPlacement, ReviewScope};
 
     struct Fixture {
         store: Store,
@@ -134,11 +181,67 @@ mod tests {
         review
     }
 
+    /// A commit whose SHA has landed.
     fn commit(f: &Fixture, updated_at: i64) -> Commit {
-        let mut commit = Commit::new_pending(&f.branch.id);
+        let mut commit = Commit::new_with_sha(&f.branch.id, "abc123");
         commit.updated_at = updated_at;
         f.store.create_commit(&commit).unwrap();
         commit
+    }
+
+    // The rows a session start writes, built as `session_commands` builds
+    // them: linked to the session, with nothing in them yet.
+
+    const SESSION: &str = "session-1";
+
+    fn note_stub(f: &Fixture, updated_at: i64) -> Note {
+        let mut stub = Note::new(&f.branch.id, "Prompt", "").with_session(SESSION);
+        assert_eq!(stub.completed_at, None);
+        stub.updated_at = updated_at;
+        f.store.create_note(&stub).unwrap();
+        stub
+    }
+
+    fn project_note_stub(f: &Fixture, updated_at: i64) -> ProjectNote {
+        let mut stub = ProjectNote::new(&f.project.id, "", "").with_session(SESSION);
+        assert_eq!(stub.completed_at, None);
+        stub.updated_at = updated_at;
+        f.store.create_project_note(&stub).unwrap();
+        stub
+    }
+
+    fn started_review(f: &Fixture, updated_at: i64) -> Review {
+        let mut review = Review::new(&f.branch.id, "", ReviewScope::Branch).with_session(SESSION);
+        assert_eq!(review.completed_at, None);
+        review.updated_at = updated_at;
+        f.store.create_review(&review).unwrap();
+        review
+    }
+
+    fn pending_commit(f: &Fixture, updated_at: i64) -> Commit {
+        let mut commit = Commit::new_pending(&f.branch.id).with_session(SESSION);
+        assert_eq!(commit.sha, None);
+        commit.updated_at = updated_at;
+        f.store.create_commit(&commit).unwrap();
+        commit
+    }
+
+    fn comment(created_at: i64) -> Comment {
+        let mut comment = Comment::new("src/lib.rs", Span::new(1, 2), "Why?");
+        comment.created_at = created_at;
+        comment
+    }
+
+    /// Runs `write` and checks the project's activity moved to the wall clock
+    /// time of the write: later than every fixed timestamp in these tests.
+    fn assert_counts_now(f: &Fixture, what: &str, write: impl FnOnce()) {
+        let before = now_timestamp();
+        write();
+        let at = activity(&f.store).get(&f.project.id).copied();
+        assert!(
+            at.is_some_and(|at| at >= before),
+            "{what}: expected at least {before}, got {at:?}"
+        );
     }
 
     fn activity(store: &Store) -> BTreeMap<String, i64> {
@@ -192,7 +295,7 @@ mod tests {
 
     #[test]
     fn counts_an_update_later_than_the_completion() {
-        // A comment on a completed review, or an edit to a finished note.
+        // A comment on a completed review, or a revision of a finished note.
         let f = fixture();
         project_note(&f, 500, Some(100));
         note(&f, 400, Some(100));
@@ -201,28 +304,276 @@ mod tests {
     }
 
     #[test]
-    fn counts_a_session_that_has_started_and_not_finished() {
-        // The stub row is written when the session starts, uncompleted.
+    fn a_started_session_changes_nothing() {
+        // Alone in a project, each row a session start writes leaves the
+        // project with no activity at all.
         let f = fixture();
-        let mut stub = Note::new(&f.branch.id, "Prompt", "");
-        assert_eq!(stub.completed_at, None);
-        stub.updated_at = 250;
-        f.store.create_note(&stub).unwrap();
-        assert_eq!(activity(&f.store), only(&f, 250));
+        note_stub(&f, 250);
+        assert_eq!(activity(&f.store), BTreeMap::new(), "note stub");
 
-        // Finishing it counts again, at the wall clock.
-        f.store.mark_note_completed(&stub.id).unwrap();
-        assert!(activity(&f.store)[&f.project.id] > 250);
+        let f = fixture();
+        project_note_stub(&f, 250);
+        assert_eq!(activity(&f.store), BTreeMap::new(), "project note stub");
+
+        let f = fixture();
+        started_review(&f, 250);
+        assert_eq!(activity(&f.store), BTreeMap::new(), "started review");
+
+        let f = fixture();
+        pending_commit(&f, 250);
+        assert_eq!(activity(&f.store), BTreeMap::new(), "pending commit");
+
+        // Beside older work, all four together leave its time in place.
+        let f = fixture();
+        project_note(&f, 100, Some(100));
+        note_stub(&f, 250);
+        project_note_stub(&f, 250);
+        started_review(&f, 250);
+        pending_commit(&f, 250);
+        assert_eq!(activity(&f.store), only(&f, 100));
     }
 
     #[test]
-    fn a_commit_counts_again_when_its_sha_lands() {
+    fn the_writes_a_session_start_makes_later_change_nothing() {
+        // A queued session's rows are stamped again when it is claimed, and a
+        // review's again when the branch tip is filled in. Both stamp the
+        // wall clock, far above the 100 here.
         let f = fixture();
-        let pending = commit(&f, 100);
+        project_note(&f, 100, Some(100));
+        note_stub(&f, 250);
+        let review = started_review(&f, 250);
+        pending_commit(&f, 250);
+
+        f.store.mark_session_artifact_started(SESSION).unwrap();
+        assert_eq!(activity(&f.store), only(&f, 100), "claimed");
+
+        f.store
+            .update_review_commit_sha(&review.id, "abc123")
+            .unwrap();
+        let stored = f.store.get_review(&review.id).unwrap().unwrap();
+        assert!(stored.updated_at > 250, "the write landed");
+        assert_eq!(activity(&f.store), only(&f, 100), "review tip filled in");
+    }
+
+    #[test]
+    fn a_note_counts_once_its_session_writes_or_finishes() {
+        // Finished with no note written.
+        let f = fixture();
+        let stub = note_stub(&f, 250);
+        assert_counts_now(&f, "note completed", || {
+            f.store.mark_note_completed(&stub.id).unwrap();
+        });
+
+        // The runner storing the turn's note.
+        let f = fixture();
+        let stub = note_stub(&f, 250);
+        assert_counts_now(&f, "note title and content", || {
+            f.store
+                .update_note_title_and_content(&stub.id, "Findings", "body", None, None)
+                .unwrap();
+        });
+
+        let f = fixture();
+        let stub = note_stub(&f, 250);
+        assert_counts_now(&f, "note content", || {
+            f.store.update_note_content(&stub.id, "body").unwrap();
+        });
+
+        let f = fixture();
+        let stub = project_note_stub(&f, 250);
+        assert_counts_now(&f, "project note completed", || {
+            f.store.mark_project_note_completed(&stub.id).unwrap();
+        });
+
+        let f = fixture();
+        let stub = project_note_stub(&f, 250);
+        assert_counts_now(&f, "project note title and content", || {
+            f.store
+                .update_project_note_title_and_content(&stub.id, "Plan", "body", None, None)
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_finished_session_note_counts_again_when_it_is_revised() {
+        // A later turn rewriting a note that completed long ago.
+        let f = fixture();
+        let mut done = Note::new(&f.branch.id, "Findings", "body").with_session(SESSION);
+        done.updated_at = 100;
+        done.completed_at = Some(200);
+        f.store.create_note(&done).unwrap();
+        assert_eq!(activity(&f.store), only(&f, 200));
+
+        assert_counts_now(&f, "note revised", || {
+            f.store
+                .update_note_title_and_content(&done.id, "Findings", "new body", None, None)
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_note_the_user_writes_counts_when_saved() {
+        // A written note has no session and is complete when saved.
+        let f = fixture();
+        let mut written = Note::new_standalone(&f.branch.id, "Bump the lockfile", "")
+            .with_subtype(Note::SUBTYPE_WRITTEN);
+        written.updated_at = 300;
+        written.completed_at = Some(300);
+        f.store.create_note_with_unique_title(&mut written).unwrap();
+        assert_eq!(activity(&f.store), only(&f, 300));
+
+        assert_counts_now(&f, "written note edited", || {
+            f.store
+                .update_written_note(&written.id, "Bump the lockfile", "before release")
+                .unwrap();
+        });
+
+        // A title-only project note has no `completed_at`. With no session it
+        // is not a stub, so it counts.
+        let f = fixture();
+        let mut title_only = ProjectNote::new(&f.project.id, "Ship on Friday", "");
+        assert_eq!(title_only.completed_at, None);
+        title_only.updated_at = 300;
+        f.store.create_project_note(&title_only).unwrap();
+        assert_eq!(activity(&f.store), only(&f, 300));
+    }
+
+    #[test]
+    fn a_review_counts_once_its_session_finishes() {
+        let f = fixture();
+        let review = started_review(&f, 250);
+        assert_counts_now(&f, "review titled", || {
+            f.store
+                .update_review_title(&review.id, "Ready to ship")
+                .unwrap();
+        });
+
+        // Finished with no title found.
+        let f = fixture();
+        let review = started_review(&f, 250);
+        assert_counts_now(&f, "review completed", || {
+            f.store.mark_review_completed(&review.id).unwrap();
+        });
+    }
+
+    #[test]
+    fn writes_to_a_finished_review_count() {
+        let finished = |f: &Fixture| {
+            let mut review =
+                Review::new(&f.branch.id, "abc123", ReviewScope::Branch).with_session(SESSION);
+            review.updated_at = 100;
+            review.completed_at = Some(200);
+            f.store.create_review(&review).unwrap();
+            assert_eq!(activity(&f.store), only(f, 200));
+            review
+        };
+
+        let f = fixture();
+        let review = finished(&f);
+        assert_counts_now(&f, "comment added", || {
+            f.store.add_comment(&review.id, &comment(150)).unwrap();
+        });
+
+        let f = fixture();
+        let review = finished(&f);
+        assert_counts_now(&f, "file marked reviewed", || {
+            f.store.mark_reviewed(&review.id, "src/lib.rs").unwrap();
+        });
+    }
+
+    #[test]
+    fn writes_to_a_review_with_no_session_count() {
+        // The diff viewer creates the review on the first comment or file
+        // marked reviewed. No session start wrote it, so it counts from the
+        // first write on.
+        let f = fixture();
+        assert_counts_now(&f, "review created by the first action", || {
+            f.store
+                .ensure_review(&f.branch.id, "abc123", ReviewScope::Commit)
+                .unwrap();
+        });
+
+        let f = fixture();
+        let manual = review(&f, 100, None);
+        assert_eq!(activity(&f.store), only(&f, 100));
+        assert_counts_now(&f, "comment added", || {
+            f.store.add_comment(&manual.id, &comment(150)).unwrap();
+        });
+
+        let f = fixture();
+        let manual = review(&f, 100, None);
+        assert_counts_now(&f, "file marked reviewed", || {
+            f.store.mark_reviewed(&manual.id, "src/lib.rs").unwrap();
+        });
+    }
+
+    #[test]
+    fn a_comment_on_a_review_still_in_flight_counts_from_its_own_time() {
+        // The review row is ignored until its session finishes, so the
+        // comment's own timestamp is what counts, not the `updated_at` the
+        // write stamped on the review.
+        let f = fixture();
+        let review = started_review(&f, 250);
+        let added = comment(700);
+        f.store.add_comment(&review.id, &added).unwrap();
+        assert_eq!(activity(&f.store), only(&f, 700));
+
+        // A file marked reviewed stamps only the review row. It cannot be
+        // told apart from the start, so it waits for the session to finish.
+        f.store.mark_reviewed(&review.id, "src/lib.rs").unwrap();
+        assert_eq!(activity(&f.store), only(&f, 700));
+
+        // Deleting the comment stamps the comment.
+        assert_counts_now(&f, "comment deleted", || {
+            f.store.delete_comment(&added.id).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_file_marked_reviewed_in_flight_counts_when_the_session_finishes() {
+        let f = fixture();
+        project_note(&f, 100, Some(100));
+        let review = started_review(&f, 250);
+        f.store.mark_reviewed(&review.id, "src/lib.rs").unwrap();
         assert_eq!(activity(&f.store), only(&f, 100));
 
-        f.store.update_commit_sha(&pending.id, "abc123").unwrap();
-        assert!(activity(&f.store)[&f.project.id] > 100);
+        assert_counts_now(&f, "review completed", || {
+            f.store.mark_review_completed(&review.id).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_commit_counts_once_its_sha_lands() {
+        let f = fixture();
+        let pending = pending_commit(&f, 250);
+        assert_eq!(activity(&f.store), BTreeMap::new());
+        assert_counts_now(&f, "sha set", || {
+            f.store.update_commit_sha(&pending.id, "abc123").unwrap();
+        });
+
+        let f = fixture();
+        let pending = pending_commit(&f, 250);
+        assert_counts_now(&f, "pending commit completed", || {
+            let owns_sha = f
+                .store
+                .complete_pending_commit_sha(&pending.id, &f.branch.id, "abc123")
+                .unwrap();
+            assert!(owns_sha);
+        });
+    }
+
+    #[test]
+    fn a_landed_commit_counts_again_when_a_rebase_remaps_it() {
+        let f = fixture();
+        let landed = commit(&f, 100);
+        assert_eq!(activity(&f.store), only(&f, 100));
+        assert_counts_now(&f, "sha remapped", || {
+            let remapped = f
+                .store
+                .remap_commit_shas(&f.branch.id, &[(landed.id.as_str(), "abc123", "def456")])
+                .unwrap();
+            assert_eq!(remapped, 1);
+        });
     }
 
     #[test]

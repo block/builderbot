@@ -331,7 +331,7 @@ impl ReconcileBlox for FakeBlox {
     /// anything else (a clear) prints nothing.
     fn exec(&self, _: &ReconcileTarget, args: &[&str]) -> Result<String, String> {
         let script = args.last().copied().unwrap_or_default().to_string();
-        let collects = script.contains("echo done; else echo pending");
+        let collects = crate::remote_staged_mcp::note_outbox::is_collect_script(&script);
         self.execs.lock().unwrap().push(script);
         let outbox = self.outbox.lock().unwrap().clone()?;
         Ok(if collects { outbox } else { String::new() })

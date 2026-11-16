@@ -48,6 +48,7 @@
  * nothing newer than Node 18 syntax so an older workstation image still runs it.
  */
 
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -59,7 +60,7 @@ const readline = require("readline");
 
 // Reported as `serverInfo.version` and stamped by tools into what they write
 // (`write_note`'s `meta.json` keeps it under its original `helperVersion` key).
-const SERVER_VERSION = 5;
+const SERVER_VERSION = 6;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -153,12 +154,17 @@ function removeIfPresent(filePath) {
 //                server only reads it)
 //     note.md    the published note body (markdown, without the title)
 //     meta.json  {"title", "suggestedNextSteps", "turn", "writtenAt", "helperVersion"}
-//     done       marker: the turn delivered a note
+//     done       marker: the turn delivered a note. It holds the call's
+//                generation token, 32 hex characters, new on every call
 //
 // `done` is removed before a rewrite starts and recreated after both files
-// are in place, so a collector that sees it — even one that lands between
-// the renames of a second call — always reads a title and body from the same
-// call. The laptop's reader is `remote_staged_mcp::note_outbox`.
+// are in place, so the marker is absent for the whole of a rewrite. That
+// alone does not protect a collector, which reads the files in separate
+// steps: a whole second call can fit between its read of `meta.json` and
+// its read of `note.md`, and the marker is present before and after. So the
+// collector reads the marker before and after the files and takes them as
+// one note only when it finds the same token both times. The laptop's
+// reader is `remote_staged_mcp::note_outbox`.
 
 // Must stay word-for-word in step with `WRITE_NOTE_DESCRIPTION` in
 // `apps/staged/src-tauri/src/note_tool.rs`.
@@ -397,6 +403,16 @@ function savedMessage(title, bodyLength) {
   );
 }
 
+/**
+ * A token for one `write_note` call's `done` marker: 32 lowercase hex
+ * characters, random, so no two calls write the same one. The collector
+ * prints it as part of a line of its own output, so it stays within letters
+ * and digits and has no newline.
+ */
+function generationToken() {
+  return crypto.randomBytes(16).toString("hex");
+}
+
 /** Validate the arguments, read the draft and write the note outbox. Returns {text, isError}. */
 function writeNote(context, args) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
@@ -448,13 +464,15 @@ function writeNote(context, args) {
     helperVersion: SERVER_VERSION,
   };
   // Drop the marker of any earlier call first, then body, then meta, then
-  // the marker again: a collector that sees `done` can rely on the other two
-  // being complete *and* from the same call, even if it reads while a
-  // rewrite is between its renames.
+  // the marker again, holding a token no other call has written: a collector
+  // that reads the same token before and after the other two files can rely
+  // on them being complete *and* from the same call. A missing marker is a
+  // rewrite between its renames; a different token is a whole call that ran
+  // between the collector's reads.
   removeIfPresent(path.join(directory, "done"));
   writeAtomic(directory, "note.md", Buffer.from(body, "utf8"));
   writeAtomic(directory, "meta.json", Buffer.from(JSON.stringify(meta), "utf8"));
-  writeAtomic(directory, "done", Buffer.alloc(0));
+  writeAtomic(directory, "done", Buffer.from(generationToken(), "ascii"));
   log(
     "saved note " + JSON.stringify(title) + " (" + body.length + " chars) for session " + context.sessionId
   );

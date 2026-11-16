@@ -34,7 +34,7 @@ fn done_output() -> String {
 }
 
 pub(super) fn is_collect(args: &[&str]) -> bool {
-    args.len() == 3 && args[2].contains("echo done; else echo pending")
+    args.len() == 3 && crate::remote_staged_mcp::note_outbox::is_collect_script(args[2])
 }
 
 /// Records every workstation command and answers the collect script with

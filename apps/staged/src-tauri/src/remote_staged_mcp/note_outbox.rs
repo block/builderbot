@@ -11,7 +11,8 @@
 //!                                           writes and edits; `write_note` reads it
 //! ~/.staged/sessions/<session-id>/note.md   the published body (markdown, no title)
 //! ~/.staged/sessions/<session-id>/meta.json title, suggested next steps, turn id
-//! ~/.staged/sessions/<session-id>/done      marker: a complete note is present
+//! ~/.staged/sessions/<session-id>/done      marker: a complete note is present;
+//!                                           holds that call's generation token
 //! ```
 //!
 //! The draft is the laptop's to seed and clear (`note_draft`): the
@@ -379,29 +380,77 @@ pub(crate) fn clear_outbox_and_seed(
     Ok(DraftSeed::Seeded)
 }
 
-/// Print the outbox as four lines: `done`/`pending`, then `meta.json` and
+/// Print the outbox as four lines: the marker line, then `meta.json` and
 /// `note.md` each as one base64 line (empty when the file is missing), then
-/// the `done`/`pending` state again. Base64 keeps arbitrary markdown —
-/// including lines that look like our framing — out of the line protocol.
+/// the marker line again. Base64 keeps arbitrary markdown — including lines
+/// that look like our framing — out of the line protocol.
 ///
-/// The marker is tested twice because the three reads are separate steps: a
-/// rewrite that starts after the first test (`write_note` unlinks `done`, then
-/// renames a new body and a new meta into place, then recreates `done`) can
-/// hand this script the new body with the old title. The tool's own
-/// ordering guarantees that `done` is absent for the whole of such a rewrite,
-/// so a marker that is present both before and after the reads brackets a
-/// title and body from the same call; [`parse_collect_output`] treats any
-/// other combination as pending. Always exits 0.
+/// A marker line is `pending` when there is no `done` file, and otherwise
+/// `done` followed by the generation token `write_note` wrote into it (see
+/// [`MarkerLine`]). The marker is read with one `cat`, so its presence and
+/// its content come from the same open, and the token is cut down to
+/// letters and digits so that nothing in the file can add a line.
+///
+/// The marker is read twice because the three reads are separate steps: a
+/// rewrite that starts after the first read (`write_note` unlinks `done`,
+/// then renames a new body and a new meta into place, then recreates `done`)
+/// can hand this script the new body with the old title. The tool's own
+/// ordering guarantees that `done` is absent for the whole of such a
+/// rewrite, which catches a rewrite still in flight at the second read. A
+/// rewrite that *finished* between the reads has put a marker back, so
+/// presence alone does not tell it from the first call's: the token does,
+/// because every call writes a new one. Only the same token before and
+/// after the reads brackets a title and body from the same call;
+/// [`parse_collect_output`] treats any other combination as pending. Always
+/// exits 0.
 pub(crate) fn collect_script(session_id: &str) -> String {
     let dir = session_dir_expr(session_id);
     format!(
         "d={dir}; \
-         if [ -f \"$d/done\" ]; then echo done; else echo pending; fi; \
+         m() {{ if t=$(cat \"$d/done\" 2>/dev/null); \
+         then echo \"done $(printf %s \"$t\" | tr -cd 0-9A-Za-z)\"; else echo pending; fi; }}; \
+         m; \
          if [ -f \"$d/meta.json\" ]; then base64 < \"$d/meta.json\" | tr -d '\\n'; fi; echo; \
          if [ -f \"$d/note.md\" ]; then base64 < \"$d/note.md\" | tr -d '\\n'; fi; echo; \
-         if [ -f \"$d/done\" ]; then echo done; else echo pending; fi; \
+         m; \
          exit 0"
     )
+}
+
+/// Whether `script` is a [`collect_script`], for test doubles of the remote
+/// runner that answer it with a scripted outbox. It is the only script that
+/// reads the marker's content; the clears only test that the file exists.
+#[cfg(test)]
+pub(crate) fn is_collect_script(script: &str) -> bool {
+    script.contains("cat \"$d/done\"")
+}
+
+/// One marker line of the collect script's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerLine<'a> {
+    /// No `done` file.
+    Pending,
+    /// A `done` file holding this generation token. `write_note` writes a
+    /// new random token on every call; a script from before version 6 wrote
+    /// an empty file, which reads as the empty token.
+    Done(&'a str),
+}
+
+impl<'a> MarkerLine<'a> {
+    /// `pending`, or `done` alone or followed by a token; anything else is
+    /// not a marker line.
+    fn parse(line: &'a str) -> Option<Self> {
+        if line == "pending" {
+            return Some(Self::Pending);
+        }
+        let token = line.strip_prefix("done")?;
+        if token.is_empty() {
+            return Some(Self::Done(""));
+        }
+        token
+            .starts_with(char::is_whitespace)
+            .then(|| Self::Done(token.trim()))
+    }
 }
 
 /// `meta.json` as `write_note` writes it.
@@ -434,30 +483,31 @@ pub(crate) struct OutboxSnapshot {
 pub(crate) fn parse_collect_output(output: &str) -> Result<OutboxSnapshot, String> {
     use base64::Engine;
     let mut lines = output.lines().map(str::trim);
-    let done_before = match lines.next() {
-        Some("done") => true,
-        Some("pending") => false,
-        other => {
-            return Err(format!(
-                "unexpected outbox status line {other:?} in {output:?}"
-            ))
-        }
+    let first_line = lines.next();
+    let Some(before) = first_line.and_then(MarkerLine::parse) else {
+        return Err(format!(
+            "unexpected outbox status line {first_line:?} in {output:?}"
+        ));
     };
     let meta_line = lines.next();
     let body_line = lines.next();
-    // The marker re-read after both files (see `collect_script`). An older
-    // script that printed only three lines is read as before; a marker that
-    // changed state while the files were being read means the files may
-    // straddle two calls, so the outbox counts as pending for this read.
+    // The marker re-read after both files (see `collect_script`). Output
+    // with only three lines (no re-read) is read by its first line alone. A
+    // marker that was missing at either read, or that carries a different
+    // token after the files than before them, means the files may straddle
+    // two calls, so the outbox counts as pending for this read. Two empty
+    // tokens are the same marker as far as anyone can tell: that is a note
+    // published by a script that wrote no token, collected as it always was.
     let done = match lines.next() {
-        None => done_before,
-        Some("done") => done_before,
-        Some("pending") => false,
-        other => {
-            return Err(format!(
-                "unexpected trailing outbox status line {other:?} in {output:?}"
-            ))
-        }
+        None => matches!(before, MarkerLine::Done(_)),
+        last_line @ Some(line) => match MarkerLine::parse(line) {
+            Some(after) => matches!(before, MarkerLine::Done(_)) && before == after,
+            None => {
+                return Err(format!(
+                    "unexpected trailing outbox status line {last_line:?} in {output:?}"
+                ))
+            }
+        },
     };
     let decode = |line: Option<&str>, what: &str| -> Result<Option<Vec<u8>>, String> {
         match line.filter(|l| !l.is_empty()) {
@@ -876,13 +926,215 @@ mod tests {
         let late = format!("pending\n{}\n{}\ndone\n", b64(meta), b64(b"B"));
         assert!(!parse_collect_output(&late).unwrap().done);
         assert!(parse_collect_output("done\n\n\nmaybe\n").is_err());
-        assert_eq!(
-            collect_script("sess-1")
-                .matches("echo done; else echo pending")
-                .count(),
-            2,
-            "the script tests the marker before and after the reads"
+    }
+
+    #[test]
+    fn a_marker_whose_token_changed_during_the_reads_makes_the_snapshot_pending() {
+        let meta = br#"{"title":"T","turn":"t1"}"#;
+        let bracketed = |before: &str, after: &str| {
+            format!("{before}\n{}\n{}\n{after}\n", b64(meta), b64(b"B"))
+        };
+        let done = |before: &str, after: &str| {
+            parse_collect_output(&bracketed(before, after))
+                .unwrap()
+                .done
+        };
+
+        assert!(
+            done("done 0a1b", "done 0a1b"),
+            "one call's marker brackets the files"
         );
+        // A whole `write_note` call fitted between the two marker reads: the
+        // marker is present both times, but it is not the same marker, so
+        // the title and the body may come from different calls.
+        let straddled = parse_collect_output(&bracketed("done 0a1b", "done 9f8e")).unwrap();
+        assert!(!straddled.done, "two calls' markers: not one note");
+        assert!(
+            straddled.meta.is_some() && straddled.body.is_some(),
+            "the files themselves are still reported"
+        );
+        assert_eq!(
+            outbox_state(straddled, Some("t1")).unwrap(),
+            OutboxState::Pending
+        );
+
+        // A script from before the token wrote an empty marker. Two empty
+        // tokens are read as they always were, so a note it published is
+        // still collected.
+        assert!(done("done", "done"));
+        assert!(done("done ", "done "), "what `echo \"done $t\"` prints");
+        // One empty and one not is two different markers, in either order.
+        assert!(!done("done", "done 0a1b"));
+        assert!(!done("done 0a1b", "done"));
+        // The token does not rescue a marker that was absent at either read.
+        assert!(!done("pending", "done 0a1b"));
+        assert!(!done("done 0a1b", "pending"));
+
+        // Three lines (no marker re-read) still parse, token or not.
+        let three_lines = format!("done 0a1b\n{}\n{}\n", b64(meta), b64(b"B"));
+        assert!(parse_collect_output(&three_lines).unwrap().done);
+
+        // Only `done`, alone or followed by a token, is a marker line.
+        assert!(parse_collect_output(&bracketed("done0a1b", "done0a1b")).is_err());
+        assert!(parse_collect_output(&bracketed("done 0a1b", "done0a1b")).is_err());
+        assert!(parse_collect_output(&bracketed("pending 0a1b", "pending")).is_err());
+    }
+
+    /// The four lines the collect script prints against `home`, under `sh`.
+    fn collect_lines(home: &std::path::Path) -> Vec<String> {
+        let output = local_exec(home)(&["sh", "-c", &collect_script("sess-1")]).unwrap();
+        let lines: Vec<String> = output.lines().map(str::to_string).collect();
+        assert_eq!(lines.len(), 4, "{output:?}");
+        lines
+    }
+
+    #[test]
+    fn the_collect_script_prints_the_marker_token_on_both_marker_lines() {
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let marker_lines = || {
+            let lines = collect_lines(home.path());
+            (lines[0].clone(), lines[3].clone())
+        };
+        let both = |line: &str| (line.to_string(), line.to_string());
+
+        assert_eq!(marker_lines(), both("pending"), "no session directory");
+        std::fs::create_dir_all(&outbox).unwrap();
+        assert_eq!(marker_lines(), both("pending"), "no marker");
+
+        let token = "00112233445566778899aabbccddeeff";
+        std::fs::write(outbox.join("done"), token).unwrap();
+        assert_eq!(marker_lines(), both(&format!("done {token}")));
+
+        // The empty marker of a script from before the token.
+        std::fs::write(outbox.join("done"), "").unwrap();
+        let (before, after) = marker_lines();
+        assert_eq!((before.trim(), after.trim()), ("done", "done"));
+
+        // Whatever else ends up in the marker cannot break the line framing:
+        // the token is cut down to letters and digits on one line.
+        std::fs::write(outbox.join("done"), "ab cd\nef\n$(echo x) `y`\n").unwrap();
+        assert_eq!(marker_lines(), both("done abcdefechoxy"));
+
+        // Not a readable file: no marker.
+        std::fs::remove_file(outbox.join("done")).unwrap();
+        std::fs::create_dir(outbox.join("done")).unwrap();
+        assert_eq!(marker_lines(), both("pending"));
+    }
+
+    #[test]
+    fn a_whole_rewrite_between_the_file_reads_is_never_collected_as_one_note() {
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let second = home.path().join("second-publication");
+        let publish = |dir: &std::path::Path, title: &str, body: &str, token: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("note.md"), body).unwrap();
+            std::fs::write(
+                dir.join("meta.json"),
+                format!(
+                    r#"{{"title":"{title}","suggestedNextSteps":null,"turn":"turn-1","writtenAt":1,"helperVersion":6}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join("done"), token).unwrap();
+        };
+        publish(
+            &outbox,
+            "First",
+            "first body",
+            "11111111111111111111111111111111",
+        );
+        publish(
+            &second,
+            "Second",
+            "second body",
+            "22222222222222222222222222222222",
+        );
+
+        // The race, made deterministic: `base64` is wrapped in a shell
+        // function that, once the collect script has read `meta.json`, does
+        // what a second `write_note` call does, in its order: unlink the
+        // marker, replace `note.md`, replace `meta.json`, write the marker.
+        // The script then reads the new body and finds a marker again.
+        let rewrite_after_the_first_read = format!(
+            "base64() {{ command base64 \"$@\"; s='{second}'; \
+             if [ -f \"$s/done\" ]; then rm -f \"$d/done\"; \
+             mv \"$s/note.md\" \"$d/note.md\"; mv \"$s/meta.json\" \"$d/meta.json\"; \
+             mv \"$s/done\" \"$d/done\"; fi; }}; ",
+            second = second.display()
+        );
+        let run = local_exec(home.path());
+        let exec = |args: &[&str]| -> Result<String, String> {
+            assert_eq!(args[..2], ["sh", "-c"]);
+            run(&[
+                "sh",
+                "-c",
+                &format!("{rewrite_after_the_first_read}{}", args[2]),
+            ])
+        };
+
+        assert_eq!(
+            collect(&exec, "sess-1", Some("turn-1")).unwrap(),
+            OutboxState::Pending,
+            "the first call's title with the second call's body is not a note"
+        );
+        assert!(
+            !second.join("done").exists(),
+            "the rewrite ran during that collection"
+        );
+        match collect(&exec, "sess-1", Some("turn-1")).unwrap() {
+            OutboxState::Delivered(submission) => {
+                assert_eq!(submission.title, "Second");
+                assert_eq!(submission.body, "second body");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_write_note_call_writes_a_fresh_generation_token_into_the_marker() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping write_note marker token test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let call = |id: u32, title: &str| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"write_note","arguments":{"title":title}}});
+        let token = || std::fs::read_to_string(outbox.join("done")).unwrap();
+        let is_token = |token: &str| {
+            token.len() == 32
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+
+        write_draft(home.path(), "body");
+        let first = run_script(home.path(), &node, &[call(1, "First")]);
+        assert_eq!(first[0]["result"]["isError"], false);
+        let first_token = token();
+        assert!(is_token(&first_token), "{first_token:?}");
+
+        // The same title and the same draft, republished: the files are
+        // byte for byte what they were (bar the timestamp), and the marker
+        // still tells the two calls apart. Two calls in one server process
+        // differ as well.
+        let again = run_script(home.path(), &node, &[call(2, "First"), call(3, "First")]);
+        assert_eq!(again[0]["result"]["isError"], false);
+        assert_eq!(again[1]["result"]["isError"], false);
+        let last_token = token();
+        assert!(is_token(&last_token), "{last_token:?}");
+        assert_ne!(first_token, last_token);
+
+        // The collect script reports that token on both marker lines, and
+        // the note is collected.
+        let lines = collect_lines(home.path());
+        assert_eq!(lines[0], format!("done {last_token}"));
+        assert_eq!(lines[3], lines[0]);
+        assert!(matches!(
+            collect(&local_exec(home.path()), "sess-1", Some("turn-1")).unwrap(),
+            OutboxState::Delivered(submission) if submission.title == "First"
+        ));
     }
 
     #[test]
@@ -992,7 +1244,7 @@ mod tests {
         move |args: &[&str]| {
             log.borrow_mut()
                 .push(args.iter().map(|a| a.to_string()).collect());
-            if args.len() == 3 && args[2].contains("echo done; else echo pending") {
+            if args.len() == 3 && is_collect_script(args[2]) {
                 Ok(collect_output.clone())
             } else {
                 Ok(String::new())
@@ -1120,10 +1372,7 @@ mod tests {
         assert_eq!(submission.source, NoteSubmissionSource::Outbox);
         // One round trip per collection, nothing else.
         assert_eq!(log.borrow().len(), 3, "{:?}", log.borrow());
-        assert!(log
-            .borrow()
-            .iter()
-            .all(|cmd| cmd[2].contains("echo done; else echo pending")));
+        assert!(log.borrow().iter().all(|cmd| is_collect_script(&cmd[2])));
     }
 
     #[test]
@@ -1148,7 +1397,7 @@ mod tests {
         assert_eq!(ingested[0].source, NoteSubmissionSource::Outbox);
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
-        assert!(commands[0][2].contains("echo done; else echo pending"));
+        assert!(is_collect_script(&commands[0][2]));
         assert_eq!(commands[1][2], clear_outbox_and_seed_script("sess-1", None));
     }
 
@@ -1736,7 +1985,11 @@ mod tests {
         let output = exec(&["sh", "-c", &collect_script("sess-1")]).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 4, "{output:?}");
-        assert_eq!((lines[0], lines[3]), ("done", "done"));
+        assert!(
+            lines[0].starts_with("done ") && lines[0].len() > "done ".len(),
+            "the marker line carries the call's token: {output:?}"
+        );
+        assert_eq!(lines[3], lines[0]);
         assert!(matches!(
             collect(&exec, "sess-1", None).unwrap(),
             OutboxState::Delivered(submission) if submission.title == "Again"
@@ -1860,7 +2113,7 @@ mod tests {
         other: impl Fn(usize) -> Result<String, String> + 'a,
     ) -> impl Fn(&[&str]) -> Result<String, String> + 'a {
         move |args: &[&str]| {
-            if args[2].contains("echo done; else echo pending") {
+            if is_collect_script(args[2]) {
                 return Ok(collect_output.to_string());
             }
             let index = log.borrow().len();

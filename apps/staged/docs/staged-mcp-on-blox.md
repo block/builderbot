@@ -155,7 +155,12 @@ scratch area shared by every tool of that session:
   (`rustTrim`), so one file gives one body on both transports.
 - Write atomically (`writeAtomic`: temp file, `fsync`, rename, mode 600).
   When the laptop must read several files as one unit, bracket them with a
-  marker the way `write_note` does with `done`.
+  marker the way `write_note` does with `done`: remove it before the first
+  file changes, write it back last, and put a new random token in it on
+  every call. The laptop reads the marker before and after the files and
+  trusts them only when the token is the same both times. A marker without
+  a token cannot show that a whole call ran between two of the laptop's
+  reads.
 - The laptop reads the directory over `ws exec` with `sh -c` scripts and
   parses stdout only (`sq blox ws exec` prints its own log line on stderr).
   File content travels base64-encoded so it cannot break the line framing.
@@ -172,7 +177,7 @@ scratch area shared by every tool of that session:
 draft.md   the note body, written and edited by the agent; write_note publishes it
 note.md    the published body: a copy of draft.md taken by the call
 meta.json  title, suggested next steps, turn id, timestamp, script version
-done       marker, removed first and written last
+done       marker holding the call's token, removed first and written last
 ```
 
 `note.md`, `meta.json` and `done` are the outbox the laptop collects.
@@ -216,7 +221,9 @@ takes no `body` and publishes `draft.md`; version 4: the draft read drops a
 leading byte order mark, trims as Rust does, reports an unreadable draft as
 a rejected call, and the saved-note text counts UTF-8 bytes as the laptop
 does; version 5: the saved-note text calls that count bytes, not
-characters).
+characters; version 6: `write_note` writes a random token into `done`, which
+was an empty file before, so the collector can tell two calls' markers
+apart).
 
 On the laptop:
 

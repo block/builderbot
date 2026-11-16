@@ -51,7 +51,7 @@ fn recording_exec<'a>(
     move |args: &[&str]| {
         assert_eq!(args[..2], ["sh", "-c"], "{args:?}");
         log.borrow_mut().push(args[2].to_string());
-        if args[2].contains("echo done; else echo pending") {
+        if note_outbox::is_collect_script(args[2]) {
             Ok(collect_output.to_string())
         } else {
             Ok(String::new())
@@ -285,7 +285,7 @@ fn a_failed_draft_seed_leaves_the_recovery_settled() {
     let store = Arc::new(Store::in_memory().unwrap());
     let session_id = note_session(&store, false, STORED_NOTE);
     let exec = |args: &[&str]| -> Result<String, String> {
-        if args[2].contains("echo done; else echo pending") {
+        if note_outbox::is_collect_script(args[2]) {
             Ok("pending\n".to_string())
         } else {
             Ok("staged-draft-seed-failed\n".to_string())

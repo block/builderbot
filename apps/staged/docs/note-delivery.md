@@ -365,7 +365,7 @@ note's three files beside it:
 ~/.staged/sessions/<session-id>/draft.md   the agent's draft: the note body (markdown, no title)
 ~/.staged/sessions/<session-id>/note.md    published body, a copy of the draft at the call
 ~/.staged/sessions/<session-id>/meta.json  {"title","suggestedNextSteps","turn","writtenAt","helperVersion"}
-~/.staged/sessions/<session-id>/done       marker, removed first and written last
+~/.staged/sessions/<session-id>/done       marker holding the call's token, removed first and written last
 ```
 
 `note.md` is a snapshot, not a link: the collector reads the note the call
@@ -374,8 +374,17 @@ left in place after the call so a second call republishes it.
 
 A rewrite (a second `write_note` call in the same turn) unlinks `done` before
 it touches `note.md`, and recreates it only after both files are renamed into
-place, so a reader that sees the marker — even the sweep, which can land at
-any moment — always gets a title and body from the same call.
+place, so the marker is absent for the whole of a rewrite. Every call also
+writes a new random generation token into the marker, 32 hex characters. A
+script from before version 6 left the file empty.
+
+The token is there because a reader takes several steps to read the three
+files, and the sweep can land at any moment. A whole second call can fit
+between the read of `meta.json` and the read of `note.md`, and the marker is
+present both before and after it. Presence alone would then pair the first
+call's title and suggested next steps with the second call's body. The
+collector reads the marker on both sides of the files and takes them as one
+note only when the token is the same (see _Collector_ below).
 
 The `turn` value is the per-run id the server was started with, so the
 collector can tell this run's note from an earlier one. `helperVersion` is
@@ -384,13 +393,31 @@ the script's `SERVER_VERSION`, under the key earlier builds wrote.
 ### Collector
 
 When a turn settles cleanly, `note_outbox::collect_turn_into_slot` runs
-one `ws exec sh -c` that prints `done`/`pending`, `meta.json` and `note.md` as
+one `ws exec sh -c` that prints the marker line, `meta.json` and `note.md` as
 base64 lines (base64 keeps arbitrary markdown out of the line protocol), and
-then `done`/`pending` again. The marker is re-tested after the files were
-read because `write_note` unlinks it while a rewrite is in flight: if the two
-readings disagree the files may be from different calls, and the snapshot is
-treated as `Pending` and read again later rather than trusted. A
-`Delivered` result for this run's turn id becomes a `NoteSubmission` with
+then the marker line again. A marker line is `pending` when there is no
+`done` file, and otherwise `done` followed by the token in it. The script
+reads the marker with one `cat`, so presence and content come from the same
+open, and cuts the token down to letters and digits so the file cannot add a
+line to the output.
+
+The files count as one note only when both marker lines say `done` with the
+same token (`parse_collect_output`). Anything else is treated as `Pending`
+and read again later rather than trusted:
+
+- a marker missing at either read: `write_note` unlinks it while a rewrite
+  is in flight, so the files may be half replaced;
+- two different tokens: a whole `write_note` call ran between the two marker
+  reads, so the title read first and the body read second may be from
+  different calls.
+
+Two empty tokens count as the same marker. That is a note published by a
+script from before version 6, which is collected as it always was, without
+the second protection. One empty token and one that is not are different
+markers. The clear scripts only test that the marker exists, so they are
+unchanged and work with either script.
+
+A `Delivered` result for this run's turn id becomes a `NoteSubmission` with
 source `Outbox` and is stored in the same `NoteSubmissionSlot` the local tool
 fills. From there it feeds, with no further round trip:
 
@@ -1266,8 +1293,9 @@ Blox:
    (no `~`, no `$HOME`), and the log line `Staged MCP on Blox attached …
 note draft at <path>` names the same file. After the `write_note` call,
    `~/.staged/sessions/<session-id>/` on the workstation holds `draft.md`,
-   `note.md` (identical to the draft, trimmed), `meta.json` and `done`. The
-   commands before the agent starts are the ones that ran before the draft
+   `note.md` (identical to the draft, trimmed), `meta.json` and `done`.
+   `done` holds 32 hex characters, and a second `write_note` call changes
+   them. The commands before the agent starts are the ones that ran before the draft
    existed (the install probe, the outbox read, the clear); none was added
    for the draft.
    Goose amendment on Blox: on a Goose remote note session whose note is
@@ -1440,7 +1468,12 @@ appears with an unresolved home and only then),
 `remote_staged_mcp::tests` (the Staged MCP on Blox itself: install,
 injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),
 `remote_staged_mcp::note_outbox::tests` (outbox parsing including a
-marker that changed between the reads, transport vs content failures,
+marker that changed between the reads and a marker whose token changed
+between them, with equal, differing, empty and half-empty tokens, the
+collect script printing the token on both marker lines under a local `sh`,
+a whole rewrite made to land between the script's two file reads never
+collected as one note, two `write_note` calls writing different tokens,
+transport vs content failures,
 per-turn collection into the slot, start-of-run recovery that discards
 unusable content and a note with a broken Pikchr block, `write_note` run as a subprocess with fake JSON-RPC
 including a rewrite blocked between its renames and a call with no

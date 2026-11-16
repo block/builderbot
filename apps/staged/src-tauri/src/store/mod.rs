@@ -338,6 +338,13 @@ impl Store {
         Ok(store)
     }
 
+    /// Holds the connection as a long write does, for tests of what must not
+    /// wait on it.
+    #[cfg(test)]
+    pub(crate) fn hold_connection(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
+    }
+
     /// Publish a change to the feed, if one is attached.
     ///
     /// Never blocks and never fails the mutation: a send error just means

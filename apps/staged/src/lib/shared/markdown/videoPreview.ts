@@ -1,5 +1,11 @@
 /**
- * videoPreview.ts — show a note video's first frame before it is played
+ * videoPreview.ts — a note video's `src`, and its first frame before it is played
+ *
+ * `resolveStagedVideoSrc` is where the viewer (`mediaRendering.ts`) and the
+ * editor (`wysiwygMedia.ts`) get a `<video src>`: the served URL
+ * (`resolveStagedVideoUrl`, the desktop app's loopback stream when it has
+ * one) with the preview fragment below. A `<video>` whose stream fails to
+ * load is put back on the `staged-media` protocol, see `leaveFailedStream`.
  *
  * WebKit (the desktop WKWebView, Safari, every iOS browser) decodes nothing
  * for `preload="metadata"`, so a note video is an empty box until played.
@@ -20,7 +26,7 @@
  * server, and the script seeks are ordinary ranged reads. Both were measured
  * in a WKWebView; jsdom has no media pipeline to show either.
  */
-import { resolveStagedMediaUrl } from './mediaUrl';
+import { protocolUrlForStreamedVideo, resolveStagedVideoUrl } from './mediaUrl';
 
 /**
  * Start time of the media fragment, in seconds. Small enough to be the first
@@ -39,8 +45,8 @@ const PAINT_GRACE_MS = 250;
 
 /** `src` for a note `<video>`: the served URL, with the preview fragment. */
 export function resolveStagedVideoSrc(id: string, ext: string): string {
-  watchForBlankPreviews();
-  return withVideoPreviewFragment(resolveStagedMediaUrl(id, ext));
+  watchNoteVideos();
+  return withVideoPreviewFragment(resolveStagedVideoUrl(id, ext));
 }
 
 /**
@@ -64,19 +70,35 @@ let watching = false;
  * them for every note video, whichever markup path drew it and however it was
  * mounted (`{@html}`, a ProseMirror node view).
  */
-function watchForBlankPreviews() {
+function watchNoteVideos() {
   if (watching || typeof document === 'undefined') return;
   watching = true;
-  document.addEventListener(
-    'loadedmetadata',
-    (event) => {
-      const video = event.target;
-      if (video instanceof HTMLVideoElement && video.closest('.markdown-media-video')) {
-        void paintBlankPreview(video);
-      }
-    },
-    true
-  );
+  const onNoteVideo = (type: string, handle: (video: HTMLVideoElement) => void) =>
+    document.addEventListener(
+      type,
+      (event) => {
+        const video = event.target;
+        if (video instanceof HTMLVideoElement && video.closest('.markdown-media-video')) {
+          handle(video);
+        }
+      },
+      true
+    );
+  onNoteVideo('loadedmetadata', (video) => void paintBlankPreview(video));
+  onNoteVideo('error', leaveFailedStream);
+}
+
+/**
+ * The desktop app streams video from a loopback listener, and tells the page
+ * its address before knowing that it will keep answering. A video that fails
+ * to load from there is loaded over the `staged-media` protocol instead,
+ * which is slower to seek but needs nothing beyond the app itself. Once: the
+ * protocol URL is not a stream URL, so a clip WebKit cannot play at all
+ * fails a second time and stays failed.
+ */
+function leaveFailedStream(video: HTMLVideoElement) {
+  const fallback = protocolUrlForStreamedVideo(video.currentSrc || video.src);
+  if (fallback) video.src = fallback;
 }
 
 /**

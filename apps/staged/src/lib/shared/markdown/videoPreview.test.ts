@@ -20,6 +20,18 @@ describe('the preview fragment', () => {
     );
   });
 
+  // The loopback stream is the desktop app's (videoStream.test.ts); a browser
+  // or phone could not reach it, whatever a page global says.
+  it('rides on the web URL even where a stream address is set', () => {
+    const page = globalThis as { __STAGED_MEDIA_STREAM__?: string };
+    page.__STAGED_MEDIA_STREAM__ = `http://127.0.0.1:49152/${'5e'.repeat(32)}`;
+    try {
+      expect(resolveStagedVideoSrc(id, 'mp4')).toBe(`/api/media/${id}.mp4#t=0.001`);
+    } finally {
+      delete page.__STAGED_MEDIA_STREAM__;
+    }
+  });
+
   it('follows a query string', () => {
     expect(withVideoPreviewFragment('/api/media/a.mp4?token=x&v=2')).toBe(
       '/api/media/a.mp4?token=x&v=2#t=0.001'

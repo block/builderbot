@@ -117,6 +117,31 @@ describe('stagedMediaView', () => {
     expect(video.querySelector('video')?.hasAttribute('controls')).toBe(true);
   });
 
+  // The desktop app streams video from a loopback listener it announces in a
+  // page global (mediaUrl.ts). The address is for the `<video>` alone: it is
+  // new at every launch and carries a secret, so it must not reach the note.
+  it('streams a video as the viewer does, and keeps the address out of the note', async () => {
+    const stream = `http://127.0.0.1:49152/${'5e'.repeat(32)}`;
+    const page = globalThis as { __STAGED_MEDIA_STREAM__?: string };
+    page.__STAGED_MEDIA_STREAM__ = stream;
+    try {
+      await createEditor(note);
+      const [image, video] = figures();
+      const src = `${stream}/3f2a9c1e-1234-4567-8123-123456789abd.mp4#t=0.001`;
+      expect(video.querySelector('video')?.getAttribute('src')).toBe(src);
+      expect(image.querySelector('img')?.getAttribute('src')).toBe(
+        'staged-media://localhost/3f2a9c1e-1234-4567-8123-123456789abc.png'
+      );
+      const viewer = document.createElement('div');
+      viewer.innerHTML = renderMarkdown(`![Clip](${VIDEO})`);
+      expect(viewer.querySelector('video')?.getAttribute('src')).toBe(src);
+      expect(currentMarkdown()).toContain(`![Clip](${VIDEO})`);
+      expect(currentMarkdown()).not.toContain('127.0.0.1');
+    } finally {
+      delete page.__STAGED_MEDIA_STREAM__;
+    }
+  });
+
   // The editor builds its figure by hand and the viewer renders a string
   // (mediaRendering.ts); a video has to come out of both the same, preview
   // fragment included, or one of them is an empty box until played.

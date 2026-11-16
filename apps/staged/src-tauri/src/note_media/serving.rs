@@ -1,9 +1,63 @@
 //! ID-only media lookup and seek-based responses for the desktop URI protocol.
+//!
+//! Images and PDFs reach the desktop webview through this protocol. Video
+//! does too, but only as the fallback for [`super::stream`]: wry hands every
+//! response to the webview as one buffer, through the app main thread, so a
+//! request with no `Range` header (WebKit sends one for a WebM) reads the
+//! whole file into memory here, and WebKit asks for an MP4 one sample at a
+//! time.
 
 use super::refs::parse_media_file;
 use crate::store::Store;
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use tauri::http::{header, Method, Request, Response, StatusCode};
+
+/// Where the app's store is fetched from when a file is not in the
+/// [`MediaIndex`] yet. The error is the status to answer with.
+pub(crate) type StoreSource = dyn Fn() -> Result<Arc<Store>, StatusCode> + Send + Sync;
+
+/// Where each served file is and what it is, by `<id>.<ext>`, so that only
+/// the first request for a file asks the store. Every store read waits on the
+/// one connection mutex the rest of the app writes through, and WebKit sends
+/// a video's requests one after another, so a wait there used to be paid by
+/// each of the hundreds of requests behind a single seek.
+///
+/// An id names bytes that never change, but the file moves when its project
+/// does and goes when its last reference is deleted. An entry is therefore
+/// only trusted while its file is still there (one `stat`, no lock shared
+/// with the app); otherwise the store is asked again.
+#[derive(Default)]
+pub(crate) struct MediaIndex {
+    files: RwLock<HashMap<String, (PathBuf, String)>>,
+}
+
+/// Entries are a path and a MIME type. Past this many the index starts over
+/// rather than tracking which were used last.
+const MAX_INDEXED_FILES: usize = 4096;
+
+impl MediaIndex {
+    /// Path and MIME type of `file`, from the index or else the store.
+    pub(crate) fn locate(
+        &self,
+        file: &str,
+        store: &StoreSource,
+    ) -> Result<(PathBuf, String), StatusCode> {
+        let known = self.files.read().unwrap().get(file).cloned();
+        if let Some(found) = known.filter(|(path, _)| path.is_file()) {
+            return Ok(found);
+        }
+        let found = lookup(&*store()?, file)?;
+        let mut files = self.files.write().unwrap();
+        if files.len() >= MAX_INDEXED_FILES {
+            files.clear();
+        }
+        files.insert(file.to_owned(), found.clone());
+        Ok(found)
+    }
+}
 
 pub(crate) fn lookup(
     store: &Store,
@@ -49,8 +103,12 @@ pub(crate) fn range_slice(len: u64, header: &str) -> Option<(u64, u64)> {
     (start <= end && start < len).then_some((start, end))
 }
 
-pub(crate) fn response(store: &Store, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
-    match serve(store, &request) {
+pub(crate) fn response(
+    index: &MediaIndex,
+    store: &StoreSource,
+    request: Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
+    match serve(index, store, &request) {
         Ok(response) => response,
         Err(status) => Response::builder()
             .status(status)
@@ -60,7 +118,11 @@ pub(crate) fn response(store: &Store, request: Request<Vec<u8>>) -> Response<Vec
     }
 }
 
-fn serve(store: &Store, request: &Request<Vec<u8>>) -> Result<Response<Vec<u8>>, StatusCode> {
+fn serve(
+    index: &MediaIndex,
+    store: &StoreSource,
+    request: &Request<Vec<u8>>,
+) -> Result<Response<Vec<u8>>, StatusCode> {
     if request.method() != Method::GET && request.method() != Method::HEAD {
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
@@ -69,7 +131,7 @@ fn serve(store: &Store, request: &Request<Vec<u8>>) -> Result<Response<Vec<u8>>,
         .path()
         .strip_prefix('/')
         .ok_or(StatusCode::NOT_FOUND)?;
-    let (path, mime) = lookup(store, file_name)?;
+    let (path, mime) = index.locate(file_name, store)?;
     let mut file = std::fs::File::open(path).map_err(|_| StatusCode::NOT_FOUND)?;
     let len = file
         .metadata()

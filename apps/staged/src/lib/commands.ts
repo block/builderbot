@@ -353,6 +353,25 @@ export function listProjectRepos(
   );
 }
 
+/**
+ * Every project's repo list in one reply, keyed by project id: what
+ * {@link listProjectRepos} returns for each project. For hydrating many
+ * projects at once, where one reply per project means one pass over every
+ * mounted card per project. A project the backend did not hold is absent.
+ *
+ * Cached on the web like the per-project list, under one argless key that
+ * every invalidation of a project's repo list also drops (see
+ * `ALL_PROJECTS_COMMAND` in cache.ts).
+ */
+export function listProjectReposByProject(
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<Record<string, ProjectRepo[]>>> {
+  return cachedCommand('list_project_repos_by_project', undefined, {
+    ttl: 10 * 60_000,
+    bypassRead: options.force,
+  });
+}
+
 export function listRecentRepos(limit?: number): Promise<RecentRepo[]> {
   return invokeCommand('list_recent_repos', { limit: limit ?? 10 });
 }
@@ -669,6 +688,26 @@ export async function listBranchesForProject(
   return observeListResult(result, (branches) => noteProjectBranches(projectId, branches));
 }
 
+/**
+ * Every project's branch list in one reply, keyed by project id: what
+ * {@link listBranchesForProject} returns for each project, and observed the
+ * same way, so the persisted-timeline bookkeeping sees these lists too. For
+ * hydrating many projects at once (see {@link listProjectReposByProject}).
+ */
+export async function listBranchesByProject(
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<Record<string, Branch[]>>> {
+  const result = await cachedCommand<Record<string, Branch[]>>(
+    'list_branches_by_project',
+    undefined,
+    {
+      ttl: 2 * 60_000,
+      bypassRead: options.force,
+    }
+  );
+  return observeListResult(result, noteBranchesByProject);
+}
+
 /** Get a single branch by ID. */
 export function getBranch(branchId: string): Promise<Branch | null> {
   return invokeCommand('get_branch', { branchId });
@@ -947,14 +986,31 @@ function noteProjects(projects: ReadonlyArray<Pick<Project, 'id'>>): void {
   dropInvalidSeededTimelines();
 }
 
-function noteProjectBranches(
-  projectId: string,
-  branches: ReadonlyArray<Pick<Branch, 'id'> & TimelineScopeBranch>
-): void {
+type ListedBranch = Pick<Branch, 'id'> & TimelineScopeBranch;
+
+function recordProjectBranches(projectId: string, branches: ReadonlyArray<ListedBranch>): void {
   for (const branch of branches) {
     branchScopes.set(branch.id, timelineScopeOf(branch));
   }
   listedProjectBranches.set(projectId, new Set(branches.map((b) => b.id)));
+}
+
+function noteProjectBranches(projectId: string, branches: ReadonlyArray<ListedBranch>): void {
+  recordProjectBranches(projectId, branches);
+  dropInvalidSeededTimelines();
+}
+
+/**
+ * {@link noteProjectBranches} for an all-projects reply: every list in it is
+ * recorded, then the seeded timelines are checked once against all of them
+ * rather than once per project.
+ */
+function noteBranchesByProject(
+  branchesByProject: Readonly<Record<string, ReadonlyArray<ListedBranch>>>
+): void {
+  for (const [projectId, branches] of Object.entries(branchesByProject)) {
+    recordProjectBranches(projectId, branches);
+  }
   dropInvalidSeededTimelines();
 }
 

@@ -79,9 +79,13 @@ Add `--browser webkit` and point `BROWSER_PATH` at Playwright's WebKit launcher,
 - **It does not depend on the call pattern.** Load is finished when every card is in the document,
   every project has been handed its branch list by whichever command the app uses, no reply is
   pending, and no frame has been blocked for 500 ms. Updates finish on the last two conditions.
-- **The mock already answers two bulk commands that are not in the app yet**,
-  `list_branches_by_project` and `list_project_repos_by_project`, each returning one map of project
-  id to list. If a change adds them under other names, change those two keys in `mock-tauri.js`.
+- **The mock answers both ways the app reads branches and repos.** The app hydrates many projects
+  with `list_branches_by_project` and `list_project_repos_by_project`, each returning one map of
+  project id to list, and reads a single project with `list_branches_for_project` and
+  `list_project_repos`. The fixture holds the maps the two bulk commands return, and the benchmark
+  checks them against the per-project lists before writing it. The "per-project calls" column
+  counts only the per-project pair, so it shows how much of a load or update still goes one
+  project at a time.
 - **Check `misses` and `errors` in the progress output.** A command the mock does not know returns
   `null` and is listed under `misses`. Page errors are counted under `errors`. Both should be empty.
 - **Numbers move with machine load.** The 1000-project home-board load took 11.2 s at a load

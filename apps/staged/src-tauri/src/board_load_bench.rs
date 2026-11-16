@@ -3,11 +3,15 @@
 //! An `#[ignore]`d test, so it never runs in CI. It creates a throwaway
 //! SQLite database per dataset size inside `STAGED_BOARD_BENCH_DIR` (which
 //! must not be under `~/.staged`), seeds it through the real `Store` write
-//! methods, then times the exact reads the frontend issues to fill the
-//! board: `list_projects`, `get_tag_state`, `get_all_repo_badges`, and one
-//! `list_branches_for_project` plus one `list_project_repos` per project.
-//! It also writes each dataset's real command output to
-//! `fixture-<n>.json`, which the browser harness
+//! methods, then times the reads the frontend issues to fill the board:
+//! `list_projects`, `get_tag_state`, `get_all_repo_badges`, and the branch
+//! and repo lists of every project. Those lists are timed both ways the app
+//! can ask for them: the two all-projects commands it hydrates with
+//! (`list_branches_by_project`, `list_project_repos_by_project`), and one
+//! `list_branches_for_project` plus one `list_project_repos` per project,
+//! which it still sends for a single project and which was the only way
+//! before the bulk commands. It also writes each dataset's real command
+//! output to `fixture-<n>.json`, which the browser harness
 //! (`apps/staged/scripts/board-perf/`) serves back to the real frontend.
 //!
 //! Run from `apps/staged/src-tauri`:
@@ -29,6 +33,7 @@ use std::time::Instant;
 use serde_json::json;
 
 use crate::branches::list_branches_for_project_impl;
+use crate::project_commands::{list_branches_by_project_impl, list_project_repos_by_project_impl};
 use crate::store::{
     Branch, Commit, NewTag, Note, Project, ProjectRepo, RepoBadge, Session, SessionStatus, Store,
     TagColor, Workdir,
@@ -334,9 +339,9 @@ fn board_load_bench() {
         .unwrap_or(7);
 
     println!(
-        "\n| projects | branches | seeded rows | list_projects ms | get_tag_state ms | get_all_repo_badges ms | per-project calls | per-project serial ms | per-project 8 threads ms | per call µs | payload KB |"
+        "\n| projects | branches | seeded rows | list_projects ms | get_tag_state ms | get_all_repo_badges ms | list_branches_by_project ms | list_project_repos_by_project ms | per-project calls | per-project serial ms | per-project 8 threads ms | per call µs | payload KB |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 
     for n in sizes {
         let db_path = dir.join(format!("data-{n}.db"));
@@ -350,12 +355,18 @@ fn board_load_bench() {
         let mut list_projects = Vec::new();
         let mut tag_state = Vec::new();
         let mut badges = Vec::new();
+        let mut bulk_branches = Vec::new();
+        let mut bulk_repos = Vec::new();
         let mut serial = Vec::new();
         let mut threaded = Vec::new();
         for _ in 0..rounds {
             list_projects.push(time_ms(|| store.list_projects().unwrap()).1);
             tag_state.push(time_ms(|| store.get_tag_state().unwrap()).1);
             badges.push(time_ms(|| store.list_repo_badges().unwrap()).1);
+            // The two all-projects commands the app hydrates with.
+            bulk_branches.push(time_ms(|| list_branches_by_project_impl(&store).unwrap()).1);
+            bulk_repos.push(time_ms(|| list_project_repos_by_project_impl(&store).unwrap()).1);
+            // The same lists asked for one project at a time.
             serial.push(
                 time_ms(|| {
                     for id in ids.iter() {
@@ -389,17 +400,33 @@ fn board_load_bench() {
             );
         }
 
-        // What the commands return, for the browser harness.
+        // What the commands return, for the browser harness. The mock
+        // answers the all-projects commands with these maps whole, and the
+        // per-project ones with one entry each, so check here that the two
+        // agree rather than let the harness serve a pairing the app can't
+        // produce.
         let projects = store.list_projects().unwrap();
-        let mut branches = BTreeMap::new();
-        let mut repos = BTreeMap::new();
+        let branches = list_branches_by_project_impl(&store).unwrap();
+        let repos = list_project_repos_by_project_impl(&store).unwrap();
+        let mut per_project_branches = BTreeMap::new();
+        let mut per_project_repos = BTreeMap::new();
         for id in ids.iter() {
-            branches.insert(
+            per_project_branches.insert(
                 id.clone(),
                 list_branches_for_project_impl(&store, id).unwrap(),
             );
-            repos.insert(id.clone(), store.list_project_repos(id).unwrap());
+            per_project_repos.insert(id.clone(), store.list_project_repos(id).unwrap());
         }
+        assert_eq!(
+            json!(branches),
+            json!(per_project_branches),
+            "the all-projects branch list must match the per-project lists"
+        );
+        assert_eq!(
+            json!(repos),
+            json!(per_project_repos),
+            "the all-projects repo list must match the per-project lists"
+        );
         let fixture = json!({
             "projects": projects,
             "branches": branches,
@@ -412,12 +439,14 @@ fn board_load_bench() {
 
         let serial_ms = median_ms(serial);
         println!(
-            "| {n} | {} | {} | {:.2} | {:.2} | {:.2} | {} | {:.1} | {:.1} | {:.0} | {} |",
+            "| {n} | {} | {} | {:.2} | {:.2} | {:.2} | {:.1} | {:.1} | {} | {:.1} | {:.1} | {:.0} | {} |",
             seeded.branches,
             seeded.rows,
             median_ms(list_projects),
             median_ms(tag_state),
             median_ms(badges),
+            median_ms(bulk_branches),
+            median_ms(bulk_repos),
             2 * n,
             serial_ms,
             median_ms(threaded),

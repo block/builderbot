@@ -550,6 +550,31 @@ describe('cached mutation command wrappers', () => {
     ]);
   });
 
+  it('reads the all-projects lists through the cache, each under one argless key', async () => {
+    const branches = { 'project-1': [{ id: 'branch-1' }] };
+    const repos = { 'project-1': [{ id: 'repo-1' }] };
+    cachedCommand
+      .mockResolvedValueOnce({ data: branches, revalidating: null })
+      .mockResolvedValueOnce({ data: repos, revalidating: null })
+      .mockResolvedValueOnce({ data: branches, revalidating: null })
+      .mockResolvedValueOnce({ data: repos, revalidating: null });
+
+    const { listBranchesByProject, listProjectReposByProject } = await import('./commands');
+
+    await expect(listBranchesByProject()).resolves.toEqual({ data: branches, revalidating: null });
+    await expect(listProjectReposByProject()).resolves.toEqual({ data: repos, revalidating: null });
+    await listBranchesByProject({ force: true });
+    await listProjectReposByProject({ force: true });
+
+    // The per-project lists' TTLs: the same data, as fresh for as long.
+    expect(cachedCommand.mock.calls).toEqual([
+      ['list_branches_by_project', undefined, { ttl: 2 * 60_000, bypassRead: undefined }],
+      ['list_project_repos_by_project', undefined, { ttl: 10 * 60_000, bypassRead: undefined }],
+      ['list_branches_by_project', undefined, { ttl: 2 * 60_000, bypassRead: true }],
+      ['list_project_repos_by_project', undefined, { ttl: 10 * 60_000, bypassRead: true }],
+    ]);
+  });
+
   it('uses the standard provider discovery cache by default', async () => {
     const providers = [{ id: 'goose', label: 'Goose' }];
     cachedCommand.mockResolvedValue({ data: providers, revalidating: null });
@@ -803,6 +828,8 @@ describe('persisted branch timelines (desktop)', () => {
         return backend.projects;
       case 'list_branches_for_project':
         return backend.branches[args.projectId] ?? [];
+      case 'list_branches_by_project':
+        return backend.branches;
       case 'get_branch_timeline':
         return backend.timelines[args.branchId];
       default:
@@ -958,6 +985,45 @@ describe('persisted branch timelines (desktop)', () => {
     await vi.waitFor(async () => {
       expect(await idbKeys(store())).toEqual([]);
     });
+  });
+
+  it('drops a seeded entry once the all-projects branch list no longer has it', async () => {
+    await firstSession();
+    backend.projects = [{ id: 'p1' }, { id: 'p2' }];
+    backend.timelines.c1 = timeline('c1-v1');
+    // b2 was deleted; b1 now lives in a different worktree; p2's branch is new.
+    backend.branches = {
+      p1: [branch('b1', { worktreePath: '/wt/elsewhere' })],
+      p2: [branch('c1', { projectId: 'p2' })],
+    };
+
+    const commands = await launch();
+    expect(commands.getBranchTimelineWithRevalidation('b2').cached).toEqual(timeline('b2-v1'));
+
+    // The bulk hydration's read is observed like a per-project list.
+    await commands.listBranchesByProject();
+    expect(commands.getBranchTimelineWithRevalidation('b1').cached).toBeNull();
+    expect(commands.getBranchTimelineWithRevalidation('b2').cached).toBeNull();
+    await vi.waitFor(async () => {
+      expect(await idbKeys(store())).toEqual([]);
+    });
+
+    // Every project's branches had their identity recorded: p2's timeline is
+    // persisted with a scope, as after a per-project list.
+    await commands.getBranchTimeline('c1');
+    const next = await launch();
+    await next.listBranchesByProject();
+    expect(next.getBranchTimelineWithRevalidation('c1').cached).toEqual(timeline('c1-v1'));
+  });
+
+  it('keeps seeded entries the all-projects branch list still has', async () => {
+    await firstSession();
+
+    const commands = await launch();
+    await commands.listBranchesByProject();
+
+    expect(commands.getBranchTimelineWithRevalidation('b1').cached).toEqual(timeline('b1-v1'));
+    expect(commands.getBranchTimelineWithRevalidation('b2').cached).toEqual(timeline('b2-v1'));
   });
 
   it('drops seeded entries whose project is gone', async () => {

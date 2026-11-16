@@ -208,8 +208,10 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     // event, which waited behind whatever held the store.
     ("lib.rs", "list_projects"),
     ("lib.rs", "list_project_repos"),
+    ("lib.rs", "list_project_repos_by_project"),
     ("lib.rs", "get_all_repo_badges"),
     ("branches.rs", "list_branches_for_project"),
+    ("branches.rs", "list_branches_by_project"),
     ("session_commands.rs", "poll_session"),
     ("session_commands.rs", "get_session"),
     ("session_commands.rs", "get_session_messages"),

@@ -64,9 +64,8 @@
       return fresh(`b:${projectId}`, fixture.branches[projectId] ?? []);
     },
     list_project_repos: ({ projectId }) => fresh(`r:${projectId}`, fixture.repos[projectId] ?? []),
-    // Not in the app yet: the bulk reads the fix plan proposes, one map of
-    // project id to list each. Answered here so the harness runs unchanged
-    // against a fix that adds them under these names.
+    // The bulk reads the app hydrates many projects with: one map of project
+    // id to list each, which is how the fixture stores them.
     list_branches_by_project: () => {
       for (const projectId of Object.keys(fixture.branches)) served(projectId);
       return fresh('b:*', fixture.branches);

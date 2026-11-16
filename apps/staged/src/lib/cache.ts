@@ -36,6 +36,34 @@ function isPersisted(command: string): boolean {
 }
 
 /**
+ * Per-project list commands, each mapped to the argless command that returns
+ * the same list for every project in one reply. The all-projects entry embeds
+ * every per-project entry, so it is out of date whenever any of them is:
+ * every invalidation of the per-project command, whole or for one project,
+ * drops the all-projects entry with it.
+ *
+ * Kept here, not at the call sites, so a mutation or change-feed handler that
+ * invalidates a project's list cannot leave the all-projects copy behind to
+ * be served over it on the next load.
+ */
+const ALL_PROJECTS_COMMAND: Readonly<Record<string, string>> = {
+  list_branches_for_project: 'list_branches_by_project',
+  list_project_repos: 'list_project_repos_by_project',
+};
+
+/**
+ * Drop the all-projects entry that embeds `command`'s entries, when it has
+ * one. Called first, and never awaited before the caller's own stamps: the
+ * per-key drop stamps its key synchronously, so the two are stamped in the
+ * same step and an in-flight all-projects read is blocked from caching what
+ * it read before the change (see `invalidationSequence`).
+ */
+function invalidateAllProjectsEntry(command: string): Promise<void> {
+  const allProjects = ALL_PROJECTS_COMMAND[command];
+  return allProjects ? invalidateCache(allProjects) : Promise.resolve();
+}
+
+/**
  * Every invalidation call takes the next sequence number synchronously and
  * stamps the keys it covers with it. A fetch captures the current number as
  * its network call goes out, and skips its cache write when its key carries a
@@ -532,6 +560,7 @@ export async function invalidateCache(
   args?: Record<string, unknown>
 ): Promise<void> {
   if (!isPersisted(command)) return;
+  const allProjects = invalidateAllProjectsEntry(command);
   const key = cacheKey(command, args);
   markInvalidated(key, nextInvalidationSequence());
   try {
@@ -539,6 +568,7 @@ export async function invalidateCache(
   } catch {
     // Best-effort: the stamp above already blocks an in-flight write.
   }
+  await allProjects;
 }
 
 /**
@@ -572,8 +602,10 @@ async function invalidateMatching(matches: (key: string) => boolean): Promise<vo
 /** Invalidate all entries for a command (regardless of args). */
 export async function invalidateCacheByCommand(command: string): Promise<void> {
   if (!isPersisted(command)) return;
+  const allProjects = invalidateAllProjectsEntry(command);
   const prefix = `${command}:`;
   await invalidateMatching((key) => key.startsWith(prefix));
+  await allProjects;
 }
 
 function parseCacheArgs(key: string, command: string): Record<string, unknown> | undefined {
@@ -595,11 +627,13 @@ export async function invalidateCacheByArgs(
   partialArgs: Record<string, unknown>
 ): Promise<void> {
   if (!isPersisted(command)) return;
+  const allProjects = invalidateAllProjectsEntry(command);
   await invalidateMatching((key) => {
     const args = parseCacheArgs(key, command);
     if (!args) return false;
     return Object.entries(partialArgs).every(([argKey, argValue]) => args[argKey] === argValue);
   });
+  await allProjects;
 }
 
 /** Mark all entries as stale so SWR serves them while revalidating. */

@@ -595,6 +595,86 @@ describe('invalidateCacheByArgs', () => {
   });
 });
 
+describe('all-projects entries', () => {
+  // The all-projects reply embeds every project's list, so it is out of date
+  // whenever any per-project entry is. Each invalidator of the per-project
+  // command has to take the all-projects entry with it.
+  const ttl = { ttl: 60_000 };
+
+  async function cacheBoth(perProject: string, allProjects: string): Promise<void> {
+    mockInvoke.mockResolvedValue('one project');
+    await cachedCommand(perProject, { projectId: 'p1' }, ttl);
+    mockInvoke.mockResolvedValue('every project');
+    await cachedCommand(allProjects, undefined, ttl);
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue('fresh');
+  }
+
+  /** Whether a plain read of the argless entry is still answered from the cache. */
+  async function isCached(command: string): Promise<boolean> {
+    const before = mockInvoke.mock.calls.length;
+    await cachedCommand(command, undefined, ttl);
+    return mockInvoke.mock.calls.length === before;
+  }
+
+  it.each([
+    ['list_branches_for_project', 'list_branches_by_project'],
+    ['list_project_repos', 'list_project_repos_by_project'],
+  ])('dropping one %s entry drops the %s entry', async (perProject, allProjects) => {
+    await cacheBoth(perProject, allProjects);
+    await invalidateCache(perProject, { projectId: 'p1' });
+    expect(await isCached(allProjects)).toBe(false);
+
+    await cacheBoth(perProject, allProjects);
+    await invalidateCacheByArgs(perProject, { projectId: 'p1' });
+    expect(await isCached(allProjects)).toBe(false);
+
+    await cacheBoth(perProject, allProjects);
+    await invalidateCacheByCommand(perProject);
+    expect(await isCached(allProjects)).toBe(false);
+  });
+
+  it('drops it for a project that has no per-project entry of its own', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+
+    // p2 was only ever read as part of the all-projects reply.
+    await invalidateCacheByArgs('list_branches_for_project', { projectId: 'p2' });
+
+    expect(await isCached('list_branches_by_project')).toBe(false);
+  });
+
+  it('keeps the other all-projects entry, and both for an unrelated command', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    mockInvoke.mockResolvedValue('every project');
+    await cachedCommand('list_project_repos_by_project', undefined, ttl);
+
+    await invalidateCacheByCommand('list_branches_for_project');
+    expect(await isCached('list_project_repos_by_project')).toBe(true);
+
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    await invalidateCacheByCommand('list_projects');
+    await invalidateCache('get_tag_state');
+    expect(await isCached('list_branches_by_project')).toBe(true);
+  });
+
+  it('blocks an all-projects read in flight from caching what it read before the change', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const inFlight = cachedCommand<string>('list_branches_by_project', undefined, ttl);
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    // A branch of one project changes while the all-projects read is out.
+    // Not awaited: the stamp has to be in place as soon as the call returns.
+    const invalidation = invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+    pending.resolve('pre-change');
+    await expect(inFlight).resolves.toEqual({ data: 'pre-change', revalidating: null });
+    await invalidation;
+
+    mockInvoke.mockResolvedValue('fresh');
+    expect(await isCached('list_branches_by_project')).toBe(false);
+  });
+});
+
 describe('first-load race protection', () => {
   it('invalidateCacheByCommand blocks a cache write from an in-flight first-load fetch', async () => {
     const pending = deferred<string>();

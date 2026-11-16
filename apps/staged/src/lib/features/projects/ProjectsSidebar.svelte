@@ -46,6 +46,7 @@
   import SidebarSearchField from './SidebarSearchField.svelte';
   import SidebarSectionHead from './SidebarSectionHead.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
+  import { projectOrderStore } from './projectOrder.svelte';
   import {
     matchingRepoKeys,
     resultsLabel,
@@ -68,9 +69,10 @@
   // All rendered data comes from the shared projectsData store; UI state
   // (width, scroll) lives here or in projectsSidebarState, and the search
   // query in projectsListViewState so the landing-page grid shares it. Rows
-  // come from liveProjects (here and through projectFiltersStore), so a
-  // project's row goes as soon as its delete is confirmed.
-  let projects = $derived(projectsDataStore.liveProjects);
+  // come from the live projects in the window's sort order (projectOrder,
+  // here and through projectFiltersStore), so a project's row goes as soon as
+  // its delete is confirmed and the rows are in the grid's order.
+  let projects = $derived(projectOrderStore.sortedProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);

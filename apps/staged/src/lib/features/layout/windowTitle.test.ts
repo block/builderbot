@@ -25,6 +25,9 @@ beforeEach(() => {
   vi.doMock('../../stores/projectState.svelte', () => ({
     projectStateStore: { isUnread: () => false },
   }));
+  vi.doMock('../projects/projectOrder.svelte', () => ({
+    projectOrderStore: { sortedProjects: [] },
+  }));
   vi.doMock('../projects/projectStatus', () => ({ getProjectStatus: vi.fn() }));
   vi.doMock('../projects/workspaceLifecycle.svelte', () => ({
     workspaceLifecycle: { getWorktreeErrors: () => new Map() },
@@ -45,6 +48,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.doUnmock('../../stores/projectsData.svelte');
   vi.doUnmock('../../stores/projectState.svelte');
+  vi.doUnmock('../projects/projectOrder.svelte');
   vi.doUnmock('../projects/projectStatus');
   vi.doUnmock('../projects/workspaceLifecycle.svelte');
   vi.doUnmock('../../stores/tags.svelte');

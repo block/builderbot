@@ -11,8 +11,9 @@
 // (layOutBoard), with every column as tall as the board. A column's goes
 // through the real pointerDrag action, at points taken from the columns'
 // stubbed rects (layOutColumns), with the real chip following the pointer.
-// The last block puts the real projectFiltersStore in front of it, as
-// ProjectsList does, so the tag chips decide which cards it shows.
+// The last two blocks put the real projectFiltersStore in front of it, as
+// ProjectsList does, so the tag chips decide which cards it shows and the
+// window's sort decides their order inside each column.
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, TagState } from '../../types';
@@ -112,6 +113,7 @@ vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 import { toast } from 'svelte-sonner';
 import { tagsStore } from '../../stores/tags.svelte';
 import { projectFiltersStore } from '../projects/projectFilters.svelte';
+import { setProjectSort } from '../projects/projectSortPrefs.svelte';
 import FilteredBoardHarness from './testStubs/FilteredBoardHarness.svelte';
 import { NO_TAG_COLUMN_KEY } from './boardPrefs';
 import { boardViewPrefs } from './boardViewPrefs.svelte';
@@ -2864,5 +2866,105 @@ describe('ProjectsBoard under the tag filters', () => {
     expect(cardsIn(root, 'doing')).toEqual(['p2']);
     expect(cardsIn(root, 'done')).toEqual([]);
     expect(document.activeElement).toBe(card(root, 'p2'));
+  });
+});
+
+describe('ProjectsBoard under the window sort', () => {
+  // The projects are p1, p2 and p3, and Priority's tags happen to be named
+  // p0 and p1: `{ projectId: 'p3', tagId: 'p0' }` gives project p3 priority P0.
+  const BY_PRIORITY = [{ kind: 'group' as const, groupId: 'priority', direction: 'asc' as const }];
+
+  /** The Status board over the window's sorted, filtered list, as ProjectsList wires it. */
+  async function mountSorted(state: TagState) {
+    backend.state = state;
+    await tagsStore.load({ force: true });
+    projects.splice(0, projects.length, project('p1'), project('p2'), project('p3'));
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    component = mount(FilteredBoardHarness, {
+      target,
+      props: { group: tagsStore.catalog.groupsById.get('status') ?? null, onOpen: openProject },
+    });
+    await settle();
+    return target;
+  }
+
+  afterEach(() => {
+    setProjectSort([]);
+  });
+
+  it('orders the cards in each column by the sort, and by the list with none', async () => {
+    const root = await mountSorted(
+      tagState([
+        { projectId: 'p1', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'p1' },
+        { projectId: 'p3', tagId: 'doing' },
+        { projectId: 'p3', tagId: 'p0' },
+      ])
+    );
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p2', 'p3']);
+
+    setProjectSort(BY_PRIORITY);
+    await settle();
+    // P0, then P1, then the project with no priority.
+    expect(cardsIn(root, 'doing')).toEqual(['p3', 'p2', 'p1']);
+    expect(setStoreValue).toHaveBeenLastCalledWith('projects-sort', BY_PRIORITY);
+
+    setProjectSort([{ ...BY_PRIORITY[0], direction: 'desc' }]);
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p2', 'p3', 'p1']);
+
+    setProjectSort([]);
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p2', 'p3']);
+  });
+
+  it('lands a card dropped on another column in its sorted slot', async () => {
+    const root = await mountSorted(
+      tagState([
+        { projectId: 'p1', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'p1' },
+        { projectId: 'p3', tagId: 'idea' },
+        { projectId: 'p3', tagId: 'p0' },
+      ])
+    );
+    setProjectSort(BY_PRIORITY);
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p2', 'p1']);
+    expect(cardsIn(root, 'idea')).toEqual(['p3']);
+
+    // The drop picks the column; the sort picks the slot, here the top.
+    await dragTo(root, 'p3', over(column(root, 'doing')));
+
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p3', 'status', 'doing');
+    expect(cardsIn(root, 'doing')).toEqual(['p3', 'p2', 'p1']);
+    expect(cardsIn(root, 'idea')).toEqual([]);
+    expect(document.activeElement).toBe(card(root, 'p3'));
+  });
+
+  it('a key for the board’s own group changes nothing, and the next key decides', async () => {
+    const root = await mountSorted(
+      tagState([
+        { projectId: 'p1', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'p0' },
+        { projectId: 'p3', tagId: 'idea' },
+      ])
+    );
+    const byStatus = { kind: 'group' as const, groupId: 'status', direction: 'desc' as const };
+
+    // Every card in a column has the same Status, so the key ties throughout.
+    setProjectSort([byStatus]);
+    await settle();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p2']);
+    expect(cardsIn(root, 'idea')).toEqual(['p3']);
+
+    setProjectSort([byStatus, ...BY_PRIORITY]);
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p2', 'p1']);
+    expect(cardsIn(root, 'idea')).toEqual(['p3']);
   });
 });

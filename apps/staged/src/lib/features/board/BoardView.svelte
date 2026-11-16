@@ -37,6 +37,7 @@
   import ProjectFilterChips from '../projects/ProjectFilterChips.svelte';
   import { repoSeedFromNewProjectEvent } from '../projects/newProjectEvent';
   import { projectFiltersStore } from '../projects/projectFilters.svelte';
+  import { projectOrderStore } from '../projects/projectOrder.svelte';
   import { searchOrderHold, visibleProjects } from '../projects/projectSearch';
   import { projectSearchSnapshots } from '../projects/projectSearchContext';
   import { projectSearchIndex } from '../projects/projectSearchIndex.svelte';
@@ -55,7 +56,8 @@
   const layer = useWorkspaceLayer();
 
   let group = $derived(tagsStore.catalog.groupsById.get(groupId) ?? null);
-  let projects = $derived(projectsDataStore.liveProjects);
+  // In the window's sort order, as the filtered list below is (projectOrder).
+  let projects = $derived(projectOrderStore.sortedProjects);
   let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
   let error = $derived(projectsDataStore.error);
 

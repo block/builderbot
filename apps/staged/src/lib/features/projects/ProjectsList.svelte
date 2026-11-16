@@ -50,6 +50,7 @@
     setProjectsListScrollTop,
   } from './projectsListViewState.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
+  import { projectOrderStore } from './projectOrder.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
   import ProjectsViewToggle from './ProjectsViewToggle.svelte';
   import {
@@ -74,8 +75,11 @@
   // search query in projectsListViewState, so the sidebar sees the same
   // selection and query; scroll restore is view-local but persists across
   // visits via that same state; modal state stays in the component. A project
-  // being deleted is already off liveProjects, so its card goes on confirm.
-  let projects = $derived(projectsDataStore.liveProjects);
+  // being deleted is already off the live list, so its card goes on confirm.
+  // The list is in the window's sort order (projectOrder), which is also the
+  // order the filtered list keeps, the sticky card is put back into and a
+  // cleared search settles back to.
+  let projects = $derived(projectOrderStore.sortedProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);

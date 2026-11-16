@@ -15,6 +15,7 @@ import {
   sortKeyLabel,
   sortProjects,
   sortSummary,
+  sortUsesActivity,
   withSortKeyAdded,
   withSortKeyDirection,
   withSortKeyMoved,
@@ -177,6 +178,24 @@ describe('resolveProjectSort', () => {
 });
 
 // ── Sorting ──
+
+describe('sortUsesActivity', () => {
+  it('is true only with a last-updated key, wherever it sits', () => {
+    expect(sortUsesActivity([])).toBe(false);
+    expect(
+      sortUsesActivity([
+        { kind: 'created', direction: 'desc' },
+        { kind: 'group', groupId: 'priority', direction: 'asc' },
+      ])
+    ).toBe(false);
+    expect(
+      sortUsesActivity([
+        { kind: 'group', groupId: 'priority', direction: 'asc' },
+        { kind: 'updated', direction: 'asc' },
+      ])
+    ).toBe(true);
+  });
+});
 
 describe('sortProjects', () => {
   it('returns the input array itself for an empty sort', () => {

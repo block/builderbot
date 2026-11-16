@@ -4,8 +4,10 @@
   + column that adds a tag to the group.
 
   It shows the grid's projects (the filter chips, tag chips included, narrow
-  them) in the grid's newest-first order, and a search hides cards rather
-  than unmounting them, as in the grid. Moving a card between columns changes
+  them) in the grid's order, which is the window's sort (projectOrder) and
+  newest first by default, and a search hides cards rather than unmounting
+  them, as in the grid. A sort key for this board's own group ties inside
+  every column, so the next key orders the cards. Moving a card between columns changes
   the project's tag in the group: by dragging it with a fine pointer on
   desktop, else by "Move to" in the card's context menu. Both are the same
   optimistic write (tagActions.setProjectGroupTag), so the card moves at

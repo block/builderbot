@@ -106,6 +106,15 @@ export function resolveProjectSort(
     : sort.filter((key) => isKnownKey(key, catalog));
 }
 
+/**
+ * Whether the sort has a last-updated key, which is the only key that needs
+ * the per-project activity read. Never a group key, so it holds for the
+ * stored sort and the resolved one alike.
+ */
+export function sortUsesActivity(sort: ProjectSort): boolean {
+  return sort.some((key) => key.kind === 'updated');
+}
+
 // =============================================================================
 // Edits
 // =============================================================================

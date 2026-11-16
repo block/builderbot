@@ -10,7 +10,9 @@ import {
   dragPositionAlong,
   edgeScrollSpeed,
   isNewPress,
+  isPressShapedMove,
   isPrimaryPress,
+  isPrimaryRelease,
   pastDragThreshold,
   scrollStep,
   spanAlong,
@@ -54,11 +56,13 @@ describe('pastDragThreshold', () => {
 // A press is a pointerdown in every engine. WebKit takes the mouse button
 // to be down until it sees a release, and a native drag takes the release
 // with it: the next press then arrives as a pointermove that names the
-// primary button, with a mousedown and no pointerdown.
+// primary button, with a mousedown and no pointerdown. WebKit sends the same
+// pointermove, with no mousedown, as the first move after another button is
+// clicked while the primary one is held. So the move alone is not a press.
+
+const event = (type: string, button: number, buttons: number) => ({ type, button, buttons });
 
 describe('isPrimaryPress', () => {
-  const event = (type: string, button: number, buttons: number) => ({ type, button, buttons });
-
   it('is a pointerdown for the primary button', () => {
     expect(isPrimaryPress(event('pointerdown', 0, 1))).toBe(true);
   });
@@ -68,26 +72,9 @@ describe('isPrimaryPress', () => {
     expect(isPrimaryPress(event('pointerdown', 2, 2))).toBe(false);
   });
 
-  it('is a pointermove that names the primary button, with it alone down', () => {
-    expect(isPrimaryPress(event('pointermove', 0, 1))).toBe(true);
-  });
-
-  it('is not a pointermove that names no button, whatever is down', () => {
-    expect(isPrimaryPress(event('pointermove', -1, 1))).toBe(false);
-    expect(isPrimaryPress(event('pointermove', -1, 0))).toBe(false);
-  });
-
-  it('is not the primary button coming up while another is held', () => {
-    expect(isPrimaryPress(event('pointermove', 0, 2))).toBe(false);
-  });
-
-  it('is not a chord: the primary button pressed with another held', () => {
+  it('is not a pointermove shaped like a press: that is one only with its mousedown', () => {
+    expect(isPrimaryPress(event('pointermove', 0, 1))).toBe(false);
     expect(isPrimaryPress(event('pointermove', 0, 3))).toBe(false);
-  });
-
-  it('is not another button changing during a press', () => {
-    expect(isPrimaryPress(event('pointermove', 2, 3))).toBe(false);
-    expect(isPrimaryPress(event('pointermove', 2, 1))).toBe(false);
   });
 
   it('is not a release', () => {
@@ -96,34 +83,101 @@ describe('isPrimaryPress', () => {
   });
 });
 
-describe('isNewPress', () => {
-  const event = (type: string, button: number, buttons: number) => ({ type, button, buttons });
-
-  it('is any pointerdown, whichever button', () => {
-    expect(isNewPress(event('pointerdown', 0, 1))).toBe(true);
-    expect(isNewPress(event('pointerdown', 2, 2))).toBe(true);
+describe('isPressShapedMove', () => {
+  it('is a pointermove that names the primary button and reports it down', () => {
+    expect(isPressShapedMove(event('pointermove', 0, 1))).toBe(true);
   });
 
-  it('is a pointermove that reports the primary button pressed, whatever else is held', () => {
-    expect(isNewPress(event('pointermove', 0, 1))).toBe(true);
-    expect(isNewPress(event('pointermove', 0, 3))).toBe(true);
+  it('is one whatever else is held: a chord has the shape too', () => {
+    expect(isPressShapedMove(event('pointermove', 0, 3))).toBe(true);
+    expect(isPressShapedMove(event('pointermove', 0, 5))).toBe(true);
   });
 
-  it('is not an ordinary move of a pressed pointer', () => {
-    expect(isNewPress(event('pointermove', -1, 1))).toBe(false);
+  it('is not a pointermove that names no button, whatever is down', () => {
+    expect(isPressShapedMove(event('pointermove', -1, 1))).toBe(false);
+    expect(isPressShapedMove(event('pointermove', -1, 0))).toBe(false);
   });
 
   it('is not the primary button coming up while another is held', () => {
-    expect(isNewPress(event('pointermove', 0, 2))).toBe(false);
+    expect(isPressShapedMove(event('pointermove', 0, 2))).toBe(false);
   });
 
-  it('is not a second button pressed or released during a drag', () => {
-    expect(isNewPress(event('pointermove', 2, 3))).toBe(false);
-    expect(isNewPress(event('pointermove', 2, 1))).toBe(false);
+  it('is not another button going down or coming up during a press', () => {
+    expect(isPressShapedMove(event('pointermove', 2, 3))).toBe(false);
+    expect(isPressShapedMove(event('pointermove', 2, 1))).toBe(false);
+    expect(isPressShapedMove(event('pointermove', 1, 5))).toBe(false);
+    expect(isPressShapedMove(event('pointermove', 1, 1))).toBe(false);
+  });
+
+  it('is not a pointerdown or a release, which need no confirming', () => {
+    expect(isPressShapedMove(event('pointerdown', 0, 1))).toBe(false);
+    expect(isPressShapedMove(event('pointerup', 0, 1))).toBe(false);
+  });
+});
+
+// A handle following a pointer takes a new press from it as proof that the
+// release it was waiting for never reached the page. WebKit sends a
+// pointerdown for another button pressed during the press, once it has
+// taken a right click for the end of the press. That proves nothing.
+
+describe('isNewPress', () => {
+  it('is a pointerdown for the primary button', () => {
+    expect(isNewPress(event('pointerdown', 0, 1))).toBe(true);
+    expect(isNewPress(event('pointerdown', 0, 3))).toBe(true);
+  });
+
+  it('is a pointerdown for another button that reports the primary one up', () => {
+    expect(isNewPress(event('pointerdown', 2, 2))).toBe(true);
+    expect(isNewPress(event('pointerdown', 1, 4))).toBe(true);
+    expect(isNewPress(event('pointerdown', 1, 6))).toBe(true);
+  });
+
+  it('is not a pointerdown for another button with the primary one still held', () => {
+    expect(isNewPress(event('pointerdown', 2, 3))).toBe(false);
+    expect(isNewPress(event('pointerdown', 1, 5))).toBe(false);
+  });
+
+  it('is not a pointermove, even one shaped like a press', () => {
+    expect(isNewPress(event('pointermove', 0, 1))).toBe(false);
+    expect(isNewPress(event('pointermove', 0, 3))).toBe(false);
+    expect(isNewPress(event('pointermove', -1, 1))).toBe(false);
+    expect(isNewPress(event('pointermove', -1, 0))).toBe(false);
   });
 
   it('is not a release', () => {
     expect(isNewPress(event('pointerup', 0, 0))).toBe(false);
+  });
+});
+
+// The release that ends a press is the pointerup that leaves the primary
+// button up. WebKit sends a pointerup for the right button when it is
+// clicked during the press and the context menu is not prevented.
+
+describe('isPrimaryRelease', () => {
+  it('is a pointerup that reports no button down', () => {
+    expect(isPrimaryRelease(event('pointerup', 0, 0))).toBe(true);
+  });
+
+  it('is a pointerup that leaves only other buttons down', () => {
+    expect(isPrimaryRelease(event('pointerup', 0, 2))).toBe(true);
+    expect(isPrimaryRelease(event('pointerup', 0, 6))).toBe(true);
+  });
+
+  it('is a pointerup for another button that leaves the primary one up too', () => {
+    expect(isPrimaryRelease(event('pointerup', 2, 0))).toBe(true);
+  });
+
+  it('is not a pointerup for another button with the primary one still down', () => {
+    expect(isPrimaryRelease(event('pointerup', 2, 1))).toBe(false);
+    expect(isPrimaryRelease(event('pointerup', 1, 1))).toBe(false);
+    expect(isPrimaryRelease(event('pointerup', 2, 5))).toBe(false);
+  });
+
+  it('is not a move or a press, whatever they report', () => {
+    expect(isPrimaryRelease(event('pointermove', -1, 0))).toBe(false);
+    expect(isPrimaryRelease(event('pointermove', 0, 2))).toBe(false);
+    expect(isPrimaryRelease(event('pointerdown', 2, 2))).toBe(false);
+    expect(isPrimaryRelease(event('pointercancel', 0, 0))).toBe(false);
   });
 });
 

@@ -37,41 +37,70 @@ export function pastDragThreshold(
   return Math.hypot(point.clientX - pressed.clientX, point.clientY - pressed.clientY) >= threshold;
 }
 
-/** What of a pointer event says whether it is a press. */
+/** What of a pointer event says which button changed, and which are down. */
 export type PressEvent = Pick<PointerEvent, 'type' | 'button' | 'buttons'>;
 
 /**
- * Whether a pointer event is the primary button going down with no other
- * button held: the press that can arm a drag handle.
- *
- * That is a pointerdown for the primary button, in every engine. It is also
- * a pointermove whose `button` is the primary one and whose `buttons` hold
- * it alone. A pointer sends no second pointerdown while the engine takes a
- * button of its to be down, and reports a button that changes meanwhile on
- * a pointermove. WebKit takes the mouse button to be down for as long as it
- * has seen no release, and a native drag (of a card, a tag row, or text
- * selected in a field) takes the release with it. The next press then
- * arrives as that pointermove and a mousedown, with no pointerdown, and
- * the moves and the release after it arrive as usual.
- *
- * With another button held it is a chord, which arms nothing either way.
+ * Whether a pointer event is, on its own, the primary button going down: a
+ * pointerdown for it. That is the press that can arm a drag handle, in
+ * every engine. See `isPressShapedMove` for the press that is not one.
  */
 export function isPrimaryPress(event: PressEvent): boolean {
-  if (event.button !== 0) return false;
-  if (event.type === 'pointerdown') return true;
-  return event.type === 'pointermove' && event.buttons === 1;
+  return event.type === 'pointerdown' && event.button === 0;
 }
 
 /**
- * Whether a pointer event shows a button of the pointer going down: any
- * pointerdown, and a pointermove that reports the primary button pressed
- * (see `isPrimaryPress`), whatever else is held. A handle following a
- * pointer takes one from that pointer as proof that its last release never
- * reached the page.
+ * Whether a pointermove has the shape of a press of the primary button: it
+ * names that button as the one that changed, and reports it down. It is
+ * not a press on its own. WebKit sends this shape for two things.
+ *
+ * One is a press. A pointer sends no second pointerdown while the engine
+ * takes a button of its to be down. WebKit takes the mouse button to be
+ * down for as long as it has seen no release, and a native drag (of a card,
+ * a tag row, or text selected in a field) takes the release with it. The
+ * next press then arrives as this pointermove, with no pointerdown, and the
+ * moves and the release after it arrive as usual.
+ *
+ * The other is no press at all. Another button clicked while the primary
+ * one is held (a middle click, or a right click whose context menu is
+ * prevented) reaches the page as two pointermoves that name that button.
+ * WebKit then names the primary button on the first move the pointer makes
+ * afterwards, with it still down and nothing pressed.
+ *
+ * What tells them apart is the mousedown: a press sends one for the primary
+ * button straight after the pointermove, in the same task, and the move
+ * after a chord sends none. So the shape counts as a press only once that
+ * mousedown has followed it (see `pointerDrag`).
+ */
+export function isPressShapedMove(event: PressEvent): boolean {
+  return event.type === 'pointermove' && event.button === 0 && (event.buttons & 1) !== 0;
+}
+
+/**
+ * Whether a pointerdown from a pointer that a handle is already following
+ * proves that the release the handle was waiting for never reached the
+ * page: the primary button went down again, or the event reports it up.
+ *
+ * Another button going down with the primary one still held proves
+ * nothing. An engine should send that as a pointermove, since the pointer
+ * is already down. WebKit sends a pointerdown for it once it has taken a
+ * right click made during the press for the end of the press (see
+ * `isPrimaryRelease`).
  */
 export function isNewPress(event: PressEvent): boolean {
-  if (event.type === 'pointerdown') return true;
-  return event.type === 'pointermove' && event.button === 0 && (event.buttons & 1) !== 0;
+  return event.type === 'pointerdown' && (event.button === 0 || (event.buttons & 1) === 0);
+}
+
+/**
+ * Whether a pointerup leaves the primary button up: the release that ends
+ * a press made with it. A pointerup that reports the primary button still
+ * down is another button's. An engine should send that as a pointermove,
+ * but WebKit sends a pointerup for the right button when it is clicked
+ * during the press and nothing prevents the context menu. It takes the
+ * pointer to be up from there, though the primary button is still held.
+ */
+export function isPrimaryRelease(event: PressEvent): boolean {
+  return event.type === 'pointerup' && (event.buttons & 1) === 0;
 }
 
 /** How deep each edge's scroll zone runs into the container, in px. */
@@ -312,9 +341,15 @@ type Phase =
 
 /**
  * The drag-handle action. A primary-button press with a mouse or pen arms
- * it (see `isPrimaryPress` for what a press is), and `DRAG_THRESHOLD` px of
- * movement starts the drag, so a plain click still clicks. Touch is ignored:
- * a finger scrolls, and the menus are the way to reorder there.
+ * it, and `DRAG_THRESHOLD` px of movement starts the drag, so a plain click
+ * still clicks. Touch is ignored: a finger scrolls, and the menus are the
+ * way to reorder there.
+ *
+ * A press is a pointerdown for the primary button (see `isPrimaryPress`).
+ * It is also a pointermove shaped like one, once the mousedown for the
+ * primary button has followed it as the next event (see
+ * `isPressShapedMove`). Without that mousedown the move is only a move.
+ * With another button held it is a chord, which arms nothing either way.
  *
  * A drag ends in `drop` on release, or in `cancel`: on Escape, a
  * pointercancel, the handle losing the pointer's capture, the window losing
@@ -326,6 +361,13 @@ type Phase =
  * is also a button does not act on being dragged. A release the page never
  * saw swallows nothing: the pointer's next press, wherever it is made, ends
  * the wait for it, and that press's click is its own.
+ *
+ * Another button clicked while the drag is held (a right or a middle click)
+ * changes nothing: the drag runs on to the primary button's release. Only
+ * that release drops (see `isPrimaryRelease`), and nothing a chord sends is
+ * taken for a new press. No context menu opens under a drag: a menu would
+ * take the release with it, and the right click that asked for it was made
+ * with something in hand. Nor does that click move focus or select.
  *
  * Given an `image`, a small chip naming what is dragged follows the pointer
  * (see `dragChipOrigin` for where). It is a child of the body, fixed and out
@@ -362,6 +404,19 @@ export function pointerDrag(
   let pressed: PointerDragPoint = { clientX: 0, clientY: 0 };
   let last: PointerDragPoint = pressed;
   let captured = false;
+  /**
+   * A pointermove over the handle shaped like a press, which is one if the
+   * mousedown for the primary button is the next event the handle hears
+   * (see `isPressShapedMove`). Any other pointer event on the handle ends
+   * the wait.
+   */
+  let unconfirmed: PointerEvent | null = null;
+  /**
+   * The same wait for the pointer this handle follows, wherever it is: its
+   * last event was a pointermove shaped like a press, which the mousedown
+   * for the primary button would make a new press.
+   */
+  let followedPressShaped = false;
   let frame: number | null = null;
   let frameTime: number | null = null;
   let carry = 0;
@@ -564,6 +619,8 @@ export function pointerDrag(
 
   function listen() {
     window.addEventListener('pointerdown', handleFollowedPointerDown, true);
+    window.addEventListener('mousedown', handleFollowedMouseDown, true);
+    window.addEventListener('contextmenu', handleContextMenu, true);
     window.addEventListener('pointermove', handlePointerMove, true);
     window.addEventListener('pointerup', handlePointerUp, true);
     window.addEventListener('pointercancel', handlePointerCancel, true);
@@ -575,6 +632,8 @@ export function pointerDrag(
 
   function unlisten() {
     window.removeEventListener('pointerdown', handleFollowedPointerDown, true);
+    window.removeEventListener('mousedown', handleFollowedMouseDown, true);
+    window.removeEventListener('contextmenu', handleContextMenu, true);
     window.removeEventListener('pointermove', handlePointerMove, true);
     window.removeEventListener('pointerup', handlePointerUp, true);
     window.removeEventListener('pointercancel', handlePointerCancel, true);
@@ -599,6 +658,7 @@ export function pointerDrag(
     // Only this handle's own mark: another handle's drag may be under way.
     if (phase === 'dragging') root.removeAttribute(POINTER_DRAG_ATTRIBUTE);
     phase = next;
+    followedPressShaped = false;
     removeChip();
     stopScrolling();
     releaseCapture();
@@ -640,19 +700,38 @@ export function pointerDrag(
   }
 
   /**
-   * A press on the handle: a pointerdown, or the pointermove an engine
-   * sends in its place when it takes the pointer's button to be down
-   * already (see `isPrimaryPress`). Any other pointermove over the handle
-   * is not this listener's.
+   * A pointerdown or a pointermove on the handle. A pointerdown is a press.
+   * A pointermove shaped like one is remembered, and is a press if the
+   * mousedown for the primary button comes next (see `handleMouseDown`).
+   * Any other pointermove over the handle is nothing, and ends that wait.
    */
   function handlePress(event: PointerEvent) {
-    if (event.type !== 'pointerdown' && !isPrimaryPress(event)) return;
+    if (event.type !== 'pointerdown') {
+      unconfirmed = isPressShapedMove(event) ? event : null;
+      return;
+    }
+    unconfirmed = null;
+    // Another button of the pointer this handle follows, with the primary
+    // one still held: a chord, not a new gesture.
+    if (phase !== 'idle' && event.pointerId === pointerId && !isNewPress(event)) return;
+    takePress(event);
+  }
+
+  /**
+   * A press on the handle: a pointerdown, or the pointermove an engine
+   * sent in its place and its mousedown has since confirmed.
+   */
+  function takePress(event: PointerEvent) {
     // A press made while a guard is still up is a new gesture: its click is
     // its own.
     dropClickGuard();
     if (phase !== 'idle') abandon(false);
     if (!enabled()) return;
-    if (event.pointerType === 'touch' || !event.isPrimary || !isPrimaryPress(event)) return;
+    if (event.pointerType === 'touch' || !event.isPrimary || event.button !== 0) return;
+    // A pointerdown is the first button of the pointer to go down. The
+    // press sent as a move says what else is held: with another button it
+    // is a chord, which arms nothing.
+    if (event.type !== 'pointerdown' && event.buttons !== 1) return;
     phase = 'armed';
     pointerId = event.pointerId;
     pressed = pointOf(event);
@@ -682,31 +761,45 @@ export function pointerDrag(
   }
 
   /**
-   * The mousedown of the press that armed the handle. An engine sends it
-   * after the pointer event that armed it, in the same task. It has no
-   * default action: no selection starts, so there is none for the engine
-   * to extend, or to move focus with, while the button is down.
+   * The mousedown of a press on the handle. An engine sends it after the
+   * press's pointer event, in the same task.
+   *
+   * It is what makes a press of a pointermove shaped like one: the handle
+   * arms here, from that move, if the move was the last pointer event it
+   * heard. The move after a chord has the same shape and no mousedown, and
+   * arms nothing.
+   *
+   * The mousedown of the press that armed the handle has no default
+   * action: no selection starts, so there is none for the engine to
+   * extend, or to move focus with, while the button is down.
    *
    * A press that did not arm the handle keeps its default: one made with
    * another button, by touch, or while the handle is off (a name field
    * inside it then selects text as usual).
    */
   function handleMouseDown(event: MouseEvent) {
-    if (phase !== 'armed' || event.button !== 0) return;
+    const move = unconfirmed;
+    unconfirmed = null;
+    if (event.button !== 0) return;
+    if (move) takePress(move);
+    if (phase !== 'armed') return;
     event.preventDefault();
     movePressFocus();
   }
 
   /**
    * The pointer this handle is following was pressed again, anywhere in the
-   * window. A pointer shows a button going down only when the page saw its
-   * last release, or never will: a pointerdown when none of its buttons
-   * was down, and where the engine still takes one to be down, a
-   * pointermove that reports the primary button pressed (see `isNewPress`).
-   * A second button pressed during a drag is neither. So the release this
-   * handle was waiting for never reached the page. It went to another
-   * window, say, after this one lost focus, and the click that brought the
-   * focus back was passed through to the page with no move before it.
+   * window. A pointer presses its primary button again only when the page
+   * saw its last release, or never will. So the release this handle was
+   * waiting for never reached the page. It went to another window, say,
+   * after this one lost focus, and the click that brought the focus back
+   * was passed through to the page with no move before it.
+   *
+   * The press is a pointerdown that shows the primary button going down or
+   * already up (see `isNewPress`). Where the engine still takes a button
+   * to be down, it is a pointermove shaped like a press and then the
+   * mousedown for the primary button (see `handleFollowedMouseDown`).
+   * Another button pressed during the drag is neither, in either form.
    *
    * The gesture is over, without a drop. Left to wait, the release of this
    * new press would be taken for the old one: after a cancelled drag it
@@ -720,16 +813,41 @@ export function pointerDrag(
    */
   function handleFollowedPointerDown(event: PointerEvent) {
     if (event.pointerId !== pointerId) return;
-    abandon(false);
+    followedPressShaped = false;
+    if (isNewPress(event)) abandon(false);
+  }
+
+  /**
+   * A mousedown for the primary button, straight after a pointermove from
+   * the followed pointer that was shaped like a press: the two together
+   * are a new press, sent by an engine that takes the button to be down
+   * already. The release this handle was waiting for was missed (see
+   * `handleFollowedPointerDown`).
+   *
+   * Without the mousedown the move was only a move, which is what the
+   * first one after a chord is (see `isPressShapedMove`).
+   *
+   * A mousedown names no pointer. The move before it does, and no other
+   * event from that pointer has come between the two.
+   *
+   * The mousedown of any other button, pressed during a drag, has no
+   * default action. Left to the engine, a right or middle press over a
+   * text field puts focus in the field, and a right press selects a word
+   * there. Nothing the pointer is over takes focus during a drag.
+   */
+  function handleFollowedMouseDown(event: MouseEvent) {
+    if (event.button !== 0) {
+      if (phase === 'dragging') event.preventDefault();
+      return;
+    }
+    if (followedPressShaped) abandon(false);
   }
 
   function handlePointerMove(event: PointerEvent) {
     if (event.pointerId !== pointerId) return;
-    // A press sent as a move: the release before it was missed.
-    if (isNewPress(event)) {
-      abandon(false);
-      return;
-    }
+    // Shaped like a press: a new one if its mousedown comes next, and the
+    // move it looks like if not.
+    followedPressShaped = isPressShapedMove(event);
     // The button is up, so the release went somewhere the page never saw
     // (outside the window with no capture, or under a context menu).
     if ((event.buttons & 1) === 0) {
@@ -737,7 +855,10 @@ export function pointerDrag(
       return;
     }
     if (phase === 'armed') {
-      if (pastDragThreshold(pressed, event)) beginDrag(event);
+      // A move that may be a new press starts no drag. If it is one, this
+      // press is over, and a drag begun here would start only to be
+      // cancelled. If not, the next move starts the drag.
+      if (!followedPressShaped && pastDragThreshold(pressed, event)) beginDrag(event);
     } else if (phase === 'dragging') {
       last = pointOf(event);
       placeChip();
@@ -747,6 +868,10 @@ export function pointerDrag(
 
   function handlePointerUp(event: PointerEvent) {
     if (event.pointerId !== pointerId) return;
+    followedPressShaped = false;
+    // Another button's release, with the primary one still down: the press
+    // goes on.
+    if (!isPrimaryRelease(event)) return;
     const wasDragging = phase === 'dragging';
     const swallow = wasDragging || phase === 'spent';
     settle('idle');
@@ -765,6 +890,25 @@ export function pointerDrag(
     if (event.pointerId !== pointerId || event.target !== node) return;
     captured = false;
     if (phase === 'dragging') abandon(true);
+  }
+
+  /**
+   * A right click made during a drag asks for a context menu. None opens:
+   * not the engine's own, and not one of the page's, which never hears of
+   * it. A menu would take the pointer's release with it and leave the drag
+   * to be cancelled by the next move.
+   *
+   * It also settles how WebKit reports that right click. With the menu
+   * prevented, the right button's release is a pointermove, and the
+   * handle keeps its capture of the pointer. Left alone, it is a pointerup
+   * that takes the capture away (see `isPrimaryRelease`).
+   *
+   * Before the drag starts and after it ends, a right click is left alone.
+   */
+  function handleContextMenu(event: MouseEvent) {
+    if (phase !== 'dragging') return;
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   function handleKeydown(event: KeyboardEvent) {

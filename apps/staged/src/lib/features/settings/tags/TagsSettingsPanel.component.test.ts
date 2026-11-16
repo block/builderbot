@@ -1727,7 +1727,9 @@ describe('TagsSettingsPanel', () => {
       const root = await mountPanel(threeGroups());
       layOutGroups(root);
 
-      pointerEvent('pointermove', groupHandle('status'), pressPoint('status'), { button: 0 });
+      const handle = groupHandle('status');
+      pointerEvent('pointermove', handle, pressPoint('status'), { button: 0 });
+      handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       movePointer(pointerOver('area', 'lower'));
       expect(dragMark()).toBe('active');
       expect(groupDropLines(root)).toEqual(['area:after']);
@@ -1741,6 +1743,73 @@ describe('TagsSettingsPanel', () => {
       expect(click.defaultPrevented).toBe(true);
       await settle();
 
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+    });
+
+    // WebKit sends that same move, with no mousedown, as the first move
+    // after another button is clicked while the primary one is held. It is
+    // not a press: a press made elsewhere, carried over a group's handle and
+    // right-clicked there, dragged the group.
+
+    it('does not drag a group from a move that only looks like a press', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pointerEvent('pointermove', groupHandle('status'), pressPoint('status'), { button: 0 });
+      movePointer(pointerOver('area', 'lower'));
+      expect(dragMark()).toBeNull();
+      expect(groupDropLines(root)).toEqual([]);
+      await releasePointer(pointerOver('area', 'lower'));
+
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+      expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Priority', 'Area']);
+    });
+
+    // A right click in the middle of a group drag is not the end of it.
+    // WebKit sends the click one of two ways. Where the context menu is
+    // prevented, and for a middle click, it is two moves that name the
+    // button, and the next move then looks like a press of the primary one.
+    // That move cancelled the drag. With the context menu left alone, the
+    // right button's release is a pointerup with the primary button still
+    // down. That dropped the group where it stood. A drag now prevents the
+    // menu, and takes only the primary button's release for its drop.
+
+    it.each([
+      ['as moves, the next one shaped like a press', 'moves'],
+      ['with its release a pointerup', 'release'],
+    ] as const)('keeps a group drag running through a right click sent %s', async (_name, sent) => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      dragGroupOver('status', 'priority', 'lower');
+      expect(groupDropLines(root)).toEqual(['priority:after']);
+      const at = pointerOver('priority', 'lower');
+      pointerEvent('pointermove', document.body, at, { button: 2, buttons: 3 });
+      document.body.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 2, buttons: 3 })
+      );
+      pointerEvent(sent === 'moves' ? 'pointermove' : 'pointerup', document.body, at, {
+        button: 2,
+        buttons: 1,
+      });
+      flushSync();
+      expect(dragMark()).toBe('active');
+      expect(dragChip()).not.toBeNull();
+      expect(draggedGroup(root)).toBe('status');
+      expect(groupDropLines(root)).toEqual(['priority:after']);
+      expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+
+      // The first move after it: the one that names the primary button.
+      pointerEvent('pointermove', document.body, pointerOver('area', 'lower'), {
+        button: sent === 'moves' ? 0 : -1,
+      });
+      flushSync();
+      expect(dragMark()).toBe('active');
+      expect(groupDropLines(root)).toEqual(['area:after']);
+      await dropGroupOn('area', 'lower');
+
+      expect(dragChip()).toBeNull();
       expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
       expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
     });

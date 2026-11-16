@@ -83,15 +83,6 @@ const moveTo = (x: number, y: number, init: PointerEventInit = {}) =>
 const release = (x: number, y: number, init: PointerEventInit = {}) =>
   pointer('pointerup', outside, x, y, init);
 
-/**
- * The press WebKit sends in place of a pointerdown while it takes the mouse
- * button to be down: a move that names the primary button. It does after a
- * native drag (of a card, a tag row, text selected in a field), which takes
- * the release with it. A mousedown follows, and no pointerdown.
- */
-const latePress = (x = 100, y = 100, init: PointerEventInit = {}) =>
-  pointer('pointermove', handle, x, y, { button: 0, ...init });
-
 /** The mousedown an engine sends after the pointer event of a mouse's press. */
 function mousedown(target: Element = handle, init: MouseEventInit = {}): MouseEvent {
   const event = new MouseEvent('mousedown', {
@@ -101,6 +92,67 @@ function mousedown(target: Element = handle, init: MouseEventInit = {}): MouseEv
     buttons: 1,
     ...init,
   });
+  target.dispatchEvent(event);
+  return event;
+}
+
+/**
+ * A move that names the primary button and reports it down: the shape of a
+ * press, and not one on its own. WebKit sends it for a press (see
+ * `latePress`), and as the first move after another button is clicked
+ * while the primary one is held (see `chordAsMoves`).
+ */
+const pressShapedMove = (target: EventTarget, x: number, y: number, init: PointerEventInit = {}) =>
+  pointer('pointermove', target, x, y, { button: 0, ...init });
+
+/**
+ * The press WebKit sends in place of a pointerdown while it takes the mouse
+ * button to be down: a move shaped like a press, then the mousedown, and no
+ * pointerdown. It does after a native drag (of a card, a tag row, text
+ * selected in a field), which takes the release with it. Answers the
+ * mousedown.
+ */
+function latePress(
+  x = 100,
+  y = 100,
+  init: PointerEventInit = {},
+  target: Element = handle
+): MouseEvent {
+  pressShapedMove(target, x, y, init);
+  return mousedown(target, { buttons: init.buttons ?? 1 });
+}
+
+const BUTTON_MASK: Record<number, number> = { 1: 4, 2: 2 };
+
+/**
+ * Another button clicked while the primary one is held, as WebKit sends a
+ * middle click, and a right click whose context menu the page prevents: a
+ * move that names the button going down, its mousedown, and a move that
+ * names it coming up. The pointer's next move is then shaped like a press
+ * of the primary button (see `pressShapedMove`), with no mousedown.
+ */
+function chordAsMoves(target: Element, x: number, y: number, button = 2) {
+  const buttons = 1 | BUTTON_MASK[button];
+  pointer('pointermove', target, x, y, { button, buttons });
+  mousedown(target, { button, buttons });
+  pointer('pointermove', target, x, y, { button, buttons: 1 });
+}
+
+/**
+ * A right click while the primary button is held, as WebKit sends it when
+ * nothing prevents the context menu. The right button's release is a
+ * pointerup that reports the primary one still down, and WebKit takes the
+ * pointer to be up from there: it sends the next right click's press as a
+ * pointerdown (`again`).
+ */
+function chordAsRelease(target: Element, x: number, y: number, again = false) {
+  pointer(again ? 'pointerdown' : 'pointermove', target, x, y, { button: 2, buttons: 3 });
+  mousedown(target, { button: 2, buttons: 3 });
+  pointer('pointerup', target, x, y, { button: 2, buttons: 1 });
+}
+
+function contextmenu(target: Element = outside): MouseEvent {
+  const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 });
   target.dispatchEvent(event);
   return event;
 }
@@ -318,7 +370,7 @@ describe('what arms the handle', () => {
     // Nor once the primary button joins it. That sends a move that names
     // the primary button, with both down: a chord, not a press.
     press(100, 100, { button: 2, buttons: 2 });
-    pointer('pointermove', handle, 100, 100, { button: 0, buttons: 3 });
+    latePress(100, 100, { buttons: 3 });
     moveTo(110, 100, { buttons: 3 });
 
     expect(calls).toEqual([]);
@@ -348,9 +400,9 @@ describe('what arms the handle', () => {
 
 // After a native drag WebKit sees no release, so it takes the mouse button
 // to be down and sends the next press as a move that names the primary
-// button (see `isPrimaryPress`). Left unarmed, the first drag after a card
-// or tag row drag did nothing, and its release clicked whatever the press
-// and the release shared an ancestor in.
+// button, then a mousedown (see `isPressShapedMove`). Left unarmed, the
+// first drag after a card or tag row drag did nothing, and its release
+// clicked whatever the press and the release shared an ancestor in.
 
 describe('a press the engine sends as a move', () => {
   it('arms the handle: the moves after it drag, and the release drops', () => {
@@ -451,16 +503,20 @@ describe('a press the engine sends as a move', () => {
   // the release it was waiting for never reached the page. Where the engine
   // still takes the button to be down, that press comes as a move too.
 
+  // The move comes first, and is still where the pointer is: the drag
+  // follows it there. The mousedown after it is what ends the drag.
   it('made elsewhere, cancels a drag whose release never came, and its release drops nothing', () => {
     attach();
     startDrag();
-    pointer('pointermove', outside, 300, 300, { button: 0 });
+    pressShapedMove(outside, 300, 300);
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 300,300']);
+    mousedown(outside);
 
-    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 300,300', 'cancel']);
     expect(dragMark()).toBeNull();
     moveTo(310, 300);
     release(310, 300);
-    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 300,300', 'cancel']);
   });
 
   it('made on the handle, cancels the drag whose release never came and arms afresh', () => {
@@ -472,16 +528,19 @@ describe('a press the engine sends as a move', () => {
     expect(calls).toEqual([
       'start 100,100',
       'move 110,100',
+      'move 300,300',
       'cancel',
       'start 300,300',
       'move 310,300',
     ]);
   });
 
+  // Its move is far from the old press, and must not start a drag of the
+  // handle that the mousedown would then cancel.
   it('made elsewhere, ends a press whose release never came: it does not drag the handle', () => {
     attach();
     press(100, 100);
-    pointer('pointermove', outside, 300, 300, { button: 0 });
+    latePress(300, 300, {}, outside);
     moveTo(310, 300);
     release(310, 300);
 
@@ -494,7 +553,7 @@ describe('a press the engine sends as a move', () => {
     outside.addEventListener('click', heard);
     startDrag();
     keydown('Escape');
-    pointer('pointermove', outside, 300, 300, { button: 0 });
+    latePress(300, 300, {}, outside);
     release(300, 300);
     const later = click(outside);
 
@@ -505,10 +564,314 @@ describe('a press the engine sends as a move', () => {
   it('from another pointer does not end the drag', () => {
     attach();
     startDrag();
-    pointer('pointermove', outside, 300, 300, { button: 0, pointerId: 2 });
+    latePress(300, 300, { pointerId: 2 }, outside);
     release(120, 100);
 
     expect(calls).toEqual(['start 100,100', 'move 110,100', 'drop 120,100']);
+  });
+
+  it('hears a mousedown made elsewhere that stops on its way down', () => {
+    attach();
+    outside.addEventListener('mousedown', (event) => event.stopPropagation());
+    startDrag();
+    latePress(300, 300, {}, outside);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 300,300', 'cancel']);
+  });
+});
+
+// The same move with no mousedown after it is no press. WebKit sends it as
+// the first move a pointer makes after another button is clicked while the
+// primary one is held: a middle click, or a right click whose context menu
+// the page prevents. Taken for a press, it cancelled a drag and armed the
+// handle afresh, and it armed a handle the pointer was only passing over.
+
+describe('a move shaped like a press, with no mousedown after it', () => {
+  it('does not arm the handle', () => {
+    attach();
+    pressShapedMove(handle, 100, 100);
+    moveTo(110, 100);
+    moveTo(150, 130);
+    release(150, 130);
+
+    expect(calls).toEqual([]);
+    expect(dragMark()).toBeNull();
+  });
+
+  it('does not arm a handle the pointer passes with the button held, after a chord over it', () => {
+    attach();
+    // A press made elsewhere, dragged over the handle, and a right click there.
+    pointer('pointermove', handle, 100, 100);
+    chordAsMoves(handle, 100, 100);
+    pressShapedMove(handle, 101, 101);
+    pointer('pointermove', handle, 106, 101);
+    moveTo(150, 130);
+    release(150, 130);
+    click();
+
+    expect(calls).toEqual([]);
+    expect(clicks).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a right click', 2],
+    ['a middle click', 1],
+  ])('after %s during a drag is a move: the drag runs on to its drop', (_name, button) => {
+    attach();
+    startDrag();
+    chordAsMoves(outside, 110, 100, button);
+    pressShapedMove(outside, 120, 100);
+    expect(dragMark()).toBe('active');
+    moveTo(150, 130);
+    release(150, 130);
+
+    expect(calls).toEqual([
+      'start 100,100',
+      // The two moves of the chord, where the pointer already was.
+      'move 110,100',
+      'move 110,100',
+      'move 110,100',
+      'move 120,100',
+      'move 150,130',
+      'drop 150,130',
+    ]);
+  });
+
+  // With the pointer captured, every event of the drag goes to the handle,
+  // this move among them. It is not a press on the handle either.
+  it('sent to the handle during a drag neither cancels the drag nor arms afresh', () => {
+    handle.setPointerCapture = vi.fn();
+    handle.releasePointerCapture = vi.fn();
+    attach();
+    startDrag();
+    chordAsMoves(handle, 110, 100);
+    pressShapedMove(handle, 120, 100);
+    pointer('pointermove', handle, 150, 130);
+    pointer('pointerup', handle, 150, 130);
+
+    expect(calls.filter((call) => !call.startsWith('move'))).toEqual([
+      'start 100,100',
+      'drop 150,130',
+    ]);
+    expect(handle.setPointerCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('still drops when the release comes within the threshold of it', () => {
+    attach();
+    startDrag();
+    chordAsMoves(handle, 110, 100);
+    pressShapedMove(handle, 111, 100);
+    pointer('pointerup', handle, 111, 100);
+
+    expect(calls.at(-1)).toBe('drop 111,100');
+    expect(calls).not.toContain('cancel');
+  });
+
+  // The move may yet be a press that ends this one, so it starts no drag
+  // itself. The next move does, from where the handle was pressed.
+  it('on a pressed handle starts no drag itself, and the next move starts one from the press', () => {
+    attach();
+    press(100, 100);
+    mousedown();
+    chordAsMoves(handle, 100, 100);
+    pressShapedMove(outside, 130, 100);
+    expect(calls).toEqual([]);
+    moveTo(131, 100);
+    release(131, 100);
+
+    expect(calls).toEqual(['start 100,100', 'move 131,100', 'drop 131,100']);
+  });
+
+  it('after a cancelled drag does not end the wait for the release: its click is swallowed', () => {
+    attach();
+    startDrag();
+    keydown('Escape');
+    chordAsMoves(outside, 110, 100);
+    pressShapedMove(outside, 111, 100);
+    release(111, 100);
+    click();
+
+    expect(clicks).not.toHaveBeenCalled();
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+  });
+
+  // The mousedown that makes a press of the move is the next event from the
+  // pointer. One that comes after anything else belongs to something else.
+  it.each([
+    ['an ordinary move', () => void pointer('pointermove', handle, 101, 100)],
+    [
+      'a move with no button down',
+      () => void pointer('pointermove', handle, 101, 100, { buttons: 0 }),
+    ],
+    [
+      'another button going down',
+      () => void pointer('pointermove', handle, 100, 100, { button: 2, buttons: 3 }),
+    ],
+    ['a pointerdown for another button', () => void press(100, 100, { button: 2, buttons: 3 })],
+  ])('is not made a press on the handle by a mousedown that follows %s', (_name, between) => {
+    attach();
+    pressShapedMove(handle, 100, 100);
+    between();
+    const event = mousedown();
+    moveTo(110, 100);
+
+    expect(calls).toEqual([]);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('is not made a press by the mousedown of another button, nor by one after that', () => {
+    attach();
+    pressShapedMove(handle, 100, 100);
+    mousedown(handle, { button: 2, buttons: 3 });
+    const event = mousedown();
+    moveTo(110, 100);
+
+    expect(calls).toEqual([]);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it.each([
+    ['an ordinary move', () => void moveTo(121, 100)],
+    [
+      'another button’s pointerup',
+      () => void pointer('pointerup', outside, 120, 100, { button: 2, buttons: 1 }),
+    ],
+    [
+      'another button’s pointerdown',
+      () => void pointer('pointerdown', outside, 120, 100, { button: 2, buttons: 3 }),
+    ],
+  ])('does not end a drag by a mousedown that follows %s', (_name, between) => {
+    attach();
+    startDrag();
+    pressShapedMove(outside, 120, 100);
+    between();
+    mousedown(outside);
+    release(130, 100);
+
+    expect(calls).not.toContain('cancel');
+    expect(calls.at(-1)).toBe('drop 130,100');
+  });
+
+  it('does not end a drag by the mousedown of another button', () => {
+    attach();
+    startDrag();
+    pressShapedMove(outside, 120, 100);
+    mousedown(outside, { button: 2, buttons: 3 });
+    release(130, 100);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 120,100', 'drop 130,100']);
+  });
+
+  // The wait for a mousedown ends with the gesture. Left over, it would
+  // take the next press's own mousedown for a second press, and end it.
+  it('is forgotten when the drag ends: the next press still drags', () => {
+    attach();
+    startDrag();
+    pressShapedMove(outside, 120, 100);
+    pointer('pointercancel', outside, 120, 100);
+    calls = [];
+
+    press(100, 100);
+    mousedown();
+    moveTo(110, 100);
+    expect(calls).toEqual(['start 100,100', 'move 110,100']);
+  });
+});
+
+// A right click during the press reaches the page another way when nothing
+// prevents the context menu. WebKit sends the right button's release as a
+// pointerup, and takes the pointer to be up from there, so the next right
+// click's press is a pointerdown. None of it is the release of the primary
+// button, or a new press: taken for them, the right click dropped the drag
+// where it stood, and ended a press before it could become a drag.
+
+describe('another button released as a pointerup during the press', () => {
+  it('does not drop: the drag runs on to the primary button’s release', () => {
+    attach();
+    startDrag();
+    chordAsRelease(handle, 110, 100);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 110,100']);
+    expect(dragMark()).toBe('active');
+    moveTo(150, 130);
+    release(150, 130);
+    expect(calls).toEqual([
+      'start 100,100',
+      'move 110,100',
+      'move 110,100',
+      'move 150,130',
+      'drop 150,130',
+    ]);
+  });
+
+  it('has the click after the drop swallowed still', () => {
+    attach();
+    startDrag();
+    chordAsRelease(outside, 110, 100);
+    // Time passes between the right click and the release.
+    vi.runAllTimers();
+    release(110, 100);
+    click();
+
+    expect(clicks).not.toHaveBeenCalled();
+  });
+
+  it('does not end the drag when the button is clicked again, anywhere', () => {
+    attach();
+    startDrag();
+    chordAsRelease(handle, 110, 100);
+    chordAsRelease(outside, 120, 100, true);
+    // And over the handle itself, where the pointerdown is on the handle.
+    chordAsRelease(handle, 100, 100, true);
+    release(150, 130);
+
+    expect(calls).not.toContain('cancel');
+    expect(calls.filter((call) => !call.startsWith('move'))).toEqual([
+      'start 100,100',
+      'drop 150,130',
+    ]);
+  });
+
+  it('leaves a pressed handle pressed: it still drags', () => {
+    attach();
+    press(100, 100);
+    mousedown();
+    chordAsRelease(handle, 100, 100);
+    moveTo(110, 100);
+    release(110, 100);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'drop 110,100']);
+  });
+
+  it('does not end the wait after a cancelled drag: the release’s click is swallowed', () => {
+    attach();
+    startDrag();
+    keydown('Escape');
+    chordAsRelease(outside, 110, 100);
+    vi.runAllTimers();
+    release(110, 100);
+    click();
+
+    expect(clicks).not.toHaveBeenCalled();
+  });
+
+  it('drops when it is the primary button that comes up first, with the other still held', () => {
+    attach();
+    startDrag();
+    pointer('pointermove', outside, 110, 100, { button: 2, buttons: 3 });
+    pointer('pointerup', outside, 120, 100, { button: 0, buttons: 2 });
+
+    expect(calls.at(-1)).toBe('drop 120,100');
+  });
+
+  it('is still ended by a pointerdown that shows the primary button up: its release was missed', () => {
+    attach();
+    startDrag();
+    chordAsRelease(outside, 110, 100);
+    pointer('pointerdown', outside, 300, 300, { button: 2, buttons: 2 });
+
+    expect(calls.at(-1)).toBe('cancel');
+    expect(dragMark()).toBeNull();
   });
 });
 
@@ -530,9 +893,17 @@ describe('the mousedown of the press', () => {
 
   it('has no default after a press the engine sent as a move', () => {
     attach();
-    latePress(100, 100);
 
-    expect(mousedown().defaultPrevented).toBe(true);
+    expect(latePress(100, 100).defaultPrevented).toBe(true);
+  });
+
+  it('keeps its default after a press sent as a move that did not arm the handle', () => {
+    attach({ enabled: false });
+    expect(latePress(100, 100).defaultPrevented).toBe(false);
+
+    action.update?.(surface({ enabled: true }));
+    expect(latePress(100, 100, { pointerType: 'touch' }).defaultPrevented).toBe(false);
+    expect(latePress(100, 100, { buttons: 3 }).defaultPrevented).toBe(false);
   });
 
   it('keeps its default with no press before it', () => {
@@ -605,6 +976,48 @@ describe('the mousedown of the press', () => {
     press(100, 100);
 
     expect(mousedown(outside).defaultPrevented).toBe(false);
+  });
+
+  // While it follows a pointer the action listens on the window, for the
+  // mousedown of a press made elsewhere among other things. Each of those
+  // listeners comes off when the gesture ends, however it ends.
+  it.each([
+    ['a click', () => void release(100, 100)],
+    [
+      'a drop',
+      () => {
+        moveTo(110, 100);
+        release(110, 100);
+      },
+    ],
+    [
+      'a cancelled drag and its release',
+      () => {
+        moveTo(110, 100);
+        keydown('Escape');
+        release(110, 100);
+      },
+    ],
+    ['a press made elsewhere', () => void latePress(300, 300, {}, outside)],
+    ['the handle unmounting', () => action.destroy?.()],
+  ])('takes every listener it put on the window off after %s', (_name, end) => {
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    attach();
+    press(100, 100);
+    mousedown();
+    const put = added.mock.calls.map(([type, listener, capture]) => [type, listener, capture]);
+    expect(put.map(([type]) => type)).toContain('mousedown');
+
+    end();
+    // The guard on the click after a drag comes off with its timer.
+    vi.runAllTimers();
+
+    const all = added.mock.calls.map(([type, listener, capture]) => [type, listener, capture]);
+    const taken = removed.mock.calls.map(([type, listener, capture]) => [type, listener, capture]);
+    for (const listener of all) expect(taken).toContainEqual(listener);
+    added.mockRestore();
+    removed.mockRestore();
   });
 });
 
@@ -1253,6 +1666,80 @@ describe('pointer capture', () => {
     release(120, 100);
     expect(calls).toEqual(['start 100,100', 'move 110,100', 'drop 120,100']);
     expect(handle.releasePointerCapture).not.toHaveBeenCalled();
+  });
+});
+
+// A right click made with a column or group in hand asks for a context
+// menu. A menu would take the release with it. Preventing it also has
+// WebKit send the click as moves, and leave the handle its capture.
+
+describe('a context menu asked for during a drag', () => {
+  it('does not open, and nothing else on the page hears of it', () => {
+    attach();
+    const heard = vi.fn();
+    outside.addEventListener('contextmenu', heard);
+    startDrag();
+    const event = contextmenu();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(heard).not.toHaveBeenCalled();
+    expect(calls).toEqual(['start 100,100', 'move 110,100']);
+  });
+
+  it('is left alone before the press becomes a drag', () => {
+    attach();
+    const heard = vi.fn();
+    outside.addEventListener('contextmenu', heard);
+    expect(contextmenu().defaultPrevented).toBe(false);
+    press(100, 100);
+    expect(contextmenu().defaultPrevented).toBe(false);
+
+    expect(heard).toHaveBeenCalledTimes(2);
+  });
+
+  it('is left alone once the drag is over, by a drop or a cancel', () => {
+    attach();
+    startDrag();
+    release(110, 100);
+    expect(contextmenu().defaultPrevented).toBe(false);
+
+    startDrag();
+    keydown('Escape');
+    // The button is still down, and the handle still waits for its release.
+    expect(contextmenu().defaultPrevented).toBe(false);
+  });
+});
+
+// Left to the engine, another button pressed over a text field during a
+// drag puts focus in the field, and a right press selects a word there.
+
+describe('the mousedown of another button during a drag', () => {
+  it('has no default, wherever it lands', () => {
+    attach();
+    startDrag();
+
+    expect(mousedown(outside, { button: 2, buttons: 3 }).defaultPrevented).toBe(true);
+    expect(mousedown(outside, { button: 1, buttons: 5 }).defaultPrevented).toBe(true);
+    expect(calls).toEqual(['start 100,100', 'move 110,100']);
+  });
+
+  it('keeps its default before the press becomes a drag, and once the drag is over', () => {
+    attach();
+    press(100, 100);
+    expect(mousedown(outside, { button: 2, buttons: 3 }).defaultPrevented).toBe(false);
+    moveTo(110, 100);
+    keydown('Escape');
+    expect(mousedown(outside, { button: 2, buttons: 3 }).defaultPrevented).toBe(false);
+    release(110, 100);
+    expect(mousedown(outside, { button: 2, buttons: 2 }).defaultPrevented).toBe(false);
+  });
+
+  it('leaves the default of a new press made elsewhere, which ends the drag', () => {
+    attach();
+    startDrag();
+
+    expect(latePress(300, 300, {}, outside).defaultPrevented).toBe(false);
+    expect(calls.at(-1)).toBe('cancel');
   });
 });
 

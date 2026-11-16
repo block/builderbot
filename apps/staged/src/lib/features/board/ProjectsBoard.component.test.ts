@@ -1717,9 +1717,9 @@ describe('ProjectsBoard column drag', () => {
     const root = await mountBoard();
     layOutColumns(root);
 
-    pointerEvent('pointermove', columnHandle(root, 'done'), pressPoint(root, 'done'), {
-      button: 0,
-    });
+    const handle = columnHandle(root, 'done');
+    pointerEvent('pointermove', handle, pressPoint(root, 'done'), { button: 0 });
+    handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     movePointer(pointerOver(root, 'idea', 'left'));
     expect(dragMark()).toBe('active');
     expect(dropLines(root)).toEqual(['idea:before']);
@@ -1733,6 +1733,74 @@ describe('ProjectsBoard column drag', () => {
     expect(click.defaultPrevented).toBe(true);
     await settle();
 
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+  });
+
+  // WebKit sends that same move, with no mousedown, as the first move after
+  // another button is clicked while the primary one is held. It is not a
+  // press: a press made elsewhere, carried over a column's handle and
+  // right-clicked there, dragged the column.
+
+  it('does not drag a column from a move that only looks like a press', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    pointerEvent('pointermove', columnHandle(root, 'done'), pressPoint(root, 'done'), {
+      button: 0,
+    });
+    movePointer(pointerOver(root, 'idea', 'left'));
+    expect(dragMark()).toBeNull();
+    expect(dropLines(root)).toEqual([]);
+    await releasePointer(pointerOver(root, 'idea', 'left'));
+
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'idea', 'doing', 'done']);
+  });
+
+  // A right click in the middle of a column drag is not the end of it.
+  // WebKit sends the click one of two ways. Where the context menu is
+  // prevented, and for a middle click, it is two moves that name the
+  // button, and the next move then looks like a press of the primary one.
+  // That move cancelled the drag. With the context menu left alone, the
+  // right button's release is a pointerup with the primary button still
+  // down. That dropped the column where it stood. A drag now prevents the
+  // menu, and takes only the primary button's release for its drop.
+
+  it.each([
+    ['as moves, the next one shaped like a press', 'moves'],
+    ['with its release a pointerup', 'release'],
+  ] as const)('keeps a column drag running through a right click sent %s', async (_name, sent) => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    dragColumnOver(root, 'done', 'doing', 'left');
+    expect(dropLines(root)).toEqual(['doing:before']);
+    const at = pointerOver(root, 'doing', 'left');
+    pointerEvent('pointermove', document.body, at, { button: 2, buttons: 3 });
+    document.body.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 2, buttons: 3 })
+    );
+    pointerEvent(sent === 'moves' ? 'pointermove' : 'pointerup', document.body, at, {
+      button: 2,
+      buttons: 1,
+    });
+    flushSync();
+    expect(dragMark()).toBe('active');
+    expect(dragChip()).not.toBeNull();
+    expect(dropLines(root)).toEqual(['doing:before']);
+    expect(commandsMock.moveTag).not.toHaveBeenCalled();
+
+    // The first move after it: the one that names the primary button.
+    pointerEvent('pointermove', document.body, pointerOver(root, 'idea', 'left'), {
+      button: sent === 'moves' ? 0 : -1,
+    });
+    flushSync();
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['idea:before']);
+    await dropColumnOn(root, 'idea', 'left');
+
+    expect(dragChip()).toBeNull();
     expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
     expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
   });

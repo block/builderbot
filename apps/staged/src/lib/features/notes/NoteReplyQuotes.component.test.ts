@@ -560,11 +560,14 @@ describe('NoteReplyQuotes pressing a mark', () => {
 
     const input = field()!;
     expect(input.value).toBe('Why on every write?');
-    expect(document.querySelector('[data-slot="popover-content"]')!.textContent).toContain(
+    // The open reply's passage stays lit, which is what shows what the
+    // field replies to: the field does not repeat it, and no Reply button
+    // stands beside it.
+    expect(marks().every((mark) => mark.classList.contains('is-active'))).toBe(true);
+    expect(document.querySelector('[data-slot="popover-content"]')!.textContent).not.toContain(
       'The cache is invalidated on every write.'
     );
-    // The open reply's passage stays lit.
-    expect(marks().every((mark) => mark.classList.contains('is-active'))).toBe(true);
+    expect(button()).toBeNull();
 
     type('Why on every write? Batch them.');
     key(input, 'Enter');

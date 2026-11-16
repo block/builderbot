@@ -8,9 +8,13 @@
 
   - With the chat composer showing beside the note (`chatVisible`), the block
     goes straight into it (`onAdd`) and the caret lands in its reply input.
-  - Otherwise a reply field opens here — a popover by the button, or on a
-    phone a sheet at the bottom of the dialog (`sheetHost`), above the
-    keyboard — with the quote and its heading path. The block is already in
+  - Otherwise a reply field opens here — a popover where the button was,
+    or on a phone a sheet at the bottom of the dialog (`sheetHost`), above
+    the keyboard. The button goes while the field is open: it has been
+    pressed, and comes back with the next selection. The popover sits by
+    the passage, which is lit in the note, so it holds only the reply; the
+    sheet lies over the note and may cover the passage, so it shows the
+    quote and its heading path as well. The block is already in
     the draft when the field opens (`onReply`, see
     replyDrafts.startLiveQuoteReply), and the reply typed into it is written
     as it goes, so dismissing the field only closes it: Escape, Enter, a
@@ -168,7 +172,14 @@
   /** A key press on the block's mark opened the field: the mark takes focus back as a key closes it. */
   let openedByKey = false;
   let replyEl = $state<HTMLTextAreaElement | null>(null);
+  /** Where the button is, and the popover while the button is away. */
+  let anchorEl = $state<HTMLElement | null>(null);
   let buttonEl = $state<HTMLElement | null>(null);
+  /**
+   * The button's width as last measured. It is not mounted under an open
+   * field, which stays where the button's width put it.
+   */
+  let buttonWidth: number | null = null;
   let dockButtonEl = $state<HTMLElement | null>(null);
   /** The selection the docked button shows; kept through its leaving animation. */
   let dockShown = $state.raw<NoteSelectionQuote | null>(null);
@@ -204,6 +215,7 @@
     const last = rects[rects.length - 1] ?? range.getBoundingClientRect();
     if (last.width === 0 && last.height === 0) return null;
     const touch = viewport.hasCoarsePointer;
+    if (buttonEl) buttonWidth = buttonEl.offsetWidth;
     const box = container.getBoundingClientRect();
     return replyButtonOffset({
       end: last,
@@ -214,7 +226,7 @@
         scrollLeft: container.scrollLeft,
         clientWidth: container.clientWidth,
       },
-      buttonWidth: buttonEl?.offsetWidth ?? (touch ? 92 : 72),
+      buttonWidth: buttonWidth ?? (touch ? 92 : 72),
       touch,
     });
   }
@@ -487,7 +499,7 @@
     activeQuoteId = quote.id;
     editing = true;
     openedByKey = byKey;
-    // The button the popover hangs from is mounted before the popover opens.
+    // The anchor the popover hangs from is mounted before the popover opens.
     flushSync();
     open = true;
     if (sheetMode) {
@@ -594,8 +606,11 @@
   }
 </script>
 
-{#snippet replyField()}
-  <QuoteExcerpt quote={selection!.quote} headings={selection!.headings} clampLines={3} />
+<!-- `withQuote` for the sheet, which may cover the passage it replies to. -->
+{#snippet replyField(withQuote: boolean)}
+  {#if withQuote}
+    <QuoteExcerpt quote={selection!.quote} headings={selection!.headings} clampLines={3} />
+  {/if}
   <textarea
     bind:this={replyEl}
     value={reply}
@@ -627,37 +642,50 @@
 {/snippet}
 
 {#if selection && anchor && !dockMode}
-  <div class="selection-reply-anchor" style:top="{anchor.top}px" style:left="{anchor.left}px">
-    <button
-      type="button"
-      bind:this={buttonEl}
-      class="selection-reply-button touch-hit"
-      class:is-open={open}
-      title={editing ? 'Edit your reply' : 'Reply to the selected text'}
-      aria-label={editing ? 'Edit your reply' : 'Reply to the selected text'}
-      aria-busy={adding}
-      onmousedown={(event: MouseEvent) => event.preventDefault()}
-      onclick={handleButtonClick}
-    >
-      <MessageSquareQuote size={12} aria-hidden="true" />
-      <span>Reply</span>
-    </button>
+  <div
+    bind:this={anchorEl}
+    class="selection-reply-anchor"
+    style:top="{anchor.top}px"
+    style:left="{anchor.left}px"
+  >
+    <!-- Not under an open field (`editing`: one about to open from a mark),
+         which takes the button's place. -->
+    {#if !open && !editing}
+      <button
+        type="button"
+        bind:this={buttonEl}
+        class="selection-reply-button touch-hit"
+        title="Reply to the selected text"
+        aria-label="Reply to the selected text"
+        aria-busy={adding}
+        onmousedown={(event: MouseEvent) => event.preventDefault()}
+        onclick={handleButtonClick}
+      >
+        <MessageSquareQuote size={12} aria-hidden="true" />
+        <span>Reply</span>
+      </button>
+    {/if}
     {#if !sheetMode}
       <Popover.Root {open} onOpenChange={handleOpenChange}>
+        <!-- The passage is lit in the note right beside the popover, so the
+             quote is not repeated in it. With no quote to read out, the
+             label is what names the popover. -->
         <Popover.Content
-          customAnchor={buttonEl}
+          customAnchor={anchorEl}
           side="bottom"
           align="start"
-          sideOffset={6}
+          sideOffset={0}
           collisionPadding={12}
-          class="selection-reply-popover w-[min(340px,calc(100vw-24px))] gap-2.5 p-3"
+          role="dialog"
+          aria-label="Reply to the selected text"
+          class="selection-reply-popover w-[min(340px,calc(100vw-24px))] gap-2 p-2.5"
           onOpenAutoFocus={(event: Event) => {
             event.preventDefault();
             replyEl?.focus();
           }}
           onCloseAutoFocus={(event: Event) => event.preventDefault()}
         >
-          {@render replyField()}
+          {@render replyField(false)}
         </Popover.Content>
       </Popover.Root>
     {/if}
@@ -698,7 +726,7 @@
         onclick={scrim.onclick}
       ></div>
       <div class="selection-reply-panel">
-        {@render replyField()}
+        {@render replyField(true)}
       </div>
     </div>
   </Portal>
@@ -731,8 +759,7 @@
       background-color 0.1s;
   }
 
-  .selection-reply-button:hover,
-  .selection-reply-button.is-open {
+  .selection-reply-button:hover {
     border-color: var(--border-emphasis);
     background: var(--bg-hover);
     color: var(--text-primary);

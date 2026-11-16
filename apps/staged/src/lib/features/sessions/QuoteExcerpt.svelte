@@ -2,8 +2,9 @@
   QuoteExcerpt.svelte — A quoted passage of a note: the heading path it sits
   under as a breadcrumb, then the text behind a note-coloured rule.
 
-  Shared by the note's selection popover, the composer's quote blocks and the
-  transcript's sent quotes, so a quote reads the same from selection to send.
+  Shared by the note's reply sheet on a phone, the composer's quote blocks
+  and the transcript's sent quotes, so a quote reads the same from selection
+  to send.
   `clampLines` caps the text's height (0: show it all); the full text is
   always in its tooltip.
 -->

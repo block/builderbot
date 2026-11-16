@@ -10,7 +10,10 @@ import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 // a selection in the note has settled; with the chat composer beside the
 // note a press adds the block there (`onAdd`), otherwise it opens a reply
 // field whose block is already in the draft (`onReply`) and whose typing is
-// handed on as it goes, so dismissing the field just closes it. By touch the
+// handed on as it goes, so dismissing the field just closes it. The button
+// is not shown under an open field, and the field by the passage (the
+// popover) holds the reply without repeating the quote, which the sheet on a
+// phone, lying over the note, still shows. By touch the
 // tap that presses the button collapses the page selection first, and the
 // captured quote has to survive that. On a phone the button is docked above
 // the bottom bar instead of beside the selection, and the field is a sheet.
@@ -190,6 +193,11 @@ function button(): HTMLButtonElement | null {
 
 function field(): HTMLTextAreaElement | null {
   return document.querySelector<HTMLTextAreaElement>('.selection-reply-input');
+}
+
+/** The reply field beside the passage (not the sheet a phone has instead). */
+function popover(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-slot="popover-content"]');
 }
 
 function dockButton(): HTMLButtonElement | null {
@@ -374,7 +382,7 @@ describe('NoteSelectionReply reply field', () => {
     const input = field();
     expect(input).not.toBeNull();
     // Nothing to confirm: no buttons in the field.
-    expect(document.querySelectorAll('[data-slot="popover-content"] button')).toHaveLength(0);
+    expect(popover()!.querySelectorAll('button')).toHaveLength(0);
 
     input!.value = 'Why on every write?';
     input!.dispatchEvent(new Event('input', { bubbles: true }));
@@ -388,6 +396,66 @@ describe('NoteSelectionReply reply field', () => {
     expect(field()).toBeNull();
     expect(button()).toBeNull();
     expect(document.getSelection()?.isCollapsed).toBe(true);
+  });
+
+  it('takes the Reply button away while the field is open, and offers it again for the next selection', () => {
+    render();
+    selectPassage();
+    settle();
+    expect(button()).not.toBeNull();
+
+    click(button()!);
+
+    expect(field()).not.toBeNull();
+    expect(button()).toBeNull();
+    // What the field hangs from stays where the button was.
+    expect(document.querySelector('.selection-reply-anchor')).not.toBeNull();
+
+    // No button for a selection made under the open field either.
+    selectPassage(4, 9);
+    settle();
+    expect(button()).toBeNull();
+
+    pressKey(field()!, 'Escape');
+    expect(field()).toBeNull();
+    // Closed, with nothing selected: nothing to offer.
+    expect(button()).toBeNull();
+
+    selectPassage(4, 9);
+    settle();
+    expect(button()).not.toBeNull();
+    expect(field()).toBeNull();
+  });
+
+  it('holds the reply and its status line, without repeating the passage it sits beside', () => {
+    render();
+    selectPassage();
+    settle();
+    click(button()!);
+
+    const content = popover()!;
+    expect(content.querySelector('.quote-excerpt')).toBeNull();
+    expect(content.querySelector('blockquote')).toBeNull();
+    expect(content.textContent).not.toContain('The cache is invalidated on every write.');
+    // Nor the heading path, which was there to place the quote.
+    expect(content.textContent).not.toContain('Architecture');
+    // The reply comes first, then the status line.
+    expect(content.firstElementChild).toBe(field());
+    expect(content.querySelector('.selection-reply-status')!.textContent).toContain(
+      'Kept in your reply draft'
+    );
+  });
+
+  it('is named for assistive technology, with no quote in it to go by', () => {
+    render();
+    selectPassage();
+    settle();
+    click(button()!);
+
+    const content = popover()!;
+    expect(content.getAttribute('role')).toBe('dialog');
+    expect(content.getAttribute('aria-label')).toBe('Reply to the selected text');
+    expect(field()!.getAttribute('aria-label')).toBe('Reply to the selected text');
   });
 
   it('lets Shift+Enter through for a new line', () => {
@@ -495,12 +563,10 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(onAdd).not.toHaveBeenCalled();
     const input = field()!;
     expect(input.value).toBe('Why on every write?');
-    // Anchored as a new reply's field is: hung from the button by the passage.
-    expect(button()).not.toBeNull();
-    expect(button()!.classList.contains('is-open')).toBe(true);
-    expect(document.querySelector('[data-slot="popover-content"]')!.textContent).toContain(
-      'The cache is invalidated on every write.'
-    );
+    // Anchored as a new reply's field is, by the passage, with no Reply
+    // button: there is no selection to reply to.
+    expect(document.querySelector('.selection-reply-anchor')).not.toBeNull();
+    expect(button()).toBeNull();
     expect(onActiveQuoteChange).toHaveBeenLastCalledWith('q7');
 
     input.value = 'Why on every write? Batch them.';
@@ -532,6 +598,40 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(editLive.finish).not.toHaveBeenCalled();
     expect(field()).toBeNull();
     expect(button()).toBeNull();
+  });
+
+  it('holds the reply, the status line and Remove, without repeating the marked passage', () => {
+    const { reply } = render();
+    reply.editQuote(existing, passageRange());
+    flushSync();
+
+    const content = popover()!;
+    expect(content.querySelector('.quote-excerpt')).toBeNull();
+    expect(content.textContent).not.toContain('The cache is invalidated on every write.');
+    expect(content.textContent).not.toContain('Architecture');
+    expect(content.firstElementChild).toBe(field());
+    expect(field()!.value).toBe('Why on every write?');
+    expect(content.querySelector('.selection-reply-status')).not.toBeNull();
+    expect(content.contains(removeButton())).toBe(true);
+    // Named, as a new reply's field is.
+    expect(content.getAttribute('role')).toBe('dialog');
+    expect(content.getAttribute('aria-label')).toBe('Reply to the selected text');
+  });
+
+  it('shows no Reply button from opening to closing, then offers one for a selection', () => {
+    const { reply } = render();
+    reply.editQuote(existing, passageRange());
+    flushSync();
+    expect(field()).not.toBeNull();
+    expect(button()).toBeNull();
+
+    pressKey(field()!, 'Escape');
+    expect(field()).toBeNull();
+    expect(button()).toBeNull();
+
+    selectPassage(4, 9);
+    settle();
+    expect(button()).not.toBeNull();
   });
 
   it("has no Remove button in a new reply's field", () => {
@@ -709,6 +809,8 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
     expect(onEdit).toHaveBeenCalledWith(existing);
     expect(field()!.value).toBe('Why on every write?');
     expect(removeButton()).not.toBeNull();
+    // The button that was pressed goes under the field it reopened.
+    expect(button()).toBeNull();
 
     pressKey(field()!, 'Enter');
     expect(editLive.finish).toHaveBeenCalledTimes(1);
@@ -767,6 +869,10 @@ describe('NoteSelectionReply reopened from a marked passage', () => {
       expect(document.activeElement).toBe(field());
       expect(field()!.value).toBe('Why on every write?');
       expect(dockButton()).toBeNull();
+      // The sheet may lie over the passage, so it still shows what is quoted.
+      expect(sheet!.querySelector('.quote-text')!.textContent).toContain(
+        'The cache is invalidated on every write.'
+      );
 
       click(removeButton()!);
       expect(editLive.remove).toHaveBeenCalledTimes(1);
@@ -878,9 +984,16 @@ describe('NoteSelectionReply by touch', () => {
 
       const sheet = hosts.sheetHost.querySelector('.selection-reply-sheet');
       expect(sheet).not.toBeNull();
-      expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+      expect(popover()).toBeNull();
       expect(document.activeElement).toBe(field());
       expect(sheet!.textContent).not.toContain('Esc');
+      // The sheet lies over the note and may cover the passage: unlike the
+      // popover it shows the quote, under its heading path.
+      expect(sheet!.getAttribute('aria-label')).toBe('Reply to the selected text');
+      expect(sheet!.querySelector('.quote-text')!.textContent).toContain(
+        'The cache is invalidated on every write.'
+      );
+      expect(sheet!.querySelector('.quote-path')!.textContent).toContain('Architecture');
 
       const scrim = sheet!.querySelector<HTMLElement>('.selection-reply-scrim')!;
       press(scrim, 'touch');
@@ -1003,6 +1116,11 @@ describe('NoteSelectionReply docked on a phone', () => {
 
       expect(dockButton()).toBeNull();
       expect(button()).not.toBeNull();
+
+      // There too the button goes under the field it opens.
+      click(button()!);
+      expect(popover()).not.toBeNull();
+      expect(button()).toBeNull();
     } finally {
       dockHost.remove();
     }

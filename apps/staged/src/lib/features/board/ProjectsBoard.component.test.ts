@@ -295,7 +295,7 @@ function pointerEvent(
     pointerId: 1,
     pointerType: 'mouse',
     isPrimary: true,
-    button: 0,
+    button: type === 'pointermove' ? -1 : 0,
     buttons: type === 'pointerup' ? 0 : 1,
     ...at,
     ...init,
@@ -1706,6 +1706,96 @@ describe('ProjectsBoard column drag', () => {
     expect(columnHandle(root, 'doing').classList.contains('draggable')).toBe(true);
     await dragColumn(root, 'doing', 'idea', 'left');
     expect(commandsMock.moveTag.mock.calls).toEqual([['doing', 'status', 0]]);
+  });
+
+  // After a card's drag, which is a native one, WebKit sees no release and
+  // takes the mouse button to be down. It sends the next press as a move
+  // that names the primary button, with a mousedown and no pointerdown. The
+  // first column drag after a card drag did nothing.
+
+  it('drags a column whose press the engine sent as a move, after a native drag', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+
+    pointerEvent('pointermove', columnHandle(root, 'done'), pressPoint(root, 'done'), {
+      button: 0,
+    });
+    movePointer(pointerOver(root, 'idea', 'left'));
+    expect(dragMark()).toBe('active');
+    expect(dropLines(root)).toEqual(['idea:before']);
+
+    // The click that the release sends comes in the same task, and goes to
+    // what the press and the release share: the row, or further out. It
+    // used to reach it. It is swallowed.
+    pointerEvent('pointerup', document.body, pointerOver(root, 'idea', 'left'));
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    root.querySelector('.board-columns')!.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    await settle();
+
+    expect(commandsMock.moveTag.mock.calls).toEqual([['done', 'status', 0]]);
+    expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+  });
+
+  // The press on a handle has no default action, so the engine starts no
+  // selection to extend as the pointer moves. WebKit put that selection,
+  // and focus with it, into a field the pointer passed: the Search field
+  // above the board.
+
+  it('cancels the default of a press on a column’s handle, and takes focus off a field', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+    const search = document.createElement('input');
+    document.body.append(search);
+    search.focus();
+    const mousedown = (target: Element) => {
+      const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    try {
+      pressColumn(root, 'done');
+      const name = column(root, 'done').querySelector('.column-name')!;
+      expect(mousedown(name).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(document.body);
+
+      // Focus is where the press left it through the drag and after the drop.
+      movePointer(pointerOver(root, 'idea', 'left'));
+      await dropColumnOn(root, 'idea', 'left');
+      expect(columnKeys(root)).toEqual([NO_TAG_COLUMN_KEY, 'done', 'idea', 'doing']);
+      expect(document.activeElement).toBe(document.body);
+
+      // "No ‹group›" does not drag, so a press on its header is an
+      // ordinary one. So is one on a column's menu trigger, beside the
+      // handle, and on a card.
+      search.focus();
+      pressColumn(root, NO_TAG_COLUMN_KEY);
+      expect(mousedown(columnHandle(root, NO_TAG_COLUMN_KEY)).defaultPrevented).toBe(false);
+      const trigger = column(root, 'idea').querySelector('.board-column-menu-trigger')!;
+      expect(mousedown(trigger).defaultPrevented).toBe(false);
+      expect(mousedown(card(root, 'p1')).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(search);
+    } finally {
+      search.remove();
+    }
+  });
+
+  it('leaves a press in a column’s name field alone while the name is edited', async () => {
+    const root = await mountBoard();
+    layOutColumns(root);
+    menuItem(await openColumnMenu(root, 'doing'), 'Rename').click();
+    await settle();
+    const input = column(root, 'doing').querySelector<HTMLInputElement>('.column-name-input')!;
+
+    // The field is inside the handle, which is off: the press places the
+    // caret and can select the name's text.
+    pointerEvent('pointerdown', input, pressPoint(root, 'doing'));
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+    input.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input);
   });
 
   it('refuses a native drag that starts in the handle, which would take the pointer', async () => {

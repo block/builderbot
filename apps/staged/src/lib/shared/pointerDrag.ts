@@ -37,6 +37,43 @@ export function pastDragThreshold(
   return Math.hypot(point.clientX - pressed.clientX, point.clientY - pressed.clientY) >= threshold;
 }
 
+/** What of a pointer event says whether it is a press. */
+export type PressEvent = Pick<PointerEvent, 'type' | 'button' | 'buttons'>;
+
+/**
+ * Whether a pointer event is the primary button going down with no other
+ * button held: the press that can arm a drag handle.
+ *
+ * That is a pointerdown for the primary button, in every engine. It is also
+ * a pointermove whose `button` is the primary one and whose `buttons` hold
+ * it alone. A pointer sends no second pointerdown while the engine takes a
+ * button of its to be down, and reports a button that changes meanwhile on
+ * a pointermove. WebKit takes the mouse button to be down for as long as it
+ * has seen no release, and a native drag (of a card, a tag row, or text
+ * selected in a field) takes the release with it. The next press then
+ * arrives as that pointermove and a mousedown, with no pointerdown, and
+ * the moves and the release after it arrive as usual.
+ *
+ * With another button held it is a chord, which arms nothing either way.
+ */
+export function isPrimaryPress(event: PressEvent): boolean {
+  if (event.button !== 0) return false;
+  if (event.type === 'pointerdown') return true;
+  return event.type === 'pointermove' && event.buttons === 1;
+}
+
+/**
+ * Whether a pointer event shows a button of the pointer going down: any
+ * pointerdown, and a pointermove that reports the primary button pressed
+ * (see `isPrimaryPress`), whatever else is held. A handle following a
+ * pointer takes one from that pointer as proof that its last release never
+ * reached the page.
+ */
+export function isNewPress(event: PressEvent): boolean {
+  if (event.type === 'pointerdown') return true;
+  return event.type === 'pointermove' && event.button === 0 && (event.buttons & 1) !== 0;
+}
+
 /** How deep each edge's scroll zone runs into the container, in px. */
 export const EDGE_SCROLL_ZONE = 48;
 
@@ -275,9 +312,9 @@ type Phase =
 
 /**
  * The drag-handle action. A primary-button press with a mouse or pen arms
- * it, and `DRAG_THRESHOLD` px of movement starts the drag, so a plain click
- * still clicks. Touch is ignored: a finger scrolls, and the menus are the
- * way to reorder there.
+ * it (see `isPrimaryPress` for what a press is), and `DRAG_THRESHOLD` px of
+ * movement starts the drag, so a plain click still clicks. Touch is ignored:
+ * a finger scrolls, and the menus are the way to reorder there.
  *
  * A drag ends in `drop` on release, or in `cancel`: on Escape, a
  * pointercancel, the handle losing the pointer's capture, the window losing
@@ -295,10 +332,25 @@ type Phase =
  * of the page's flow, takes no pointer events, and goes when the drag ends,
  * by a drop or by any cancel.
  *
- * The handle itself needs `user-select: none`, so the press does not start a
- * text selection before it is a drag. The action refuses a native drag that
- * starts in the handle (of an image, a link or selected text), which would
- * take the pointer away.
+ * The press that arms the handle has no default action of its own. Left to
+ * the engine, a mouse press starts a text selection that the engine extends
+ * for as long as the button is down, whatever `user-select` says once the
+ * drag is under way. WebKit puts that selection, and the keyboard focus
+ * with it, into a text field the pointer passes, and leaves the text
+ * between the press and the release selected when a drag is cancelled with
+ * the button still down. So the armed press's mousedown is cancelled, and
+ * nothing the pointer passes selects or takes focus, from the press to the
+ * release.
+ *
+ * Cancelling the mousedown also cancels what a press does to focus, which
+ * the action then does by hand (see `movePressFocus`): focus leaves a field
+ * being edited, as on any press outside it. From there it stays put, so
+ * after a drop it is where the press left it, not where the pointer went.
+ *
+ * The handle itself needs `user-select: none`, for an engine that selects
+ * on a press whose default was not the one cancelled. The action refuses a
+ * native drag that starts in the handle (of an image, a link or selected
+ * text), which would take the pointer away.
  */
 export function pointerDrag(
   node: HTMLElement,
@@ -587,13 +639,20 @@ export function pointerDrag(
     startScrolling();
   }
 
-  function handlePointerDown(event: PointerEvent) {
+  /**
+   * A press on the handle: a pointerdown, or the pointermove an engine
+   * sends in its place when it takes the pointer's button to be down
+   * already (see `isPrimaryPress`). Any other pointermove over the handle
+   * is not this listener's.
+   */
+  function handlePress(event: PointerEvent) {
+    if (event.type !== 'pointerdown' && !isPrimaryPress(event)) return;
     // A press made while a guard is still up is a new gesture: its click is
     // its own.
     dropClickGuard();
     if (phase !== 'idle') abandon(false);
     if (!enabled()) return;
-    if (event.pointerType === 'touch' || !event.isPrimary || event.button !== 0) return;
+    if (event.pointerType === 'touch' || !event.isPrimary || !isPrimaryPress(event)) return;
     phase = 'armed';
     pointerId = event.pointerId;
     pressed = pointOf(event);
@@ -602,13 +661,52 @@ export function pointerDrag(
   }
 
   /**
+   * What a press does to keyboard focus, done by hand: the armed press's
+   * mousedown is cancelled, which cancels this with it. A press on
+   * something that takes no focus itself gives focus to the nearest thing
+   * around it that can hold it (the dialog the handle is in, say), and
+   * otherwise leaves nothing focused. Either way it takes focus out of a
+   * field being edited, which is how the field hears that the edit is done.
+   *
+   * Focus already on something the handle is inside stays there. Nothing
+   * scrolls for it: the press was made on what is already showing.
+   */
+  function movePressFocus() {
+    const doc = node.ownerDocument;
+    const active = doc.activeElement;
+    if (!(active instanceof HTMLElement) || active === doc.body || active.contains(node)) return;
+    const holder = node.closest<HTMLElement>('[tabindex]');
+    if (holder) holder.focus({ preventScroll: true });
+    // Nothing around the handle holds focus, or what does would not take it.
+    if (doc.activeElement === active) active.blur();
+  }
+
+  /**
+   * The mousedown of the press that armed the handle. An engine sends it
+   * after the pointer event that armed it, in the same task. It has no
+   * default action: no selection starts, so there is none for the engine
+   * to extend, or to move focus with, while the button is down.
+   *
+   * A press that did not arm the handle keeps its default: one made with
+   * another button, by touch, or while the handle is off (a name field
+   * inside it then selects text as usual).
+   */
+  function handleMouseDown(event: MouseEvent) {
+    if (phase !== 'armed' || event.button !== 0) return;
+    event.preventDefault();
+    movePressFocus();
+  }
+
+  /**
    * The pointer this handle is following was pressed again, anywhere in the
-   * window. A pointer sends a pointerdown only when none of its buttons was
-   * down (a second button pressed during a drag is a pointermove), so the
-   * release this handle was waiting for never reached the page. It went to
-   * another window, say, after this one lost focus, and the click that
-   * brought the focus back was passed through to the page with no move
-   * before it.
+   * window. A pointer shows a button going down only when the page saw its
+   * last release, or never will: a pointerdown when none of its buttons
+   * was down, and where the engine still takes one to be down, a
+   * pointermove that reports the primary button pressed (see `isNewPress`).
+   * A second button pressed during a drag is neither. So the release this
+   * handle was waiting for never reached the page. It went to another
+   * window, say, after this one lost focus, and the click that brought the
+   * focus back was passed through to the page with no move before it.
    *
    * The gesture is over, without a drop. Left to wait, the release of this
    * new press would be taken for the old one: after a cancelled drag it
@@ -627,6 +725,11 @@ export function pointerDrag(
 
   function handlePointerMove(event: PointerEvent) {
     if (event.pointerId !== pointerId) return;
+    // A press sent as a move: the release before it was missed.
+    if (isNewPress(event)) {
+      abandon(false);
+      return;
+    }
     // The button is up, so the release went somewhere the page never saw
     // (outside the window with no capture, or under a context menu).
     if ((event.buttons & 1) === 0) {
@@ -684,7 +787,9 @@ export function pointerDrag(
     if (enabled()) event.preventDefault();
   }
 
-  node.addEventListener('pointerdown', handlePointerDown);
+  node.addEventListener('pointerdown', handlePress);
+  node.addEventListener('pointermove', handlePress);
+  node.addEventListener('mousedown', handleMouseDown);
   node.addEventListener('dragstart', handleNativeDragStart);
 
   return {
@@ -695,7 +800,9 @@ export function pointerDrag(
       startScrolling();
     },
     destroy() {
-      node.removeEventListener('pointerdown', handlePointerDown);
+      node.removeEventListener('pointerdown', handlePress);
+      node.removeEventListener('pointermove', handlePress);
+      node.removeEventListener('mousedown', handleMouseDown);
       node.removeEventListener('dragstart', handleNativeDragStart);
       abandon(false);
       dropClickGuard();

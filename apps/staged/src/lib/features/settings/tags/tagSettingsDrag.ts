@@ -8,6 +8,11 @@
  * and the panel resolves each point the pointer reaches from the sections'
  * rects, forgiving a pointer that strays a little off the list.
  *
+ * After a drop the list scrolls only as far as it takes to show the group
+ * that moved (see `groupRevealOffset`). Where the list is scrolled to is
+ * otherwise its own: the panel turns the engine's scroll anchoring off for
+ * it, which would move it to follow whatever was on screen before.
+ *
  * A tag carries a type of its own and nothing else. Some engines only start
  * a drag that carries data, and this is data enough. It carries no
  * `text/plain` copy (as for a board card, see boardDrop): a tag released
@@ -18,6 +23,7 @@
 import {
   dragPositionAlong,
   spanAlong,
+  type AxisSpan,
   type DragBox,
   type PointerDragPoint,
 } from '../../../shared/pointerDrag';
@@ -109,4 +115,40 @@ export function groupAtPoint(
       ? last.anchorGroupId === over.groupId
       : last?.anchorGroupId === next.groupId;
   return named && last ? last : { anchorGroupId: over.groupId, place: 'after' };
+}
+
+/**
+ * The room, in px, a group shown after a drop keeps from the list's top and
+ * bottom edges: half the gap between two sections, so the group is clear of
+ * the edge and its neighbour's end is not left peeking in.
+ */
+export const GROUP_REVEAL_MARGIN = 12;
+
+/** Slack for fractional positions under zoom. */
+const REVEAL_EPSILON = 1;
+
+/**
+ * How far to scroll the list (negative is up) to show a group that a drop
+ * just moved, given how far down the page the list and the group's section
+ * span. Zero when the section is already in view, so a drop made where the
+ * pointer could see it scrolls nothing.
+ *
+ * The scroll is the least that brings the whole section in, with
+ * `GROUP_REVEAL_MARGIN` to spare: its top to the list's top when it starts
+ * above, its bottom to the list's bottom when it ends below. A section
+ * taller than the list lines its top up, since its header is what says
+ * which group it is.
+ */
+export function groupRevealOffset(
+  list: AxisSpan,
+  section: AxisSpan,
+  margin = GROUP_REVEAL_MARGIN
+): number {
+  const start = list.start + margin;
+  const end = list.end - margin;
+  const toTop = section.start - start;
+  const toBottom = section.end - end;
+  const taller = section.end - section.start > end - start;
+  if (taller || toTop < -REVEAL_EPSILON) return Math.abs(toTop) <= REVEAL_EPSILON ? 0 : toTop;
+  return toBottom > REVEAL_EPSILON ? toBottom : 0;
 }

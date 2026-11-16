@@ -23,10 +23,15 @@
   or just past it, the group scrolls it. A chip with the group's name
   follows the pointer.
 
+  A drop leaves the list scrolled where it was, and then scrolls it only as
+  far as it takes to show the group that moved. The list opts out of the
+  engine's scroll anchoring for that (see `.panel-body`).
+
   State and actions live in a TagsEditor (see tagsEditor.svelte.ts) that the
   sections and rows share.
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import Info from '@lucide/svelte/icons/info';
   import Tags from '@lucide/svelte/icons/tags';
   import type { PointerDragPoint } from '../../../shared/pointerDrag';
@@ -38,7 +43,7 @@
   import NewTagGroupMenu from './NewTagGroupMenu.svelte';
   import TagGroupSection, { type TagGroupDragHandlers } from './TagGroupSection.svelte';
   import UngroupedTagsSection from './UngroupedTagsSection.svelte';
-  import { groupAtPoint } from './tagSettingsDrag';
+  import { groupAtPoint, groupRevealOffset } from './tagSettingsDrag';
   import { TagsEditor } from './tagsEditor.svelte';
 
   const editor = new TagsEditor();
@@ -73,6 +78,29 @@
     else editor.groupDragLeave();
   }
 
+  /**
+   * Scroll the list, and only the list, as far as it takes to show a group
+   * that a drop just moved (see `groupRevealOffset`). The drop can be made
+   * with the list scrolled, and can move a group that had scrolled out of
+   * view, or one too tall to be seen whole from where the pointer let go.
+   */
+  async function revealGroup(groupId: string) {
+    // The section is where the drop put it once the new order has rendered.
+    await tick();
+    if (!body) return;
+    const section = [...body.querySelectorAll<HTMLElement>('[data-tag-group]')].find(
+      (el) => el.dataset.tagGroup === groupId
+    );
+    if (!section) return;
+    const list = body.getBoundingClientRect();
+    const rect = section.getBoundingClientRect();
+    const offset = groupRevealOffset(
+      { start: list.top, end: list.bottom },
+      { start: rect.top, end: rect.bottom }
+    );
+    if (offset !== 0) body.scrollTop += offset;
+  }
+
   // A group's drag, as the pointerDrag action on its handle reports it. The
   // action follows every `start` with a `drop` or a `cancel`, so no group
   // drag is ever left over.
@@ -91,11 +119,12 @@
     },
     /**
      * Drop the dragged group where the pointer was released, which is
-     * resolved as any other point.
+     * resolved as any other point. A group that moved is then shown.
      */
     drop(point) {
       holdGroupAt(point);
-      editor.groupDrop();
+      const moved = editor.groupDrop();
+      if (moved !== null) void revealGroup(moved);
     },
     cancel: () => editor.groupDragEnd(),
   };
@@ -128,6 +157,7 @@
           {editor}
           {group}
           tags={catalog.tagsByGroup.get(group.id) ?? []}
+          first={i === 0}
           canMoveUp={i > 0}
           canMoveDown={i < catalog.groups.length - 1}
           groupDrag={groupDragHandlers}
@@ -224,6 +254,15 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    /* Where the list is scrolled to is its own to keep. An engine with
+       scroll anchoring (WebKit has it) scrolls a list to hold still
+       whatever was on screen when the content above that changes height.
+       A group dropped further down leaves the content above, so the engine
+       would scroll the list up by the group's height: to the top, for a
+       tall group, and away from where the group landed. With anchoring off
+       the list stays put, and the panel shows the group itself (see
+       `revealGroup`). */
+    overflow-anchor: none;
     padding: 16px;
     /* The phone layout's bottom inset (SettingsPage's `.panel-pad`). */
     padding-bottom: calc(16px + var(--settings-panel-inset-bottom, 0px));

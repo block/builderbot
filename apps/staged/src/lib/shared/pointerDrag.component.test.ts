@@ -47,7 +47,11 @@ function attach(overrides: Partial<PointerDragOptions> = {}) {
   action = pointerDrag(handle, surface(overrides));
 }
 
-/** A mouse's primary button, as the engines send it. The release has no button down. */
+/**
+ * A mouse's primary button, as the engines send it. The release has no
+ * button down. A move names no button (-1): only a press and a release do,
+ * and a move that names one is a button changing state mid-press.
+ */
 function pointer(
   type: string,
   target: EventTarget,
@@ -61,7 +65,7 @@ function pointer(
     pointerId: 1,
     pointerType: 'mouse',
     isPrimary: true,
-    button: 0,
+    button: type === 'pointermove' ? -1 : 0,
     buttons: type === 'pointerup' || type === 'pointercancel' ? 0 : 1,
     clientX,
     clientY,
@@ -78,6 +82,28 @@ const moveTo = (x: number, y: number, init: PointerEventInit = {}) =>
   pointer('pointermove', outside, x, y, init);
 const release = (x: number, y: number, init: PointerEventInit = {}) =>
   pointer('pointerup', outside, x, y, init);
+
+/**
+ * The press WebKit sends in place of a pointerdown while it takes the mouse
+ * button to be down: a move that names the primary button. It does after a
+ * native drag (of a card, a tag row, text selected in a field), which takes
+ * the release with it. A mousedown follows, and no pointerdown.
+ */
+const latePress = (x = 100, y = 100, init: PointerEventInit = {}) =>
+  pointer('pointermove', handle, x, y, { button: 0, ...init });
+
+/** The mousedown an engine sends after the pointer event of a mouse's press. */
+function mousedown(target: Element = handle, init: MouseEventInit = {}): MouseEvent {
+  const event = new MouseEvent('mousedown', {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    buttons: 1,
+    ...init,
+  });
+  target.dispatchEvent(event);
+  return event;
+}
 
 function click(target: Element = handle): MouseEvent {
   const event = new MouseEvent('click', { bubbles: true, cancelable: true });
@@ -289,8 +315,10 @@ describe('what arms the handle', () => {
     moveTo(110, 100, { buttons: 2 });
     press(100, 100, { button: 1, buttons: 4 });
     moveTo(110, 100, { buttons: 4 });
-    // Nor once the primary button joins it: that sends a move, not a press.
+    // Nor once the primary button joins it. That sends a move that names
+    // the primary button, with both down: a chord, not a press.
     press(100, 100, { button: 2, buttons: 2 });
+    pointer('pointermove', handle, 100, 100, { button: 0, buttons: 3 });
     moveTo(110, 100, { buttons: 3 });
 
     expect(calls).toEqual([]);
@@ -315,6 +343,399 @@ describe('what arms the handle', () => {
     action.update?.(surface({ enabled: true }));
     startDrag();
     expect(calls).toEqual(['start 100,100', 'move 110,100']);
+  });
+});
+
+// After a native drag WebKit sees no release, so it takes the mouse button
+// to be down and sends the next press as a move that names the primary
+// button (see `isPrimaryPress`). Left unarmed, the first drag after a card
+// or tag row drag did nothing, and its release clicked whatever the press
+// and the release shared an ancestor in.
+
+describe('a press the engine sends as a move', () => {
+  it('arms the handle: the moves after it drag, and the release drops', () => {
+    attach();
+    latePress(100, 100);
+    expect(calls).toEqual([]);
+    moveTo(110, 100);
+    moveTo(150, 130);
+    release(150, 130);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 150,130', 'drop 150,130']);
+    expect(dragMark()).toBeNull();
+  });
+
+  it('is still a click when it never moves past the threshold', () => {
+    attach();
+    latePress(100, 100);
+    moveTo(102, 100);
+    release(102, 100);
+    click();
+
+    expect(calls).toEqual([]);
+    expect(clicks).toHaveBeenCalledTimes(1);
+  });
+
+  it('has the click after its drag swallowed, wherever the click lands', () => {
+    attach();
+    const heard = vi.fn();
+    document.body.addEventListener('click', heard);
+    latePress(100, 100);
+    moveTo(110, 100);
+    release(110, 100);
+    // The press and the release were on different elements, so the click
+    // goes to what holds both.
+    const event = click(document.body);
+    document.body.removeEventListener('click', heard);
+
+    expect(heard).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('captures the pointer the move names', () => {
+    const capture = vi.fn();
+    handle.setPointerCapture = capture;
+    handle.releasePointerCapture = vi.fn();
+    attach();
+    latePress(100, 100, { pointerId: 7 });
+    moveTo(110, 100, { pointerId: 7 });
+
+    expect(capture).toHaveBeenCalledExactlyOnceWith(7);
+  });
+
+  it('is not an ordinary move over the handle, with the button down or up', () => {
+    attach();
+    // A pointer pressed elsewhere and dragged across the handle.
+    pointer('pointermove', handle, 100, 100);
+    moveTo(110, 100);
+    // And one passing over it with no button down.
+    pointer('pointermove', handle, 100, 100, { buttons: 0 });
+    moveTo(110, 100, { buttons: 0 });
+
+    expect(calls).toEqual([]);
+  });
+
+  it('is not the primary button coming up over the handle while another is held', () => {
+    attach();
+    pointer('pointermove', handle, 100, 100, { button: 0, buttons: 2 });
+    moveTo(110, 100, { buttons: 2 });
+
+    expect(calls).toEqual([]);
+  });
+
+  it('does not arm for a finger, for a pointer that is not the primary one, or while the handle is off', () => {
+    attach();
+    latePress(100, 100, { pointerType: 'touch' });
+    moveTo(110, 100, { pointerType: 'touch' });
+    release(110, 100, { pointerType: 'touch' });
+    latePress(100, 100, { isPrimary: false });
+    moveTo(110, 100, { isPrimary: false });
+    release(110, 100, { isPrimary: false });
+    action.update?.(surface({ enabled: false }));
+    latePress(100, 100);
+    moveTo(110, 100);
+
+    expect(calls).toEqual([]);
+  });
+
+  it('does not arm once the handle unmounts', () => {
+    attach();
+    action.destroy?.();
+    latePress(100, 100);
+    moveTo(110, 100);
+
+    expect(calls).toEqual([]);
+  });
+
+  // While the handle follows a pointer, a press from that pointer proves
+  // the release it was waiting for never reached the page. Where the engine
+  // still takes the button to be down, that press comes as a move too.
+
+  it('made elsewhere, cancels a drag whose release never came, and its release drops nothing', () => {
+    attach();
+    startDrag();
+    pointer('pointermove', outside, 300, 300, { button: 0 });
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+    expect(dragMark()).toBeNull();
+    moveTo(310, 300);
+    release(310, 300);
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+  });
+
+  it('made on the handle, cancels the drag whose release never came and arms afresh', () => {
+    attach();
+    startDrag();
+    latePress(300, 300);
+    moveTo(310, 300);
+
+    expect(calls).toEqual([
+      'start 100,100',
+      'move 110,100',
+      'cancel',
+      'start 300,300',
+      'move 310,300',
+    ]);
+  });
+
+  it('made elsewhere, ends a press whose release never came: it does not drag the handle', () => {
+    attach();
+    press(100, 100);
+    pointer('pointermove', outside, 300, 300, { button: 0 });
+    moveTo(310, 300);
+    release(310, 300);
+
+    expect(calls).toEqual([]);
+  });
+
+  it('made elsewhere after a cancelled drag, keeps its own click', () => {
+    attach();
+    const heard = vi.fn();
+    outside.addEventListener('click', heard);
+    startDrag();
+    keydown('Escape');
+    pointer('pointermove', outside, 300, 300, { button: 0 });
+    release(300, 300);
+    const later = click(outside);
+
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(later.defaultPrevented).toBe(false);
+  });
+
+  it('from another pointer does not end the drag', () => {
+    attach();
+    startDrag();
+    pointer('pointermove', outside, 300, 300, { button: 0, pointerId: 2 });
+    release(120, 100);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'drop 120,100']);
+  });
+});
+
+// Left to the engine, a mouse press starts a text selection that the engine
+// extends for as long as the button is down. WebKit puts it, and the
+// keyboard focus with it, into a text field the pointer passes, and leaves
+// the text between the press and the release selected once a drag is
+// cancelled with the button still down. The armed press's mousedown has no
+// default, so there is no selection to extend. jsdom selects nothing on a
+// press, so these pin the cancelled default and what replaces it.
+
+describe('the mousedown of the press', () => {
+  it('has no default once the press armed the handle, wherever in the handle it landed', () => {
+    attach();
+    press(100, 100);
+
+    expect(mousedown(label).defaultPrevented).toBe(true);
+  });
+
+  it('has no default after a press the engine sent as a move', () => {
+    attach();
+    latePress(100, 100);
+
+    expect(mousedown().defaultPrevented).toBe(true);
+  });
+
+  it('keeps its default with no press before it', () => {
+    attach();
+
+    expect(mousedown().defaultPrevented).toBe(false);
+  });
+
+  it('keeps its default while the handle is off, so a field inside it selects text', () => {
+    attach({ enabled: false });
+    press(100, 100);
+
+    expect(mousedown(label).defaultPrevented).toBe(false);
+  });
+
+  it('keeps its default for a finger, whose mousedown follows the lift', () => {
+    attach();
+    press(100, 100, { pointerType: 'touch' });
+    release(100, 100, { pointerType: 'touch' });
+
+    expect(mousedown().defaultPrevented).toBe(false);
+  });
+
+  it('keeps its default for another button, pressed alone or during the press', () => {
+    attach();
+    press(100, 100, { button: 2, buttons: 2 });
+    expect(mousedown(handle, { button: 2, buttons: 2 }).defaultPrevented).toBe(false);
+    release(100, 100);
+
+    press(100, 100);
+    expect(mousedown(handle, { button: 1, buttons: 5 }).defaultPrevented).toBe(false);
+  });
+
+  it('keeps its default once the press is over, and once the handle unmounts', () => {
+    attach();
+    press(100, 100);
+    mousedown();
+    release(100, 100);
+    expect(mousedown().defaultPrevented).toBe(false);
+
+    press(100, 100);
+    action.destroy?.();
+    expect(mousedown().defaultPrevented).toBe(false);
+  });
+
+  // Unmounting ends the press, so a listener left on the handle would cancel
+  // nothing. It would still hold the handle and its options for as long as
+  // the node lives, so every listener the action put on the handle comes
+  // off, the press sent as a move and its mousedown among them.
+  it('takes every listener it put on the handle off once the handle unmounts', () => {
+    const added = vi.spyOn(handle, 'addEventListener');
+    const removed = vi.spyOn(handle, 'removeEventListener');
+    attach();
+    const put = added.mock.calls.map(([type, listener]) => [type, listener]);
+    expect(put.map(([type]) => type).sort()).toEqual([
+      'dragstart',
+      'mousedown',
+      'pointerdown',
+      'pointermove',
+    ]);
+
+    action.destroy?.();
+
+    const taken = removed.mock.calls.map(([type, listener]) => [type, listener]);
+    for (const listener of put) expect(taken).toContainEqual(listener);
+  });
+
+  it('is left alone outside the handle', () => {
+    attach();
+    press(100, 100);
+
+    expect(mousedown(outside).defaultPrevented).toBe(false);
+  });
+});
+
+// Cancelling the mousedown cancels what a press does to focus, so the
+// action does that by hand. From then on nothing moves focus: after a drop
+// it is where the press left it.
+
+describe('focus', () => {
+  let field: HTMLInputElement;
+  /** Each focus change heard on the page, as `in:tag` or `out:tag`. */
+  let changes: string[];
+  const hear = (event: Event) =>
+    changes.push(
+      `${event.type === 'focusin' ? 'in' : 'out'}:${(event.target as Element).localName}`
+    );
+
+  beforeEach(() => {
+    field = document.createElement('input');
+    document.body.append(field);
+    field.focus();
+    changes = [];
+    document.addEventListener('focusin', hear);
+    document.addEventListener('focusout', hear);
+  });
+
+  afterEach(() => {
+    document.removeEventListener('focusin', hear);
+    document.removeEventListener('focusout', hear);
+  });
+
+  /** Put the handle inside something that can hold focus, as a dialog's content can. */
+  function wrapHandle(): HTMLDivElement {
+    const holder = document.createElement('div');
+    holder.tabIndex = -1;
+    document.body.append(holder);
+    holder.append(handle);
+    return holder;
+  }
+
+  it('leaves a field being edited on the press, as on any press outside the field', () => {
+    attach();
+    press(100, 100);
+    // Not before the mousedown: that is the event whose default it replaces.
+    expect(document.activeElement).toBe(field);
+    mousedown();
+
+    expect(document.activeElement).toBe(document.body);
+    expect(changes).toEqual(['out:input']);
+  });
+
+  it('goes to the nearest thing around the handle that holds focus, without scrolling to it', () => {
+    const holder = wrapHandle();
+    const focus = vi.spyOn(holder, 'focus');
+    attach();
+    press(100, 100);
+    mousedown();
+
+    expect(document.activeElement).toBe(holder);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it('leaves the field when what is around the handle will not take focus', () => {
+    const holder = wrapHandle();
+    holder.focus = () => {};
+    attach();
+    press(100, 100);
+    mousedown();
+
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('stays on something the handle is inside', () => {
+    const holder = wrapHandle();
+    const outer = document.createElement('div');
+    outer.tabIndex = -1;
+    document.body.append(outer);
+    outer.append(holder);
+    outer.focus();
+    changes = [];
+    attach();
+    press(100, 100);
+    mousedown();
+
+    expect(document.activeElement).toBe(outer);
+    expect(changes).toEqual([]);
+  });
+
+  it('is not touched by a press that did not arm the handle', () => {
+    attach({ enabled: false });
+    press(100, 100);
+    mousedown();
+    expect(document.activeElement).toBe(field);
+
+    action.update?.(surface());
+    press(100, 100, { button: 2, buttons: 2 });
+    mousedown(handle, { button: 2, buttons: 2 });
+    expect(document.activeElement).toBe(field);
+    expect(changes).toEqual([]);
+  });
+
+  it('moves at the press and not again: through the drag, the drop and the click', () => {
+    const other = document.createElement('input');
+    outside.append(other);
+    attach();
+    press(100, 100);
+    mousedown();
+    changes = [];
+    // Across another field, and released over it.
+    pointer('pointermove', other, 110, 100);
+    pointer('pointermove', other, 150, 130);
+    pointer('pointerup', other, 150, 130);
+    click(other);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'move 150,130', 'drop 150,130']);
+    expect(document.activeElement).toBe(document.body);
+    expect(changes).toEqual([]);
+  });
+
+  it('does not move when Escape cancels the drag, or on the release after it', () => {
+    attach();
+    press(100, 100);
+    mousedown();
+    changes = [];
+    moveTo(110, 100);
+    keydown('Escape');
+    moveTo(200, 200);
+    release(200, 200);
+
+    expect(calls).toEqual(['start 100,100', 'move 110,100', 'cancel']);
+    expect(document.activeElement).toBe(document.body);
+    expect(changes).toEqual([]);
   });
 });
 

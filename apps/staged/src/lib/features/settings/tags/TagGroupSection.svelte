@@ -60,12 +60,14 @@
     editor: TagsEditor;
     group: TagGroup;
     tags: Tag[];
+    /** The first group in the list: no section is above it. */
+    first: boolean;
     canMoveUp: boolean;
     canMoveDown: boolean;
     groupDrag: TagGroupDragHandlers;
   }
 
-  let { editor, group, tags, canMoveUp, canMoveDown, groupDrag }: Props = $props();
+  let { editor, group, tags, first, canMoveUp, canMoveDown, groupDrag }: Props = $props();
 
   let dropPlace = $derived(editor.groupDropPlaceFor(group.id));
 
@@ -125,6 +127,7 @@
 
 <section
   class="tag-group"
+  class:first-in-list={first}
   class:dragging={editor.dragGroupId === group.id}
   class:drop-before={dropPlace === 'before'}
   class:drop-after={dropPlace === 'after'}
@@ -251,6 +254,15 @@
 
   .tag-group.drop-before::before {
     top: -13px;
+  }
+
+  /* The first group has no section above it, only the list's 16px of
+     padding, with the divider under the panel's intro at its top. A line at
+     -13px sits 3px under that divider and reads as part of it. The line
+     goes midway across the room it has instead: 7px clear of the divider
+     and 7px clear of the group. */
+  .tag-group.first-in-list.drop-before::before {
+    top: -9px;
   }
 
   .tag-group.drop-after::after {

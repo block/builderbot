@@ -329,14 +329,19 @@ export class TagsEditor {
     this.groupDropTarget = null;
   }
 
-  /** Drop the dragged group where the pointer last put it. */
-  groupDrop(): void {
+  /**
+   * Drop the dragged group where the pointer last put it. Returns the
+   * group's id when the drop moved it, and null when it changed nothing.
+   */
+  groupDrop(): string | null {
     const groupId = this.dragGroupId;
     const target = this.groupDropTarget;
     this.groupDragEnd();
-    if (groupId === null || target === null) return;
+    if (groupId === null || target === null) return null;
     const order = resolveGroupDrop(this.catalog.groups, groupId, target);
-    if (order) void pendingCatalogMoves.reorderGroups(order);
+    if (!order) return null;
+    void pendingCatalogMoves.reorderGroups(order);
+    return groupId;
   }
 
   /** The group drag ended, by a drop or without one. */

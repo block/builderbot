@@ -235,7 +235,8 @@ const dragChip = () => document.querySelector<HTMLElement>(`.${DRAG_CHIP_CLASS}`
 
 /**
  * A mouse's pointer event at `at`, as the engines send it: the primary
- * button, down for all but the release.
+ * button, down for all but the release. A move names no button (-1), since
+ * none changed.
  */
 function pointerEvent(
   type: string,
@@ -249,7 +250,7 @@ function pointerEvent(
     pointerId: 1,
     pointerType: 'mouse',
     isPrimary: true,
-    button: 0,
+    button: type === 'pointermove' ? -1 : 0,
     buttons: type === 'pointerup' ? 0 : 1,
     ...at,
     ...init,
@@ -1621,9 +1622,14 @@ describe('TagsSettingsPanel', () => {
         ]);
         expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
 
-        // The release ended the scrolling with the drag.
+        // Status, now last, spans 199 to 319: past the list's bottom edge.
+        // The list scrolls the 31px it takes to show it whole, 12px clear
+        // of the edge.
+        expect(scrolled()).toBe(136);
+
+        // The release ended the drag's own scrolling with the drag.
         runFrame(300);
-        expect(scrolled()).toBe(105);
+        expect(scrolled()).toBe(136);
       } finally {
         vi.unstubAllGlobals();
       }
@@ -1710,6 +1716,208 @@ describe('TagsSettingsPanel', () => {
       } finally {
         vi.unstubAllGlobals();
       }
+    });
+
+    // After a tag row's drag, which is a native one, WebKit sees no release
+    // and takes the mouse button to be down. It sends the next press as a
+    // move that names the primary button, with a mousedown and no
+    // pointerdown. The first group drag after a tag drag did nothing.
+
+    it('drags a group whose press the engine sent as a move, after a native drag', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pointerEvent('pointermove', groupHandle('status'), pressPoint('status'), { button: 0 });
+      movePointer(pointerOver('area', 'lower'));
+      expect(dragMark()).toBe('active');
+      expect(groupDropLines(root)).toEqual(['area:after']);
+
+      // The click that the release sends comes in the same task, and goes
+      // to what the press and the release share: the list, or further out.
+      // It used to reach it. It is swallowed.
+      pointerEvent('pointerup', document.body, pointerOver('area', 'lower'));
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+      root.querySelector('.panel-body')!.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      await settle();
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+      expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+    });
+
+    // The press on a handle has no default action, so the engine starts no
+    // selection to extend as the pointer moves. WebKit put that selection,
+    // and focus with it, into a name field the pointer passed, and left
+    // the rows selected after a drag that Escape ended.
+
+    /** The mousedown an engine sends after the pointer event of a mouse's press. */
+    function mousedown(target: Element): MouseEvent {
+      const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+      target.dispatchEvent(event);
+      return event;
+    }
+
+    it('cancels the default of a press on a group’s handle, and leaves the fields their own', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+
+      pressGroup('status');
+      expect(mousedown(groupHandle('status')).defaultPrevented).toBe(true);
+      await releasePointer(pressPoint('status'));
+
+      // A name field, a group's menu trigger and a tag row are not the
+      // handle: a press there places a caret, opens a menu or drags a tag.
+      const name = section('status').querySelector<HTMLInputElement>('[aria-label="Group name"]')!;
+      pointerEvent('pointerdown', name, pressPoint('status'));
+      expect(mousedown(name).defaultPrevented).toBe(false);
+      await releasePointer(pressPoint('status'));
+      const trigger = root.querySelector<HTMLElement>('[aria-label="Actions for Status"]')!;
+      expect(mousedown(trigger).defaultPrevented).toBe(false);
+      expect(mousedown(row('idea')).defaultPrevented).toBe(false);
+    });
+
+    it('takes focus off a name being edited on the press, and nowhere else through the drag', async () => {
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+      const name = section('priority').querySelector<HTMLInputElement>(
+        '[aria-label="Group name"]'
+      )!;
+      type(name, 'Urgency');
+
+      // As any press outside the field does: the field hears that the edit
+      // is done, and saves it.
+      pressGroup('status');
+      mousedown(groupHandle('status'));
+      await settle();
+      expect(document.activeElement).toBe(document.body);
+      expect(commandsMock.renameTagGroup.mock.calls).toEqual([['priority', 'Urgency']]);
+
+      // Across Priority's fields and down to Area, then dropped.
+      movePointer(pointerOver('priority', 'upper'));
+      movePointer(pointerOver('area', 'lower'));
+      expect(document.activeElement).toBe(document.body);
+      await dropGroupOn('area', 'lower');
+
+      expect(commandsMock.reorderTagGroups.mock.calls).toEqual([[['priority', 'area', 'status']]]);
+      expect(document.activeElement).toBe(document.body);
+    });
+
+    // After a drop the list is where it was scrolled to, and then scrolls
+    // only as far as it takes to show the group that moved. WebKit's scroll
+    // anchoring used to scroll it up by the height of a group dropped
+    // further down: to the top, for a tall group. The panel turns anchoring
+    // off in CSS (pinned in tagSettingsDrag.test.ts), which jsdom, having no
+    // layout, neither does nor undoes.
+
+    /** `layOutScrollingList`, with a way to scroll the list as the wheel does. */
+    function layOutWheeledList(root: ParentNode) {
+      const layout = layOutScrollingList(root);
+      const list = root.querySelector<HTMLElement>('.panel-body')!;
+      const wheelTo = (scrollTop: number) => {
+        list.scrollTop = scrollTop;
+        list.dispatchEvent(new Event('scroll'));
+        flushSync();
+      };
+      return { ...layout, wheelTo };
+    }
+
+    it('leaves the list scrolled where it was when the dropped group is in view', async () => {
+      const root = await mountPanel(threeGroups());
+      const { scrolled, wheelTo } = layOutWheeledList(root);
+      try {
+        // Status, picked up at the top and held clear of both scroll zones
+        // while the list scrolls to its end under it: Area, from 130 to
+        // 250, has its lower half under the pointer.
+        pressGroup('status');
+        movePointer({ clientX: 300, clientY: 200 });
+        wheelTo(174);
+        expect(groupDropLines(root)).toEqual(['area:after']);
+
+        await releasePointer({ clientX: 300, clientY: 200 });
+        expect(nameInputs(root, 'Group name')).toEqual(['Priority', 'Area', 'Status']);
+        // Status landed where Area was, from 130 to 250: all in view.
+        expect(scrolled()).toBe(174);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('scrolls the list up to show a group dropped above what it shows', async () => {
+      const root = await mountPanel(threeGroups());
+      const { scrolled, wheelTo } = layOutWheeledList(root);
+      try {
+        // Area, held just above the list's top edge with the list scrolled
+        // to its end. What shows at the list's first pixel is Priority's
+        // upper half (Priority spans -14 to 106), so Area lands above it.
+        wheelTo(174);
+        pressGroup('area');
+        movePointer({ clientX: 300, clientY: -10 });
+        expect(groupDropLines(root)).toEqual(['priority:before']);
+
+        await releasePointer({ clientX: 300, clientY: -10 });
+        expect(nameInputs(root, 'Group name')).toEqual(['Status', 'Area', 'Priority']);
+        // Area, now second, spans -14 to 106. The list scrolls up the 26px
+        // that brings its top 12px clear of the edge, and no further.
+        expect(scrolled()).toBe(148);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('scrolls nothing for a drop that moves nothing, though the group is out of view', async () => {
+      const root = await mountPanel(threeGroups());
+      const { scrolled, wheelTo } = layOutWheeledList(root);
+      try {
+        // Status, scrolled out above the list, held over Priority's upper
+        // half: the place it is already in.
+        pressGroup('status');
+        movePointer({ clientX: 300, clientY: 200 });
+        wheelTo(174);
+        movePointer({ clientX: 300, clientY: 20 });
+        expect(groupDropLines(root)).toEqual([]);
+        expect(dragMark()).toBe('refused');
+
+        await releasePointer({ clientX: 300, clientY: 20 });
+        expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+        expect(scrolled()).toBe(174);
+
+        // Nor for a drag that Escape ends.
+        pressGroup('status');
+        movePointer({ clientX: 300, clientY: 200 });
+        document.body.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+        );
+        await releasePointer({ clientX: 300, clientY: 200 });
+        expect(commandsMock.reorderTagGroups).not.toHaveBeenCalled();
+        expect(scrolled()).toBe(174);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    // The line above the first group has only the list's padding to sit in,
+    // under the divider of the panel's intro. The section says it is first,
+    // and its line sits midway across that room. jsdom has no layout, so
+    // this pins the mark, not where the line is drawn.
+
+    it('marks the first group in the list, whose drop line keeps clear of the divider above', async () => {
+      const firstInList = (root: ParentNode) =>
+        [...root.querySelectorAll<HTMLElement>('.tag-group.first-in-list')].map(
+          (el) => el.dataset.tagGroup
+        );
+      const root = await mountPanel(threeGroups());
+      layOutGroups(root);
+      expect(firstInList(root)).toEqual(['status']);
+
+      // The line before the first group is the one that needs the mark.
+      dragGroupOver('area', 'status', 'upper');
+      expect(groupDropLines(root)).toEqual(['status:before']);
+      expect(firstInList(root)).toEqual(['status']);
+
+      // The mark follows the order: Area dropped first becomes the first.
+      await dropGroupOn('status', 'upper');
+      expect(nameInputs(root, 'Group name')).toEqual(['Area', 'Status', 'Priority']);
+      expect(firstInList(root)).toEqual(['area']);
     });
 
     it.each([

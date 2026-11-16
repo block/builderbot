@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { DRAG_REACH } from '../../../shared/pointerDrag';
 import {
   groupAtPoint,
+  GROUP_REVEAL_MARGIN,
+  groupRevealOffset,
   isTagDrag,
   TAG_DRAG_TYPE,
   writeTagDrag,
   type GroupSectionBox,
 } from './tagSettingsDrag';
+import panelSource from './TagsSettingsPanel.svelte?raw';
 
 /** Enough of a DataTransfer for the drag helpers. */
 function dataTransfer(data: Record<string, string> = {}): DataTransfer {
@@ -261,5 +264,83 @@ describe('groupAtPoint', () => {
   it('lands nowhere in a list with no groups', () => {
     expect(groupAtPoint(at(300, 300), list, [], null)).toBeNull();
     expect(groupAtPoint(at(300, 300), list, [], last)).toBeNull();
+  });
+});
+
+describe('groupRevealOffset', () => {
+  // A list from 100 to 500 down the page: its view, 12px in from each edge,
+  // runs from 112 to 488.
+  const list = { start: 100, end: 500 };
+  const view = { start: list.start + GROUP_REVEAL_MARGIN, end: list.end - GROUP_REVEAL_MARGIN };
+
+  it('is zero for a section in view', () => {
+    expect(groupRevealOffset(list, { start: 200, end: 320 })).toBe(0);
+  });
+
+  it('is zero for a section that just fits at either edge of the view', () => {
+    expect(groupRevealOffset(list, { start: view.start, end: view.start + 120 })).toBe(0);
+    expect(groupRevealOffset(list, { start: view.end - 120, end: view.end })).toBe(0);
+  });
+
+  it('scrolls down by how far the section runs past the view', () => {
+    expect(groupRevealOffset(list, { start: 400, end: 520 })).toBe(520 - view.end);
+    // Wholly below the list.
+    expect(groupRevealOffset(list, { start: 600, end: 720 })).toBe(720 - view.end);
+  });
+
+  it('scrolls up by how far the section starts before the view', () => {
+    expect(groupRevealOffset(list, { start: 90, end: 210 })).toBe(90 - view.start);
+    // Wholly above the list.
+    expect(groupRevealOffset(list, { start: -300, end: -180 })).toBe(-300 - view.start);
+  });
+
+  it('keeps the margin from the edge of the list, not the edge itself', () => {
+    // In the list, but nearer its bottom edge than the margin.
+    expect(groupRevealOffset(list, { start: 375, end: 495 })).toBe(7);
+    expect(groupRevealOffset(list, { start: 105, end: 225 })).toBe(-7);
+  });
+
+  it('lines the top of a section taller than the view up with it, from either side', () => {
+    // Its header is above the view, its tail in it.
+    expect(groupRevealOffset(list, { start: -100, end: 400 })).toBe(-100 - view.start);
+    // Its header is in the view, its tail runs out below: more of it shows
+    // from the top.
+    expect(groupRevealOffset(list, { start: 300, end: 800 })).toBe(300 - view.start);
+    // Already lined up.
+    expect(groupRevealOffset(list, { start: view.start, end: 900 })).toBe(0);
+  });
+
+  it('takes a position a fraction of a pixel out as in', () => {
+    expect(groupRevealOffset(list, { start: view.start - 0.5, end: 300 })).toBe(0);
+    expect(groupRevealOffset(list, { start: 300, end: view.end + 0.5 })).toBe(0);
+    expect(groupRevealOffset(list, { start: view.start + 0.5, end: 900 })).toBe(0);
+  });
+
+  it('takes another margin', () => {
+    expect(groupRevealOffset(list, { start: 400, end: 520 }, 0)).toBe(20);
+  });
+});
+
+// WebKit anchors a scroller's position to what is on screen: when content
+// above that changes height, it scrolls to hold the screen still. A group
+// dropped further down the list leaves the content above, and the list was
+// scrolled up by the group's height. The rule is one CSS declaration, which
+// jsdom, having no layout, cannot show the effect of. So the source is
+// checked for it.
+
+describe('the list of groups', () => {
+  /** The declarations of a rule in the panel's style block. */
+  function rule(selector: string): string {
+    const style = panelSource.slice(panelSource.indexOf('<style>'));
+    const start = style.indexOf(`\n  ${selector} {`);
+    expect(start, `no rule for ${selector}`).toBeGreaterThan(-1);
+    return style.slice(start, style.indexOf('\n  }', start));
+  }
+
+  it('opts out of scroll anchoring, so a drop leaves it scrolled where it was', () => {
+    const body = rule('.panel-body');
+
+    expect(body).toMatch(/^\s*overflow-y: auto;$/m);
+    expect(body).toMatch(/^\s*overflow-anchor: none;$/m);
   });
 });

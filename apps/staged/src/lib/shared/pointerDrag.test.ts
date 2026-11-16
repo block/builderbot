@@ -9,6 +9,8 @@ import {
   dragChipOrigin,
   dragPositionAlong,
   edgeScrollSpeed,
+  isNewPress,
+  isPrimaryPress,
   pastDragThreshold,
   scrollStep,
   spanAlong,
@@ -46,6 +48,82 @@ describe('pastDragThreshold', () => {
   it('takes another threshold', () => {
     expect(pastDragThreshold(pressed, at(109, 100), 10)).toBe(false);
     expect(pastDragThreshold(pressed, at(110, 100), 10)).toBe(true);
+  });
+});
+
+// A press is a pointerdown in every engine. WebKit takes the mouse button
+// to be down until it sees a release, and a native drag takes the release
+// with it: the next press then arrives as a pointermove that names the
+// primary button, with a mousedown and no pointerdown.
+
+describe('isPrimaryPress', () => {
+  const event = (type: string, button: number, buttons: number) => ({ type, button, buttons });
+
+  it('is a pointerdown for the primary button', () => {
+    expect(isPrimaryPress(event('pointerdown', 0, 1))).toBe(true);
+  });
+
+  it('is not a pointerdown for any other button', () => {
+    expect(isPrimaryPress(event('pointerdown', 1, 4))).toBe(false);
+    expect(isPrimaryPress(event('pointerdown', 2, 2))).toBe(false);
+  });
+
+  it('is a pointermove that names the primary button, with it alone down', () => {
+    expect(isPrimaryPress(event('pointermove', 0, 1))).toBe(true);
+  });
+
+  it('is not a pointermove that names no button, whatever is down', () => {
+    expect(isPrimaryPress(event('pointermove', -1, 1))).toBe(false);
+    expect(isPrimaryPress(event('pointermove', -1, 0))).toBe(false);
+  });
+
+  it('is not the primary button coming up while another is held', () => {
+    expect(isPrimaryPress(event('pointermove', 0, 2))).toBe(false);
+  });
+
+  it('is not a chord: the primary button pressed with another held', () => {
+    expect(isPrimaryPress(event('pointermove', 0, 3))).toBe(false);
+  });
+
+  it('is not another button changing during a press', () => {
+    expect(isPrimaryPress(event('pointermove', 2, 3))).toBe(false);
+    expect(isPrimaryPress(event('pointermove', 2, 1))).toBe(false);
+  });
+
+  it('is not a release', () => {
+    expect(isPrimaryPress(event('pointerup', 0, 0))).toBe(false);
+    expect(isPrimaryPress(event('pointercancel', 0, 0))).toBe(false);
+  });
+});
+
+describe('isNewPress', () => {
+  const event = (type: string, button: number, buttons: number) => ({ type, button, buttons });
+
+  it('is any pointerdown, whichever button', () => {
+    expect(isNewPress(event('pointerdown', 0, 1))).toBe(true);
+    expect(isNewPress(event('pointerdown', 2, 2))).toBe(true);
+  });
+
+  it('is a pointermove that reports the primary button pressed, whatever else is held', () => {
+    expect(isNewPress(event('pointermove', 0, 1))).toBe(true);
+    expect(isNewPress(event('pointermove', 0, 3))).toBe(true);
+  });
+
+  it('is not an ordinary move of a pressed pointer', () => {
+    expect(isNewPress(event('pointermove', -1, 1))).toBe(false);
+  });
+
+  it('is not the primary button coming up while another is held', () => {
+    expect(isNewPress(event('pointermove', 0, 2))).toBe(false);
+  });
+
+  it('is not a second button pressed or released during a drag', () => {
+    expect(isNewPress(event('pointermove', 2, 3))).toBe(false);
+    expect(isNewPress(event('pointermove', 2, 1))).toBe(false);
+  });
+
+  it('is not a release', () => {
+    expect(isNewPress(event('pointerup', 0, 0))).toBe(false);
   });
 });
 

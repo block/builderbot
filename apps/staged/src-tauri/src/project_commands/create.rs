@@ -83,19 +83,21 @@ pub(crate) struct InitialRepo {
 /// missing, and — for a local project created with a repo — the worktree
 /// followed by the repo's prerun actions.
 ///
-/// Every await is inside [`create_project_impl`] and ahead of its first
-/// write, and the setup is spawned in the same synchronous stretch as the
-/// last write, so a request future dropped part-way (see the `web_server`
-/// module docs) has either written nothing or written every row and started
-/// the setup.
-pub(crate) async fn create_project_and_setup(
+/// Blocking: it writes to the store, asks `gh` for the default branch when
+/// none was prefetched, and on the first remote create of the process looks
+/// `sq` up through a login shell. Both callers run it under
+/// `spawn_blocking`, which also means a request future dropped part-way
+/// (see the `web_server` module docs) cannot interrupt it: the closure runs
+/// to its end, so the project has either every row and its setup started,
+/// or nothing.
+pub(crate) fn create_project_and_setup(
     app_handle: tauri::AppHandle,
     store: Arc<Store>,
     request: CreateProjectRequest,
 ) -> Result<store::Project, String> {
     // Only a remote request cares, and the first answer costs a PATH probe.
     let remote_available = request.wants_remote() && blox::is_sq_available();
-    let created = create_project_impl(Arc::clone(&store), request, remote_available).await?;
+    let created = create_project_impl(Arc::clone(&store), request, remote_available)?;
     start_project_setup(app_handle, store, &created);
     Ok(created.project)
 }
@@ -136,7 +138,7 @@ fn start_project_setup(app_handle: tauri::AppHandle, store: Arc<Store>, created:
 /// Subpath validation is handled by the frontend before submission
 /// (`SubpathInput.waitForValidation`). Skipping the redundant backend
 /// re-validation here removes a ~500ms-2s GitHub API round-trip.
-pub(crate) async fn create_project_impl(
+pub(crate) fn create_project_impl(
     store: Arc<Store>,
     request: CreateProjectRequest,
     remote_available: bool,
@@ -193,19 +195,13 @@ pub(crate) async fn create_project_impl(
 
     // Use the frontend-prefetched default branch when available to avoid a
     // ~500ms-2s GitHub API round-trip during project creation. The fallback
-    // runs `gh`, so it goes to the blocking pool, and ahead of the first
-    // write: the web transport drops a request future at its next await when
-    // the client goes away, and no await may fall between the writes below.
-    let effective_base = match github_repo.clone() {
-        Some(repo) => Some(
-            tauri::async_runtime::spawn_blocking(move || {
-                git::resolve_default_branch(default_branch, &repo)
-            })
-            .await
-            .map_err(|e| e.to_string())?,
-        ),
-        None => None,
-    };
+    // runs `gh`, which can take up to its 60 s timeout, so it comes ahead of
+    // the first write: the refetches each write's change event triggers
+    // would otherwise show the project without its branch for as long as
+    // `gh` took.
+    let effective_base = github_repo
+        .as_deref()
+        .map(|repo| git::resolve_default_branch(default_branch, repo));
 
     let initial_repo = write_project_and(&store, &project, created_by.as_ref(), || {
         write_initial_repo(
@@ -475,11 +471,7 @@ mod tests {
         request: CreateProjectRequest,
         remote_available: bool,
     ) -> Result<CreatedProject, String> {
-        tauri::async_runtime::block_on(create_project_impl(
-            Arc::clone(store),
-            request,
-            remote_available,
-        ))
+        create_project_impl(Arc::clone(store), request, remote_available)
     }
 
     /// The desktop and browser requests name no creator, so the column stays

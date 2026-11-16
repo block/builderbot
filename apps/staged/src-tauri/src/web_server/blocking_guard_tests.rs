@@ -342,8 +342,10 @@ const OFFLOADED_ARM_INLINE: &[&str] = &[
 /// [`OFFLOADED_COMMANDS`] entries whose `dispatch` arm still calls the store
 /// on the runtime, each with why.
 const ARMS_NOT_OFFLOADED: &[&str] = &[
-    // Not the Tauri command's body: no `sq` check and no prerun actions. It
-    // offloads its default-branch lookup and makes its store writes inline.
+    // The shared body runs under `blocking_json`, but a control caller's
+    // request is checked and filled in first by an awaited
+    // `control_create_project_request`, which offloads its own store reads
+    // and `gh` calls and is not a handoff this check knows.
     "create_project",
 ];
 

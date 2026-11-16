@@ -517,10 +517,13 @@ async fn list_projects(
 }
 
 /// Creates a project through [`project_commands::create_project_and_setup`],
-/// the body shared with the web/control `dispatch` arm. As a synchronous
-/// command it held the main thread, and so the window, through its store
-/// writes and through the `gh` lookup it can make; the shared body runs
-/// that lookup on the blocking pool ahead of the first write.
+/// the body shared with the web/control `dispatch` arm. Blocking: it writes
+/// to the store, creates the project directory, asks `gh` for the default
+/// branch when none was prefetched, and on the first remote create of the
+/// process looks `sq` up through a login shell. Nothing but the store handle
+/// lookup runs inline here: an `async fn` command runs on a runtime worker,
+/// where a store lock wait or a child process would stall timers and event
+/// sockets instead.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 async fn create_project(
@@ -536,25 +539,25 @@ async fn create_project(
     head_repo: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
-    project_commands::create_project_and_setup(
-        app_handle,
-        store,
-        project_commands::CreateProjectRequest {
-            name,
-            github_repo,
-            location,
-            subpath,
-            branch_name,
-            pr_number,
-            default_branch,
-            head_repo,
-            // Made in the app: no control actor, and the form writes the
-            // pull request note itself.
-            created_by: None,
-            pr_note: None,
-        },
-    )
+    let request = project_commands::CreateProjectRequest {
+        name,
+        github_repo,
+        location,
+        subpath,
+        branch_name,
+        pr_number,
+        default_branch,
+        head_repo,
+        // Made in the app: no control actor, and the form writes the pull
+        // request note itself.
+        created_by: None,
+        pr_note: None,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        project_commands::create_project_and_setup(app_handle, store, request)
+    })
     .await
+    .map_err(|e| format!("create_project task failed: {e}"))?
 }
 
 /// Rename a project in place. Only the stored name changes; see

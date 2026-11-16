@@ -1210,14 +1210,13 @@ pub(crate) async fn dispatch(
                 },
             };
             // The desktop command's body: the rows, then the worktree and the
-            // repo's setup actions in the background.
-            let project = crate::project_commands::create_project_and_setup(
-                app_handle.clone(),
-                store,
-                request,
-            )
-            .await?;
-            Ok(serde_json::to_value(project).unwrap())
+            // repo's setup actions in the background. Blocking (the store,
+            // `gh`, and the `sq` probe), so it goes to the blocking pool.
+            let app_handle = app_handle.clone();
+            blocking_json(move || {
+                crate::project_commands::create_project_and_setup(app_handle, store, request)
+            })
+            .await
         }
         "list_project_repos" => {
             let store = get_store(store_mutex)?;

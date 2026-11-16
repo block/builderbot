@@ -77,7 +77,7 @@ fn create(
 }
 
 fn write(store: &Arc<Store>, request: CreateProjectRequest) -> Result<CreatedProject, String> {
-    tauri::async_runtime::block_on(create_project_impl(Arc::clone(store), request, true))
+    create_project_impl(Arc::clone(store), request, true)
 }
 
 fn created_by(store: &Store, project_id: &str) -> Option<String> {

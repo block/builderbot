@@ -17,6 +17,10 @@
   quote and is left alone, as is a press on marked text that is also a link
   or a hashtag badge. `activeQuoteId` is the quote whose reply field is
   open; its mark stays lit, as a hovered one's does, across all its pieces.
+
+  Every pass replaces all the spans, so what the old ones held is put on the
+  new: the lit state of the open and the hovered quote, and keyboard focus
+  when a quote's stop had it.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -25,6 +29,7 @@
     applyQuoteHighlights,
     clearQuoteHighlights,
     quoteHighlightRange,
+    quoteHighlightStop,
     quoteIdAtTarget,
     QUOTE_HIGHLIGHT_CLASS,
     setQuoteHighlightState,
@@ -63,6 +68,44 @@
   const ACTIVE_CLASS = 'is-active';
   const HOVERED_CLASS = 'is-hovered';
 
+  /** The quote the pointer is over, whose mark is lit. */
+  let hoveredQuoteId: string | null = null;
+  /**
+   * The quote whose keyboard stop has focus, or had it when the stop was
+   * taken out of the note: a removed element gives up focus without an
+   * event, so this is only let go when focus moves to something else.
+   */
+  let focusedQuoteId: string | null = null;
+
+  /** The quote `target` is the keyboard stop of, if it is one. */
+  function stopQuoteId(target: EventTarget | null): string | null {
+    if (
+      !(target instanceof HTMLElement) ||
+      !target.classList.contains(QUOTE_HIGHLIGHT_CLASS) ||
+      target.getAttribute('role') !== 'button'
+    ) {
+      return null;
+    }
+    return target.getAttribute('data-quote-id');
+  }
+
+  /**
+   * Give focus back to the stop that lost it when the marks were rebuilt
+   * (by this pass, a new render of the note, or a find-in-note pass). Only
+   * while focus is where a removed element leaves it, on the page or on a
+   * container around the note: anything else took it since and keeps it.
+   */
+  function restoreFocus(el: HTMLElement) {
+    const quoteId = focusedQuoteId;
+    if (quoteId === null) return;
+    const active = el.ownerDocument.activeElement;
+    const adrift = !active || active === el.ownerDocument.body || active.contains(el);
+    const stop = adrift ? quoteHighlightStop(el, quoteId) : null;
+    // Without scrolling: the reader may be elsewhere in the note by now.
+    if (stop) stop.focus({ preventScroll: true });
+    else focusedQuoteId = null;
+  }
+
   // What decides where the marks go. A reply being typed changes `quotes`
   // every few hundred milliseconds and none of this, so it re-marks nothing.
   let locationKey = $derived(
@@ -80,6 +123,10 @@
     untrack(() => {
       const marked = applyQuoteHighlights(el, quotes, { ignore: ignoreHeading });
       setQuoteHighlightState(el, ACTIVE_CLASS, activeQuoteId);
+      // The pointer has not moved, so no event will light the new spans
+      // under it; if the note moved under it instead, the next one corrects this.
+      setQuoteHighlightState(el, HOVERED_CLASS, hoveredQuoteId);
+      restoreFocus(el);
       onMarked?.(marked);
     });
     return () => clearQuoteHighlights(el);
@@ -99,7 +146,10 @@
   $effect(() => {
     const el = contentEl;
     if (!el) return;
-    let hovered: string | null = null;
+    // Another element starts with nothing under the pointer, whatever the
+    // pass above lit in it for the one before.
+    hoveredQuoteId = null;
+    setQuoteHighlightState(el, HOVERED_CLASS, null);
 
     const handleClick = (event: MouseEvent) => {
       // The second click of a double-click selects a word; it reopens nothing.
@@ -114,26 +164,18 @@
 
     const handleKeydown = (event: KeyboardEvent) => {
       if (event.key !== 'Enter' && event.key !== ' ') return;
-      const stop = event.target;
-      if (
-        !(stop instanceof HTMLElement) ||
-        !stop.classList.contains(QUOTE_HIGHLIGHT_CLASS) ||
-        stop.getAttribute('role') !== 'button'
-      ) {
-        return;
-      }
-      const quoteId = stop.getAttribute('data-quote-id');
+      const quoteId = stopQuoteId(event.target);
       if (!quoteId) return;
       // Space would scroll the note, and the note's own key handler has
       // nothing to do with a mark.
       event.preventDefault();
       event.stopPropagation();
-      activate(el, quoteId, stop);
+      activate(el, quoteId, event.target as HTMLElement);
     };
 
     const hover = (quoteId: string | null) => {
-      if (quoteId === hovered) return;
-      hovered = quoteId;
+      if (quoteId === hoveredQuoteId) return;
+      hoveredQuoteId = quoteId;
       setQuoteHighlightState(el, HOVERED_CLASS, quoteId);
     };
     // A finger has no hover: a tap's would stay lit until the next tap.
@@ -142,15 +184,29 @@
     };
     const handlePointerLeave = () => hover(null);
 
+    const handleFocusIn = (event: FocusEvent) => {
+      focusedQuoteId = stopQuoteId(event.target);
+    };
+    // Focus moved on to another element. With nothing taking it (the window
+    // went to the background, or an engine reporting a removal) it is still
+    // the stop's to get back.
+    const handleFocusOut = (event: FocusEvent) => {
+      if (event.relatedTarget) focusedQuoteId = null;
+    };
+
     el.addEventListener('click', handleClick);
     el.addEventListener('keydown', handleKeydown);
     el.addEventListener('pointerover', handlePointerOver);
     el.addEventListener('pointerleave', handlePointerLeave);
+    el.addEventListener('focusin', handleFocusIn);
+    el.addEventListener('focusout', handleFocusOut);
     return () => {
       el.removeEventListener('click', handleClick);
       el.removeEventListener('keydown', handleKeydown);
       el.removeEventListener('pointerover', handlePointerOver);
       el.removeEventListener('pointerleave', handlePointerLeave);
+      el.removeEventListener('focusin', handleFocusIn);
+      el.removeEventListener('focusout', handleFocusOut);
     };
   });
 </script>

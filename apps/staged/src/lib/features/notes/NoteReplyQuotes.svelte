@@ -107,12 +107,21 @@
     reply: string;
     /**
      * Set once the field's writes have ended: what the draft showed for the
-     * block then (`reply` undefined for no block). From there the draft is
-     * the newer of the two as soon as it shows anything else.
+     * block then. From there the draft is the newer of the two as soon as
+     * it shows anything else, the block gone included.
      */
-    writtenOver?: { reply: string | undefined };
+    writtenOver?: { reply: string };
   };
+  /**
+   * Held for a block only while its field's writes are under way, or the
+   * block is in the draft: never more entries than open fields and blocks.
+   */
   const heldReplies = new Map<string, HeldReply>();
+
+  /** How many replies are held. For tests. */
+  export function heldReplyCount(): number {
+    return heldReplies.size;
+  }
 
   function draftReply(quoteId: string): string | undefined {
     return quotes.find((quote) => quote.id === quoteId)?.reply;
@@ -240,7 +249,9 @@
         }
         if (!held || heldReplies.get(quoteId) !== held) return;
         const shown = draftReply(quoteId);
-        if (shown === held.reply) heldReplies.delete(quoteId);
+        // Shown, or with no block left to show it in: removed or sent from
+        // elsewhere while it was typed, so nothing will ever let it go.
+        if (shown === undefined || shown === held.reply) heldReplies.delete(quoteId);
         else held.writtenOver = { reply: shown };
       },
       remove: async () => {

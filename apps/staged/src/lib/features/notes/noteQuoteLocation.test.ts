@@ -282,7 +282,8 @@ describe('locateQuote', () => {
     expect(text).toContain('thecachefirst.');
 
     expect(locate(quote, anchor)).toBeNull();
-    // A single occurrence left is no better founded than several.
+    // A single occurrence left, with no heading to place it by, is no
+    // better founded than several.
     render('<p>Entries expire. Warm the cache first.</p>');
     expect(locate(quote, anchor)).toBeNull();
     // Without an anchor there is nothing to hold an occurrence to, as before.
@@ -304,6 +305,57 @@ describe('locateQuote', () => {
     span = locate(quote, anchor)!;
     const text = buildNoteTextIndex(root).text;
     expect(text.slice(span.start - 15, span.end + 3)).toBe('ArchitectureThecachewas');
+  });
+
+  it('counts the note’s edge as surroundings for a short quote at its start or end', () => {
+    render('<h1>Rollout plan</h1><p>Ship the cache behind a flag by Friday.</p>');
+    const title = captureQuoteAnchor(root, rangeOfText('h1', 'Rollout plan'), 'Rollout plan')!;
+    const word = captureQuoteAnchor(root, rangeOfText('h1', 'plan'), 'plan')!;
+    const closing = captureQuoteAnchor(root, rangeOfText('p', 'Friday.'), 'Friday.')!;
+    expect(title.prefix).toBe('');
+    expect(word.prefix).toBe('Rollout');
+    expect(closing.suffix).toBe('');
+
+    // The sentence between them is reworded: the title has nothing of what
+    // followed it, the closing word nothing of what led up to it.
+    render('<h1>Rollout plan</h1><p>Nothing goes out until next Friday.</p>');
+    const text = buildNoteTextIndex(root).text;
+    expect(locate('Rollout plan', title)).toEqual({ start: 0, end: 11 });
+    expect(locate('plan', word)).toEqual({ start: 7, end: 11 });
+    expect(locate('Friday.', closing)).toEqual({ start: text.length - 7, end: text.length });
+
+    // The same words no longer at the edge are some other occurrence...
+    render('<p>Draft.</p><h1>Rollout plan</h1><p>Nothing goes out. Friday. Maybe.</p>');
+    expect(locate('Rollout plan', title)).toBeNull();
+    expect(locate('plan', word)).toBeNull();
+    expect(locate('Friday.', closing)).toBeNull();
+    // ...and so are words as far from it as before, behind other text.
+    render('<h1>Release plan</h1><p>Nothing goes out until next Friday.</p>');
+    expect(locate('plan', word)).toBeNull();
+  });
+
+  it('takes a short quote’s only occurrence when it stands under the quote’s headings', () => {
+    const quote = 'invalidated';
+    const anchor = captureQuoteAnchor(root, rangeOfText('strong', quote), quote)!;
+    const headings = ['Rollout plan', 'Architecture'];
+    const sentence = root.querySelector('p')!;
+
+    // Reworded on both sides: nothing of its surroundings is left.
+    sentence.innerHTML = 'Entries get <strong>invalidated</strong> whenever a row changes.';
+    expect(located(locate(quote, anchor, headings))).toBe('invalidated');
+    // A quote with no headings has nothing to place the occurrence by.
+    expect(locate(quote, anchor)).toBeNull();
+
+    // A second occurrence in the section: either could be the other "invalidated".
+    root.querySelector('li')!.textContent = 'Reads are invalidated too.';
+    expect(locate(quote, anchor, headings)).toBeNull();
+
+    // The passage is rewritten away, and the word stands once, in another section.
+    sentence.textContent = 'Entries expire after an hour.';
+    root.querySelector('li')!.textContent = 'Reads go to the cache first.';
+    root.querySelector('p:last-of-type')!.textContent = 'Nothing is invalidated before the switch.';
+    expect(buildNoteTextIndex(root).text.split(quote).length - 1).toBe(1);
+    expect(locate(quote, anchor, headings)).toBeNull();
   });
 
   it('takes a long quote wherever it stands word for word, surroundings or not', () => {

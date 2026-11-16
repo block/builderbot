@@ -349,6 +349,124 @@ describe('NoteReplyQuotes marks', () => {
     expect(contentEl.querySelector('#flow-p')!.childNodes).toHaveLength(3);
   });
 
+  it('keeps a mark after its neighbours are reworded, by the note’s edge or its section', async () => {
+    const { props } = render();
+    // The note's closing words, and a word it holds once, mid-sentence.
+    const closing = contentEl.querySelector('#again-p')!.textContent!;
+    await replyTo('#again-p', 'Which switch?', closing.indexOf('the switch.'));
+    const flow = contentEl.querySelector('#flow-p')!.textContent!;
+    const from = flow.indexOf('invalidated');
+    await replyTo('#flow-p', 'By whom?', from, from + 'invalidated'.length);
+    expect(markedText()).toBe('invalidatedthe switch.');
+
+    // An agent rewords what stands around both.
+    const reworded = NOTE_HTML.replace(
+      'The cache is invalidated on every write.',
+      'Entries get invalidated whenever a row changes.'
+    ).replace('The cache is warmed before the switch.', 'Warm it, then flip the switch.');
+    contentEl.innerHTML = reworded;
+    props.renderKey = reworded;
+    flushSync();
+
+    expect(markedText()).toBe('invalidatedthe switch.');
+    expect(contentEl.querySelector('#flow-p .note-quote-highlight')!.textContent).toBe(
+      'invalidated'
+    );
+  });
+
+  it('keeps keyboard focus on a quote’s mark when the marks are rebuilt', async () => {
+    const { props } = render();
+    await replyTo('#flow-p', 'Why?');
+    const focused = () => document.activeElement as HTMLElement;
+    const first = marks()[0];
+    first.focus();
+
+    // An agent edits the note: every node is replaced.
+    contentEl.innerHTML = NOTE_HTML;
+    expect(document.activeElement).toBe(document.body);
+    props.renderKey = `${NOTE_HTML} `;
+    flushSync();
+    expect(focused()).not.toBe(first);
+    expect(focused().getAttribute('role')).toBe('button');
+    expect(focused().getAttribute('data-quote-id')).toBe(first.getAttribute('data-quote-id'));
+    expect(focused().isConnected).toBe(true);
+
+    // A find-in-note pass takes the marks out, and so does closing it.
+    highlightNoteMatches(scrollEl, contentEl, 'cache');
+    props.refreshKey = 1;
+    flushSync();
+    expect(focused()).toBe(marks()[0]);
+    highlightNoteMatches(scrollEl, contentEl, '');
+    props.refreshKey = 2;
+    flushSync();
+    expect(focused()).toBe(marks()[0]);
+    expect(focused().isConnected).toBe(true);
+
+    // Another quote re-marks the note too, and its own mark takes nothing.
+    await replyTo('#again-p', 'Which flag?', 0, 'Ship behind a flag.'.length);
+    marks()[0].focus();
+    await replyDraftWriter.clearNow(replyDraftKey(props.sessionId));
+    await drain();
+    // The quote is gone, and its mark with it: focus is not put elsewhere.
+    expect(marks()).toHaveLength(0);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('leaves focus where it went when the marks are rebuilt', async () => {
+    const { props } = render();
+    await replyTo('#flow-p', 'Why?');
+
+    // Focus moved on from the mark before the note changed...
+    marks()[0].focus();
+    dialog.focus();
+    contentEl.innerHTML = NOTE_HTML;
+    props.renderKey = `${NOTE_HTML} `;
+    flushSync();
+    expect(document.activeElement).toBe(dialog);
+
+    // ...or went somewhere of its own after the mark was taken out.
+    marks()[0].focus();
+    contentEl.innerHTML = NOTE_HTML;
+    dialog.focus();
+    props.renderKey = NOTE_HTML;
+    flushSync();
+    expect(document.activeElement).toBe(dialog);
+    // And is not brought back by a later pass.
+    dialog.blur();
+    props.refreshKey = 1;
+    flushSync();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('keeps the mark under a resting pointer lit when the marks are rebuilt', async () => {
+    const { props } = render();
+    await replyTo('#flow-p', 'Why?');
+    const over = (el: Element) => {
+      el.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+    };
+    const lit = () => marks().filter((mark) => mark.classList.contains('is-hovered'));
+
+    over(marks()[0]);
+    expect(lit()).toHaveLength(1);
+
+    // Find-in-note re-marks on every keystroke, under a pointer that is not moving.
+    highlightNoteMatches(scrollEl, contentEl, 'cache');
+    props.refreshKey = 1;
+    flushSync();
+    expect(marks().length).toBeGreaterThan(1);
+    expect(lit()).toEqual(marks());
+
+    // The pointer's next move is over a new span of the same quote, then away.
+    over(marks()[1]);
+    expect(lit()).toEqual(marks());
+    over(contentEl.querySelector('#again-p')!);
+    expect(lit()).toHaveLength(0);
+    highlightNoteMatches(scrollEl, contentEl, '');
+    props.refreshKey = 2;
+    flushSync();
+    expect(lit()).toHaveLength(0);
+  });
+
   it('drops the mark when the reply is sent and the draft cleared', async () => {
     const { sessionId } = render();
     await replyTo('#flow-p', 'Why?');
@@ -653,6 +771,44 @@ describe('NoteReplyQuotes pressing a mark', () => {
     // Closing wrote nothing back: the draft stays sent.
     expect((await loadReplyDraft(sessionId)).quotes).toHaveLength(0);
     expect(replyDraftPresence.has(sessionId)).toBe(false);
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it('holds no reply once its field has closed and the draft has caught up or let the block go', async () => {
+    const { sessionId } = render();
+    const held = () => (component as unknown as { heldReplyCount(): number }).heldReplyCount();
+    await replyTo('#flow-p', 'Why?');
+    expect(held()).toBe(0);
+
+    // Typed, and held until the write lands.
+    click(marks()[0]);
+    type('Why? Batch them.');
+    expect(held()).toBe(1);
+    key(field()!, 'Escape');
+    await drain();
+    expect(held()).toBe(0);
+
+    // Typed, and the draft is sent from another window before the write:
+    // the block the reply was for never shows it.
+    click(marks()[0]);
+    type('Why? Never shown.');
+    await replyDraftWriter.clearNow(replyDraftKey(sessionId));
+    await drain();
+    expect(field()).toBeNull();
+    expect(replyDraftPresence.quotes(sessionId)).toHaveLength(0);
+    expect(held()).toBe(0);
+
+    // The same for a new reply whose block is removed elsewhere as it is typed.
+    select('#again-p', 0, 'Ship behind a flag.'.length);
+    click(button()!);
+    type('Which');
+    await drain(400);
+    expect(replyDraftPresence.quotes(sessionId)).toHaveLength(1);
+    type('Which flag?');
+    expect(held()).toBe(1);
+    await storeDraft(sessionId, { quotes: [], text: '' });
+    expect(field()).toBeNull();
+    expect(held()).toBe(0);
     expect(toastError).not.toHaveBeenCalled();
   });
 

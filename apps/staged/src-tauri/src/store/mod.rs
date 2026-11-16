@@ -24,6 +24,7 @@ mod messages;
 mod migrations;
 mod note_transfer;
 mod notes;
+mod project_activity;
 mod project_notes;
 mod project_repos;
 mod project_search;
@@ -59,6 +60,7 @@ pub use control_grants::{renewed_expiry, ControlGrantRecord, CONTROL_GRANT_LIFET
 pub use messages::TranscriptWindow;
 pub use models::*;
 pub use note_transfer::ChildNoteMove;
+pub use project_activity::ProjectActivity;
 pub use project_notes::DeletedProjectNoteSessions;
 pub use project_search::{ProjectSearchItem, ProjectSearchItemKind};
 pub use project_transfer::{BranchLanding, BranchTransfer, ProjectTransfer};

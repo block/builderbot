@@ -719,6 +719,20 @@ export interface ProjectSearchItem {
 }
 
 // =============================================================================
+// Project activity
+// =============================================================================
+
+/**
+ * When a project last saw activity: its latest note, project-note, review or
+ * commit timestamp. Derived on read, never stored.
+ */
+export interface ProjectActivity {
+  projectId: string;
+  /** Milliseconds since the epoch, on the same clock as `Project.createdAt`. */
+  lastActivityAt: number;
+}
+
+// =============================================================================
 // Sessions
 // =============================================================================
 

@@ -42,10 +42,13 @@
   import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
   import SidebarBoardRows from './SidebarBoardRows.svelte';
   import { transferringTitle } from './projectTransfer';
+  import ProjectSortMenu from './ProjectSortMenu.svelte';
   import SidebarFilterMenu from './SidebarFilterMenu.svelte';
   import SidebarSearchField from './SidebarSearchField.svelte';
   import SidebarSectionHead from './SidebarSectionHead.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
+  import { projectOrderStore } from './projectOrder.svelte';
+  import { projectSortPrefs } from './projectSortPrefs.svelte';
   import {
     matchingRepoKeys,
     resultsLabel,
@@ -59,7 +62,8 @@
   import { queryTerms } from '../../shared/textSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
-  import { neighbourAfterRemove } from './focusAfterRemove';
+  import { focusThroughMove, neighbourAfterRemove } from './focusAfterRemove';
+  import { keepFocusThroughReorder } from './focusThroughReorder.svelte';
   import { createScrollIfActive } from './activeRowScroll';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
@@ -68,9 +72,10 @@
   // All rendered data comes from the shared projectsData store; UI state
   // (width, scroll) lives here or in projectsSidebarState, and the search
   // query in projectsListViewState so the landing-page grid shares it. Rows
-  // come from liveProjects (here and through projectFiltersStore), so a
-  // project's row goes as soon as its delete is confirmed.
-  let projects = $derived(projectsDataStore.liveProjects);
+  // come from the live projects in the window's sort order (projectOrder,
+  // here and through projectFiltersStore), so a project's row goes as soon as
+  // its delete is confirmed and the rows are in the grid's order.
+  let projects = $derived(projectOrderStore.sortedProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
@@ -144,8 +149,8 @@
   // Matched on branches, PRs, repo labels and titles too (projectSearch),
   // prepared once per data change and only while searching, like the grid;
   // rows found that way say why on their meta line. Ranked like the grid,
-  // too, and like it re-ranked only when the query or the chips are edited
-  // (searchOrderHold).
+  // too, and like it re-ranked only when the query, the chips or the sort
+  // are edited (searchOrderHold).
   const searchSnapshot = projectSearchSnapshots();
   let searchData = $derived(searching ? searchSnapshot() : null);
   const holdOrder = searchOrderHold();
@@ -153,6 +158,7 @@
     holdOrder(
       searchQuery.current,
       projectFiltersStore.activeFilters,
+      projectSortPrefs.sort,
       sidebarProjectMatches(sidebarProjects, searchQuery.current, searchData)
     )
   );
@@ -216,22 +222,50 @@
   // one focus takes, even when the filter or search shows a different
   // neighbour. The list keeps that row as the selected one when the filter
   // rules it out, so highlight and focus agree.
-  // While searching, the screen order is the rank's, not sidebarProjects'.
   function removeProject(project: Project) {
-    const rank = projectRank;
-    const shownIds =
-      rank === null
-        ? sidebarProjects.map((p) => p.id)
-        : [...rank].sort(([, a], [, b]) => a - b).map(([id]) => id);
-    const focusAfterRemove = neighbourAfterRemove(shownIds, project.id, (projectId) =>
-      projectRank === null || projectRank.has(projectId)
-        ? [...(sidebarBodyEl?.querySelectorAll<HTMLElement>('.project-row') ?? [])].find(
-            (row) => row.dataset.projectId === projectId
-          )
-        : null
-    );
+    const focusAfterRemove = neighbourAfterRemove(shownRowIds(), project.id, shownRow);
     void projectActions.requestRemoveProject(project, focusAfterRemove);
   }
+
+  /** The rows in screen order. While searching that is the rank's, not sidebarProjects'. */
+  function shownRowIds(): string[] {
+    const rank = projectRank;
+    return rank === null
+      ? sidebarProjects.map((p) => p.id)
+      : [...rank].sort(([, a], [, b]) => a - b).map(([id]) => id);
+  }
+
+  /** A project's row, if the list is showing it. */
+  function shownRow(projectId: string): HTMLElement | null {
+    if (projectRank !== null && !projectRank.has(projectId)) return null;
+    return (
+      [...(sidebarBodyEl?.querySelectorAll<HTMLElement>('.project-row') ?? [])].find(
+        (row) => row.dataset.projectId === projectId
+      ) ?? null
+    );
+  }
+
+  // A tag picked from a row's menu moves the row when the list is sorted by
+  // that tag's group, or takes it off the list when a tag filter rules it
+  // out. Focus stays with the row, or goes to the one that took its place.
+  const movedRowFocus = focusThroughMove(shownRow);
+
+  /** The project whose row holds focus, if one of the list's does. */
+  function focusedRowId(): string | null {
+    const row = document.activeElement?.closest<HTMLElement>('.project-row');
+    return row && sidebarBodyEl?.contains(row) ? (row.dataset.projectId ?? null) : null;
+  }
+
+  // A row reached from the keyboard keeps focus when the list re-sorts
+  // under it: its project's activity moved, or its tags changed elsewhere.
+  // The pointer needs nothing here, since the order holds through a press
+  // (projectActivity).
+  keepFocusThroughReorder({
+    shownIds: shownRowIds,
+    rendered: () => rowOrder.rows,
+    focusedId: focusedRowId,
+    elementFor: shownRow,
+  });
 
   function openAllProjects() {
     goHome();
@@ -531,6 +565,7 @@
               onclick={openAllProjects}
             >
               {#snippet trailing()}
+                <ProjectSortMenu variant="sidebar" />
                 <SidebarFilterMenu />
               {/snippet}
             </SidebarSectionHead>
@@ -648,11 +683,18 @@
                       </div>
                     </button>
                   </ContextMenu.Trigger>
-                  <ContextMenu.Content class="min-w-[172px]">
+                  <ContextMenu.Content
+                    class="min-w-[172px]"
+                    onCloseAutoFocus={movedRowFocus.menuClosed}
+                  >
                     <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
                       <Mail size={14} /> Mark as Unread
                     </ContextMenu.Item>
-                    <ProjectTagMenuItems {project} />
+                    <ProjectTagMenuItems
+                      {project}
+                      onGroupTagChange={(projectId) =>
+                        movedRowFocus.moving(shownRowIds(), projectId)}
+                    />
                     <ContextMenu.Separator />
                     <ProjectTransferMenuItem {project} />
                     <ContextMenu.Item

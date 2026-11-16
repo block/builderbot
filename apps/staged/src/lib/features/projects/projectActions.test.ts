@@ -197,6 +197,8 @@ let storeState: {
   reposByProject: Map<string, ProjectRepo[]>;
   deletingProjectNames: Map<string, string>;
   transferringProjects: Map<string, string>;
+  /** The window's sort, as the ids in sorted order; null for the list's own order. */
+  sortedIds: string[] | null;
 };
 
 async function importActions() {
@@ -303,8 +305,25 @@ beforeEach(() => {
     reposByProject: new Map([['p1', [projectRepo()]]]),
     deletingProjectNames: new Map(),
     transferringProjects: new Map(),
+    sortedIds: null,
   };
 
+  // The mocked delete marks the project the way the real store does, so the
+  // sorted list (the live projects) drops it from then on.
+  projectDeleteStarted.mockImplementation((projectId: string, name: string) => {
+    storeState.deletingProjectNames.set(projectId, name);
+  });
+  vi.doMock('./projectOrder.svelte', () => ({
+    projectOrderStore: {
+      // As the real store: the live projects, in the window's sort order.
+      get sortedProjects() {
+        const live = storeState.projects.filter((p) => !storeState.deletingProjectNames.has(p.id));
+        const order = storeState.sortedIds;
+        if (!order) return live;
+        return [...live].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+      },
+    },
+  }));
   vi.doMock('../../api/commands', () => ({
     deleteProject,
     hasUnpushedCommits,
@@ -391,6 +410,7 @@ afterEach(() => {
   vi.doUnmock('../../stores/projectsData.svelte');
   vi.doUnmock('../../stores/projectState.svelte');
   vi.doUnmock('./workspaceLifecycle.svelte');
+  vi.doUnmock('./projectOrder.svelte');
   vi.doUnmock('../../shared/utils');
   vi.doUnmock('svelte-sonner');
   vi.unstubAllGlobals();
@@ -732,6 +752,43 @@ describe('navigation on delete', () => {
     await actions.requestRemoveProject(project());
 
     expect(selectProject).toHaveBeenCalledWith('p2');
+  });
+
+  it('follows the window sort, not the order the projects are listed in', async () => {
+    // Listed [p1, p2, p3], sorted [p3, p1, p2]: after p1 comes p2, and p3,
+    // which follows p1 in neither order, is not the one opened.
+    storeState.projects = [project(), project({ id: 'p2' }), project({ id: 'p3' })];
+    storeState.sortedIds = ['p3', 'p1', 'p2'];
+    navigationState.selectedProjectId = 'p1';
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project());
+
+    expect(selectProject).toHaveBeenCalledWith('p2');
+  });
+
+  it('falls back to the project before it in the window sort when it sorts last', async () => {
+    // Listed [p1, p2, p3], sorted [p2, p3, p1]: nothing follows p1, so the
+    // closest earlier one, p3, opens. By list order it would have been p2.
+    storeState.projects = [project(), project({ id: 'p2' }), project({ id: 'p3' })];
+    storeState.sortedIds = ['p2', 'p3', 'p1'];
+    navigationState.selectedProjectId = 'p1';
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project());
+
+    expect(selectProject).toHaveBeenCalledWith('p3');
+  });
+
+  it('skips a project already being deleted', async () => {
+    storeState.projects = [project(), project({ id: 'p2' }), project({ id: 'p3' })];
+    storeState.deletingProjectNames.set('p2', 'p2');
+    navigationState.selectedProjectId = 'p1';
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project());
+
+    expect(selectProject).toHaveBeenCalledWith('p3');
   });
 
   it('goes home when the selected project was the last one', async () => {

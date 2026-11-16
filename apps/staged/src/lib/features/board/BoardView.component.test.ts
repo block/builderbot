@@ -1,8 +1,9 @@
 // Mounts the pinned board's detail view over the real tagsStore, filter
 // store and board, with the backend commands, the data stores and
 // navigation mocked: it renders the route's group without the "Board by"
-// picker, opens a card's project, and leaves the board route once the group
-// is unpinned or deleted (navigation.test.ts covers where that lands).
+// picker, opens a card's project, offers the window's sort menu with its own
+// group's key marked as doing nothing, and leaves the board route once the
+// group is unpinned or deleted (navigation.test.ts covers where that lands).
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, TagState } from '../../types';
@@ -114,6 +115,7 @@ vi.mock('svelte-sonner', () => ({ toast: { error: vi.fn() } }));
 
 import { tagsStore } from '../../stores/tags.svelte';
 import { projectFiltersStore } from '../projects/projectFilters.svelte';
+import { projectSortPrefs } from '../projects/projectSortPrefs.svelte';
 import { projectsListViewState } from '../projects/projectsListViewState.svelte';
 import BoardView from './BoardView.svelte';
 
@@ -159,6 +161,22 @@ function columnKeys(root: ParentNode): string[] {
   );
 }
 
+function sortTrigger(root: ParentNode): HTMLElement {
+  const found = root.querySelector<HTMLElement>('.search-row [aria-label^="Sort projects"]');
+  if (!found) throw new Error('No sort menu in the search row');
+  return found;
+}
+
+/** Open the sort menu and return its key rows as "name: hint", top to bottom. */
+async function sortKeyRows(root: ParentNode): Promise<string[]> {
+  sortTrigger(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await settle();
+  return [...document.querySelectorAll<HTMLElement>('[data-sort-key]')].map((row) => {
+    const [, name, hint] = [...row.querySelectorAll('span')].map((el) => el.textContent!.trim());
+    return `${name}: ${hint}`;
+  });
+}
+
 function card(root: ParentNode, projectId: string): HTMLElement {
   const found = [...root.querySelectorAll<HTMLElement>('[data-board-card]')].find(
     (el) => el.dataset.boardCard === projectId
@@ -191,6 +209,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   projectFiltersStore.clearFilters();
   projectsListViewState.searchQuery = '';
+  projectSortPrefs.sort = [];
 });
 
 afterEach(() => {
@@ -248,6 +267,69 @@ describe('BoardView', () => {
       (el) => el.dataset.boardCard
     );
     expect(shown).toEqual(['p2']);
+  });
+
+  it('offers the sort menu in its search row, naming the window’s sort', async () => {
+    projectSortPrefs.sort = [{ kind: 'group', groupId: 'priority', direction: 'asc' }];
+    const root = await mountView(pinnedStatus());
+
+    expect(sortTrigger(root).getAttribute('aria-label')).toBe('Sort projects: Priority');
+    expect(await sortKeyRows(root)).toEqual(['Priority: Tag order']);
+  });
+
+  it('marks the key for its own group as used for the columns', async () => {
+    projectSortPrefs.sort = [
+      { kind: 'group', groupId: 'status', direction: 'asc' },
+      { kind: 'group', groupId: 'priority', direction: 'desc' },
+    ];
+    const root = await mountView(pinnedStatus());
+
+    expect(await sortKeyRows(root)).toEqual([
+      'Status: Used for columns here',
+      'Priority: Reverse tag order',
+    ]);
+    // Still named on the trigger: it orders the grid and the sidebar.
+    expect(sortTrigger(root).getAttribute('aria-label')).toBe('Sort projects: Status, Priority');
+  });
+
+  it('marks the group of the board the route names, not another pinned one', async () => {
+    projectSortPrefs.sort = [
+      { kind: 'group', groupId: 'status', direction: 'asc' },
+      { kind: 'group', groupId: 'priority', direction: 'asc' },
+    ];
+    const state = pinnedStatus();
+    const root = await mountView(
+      { ...state, groups: state.groups.map((g) => ({ ...g, showInSidebar: true })) },
+      'priority'
+    );
+
+    expect(await sortKeyRows(root)).toEqual([
+      'Status: Tag order',
+      'Priority: Used for columns here',
+    ]);
+  });
+
+  it('sorts its cards by the key the menu marks, once past its own group', async () => {
+    // Priority then Status on the Priority board: Priority ties in every
+    // column, so Status orders the cards.
+    projectSortPrefs.sort = [
+      { kind: 'group', groupId: 'priority', direction: 'asc' },
+      { kind: 'group', groupId: 'status', direction: 'asc' },
+    ];
+    const state = pinnedStatus([
+      { projectId: 'p1', tagId: 'done' },
+      { projectId: 'p2', tagId: 'idea' },
+      { projectId: 'p3', tagId: 'doing' },
+    ]);
+    const root = await mountView(
+      { ...state, groups: state.groups.map((g) => ({ ...g, showInSidebar: true })) },
+      'priority'
+    );
+
+    const shown = [...root.querySelectorAll<HTMLElement>('[data-board-card]')].map(
+      (el) => el.dataset.boardCard
+    );
+    expect(shown).toEqual(['p2', 'p3', 'p1']);
   });
 
   it('leaves the board route once its board is unpinned', async () => {

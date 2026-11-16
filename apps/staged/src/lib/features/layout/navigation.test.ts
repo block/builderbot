@@ -18,6 +18,8 @@ let projectsStoreMock: {
   isProjectDeleting: (projectId: string) => boolean;
 };
 let deletingProjectIds: Set<string>;
+/** The window's sorted project list (projectOrder), which next and previous walk. */
+let projectOrderMock: { sortedProjects: Array<{ id: string }> };
 let takeWindowSeed: ReturnType<typeof vi.fn>;
 let pruneDeletedProjects: ReturnType<typeof vi.fn>;
 /** The tag catalog, as far as navigation reads it: which boards are pinned. */
@@ -50,6 +52,7 @@ beforeEach(() => {
   clearSnapshot = vi.fn();
   snapshotProjectId = null;
   deletingProjectIds = new Set();
+  projectOrderMock = { sortedProjects: [] };
   projectsStoreMock = {
     projects: [],
     loaded: false,
@@ -94,6 +97,7 @@ beforeEach(() => {
   vi.doMock('../projects/projectsListViewState.svelte', () => ({
     requestProjectsListRestore: vi.fn(),
   }));
+  vi.doMock('../projects/projectOrder.svelte', () => ({ projectOrderStore: projectOrderMock }));
   vi.doMock('../../stores/tags.svelte', () => ({ tagsStore: tagsStoreMock }));
   vi.doMock('../../shared/viewport.svelte', () => ({ viewport: viewportMock }));
   vi.doMock('./diffRouteRefresh', () => ({ refreshDiffRoute }));
@@ -1850,6 +1854,87 @@ describe('history navigation', () => {
 
       expect(navigation.currentRoute).toEqual(projectRoute('a'));
     });
+  });
+});
+
+describe('next and previous project', () => {
+  /** Whether a dialog is open, which is when the shortcuts do nothing. */
+  let dialogOpen: boolean;
+
+  beforeEach(() => {
+    dialogOpen = false;
+    vi.stubGlobal('document', {
+      querySelectorAll: () => [],
+      querySelector: () => (dialogOpen ? {} : null),
+    });
+    // Listed newest first as [a, b, c] and sorted, by the window's sort, as
+    // [c, a, b]: the order the sidebar shows, and the one to walk.
+    projectsStoreMock.projects = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    projectOrderMock.sortedProjects = [{ id: 'c' }, { id: 'a' }, { id: 'b' }];
+  });
+
+  it('walk the sorted list, not the order the projects are listed in', async () => {
+    const { selectProject, selectNextProject, selectPreviousProject, navigation } =
+      await importNavigation();
+    selectProject('a');
+
+    selectNextProject();
+    expect(navigation.selectedProjectId).toBe('b');
+
+    selectPreviousProject();
+    selectPreviousProject();
+    expect(navigation.selectedProjectId).toBe('c');
+  });
+
+  it('stop at the ends of the sorted list', async () => {
+    const { selectProject, selectNextProject, selectPreviousProject, navigation } =
+      await importNavigation();
+    selectProject('c');
+    selectPreviousProject();
+    expect(navigation.selectedProjectId).toBe('c');
+
+    selectProject('b');
+    selectNextProject();
+    expect(navigation.selectedProjectId).toBe('b');
+  });
+
+  it('follow the list when the sort changes', async () => {
+    const { selectProject, selectNextProject, navigation } = await importNavigation();
+    selectProject('a');
+    projectOrderMock.sortedProjects = [{ id: 'b' }, { id: 'a' }, { id: 'c' }];
+
+    selectNextProject();
+
+    expect(navigation.selectedProjectId).toBe('c');
+  });
+
+  it('skip a project being deleted, which the sorted list no longer holds', async () => {
+    const { selectProject, selectNextProject, navigation } = await importNavigation();
+    selectProject('c');
+    projectOrderMock.sortedProjects = [{ id: 'c' }, { id: 'b' }];
+
+    selectNextProject();
+
+    expect(navigation.selectedProjectId).toBe('b');
+  });
+
+  it('do nothing off a project, or under a dialog', async () => {
+    const { selectProject, selectNextProject, selectPreviousProject, goHome, navigation } =
+      await importNavigation();
+    selectNextProject();
+    expect(navigation.selectedProjectId).toBeNull();
+
+    selectProject('a');
+    dialogOpen = true;
+    selectNextProject();
+    selectPreviousProject();
+    expect(navigation.selectedProjectId).toBe('a');
+
+    dialogOpen = false;
+    goHome();
+    selectNextProject();
+    expect(navigation.currentRoute).toEqual({ kind: 'projects' });
+    expect(navigation.selectedProjectId).toBeNull();
   });
 });
 

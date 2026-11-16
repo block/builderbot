@@ -24,6 +24,14 @@
     remove(project: Project): void;
     /** A "Move to" pick changed the card's column. */
     moved(projectId: string): void;
+    /**
+     * A pick in the card's menu is about to change the project's tag in
+     * another group than the board's. The card stays in its column, but the
+     * sort can move it there and the tag chips can take it off the board.
+     */
+    groupTagChanging(projectId: string): void;
+    /** The card's menu has closed and is handing focus back. */
+    menuClosed(): void;
   }
 </script>
 
@@ -102,6 +110,8 @@
       onRemove={() => handlers.remove(project)}
       moveToGroup={group}
       onMoved={(projectId) => handlers.moved(projectId)}
+      onGroupTagChange={(projectId) => handlers.groupTagChanging(projectId)}
+      onCloseAutoFocus={() => handlers.menuClosed()}
     />
   </ContextMenu.Root>
 </div>

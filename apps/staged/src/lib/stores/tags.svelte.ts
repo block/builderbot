@@ -49,6 +49,7 @@ const EMPTY_TAG_IDS: ReadonlySet<string> = new Set();
 class TagsStore {
   private _snapshot = $state.raw<TagState>(EMPTY_TAG_STATE);
   private _loaded = $state(false);
+  private _hasSnapshot = $state(false);
   private _intents = $state.raw<IntentOverlay>(new Map());
 
   /** Seq of the newest `get_tag_state` request issued. */
@@ -98,6 +99,18 @@ class TagsStore {
    */
   get loaded(): boolean {
     return this._loaded;
+  }
+
+  /**
+   * Whether the catalog is one the backend sent: a snapshot has been
+   * applied, from the network or the web cache. A failed first load settles
+   * `loaded` but not this, and the catalog is then still the empty one the
+   * store starts with. For readers that would take a group missing from the
+   * catalog for deleted and act on it, as an edit to the project sort drops
+   * its keys (ProjectSortMenu).
+   */
+  get hasSnapshot(): boolean {
+    return this._hasSnapshot;
   }
 
   /**
@@ -224,6 +237,7 @@ class TagsStore {
     }
     this._snapshot = state;
     this._loaded = true;
+    this._hasSnapshot = true;
   }
 
   // ── Pending assignment writes (driven by tagActions) ──

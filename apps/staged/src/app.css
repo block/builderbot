@@ -653,3 +653,52 @@ mark.search-match-current {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Search-row menu triggers ──
+   The bordered button that opens a menu from a projects search row: "Board
+   by" and "Hidden columns" (BoardToolbar) and "Sort" (ProjectSortMenu). A
+   muted `trigger-label`, the `trigger-value` it currently holds, and a
+   `board-toolbar-chevron` icon. Here, not in either component: the trigger
+   renders inside a dropdown-menu child, out of reach of a scoped style, and
+   each component is used without the other. */
+.board-toolbar-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 240px;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: var(--size-sm);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.board-toolbar-trigger:hover:not(:disabled),
+.board-toolbar-trigger[data-state='open'] {
+  background: var(--bg-hover);
+  border-color: var(--border-emphasis);
+}
+
+.board-toolbar-trigger .trigger-label {
+  color: var(--text-muted);
+}
+
+.board-toolbar-trigger .trigger-value {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-toolbar-trigger .board-toolbar-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}

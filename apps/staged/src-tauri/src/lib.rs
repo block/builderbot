@@ -39,6 +39,7 @@ pub(crate) mod pipeline_dependency;
 pub mod pr_detection;
 pub mod pr_poll_scheduler;
 mod preference_events;
+pub mod project_activity;
 pub mod project_commands;
 pub mod project_mcp;
 pub mod project_open;
@@ -2476,6 +2477,8 @@ pub fn run() {
             note_commands::delete_project_note,
             // Project search
             project_search::get_project_search_index,
+            // Project activity
+            project_activity::get_project_activity,
             note_transfer::get_note_repo,
             note_transfer::move_note_to_project,
             note_transfer::copy_note_to_project,

@@ -27,12 +27,24 @@
     moveToGroup?: TagGroup | null;
     /** After a "Move to" pick that changed the project's column. */
     onMoved?: (projectId: string) => void;
+    /** As a pick changes the project's tag in a group (ProjectTagMenuItems). */
+    onGroupTagChange?: (projectId: string) => void;
+    /** The menu has closed and is handing focus back. */
+    onCloseAutoFocus?: (event: Event) => void;
   }
 
-  let { project, transferring, onRemove, moveToGroup = null, onMoved }: Props = $props();
+  let {
+    project,
+    transferring,
+    onRemove,
+    moveToGroup = null,
+    onMoved,
+    onGroupTagChange,
+    onCloseAutoFocus,
+  }: Props = $props();
 </script>
 
-<ContextMenu.Content class="min-w-[172px]">
+<ContextMenu.Content class="min-w-[172px]" {onCloseAutoFocus}>
   {#if moveToGroup}
     <BoardMoveToMenu {project} group={moveToGroup} {onMoved} />
     <ContextMenu.Separator />
@@ -40,7 +52,7 @@
   <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
     <Mail size={14} /> Mark as Unread
   </ContextMenu.Item>
-  <ProjectTagMenuItems {project} omitGroupId={moveToGroup?.id ?? null} />
+  <ProjectTagMenuItems {project} omitGroupId={moveToGroup?.id ?? null} {onGroupTagChange} />
   <ContextMenu.Separator />
   <ProjectTransferMenuItem {project} />
   <ContextMenu.Item variant="destructive" disabled={transferring} onSelect={onRemove}>

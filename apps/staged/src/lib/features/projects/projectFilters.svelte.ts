@@ -27,6 +27,7 @@ import { projectStateStore } from '../../stores/projectState.svelte';
 import { tagsStore } from '../../stores/tags.svelte';
 import type { TagCatalog } from '../tags/tagState';
 import { UNGROUPED_SECTION_LABEL } from '../tags/tagPickerModel';
+import { projectOrderStore } from './projectOrder.svelte';
 import { getProjectStatus } from './projectStatus';
 import { workspaceLifecycle } from './workspaceLifecycle.svelte';
 
@@ -349,8 +350,11 @@ class ProjectFiltersStore {
   // count, and each pass would otherwise call getProjectStatus for every
   // project when `running` is active. The counts are read twice per chip.
   //
-  // All of them read liveProjects, so a project being deleted drops out of
-  // the chips' counts and repo filters as its card leaves the list.
+  // All of them read the live projects, so a project being deleted drops out
+  // of the chips' counts and repo filters as its card leaves the list. The
+  // counts and chips don't depend on order and read liveProjects;
+  // filteredProjects filters the window's sorted list (projectOrder) and
+  // keeps its order, so every surface that renders it agrees.
 
   /**
    * The selection as toggled, stale tag keys included. Replaced, never
@@ -397,7 +401,7 @@ class ProjectFiltersStore {
 
   filteredProjects: Project[] = $derived.by(() =>
     filterProjects(
-      projectsDataStore.liveProjects,
+      projectOrderStore.sortedProjects,
       this._activeFilters,
       projectsDataStore.reposByProject,
       (projectId) => projectStateStore.isUnread(projectId),

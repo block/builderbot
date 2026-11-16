@@ -217,6 +217,7 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     ("session_commands.rs", "get_active_sessions"),
     ("note_commands.rs", "list_project_notes"),
     ("project_search.rs", "get_project_search_index"),
+    ("project_activity.rs", "get_project_activity"),
     // The writes sent on every note save, note open, chat open or close and
     // queued follow-up. The frontend keeps the order of the ones it does not
     // await (the `writeOrder` queue in `commands.ts`).

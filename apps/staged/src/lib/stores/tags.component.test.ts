@@ -168,6 +168,28 @@ describe('loading', () => {
     expect(store.iconGroup).toBeNull();
   });
 
+  it('has no snapshot after a failed first load, until a read lands', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const store = await importStore();
+    expect(store.hasSnapshot).toBe(false);
+    const loading = store.load();
+    fetches[0].answer.reject(new Error('backend down'));
+    await loading;
+    // Loaded, but the catalog is still the empty one the store starts with.
+    expect(store.loaded).toBe(true);
+    expect(store.hasSnapshot).toBe(false);
+    expect(store.groups).toEqual([]);
+
+    // A catalog write patched in is not the backend's catalog either.
+    store.patchLocal((current) => current);
+    expect(store.hasSnapshot).toBe(false);
+
+    answer(1, withP1('done'));
+    await tick();
+    expect(store.hasSnapshot).toBe(true);
+    expect(store.groups.map((g) => g.id)).toContain('status');
+  });
+
   it('counts usage over live projects only', async () => {
     const store = await importStore();
     const loading = store.load();

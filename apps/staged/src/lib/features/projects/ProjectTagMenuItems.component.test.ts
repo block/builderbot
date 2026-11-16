@@ -64,12 +64,15 @@ async function settle() {
 }
 
 /** Mount the harness and open its context menu. */
-async function openContextMenu(state: TagState): Promise<HTMLElement> {
+async function openContextMenu(
+  state: TagState,
+  onGroupTagChange?: (projectId: string) => void
+): Promise<HTMLElement> {
   backend.state = state;
   await tagsStore.load({ force: true });
   const target = document.createElement('div');
   document.body.appendChild(target);
-  component = mount(Harness, { target, props: { project } });
+  component = mount(Harness, { target, props: { project, onGroupTagChange } });
   await settle();
   target
     .querySelector('.harness-trigger')!
@@ -184,6 +187,41 @@ describe('ProjectTagMenuItems', () => {
 
     expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p1', 'priority', 'p1');
     expect(tagsStore.groupTagFor('p1', 'priority')?.id).toBe('p1');
+  });
+
+  it('says a group pick is coming before it is written, while the tag is still the old one', async () => {
+    const seen: Array<[string, string | null]> = [];
+    const menu = await openContextMenu(tagState([{ projectId: 'p1', tagId: 'p0' }]), (projectId) =>
+      seen.push([projectId, tagsStore.groupTagFor(projectId, 'priority')?.id ?? null])
+    );
+    const sub = await openSub(menu, 'priority');
+
+    item(sub, 'P1').click();
+    await settle();
+
+    expect(seen).toEqual([['p1', 'p0']]);
+    expect(tagsStore.groupTagFor('p1', 'priority')?.id).toBe('p1');
+  });
+
+  it('says nothing for a pick of the tag the project already has, or for Tags', async () => {
+    const onGroupTagChange = vi.fn();
+    let menu = await openContextMenu(
+      tagState([{ projectId: 'p1', tagId: 'p0' }]),
+      onGroupTagChange
+    );
+    item(await openSub(menu, 'priority'), 'P0').click();
+    await settle();
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+
+    unmount(component!);
+    component = null;
+    document.body.innerHTML = '';
+    menu = await openContextMenu(tagState([{ projectId: 'p1', tagId: 'p0' }]), onGroupTagChange);
+    item(await openSub(menu, 'ungrouped'), 'q4').click();
+    await settle();
+    expect(commandsMock.setProjectTagAssigned).toHaveBeenCalledWith('p1', 'q4', true);
+
+    expect(onGroupTagChange).not.toHaveBeenCalled();
   });
 
   it('clears the icon group with Default, which previews the computed status', async () => {

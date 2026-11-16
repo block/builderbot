@@ -13,6 +13,10 @@
   and passes the board's group as `omitGroupId` so the same choice isn't
   offered twice.
 
+  A group pick can move the project's card or row, when the list is sorted
+  by that group. `onGroupTagChange` tells the list one is coming, so it can
+  keep focus with the row (focusThroughMove).
+
   Built on the ContextMenu.Sub wrappers, so on a phone each submenu is a
   sheet over the menu's own, with a Back row. Branches come from the shared
   projects store, so the Default preview reads "Loading…" rather than a guess
@@ -39,9 +43,15 @@
     project: Project;
     /** A group to leave out: on a board card, "Move to" already covers it. */
     omitGroupId?: string | null;
+    /**
+     * A pick is changing the project's tag in a group, which moves its card
+     * or row in a list sorted by that group. Called before the write, while
+     * the list still shows the project where it was.
+     */
+    onGroupTagChange?: (projectId: string) => void;
   }
 
-  let { project, omitGroupId = null }: Props = $props();
+  let { project, omitGroupId = null, onGroupTagChange }: Props = $props();
 
   let groups = $derived(tagsStore.groups.filter((group) => group.id !== omitGroupId));
   let ungrouped = $derived(tagsStore.tagsByGroup.get(null) ?? []);
@@ -57,6 +67,8 @@
 
   function pickGroupTag(group: TagGroup, value: string) {
     const next = value === NO_TAG_MENU_VALUE ? null : value;
+    if ((tagsStore.groupTagFor(project.id, group.id)?.id ?? null) === next) return;
+    onGroupTagChange?.(project.id);
     void tagActions.setProjectGroupTag(project, group.id, next);
   }
 </script>

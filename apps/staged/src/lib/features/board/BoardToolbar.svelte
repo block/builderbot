@@ -3,6 +3,8 @@
   "Hidden columns (n)" to bring back columns hidden from their menus. In the
   home page's search row on desktop; at the top of the phone pager. A pinned
   board (BoardView) fixes its group by route, so it leaves the picker out.
+  The triggers wear `board-toolbar-trigger` (app.css), as the sort menu
+  beside them does.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -107,47 +109,5 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-  }
-
-  :global(.board-toolbar-trigger) {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-    max-width: 240px;
-    height: 32px;
-    padding: 0 8px 0 10px;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    cursor: pointer;
-    transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease;
-  }
-
-  :global(.board-toolbar-trigger:hover),
-  :global(.board-toolbar-trigger[data-state='open']) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-  }
-
-  :global(.board-toolbar-trigger .trigger-label) {
-    color: var(--text-muted);
-  }
-
-  :global(.board-toolbar-trigger .trigger-value) {
-    min-width: 0;
-    overflow: hidden;
-    font-weight: 500;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  :global(.board-toolbar-trigger .board-toolbar-chevron) {
-    flex-shrink: 0;
-    color: var(--text-muted);
   }
 </style>

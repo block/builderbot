@@ -4,7 +4,10 @@
   import type { Project } from '../../../types';
   import ProjectTagMenuItems from '../ProjectTagMenuItems.svelte';
 
-  let { project }: { project: Project } = $props();
+  let {
+    project,
+    onGroupTagChange,
+  }: { project: Project; onGroupTagChange?: (projectId: string) => void } = $props();
 </script>
 
 <ContextMenu.Root>
@@ -12,6 +15,6 @@
     <div class="harness-trigger">{project.name}</div>
   </ContextMenu.Trigger>
   <ContextMenu.Content>
-    <ProjectTagMenuItems {project} />
+    <ProjectTagMenuItems {project} {onGroupTagChange} />
   </ContextMenu.Content>
 </ContextMenu.Root>

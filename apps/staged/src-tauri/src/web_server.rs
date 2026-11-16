@@ -3157,6 +3157,10 @@ pub(crate) async fn dispatch(
             let store = get_store(store_mutex)?;
             blocking_store_json(move || store.list_project_search_items()).await
         }
+        "get_project_activity" => {
+            let store = get_store(store_mutex)?;
+            blocking_store_json(move || store.list_project_activity()).await
+        }
         "get_project_note" => {
             let store = get_store(store_mutex)?;
             let project_note_id: String = arg(&args, "projectNoteId")?;

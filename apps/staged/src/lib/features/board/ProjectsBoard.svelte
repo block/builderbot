@@ -4,15 +4,21 @@
   + column that adds a tag to the group.
 
   It shows the grid's projects (the filter chips, tag chips included, narrow
-  them) in the grid's newest-first order, and a search hides cards rather
-  than unmounting them, as in the grid. Moving a card between columns changes
+  them) in the grid's order, which is the window's sort (projectOrder) and
+  newest first by default, and a search hides cards rather than unmounting
+  them, as in the grid. A sort key for this board's own group ties inside
+  every column, so the next key orders the cards. Moving a card between columns changes
   the project's tag in the group: by dragging it with a fine pointer on
   desktop, else by "Move to" in the card's context menu. Both are the same
   optimistic write (tagActions.setProjectGroupTag), so the card moves at
   once, and goes back with a toast if the write fails; focus follows it to
   its new column. A move the tag chips rule out (onto Done with only In
   progress's chip on) takes the card off the board, and focus goes to its
-  neighbour instead.
+  neighbour instead. A tag in another group, picked from the card's menu,
+  leaves the card in its column but can move it there (the sort) or take it
+  off the board (the chips), and focus is kept the same way. So is the focus
+  of a card that a re-sort nobody picked moves, as its project's activity or
+  tags change.
 
   The columns are all as tall as the board, which is at least as tall as the
   tallest of them and reaches the bottom of the page it is on: a column with
@@ -75,7 +81,12 @@
   import { tagActions } from '../tags/tagActions.svelte';
   import { resolveTagDrop } from '../tags/tagReorder';
   import { projectActions } from '../projects/projectActions.svelte';
-  import { focusIfDropped, neighbourAfterRemove } from '../projects/focusAfterRemove';
+  import {
+    focusIfDropped,
+    focusThroughMove,
+    neighbourAfterRemove,
+  } from '../projects/focusAfterRemove';
+  import { keepFocusThroughReorder } from '../projects/focusThroughReorder.svelte';
   import type { BoardCardHandlers } from './BoardCard.svelte';
   import BoardAddColumn from './BoardAddColumn.svelte';
   import BoardColumn, { type BoardColumnDragHandlers } from './BoardColumn.svelte';
@@ -232,6 +243,28 @@
     renderedCardIds = shownCardIds();
   });
 
+  /** The project whose card holds focus, if one of this board's does. */
+  function focusedCardId(): string | null {
+    const card = document.activeElement?.closest<HTMLElement>('[data-board-card]');
+    return card && boardEl?.contains(card) ? (card.dataset.boardCard ?? null) : null;
+  }
+
+  // A card reached from the keyboard keeps focus when the cards re-sort
+  // under it, and when a change made elsewhere puts it in another column.
+  keepFocusThroughReorder({
+    shownIds: shownCardIds,
+    focusedId: focusedCardId,
+    elementFor: cardElement,
+  });
+
+  // A tag in another group, picked from a card's menu: the card moves
+  // within its column when the board is sorted by that group, or leaves the
+  // board when a tag chip rules it out. Focus stays with the card, or goes
+  // to the one that took its place, as in the grid and the sidebar.
+  // focusCard is not enough here: it runs as the pick is made, before the
+  // menu hands focus back.
+  const movedCardFocus = focusThroughMove(cardElement);
+
   function targetAt(point: DragPoint): BoardDropTarget | null {
     return columnsEl ? dropTargetAt(point, columnsEl) : null;
   }
@@ -327,6 +360,8 @@
       void projectActions.requestRemoveProject(project, focusAfterRemove);
     },
     moved: (projectId) => void focusCard(projectId),
+    groupTagChanging: (projectId) => movedCardFocus.moving(shownCardIds(), projectId),
+    menuClosed: () => movedCardFocus.menuClosed(),
   };
 
   /**

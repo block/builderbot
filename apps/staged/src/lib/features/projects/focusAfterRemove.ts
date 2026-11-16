@@ -1,3 +1,4 @@
+import { tick } from 'svelte';
 import { activeLayerHost } from '../layout/workspaceLayer';
 
 /**
@@ -51,4 +52,82 @@ export function focusIfDropped(resolve: () => HTMLElement | null): void {
   const active = document.activeElement;
   if (active && active !== document.body) return;
   resolve()?.focus({ preventScroll: true });
+}
+
+/**
+ * Where focus belongs for a project whose row may move or leave its list:
+ * its row while the list still shows it, else the row that took its place
+ * (neighbourAfterRemove). `shownIds` is the list in screen order as it stood
+ * before the change.
+ */
+export function rowOrNeighbour(
+  shownIds: readonly string[],
+  projectId: string,
+  elementFor: (projectId: string) => HTMLElement | null | undefined
+): () => HTMLElement | null {
+  const neighbour = neighbourAfterRemove(shownIds, projectId, elementFor);
+  return () => {
+    const row = elementFor(projectId);
+    return row?.isConnected ? row : neighbour(null);
+  };
+}
+
+/**
+ * Give dropped focus back to what `resolve` names once the list has
+ * re-rendered: after the render in flight, then once more a frame later,
+ * since WebKit can drop the focus a moved node was just given.
+ */
+export function refocusAfterRender(resolve: () => HTMLElement | null): void {
+  void tick().then(() => {
+    focusIfDropped(resolve);
+    requestAnimationFrame(() => focusIfDropped(resolve));
+  });
+}
+
+/**
+ * Keeps focus with a card or row through a change that moves it in its list.
+ *
+ * A tag picked from a project's context menu can move its card or row: the
+ * list is sorted by that tag's group (projectOrder), so the pick re-sorts
+ * it. The keyed row is then a node moved in the document, and a node that
+ * moves while it holds focus loses it, to `<body>`. That happens when the
+ * closing menu hands focus back to the row before the list re-renders. The
+ * pick can also take the row off the list, when a tag chip filters it out.
+ *
+ * `moving` is called as the pick is made, while the list still shows the
+ * project where it was. `menuClosed` is called from the menu's
+ * `onCloseAutoFocus`, which is where the menu gives focus back. Once that
+ * and the re-render have both happened, focus that dropped goes to the
+ * project's row, or to the row that took its place when it left the list.
+ * Focus that went anywhere else is left alone (focusIfDropped). A menu
+ * closed without a pick does nothing.
+ *
+ * This is for a move picked from a menu, where focus is in the menu while
+ * the list re-renders. A row that holds focus when its list re-sorts for
+ * any other reason is keepFocusThroughReorder's.
+ */
+export interface FocusThroughMove {
+  /** `projectId` is about to move; `shownIds` is the list in screen order as it stands. */
+  moving(shownIds: readonly string[], projectId: string): void;
+  /** The menu the move was picked from has closed. */
+  menuClosed(): void;
+}
+
+/** `elementFor` answers for what is on screen now, as for neighbourAfterRemove. */
+export function focusThroughMove(
+  elementFor: (projectId: string) => HTMLElement | null | undefined
+): FocusThroughMove {
+  let pending: (() => HTMLElement | null) | null = null;
+  return {
+    moving(shownIds, projectId) {
+      pending = rowOrNeighbour(shownIds, projectId, elementFor);
+    },
+    menuClosed() {
+      const resolve = pending;
+      pending = null;
+      // After the render that moves the row, and after the menu's own focus
+      // return, which follows this call.
+      if (resolve) refocusAfterRender(resolve);
+    },
+  };
 }

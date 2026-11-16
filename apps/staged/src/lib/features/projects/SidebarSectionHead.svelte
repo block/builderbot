@@ -2,10 +2,14 @@
   SidebarSectionHead.svelte - Uppercase section header for the projects sidebar.
 
   "PINNED REPOS 3" / "ALL PROJECTS 12": a small-caps label with a faint count,
-  plus a trailing slot for the section's tool (the All repos link, the Filter
-  menu). With `onclick` the label is a navigation target — `active` marks the
-  section whose view is showing with an accent dot, the way the old All
-  Projects row highlighted.
+  plus a trailing slot for the section's tools (the All repos link, the Sort
+  and Filter menus). With `onclick` the label is a navigation target —
+  `active` marks the section whose view is showing with an accent dot, the way
+  the old All Projects row highlighted.
+
+  The tools keep their width. In a sidebar too narrow for both, the label's
+  text gives way with an ellipsis and the count stays, so the heading never
+  runs under the tools.
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
@@ -25,12 +29,12 @@
 <div class="section-head">
   {#if onclick}
     <button type="button" class="label" class:active {onclick}>
-      {label}
+      <span class="text">{label}</span>
       {#if count !== undefined}<span class="count">{count}</span>{/if}
     </button>
   {:else}
     <span class="label static">
-      {label}
+      <span class="text">{label}</span>
       {#if count !== undefined}<span class="count">{count}</span>{/if}
     </span>
   {/if}
@@ -80,8 +84,15 @@
     color: var(--text-primary);
   }
 
+  .text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .label.active::after {
     content: '';
+    flex-shrink: 0;
     width: 5px;
     height: 5px;
     border-radius: 50%;
@@ -89,6 +100,7 @@
   }
 
   .count {
+    flex-shrink: 0;
     color: var(--text-faint);
     letter-spacing: 0;
   }

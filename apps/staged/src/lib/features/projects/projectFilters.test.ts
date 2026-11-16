@@ -78,6 +78,9 @@ beforeEach(() => {
   vi.doMock('../../stores/projectState.svelte', () => ({
     projectStateStore: { isUnread: () => false },
   }));
+  // The sorted list filteredProjects filters; its own store is tested in
+  // projectOrder.component.test.ts.
+  vi.doMock('./projectOrder.svelte', () => ({ projectOrderStore: { sortedProjects: [] } }));
   vi.doMock('./projectStatus', () => ({ getProjectStatus: vi.fn() }));
   vi.doMock('./workspaceLifecycle.svelte', () => ({
     workspaceLifecycle: { getWorktreeErrors: () => new Map() },
@@ -98,6 +101,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.doUnmock('../../stores/projectsData.svelte');
   vi.doUnmock('../../stores/projectState.svelte');
+  vi.doUnmock('./projectOrder.svelte');
   vi.doUnmock('./projectStatus');
   vi.doUnmock('./workspaceLifecycle.svelte');
   vi.doUnmock('../../stores/tags.svelte');

@@ -37,6 +37,7 @@ import {
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
+import { projectOrderStore } from './projectOrder.svelte';
 import { focusIfDropped, type FocusAfterRemove } from './focusAfterRemove';
 import { workspaceLifecycle } from './workspaceLifecycle.svelte';
 import {
@@ -428,6 +429,9 @@ class ProjectActionsController {
     const id = project.id;
     const name = projectDisplayName(project);
     const branchesToClear = projectsDataStore.branchesByProject.get(id) || [];
+    // The order the sidebar shows (projectOrder), read while the project is
+    // still in it: it is the live list, which drops the project once marked.
+    const order = projectOrderStore.sortedProjects;
     // Marks the project deleting, which also hides it from the grid, the
     // sidebar and the pickers (projectsDataStore.liveProjects) right away.
     projectsDataStore.projectDeleteStarted(id, name);
@@ -437,15 +441,12 @@ class ProjectActionsController {
     // other project (sidebar/landing-grid context menu) keeps the current view.
     let openedInstead: string | null = null;
     if (navigation.selectedProjectId === id) {
-      const projects = projectsDataStore.projects;
-      const currentIndex = projects.findIndex((p) => p.id === id);
-      const alive = projects.filter(
-        (p) => p.id !== id && !projectsDataStore.isProjectDeleting(p.id)
-      );
+      const currentIndex = order.findIndex((p) => p.id === id);
+      const alive = order.filter((p) => p.id !== id && !projectsDataStore.isProjectDeleting(p.id));
       if (alive.length > 0) {
-        // Prefer the next project after the current one; fall back to the closest earlier one
-        const next =
-          alive.find((p) => projects.indexOf(p) > currentIndex) ?? alive[alive.length - 1];
+        // Prefer the next project after the current one in that order; fall
+        // back to the closest earlier one
+        const next = alive.find((p) => order.indexOf(p) > currentIndex) ?? alive[alive.length - 1];
         selectProject(next.id);
         openedInstead = next.id;
       } else {

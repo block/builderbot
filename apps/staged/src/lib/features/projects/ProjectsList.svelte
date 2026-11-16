@@ -31,7 +31,8 @@
   import ProjectCardStatusIndicator from './ProjectCardStatusIndicator.svelte';
   import ProjectCardLabels from './ProjectCardLabels.svelte';
   import { projectActions } from './projectActions.svelte';
-  import { neighbourAfterRemove } from './focusAfterRemove';
+  import { focusThroughMove, neighbourAfterRemove } from './focusAfterRemove';
+  import { keepFocusThroughReorder } from './focusThroughReorder.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
   import SearchField from '../../shared/SearchField.svelte';
@@ -50,8 +51,11 @@
     setProjectsListScrollTop,
   } from './projectsListViewState.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
+  import { projectOrderStore } from './projectOrder.svelte';
+  import { projectSortPrefs } from './projectSortPrefs.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
   import ProjectsViewToggle from './ProjectsViewToggle.svelte';
+  import ProjectSortMenu from './ProjectSortMenu.svelte';
   import {
     projectShortcutNumbers,
     searchOrderHold,
@@ -74,8 +78,11 @@
   // search query in projectsListViewState, so the sidebar sees the same
   // selection and query; scroll restore is view-local but persists across
   // visits via that same state; modal state stays in the component. A project
-  // being deleted is already off liveProjects, so its card goes on confirm.
-  let projects = $derived(projectsDataStore.liveProjects);
+  // being deleted is already off the live list, so its card goes on confirm.
+  // The list is in the window's sort order (projectOrder), which is also the
+  // order the filtered list keeps, the sticky card is put back into and a
+  // cleared search settles back to.
+  let projects = $derived(projectOrderStore.sortedProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
@@ -157,14 +164,16 @@
   let searchData = $derived(searchActive ? searchSnapshot() : null);
   // The cards left on screen, best match first, and why each matched when
   // its name and repos don't say, from one pass. See visibleProjects for the
-  // composition. Ranked when the query or the chips are edited and only then:
-  // a data change under a held query, a visit's read-state change included,
-  // hides or appends cards but never moves one (searchOrderHold).
+  // composition. Ranked when the query, the chips or the sort are edited and
+  // only then: a data change under a held query, a visit's read-state change
+  // or a re-sort as activity moves included, hides or appends cards but
+  // never moves one (searchOrderHold).
   const holdOrder = searchOrderHold();
   let search = $derived(
     holdOrder(
       gridQuery.current,
       projectFiltersStore.activeFilters,
+      projectSortPrefs.sort,
       visibleProjects(
         projects,
         projectFiltersStore.filteredProjects,
@@ -355,19 +364,49 @@
     return projectsDataStore.isProjectDeleting(projectId);
   }
 
+  /** A project's card, if the grid is showing it. */
+  function shownCard(projectId: string): HTMLElement | null {
+    if (searchRank !== null && !searchRank.has(projectId)) return null;
+    return projectCardElements.get(projectId)?.querySelector<HTMLElement>('.project-card') ?? null;
+  }
+
   // The card goes as soon as the remove is confirmed, taking focus with it, so
   // focus moves on to the card that takes its place.
   function removeProject(project: Project) {
     const focusAfterRemove = neighbourAfterRemove(
       filteredProjects.map((p) => p.id),
       project.id,
-      (projectId) =>
-        searchRank === null || searchRank.has(projectId)
-          ? projectCardElements.get(projectId)?.querySelector<HTMLElement>('.project-card')
-          : null
+      shownCard
     );
     void projectActions.requestRemoveProject(project, focusAfterRemove);
   }
+
+  // A tag picked from a card's menu moves the card when the grid is sorted by
+  // that tag's group, or takes it off the grid when a tag chip filters it
+  // out. Focus stays with the card, or goes to the one that took its place.
+  const movedCardFocus = focusThroughMove(shownCard);
+
+  /** The project whose card holds focus, if one of the grid's does. */
+  function focusedCardId(): string | null {
+    // Most renders find focus in the search field or nowhere: no card to look up.
+    const focused = document.activeElement?.closest('.project-card-wrapper');
+    if (!focused) return null;
+    for (const [projectId, wrapper] of projectCardElements) {
+      if (wrapper === focused) return projectId;
+    }
+    return null;
+  }
+
+  // A card reached from the keyboard keeps focus when the grid re-sorts
+  // under it: its project's activity moved, or its tags changed elsewhere.
+  // The pointer needs nothing here, since the order holds through a press
+  // (projectActivity).
+  keepFocusThroughReorder({
+    shownIds: () => filteredProjects.map((p) => p.id),
+    rendered: () => cardOrder.rows,
+    focusedId: focusedCardId,
+    elementFor: shownCard,
+  });
 
   function openProject(projectId: string) {
     if (isProjectDeleting(projectId)) return;
@@ -523,6 +562,9 @@
             onkeydown={cardOrder.fieldKeydown}
           />
           <ProjectsViewToggle value={boardViewPrefs.viewMode} onChange={setProjectsViewMode} />
+          <!-- One sort for the grid and the board. On the board, the key for
+               the group its columns come from is marked as doing nothing. -->
+          <ProjectSortMenu boardGroupId={boardMode ? (boardGroup?.id ?? null) : null} />
           {#if boardMode && boardGroup && tagsStore.loaded && !viewport.isMobile}
             <BoardToolbar group={boardGroup} />
           {/if}
@@ -629,6 +671,12 @@
                     {project}
                     transferring={status.kind === 'transferring'}
                     onRemove={() => removeProject(project)}
+                    onGroupTagChange={(projectId) =>
+                      movedCardFocus.moving(
+                        filteredProjects.map((p) => p.id),
+                        projectId
+                      )}
+                    onCloseAutoFocus={movedCardFocus.menuClosed}
                   />
                 </ContextMenu.Root>
               </div>
@@ -898,6 +946,12 @@
     .content {
       padding: 16px;
       padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    }
+
+    /* Room for the view toggle and the sort button beside the field on a
+       small phone, before the row wraps one of them onto a line of its own. */
+    .search-row > :global(.search-field) {
+      flex-basis: 160px;
     }
 
     .projects-grid {

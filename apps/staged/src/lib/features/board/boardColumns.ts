@@ -5,8 +5,9 @@
  * can bring them back; the layout also counts the showing cards they hold,
  * so a board with nothing on it can say where its matches went.
  *
- * Cards keep the order the projects come in, which is the grid's: newest
- * first. Every card the filter chips allow is in its column, search matches
+ * Cards keep the order the projects come in, which is the grid's: the
+ * window's sort (projectOrder), newest first by default. Bucketing keeps that
+ * order inside each column, so the board never sorts. Every card the filter chips allow is in its column, search matches
  * or not, so a keystroke hides cards rather than rebuilding them; a column's
  * count is the cards a search leaves showing.
  */
@@ -20,7 +21,7 @@ export interface BoardColumn {
   /** Null for "No ‹group›". */
   tag: Tag | null;
   name: string;
-  /** The column's cards, search misses included, newest first. */
+  /** The column's cards, search misses included, in the order they came in. */
   projects: Project[];
   /** The cards a search leaves showing. */
   count: number;

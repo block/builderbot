@@ -16,6 +16,7 @@ import {
   type ProjectSearchIndexItem,
   type SearchContext,
 } from './projectSearch';
+import type { ProjectSort } from './projectSort';
 
 // ── Fixtures ──
 
@@ -1337,8 +1338,11 @@ describe('searchOrderHold', () => {
   // The active chip filters: one Set throughout, as the store keeps it until
   // a chip is toggled.
   const chips: ReadonlySet<string> = new Set();
+  // The window's stored sort: one array throughout, as the preference keeps
+  // it until the sort is edited.
+  const sort: ProjectSort = [];
   const run = (hold: ReturnType<typeof searchOrderHold>, query: string, data = before) =>
-    hold(query, chips, searchProjects(list, query, buildSearchSnapshot(list, context(data))));
+    hold(query, chips, sort, searchProjects(list, query, buildSearchSnapshot(list, context(data))));
   const ids = (result: { projects: Project[] }) => result.projects.map((p) => p.id);
   // A PR poll brings c a PR titled "Fix login": 32 points, ahead of a.
   const polled = {
@@ -1352,7 +1356,7 @@ describe('searchOrderHold', () => {
   it('ranks the first result for a query as searchProjects did', () => {
     const hold = searchOrderHold();
     const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(before)));
-    expect(hold('login', chips, fresh)).toBe(fresh);
+    expect(hold('login', chips, sort, fresh)).toBe(fresh);
     expect(ids(fresh)).toEqual(['a', 'b', 'c']);
   });
 
@@ -1441,7 +1445,7 @@ describe('searchOrderHold', () => {
     const hold = searchOrderHold();
     run(hold, 'login');
     const blank = searchProjects(list, '');
-    expect(hold('', chips, blank)).toBe(blank);
+    expect(hold('', chips, sort, blank)).toBe(blank);
     expect(ids(run(hold, 'login', polled))).toEqual(['c', 'a', 'b']);
   });
 
@@ -1454,7 +1458,7 @@ describe('searchOrderHold', () => {
       index: { ...before.index, b: [indexItem({ id: 'n', title: 'Login notes v2' })] },
     };
     const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(retitled)));
-    const held = hold('login', chips, fresh);
+    const held = hold('login', chips, sort, fresh);
     expect(held.rank).toBe(first.rank);
     expect(held.projects).toBe(first.projects);
     expect(held.reasons).toBe(fresh.reasons);
@@ -1464,6 +1468,7 @@ describe('searchOrderHold', () => {
     const again = hold(
       'login',
       chips,
+      sort,
       searchProjects(renamed, 'login', buildSearchSnapshot(renamed, context(retitled)))
     );
     expect(again.rank).toBe(first.rank);
@@ -1476,10 +1481,15 @@ describe('searchOrderHold', () => {
     const only = [a];
     // A match on the name alone: no reason line, so the reasons map is the
     // shared empty one both times.
-    const first = hold('a', chips, searchProjects(only, 'a', buildSearchSnapshot(only, context())));
+    const first = hold(
+      'a',
+      chips,
+      sort,
+      searchProjects(only, 'a', buildSearchSnapshot(only, context()))
+    );
     const next = searchProjects(only, 'a', buildSearchSnapshot(only, context()));
     expect(next.reasons).toBe(first.reasons);
-    expect(hold('a', chips, next)).toBe(first);
+    expect(hold('a', chips, sort, next)).toBe(first);
   });
 
   it('hands back the fresh result when its own order is the held one', () => {
@@ -1491,7 +1501,7 @@ describe('searchOrderHold', () => {
     };
     const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(renamed)));
     expect(ids(fresh)).toEqual(['a', 'c']);
-    expect(hold('login', chips, fresh)).toBe(fresh);
+    expect(hold('login', chips, sort, fresh)).toBe(fresh);
   });
 
   it('puts a project that matches again back in its slot, not at the end', () => {
@@ -1537,7 +1547,7 @@ describe('searchOrderHold', () => {
     // The chips' result changes below, but no chip is toggled: the filter
     // Set stays the same.
     const show = (chipped: Project[], sticky: string | null) =>
-      ids(hold('login', chips, visibleProjects(five, chipped, sticky, 'login', snapshot)));
+      ids(hold('login', chips, sort, visibleProjects(five, chipped, sticky, 'login', snapshot)));
     expect(show(five, null)).toEqual(['a', 'x', 'd', 'c', 'b']);
     // Visiting x marks it read; under the project layer, the Unread chip
     // drops it.
@@ -1573,6 +1583,7 @@ describe('searchOrderHold', () => {
         hold(
           'login',
           filters,
+          sort,
           searchProjects(chipped, 'login', buildSearchSnapshot(three, context(data)))
         )
       );
@@ -1604,6 +1615,50 @@ describe('searchOrderHold', () => {
       expect(show(hold, none, three, polledNotes)).toEqual(['b', 'a', 'c']);
       // Unread on: ranked afresh, so c now leads a.
       expect(show(hold, new Set(['unread']), unreadOnly, polledNotes)).toEqual(['c', 'a']);
+    });
+  });
+
+  describe('when the sort is edited', () => {
+    // Three projects named for "login" alike, so they tie and the order of
+    // the list searched decides: the window's sort.
+    const [x, y, z] = ['x', 'y', 'z'].map((id) => project({ id, name: `Login ${id}` }));
+    const newestFirst = [x, y, z];
+    const oldestFirst = [z, y, x];
+    const snapshot = buildSearchSnapshot(newestFirst, context());
+    const show = (
+      hold: ReturnType<typeof searchOrderHold>,
+      stored: ProjectSort,
+      sorted: Project[]
+    ) => ids(hold('login', chips, stored, searchProjects(sorted, 'login', snapshot)));
+
+    it('ranks afresh, so the ties follow the new sort', () => {
+      const hold = searchOrderHold();
+      expect(show(hold, sort, newestFirst)).toEqual(['x', 'y', 'z']);
+      // "Oldest first" picked from the menu beside the search field: the
+      // preference's new array. Held, the cards would stay as they were.
+      const oldest: ProjectSort = [{ kind: 'created', direction: 'asc' }];
+      expect(show(hold, oldest, oldestFirst)).toEqual(['z', 'y', 'x']);
+      // And reset.
+      expect(show(hold, [], newestFirst)).toEqual(['x', 'y', 'z']);
+    });
+
+    it('holds a list that re-sorts under the same sort', () => {
+      const hold = searchOrderHold();
+      const byUpdated: ProjectSort = [{ kind: 'updated', direction: 'desc' }];
+      expect(show(hold, byUpdated, newestFirst)).toEqual(['x', 'y', 'z']);
+      // A session writes to z and it rises to the top of the sorted list.
+      // Nobody edited the sort, so nothing moves under the cursor.
+      expect(show(hold, byUpdated, [z, x, y])).toEqual(['x', 'y', 'z']);
+    });
+
+    it('forgets the slots held before it', () => {
+      const hold = searchOrderHold();
+      expect(show(hold, sort, newestFirst)).toEqual(['x', 'y', 'z']);
+      expect(show(hold, sort, [x, z])).toEqual(['x', 'z']);
+      // y matches again after the edit: ranked where the new sort puts it,
+      // not back in the slot it had.
+      const oldest: ProjectSort = [{ kind: 'created', direction: 'asc' }];
+      expect(show(hold, oldest, oldestFirst)).toEqual(['z', 'y', 'x']);
     });
   });
 });

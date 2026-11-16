@@ -1,6 +1,7 @@
 import type { Parser, Tokens } from 'marked';
 import type { ImageDimensions } from '../../types';
 import { parseStagedMediaReference, resolveStagedMediaUrl } from './mediaUrl';
+import { resolveStagedVideoSrc } from './videoPreview';
 
 /** Stored size and density of an embedded image, when the caller has it. */
 export type MediaDimensionsLookup = (id: string) => ImageDimensions | null | undefined;
@@ -38,7 +39,9 @@ export function renderMarkdownMedia(
     parser && token.tokens ? parser.parseInline(token.tokens, parser.textRenderer) : token.text;
   const alt = escapeHtml(text);
   const title = token.title ? ` title="${escapeHtml(token.title)}"` : '';
-  const src = escapeHtml(resolveStagedMediaUrl(id, ext));
+  const src = escapeHtml(
+    kind === 'video' ? resolveStagedVideoSrc(id, ext) : resolveStagedMediaUrl(id, ext)
+  );
   // Videos get no expand button: the native controls already offer full
   // screen, and an overlay would sit over them.
   return [

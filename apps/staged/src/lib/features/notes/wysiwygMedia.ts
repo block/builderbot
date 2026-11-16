@@ -31,6 +31,7 @@ import {
   resolveStagedMediaUrl,
   type MediaKind,
 } from '../../shared/markdown/mediaUrl';
+import { resolveStagedVideoSrc } from '../../shared/markdown/videoPreview';
 import type { ImageDimensions } from '../../types';
 
 export const stagedMediaView = $view(imageSchema.node, () => (node, view, getPos): NodeView => {
@@ -180,7 +181,7 @@ function mediaFigure(
 ): HTMLElement {
   const alt = String(node.attrs.alt ?? '');
   const title = String(node.attrs.title ?? '');
-  const src = resolveStagedMediaUrl(id, ext);
+  const src = kind === 'video' ? resolveStagedVideoSrc(id, ext) : resolveStagedMediaUrl(id, ext);
 
   const figure = document.createElement('figure');
   figure.className = `markdown-media markdown-media-${kind}`;

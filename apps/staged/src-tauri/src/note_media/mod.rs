@@ -11,6 +11,7 @@ pub(crate) mod pdf;
 pub(crate) use materialize::{materialize_note_media_with, RemoteMedia};
 pub(crate) mod refs;
 pub(crate) mod serving;
+pub(crate) mod stream;
 
 use crate::store::{Image, Store};
 use refs::{extract_media_refs, media_ids, stored_ref, unavailable};

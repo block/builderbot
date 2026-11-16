@@ -18,6 +18,7 @@ import { NodeSelection, TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { callCommand, getMarkdown } from '@milkdown/kit/utils';
 
+import { renderMarkdown } from '../../shared/markdown/renderMarkdown';
 import { wysiwygPlugins } from './wysiwygPlugins';
 
 const IMAGE = 'staged-media://3f2a9c1e-1234-4567-8123-123456789abc.png';
@@ -109,10 +110,61 @@ describe('stagedMediaView', () => {
       'staged-media://localhost/3f2a9c1e-1234-4567-8123-123456789abc.png'
     );
     expect(image.querySelector('figcaption')?.textContent).toBe('Shot');
+    // With the preview fragment (videoPreview.ts); the image has none.
     expect(video.querySelector('video')?.getAttribute('src')).toBe(
-      'staged-media://localhost/3f2a9c1e-1234-4567-8123-123456789abd.mp4'
+      'staged-media://localhost/3f2a9c1e-1234-4567-8123-123456789abd.mp4#t=0.001'
     );
     expect(video.querySelector('video')?.hasAttribute('controls')).toBe(true);
+  });
+
+  // The desktop app streams video from a loopback listener it announces in a
+  // page global (mediaUrl.ts). The address is for the `<video>` alone: it is
+  // new at every launch and carries a secret, so it must not reach the note.
+  it('streams a video as the viewer does, and keeps the address out of the note', async () => {
+    const stream = `http://127.0.0.1:49152/${'5e'.repeat(32)}`;
+    const page = globalThis as { __STAGED_MEDIA_STREAM__?: string };
+    page.__STAGED_MEDIA_STREAM__ = stream;
+    try {
+      await createEditor(note);
+      const [image, video] = figures();
+      const src = `${stream}/3f2a9c1e-1234-4567-8123-123456789abd.mp4#t=0.001`;
+      expect(video.querySelector('video')?.getAttribute('src')).toBe(src);
+      expect(image.querySelector('img')?.getAttribute('src')).toBe(
+        'staged-media://localhost/3f2a9c1e-1234-4567-8123-123456789abc.png'
+      );
+      const viewer = document.createElement('div');
+      viewer.innerHTML = renderMarkdown(`![Clip](${VIDEO})`);
+      expect(viewer.querySelector('video')?.getAttribute('src')).toBe(src);
+      expect(currentMarkdown()).toContain(`![Clip](${VIDEO})`);
+      expect(currentMarkdown()).not.toContain('127.0.0.1');
+    } finally {
+      delete page.__STAGED_MEDIA_STREAM__;
+    }
+  });
+
+  // The editor builds its figure by hand and the viewer renders a string
+  // (mediaRendering.ts); a video has to come out of both the same, preview
+  // fragment included, or one of them is an empty box until played.
+  it.each(['mp4', 'webm', 'mov'])('draws a %s video exactly as the viewer does', async (ext) => {
+    const reference = `![Clip](staged-media://3f2a9c1e-1234-4567-8123-123456789abd.${ext} "Demo")`;
+    const attributes = (video: Element | null | undefined) =>
+      Object.fromEntries([...(video?.attributes ?? [])].map(({ name, value }) => [name, value]));
+
+    await createEditor(`# Note\n\n${reference}`);
+    const edited = attributes(figures()[0].querySelector('video'));
+    const viewer = document.createElement('div');
+    viewer.innerHTML = renderMarkdown(reference);
+    const viewed = attributes(viewer.querySelector('video'));
+
+    expect(edited).toEqual(viewed);
+    expect(edited).toEqual({
+      src: `staged-media://localhost/3f2a9c1e-1234-4567-8123-123456789abd.${ext}#t=0.001`,
+      controls: '',
+      preload: 'metadata',
+      playsinline: '',
+      'aria-label': 'Clip',
+      title: 'Demo',
+    });
   });
 
   it('leaves other images on the plain img the preset draws', async () => {

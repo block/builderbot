@@ -1759,23 +1759,47 @@ fn dispatch_menu_event(id: &str, has_focused_window: bool) -> MenuDispatch {
     }
 }
 
+/// The store as the media handlers reach it: looked up when a file is not in
+/// the media index yet, and a 503 while there is none (before a reset is
+/// confirmed).
+fn media_store_source(app: tauri::AppHandle) -> Arc<note_media::serving::StoreSource> {
+    Arc::new(move || {
+        app.try_state::<Mutex<Option<Arc<Store>>>>()
+            .and_then(|slot| slot.lock().unwrap().clone())
+            .ok_or(tauri::http::StatusCode::SERVICE_UNAVAILABLE)
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Note media reaches the webview two ways (see `note_media::stream`):
+    // video over a loopback listener, everything else, and video when that
+    // listener is unavailable, over the `staged-media` protocol. Both find
+    // files through one index, so the store is asked once per file. The
+    // listener is bound here, ahead of the builder, because its address goes
+    // to the page in an initialization script, and windows are built before
+    // `setup` runs; it starts answering in `setup`. The script names the
+    // address only to the app's own pages, whose origin the config decides.
+    let context = tauri::generate_context!();
+    let media_index = Arc::new(note_media::serving::MediaIndex::default());
+    let media_stream = note_media::stream::MediaStream::bind();
+    let protocol_index = Arc::clone(&media_index);
+
     tauri::Builder::default()
-        .register_asynchronous_uri_scheme_protocol("staged-media", |context, request, responder| {
-            let app = context.app_handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let state = app.state::<Mutex<Option<Arc<store::Store>>>>();
-                let response = match get_store(&state) {
-                    Ok(store) => note_media::serving::response(&store, request),
-                    Err(_) => tauri::http::Response::builder()
-                        .status(503)
-                        .body(Vec::new())
-                        .unwrap(),
-                };
-                responder.respond(response);
-            });
-        })
+        .plugin(note_media::stream::plugin(
+            media_stream.as_ref().ok(),
+            &note_media::stream::page_origins(context.config()),
+        ))
+        .register_asynchronous_uri_scheme_protocol(
+            "staged-media",
+            move |context, request, responder| {
+                let store = media_store_source(context.app_handle().clone());
+                let index = Arc::clone(&protocol_index);
+                tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(note_media::serving::response(&index, &*store, request));
+                });
+            },
+        )
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1798,7 +1822,13 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_store::Builder::new().build())
-        .setup(|app| {
+        .setup(move |app| {
+            note_media::stream::start(
+                media_stream,
+                media_index,
+                media_store_source(app.handle().clone()),
+            );
+
             // Start capturing home's shell env before anything can ask for a
             // worktree's: the ACP tools reconciler started below, doctor and
             // session starts all need it, and a cold `$SHELL -ils` takes
@@ -2598,7 +2628,7 @@ pub fn run() {
             // stagedctl on PATH (Settings action)
             stagedctl_link::commands::link_stagedctl_on_path,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             // Now that window close is intercepted, the only producers are our

@@ -31,6 +31,45 @@ impl Fixture {
         }
     }
 
+    /// The store as the media handlers are given it, and how many times they
+    /// asked for it.
+    pub fn store_source(
+        &self,
+    ) -> (
+        std::sync::Arc<serving::StoreSource>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (store, count) = (self.store.clone(), asked.clone());
+        let source = std::sync::Arc::new(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(store.clone())
+        });
+        (source, asked)
+    }
+
+    /// One request through the desktop protocol, with an index of its own.
+    pub fn protocol(
+        &self,
+        request: tauri::http::Request<Vec<u8>>,
+    ) -> tauri::http::Response<Vec<u8>> {
+        serving::response(
+            &serving::MediaIndex::default(),
+            &*self.store_source().0,
+            request,
+        )
+    }
+
+    /// Store a small MP4 as a note video; returns its `<id>.mp4` and bytes.
+    pub fn video(&self, len: usize) -> (String, Vec<u8>) {
+        let mut mp4 = b"\0\0\0\x18ftypisom\0\0\0\0".to_vec();
+        mp4.extend((0..len.saturating_sub(mp4.len())).map(|i| (i % 251) as u8));
+        std::fs::write(self.dir.path().join("clip.mp4"), &mp4).unwrap();
+        let outcome = self.ingest("", "![a](clip.mp4)");
+        let id = outcome.kept_ids.iter().next().unwrap();
+        (format!("{id}.mp4"), mp4)
+    }
+
     pub fn ingest(&self, previous: &str, content: &str) -> IngestOutcome {
         ingest_note_media(
             &self.store,
@@ -712,8 +751,7 @@ fn desktop_protocol_serves_pdf_attachments_with_ranges() {
         "application/pdf"
     );
     assert!(serving::lookup(&f.store, &format!("{}.png", image.id)).is_err());
-    let response = serving::response(
-        &f.store,
+    let response = f.protocol(
         Request::builder()
             .uri(format!("staged-media://localhost/{}.pdf", image.id))
             .header("Range", "bytes=0-4")
@@ -738,8 +776,7 @@ fn desktop_protocol_seeks_and_handles_head_and_unsatisfiable_ranges() {
     let outcome = f.ingest("", "![a](shot.png)");
     let id = outcome.kept_ids.iter().next().unwrap();
     let uri = format!("staged-media://localhost/{id}.png");
-    let response = serving::response(
-        &f.store,
+    let response = f.protocol(
         Request::builder()
             .uri(&uri)
             .header("Range", "bytes=2-5")
@@ -753,8 +790,7 @@ fn desktop_protocol_seeks_and_handles_head_and_unsatisfiable_ranges() {
         format!("bytes 2-5/{}", PNG.len())
     );
     assert_eq!(response.headers()["content-type"], "image/png");
-    let response = serving::response(
-        &f.store,
+    let response = f.protocol(
         Request::builder()
             .uri(&uri)
             .header("Range", "bytes=999-")
@@ -762,8 +798,7 @@ fn desktop_protocol_seeks_and_handles_head_and_unsatisfiable_ranges() {
             .unwrap(),
     );
     assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-    let response = serving::response(
-        &f.store,
+    let response = f.protocol(
         Request::builder()
             .uri(&uri)
             .method("HEAD")
@@ -775,6 +810,125 @@ fn desktop_protocol_seeks_and_handles_head_and_unsatisfiable_ranges() {
     assert_eq!(response.headers()["content-length"], PNG.len().to_string());
     assert!(serving::lookup(&f.store, "../file.png").is_err());
     assert!(serving::lookup(&f.store, &format!("{id}.mp4")).is_err());
+}
+
+/// WebKit sends a video's requests one after another, hundreds for a single
+/// seek over this protocol, so a store lookup per request made each of them
+/// wait on whatever held the connection. Only the first may ask.
+#[test]
+fn desktop_protocol_asks_the_store_once_per_file_and_answers_while_it_is_held() {
+    use std::sync::atomic::Ordering;
+    use tauri::http::{Request, StatusCode};
+    let f = Fixture::new();
+    let (file, mp4) = f.video(4096);
+    let index = std::sync::Arc::new(serving::MediaIndex::default());
+    let (store, asked) = f.store_source();
+    let get = |range: Option<&str>| {
+        let mut request = Request::builder().uri(format!("staged-media://localhost/{file}"));
+        if let Some(range) = range {
+            request = request.header("Range", range);
+        }
+        request.body(vec![]).unwrap()
+    };
+    let response = serving::response(&index, &*store, get(Some("bytes=0-15")));
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+
+    let held = f.store.hold_connection();
+    let (sent, received) = std::sync::mpsc::channel();
+    let worker = {
+        let (index, store, request) = (index.clone(), store.clone(), get(Some("bytes=100-199")));
+        std::thread::spawn(move || {
+            let _ = sent.send(serving::response(&index, &*store, request));
+        })
+    };
+    let response = received
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a ranged request waited on the store connection");
+    drop(held);
+    worker.join().unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.body(), &mp4[100..200]);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+
+    // This protocol cannot stream (wry takes one buffer per response), so a
+    // request with no Range is the whole file in memory. That is what video
+    // has the loopback stream for; here it is the fallback only.
+    let response = serving::response(&index, &*store, get(None));
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-length"], mp4.len().to_string());
+    assert!(response.body() == &mp4);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+
+    // An entry is believed only while its file is there: a file moves with
+    // its project and goes with its last reference, and then the store is
+    // asked again.
+    let (id, _) = file.split_once('.').unwrap();
+    let image = f.store.get_image(id).unwrap().unwrap();
+    std::fs::remove_file(
+        crate::store::images::image_file_path(&image.project_id, id, &image.filename).unwrap(),
+    )
+    .unwrap();
+    let response = serving::response(&index, &*store, get(Some("bytes=0-15")));
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+}
+
+/// A branch that moves to another project takes its media along: the rows
+/// get the new project and the files its `images/` directory. The index
+/// still holds the old path, finds nothing there, and asks the store once
+/// more for the new one.
+#[test]
+fn desktop_media_index_follows_a_file_that_moved_with_its_project() {
+    use std::sync::atomic::Ordering;
+    use tauri::http::{Request, StatusCode};
+    let f = Fixture::new();
+    let (file, mp4) = f.video(4096);
+    let (id, _) = file.split_once('.').unwrap();
+    let index = serving::MediaIndex::default();
+    let (store, asked) = f.store_source();
+    let get = || {
+        Request::builder()
+            .uri(format!("staged-media://localhost/{file}"))
+            .header("Range", "bytes=100-199")
+            .body(vec![])
+            .unwrap()
+    };
+    let path_in = |project: &str| crate::store::images::image_file_path(project, id, "clip.mp4");
+    let old_path = path_in(&f.project.id).unwrap();
+    assert_eq!(
+        index.locate(&file, &*store).unwrap().0,
+        old_path,
+        "the fixture's video is not where this test moves it from"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+
+    // What `move_branch` does for a branch's media: rows, then files.
+    let destination = Project::new("test/note-media-destination");
+    f.store.create_project(&destination).unwrap();
+    f.store
+        .hold_connection()
+        .execute(
+            "UPDATE images SET project_id = ?1 WHERE branch_id = ?2",
+            rusqlite::params![destination.id, f.branch.id],
+        )
+        .unwrap();
+    let new_path = path_in(&destination.id).unwrap();
+    assert_ne!(new_path, old_path);
+    std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+    std::fs::rename(&old_path, &new_path).unwrap();
+
+    let response = serving::response(&index, &*store, get());
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.body(), &mp4[100..200]);
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    assert_eq!(index.locate(&file, &*store).unwrap().0, new_path);
+    // And the new path is remembered like the old one was.
+    let response = serving::response(&index, &*store, get());
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+
+    std::fs::remove_file(new_path).unwrap();
 }
 
 #[test]

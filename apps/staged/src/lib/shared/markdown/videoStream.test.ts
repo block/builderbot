@@ -39,11 +39,18 @@ interface Scripted {
   /** Times the page seeked to, in order. */
   seeks: number[];
   play: ReturnType<typeof vi.fn>;
-  state: { paused: boolean; ended: boolean; time: number; error: { code: number } | null };
+  state: {
+    paused: boolean;
+    ended: boolean;
+    time: number;
+    error: { code: number } | null;
+    /** What `currentSrc` says; null for whatever the `src` attribute is. */
+    src: string | null;
+  };
 }
 
 function script(video: HTMLVideoElement, initial: Partial<Scripted['state']> = {}): Scripted {
-  const state = { paused: true, ended: false, time: 0, error: null, ...initial };
+  const state = { paused: true, ended: false, time: 0, error: null, src: null, ...initial };
   const seeks: number[] = [];
   const play = vi.fn(() => {
     state.paused = false;
@@ -57,7 +64,7 @@ function script(video: HTMLVideoElement, initial: Partial<Scripted['state']> = {
     paused: { get: () => state.paused },
     ended: { get: () => state.ended },
     error: { get: () => state.error },
-    currentSrc: { get: () => video.getAttribute('src') },
+    currentSrc: { get: () => state.src ?? video.getAttribute('src') },
     currentTime: {
       get: () => state.time,
       set: (time: number) => {
@@ -89,10 +96,19 @@ async function loaded(video: HTMLVideoElement, clip?: Scripted) {
 
 describe('desktop note video', () => {
   let warn: ReturnType<typeof vi.spyOn>;
+  let fetched: ReturnType<typeof vi.fn>;
+  /** The app's listener: it answers (anything at all), or the connection is refused. */
+  const listener = (answers: boolean) => {
+    fetched = vi.fn(() => (answers ? Promise.resolve({}) : Promise.reject(new TypeError())));
+    vi.stubGlobal('fetch', fetched);
+  };
+  /** The listener's answer, or the lack of one, has reached the page. */
+  const settled = () => new Promise((resolve) => setTimeout(resolve));
 
   beforeEach(() => {
     page.__STAGED_MEDIA_STREAM__ = stream;
     warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    listener(true);
   });
 
   afterEach(() => {
@@ -100,6 +116,7 @@ describe('desktop note video', () => {
     document.body.innerHTML = '';
     document.getSelection()?.removeAllRanges();
     warn.mockRestore();
+    vi.unstubAllGlobals();
   });
 
   it.each(['mp4', 'webm', 'mov'])('renders %s on the stream, preview fragment and all', (ext) => {
@@ -220,6 +237,66 @@ describe('desktop note video', () => {
       expect(clip.seeks).toEqual([]);
       expect(clip.play).not.toHaveBeenCalled();
     });
+
+    /*
+     * A preview the fragment did not paint has `videoPreview.ts` seeking to
+     * later times, and for that long the video is on one of them without the
+     * reader having gone there. Resuming it there would have a later play
+     * start part way in.
+     */
+    it('while its preview is held on a later time, goes back to the start', async () => {
+      vi.useFakeTimers();
+      try {
+        // Every time the helper holds a video on, however many it has.
+        for (let held = 1; ; held++) {
+          const video = mount(`![Clip](staged-media://${id}.mp4)`);
+          const clip = script(video, { error: { code: 2 } });
+          Object.defineProperties(video, {
+            seeking: { value: false },
+            duration: { value: 120 },
+            // No frame is ever presented.
+            requestVideoFrameCallback: { value: () => 1 },
+          });
+          const seeked = () => video.dispatchEvent(new Event('seeked'));
+          await loaded(video, clip);
+          for (let i = 0; i < held; i++) {
+            seeked();
+            await vi.advanceTimersByTimeAsync(250);
+          }
+          expect(clip.seeks).toHaveLength(held);
+          // Out of times: the helper put it back at the start by itself.
+          if (clip.state.time === 0.001) {
+            expect(held).toBeGreaterThan(1);
+            break;
+          }
+          seeked();
+
+          failStream(video);
+          // With the fragment, so the protocol's preview is painted from the
+          // start and play begins there.
+          expect(video.getAttribute('src')).toBe(onProtocol);
+          await loaded(video, clip);
+          expect(clip.seeks).toHaveLength(held);
+          expect(clip.state.time).toBe(0.001);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('asks the listener whether it is there, naming neither the secret nor a video', async () => {
+      const video = mount(`![Clip](staged-media://${id}.mp4)`);
+      failStream(video);
+      await settled();
+      expect(fetched.mock.calls).toEqual([
+        ['http://127.0.0.1:49152', { mode: 'no-cors', cache: 'no-store' }],
+      ]);
+
+      // Nothing is asked for a failure that is not the stream's.
+      failStream(video);
+      await settled();
+      expect(fetched).toHaveBeenCalledTimes(1);
+    });
   });
 
   /*
@@ -229,16 +306,7 @@ describe('desktop note video', () => {
    * that is ahead of playback fires it too.
    */
   describe('whose stream goes quiet', () => {
-    let fetched: ReturnType<typeof vi.fn>;
-    /** The listener answers (anything at all) or the connection is refused. */
-    const listener = (answers: boolean) => {
-      fetched = vi.fn(() => (answers ? Promise.resolve({}) : Promise.reject(new TypeError())));
-      vi.stubGlobal('fetch', fetched);
-    };
     const stall = (video: HTMLVideoElement) => video.dispatchEvent(new Event('stalled'));
-    const settled = () => new Promise((resolve) => setTimeout(resolve));
-
-    afterEach(() => vi.unstubAllGlobals());
 
     it('asks the listener whether it is there, naming neither the secret nor a video', async () => {
       listener(true);
@@ -270,13 +338,39 @@ describe('desktop note video', () => {
       expect(message).toContain('stopped answering');
       expect(message).not.toContain(secret);
       expect(message).not.toContain('127.0.0.1');
+      // The listener is gone for every other video too.
+      expect(page.__STAGED_MEDIA_STREAM__).toBeUndefined();
 
       await loaded(video, clip);
       expect(clip.seeks).toEqual([31]);
       expect(clip.state.time).toBe(31);
       expect(clip.state.paused).toBe(false);
-      // The listener is gone for every other video too.
-      expect(page.__STAGED_MEDIA_STREAM__).toBeUndefined();
+    });
+
+    /*
+     * A dying listener can give one video both: an `error`, and the answer to
+     * an earlier stall's question. WebKit's `currentSrc` still names the
+     * stream for a task after the first of them has set the new `src`, on an
+     * element that is by then rewound.
+     */
+    it('leaves once when a failure and a stall overlap', async () => {
+      listener(false);
+      const video = mount(`![Clip](staged-media://${id}.mp4)`);
+      const clip = script(video, { paused: false, time: 31, error: { code: 2 }, src: onStream });
+
+      stall(video);
+      failStream(video);
+      expect(video.getAttribute('src')).toBe(resumedOnProtocol);
+      // The stall's question comes back unanswered, `currentSrc` still stale.
+      await settled();
+      expect(clip.state.time).toBe(0);
+      expect(video.getAttribute('src')).toBe(resumedOnProtocol);
+      expect(clip.play).toHaveBeenCalledTimes(1);
+
+      clip.state.src = null;
+      await loaded(video, clip);
+      expect(clip.seeks).toEqual([31]);
+      expect(clip.state.paused).toBe(false);
     });
 
     it('stays paused where it was when the listener is gone', async () => {
@@ -302,7 +396,9 @@ describe('desktop note video', () => {
       video.remove();
       await settled();
       expect(video.getAttribute('src')).toBe(onStream);
-      expect(warn).not.toHaveBeenCalled();
+      // Only the page learned something: the listener is gone.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(page.__STAGED_MEDIA_STREAM__).toBeUndefined();
     });
 
     it('asks nothing about a video that is not on the stream', async () => {
@@ -318,57 +414,72 @@ describe('desktop note video', () => {
     });
   });
 
-  // With a dead listener every new video would start with a failed load.
-  describe('once the protocol has loaded what the stream did not', () => {
-    it('renders later videos on the protocol and says why', async () => {
+  /*
+   * With a dead listener every new video would start with a failed load, so
+   * the page stops using the stream. Only then: a listener that is there can
+   * still fail one load, and that must not cost every later video its stream.
+   */
+  describe('and the videos after it', () => {
+    const later = () => renderMarkdown(`![B](staged-media://${other}.mp4)`);
+
+    // 2: the connection dropped or the listener said no. 3: it could not be
+    // decoded. 4: WebKit could not use what it was given.
+    it.each([2, 3, 4])(
+      'stay on the stream after one failure (media error %i) on a listener that answers',
+      async (code) => {
+        const video = mount(`![Clip](staged-media://${id}.mp4)`);
+        const clip = script(video, { paused: false, time: 9, error: { code } });
+        failStream(video);
+        await settled();
+        await loaded(video, clip);
+
+        // That one video moved, and resumed.
+        expect(video.getAttribute('src')).toBe(resumedOnProtocol);
+        expect(clip.seeks).toEqual([9]);
+        // No other does, now or later.
+        expect(fetched).toHaveBeenCalledTimes(1);
+        expect(page.__STAGED_MEDIA_STREAM__).toBe(stream);
+        expect(later()).toContain(`<video src="${stream}/${other}.mp4#t=0.001"`);
+        const next = mount(`![B](staged-media://${other}.mp4)`);
+        expect(next.getAttribute('src')).toBe(`${stream}/${other}.mp4#t=0.001`);
+        // One line, for the video that moved.
+        expect(warn).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it('render on the protocol once the listener is gone, and the page says why', async () => {
+      listener(false);
       const video = mount(`![Clip](staged-media://${id}.mp4)`);
       failStream(video);
-      // Not yet: the clip itself may be the problem.
-      expect(renderMarkdown(`![B](staged-media://${other}.mp4)`)).toContain(`src="${stream}/`);
+      // Not before the listener has had its say.
+      expect(later()).toContain(`src="${stream}/`);
 
-      await loaded(video);
+      await settled();
       expect(page.__STAGED_MEDIA_STREAM__).toBeUndefined();
-      const later = renderMarkdown(`![B](staged-media://${other}.mp4)`);
-      expect(later).toContain(`<video src="staged-media://localhost/${other}.mp4#t=0.001"`);
-      expect(later).not.toContain('127.0.0.1');
+      expect(later()).toContain(`<video src="staged-media://localhost/${other}.mp4#t=0.001"`);
+      expect(later()).not.toContain('127.0.0.1');
       expect(warn).toHaveBeenCalledTimes(2);
       const [message] = warn.mock.calls[1] as [string];
       expect(message).toContain('not answering');
       expect(message).not.toContain(secret);
+      expect(message).not.toContain('127.0.0.1');
     });
 
-    it('says why once, however many videos were on the stream', async () => {
+    it('are told why once, however many videos were on the stream', async () => {
+      listener(false);
       mount(`![A](staged-media://${id}.mp4)\n\n![B](staged-media://${other}.webm)`);
       const [first, second] = [...document.querySelectorAll('video')];
       failStream(first);
       failStream(second);
-      await loaded(first);
-      await loaded(second);
+      await settled();
       // One line per video moved, one for the stream.
       expect(warn).toHaveBeenCalledTimes(3);
     });
 
-    it('keeps the stream when the clip fails on the protocol too', () => {
-      const video = mount(`![Clip](staged-media://${id}.mp4)`);
-      failStream(video);
-      failStream(video);
-      expect(page.__STAGED_MEDIA_STREAM__).toBe(stream);
-      expect(renderMarkdown(`![B](staged-media://${other}.mp4)`)).toContain(`src="${stream}/`);
-    });
-
-    it('keeps the stream when the clip could not be decoded', async () => {
-      const video = mount(`![Clip](staged-media://${id}.mp4)`);
-      const clip = script(video, { paused: false, time: 9, error: { code: 3 } });
-      failStream(video);
-      await loaded(video);
-      // Moved and resumed like any other, but the bytes had arrived.
-      expect(clip.seeks).toEqual([9]);
-      expect(page.__STAGED_MEDIA_STREAM__).toBe(stream);
-    });
-
-    it('is not misled by a video that loads without having failed', async () => {
+    it('stay on the stream when a video loads without having failed', async () => {
       const video = mount(`![Clip](staged-media://${id}.mp4)`);
       await loaded(video);
+      expect(fetched).not.toHaveBeenCalled();
       expect(page.__STAGED_MEDIA_STREAM__).toBe(stream);
       expect(warn).not.toHaveBeenCalled();
     });

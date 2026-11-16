@@ -10,9 +10,10 @@
  * 1. It can stop answering. The app names it before knowing that it will
  *    serve, and a listener can die. A video whose stream failed
  *    (`leaveFailedStream`) or went quiet because the listener is gone
- *    (`leaveStalledStream`) moves onto the protocol, where it resumes, and
- *    once the protocol has loaded what the stream could not, the page stops
- *    using the stream.
+ *    (`leaveStalledStream`) moves onto the protocol, where it resumes. The
+ *    page stops using the stream only when the listener itself does not
+ *    answer: one failed load on a listener that is still there costs that
+ *    one video its stream and no other.
  * 2. It is a secret. Anything that reads the secret can ask the listener for
  *    any stored video until the app restarts, so the address must not leave
  *    the page. `keepStreamAddressInApp` covers the ways WebKit would hand it
@@ -20,30 +21,30 @@
  *    serializes the `src`, and the video's context menu, which offers to copy
  *    the address and to open, download or share it.
  */
+import { elementOf, isEditable } from '../../features/sessions/referenceClipboard';
 import { abandonVideoStream, protocolUrlForStreamedVideo } from './mediaUrl';
 
-/** `MediaError.MEDIA_ERR_DECODE`: the bytes arrived and could not be decoded. */
-const MEDIA_ERR_DECODE = 3;
-
 /**
- * Seconds. A video no further in than this is at the start of its clip, where
- * the preview fragment (`videoPreview.ts`) put it, and has no place to resume.
+ * Seconds. A video no further in than this has no place to resume. It is at
+ * the start of its clip, where the preview fragment (`videoPreview.ts`) put
+ * it, or on one of the times the preview helper there holds it on while it
+ * looks for a frame to paint, which is not somewhere the reader went. The
+ * furthest of those is 1 s, reported to within a millisecond. A reader who
+ * really was this far in starts over, a second back at most.
  */
-const AT_START = 0.01;
+const AT_START = 1.001;
 
-/** How a video was doing when it left the stream. */
-interface LeftStream {
-  /** Where it was, in seconds. */
-  at: number;
-  /** Whether the failure could have been the listener's rather than the clip's. */
-  streamSuspected: boolean;
+/** Where each video that is on its way off the stream was, in seconds. */
+const leftStream = new WeakMap<HTMLVideoElement, number>();
+
+/** The address a video is loading from. */
+function sourceOf(video: HTMLVideoElement): string {
+  return video.currentSrc || video.getAttribute('src') || '';
 }
-
-const leftStream = new WeakMap<HTMLVideoElement, LeftStream>();
 
 /** The protocol URL for a video that is on the stream; null for any other. */
 function offStream(video: HTMLVideoElement): string | null {
-  return protocolUrlForStreamedVideo(video.currentSrc || video.getAttribute('src') || '');
+  return protocolUrlForStreamedVideo(sourceOf(video));
 }
 
 /**
@@ -52,29 +53,50 @@ function offStream(video: HTMLVideoElement): string | null {
  * beyond the app itself. This happens once per video: the protocol URL is not
  * a stream URL, so a clip WebKit cannot play at all fails a second time and
  * stays failed.
+ *
+ * Whether later videos still use the stream is the listener's to say, not the
+ * error's. A listener that is there can fail one load (a file that is moving
+ * with its project, a dropped connection), and a dead one fails them all.
  */
 export function leaveFailedStream(video: HTMLVideoElement): void {
-  const code = video.error?.code;
-  leaveStream(video, `failed (media error ${code ?? 'unknown'})`, code !== MEDIA_ERR_DECODE);
+  const src = sourceOf(video);
+  if (!offStream(video)) return;
+  leaveStream(video, `failed (media error ${video.error?.code ?? 'unknown'})`);
+  ifListenerGone(src);
 }
 
 /**
  * Called for a note video's `stalled`: it is loading and nothing has arrived
  * for three seconds. That is all WebKit reports when the listener dies under
  * a video that already has part of its clip. There is no `error`; the video
- * waits where its data ends, for good. So a stall asks whether the listener
- * still answers, and a video whose listener is gone leaves the stream as a
- * failed one does. Any answer means it is there (a stall is also what a
- * healthy load that is ahead of playback looks like), and the request names
- * neither the secret nor a video.
+ * waits where its data ends, for good. A healthy load that is ahead of
+ * playback stalls too, so the video leaves the stream, as a failed one does,
+ * only when the listener is gone.
  */
 export function leaveStalledStream(video: HTMLVideoElement): void {
   const src = video.currentSrc;
   if (!offStream(video)) return;
-  fetch(new URL(src).origin, { mode: 'no-cors', cache: 'no-store' }).catch(() => {
+  ifListenerGone(src, () => {
     // Unless something else has moved or removed the video in the meantime.
-    if (video.isConnected && video.currentSrc === src) {
-      leaveStream(video, 'stopped answering', true);
+    if (video.isConnected && video.currentSrc === src) leaveStream(video, 'stopped answering');
+  });
+}
+
+/**
+ * Ask the listener behind a stream URL whether it still answers, with a
+ * request that names neither the secret nor a video. Any answer means it is
+ * there. When the connection is refused it is gone for every video, so the
+ * page stops using the stream (later videos render on the protocol instead
+ * of each starting with a failed load) and `then` runs. A window that is
+ * reloaded asks the app again.
+ */
+function ifListenerGone(src: string, then?: () => void): void {
+  fetch(new URL(src).origin, { mode: 'no-cors', cache: 'no-store' }).catch(() => {
+    then?.();
+    if (abandonVideoStream()) {
+      console.warn(
+        '[note video] the video stream is not answering; note video uses staged-media until this window reloads'
+      );
     }
   });
 }
@@ -83,14 +105,17 @@ export function leaveStalledStream(video: HTMLVideoElement): void {
  * Move a video that is on the stream to the protocol. A video that was
  * playing plays on, and `resumeAfterLeavingStream` puts it back where it was.
  */
-function leaveStream(video: HTMLVideoElement, why: string, streamSuspected: boolean): void {
+function leaveStream(video: HTMLVideoElement, why: string): void {
   const onProtocol = offStream(video);
-  if (!onProtocol) return;
+  // Once per video. WebKit's `currentSrc` still names the stream for a task
+  // after the new `src` is set, and a second pass in that time would save the
+  // rewound element's position over the real one.
+  if (!onProtocol || leftStream.has(video)) return;
   // Both read before the new `src`: loading it pauses and rewinds the element.
   const wasPlaying = !video.paused && !video.ended;
   const at = video.currentTime;
-  leftStream.set(video, { at, streamSuspected });
-  // A video that had left the start loads without its preview fragment.
+  leftStream.set(video, at);
+  // A video with a place to resume loads without its preview fragment.
   // WebKit seeks to a fragment's time after `loadedmetadata`, which would
   // undo the resume.
   const fallback = at > AT_START ? onProtocol.split('#')[0] : onProtocol;
@@ -103,27 +128,16 @@ function leaveStream(video: HTMLVideoElement, why: string, streamSuspected: bool
 
 /**
  * Called for a note video's `loadedmetadata`. For a video that left the
- * stream, this is the protocol loading what the stream did not:
- *
- * - The video goes back to where it was. A seek from script, not a `#t=`
- *   fragment: WebKit paints nothing for a fragment's seek on some MP4s (see
- *   `videoPreview.ts`), which would leave a paused video blank. `leaveStream`
- *   loaded it with no fragment at all, so nothing seeks after this.
- * - Unless the clip itself was at fault (a decode error), the stream is, so
- *   the page stops using it: every later video renders on the protocol
- *   instead of paying for a failed load first. A window that is reloaded
- *   asks the app again.
+ * stream, this is the protocol loading what the stream did not, and the video
+ * goes back to where it was. A seek from script, not a `#t=` fragment: WebKit
+ * paints nothing for a fragment's seek on some MP4s (see `videoPreview.ts`),
+ * which would leave a paused video blank. `leaveStream` loaded it with no
+ * fragment at all, so nothing seeks after this.
  */
 export function resumeAfterLeavingStream(video: HTMLVideoElement): void {
-  const left = leftStream.get(video);
-  if (!left) return;
+  const at = leftStream.get(video);
   leftStream.delete(video);
-  if (left.at > AT_START) video.currentTime = left.at;
-  if (left.streamSuspected && abandonVideoStream()) {
-    console.warn(
-      '[note video] the video stream is not answering; note video uses staged-media until this window reloads'
-    );
-  }
+  if (at !== undefined && at > AT_START) video.currentTime = at;
 }
 
 let keeping = false;
@@ -162,13 +176,19 @@ export function keepStreamAddressInApp(): void {
 }
 
 /**
- * Write the selection to `data` as the browser would have, with every video
- * that is on the stream named by its protocol URL instead, which is what a
- * copy held before there was a stream. Returns false, having written
- * nothing, when the selection takes in no such video or is inside an editor:
- * an editor writes its own clipboard from the document, where a video is its
- * `staged-media://` reference. With `from`, also when the selection does not
- * reach that node.
+ * Write the selection to `data`, with every video that is on the stream named
+ * by its protocol URL instead, which is what a copy held before there was a
+ * stream. This is plainer than the browser's own copy, which it replaces: the
+ * markup of the selected nodes as they are in the page, without the computed
+ * styles the browser inlines, without the elements the selection sits inside
+ * (some of a list's items are copied without their `ul`), and with no web
+ * archive flavour. Only a selection that takes in a video on the stream pays
+ * that.
+ *
+ * Returns false, having written nothing, when the selection takes in no such
+ * video or is inside an editor: an editor writes its own clipboard from the
+ * document, where a video is its `staged-media://` reference. With `from`,
+ * also when the selection does not reach that node.
  */
 function writeSelectionWithoutStream(data: DataTransfer, from?: Node): boolean {
   const selection = document.getSelection();
@@ -179,16 +199,6 @@ function writeSelectionWithoutStream(data: DataTransfer, from?: Node): boolean {
   data.setData('text/html', ranges.map(htmlWithoutStream).join(''));
   data.setData('text/plain', selection.toString());
   return true;
-}
-
-function elementOf(node: Node): Element | null {
-  return node instanceof Element ? node : node.parentElement;
-}
-
-function isEditable(range: Range): boolean {
-  return !!elementOf(range.commonAncestorContainer)?.closest(
-    '[contenteditable]:not([contenteditable="false"])'
-  );
 }
 
 function holdsStreamedVideo(range: Range): boolean {

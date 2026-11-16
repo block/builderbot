@@ -35,7 +35,7 @@ export function resolveStagedMediaUrl(id: string, ext: string): string {
  * The desktop app's loopback video stream, `http://127.0.0.1:<port>/<secret>`
  * (src-tauri `note_media/stream.rs`). The app sets the global in each window
  * before any script runs, and sets nothing when its listener could not start.
- * The page drops it when the stream turns out not to answer
+ * The page drops it when the listener turns out not to answer
  * (`abandonVideoStream`).
  */
 type StreamPage = typeof globalThis & { __STAGED_MEDIA_STREAM__?: unknown };
@@ -60,10 +60,9 @@ export function resolveStagedVideoUrl(id: string, ext: string): string {
 /**
  * Stop using the loopback stream in this page: from here on
  * `resolveStagedVideoUrl` is the protocol URL, until the window is reloaded
- * and the app names the stream again. For a stream that failed to load a
- * video the protocol then loaded (`videoStream.ts`), so that later videos do
- * not each start with a failed load. Returns whether there was a stream to
- * stop using.
+ * and the app names the stream again. For a stream whose listener no longer
+ * answers (`videoStream.ts`), so that later videos do not each start with a
+ * failed load. Returns whether there was a stream to stop using.
  */
 export function abandonVideoStream(): boolean {
   const page = globalThis as StreamPage;

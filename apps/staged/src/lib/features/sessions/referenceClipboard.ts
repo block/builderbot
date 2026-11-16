@@ -215,11 +215,16 @@ function ownCopy(html: string): Element | null {
   return new DOMParser().parseFromString(html, 'text/html').querySelector(`[${STAGED_COPY_ATTR}]`);
 }
 
-function elementOf(node: Node): Element | null {
+/** The element a node is, or is the text of. */
+export function elementOf(node: Node): Element | null {
   return node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
 }
 
-function isEditable(range: Range): boolean {
+/**
+ * Whether a range lies inside an editor, which writes its own clipboard. Every
+ * copy handler on the document asks this one question (`videoStream.ts`).
+ */
+export function isEditable(range: Range): boolean {
   return !!elementOf(range.commonAncestorContainer)?.closest(
     '[contenteditable]:not([contenteditable="false"])'
   );

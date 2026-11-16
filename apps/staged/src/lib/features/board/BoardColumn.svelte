@@ -1,6 +1,7 @@
 <!--
   BoardColumn.svelte — one board column: its tag's icon, name and card count,
-  a ⋯ menu, and the cards. A drop zone while a card is dragged.
+  a ⋯ menu, and the cards. The board marks it as the drop target while a
+  dragged card is over it.
 
   Collapsed, it is a narrow strip with the name running down it and the
   count; clicking it expands the column, and a card dragged over it tints
@@ -12,11 +13,12 @@
   With drag and drop on, a tag column drags among the others by its header
   (its icon, name and count, not the ⋯ menu, which opens on the press), or
   by its strip when collapsed. The drag is made of pointer events
-  (shared/pointerDrag), not an HTML5 drag, which the desktop build's native
-  file-drop handler would take. A line in the gap beside the column under
-  the pointer shows where it would land, and a chip with the column's icon
-  and name follows the pointer. The first column in the row has no gap
-  before it, so its line sits on its own edge. The header does not drag
+  (shared/pointerDrag), as a card's is (boardCardDrag): the desktop build's
+  native file-drop handler would take an HTML5 drag. A line in the gap
+  beside the column under the pointer shows where it would land, and a chip
+  with the column's icon and name follows the pointer. The first column in
+  the row has no gap before it, so its line sits on its own edge. The header
+  does not drag
   while its name is being edited, so the pointer can select text in the
   field, and "No ‹group›" does not drag at all.
 -->
@@ -71,10 +73,6 @@
     /** Whether the column can move a step that way (never for "No ‹group›"). */
     canMoveLeft: boolean;
     canMoveRight: boolean;
-    /** A card's drag over the column, an HTML5 one. A column's drag sends none. */
-    onDragOver: (event: DragEvent) => void;
-    onDragLeave: (event: DragEvent) => void;
-    onDrop: (event: DragEvent) => void;
     onCollapse: (collapsed: boolean) => void;
     /** Move the column one step left (-1) or right (1). */
     onMove: (step: -1 | 1) => void;
@@ -92,9 +90,6 @@
     first,
     canMoveLeft,
     canMoveRight,
-    onDragOver,
-    onDragLeave,
-    onDrop,
     onCollapse,
     onMove,
     onHide,
@@ -166,9 +161,6 @@
   class:drop-after={dropPlace === 'after'}
   data-board-column={column.key}
   aria-label={`${column.name}, ${column.count} ${column.count === 1 ? 'project' : 'projects'}`}
-  ondragover={onDragOver}
-  ondragleave={onDragLeave}
-  ondrop={onDrop}
 >
   {#if collapsed}
     <button

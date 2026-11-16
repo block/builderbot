@@ -2,90 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { indexTagCatalog } from '../tags/tagState';
 import { DRAG_REACH } from '../../shared/pointerDrag';
 import { tagState } from '../tags/testStubs/tagFixtures';
+import type { BoardDropTarget } from './boardCardDrag';
 import {
   columnAtPoint,
   columnDropSide,
-  isCardDrag,
-  PROJECT_DRAG_TYPE,
-  readProjectDrag,
+  judgeBoardDrop,
   resolveBoardDrop,
-  writeProjectDrag,
   type ColumnBox,
 } from './boardDrop';
 import { NO_TAG_COLUMN_KEY } from './boardPrefs';
 
 const catalog = indexTagCatalog(tagState());
 
-/** Enough of a DataTransfer for the drag helpers. */
-function dataTransfer(data: Record<string, string> = {}): DataTransfer {
-  const store = new Map(Object.entries(data));
-  return {
-    effectAllowed: 'none',
-    dropEffect: 'none',
-    get types() {
-      return [...store.keys()];
-    },
-    setData: (type: string, value: string) => void store.set(type, value),
-    getData: (type: string) => store.get(type) ?? '',
-  } as unknown as DataTransfer;
+function over(key: string): BoardDropTarget {
+  return { kind: 'column', key };
 }
-
-describe('writeProjectDrag', () => {
-  it('carries the project under its own type only, as a move', () => {
-    const dt = dataTransfer();
-    writeProjectDrag(dt, 'p1');
-
-    expect(dt.effectAllowed).toBe('move');
-    expect(dt.getData(PROJECT_DRAG_TYPE)).toBe('p1');
-    // No text copy: a card released over the search field, or any text
-    // input, must not paste its id there.
-    expect(dt.types).toEqual([PROJECT_DRAG_TYPE]);
-    expect(dt.getData('text/plain')).toBe('');
-  });
-});
-
-describe('readProjectDrag', () => {
-  const ids = new Set(['p1', 'p2']);
-
-  it('reads the project type first, then the fallback', () => {
-    expect(readProjectDrag(dataTransfer({ [PROJECT_DRAG_TYPE]: 'p1' }), 'p2', ids)).toBe('p1');
-    // An engine that drops the data on the way: the board saw the drag start.
-    expect(readProjectDrag(dataTransfer(), 'p2', ids)).toBe('p2');
-    expect(readProjectDrag(null, 'p1', ids)).toBe('p1');
-  });
-
-  it('ignores anything that isn’t one of the projects', () => {
-    // Text that happens to spell a project id is not a card.
-    expect(readProjectDrag(dataTransfer({ 'text/plain': 'p2' }), null, ids)).toBeNull();
-    expect(readProjectDrag(dataTransfer({ 'text/plain': 'hello' }), 'p1', ids)).toBe('p1');
-    expect(readProjectDrag(dataTransfer(), 'gone', ids)).toBeNull();
-  });
-});
-
-describe('isCardDrag', () => {
-  it('goes by the type the drag carries', () => {
-    expect(isCardDrag(dataTransfer({ [PROJECT_DRAG_TYPE]: 'p1' }), false)).toBe(true);
-    expect(isCardDrag(dataTransfer({ [PROJECT_DRAG_TYPE]: 'p1' }), true)).toBe(true);
-  });
-
-  it('is not one for files and text', () => {
-    expect(isCardDrag(dataTransfer({ 'text/plain': 'p1' }), false)).toBe(false);
-    expect(isCardDrag(dataTransfer({ Files: '' }), false)).toBe(false);
-    expect(isCardDrag(dataTransfer(), false)).toBe(false);
-    expect(isCardDrag(null, false)).toBe(false);
-  });
-
-  it('falls back to the drag the board saw start when the types are dropped', () => {
-    expect(isCardDrag(dataTransfer(), true)).toBe(true);
-    expect(isCardDrag(null, true)).toBe(true);
-  });
-
-  it('is not one for text and files dragged after a card drag that never ended', () => {
-    // The drag the board saw start speaks only for a drag with no types.
-    expect(isCardDrag(dataTransfer({ 'text/plain': 'p1' }), true)).toBe(false);
-    expect(isCardDrag(dataTransfer({ Files: '' }), true)).toBe(false);
-  });
-});
 
 describe('columnDropSide', () => {
   const rect = { left: 100, width: 272 };
@@ -331,5 +262,68 @@ describe('resolveBoardDrop', () => {
   it('is null when the group itself is gone', () => {
     expect(resolveBoardDrop(NO_TAG_COLUMN_KEY, 'deleted', catalog)).toBeNull();
     expect(resolveBoardDrop('done', 'deleted', catalog)).toBeNull();
+  });
+});
+
+describe('judgeBoardDrop', () => {
+  it('moves a card dropped on another column to that column’s tag', () => {
+    expect(judgeBoardDrop(over('done'), 'idea', 'status', catalog)).toEqual({
+      kind: 'move',
+      key: 'done',
+      write: { groupId: 'status', tagId: 'done' },
+    });
+    // From "No ‹group›", which is a column like any other to leave.
+    expect(judgeBoardDrop(over('idea'), NO_TAG_COLUMN_KEY, 'status', catalog)).toEqual({
+      kind: 'move',
+      key: 'idea',
+      write: { groupId: 'status', tagId: 'idea' },
+    });
+  });
+
+  it('clears the group’s tag on "No ‹group›"', () => {
+    expect(judgeBoardDrop(over(NO_TAG_COLUMN_KEY), 'done', 'status', catalog)).toEqual({
+      kind: 'move',
+      key: NO_TAG_COLUMN_KEY,
+      write: { groupId: 'status', tagId: null },
+    });
+  });
+
+  it('changes nothing on the card’s own column', () => {
+    expect(judgeBoardDrop(over('done'), 'done', 'status', catalog)).toEqual({ kind: 'home' });
+    expect(judgeBoardDrop(over(NO_TAG_COLUMN_KEY), NO_TAG_COLUMN_KEY, 'status', catalog)).toEqual({
+      kind: 'home',
+    });
+  });
+
+  it('changes nothing off the columns', () => {
+    expect(judgeBoardDrop(null, 'done', 'status', catalog)).toEqual({ kind: 'none' });
+  });
+
+  it('refuses the + column, whichever column the card came from', () => {
+    expect(judgeBoardDrop({ kind: 'add-column' }, 'done', 'status', catalog)).toEqual({
+      kind: 'refused',
+    });
+    expect(judgeBoardDrop({ kind: 'add-column' }, null, 'status', catalog)).toEqual({
+      kind: 'refused',
+    });
+  });
+
+  it('refuses a column whose tag vanished or left the group mid-drag', () => {
+    expect(judgeBoardDrop(over('gone'), 'idea', 'status', catalog)).toEqual({ kind: 'refused' });
+    expect(judgeBoardDrop(over('p0'), 'idea', 'status', catalog)).toEqual({ kind: 'refused' });
+  });
+
+  it('refuses every column once the group itself is gone', () => {
+    expect(judgeBoardDrop(over('done'), 'idea', 'deleted', catalog)).toEqual({ kind: 'refused' });
+    expect(judgeBoardDrop(over(NO_TAG_COLUMN_KEY), 'idea', 'deleted', catalog)).toEqual({
+      kind: 'refused',
+    });
+  });
+
+  it('moves a card whose own column is unknown (hidden, or gone)', () => {
+    expect(judgeBoardDrop(over('done'), null, 'status', catalog)).toMatchObject({
+      kind: 'move',
+      write: { groupId: 'status', tagId: 'done' },
+    });
   });
 });

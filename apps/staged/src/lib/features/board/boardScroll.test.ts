@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { overflowEdges, revealOffset, revealStep } from './boardScroll';
+import {
+  DRAG_SCROLL_EDGE,
+  DRAG_SCROLL_MAX_SPEED,
+  edgeScrollVelocity,
+  overflowEdges,
+  revealOffset,
+  revealStep,
+} from './boardScroll';
 
 describe('overflowEdges', () => {
   it('shows neither edge when the columns fit', () => {
@@ -89,5 +96,40 @@ describe('revealOffset', () => {
 
   it('lines a column wider than the view up with its left edge', () => {
     expect(revealOffset(view, { left: 100, right: 900 })).toBe(100 - 48);
+  });
+});
+
+describe('edgeScrollVelocity', () => {
+  const view = { left: 100, right: 900 };
+
+  it('leaves the board still while the card is clear of both sides', () => {
+    expect(edgeScrollVelocity(500, view)).toBe(0);
+    expect(edgeScrollVelocity(100 + DRAG_SCROLL_EDGE, view)).toBe(0);
+    expect(edgeScrollVelocity(900 - DRAG_SCROLL_EDGE, view)).toBe(0);
+  });
+
+  it('scrolls toward the side the card is held near, faster the nearer it is', () => {
+    const slow = edgeScrollVelocity(900 - DRAG_SCROLL_EDGE / 2, view);
+    const fast = edgeScrollVelocity(900 - DRAG_SCROLL_EDGE / 4, view);
+    expect(slow).toBeCloseTo(DRAG_SCROLL_MAX_SPEED / 2);
+    expect(fast).toBeGreaterThan(slow);
+    expect(edgeScrollVelocity(100 + DRAG_SCROLL_EDGE / 2, view)).toBeCloseTo(
+      -DRAG_SCROLL_MAX_SPEED / 2
+    );
+  });
+
+  it('tops out at the side, and stays there past it', () => {
+    expect(edgeScrollVelocity(900, view)).toBe(DRAG_SCROLL_MAX_SPEED);
+    expect(edgeScrollVelocity(1400, view)).toBe(DRAG_SCROLL_MAX_SPEED);
+    expect(edgeScrollVelocity(100, view)).toBe(-DRAG_SCROLL_MAX_SPEED);
+    expect(edgeScrollVelocity(-50, view)).toBe(-DRAG_SCROLL_MAX_SPEED);
+  });
+
+  it('splits a view too narrow for two edge bands down the middle', () => {
+    const narrow = { left: 0, right: DRAG_SCROLL_EDGE };
+    expect(edgeScrollVelocity(DRAG_SCROLL_EDGE / 2, narrow)).toBe(0);
+    expect(edgeScrollVelocity(DRAG_SCROLL_EDGE / 4, narrow)).toBeLessThan(0);
+    expect(edgeScrollVelocity((DRAG_SCROLL_EDGE * 3) / 4, narrow)).toBeGreaterThan(0);
+    expect(edgeScrollVelocity(10, { left: 0, right: 0 })).toBe(0);
   });
 });

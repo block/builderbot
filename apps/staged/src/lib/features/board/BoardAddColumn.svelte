@@ -2,6 +2,9 @@
   BoardAddColumn.svelte — the trailing + column: adds a tag to the board's
   group, which becomes a new column. The tag gets an automatic colour and no
   icon; both can be changed from the column menu or Settings › Tags.
+
+  It holds no cards, so it takes none: a card dragged over it is refused, and
+  it says so (`refusing`) rather than looking like somewhere to drop.
 -->
 <script lang="ts">
   import Plus from '@lucide/svelte/icons/plus';
@@ -15,9 +18,11 @@
     group: TagGroup;
     /** On the phone pager: full width. */
     paged: boolean;
+    /** A dragged card is over this column, which can't take it. */
+    refusing?: boolean;
   }
 
-  let { group, paged }: Props = $props();
+  let { group, paged, refusing = false }: Props = $props();
 
   let adding = $state(false);
   let saving = $state(false);
@@ -61,7 +66,7 @@
   }
 </script>
 
-<div class="board-add-column" class:paged>
+<div class="board-add-column" class:paged class:refusing data-board-no-drop>
   {#if adding}
     <form class="add-form" onsubmit={create} onfocusout={handleFocusOut}>
       <input
@@ -127,6 +132,19 @@
   .add-trigger:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* A card can't be dropped here. Over the hover styles, which a card
+     dragged across the + sets off too. */
+  .refusing .add-trigger {
+    border-color: var(--ui-danger);
+    background: var(--ui-danger-bg);
+    color: var(--ui-danger);
+  }
+
+  .refusing .add-form {
+    background: var(--ui-danger-bg);
+    box-shadow: inset 0 0 0 1px var(--ui-danger);
   }
 
   .add-form {

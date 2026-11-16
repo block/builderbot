@@ -68,3 +68,25 @@ export function revealOffset(view: Span, column: Span): number {
   if (column.right > view.right + EPSILON) return column.right - view.right;
   return 0;
 }
+
+/** How close to a side of the board, in px, a dragged card starts it scrolling. */
+export const DRAG_SCROLL_EDGE = 64;
+
+/** The fastest a dragged card scrolls the board, in px per second. */
+export const DRAG_SCROLL_MAX_SPEED = 900;
+
+/**
+ * How fast (px per second, negative is left) a card dragged to `x` scrolls
+ * the board sideways: nothing in the middle of `view`, then faster the
+ * nearer the pointer is to a side, and flat out at or past it. A view too
+ * narrow for two edge bands splits down the middle.
+ */
+export function edgeScrollVelocity(x: number, view: Span): number {
+  const band = Math.min(DRAG_SCROLL_EDGE, (view.right - view.left) / 2);
+  if (band <= 0) return 0;
+  const intoStart = view.left + band - x;
+  const intoEnd = x - (view.right - band);
+  if (intoStart > 0) return -DRAG_SCROLL_MAX_SPEED * Math.min(1, intoStart / band);
+  if (intoEnd > 0) return DRAG_SCROLL_MAX_SPEED * Math.min(1, intoEnd / band);
+  return 0;
+}

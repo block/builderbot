@@ -1,17 +1,17 @@
 /**
  * Dragging on the board: a card between columns, or a column among the
- * others. What a card's drag carries and what its drop means, and where a
- * dragged column's pointer puts it.
+ * others. What a card's drop means, and where a dragged column's pointer
+ * puts it.
  *
- * The two are different kinds of drag. A card's is an HTML5 drag. A column's
- * is made of pointer events (see shared/pointerDrag), so it carries no data
- * and the board resolves each point the pointer reaches from the columns'
- * rects, forgiving a pointer that strays a little off the row.
+ * Both are made of pointer events (boardCardDrag and shared/pointerDrag), so
+ * neither carries data: the board resolves what the pointer is over itself,
+ * a card's from the element under it and a column's from the columns' rects,
+ * forgiving a pointer that strays a little off the row.
  *
  * A card's drop names the column, not a tag fetched when the drag began, and
- * is resolved against the catalog as it stands at drop time: a column whose
- * tag was deleted or moved to another group mid-drag resolves to nothing
- * rather than to a stale write. A column's drop names the column under the
+ * is judged against the catalog as it stands at drop time: a column whose
+ * tag was deleted or moved to another group mid-drag is refused rather than
+ * turned into a stale write. A column's drop names the column under the
  * pointer and a side of it (see boardColumnReorder for what that moves).
  */
 
@@ -21,51 +21,10 @@ import {
   type DragBox,
   type PointerDragPoint,
 } from '../../shared/pointerDrag';
+import type { BoardDropTarget } from './boardCardDrag';
 import type { ColumnDrop } from './boardColumnReorder';
 import { NO_TAG_COLUMN_KEY } from './boardPrefs';
 import type { TagCatalog } from '../tags/tagState';
-
-/** The drag data type a board card carries its project id under. */
-export const PROJECT_DRAG_TYPE = 'application/x-staged-project';
-
-/**
- * Put a card's project on a drag, under its own type only. No `text/plain`
- * copy: a card released over the search field, or any text input, would
- * paste the project's id into it. The board's own fallback for engines that
- * drop custom types is the card it saw the drag start on (see
- * `readProjectDrag`), so the copy isn't needed to move a card.
- */
-export function writeProjectDrag(dataTransfer: DataTransfer, projectId: string): void {
-  dataTransfer.effectAllowed = 'move';
-  dataTransfer.setData(PROJECT_DRAG_TYPE, projectId);
-}
-
-/**
- * The project a drop carries: the drag data, else `fallback` (the card the
- * board saw the drag start on), as long as it names one of `projectIds`.
- * Text dragged in from elsewhere names none, so it never moves a card.
- */
-export function readProjectDrag(
-  dataTransfer: DataTransfer | null,
-  fallback: string | null,
-  projectIds: ReadonlySet<string>
-): string | null {
-  const candidates = [dataTransfer?.getData(PROJECT_DRAG_TYPE), fallback];
-  return candidates.find((id): id is string => !!id && projectIds.has(id)) ?? null;
-}
-
-/**
- * Whether a drag event is a board card's. The type the drag carries decides.
- * `started`, whether the board saw a card drag start, speaks only for a drag
- * that carries no types at all, which is an engine that dropped them. It can
- * be stale, from a drag whose card left the page and whose dragend never
- * came, and text or files dragged over the board after that are not a card.
- */
-export function isCardDrag(dataTransfer: DataTransfer | null, started: boolean): boolean {
-  const types = dataTransfer?.types ?? [];
-  if (types.includes(PROJECT_DRAG_TYPE)) return true;
-  return types.length === 0 && started;
-}
 
 /**
  * The side of a column a dragged column would land on, for a pointer at
@@ -140,6 +99,19 @@ export interface BoardDropWrite {
 }
 
 /**
+ * What releasing the card would do:
+ * - `none`: it is over nothing, and goes back where it was.
+ * - `home`: it is over its own column, so there is nothing to change.
+ * - `refused`: it is over something that can't take it, and goes back.
+ * - `move`: it changes column, by `write`.
+ */
+export type BoardDropVerdict =
+  | { kind: 'none' }
+  | { kind: 'home' }
+  | { kind: 'refused' }
+  | { kind: 'move'; key: string; write: BoardDropWrite };
+
+/**
  * Resolve a drop on `columnKey` of `groupId`'s board, or null when the group
  * is gone or the column's tag is no longer in it.
  */
@@ -152,4 +124,23 @@ export function resolveBoardDrop(
   if (columnKey === NO_TAG_COLUMN_KEY) return { groupId, tagId: null };
   const tag = catalog.tagsById.get(columnKey);
   return tag?.groupId === groupId ? { groupId, tagId: tag.id } : null;
+}
+
+/**
+ * Judge a card over `target` on `groupId`'s board. `homeKey` is the column
+ * the card is in now; "No ‹group›" clears the group's tag, as it does in the
+ * card's "Move to" menu. The + column takes no cards, and neither does a
+ * column the catalog no longer backs.
+ */
+export function judgeBoardDrop(
+  target: BoardDropTarget | null,
+  homeKey: string | null,
+  groupId: string,
+  catalog: Pick<TagCatalog, 'groupsById' | 'tagsById'>
+): BoardDropVerdict {
+  if (!target) return { kind: 'none' };
+  if (target.kind === 'add-column') return { kind: 'refused' };
+  if (target.key === homeKey) return { kind: 'home' };
+  const write = resolveBoardDrop(target.key, groupId, catalog);
+  return write ? { kind: 'move', key: target.key, write } : { kind: 'refused' };
 }

@@ -5,10 +5,11 @@
 // labels are the real ones, so its chips show which tags its column leaves
 // out. Moving a column from its menu ends in `move_tag`, through the real
 // pending overlay, so the board shows it before the write lands, and so
-// does dragging one by its header. A card's drag is an HTML5 one, driven
-// here with drag events. A column's is made of pointer events, through the
-// real pointerDrag action, at points taken from the columns' stubbed rects,
-// with the real chip following the pointer.
+// does dragging one by its header. Both drags are made of pointer events.
+// A card's goes through boardCardDrag; jsdom lays nothing out, so each test
+// says what the pointer is over. A column's goes through the real
+// pointerDrag action, at points taken from the columns' stubbed rects, with
+// the real chip following the pointer.
 // The last block puts the real projectFiltersStore in front of it, as
 // ProjectsList does, so the tag chips decide which cards it shows.
 import { flushSync, mount, tick, unmount } from 'svelte';
@@ -57,6 +58,7 @@ function project(id: string): Project {
 }
 
 const projects = vi.hoisted(() => [] as Project[]);
+const deleting = vi.hoisted(() => new Set<string>());
 
 vi.mock('../../commands', () => commandsMock);
 vi.mock('../../api/commands', () => commandsMock);
@@ -77,7 +79,7 @@ vi.mock('../../stores/projectsData.svelte', () => ({
     reposByProject: new Map(),
     deletingProjectNames: new Map(),
     transferringProjects: new Map(),
-    isProjectDeleting: () => false,
+    isProjectDeleting: (projectId: string) => deleting.has(projectId),
     isProjectHydrated: () => true,
   },
 }));
@@ -105,15 +107,17 @@ vi.mock(
 vi.mock('../layout/navigation.svelte', () => ({ openSettings: vi.fn() }));
 vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
 
+import { toast } from 'svelte-sonner';
 import { tagsStore } from '../../stores/tags.svelte';
 import { projectFiltersStore } from '../projects/projectFilters.svelte';
 import FilteredBoardHarness from './testStubs/FilteredBoardHarness.svelte';
-import { PROJECT_DRAG_TYPE } from './boardDrop';
 import { NO_TAG_COLUMN_KEY } from './boardPrefs';
 import { boardViewPrefs } from './boardViewPrefs.svelte';
 import ProjectsBoard from './ProjectsBoard.svelte';
 
 let component: ReturnType<typeof mount> | null = null;
+/** The mounted board's props, to change after the mount. */
+let boardProps: { projects: Project[] };
 
 async function settle() {
   for (let i = 0; i < 3; i++) {
@@ -148,6 +152,7 @@ async function mountBoard(
     searchRank,
     onOpen: openProject,
   });
+  boardProps = props;
   component = mount(ProjectsBoard, { target, props });
   await settle();
   return target;
@@ -217,6 +222,28 @@ function dragEvent(type: string, data: Record<string, string>, at: Partial<Point
       getData: (key: string) => store.get(key) ?? '',
       setDragImage: () => {},
     },
+  });
+  return event;
+}
+
+/** What the pointer is over, for `document.elementFromPoint` (jsdom has none). */
+let under: Element | null = null;
+
+/** A pointer event as a mouse makes them (jsdom has no PointerEvent). */
+function pointer(type: string, x: number, init: MouseEventInit = {}, pointerType = 'mouse'): Event {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: 10,
+    button: 0,
+    buttons: type === 'pointerup' ? 0 : 1,
+    ...init,
+  });
+  Object.defineProperties(event, {
+    pointerId: { value: 1 },
+    pointerType: { value: pointerType },
+    isPrimary: { value: true },
   });
   return event;
 }
@@ -359,6 +386,38 @@ function dropLines(root: ParentNode): string[] {
   );
 }
 
+/** Press a card and carry it over `over`, still held. */
+async function carry(root: ParentNode, projectId: string, over: Element | null) {
+  card(root, projectId).dispatchEvent(pointer('pointerdown', 10));
+  under = over;
+  window.dispatchEvent(pointer('pointermove', 80));
+  await settle();
+}
+
+/** Let go of the card in hand, over whatever it was last carried over. */
+async function release() {
+  window.dispatchEvent(pointer('pointerup', 80));
+  await settle();
+}
+
+async function dragTo(root: ParentNode, projectId: string, over: Element | null) {
+  await carry(root, projectId, over);
+  await release();
+}
+
+/** The copy of the card that follows the pointer. */
+function ghost(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.board-drag-ghost');
+}
+
+function board(root: ParentNode): HTMLElement {
+  return root.querySelector<HTMLElement>('.projects-board')!;
+}
+
+function addColumn(root: ParentNode): HTMLElement {
+  return root.querySelector<HTMLElement>('[data-board-no-drop]')!;
+}
+
 function menuItem(content: ParentNode, text: string): HTMLElement {
   const found = [...content.querySelectorAll<HTMLElement>('[role^="menuitem"]')].find((el) =>
     el.textContent?.includes(text)
@@ -460,15 +519,19 @@ beforeAll(() => {
     disconnect() {}
   } as unknown as typeof ResizeObserver;
   Element.prototype.scrollIntoView ??= () => {};
+  document.elementFromPoint = () => under;
 });
 
 afterAll(() => {
+  delete (document as Partial<Document>).elementFromPoint;
   delete (window as Partial<Window>).matchMedia;
   delete (globalThis as Partial<typeof globalThis>).ResizeObserver;
 });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  under = null;
+  deleting.clear();
   boardViewPrefs.columns = {};
   boardViewPrefs.groupId = null;
   // The write changes what the next get_tag_state returns, as the backend's would.
@@ -488,6 +551,7 @@ afterEach(async () => {
   if (component) unmount(component);
   component = null;
   document.body.innerHTML = '';
+  document.body.removeAttribute('style');
 });
 
 describe('ProjectsBoard', () => {
@@ -580,34 +644,276 @@ describe('ProjectsBoard', () => {
   it('moves a card dropped on another column, and clears it on "No ‹group›"', async () => {
     const root = await mountBoard();
 
-    const doing = column(root, 'doing');
-    const over = dragEvent('dragover', { [PROJECT_DRAG_TYPE]: 'p2', 'text/plain': 'p2' });
-    doing.dispatchEvent(over);
-    expect(over.defaultPrevented).toBe(true);
-    doing.dispatchEvent(dragEvent('drop', { [PROJECT_DRAG_TYPE]: 'p2', 'text/plain': 'p2' }));
-    await settle();
+    await dragTo(root, 'p2', column(root, 'doing'));
 
     expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p2', 'status', 'doing');
     expect(cardsIn(root, 'doing')).toEqual(['p2']);
     expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual([]);
     expect(document.activeElement).toBe(card(root, 'p2'));
 
-    column(root, NO_TAG_COLUMN_KEY).dispatchEvent(dragEvent('drop', { [PROJECT_DRAG_TYPE]: 'p1' }));
-    await settle();
+    // Onto a card in the column is onto the column.
+    await dragTo(root, 'p1', card(root, 'p2'));
 
-    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p1', 'status', null);
+    expect(commandsMock.setProjectGroupTag).toHaveBeenLastCalledWith('p1', 'status', 'doing');
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p2']);
+
+    await dragTo(root, 'p1', column(root, NO_TAG_COLUMN_KEY));
+
+    expect(commandsMock.setProjectGroupTag).toHaveBeenLastCalledWith('p1', 'status', null);
     expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p1']);
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledTimes(3);
   });
 
-  it('ignores drags that aren’t cards', async () => {
+  it('keeps the move across a reload: the write is what the backend returns next', async () => {
     const root = await mountBoard();
 
-    const over = dragEvent('dragover', { 'text/plain': 'hello' });
-    column(root, 'doing').dispatchEvent(over);
-    column(root, 'doing').dispatchEvent(dragEvent('drop', { 'text/plain': 'p2' }));
+    await dragTo(root, 'p2', column(root, 'done'));
+    await tagsStore.load({ force: true });
     await settle();
 
-    expect(over.defaultPrevented).toBe(false);
+    expect(cardsIn(root, 'done')).toEqual(['p1', 'p2']);
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual([]);
+  });
+
+  it('shows the card in hand and marks the column under it', async () => {
+    const root = await mountBoard();
+    const doing = column(root, 'doing');
+    expect(ghost()).toBeNull();
+
+    await carry(root, 'p2', doing);
+
+    // The card stays in its column, dimmed; its copy follows the pointer.
+    expect(card(root, 'p2').classList.contains('dragging')).toBe(true);
+    expect(ghost()?.textContent).toContain('Project p2');
+    expect(ghost()?.querySelector('[data-board-card]')).toBeNull();
+    expect(ghost()?.querySelector('.dragging')).toBeNull();
+    expect(board(root).classList.contains('dragging')).toBe(true);
+    expect(document.body.style.cursor).toBe('grabbing');
+    expect(doing.classList.contains('drop-target')).toBe(true);
+    expect(column(root, 'done').classList.contains('drop-target')).toBe(false);
+
+    // The mark follows the pointer to the next column, and off the board.
+    under = column(root, 'done');
+    window.dispatchEvent(pointer('pointermove', 120));
+    await settle();
+    expect(doing.classList.contains('drop-target')).toBe(false);
+    expect(column(root, 'done').classList.contains('drop-target')).toBe(true);
+
+    under = document.body;
+    window.dispatchEvent(pointer('pointermove', 400));
+    await settle();
+    expect(root.querySelector('.drop-target')).toBeNull();
+
+    // Let go off the board: the card goes back, and nothing is written.
+    await release();
+    expect(ghost()).toBeNull();
+    expect(card(root, 'p2').classList.contains('dragging')).toBe(false);
+    expect(board(root).classList.contains('dragging')).toBe(false);
+    expect(document.body.style.cursor).toBe('');
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+  });
+
+  it('changes nothing when a card is dropped on its own column', async () => {
+    const root = await mountBoard();
+    const done = column(root, 'done');
+    const elsewhere = card(root, 'p3');
+    elsewhere.focus();
+
+    await carry(root, 'p1', done);
+    // Its own column is not somewhere to move it to.
+    expect(done.classList.contains('drop-target')).toBe(false);
+    await release();
+
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, 'done')).toEqual(['p1']);
+    expect(document.activeElement).toBe(elsewhere);
+
+    // The same for "No ‹group›", which would otherwise clear a tag it hasn't got.
+    await dragTo(root, 'p2', column(root, NO_TAG_COLUMN_KEY));
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+  });
+
+  it('refuses a card on the + column, and says so', async () => {
+    const root = await mountBoard();
+    const add = addColumn(root);
+
+    await carry(root, 'p2', add.querySelector('.add-trigger'));
+
+    expect(add.classList.contains('refusing')).toBe(true);
+    expect(board(root).classList.contains('drag-refused')).toBe(true);
+    expect(ghost()?.classList.contains('refused')).toBe(true);
+    expect(document.body.style.cursor).toBe('not-allowed');
+    expect(root.querySelector('.drop-target')).toBeNull();
+
+    // Back over a column, it is welcome again.
+    under = column(root, 'doing');
+    window.dispatchEvent(pointer('pointermove', 60));
+    await settle();
+    expect(add.classList.contains('refusing')).toBe(false);
+    expect(document.body.style.cursor).toBe('grabbing');
+
+    under = add;
+    window.dispatchEvent(pointer('pointermove', 80));
+    await release();
+
+    expect(add.classList.contains('refusing')).toBe(false);
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+    // Nor did the drop press the +.
+    expect(add.querySelector('.add-form')).toBeNull();
+  });
+
+  it('refuses a column whose tag was deleted while the card was in hand', async () => {
+    const root = await mountBoard();
+    const doing = column(root, 'doing');
+
+    await carry(root, 'p2', doing);
+    expect(doing.classList.contains('drop-target')).toBe(true);
+
+    // Another window deletes Doing; this one hasn't redrawn its column yet.
+    tagsStore.patchLocal((state) => ({
+      ...state,
+      tags: state.tags.filter((tag) => tag.id !== 'doing'),
+    }));
+    await release();
+
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+  });
+
+  it('puts the card back, with a toast, when the write fails', async () => {
+    const root = await mountBoard();
+    let fail!: (error: Error) => void;
+    commandsMock.setProjectGroupTag.mockImplementationOnce(
+      () => new Promise<void>((_, reject) => (fail = reject))
+    );
+
+    await dragTo(root, 'p2', column(root, 'doing'));
+
+    // Optimistic: the card is across before the backend answers.
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p2', 'status', 'doing');
+    expect(cardsIn(root, 'doing')).toEqual(['p2']);
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual([]);
+    expect(toast.error).not.toHaveBeenCalled();
+
+    fail(new Error('database is locked'));
+    await settle();
+
+    expect(cardsIn(root, 'doing')).toEqual([]);
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+    expect(toast.error).toHaveBeenCalledWith('Unable to update tags', {
+      description: 'database is locked',
+    });
+
+    // And it can be dragged again.
+    await dragTo(root, 'p2', column(root, 'doing'));
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledTimes(2);
+    expect(cardsIn(root, 'doing')).toEqual(['p2']);
+  });
+
+  it('puts a moved card back when the write fails, not on "No ‹group›"', async () => {
+    const root = await mountBoard();
+    commandsMock.setProjectGroupTag.mockRejectedValueOnce(new Error('offline'));
+
+    await dragTo(root, 'p1', column(root, NO_TAG_COLUMN_KEY));
+
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p1', 'status', null);
+    expect(cardsIn(root, 'done')).toEqual(['p1']);
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+    expect(toast.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a press that doesn’t travel a click, and a drag from opening the card', async () => {
+    const root = await mountBoard();
+    const p2 = card(root, 'p2');
+
+    // A click with a tremor: down, a pixel or two, up.
+    p2.dispatchEvent(pointer('pointerdown', 10));
+    under = column(root, 'doing');
+    window.dispatchEvent(pointer('pointermove', 12));
+    window.dispatchEvent(pointer('pointerup', 12));
+    p2.click();
+    await settle();
+
+    expect(openProject).toHaveBeenCalledWith('p2');
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(ghost()).toBeNull();
+    openProject.mockClear();
+
+    // A drag let go over the card itself: the click it ends in opens nothing.
+    await carry(root, 'p2', p2);
+    window.dispatchEvent(pointer('pointerup', 80));
+    p2.click();
+    await settle();
+
+    expect(openProject).not.toHaveBeenCalled();
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+
+    p2.click();
+    expect(openProject).toHaveBeenCalledWith('p2');
+  });
+
+  it('calls a drag off on Escape', async () => {
+    const root = await mountBoard();
+
+    await carry(root, 'p2', column(root, 'doing'));
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    );
+    await settle();
+
+    expect(ghost()).toBeNull();
+    expect(root.querySelector('.drop-target')).toBeNull();
+
+    await release();
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+  });
+
+  it('leaves the context menu’s press, and a touch, alone', async () => {
+    const root = await mountBoard();
+    const doing = column(root, 'doing');
+
+    card(root, 'p2').dispatchEvent(pointer('pointerdown', 10, { button: 2, buttons: 2 }));
+    under = doing;
+    window.dispatchEvent(pointer('pointermove', 80, { buttons: 2 }));
+    window.dispatchEvent(pointer('pointerup', 80));
+    await settle();
+
+    card(root, 'p2').dispatchEvent(pointer('pointerdown', 10, {}, 'touch'));
+    window.dispatchEvent(pointer('pointermove', 80));
+    await settle();
+
+    expect(ghost()).toBeNull();
+    expect(doing.classList.contains('drop-target')).toBe(false);
+    await release();
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+  });
+
+  it('leaves the card of a project being deleted where it is', async () => {
+    const root = await mountBoard();
+    deleting.add('p2');
+
+    await dragTo(root, 'p2', column(root, 'doing'));
+
+    expect(ghost()).toBeNull();
+    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
+  });
+
+  it('lets go of a card whose project leaves the board mid-drag', async () => {
+    const root = await mountBoard();
+
+    await carry(root, 'p2', column(root, 'doing'));
+    expect(ghost()).not.toBeNull();
+    boardProps.projects = projects.filter((project) => project.id !== 'p2');
+    await settle();
+
+    expect(ghost()).toBeNull();
+    expect(root.querySelector('.drop-target')).toBeNull();
+    expect(document.body.style.cursor).toBe('');
+    await release();
     expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
   });
 
@@ -679,15 +985,12 @@ describe('ProjectsBoard', () => {
     const done = column(root, 'done');
     const strip = done.querySelector<HTMLButtonElement>('.collapsed-strip')!;
 
-    card(root, 'p3').dispatchEvent(dragEvent('dragstart', {}));
-    done.dispatchEvent(dragEvent('dragover', { [PROJECT_DRAG_TYPE]: 'p3' }));
-    await settle();
+    await carry(root, 'p3', strip);
 
     expect(done.classList.contains('drop-target')).toBe(true);
     expect(strip.classList.contains('drop-target')).toBe(true);
 
-    done.dispatchEvent(dragEvent('drop', { [PROJECT_DRAG_TYPE]: 'p3' }));
-    await settle();
+    await release();
 
     expect(strip.classList.contains('drop-target')).toBe(false);
     expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p3', 'status', 'done');
@@ -1525,66 +1828,16 @@ describe('ProjectsBoard column drag', () => {
     expect(firstInRow(root)).toEqual(['done']);
   });
 
-  it('moves a column, not a card, after a card drag that never ended', async () => {
-    const root = await mountBoard();
-    layOutColumns(root);
-
-    // The card's dragend never comes (its card left the page, say).
-    card(root, 'p2').dispatchEvent(dragEvent('dragstart', {}));
-    column(root, 'doing').dispatchEvent(dragEvent('dragover', { [PROJECT_DRAG_TYPE]: 'p2' }));
-    flushSync();
-    expect(column(root, 'doing').classList.contains('drop-target')).toBe(true);
-
-    dragColumnOver(root, 'idea', 'doing', 'right');
-
-    expect(column(root, 'doing').classList.contains('drop-target')).toBe(false);
-    expect(card(root, 'p2').classList.contains('dragging')).toBe(false);
-    expect(dropLines(root)).toEqual(['doing:after']);
-
-    await dropColumnOn(root, 'doing', 'right');
-
-    expect(commandsMock.moveTag.mock.calls).toEqual([['idea', 'status', 1]]);
-    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
-    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
-  });
-
-  it('ignores text and files dragged in after a card drag that never ended', async () => {
-    const root = await mountBoard();
-    layOutColumns(root);
-
-    // A card picked up, and never dropped or ended.
-    card(root, 'p2').dispatchEvent(dragEvent('dragstart', {}));
-
-    const foreign: Record<string, string>[] = [{ 'text/plain': 'p2' }, { Files: '' }];
-    for (const data of foreign) {
-      const over = dragEvent('dragover', data);
-      column(root, 'doing').dispatchEvent(over);
-      const drop = dragEvent('drop', data);
-      column(root, 'doing').dispatchEvent(drop);
-
-      expect(over.defaultPrevented).toBe(false);
-      expect(drop.defaultPrevented).toBe(false);
-    }
-    await settle();
-
-    expect(column(root, 'doing').classList.contains('drop-target')).toBe(false);
-    expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
-    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
-  });
-
   it('takes no card dropped in the gap between columns, and no column from it', async () => {
     const root = await mountBoard();
     const row = layOutColumns(root);
 
-    card(root, 'p2').dispatchEvent(dragEvent('dragstart', {}));
-    const over = dragEvent('dragover', { [PROJECT_DRAG_TYPE]: 'p2' }, IN_GAP);
-    row.dispatchEvent(over);
-    row.dispatchEvent(dragEvent('drop', { [PROJECT_DRAG_TYPE]: 'p2' }, IN_GAP));
-    await settle();
+    // In the gap the pointer is over the row itself, which is no column.
+    await dragTo(root, 'p2', row);
 
-    expect(over.defaultPrevented).toBe(false);
     expect(commandsMock.moveTag).not.toHaveBeenCalled();
     expect(commandsMock.setProjectGroupTag).not.toHaveBeenCalled();
+    expect(cardsIn(root, NO_TAG_COLUMN_KEY)).toEqual(['p2']);
   });
 
   it('drags a collapsed column by its strip, and does not expand it for the release', async () => {
@@ -1876,10 +2129,10 @@ describe('ProjectsBoard column drag', () => {
     expect(start.defaultPrevented).toBe(true);
     expect(column(root, 'doing').classList.contains('dragging')).toBe(false);
 
-    // A card is not in the handle, and still drags.
+    // A card refuses one too: its drag is made of pointer events as well.
     const cardStart = dragEvent('dragstart', {});
     card(root, 'p1').dispatchEvent(cardStart);
-    expect(cardStart.defaultPrevented).toBe(false);
+    expect(cardStart.defaultPrevented).toBe(true);
   });
 
   it('keeps a hidden column’s place among the columns a drag leaves alone', async () => {

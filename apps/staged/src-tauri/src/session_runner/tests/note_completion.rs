@@ -34,7 +34,14 @@ async fn finished_notes_preserve_diagram_repair_and_completion_hooks() {
             LatestAssistantPikchrValidation::Invalid(error) => error,
             other => panic!("expected diagram repair, got {other:?}"),
         };
-        let correction = build_pikchr_correction_prompt(&error, true);
+        // No `write_note` tool in this run: the error is in the reply and the
+        // repair is a corrected reply in the `---` format.
+        let correction =
+            build_pikchr_correction_prompt(&error, PikchrErrorOrigin::FinalMessage, true, None);
+        assert!(
+            correction.contains("a line containing only `---`"),
+            "{correction}"
+        );
         store
             .add_session_message(&session.id, MessageRole::User, &correction)
             .unwrap();
@@ -56,6 +63,7 @@ async fn finished_notes_preserve_diagram_repair_and_completion_hooks() {
             None,
             &store,
             turn,
+            None,
         );
         let (title, content, completed, commit_step, note_step) = if project_note {
             let note = store.get_project_note(&id).unwrap().unwrap();
@@ -132,6 +140,7 @@ fn completion_ingests_media_for_branch_and_project_notes() {
             None,
             &store,
             0,
+            None,
         );
         let note_content = if project_note {
             store.get_project_note(&id).unwrap().unwrap().content
@@ -222,6 +231,7 @@ fn rewriting_turn_without_a_next_steps_block_keeps_stored_steps() {
                 None,
                 &store,
                 turn,
+                None,
             );
             steps(&store)
         };
@@ -276,6 +286,7 @@ fn follow_up_turn_without_a_note_keeps_saved_media_even_when_sources_are_gone() 
             None,
             &f.store,
             turn,
+            None,
         );
         f.store.get_note(&note.id).unwrap().unwrap()
     };

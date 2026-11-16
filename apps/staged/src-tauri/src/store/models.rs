@@ -561,6 +561,12 @@ pub enum CompletionReason {
     RateLimited,
     /// Staged closed while the session was still running.
     AppQuit,
+    /// Staged lost a session that was running on a remote workspace, and the
+    /// workstation held no completed deliverable for it when Staged next
+    /// looked. The agent may still be working there; the session is
+    /// resumable. (A remote session whose note *was* found on the
+    /// workstation completes with [`Self::TurnComplete`] instead.)
+    Detached,
     /// Legacy sessions or indeterminate cause.
     Unknown,
 }
@@ -577,6 +583,7 @@ impl CompletionReason {
             Self::RemoteAgentLost => "remote_agent_lost",
             Self::RateLimited => "rate_limited",
             Self::AppQuit => "app_quit",
+            Self::Detached => "detached",
             Self::Unknown => "unknown",
         }
     }
@@ -592,6 +599,7 @@ impl CompletionReason {
             "remote_agent_lost" => Some(Self::RemoteAgentLost),
             "rate_limited" => Some(Self::RateLimited),
             "app_quit" => Some(Self::AppQuit),
+            "detached" => Some(Self::Detached),
             "unknown" => Some(Self::Unknown),
             _ => None,
         }
@@ -612,7 +620,8 @@ impl CompletionReason {
             | Self::Crashed
             | Self::RemoteAgentLost
             | Self::RateLimited
-            | Self::AppQuit => true,
+            | Self::AppQuit
+            | Self::Detached => true,
             Self::TurnComplete | Self::Unknown => false,
         }
     }

@@ -6,6 +6,7 @@
   import EditToolDetails from './EditToolDetails.svelte';
   import GenericToolDetails from './GenericToolDetails.svelte';
   import NetworkToolDetails from './NetworkToolDetails.svelte';
+  import NoteToolDetails from './NoteToolDetails.svelte';
   import ReadSearchToolDetails from './ReadSearchToolDetails.svelte';
 
   interface Props {
@@ -26,6 +27,8 @@
     <ReadSearchToolDetails {item} {viewModel} {displayRoots} />
   {:else if viewModel.category === 'network'}
     <NetworkToolDetails {item} {viewModel} />
+  {:else if viewModel.category === 'note'}
+    <NoteToolDetails {viewModel} />
   {:else}
     <GenericToolDetails {viewModel} />
   {/if}

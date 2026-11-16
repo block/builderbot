@@ -1506,6 +1506,11 @@ impl AcpDriver {
             .filter(|_| self.runs_dedicated_remote_process())
             .map(|turn| turn.agent_session_id.as_str())
     }
+
+    /// The MCP servers this driver hands to `session/new` / `session/load`.
+    pub fn mcp_servers(&self) -> &[McpServer] {
+        &self.mcp_servers
+    }
 }
 
 /// Environment for the remote ACP process so the provider never blocks on a
@@ -2633,8 +2638,13 @@ impl AcpDriver {
             self.is_remote,
             self.remote_working_dir.as_deref(),
         )?;
+        // The local directory is only the proxy child's cwd; the agent itself
+        // runs in the remote checkout. A branch that exists only on the
+        // workstation (no local clone) has no such directory, which is the
+        // expected case for remote-only projects rather than something to
+        // warn about on every session start.
         if self.is_remote && spawn_working_dir.as_path() != working_dir {
-            log::warn!(
+            log::debug!(
                 "Remote ACP spawn cwd missing ({}); falling back to {}",
                 working_dir.display(),
                 spawn_working_dir.display()
@@ -6391,7 +6401,7 @@ fn serve_steer(
 /// was made for. claude-agent-acp 0.95 answered the cancel of a turn with a
 /// `sleep 1` shell call in flight only after ~4 s — it lets the tool wind
 /// down first — and real tool calls run longer than that.
-const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+pub const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a steer waits for the agent's `_session/steering` answer before
 /// the request fails as [`SteerError::Unacknowledged`]. The same bound as
@@ -9085,14 +9095,15 @@ mod tests {
         consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
         describe_prompt_error, hold_for_background_quiescence,
         is_config_selection_unavailable_error, is_missing_mcp_transport_error,
-        labeled_background_continuation_origin, mcp_server_transport_supported,
-        origin_task_name_label, permission_response_for_decision, permission_response_for_options,
-        reject_queued_stop_requests, remote_acp_segments, resolve_acp_working_dir,
-        resolve_session_config_option_selection, resolve_spawn_working_dir, run_prompt_turn,
-        sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
-        sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
-        setup_acp_session, shell_exec_line, shell_exec_line_seed_name, shell_extra_env_seeds,
-        shell_quote, task_tracking_mode_from_initialize, unattended_mode_switch,
+        is_transport_loss_error, labeled_background_continuation_origin,
+        mcp_server_transport_supported, origin_task_name_label, permission_response_for_decision,
+        permission_response_for_options, reject_queued_stop_requests, remote_acp_segments,
+        resolve_acp_working_dir, resolve_session_config_option_selection,
+        resolve_spawn_working_dir, run_prompt_turn, sanitize_remote_acp_chunk,
+        sdk_message_mentions_task, sdk_message_origin_kind, sdk_message_session_state,
+        sdk_message_settles_task, send_session_setup_request, setup_acp_session, shell_exec_line,
+        shell_exec_line_seed_name, shell_extra_env_seeds, shell_quote,
+        task_tracking_mode_from_initialize, unattended_mode_switch,
         AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
         AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
         AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
@@ -10227,6 +10238,31 @@ mod tests {
     }
 
     #[test]
+    fn detects_transport_loss_errors() {
+        // The Blox proxy reporting the workstation side going away, as seen
+        // in production: the SDK's message nested in an internal error.
+        assert!(is_transport_loss_error(
+            r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("Prompt failed: Error { code: -32603: Internal error, message: \"Incoming transport closed\", data: None }")) }"#
+        ));
+        assert!(is_transport_loss_error(
+            "Failed to write prompt: Broken pipe (os error 32)"
+        ));
+        // Answers from a live agent are not losses.
+        assert!(!is_transport_loss_error(
+            "ACP authentication is required to run the prompt. Sign this agent in, then retry."
+        ));
+        assert!(!is_transport_loss_error(
+            "Timed out waiting for ACP protocol startup after 90s"
+        ));
+        assert!(!is_transport_loss_error(
+            r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#
+        ));
+        assert!(!is_transport_loss_error(
+            "Failed to persist write_note follow-up prompt: database is locked"
+        ));
+    }
+
+    #[test]
     fn detects_missing_mcp_transport_errors() {
         assert!(is_missing_mcp_transport_error(
             "Agent does not support required MCP transports (required: http=true, sse=false; \
@@ -10734,6 +10770,20 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(resolve_spawn_working_dir(&existing, true), existing);
     }
 
+    fn stdio_staged_mcp_server() -> McpServer {
+        McpServer::Stdio(
+            agent_client_protocol::schema::v1::McpServerStdio::new(
+                "staged",
+                PathBuf::from("/usr/bin/node"),
+            )
+            .args(vec![
+                "/home/bloxer/.staged/bin/staged-mcp.cjs".to_string(),
+                "session-1".to_string(),
+                "turn-1".to_string(),
+            ]),
+        )
+    }
+
     #[test]
     fn remote_goose_driver_runs_unattended_through_env() {
         let driver = AcpDriver::for_workspace_with_binary(
@@ -10851,6 +10901,25 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             caps["_meta"].is_object(),
             "the AIR asyncTasks advertisement still rides along: {request}"
         );
+    }
+
+    #[test]
+    fn remote_driver_keeps_stdio_servers() {
+        let driver = AcpDriver::for_workspace_with_binary(
+            PathBuf::from("/usr/local/bin/sq"),
+            "ws-1",
+            Some("goose"),
+            "s1",
+        )
+        .with_mcp_servers(vec![stdio_staged_mcp_server()]);
+
+        assert!(
+            matches!(driver.mcp_servers(), [McpServer::Stdio(server)] if server.name == "staged")
+        );
+        assert!(mcp_server_transport_supported(
+            &driver.mcp_servers()[0],
+            &McpCapabilities::default()
+        ));
     }
 
     #[test]

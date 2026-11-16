@@ -27,7 +27,9 @@ pub mod managed_node;
 mod mcp_progress;
 pub mod migrations;
 pub mod note_commands;
+mod note_draft;
 mod note_media;
+pub mod note_tool;
 pub mod note_transfer;
 pub mod paths;
 pub mod pikchr_mcp;
@@ -45,6 +47,7 @@ pub mod project_transfer;
 pub mod prs;
 pub(crate) mod rate_limit_metrics;
 pub mod rate_limit_scheduler;
+pub mod remote_staged_mcp;
 pub mod review_commands;
 pub mod session_commands;
 pub mod session_completion;
@@ -210,6 +213,11 @@ pub struct NoteTimelineItem {
     pub session_error_message: Option<String>,
     pub rate_limit_resets_at: Option<String>,
     pub rate_limit_kind: Option<String>,
+    /// The session is a `detached` remote note session Staged is still
+    /// working on — the dead-session sweep is polling the workstation for
+    /// its note, or an instance is storing the note it found — so the row
+    /// says "no note created yet" rather than reporting a failure.
+    pub is_polling_for_note: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,

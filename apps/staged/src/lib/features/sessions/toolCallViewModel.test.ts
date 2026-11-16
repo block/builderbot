@@ -658,6 +658,101 @@ describe('buildToolCallViewModel output handling', () => {
   });
 });
 
+describe('write_note tool rows', () => {
+  const input = {
+    title: 'README.md: Sandbox repository purpose',
+    suggested_next_steps: {
+      suggestedNextCommitStep: 'Expand the README',
+      suggestedNextNoteStep: null,
+    },
+  };
+  const saved = [
+    {
+      type: 'content',
+      content: {
+        type: 'text',
+        text: 'Saved note "README.md: Sandbox repository purpose" (82 bytes from the draft file). The note is stored; end your turn now without repeating it in your reply.',
+      },
+    },
+  ];
+
+  it.each([
+    ['Claude', 'mcp__staged__write_note'],
+    ['Goose', 'staged: write note'],
+  ])(
+    'renders the %s form as a note with its title and next steps instead of a command',
+    (_, name) => {
+      const model = buildToolCallViewModel(
+        richTool({
+          verb: 'Ran',
+          detail: name,
+          call: message({ id: 1, role: 'tool_call', content: JSON.stringify({ name, input }) }),
+          rawInput: input,
+          content: saved,
+        })
+      );
+
+      expect(model.category).toBe('note');
+      expect(model.verb).toBe('Saved note');
+      expect(model.detail).toBe('README.md: Sandbox repository purpose');
+      expect(model.metadata.note).toEqual({
+        title: 'README.md: Sandbox repository purpose',
+        suggestedNextCommitStep: 'Expand the README',
+        suggestedNextNoteStep: null,
+      });
+      expect(model.metadata.command).toBeNull();
+      expect(model.sections[0]).toEqual({ kind: 'note', note: model.metadata.note });
+      expect(model.sections.some((section) => section.kind === 'input')).toBe(false);
+      expect(model.output.primaryText).toContain('Saved note');
+      expect(model.hasDetails).toBe(true);
+    }
+  );
+
+  it('reads the note from the tool_call content when the raw input is deferred', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        call: message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'mcp__staged__write_note', input }),
+        }),
+        rawInput: { $deferred: { messageId: 1, field: 'input' } },
+      })
+    );
+    expect(model.category).toBe('note');
+    expect(model.metadata.note?.title).toBe(input.title);
+  });
+
+  it("names the row by status and keeps other servers' write tools generic", () => {
+    const note = (status: ToolStatus) =>
+      buildToolCallViewModel(
+        richTool({
+          status,
+          call: message({
+            id: 1,
+            role: 'tool_call',
+            content: JSON.stringify({ name: 'mcp__staged__write_note', input }),
+          }),
+        })
+      );
+    expect(note('in_progress').verb).toBe('Saving note');
+    expect(note('failed').verb).toBe('Note rejected');
+    expect(note('cancelled').verb).toBe('Note not saved');
+
+    const other = buildToolCallViewModel(
+      richTool({
+        call: message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'mcp__other__write_note', input }),
+        }),
+      })
+    );
+    expect(other.category).not.toBe('note');
+    expect(other.metadata.note).toBeNull();
+  });
+});
+
 describe('summarizeToolCallLocations', () => {
   function location(overrides: Partial<ToolCallLocation> = {}): ToolCallLocation {
     const path = overrides.path ?? 'src/a.ts';

@@ -23,9 +23,9 @@ mod types;
 
 // Re-export the main API
 pub use agent_client_protocol::schema::v1::{
-    ConfigOptionUpdate, McpServer, McpServerHttp, McpServerSse, SessionConfigOption,
-    SessionConfigOptionCategory, SessionInfoUpdate, SessionModeState as SessionModelState,
-    StopReason,
+    ConfigOptionUpdate, EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    SessionConfigOption, SessionConfigOptionCategory, SessionInfoUpdate,
+    SessionModeState as SessionModelState, StopReason,
 };
 pub use driver::{
     autoapprove_permission_decision, background_continuation_origin, carry_config_value_hint,
@@ -42,7 +42,7 @@ pub use driver::{
     OutOfTurnPermissionPolicy, PromptImage, ReattachTurn, RecordedTurn, RemoteProcess,
     RemoteProcessStatus, ReplayBoundary, SessionConnection, SessionLifetime, SessionSettleReason,
     SessionSettled, SteerError, SteerOutcome, Store, TransportLoss, TransportLossPhase,
-    TurnControlHandle, TurnResult, BACKGROUND_CONTINUATION_ORIGIN,
+    TurnControlHandle, TurnResult, BACKGROUND_CONTINUATION_ORIGIN, INTERRUPT_ACK_TIMEOUT,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

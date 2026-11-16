@@ -19,6 +19,18 @@ describe('failedArtifactSubtitle', () => {
     expect(failedArtifactSubtitle('interrupted', 'note')).toBe('Session stopped — no note created');
   });
 
+  it('says "yet" for a detached remote session only while Staged is still working on its note', () => {
+    expect(failedArtifactSubtitle('detached', 'note', null, null, true)).toBe(
+      'Lost the remote session — no note created yet'
+    );
+    expect(failedArtifactSubtitle('detached', 'note', null, null, false)).toBe(
+      'Lost the remote session — no note created'
+    );
+    expect(failedArtifactSubtitle('detached', 'note')).toBe(
+      'Lost the remote session — no note created'
+    );
+  });
+
   it('names a truncated background wait', () => {
     expect(failedArtifactSubtitle('held_until_cap', 'commit')).toBe(
       'Session stopped waiting on background work — no commit created'

@@ -1,11 +1,13 @@
 import type { DisplayRootInput } from './pathDisplayRoots';
 import type { RichToolItem, ToolStatus } from './acpTranscript';
 import { formatJson, terminalRefsFromAcpContent, textFromAcpContent } from './acpTranscript';
+import { writeNoteToolCall, writeNoteVerb, type WriteNoteCall } from './noteToolCall';
 import { makePathsRelative, parseToolCall, stripCodeFences } from './sessionModalHelpers';
 import { deferredToolBody, deferredToolBodyIds } from './toolCallBodies';
 import { toolCallImageContent, toolCallOutputText, type ToolCallImage } from './toolCallImages';
 
-export type ToolCallCategory = 'edit' | 'command' | 'read' | 'search' | 'network' | 'generic';
+export type ToolCallCategory =
+  'edit' | 'command' | 'read' | 'search' | 'network' | 'note' | 'generic';
 
 export type ToolCallOutputState = 'output' | 'waiting' | 'empty';
 
@@ -42,6 +44,8 @@ export interface ToolCallMetadata {
   /** Whether {@link inputText} would render anything, without formatting it. */
   hasInputText: boolean;
   parsedCommands: ParsedToolCommand[];
+  /** What a `write_note` call published (title, next steps); `null` for every other tool. */
+  note: WriteNoteCall | null;
   command: string | null;
   workingDirectory: string | null;
   targetPath: string | null;
@@ -71,6 +75,7 @@ export interface ToolCallOutput {
 export type ToolCallOutputSource = 'error' | 'stdout' | 'stderr' | 'primary';
 
 export type ToolCallSection =
+  | { kind: 'note'; note: WriteNoteCall }
   | { kind: 'image'; image: ToolCallImage }
   | { kind: 'locations'; locations: ToolCallLocation[] }
   | { kind: 'input'; label: 'Input'; text: string }
@@ -180,8 +185,10 @@ export function buildToolCallViewModel(
   return {
     key: item.key,
     category,
-    verb: item.verb,
-    detail: item.detail,
+    // The transcript builder already names a `write_note` row after its
+    // note; items built elsewhere (tests, legacy rows) get the same header.
+    verb: metadata.note ? writeNoteVerb(item.status) : item.verb,
+    detail: metadata.note ? metadata.note.title : item.detail,
     status: item.status,
     statusLabel: item.statusLabel,
     statusTone: item.statusTone,
@@ -228,11 +235,13 @@ export function extractToolCallMetadata(
   );
   const diffs = extractToolCallDiffs(item.content, displayRoots);
   const locations = extractToolCallLocations(item.locations, displayRoots);
+  const note = writeNoteToolCall(item.call.content, presentRawInput);
 
   return {
     toolKind: normalizeToken(item.toolKind),
     toolName: parsed?.name ?? null,
     input,
+    note,
     get inputText() {
       return (inputTextCache ??= formatJson(inputSource));
     },
@@ -265,6 +274,8 @@ export function classifyToolCall(
   item: RichToolItem,
   metadata = extractToolCallMetadata(item)
 ): ToolCallCategory {
+  if (metadata.note) return 'note';
+
   const toolKindCategory = categoryFromToken(item.toolKind);
   if (toolKindCategory) return toolKindCategory;
 
@@ -350,11 +361,17 @@ export function buildToolCallSections(
 ): ToolCallSection[] {
   const sections: ToolCallSection[] = [];
 
+  if (metadata.note) {
+    sections.push({ kind: 'note', note: metadata.note });
+  }
+
   if (metadata.locations.length > 0) {
     sections.push({ kind: 'locations', locations: metadata.locations });
   }
 
-  if (metadata.hasInputText) {
+  // A note's input is its title and suggested next steps: the note section
+  // shows them, so the raw JSON would only repeat it.
+  if (metadata.hasInputText && !metadata.note) {
     // `text` defers to the metadata's memoized getter so the caret-driven
     // `hasDetails` check (which only reads `kind`) never triggers formatting.
     sections.push({

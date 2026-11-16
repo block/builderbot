@@ -621,6 +621,10 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 .unwrap_or_default();
             // Session titles are temporary labels and may contain the full prompt.
             // Keep the stored document title, including when a session resumes.
+            let is_polling_for_note = crate::session_runner::note_recovery_is_pending(
+                resolved.completion_reason.as_deref(),
+                resolved.error_message.as_deref(),
+            );
             NoteTimelineItem {
                 id: n.id,
                 title: n.title,
@@ -631,6 +635,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_error_message: resolved.error_message,
                 rate_limit_resets_at: resolved.rate_limit_resets_at,
                 rate_limit_kind: resolved.rate_limit_kind,
+                is_polling_for_note,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
                 completed_at: n.completed_at,

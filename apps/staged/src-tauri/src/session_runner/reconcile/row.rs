@@ -11,6 +11,7 @@ use super::{
     AttachControl, ReconcileReason, ReconcileReasonKind, ReconcileTarget, Reconciler, RowOutcome,
     UnreachableKind, WorkspaceProbe,
 };
+use crate::session_runner::taken_over_note::{self, TakenOverTurnEnd};
 use crate::session_runner::{RegistrationEpoch, SessionStatusEvent};
 use crate::store::{CompletionReason, Session, SessionStatus};
 
@@ -520,8 +521,17 @@ impl Reconciler {
                 return outcome;
             }
             Verdict::Completed { reason } => {
-                self.run_completion_hooks(target);
-                if !cancelled_before_hooks && token.is_cancelled() {
+                if let Some(message) = self.run_completion_hooks(target) {
+                    // A note session whose published note could not be
+                    // stored as it is, or whose outbox could not be read:
+                    // parked resumable instead of completed with an empty
+                    // note (see `taken_over_note`).
+                    (
+                        SessionStatus::Error,
+                        Some(message),
+                        CompletionReason::Detached,
+                    )
+                } else if !cancelled_before_hooks && token.is_cancelled() {
                     log::info!(
                         "[reconcile] Session {session_id} cancelled during its post-completion hooks"
                     );
@@ -594,15 +604,54 @@ impl Reconciler {
 
     /// The commit, note and review hooks, against the turn's persisted base
     /// and from the prompt that started it.
-    fn run_completion_hooks(&self, target: &ReconcileTarget) {
+    ///
+    /// The run that prompted the turn is gone, and with it the submission
+    /// slot a remote note session's workstation outbox is collected into. So
+    /// the outbox is read here first, and a note the agent published goes to
+    /// the hooks as it would have at the end of that run; without this the
+    /// hooks stored an empty note and the published one sat in the outbox
+    /// until a Resume. `Some` is the message of a row that must not complete
+    /// (see [`TakenOverTurnEnd::Parked`]): the hooks did not run, and the
+    /// row ends `error`/`detached`.
+    fn run_completion_hooks(&self, target: &ReconcileTarget) -> Option<String> {
+        let session_id = target.session_id.as_str();
+        let exec = |args: &[&str]| self.blox.exec(target, args);
+        let reads_outbox = taken_over_note::delivers_note_through_outbox(
+            &self.store,
+            session_id,
+            Some(&target.workspace_name),
+        );
+        let note = if reads_outbox {
+            let end = taken_over_note::collect_taken_over_note(&exec, session_id).turn_end(
+                &target.workspace_name,
+                taken_over_note::SESSION_WAS_DISCONNECTED,
+            );
+            match end {
+                TakenOverTurnEnd::Completed { note } => note,
+                TakenOverTurnEnd::Parked {
+                    message,
+                    clear_outbox,
+                } => {
+                    if clear_outbox {
+                        taken_over_note::clear_outbox_after_takeover(
+                            &exec, session_id, false, false,
+                        );
+                    }
+                    return Some(message);
+                }
+            }
+        } else {
+            None
+        };
+        let note_handed_to_hooks = note.is_some();
         let turn_start_message_id = self
             .store
-            .latest_user_message_id(&target.session_id)
+            .latest_user_message_id(session_id)
             .ok()
             .flatten()
             .unwrap_or(0);
-        crate::session_runner::run_post_completion_hooks(
-            &target.session_id,
+        let hooks = crate::session_runner::run_post_completion_hooks(
+            session_id,
             &target.working_dir,
             target.pre_head_sha.as_deref(),
             self.blox.checkout_workspace(target),
@@ -612,7 +661,17 @@ impl Reconciler {
                 .and_then(|dir| dir.to_str()),
             &self.store,
             turn_start_message_id,
+            note,
         );
+        if reads_outbox {
+            taken_over_note::clear_outbox_after_takeover(
+                &exec,
+                session_id,
+                note_handed_to_hooks,
+                hooks.note_stored,
+            );
+        }
+        None
     }
 }
 

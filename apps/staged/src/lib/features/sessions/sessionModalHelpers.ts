@@ -1,11 +1,12 @@
 import { normalizeDisplayRoots, type DisplayRootInput } from './pathDisplayRoots';
-import type { Session, SessionMessage } from '../../types';
+import { isResumableReason, type Session, type SessionMessage } from '../../types';
 import {
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_NO_WORKSPACE,
   RECONCILE_PROMPT_NOT_RECEIVED,
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_WORKSTATION_GONE,
+  isReconcileCancelNotice,
 } from '../../shared/disconnectedSession';
 import { formatRateLimitResetTime } from '../timeline/sessionFailureCopy';
 
@@ -75,6 +76,89 @@ export interface ToolDisplay {
 }
 
 /**
+ * Tail of the error message the backend writes on a `detached` remote note
+ * session while its dead-session sweep is still polling the workstation for
+ * the note (`AWAITING_REMOTE_NOTE_SUFFIX` in `src-tauri/src/session_runner.rs`,
+ * which has a test pinning this file to the same text). The sweep replaces
+ * the message once it gives up, so the tail is what tells the two apart.
+ */
+export const REMOTE_NOTE_POLL_SUFFIX =
+  'the workstation agent may still be running, so Staged keeps checking for its note.';
+
+/**
+ * Phrase in the detail of a `detached` row whose connection was given up on
+ * after a Stop the remote agent never acknowledged
+ * (`UNACKNOWLEDGED_STOP_DETAIL_MARKER` in `src-tauri/src/session_runner.rs`,
+ * pinned by the same backend test). Whether that Stop reached the agent is
+ * unknowable, so the copy must not promise a note.
+ */
+export const REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER = 'did not acknowledge the stop';
+
+/** Whether this detached row came from a Stop the remote agent never acknowledged. */
+export function isUnacknowledgedRemoteStop(errorMessage: string | null | undefined): boolean {
+  return !!errorMessage?.includes(REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER);
+}
+
+/**
+ * Phrase in the message of a `detached` row whose turn ended while Staged
+ * could not read its note outbox on the workstation
+ * (`UNREAD_OUTBOX_DETAIL_MARKER` in `src-tauri/src/session_runner.rs`, pinned
+ * by the same backend test). No connection was lost and the agent is not
+ * still running, so the polling copy must not say either.
+ */
+export const REMOTE_NOTE_UNREAD_OUTBOX_MARKER = 'could not read its note from the workstation';
+
+/** Whether this detached row's turn ended with its workstation note outbox unread. */
+export function isUnreadRemoteOutbox(errorMessage: string | null | undefined): boolean {
+  return !!errorMessage?.includes(REMOTE_NOTE_UNREAD_OUTBOX_MARKER);
+}
+
+/** Whether the backend's dead-session sweep is still polling the workstation for this row's note. */
+export function isAwaitingRemoteNote(errorMessage: string | null | undefined): boolean {
+  return !!errorMessage?.trimEnd().endsWith(REMOTE_NOTE_POLL_SUFFIX);
+}
+
+/**
+ * Tail of the error message a Staged instance writes on a `detached` remote
+ * note session while it stores the finished note it found on the workstation
+ * (`STORING_REMOTE_NOTE_SUFFIX` in `src-tauri/src/session_runner.rs`, pinned
+ * by the same backend test). A claim this old that never completed belongs to
+ * an instance that died mid-store; the sweep polls the row again.
+ */
+export const REMOTE_NOTE_STORING_SUFFIX = 'storing the note it finished on the workstation.';
+
+/** Whether a Staged instance is storing this row's note right now (or died trying). */
+export function isStoringRemoteNote(errorMessage: string | null | undefined): boolean {
+  return !!errorMessage?.trimEnd().endsWith(REMOTE_NOTE_STORING_SUFFIX);
+}
+
+/**
+ * Which end-of-session notice the chat pane shows under the transcript.
+ *
+ * - `detached`: a lost remote session. Always the resumable notice, whatever
+ *   `errorMessage` holds — the backend writes one on every detached row (the
+ *   polling marker, the expired window, a known-bad note), and showing it as
+ *   a raw destructive error would hide the Resume action and the "still
+ *   checking" copy. The message itself comes from `sessionEndMessage`.
+ * - `error`: the raw backend message for any other failed or killed run.
+ * - `resumable`: the generic notice for the remaining resumable reasons.
+ */
+export function sessionEndNoticeKind(
+  current: Pick<Session, 'status' | 'completionReason'> & Partial<Pick<Session, 'errorMessage'>>
+): 'detached' | 'error' | 'resumable' | null {
+  if (current.status === 'running' || current.status === 'queued') return null;
+  if (current.completionReason === 'detached') return 'detached';
+  if (
+    (current.status === 'error' || current.status === 'cancelled') &&
+    current.errorMessage &&
+    !isReconcileCancelNotice(current.status, current.errorMessage)
+  ) {
+    return 'error';
+  }
+  return isResumableReason(current.completionReason) ? 'resumable' : null;
+}
+
+/**
  * The resumable-session notice: why the session ended. A Blox session that
  * Staged settled after losing its connection (see `disconnectedSession.ts`)
  * says what Staged found instead of, or as well as, the generic reason.
@@ -93,8 +177,50 @@ export function sessionEndMessage(
     case RECONCILE_MAY_STILL_RUN:
       return `${endReasonMessage(current)} The workstation didn’t confirm the stop, so the turn may still be running there.`;
     default:
+      if (current.completionReason === 'detached') {
+        return detachedEndMessage(current.errorMessage);
+      }
       return endReasonMessage(current);
   }
+}
+
+/**
+ * The notice for a lost remote session. While the backend's sweep is still
+ * polling the workstation the copy says so; the other detached messages (the
+ * poll window ran out, a note with a broken diagram, a note that could not be
+ * stored) are written for the user and already say what Resume will do.
+ */
+function detachedEndMessage(errorMessage: string | null | undefined): string {
+  if (isAwaitingRemoteNote(errorMessage)) {
+    if (isUnacknowledgedRemoteStop(errorMessage)) {
+      return (
+        'You stopped this remote session, but the workstation did not confirm it in time. ' +
+        'The stop may still have reached the agent, so a note may or may not appear; ' +
+        'Staged is checking the workstation and will complete the session if one does.'
+      );
+    }
+    if (isUnreadRemoteOutbox(errorMessage)) {
+      return (
+        'The turn of this remote session ended, but Staged could not read its note from the ' +
+        'workstation. Staged keeps checking and will complete the session when it finds the ' +
+        'note.'
+      );
+    }
+    return (
+      'Staged lost the connection to this remote session. The workstation agent may still ' +
+      'be running; Staged is checking for its note and will complete the session when it ' +
+      'appears.'
+    );
+  }
+  if (isStoringRemoteNote(errorMessage)) {
+    return (
+      'Staged lost the connection to this remote session, but the workstation agent ' +
+      'finished its note. Staged is storing it and will complete the session.'
+    );
+  }
+  const message = errorMessage?.trim();
+  if (message) return message;
+  return 'Staged lost this remote session before it delivered its result.';
 }
 
 function endReasonMessage(
@@ -108,6 +234,8 @@ function endReasonMessage(
       return 'This session’s agent stopped running on its workspace.';
     case 'rate_limited':
       return rateLimitEndMessage(current);
+    case 'detached':
+      return 'Staged lost this remote session before it delivered its result.';
     case 'app_quit':
       return 'This session was interrupted when Staged closed.';
     case 'project_session_interrupted':
@@ -508,6 +636,7 @@ const VERB_NOUNS: Record<string, string> = {
   Reading: 'files',
   Ran: 'commands',
   Running: 'commands',
+  Interrupted: 'calls',
   Searched: 'searches',
   Searching: 'searches',
   Edited: 'files',

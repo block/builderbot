@@ -1,5 +1,6 @@
 import type { SessionMessage } from '../../types';
 import type { DisplayRootInput } from './pathDisplayRoots';
+import { writeNoteToolCall, writeNoteVerb } from './noteToolCall';
 import { formatToolDisplay, parseToolCall, verbGroupSummary } from './sessionModalHelpers';
 import { deferredToolBody } from './toolCallBodies';
 
@@ -90,10 +91,42 @@ const TOOL_EVENT_KINDS = new Set(['tool_call', 'tool_call_update']);
 const PIKCHR_SESSION_STARTED_EVENT = 'pikchr_session_started';
 const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>();
 
+export interface AcpTranscriptOptions {
+  /**
+   * The session has reached a terminal state. Tool calls still `pending` or
+   * `in_progress` then can never settle — their results were lost with the
+   * connection (a crash, a detached remote session) — and render as
+   * interrupted instead of running forever.
+   */
+  sessionSettled?: boolean;
+  /**
+   * The settled session ended `completed`. An unsettled call in its *final
+   * turn* was not cut off: its update was lost but its work stood — a remote
+   * note session completed from the workstation outbox stored the very note
+   * whose `write_note` row never got its result. Such calls render as
+   * finished ("Saved note" for the note row) rather than as interrupted.
+   * Unsettled calls from an earlier turn were cut off by the prompt that
+   * followed them, whatever the session's final status, and stay
+   * "Interrupted"; so does every unsettled call of a session that ended in
+   * `error` or `cancelled`.
+   */
+  sessionCompleted?: boolean;
+}
+
+/** [`AcpTranscriptOptions`] resolved against the transcript being built. */
+interface TranscriptContext extends AcpTranscriptOptions {
+  /**
+   * The id of the user message that opened the session's final turn;
+   * `-Infinity` when the transcript has none, so every call counts as final.
+   */
+  finalTurnStartId: number;
+}
+
 export function buildAcpTranscriptGroups(
   visibleMessages: SessionMessage[],
   acpMetadataMessages: SessionMessage[],
-  displayRoots?: DisplayRootInput
+  displayRoots?: DisplayRootInput,
+  options: AcpTranscriptOptions = {}
 ): AcpTranscriptGroup[] {
   const metadataRows = sortedUniqueMessages(
     [...visibleMessages.filter(hasAcpMetadata), ...acpMetadataMessages].filter(hasAcpMetadata)
@@ -111,6 +144,13 @@ export function buildAcpTranscriptGroups(
     toolAssemblies,
     assignedResultIds
   );
+  const context: TranscriptContext = {
+    ...options,
+    finalTurnStartId: visibleMessages.reduce(
+      (latest, m) => (m.role === 'user' ? Math.max(latest, m.id) : latest),
+      -Infinity
+    ),
+  };
   const groups: AcpTranscriptGroup[] = [];
   const emittedTools = new Set<string>();
 
@@ -125,14 +165,20 @@ export function buildAcpTranscriptGroups(
         const key = toolKeyForMessage(message);
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
+          pushToolGroup(
+            groups,
+            richToolItem(assembly, displayRoots, announcedPikchrSessions, context)
+          );
           emittedTools.add(key);
         }
       } else if (!assignedResultIds.has(message.id)) {
         const key = `result:${message.id}`;
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
+          pushToolGroup(
+            groups,
+            richToolItem(assembly, displayRoots, announcedPikchrSessions, context)
+          );
           emittedTools.add(key);
         }
       }
@@ -598,11 +644,34 @@ function eventTitle(kind: AcpTranscriptEventKind): string {
 function richToolItem(
   tool: ToolAssembly,
   displayRoots?: DisplayRootInput,
-  announcedPikchrSessions?: Map<string, string>
+  announcedPikchrSessions?: Map<string, string>,
+  context: TranscriptContext = { finalTurnStartId: -Infinity }
 ): RichToolItem {
-  const status = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
+  const recordedStatus = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
+  // A call still running when its session ended never got its result: the
+  // session's connection is gone, so nothing will update the row again. In
+  // a session that nevertheless completed, a call from the final turn's
+  // work stood (see `AcpTranscriptOptions.sessionCompleted`); one from an
+  // earlier turn, or any call in a session that failed, was cut off.
+  const unsettled =
+    !!context.sessionSettled && (recordedStatus === 'pending' || recordedStatus === 'in_progress');
+  const finishedWithSession =
+    unsettled && !!context.sessionCompleted && tool.positionId >= context.finalTurnStartId;
+  const interrupted = unsettled && !finishedWithSession;
+  const status: ToolStatus = interrupted
+    ? 'cancelled'
+    : finishedWithSession
+      ? 'completed'
+      : recordedStatus;
   const pending = status === 'pending' || status === 'in_progress';
-  const display = formatToolDisplay(tool.call.content, displayRoots, pending);
+  // The `write_note` row shows the note it saved, not a shell line. An
+  // interrupted call says so in its header, not just in its status dot.
+  const note = writeNoteToolCall(tool.call.content, tool.metadata.rawInput);
+  const display = note
+    ? { verb: writeNoteVerb(status), detail: note.title }
+    : interrupted
+      ? { verb: 'Interrupted', detail: formatToolDisplay(tool.call.content, displayRoots).detail }
+      : formatToolDisplay(tool.call.content, displayRoots, pending);
   const isPikchrDiagramTool = isPikchrTool(tool);
   // A successful tool result names the child session authoritatively; tools
   // without an output-derived id — still running, or failed before the result
@@ -617,7 +686,7 @@ function richToolItem(
     verb: display.verb,
     detail: display.detail,
     status,
-    statusLabel: toolStatusLabel(status),
+    statusLabel: interrupted ? 'Interrupted' : toolStatusLabel(status),
     statusTone: toolStatusTone(status),
     toolCallId: tool.toolCallId,
     toolKind: tool.metadata.toolKind ?? null,

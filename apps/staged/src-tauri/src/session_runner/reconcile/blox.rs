@@ -216,6 +216,11 @@ pub(crate) trait ReconcileBlox: Send + Sync {
     /// The workstation the post-completion hooks read the checkout's HEAD
     /// on; `None` reads `target.working_dir` locally.
     fn checkout_workspace<'a>(&self, target: &'a ReconcileTarget) -> Option<&'a str>;
+
+    /// Run `args` on the session's workstation and return their stdout
+    /// (`ws exec`): how a note session's outbox is read, and emptied, once
+    /// its turn has ended here (see `session_runner::taken_over_note`).
+    fn exec(&self, target: &ReconcileTarget, args: &[&str]) -> Result<String, String>;
 }
 
 /// [`ReconcileBlox`] over `sq`.
@@ -391,5 +396,9 @@ impl ReconcileBlox for LiveBlox {
 
     fn checkout_workspace<'a>(&self, target: &'a ReconcileTarget) -> Option<&'a str> {
         Some(&target.workspace_name)
+    }
+
+    fn exec(&self, target: &ReconcileTarget, args: &[&str]) -> Result<String, String> {
+        crate::remote_staged_mcp::workspace_exec(&target.workspace_name)(args)
     }
 }

@@ -3,11 +3,20 @@ import {
   foldSnippetsIntoPrompt,
   formatToolDisplay,
   insertedText,
+  isAwaitingRemoteNote,
+  isStoringRemoteNote,
   makePathsRelative,
   newestUserMessageId,
   reconnectedOutcomeMessage,
+  REMOTE_NOTE_POLL_SUFFIX,
+  REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER,
+  REMOTE_NOTE_UNREAD_OUTBOX_MARKER,
+  isUnacknowledgedRemoteStop,
+  isUnreadRemoteOutbox,
+  REMOTE_NOTE_STORING_SUFFIX,
   sessionEndMessage,
   sessionErrorMessage,
+  sessionEndNoticeKind,
   snippetLabel,
 } from './sessionModalHelpers';
 import {
@@ -240,6 +249,27 @@ describe('sessionEndMessage', () => {
     );
   });
 
+  it('tells a detached session still being checked from one Staged gave up on', () => {
+    const polling = `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_POLL_SUFFIX}`;
+    const expired =
+      'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.';
+    expect(isAwaitingRemoteNote(polling)).toBe(true);
+    expect(isAwaitingRemoteNote(expired)).toBe(false);
+    expect(isAwaitingRemoteNote(null)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: polling })).toBe(
+      'Staged lost the connection to this remote session. The workstation agent may still be ' +
+        'running; Staged is checking for its note and will complete the session when it appears.'
+    );
+    // The backend's other detached messages are written for the user and
+    // already say what Resume does: shown as they are.
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: expired })).toBe(
+      expired
+    );
+    expect(sessionEndMessage({ completionReason: 'detached' })).toBe(
+      'Staged lost this remote session before it delivered its result.'
+    );
+  });
+
   it('warns that a stop the workstation didn’t confirm may not have taken', () => {
     expect(
       sessionEndMessage({ completionReason: 'interrupted', errorMessage: RECONCILE_MAY_STILL_RUN })
@@ -390,5 +420,112 @@ describe('newestUserMessageId', () => {
     ).toBe(
       'This session paused because the provider reported an API limit. Resume manually when ready.'
     );
+  });
+});
+
+describe('detached remote note sessions', () => {
+  it('does not promise a note after a Stop the remote agent never acknowledged', () => {
+    const stopped = `Staged lost the connection to this session while the agent was running on ws-1 (the agent ${REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER} within 10 seconds; the stop may still have reached it, so a note may or may not appear); ${REMOTE_NOTE_POLL_SUFFIX}`;
+    expect(isUnacknowledgedRemoteStop(stopped)).toBe(true);
+    expect(isAwaitingRemoteNote(stopped)).toBe(true);
+    expect(isUnacknowledgedRemoteStop(null)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: stopped })).toBe(
+      'You stopped this remote session, but the workstation did not confirm it in time. ' +
+        'The stop may still have reached the agent, so a note may or may not appear; ' +
+        'Staged is checking the workstation and will complete the session if one does.'
+    );
+    // Once the sweep gives up the backend's own copy is shown, Stop or not.
+    const expired =
+      'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.';
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: expired })).toBe(
+      expired
+    );
+  });
+
+  it('says the turn ended when only the note outbox could not be read', () => {
+    const unread = `This session's turn ended on ws-1, but Staged ${REMOTE_NOTE_UNREAD_OUTBOX_MARKER} (failed to read the remote note outbox: ssh: connect to host ws-1: Operation timed out); ${REMOTE_NOTE_POLL_SUFFIX}`;
+    expect(isUnreadRemoteOutbox(unread)).toBe(true);
+    expect(isAwaitingRemoteNote(unread)).toBe(true);
+    expect(isUnreadRemoteOutbox(null)).toBe(false);
+    const message = sessionEndMessage({ completionReason: 'detached', errorMessage: unread });
+    expect(message).toBe(
+      'The turn of this remote session ended, but Staged could not read its note from the ' +
+        'workstation. Staged keeps checking and will complete the session when it finds the ' +
+        'note.'
+    );
+    expect(message).not.toContain('lost the connection');
+    expect(message).not.toContain('may still be running');
+    // A row that lost its connection keeps the lost-connection copy.
+    const lost = `Staged lost the connection to this session while the agent was running on ws-1 (incoming transport closed); ${REMOTE_NOTE_POLL_SUFFIX}`;
+    expect(isUnreadRemoteOutbox(lost)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: lost })).toContain(
+      'Staged lost the connection to this remote session'
+    );
+  });
+
+  it('tells a detached session whose note is being stored', () => {
+    const storing = `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_STORING_SUFFIX}`;
+    expect(isStoringRemoteNote(storing)).toBe(true);
+    expect(isAwaitingRemoteNote(storing)).toBe(false);
+    expect(isStoringRemoteNote(null)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: storing })).toBe(
+      'Staged lost the connection to this remote session, but the workstation agent ' +
+        'finished its note. Staged is storing it and will complete the session.'
+    );
+  });
+});
+
+describe('sessionEndNoticeKind', () => {
+  const polling = `Staged lost the connection to this session while the agent was running on ws-1 (incoming transport closed); ${REMOTE_NOTE_POLL_SUFFIX}`;
+
+  it('shows a detached row with an error message as the resumable detached notice, not a raw error', () => {
+    // Every detached row the backend writes carries an error_message; the
+    // raw-error branch would hide the Resume action and the polling copy.
+    const detached = {
+      status: 'error',
+      completionReason: 'detached',
+      errorMessage: polling,
+    } as const;
+    expect(sessionEndNoticeKind(detached)).toBe('detached');
+    expect(sessionEndMessage(detached)).toContain('Staged is checking for its note');
+    expect(
+      sessionEndNoticeKind({
+        status: 'error',
+        completionReason: 'detached',
+        errorMessage:
+          'Staged lost this session while the agent was running on ws-1; its note "Plan" is complete on the workstation but could not be stored here. Resume to collect it again.',
+      })
+    ).toBe('detached');
+  });
+
+  it('keeps the raw error for other failed runs and the generic notice for resumable ones', () => {
+    expect(
+      sessionEndNoticeKind({
+        status: 'error',
+        completionReason: 'crashed',
+        errorMessage: 'ACP authentication is required to run the prompt.',
+      })
+    ).toBe('error');
+    expect(
+      sessionEndNoticeKind({
+        status: 'cancelled',
+        completionReason: 'interrupted',
+        errorMessage: 'killed',
+      })
+    ).toBe('error');
+    expect(sessionEndNoticeKind({ status: 'error', completionReason: 'crashed' })).toBe(
+      'resumable'
+    );
+    expect(sessionEndNoticeKind({ status: 'completed', completionReason: 'turn_complete' })).toBe(
+      null
+    );
+    expect(sessionEndNoticeKind({ status: 'running', completionReason: null })).toBe(null);
+    expect(
+      sessionEndNoticeKind({
+        status: 'running',
+        completionReason: 'detached',
+        errorMessage: polling,
+      })
+    ).toBe(null);
   });
 });

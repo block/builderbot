@@ -22,6 +22,198 @@ function message(
 }
 
 describe('buildAcpTranscriptGroups', () => {
+  it('shows a write_note call as its own "Saved note" row named after the note', () => {
+    const noteInput = { title: 'Plan' };
+    const visible = [
+      message({
+        id: 1,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'ToolSearch', input: { query: 'select:x' } }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-search',
+        acpToolStatus: 'completed',
+      }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'mcp__staged__write_note', input: noteInput }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-note',
+        acpToolStatus: 'completed',
+        acpRawInput: noteInput,
+      }),
+      message({
+        id: 3,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'staged: write note', input: noteInput }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-goose',
+        acpToolStatus: 'in_progress',
+      }),
+    ];
+
+    const groups = buildAcpTranscriptGroups(visible, []);
+    expect(groups).toHaveLength(1);
+    const group = groups[0];
+    if (group.type !== 'tools') throw new Error('expected a tool group');
+    expect(group.items.map((item) => [item.verb, item.detail])).toEqual([
+      ['Ran', 'ToolSearch'],
+      ['Saved note', 'Plan'],
+      ['Saving note', 'Plan'],
+    ]);
+    // Different verbs: the note rows never fold into a "Ran N commands" group.
+    expect(groupRichToolsByVerb(group.items).map((verbGroup) => verbGroup.items.length)).toEqual([
+      1, 1, 1,
+    ]);
+  });
+
+  it('renders tool calls still running when the session settled as interrupted', () => {
+    const visible = [
+      message({
+        id: 1,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'Bash', input: { command: 'sleep 60' } }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-1',
+        acpToolStatus: 'in_progress',
+      }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'Bash', input: { command: 'ls' } }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-2',
+        acpToolStatus: 'completed',
+      }),
+    ];
+
+    const live = buildAcpTranscriptGroups(visible, []);
+    const liveGroup = live[0];
+    if (liveGroup.type !== 'tools') throw new Error('expected a tool group');
+    expect(liveGroup.items[0].status).toBe('in_progress');
+    expect(liveGroup.items[0].verb).toBe('Running');
+    expect(groupRichToolsByVerb(liveGroup.items).map((g) => g.verb)).toEqual(['Running', 'Ran']);
+
+    const settled = buildAcpTranscriptGroups(visible, [], undefined, { sessionSettled: true });
+    const settledGroup = settled[0];
+    if (settledGroup.type !== 'tools') throw new Error('expected a tool group');
+    // The collapsed header says so too, not only the status dot.
+    expect(settledGroup.items[0]).toMatchObject({
+      status: 'cancelled',
+      statusLabel: 'Interrupted',
+      statusTone: 'cancelled',
+      verb: 'Interrupted',
+      detail: 'sleep 60',
+    });
+    // The call that did finish is untouched.
+    expect(settledGroup.items[1]).toMatchObject({ status: 'completed', statusLabel: 'Succeeded' });
+    const [interruptedGroup, ranGroup] = groupRichToolsByVerb(settledGroup.items);
+    expect(interruptedGroup.verb).toBe('Interrupted');
+    expect(interruptedGroup.statusTone).toBe('cancelled');
+    expect(ranGroup.summary).toBe('1 commands');
+  });
+
+  it('treats unsettled calls in a session that still completed as finished, not interrupted', () => {
+    // A remote note session completed from the workstation outbox: the
+    // `write_note` call's update was lost with the connection, but the very
+    // note it saved is what completed the session.
+    const visible = [
+      message({
+        id: 1,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__staged__write_note',
+          input: { title: 'Disconnect test note' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-1',
+        acpToolStatus: 'in_progress',
+      }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'Bash', input: { command: 'sleep 60' } }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-2',
+        acpToolStatus: 'pending',
+      }),
+    ];
+
+    const completed = buildAcpTranscriptGroups(visible, [], undefined, {
+      sessionSettled: true,
+      sessionCompleted: true,
+    });
+    const group = completed[0];
+    if (group.type !== 'tools') throw new Error('expected a tool group');
+    expect(group.items[0]).toMatchObject({
+      status: 'completed',
+      verb: 'Saved note',
+      detail: 'Disconnect test note',
+      statusTone: 'success',
+    });
+    // Finished like any other completed call: the footer shows no status
+    // for a success, so a special label would never render.
+    expect(group.items[1]).toMatchObject({
+      status: 'completed',
+      verb: 'Ran',
+      statusLabel: 'Succeeded',
+    });
+
+    // The same rows in a session that ended in error are cut off.
+    const failed = buildAcpTranscriptGroups(visible, [], undefined, {
+      sessionSettled: true,
+      sessionCompleted: false,
+    });
+    const failedGroup = failed[0];
+    if (failedGroup.type !== 'tools') throw new Error('expected a tool group');
+    expect(failedGroup.items[0]).toMatchObject({
+      verb: 'Note not saved',
+      statusLabel: 'Interrupted',
+    });
+    expect(failedGroup.items[1]).toMatchObject({ verb: 'Interrupted', statusLabel: 'Interrupted' });
+  });
+
+  it('only relabels unsettled calls from the final turn of a completed session', () => {
+    // Turn 1's `write_note` call was cut off by the follow-up prompt that
+    // opened turn 2 (the Pikchr repair, say); turn 2's call is the one whose
+    // lost update the completed session stands for.
+    const visible = [
+      message({ id: 1, role: 'user', content: 'write the note' }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__staged__write_note',
+          input: { title: 'First attempt' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-1',
+        acpToolStatus: 'in_progress',
+      }),
+      message({ id: 3, role: 'user', content: 'fix the diagram' }),
+      message({
+        id: 4,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__staged__write_note',
+          input: { title: 'Second attempt' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-2',
+        acpToolStatus: 'in_progress',
+      }),
+    ];
+    const groups = buildAcpTranscriptGroups(visible, [], undefined, {
+      sessionSettled: true,
+      sessionCompleted: true,
+    });
+    const tools = groups.flatMap((g) => (g.type === 'tools' ? g.items : []));
+    expect(tools.map((t) => [t.detail, t.verb, t.statusLabel])).toEqual([
+      ['First attempt', 'Note not saved', 'Interrupted'],
+      ['Second attempt', 'Saved note', 'Succeeded'],
+    ]);
+  });
+
   it('pairs tool results by ACP tool call id without relying on adjacency', () => {
     const visible = [
       message({ id: 1, role: 'user', content: 'go' }),

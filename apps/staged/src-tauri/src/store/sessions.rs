@@ -16,6 +16,16 @@ const SESSION_COLUMNS: &str = "id, prompt, status, working_dir, provider, agent_
     created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id,
     completion_effects_at, parent_session_id, pre_head_sha, blox_command_id, started_by";
 
+/// [`SESSION_COLUMNS`], each qualified with a table alias, for queries that
+/// join `sessions` with another table carrying an `id`.
+fn qualified_session_columns(alias: &str) -> String {
+    SESSION_COLUMNS
+        .split(',')
+        .map(|column| format!("{alias}.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// An in-flight session spawned by another session: the branch it works on
 /// and the title the branch timeline would give it. `status` is `"queued"` or
 /// `"running"`.
@@ -181,6 +191,94 @@ impl Store {
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
         )?;
         Ok(rows > 0)
+    }
+
+    /// Finish a detached-recovery claim: move a row that is
+    /// `error`/`detached` to `new_status`, and only such a row.
+    ///
+    /// The dead-owner sweep claims a remote note session by transitioning it
+    /// from `running` to `error`/[`CompletionReason::Detached`] *before* it
+    /// talks to the workstation, so two Staged instances sharing the store
+    /// cannot both collect and ingest the same outbox. Once the claimant knows
+    /// the outcome it settles the row through this method; the predicate
+    /// means a row the user resumed in the meantime (`running` or `queued`
+    /// again) is left to its new owner. Returns whether the row was updated.
+    pub fn finish_detached_recovery(
+        &self,
+        id: &str,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let error_msg = if new_status == SessionStatus::Error {
+            error_message
+        } else {
+            None
+        };
+        let rows = conn.execute(
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+             WHERE id = ?5 AND status = 'error' AND completion_reason = ?6",
+            params![
+                new_status.as_str(),
+                error_msg,
+                completion_reason.map(|r| r.as_str()),
+                now_timestamp(),
+                id,
+                CompletionReason::Detached.as_str()
+            ],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// [`Self::finish_detached_recovery`] for exactly the `error`/`detached`
+    /// row the caller read: the write also requires `updated_at` and
+    /// `error_message` to still be what the caller observed.
+    ///
+    /// This is what makes the sweep's claim exclusive across Staged instances
+    /// sharing the store. Two instances that both read the same detached row
+    /// (same polling marker, same `updated_at`) and both find the finished
+    /// note race to claim it; the first write restamps `updated_at` and
+    /// replaces the marker, so the second fails the predicate and backs off
+    /// without ingesting. The caller then guards its final write on the
+    /// stamp this claim returned, so a row another instance re-claimed in the
+    /// meantime (a stale storing claim, see
+    /// `session_runner::detached_note_poll_action`) is left to them too.
+    ///
+    /// Returns the `updated_at` the row now carries when it was written,
+    /// `None` when the row had moved on.
+    pub fn finish_detached_recovery_observed(
+        &self,
+        id: &str,
+        observed_updated_at: i64,
+        observed_error_message: Option<&str>,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+    ) -> Result<Option<i64>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let error_msg = if new_status == SessionStatus::Error {
+            error_message
+        } else {
+            None
+        };
+        let now = now_timestamp();
+        let rows = conn.execute(
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+             WHERE id = ?5 AND status = 'error' AND completion_reason = ?6
+               AND updated_at = ?7 AND error_message IS ?8",
+            params![
+                new_status.as_str(),
+                error_msg,
+                completion_reason.map(|r| r.as_str()),
+                now,
+                id,
+                CompletionReason::Detached.as_str(),
+                observed_updated_at,
+                observed_error_message,
+            ],
+        )?;
+        Ok((rows > 0).then_some(now))
     }
 
     /// [`Self::transition_from_running`] for exactly the `running` row the
@@ -618,6 +716,138 @@ impl Store {
             .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
+    }
+
+    /// Sessions parked in `error`/[`CompletionReason::Detached`]: remote
+    /// sessions Staged lost while their agent may still have been working.
+    /// The dead-owner sweep re-polls the remote note sessions among them for
+    /// a bounded window after the detachment (see
+    /// `session_runner::poll_detached_remote_note_sessions`), so the
+    /// predicate is the claimed state alone; the caller applies the window
+    /// from `updated_at`, which every write into this state restamps.
+    pub fn get_detached_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions WHERE status = 'error' AND completion_reason = ?1
+             ORDER BY updated_at ASC"
+        ))?;
+        let sessions = stmt
+            .query_map(
+                params![CompletionReason::Detached.as_str()],
+                Self::row_to_session,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
+    /// Remote note sessions that ended
+    /// `completed`/[`CompletionReason::HoldStopped`] with their note still
+    /// empty and that the dead-owner sweep still has to visit: the user
+    /// stopped the wait on the agent's background work before it called
+    /// `write_note`, and the agent carries on regardless (Blox keeps the turn
+    /// alive), so the sweep polls these rows' workstation outboxes for a
+    /// bounded window (`session_runner::poll_detached_remote_note_sessions`)
+    /// and fills the note in when it lands. Oldest write first.
+    ///
+    /// Only sessions on a branch with a Blox workspace qualify: a local
+    /// session's agent stops with its run, so a local `hold_stopped` row with
+    /// an empty note is a settled end state, not one to poll. Only rows no
+    /// sweep has settled qualify: no message yet, or a storing claim (one
+    /// ending in `storing_claim_suffix`) whose staleness the caller judges.
+    /// Every other message the sweep writes here (expired window,
+    /// unreachable workstation, note that could not be stored) settles the
+    /// row, so a row past the window drops out once its one last poll has
+    /// written one. The window itself is not applied here because that last
+    /// poll must still see a row that went past the window while no Staged
+    /// instance was running.
+    pub fn get_hold_stopped_sessions_awaiting_note(
+        &self,
+        storing_claim_suffix: &str,
+    ) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let columns = qualified_session_columns("s");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {columns}
+             FROM sessions s
+             INNER JOIN branches b ON b.id = s.branch_id
+             WHERE s.status = 'completed' AND s.completion_reason = ?1
+               AND b.workspace_name IS NOT NULL
+               AND (s.error_message IS NULL
+                    OR substr(s.error_message, -length(?2)) = ?2)
+               AND (EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.content = '')
+                    OR EXISTS (SELECT 1 FROM project_notes p WHERE p.session_id = s.id AND p.content = ''))
+             ORDER BY s.updated_at ASC"
+        ))?;
+        let sessions = stmt
+            .query_map(
+                params![CompletionReason::HoldStopped.as_str(), storing_claim_suffix],
+                Self::row_to_session,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
+    /// The sweep's guarded write for exactly the `completed`/`hold_stopped`
+    /// row it read: sets `error_message` to `error_message` and restamps
+    /// `updated_at`, only while the row still is `completed`/`hold_stopped`
+    /// with the observed stamp and message. Status and completion reason are
+    /// left alone — the session did complete; only its note is outstanding.
+    ///
+    /// This is the one writer that puts an `error_message` on a completed
+    /// row. The message is the sweep's own marker (a storing claim, an
+    /// expired window, an unreachable workstation, a note that could not be
+    /// stored), exactly as `finish_detached_recovery_observed` records them
+    /// on a `detached` row, and it serves the same purpose: the restamp and
+    /// the message make the claim exclusive across Staged instances sharing
+    /// the store, and the message keeps a settled row from being polled
+    /// again. The chat pane shows a completed row's message only for `error`
+    /// and `cancelled` rows, so the marker is invisible there; any later
+    /// status write (a resume) clears it.
+    ///
+    /// A marker (`error_message` is `Some`) is only ever meaningful while
+    /// the note is still empty, so writing one also requires an empty repo
+    /// or project note for the session. That closes the one gap the stamp
+    /// cannot: the awaiting row and the row whose note the sweep has just
+    /// stored both carry no message, and `updated_at` has millisecond
+    /// resolution, so a claim read before another instance's claim could
+    /// otherwise land on the stored row if the whole store happened within
+    /// one millisecond. Dropping the marker after a stored note
+    /// (`error_message` is `None`) has no such requirement.
+    ///
+    /// Returns the `updated_at` the row now carries when it was written,
+    /// `None` when the row had moved on.
+    pub fn mark_hold_stopped_note_recovery_observed(
+        &self,
+        id: &str,
+        observed_updated_at: i64,
+        observed_error_message: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<Option<i64>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        let note_guard = if error_message.is_some() {
+            " AND (EXISTS (SELECT 1 FROM notes n WHERE n.session_id = sessions.id AND n.content = '')
+                   OR EXISTS (SELECT 1 FROM project_notes p WHERE p.session_id = sessions.id AND p.content = ''))"
+        } else {
+            ""
+        };
+        let rows = conn.execute(
+            &format!(
+                "UPDATE sessions SET error_message = ?1, updated_at = ?2
+                 WHERE id = ?3 AND status = 'completed' AND completion_reason = ?4
+                   AND updated_at = ?5 AND error_message IS ?6{note_guard}"
+            ),
+            params![
+                error_message,
+                now,
+                id,
+                CompletionReason::HoldStopped.as_str(),
+                observed_updated_at,
+                observed_error_message,
+            ],
+        )?;
+        Ok((rows > 0).then_some(now))
     }
 
     /// How many sessions ended with exactly this `error_message`.

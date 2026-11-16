@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub mod activity;
 pub mod env_vars;
 pub mod writer;
 
@@ -40,6 +41,7 @@ impl acp_client::Store for Store {
 }
 
 // Re-export writer for backward compatibility
+pub use activity::ActivityClock;
 pub use writer::MessageWriter;
 
 fn replay_boundaries_from_messages(

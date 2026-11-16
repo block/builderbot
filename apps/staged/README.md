@@ -30,6 +30,8 @@ https://github.com/block/builderbot/releases/download/staged-latest/latest.json
 ```
 
 Release and signing details live in [`docs/release-and-updates.md`](./docs/release-and-updates.md).
+How note sessions deliver their note (the `write_note` tool, the Blox outbox, and detached recovery) is described in [`docs/note-delivery.md`](./docs/note-delivery.md).
+The workstation-side MCP server that serves Staged's tools to remote (Blox) agents, `write_note` first, is described in [`docs/staged-mcp-on-blox.md`](./docs/staged-mcp-on-blox.md).
 
 ### Development Install From Source
 
@@ -218,7 +220,7 @@ answers with a block page (and no `STAGED_NPM_REGISTRY` was set), and
 `STAGED_FALLBACK_NODE_DIST_URL` is retried once when the download from
 `nodejs.org` fails to reach the host (and no `STAGED_NODE_DIST_URL` was set —
 an explicit override is never second-guessed, for either). Both are read at
-*compile time* and are unset for from-source builds. Block's release workflow
+_compile time_ and are unset for from-source builds. Block's release workflow
 passes them from the
 `STAGED_FALLBACK_NPM_REGISTRY` / `STAGED_FALLBACK_NODE_DIST_URL` repository
 variables, which must be set for Block builds to keep working on managed

@@ -10,9 +10,12 @@
 //! is left out until the session has put something in it. See
 //! [`ACTIVITY_QUERY`] for how such a row is told apart.
 //!
-//! The read scans the four tables once, and the comments of the reviews
-//! still in flight. That is a cost of the same order as the search index
-//! read, and the frontend asks for it only while a sort uses it.
+//! The read scans the notes, the project notes, the reviews and the commits
+//! once each, and the reviews a second time to pick out the ones still in
+//! flight. Comments are read only for those reviews, through
+//! `idx_comments_review`, so the comments table is never scanned. That is a
+//! cost of the same order as the search index read, and the frontend asks
+//! for it only while a sort uses it.
 
 use serde::Serialize;
 
@@ -62,8 +65,18 @@ pub struct ProjectActivity {
 /// Its comments carry their own timestamps, so a comment added to or deleted
 /// from it still counts, from the comment's `created_at` and `deleted_at`.
 /// The writes that stamp only the review's `updated_at` (a file marked or
-/// unmarked reviewed, a reference file, a comment edited or restored) wait
-/// there for the session to finish.
+/// unmarked reviewed, a reference file, a comment edited or restored) do not
+/// count while the session runs. They count once it finishes, at the finish
+/// time. A session that fails or is stopped never stamps `completed_at`, so
+/// on its review they never count, unless the session is resumed and
+/// finishes. Restoring a comment clears its `deleted_at`, so the comment
+/// counts from its `created_at` again.
+///
+/// That source is written `reviews CROSS JOIN comments`, which holds SQLite
+/// to that order: it picks out the reviews in flight and looks up each one's
+/// comments through `idx_comments_review`. Given a plain `JOIN`, SQLite
+/// scanned every comment ever written, soft-deleted ones included, and
+/// looked up the review of each.
 ///
 /// Branch items reach a project through `branches.project_id`, the branch's
 /// current project, so they follow a branch that moves.
@@ -85,8 +98,8 @@ const ACTIVITY_QUERY: &str = "
          WHERE r.session_id IS NULL OR r.completed_at IS NOT NULL
         UNION ALL
         SELECT b.project_id, MAX(c.created_at, IFNULL(c.deleted_at, 0))
-          FROM comments c
-          JOIN reviews r ON r.id = c.review_id
+          FROM reviews r
+         CROSS JOIN comments c ON c.review_id = r.id
           JOIN branches b ON b.id = r.branch_id
          WHERE r.session_id IS NOT NULL AND r.completed_at IS NULL
         UNION ALL
@@ -527,6 +540,96 @@ mod tests {
         assert_counts_now(&f, "comment deleted", || {
             f.store.delete_comment(&added.id).unwrap();
         });
+    }
+
+    #[test]
+    fn a_comment_edited_on_a_review_still_in_flight_changes_nothing() {
+        // An edit stamps only the review row, which is ignored until the
+        // session finishes. The comment keeps counting from its own time.
+        let f = fixture();
+        let review = started_review(&f, 250);
+        let added = comment(700);
+        f.store.add_comment(&review.id, &added).unwrap();
+        assert_eq!(activity(&f.store), only(&f, 700));
+
+        let before = now_timestamp();
+        f.store.update_comment(&added.id, "Why not?").unwrap();
+        let stored = f.store.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(stored.comments[0].content, "Why not?", "the edit landed");
+        assert!(stored.updated_at >= before, "the edit stamped the review");
+        assert_eq!(activity(&f.store), only(&f, 700));
+    }
+
+    #[test]
+    fn a_comment_restored_on_a_review_still_in_flight_counts_from_its_creation_again() {
+        let f = fixture();
+        let review = started_review(&f, 250);
+        let added = comment(700);
+        f.store.add_comment(&review.id, &added).unwrap();
+        assert_counts_now(&f, "comment deleted", || {
+            f.store.delete_comment(&added.id).unwrap();
+        });
+
+        // Restoring clears the comment's `deleted_at` and stamps only the
+        // review row, so the value drops from the deletion time back to the
+        // comment's creation time. It does not stay at the deletion time and
+        // it does not move to the restore time.
+        let before = now_timestamp();
+        f.store.restore_comment(&added.id).unwrap();
+        let stored = f.store.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(stored.comments.len(), 1, "the comment is back");
+        assert!(
+            stored.updated_at >= before,
+            "the restore stamped the review"
+        );
+        assert_eq!(activity(&f.store), only(&f, 700));
+    }
+
+    #[test]
+    fn deleting_every_comment_on_a_review_still_in_flight_counts() {
+        // One statement stamps `deleted_at` on each live comment.
+        let f = fixture();
+        let review = started_review(&f, 250);
+        f.store.add_comment(&review.id, &comment(600)).unwrap();
+        f.store.add_comment(&review.id, &comment(700)).unwrap();
+        assert_eq!(activity(&f.store), only(&f, 700));
+
+        assert_counts_now(&f, "all comments deleted", || {
+            f.store.delete_all_comments(&review.id).unwrap();
+        });
+        assert_eq!(f.store.get_deleted_comments(&review.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_comments_source_reads_only_the_comments_of_reviews_in_flight() {
+        let f = fixture();
+        let conn = f.store.conn.lock().unwrap();
+        // The app never runs ANALYZE, so this is the plan a real store gets.
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {ACTIVITY_QUERY}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        // One group of steps per source, in the order the query lists them.
+        // The comments source is the fourth. Its steps read `SCAN <alias>` or
+        // `SEARCH <alias> ...`, and `c` is the comments table there.
+        let sources: Vec<&[String]> = plan.split(|step| step == "UNION ALL").collect();
+        assert_eq!(sources.len(), 5, "plan: {plan:?}");
+        let over_comments: Vec<&str> = sources[3]
+            .iter()
+            .map(String::as_str)
+            .filter(|step| step.split_whitespace().nth(1) == Some("c"))
+            .collect();
+        assert_eq!(over_comments.len(), 1, "plan: {plan:?}");
+        assert!(
+            over_comments[0].starts_with("SEARCH c USING INDEX idx_comments_review "),
+            "the comments source should look up the comments of each review in \
+             flight, not scan the comments table; plan: {plan:?}"
+        );
     }
 
     #[test]

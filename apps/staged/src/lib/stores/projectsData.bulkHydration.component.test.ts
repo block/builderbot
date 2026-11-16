@@ -6,8 +6,8 @@
 // followed by its revalidated one.
 //
 // Then the paths that used to fall back to one read per project, and the
-// recovery from a bulk read that fails: a retry, a re-read when a view next
-// asks, and a hard reload on the next project-changed.
+// recovery from a bulk read that fails: a retry after a delay, a re-read when
+// a view next asks, and a hard reload on the next project-changed.
 //
 // In the "component" vitest project for the same reason as
 // projectsData.component.test.ts: the store's runes have to compile for the
@@ -162,6 +162,39 @@ function holdIdleQueue(): { run: () => void } {
   };
 }
 
+/** What the store waits before its one retry of a bulk read that failed. */
+const RETRY_DELAY_MS = 1500;
+
+/**
+ * The store's retry delay, taken off the clock. Unless a test holds it, a
+ * wait ends on the next macrotask: never in the tick it began, and without
+ * the test sitting through it. Held, it ends when the test calls `fire()`.
+ * Every other timer is left alone.
+ */
+function stubRetryDelay() {
+  const realSetTimeout = globalThis.setTimeout;
+  const waits: Array<() => void> = [];
+  const timer = {
+    held: false,
+    /** Waits in progress. */
+    get waiting() {
+      return waits.length;
+    },
+    fire() {
+      for (const done of waits.splice(0)) done();
+    },
+  };
+  vi.stubGlobal('setTimeout', (callback: () => void, ms?: number, ...args: unknown[]) => {
+    if (ms !== RETRY_DELAY_MS) return realSetTimeout(callback, ms, ...args);
+    if (!timer.held) return realSetTimeout(callback, 0);
+    waits.push(callback);
+    return 0;
+  });
+  return timer;
+}
+
+let retryDelay: ReturnType<typeof stubRetryDelay>;
+
 async function importStore() {
   const { projectsDataStore } = await import('./projectsData.svelte');
   return projectsDataStore;
@@ -219,6 +252,7 @@ beforeEach(() => {
   // As in projectsData.component.test.ts: the store's per-frame flushes fall
   // back to setTimeout, which the tests' ticks wait on.
   vi.stubGlobal('requestAnimationFrame', undefined);
+  retryDelay = stubRetryDelay();
   windowTarget = new EventTarget();
   vi.stubGlobal('window', windowTarget);
 
@@ -425,6 +459,48 @@ describe('bulk hydration', () => {
     expect(branchNames(store)).toEqual({ p1: 'bulk', p2: 'bulk', p3: 'bulk', p4: 'single' });
     expect(repoBranchNames(store).p4).toBe('single');
     expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('applies neither list of a project that only the repo reply lacks', async () => {
+    // The backend read p4's branches but not its repos.
+    listProjectReposByProject.mockResolvedValue(swr(reposOf('bulk', ['p1', 'p2', 'p3'])));
+    const own = deferred<SwrResult<Branch[]>>();
+    listBranchesForProject.mockReturnValue(own.promise);
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    // Its branch list is in the reply, and is left for its own read: the
+    // two lists land together or not at all.
+    expect(branchNames(store)).toEqual({ p1: 'bulk', p2: 'bulk', p3: 'bulk', p4: undefined });
+    expect(store.reposByProject.has('p4')).toBe(false);
+    expect(store.isProjectHydrated('p4')).toBe(false);
+
+    own.resolve(swr([branch('p4', { branchName: 'single' })]));
+    await sweep;
+    expect(branchNames(store).p4).toBe('single');
+    expect(repoBranchNames(store).p4).toBe('single');
+  });
+
+  it('applies neither list of a project that only the branch reply lacks', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The backend read p4's repos but not its branches, and its own read
+    // fails too.
+    listBranchesByProject.mockResolvedValue(swr(branchesOf('bulk', ['p1', 'p2', 'p3'])));
+    listBranchesForProject.mockRejectedValueOnce(new Error('database disk image is malformed'));
+    const { store } = await loadedStore();
+
+    await store.ensureProjectsHydrated();
+
+    // Holding a project's repos is what says its fetch succeeded (the
+    // project-delete check): p4's did not.
+    expect(store.reposByProject.has('p4')).toBe(false);
+    expect(repoBranchNames(store)).toEqual({ p1: 'bulk', p2: 'bulk', p3: 'bulk', p4: undefined });
+    expect(store.isProjectHydrated('p4')).toBe(true);
+    // It is owed a read, which brings both lists.
+    await store.ensureProjectHydrated('p4');
+    expect(branchNames(store).p4).toBe('single');
+    expect(repoBranchNames(store).p4).toBe('single');
   });
 
   it('skips a project that left the list while the read was out', async () => {
@@ -821,6 +897,326 @@ describe('bulk hydration: cached reads (web)', () => {
   });
 });
 
+describe('bulk hydration: projects a cached reply lacks (web)', () => {
+  // The cached all-projects entry loses a project whenever one of its lists
+  // changes, so a cached reply can lack several that the network lists.
+  const CACHED = ['p1'];
+  const LACKING = ['p2', 'p3', 'p4'];
+
+  /** Cached replies that list p1 only, each with its revalidation in hand. */
+  function cachedRepliesLackingThree() {
+    const freshBranches = deferred<Record<string, Branch[]>>();
+    const freshRepos = deferred<Record<string, ProjectRepo[]>>();
+    listBranchesByProject.mockResolvedValueOnce(
+      swr(branchesOf('cached', CACHED), freshBranches.promise)
+    );
+    listProjectReposByProject.mockResolvedValueOnce(
+      swr(reposOf('cached', CACHED), freshRepos.promise)
+    );
+    return { freshBranches, freshRepos };
+  }
+
+  it('settles them from the revalidated replies, with no read per project', async () => {
+    const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    // The project the cached replies list is painted from them at once.
+    expect(branchNames(store)).toEqual({ p1: 'cached' });
+    expect(store.isProjectHydrated('p1')).toBe(true);
+    expect(LACKING.map((id) => store.isProjectHydrated(id))).toEqual([false, false, false]);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+
+    freshBranches.resolve(branchesOf('fresh'));
+    await settle();
+    // Not from the branch reply alone: a project's lists land together.
+    expect(branchNames(store)).toEqual({ p1: 'fresh' });
+    expect(store.allProjectsHydrated).toBe(false);
+    freshRepos.resolve(reposOf('fresh'));
+    await sweep;
+
+    const allFresh = { p1: 'fresh', p2: 'fresh', p3: 'fresh', p4: 'fresh' };
+    expect(branchNames(store)).toEqual(allFresh);
+    expect(repoBranchNames(store)).toEqual(allFresh);
+    expect(store.allProjectsHydrated).toBe(true);
+    expect(listBranchesByProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+    expect(listProjectRepos).not.toHaveBeenCalled();
+  });
+
+  it('assigns each map once for all of them, not once per project', async () => {
+    const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+    const seen = {
+      branches: new Set([store.branchesByProject]),
+      repos: new Set([store.reposByProject]),
+      hydrated: 0,
+    };
+    const hydrated = await watch(() => store.isProjectHydrated('p4'));
+    hydrated.flush();
+    const track = () => {
+      seen.branches.add(store.branchesByProject);
+      seen.repos.add(store.reposByProject);
+      seen.hydrated += hydrated.flush().length;
+    };
+
+    freshBranches.resolve(branchesOf('fresh'));
+    freshRepos.resolve(reposOf('fresh'));
+    // Sampled every microtask, so no assignment goes unseen.
+    for (let i = 0; i < 40; i++) {
+      await Promise.resolve();
+      track();
+    }
+    await sweep;
+    track();
+
+    // Each map: the one it held, the revalidated lists of the project the
+    // cached replies listed, then those of the three they lacked, together.
+    expect(seen.branches.size).toBe(3);
+    expect(seen.repos.size).toBe(3);
+    expect(seen.hydrated).toBe(1);
+    hydrated.stop();
+  });
+
+  it('uses as it is a reply that came without a revalidation', async () => {
+    // The cached repo reply is still fresh, and lists every project: only
+    // the branch reply lacks the three, and only it is being read again.
+    const freshBranches = deferred<Record<string, Branch[]>>();
+    listBranchesByProject.mockResolvedValueOnce(
+      swr(branchesOf('cached', CACHED), freshBranches.promise)
+    );
+    listProjectReposByProject.mockResolvedValueOnce(swr(reposOf('cached')));
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+    expect(store.reposByProject.has('p2')).toBe(false);
+
+    freshBranches.resolve(branchesOf('fresh'));
+    await sweep;
+
+    expect(branchNames(store)).toEqual({ p1: 'fresh', p2: 'fresh', p3: 'fresh', p4: 'fresh' });
+    expect(repoBranchNames(store)).toEqual({
+      p1: 'cached',
+      p2: 'cached',
+      p3: 'cached',
+      p4: 'cached',
+    });
+    expect(store.allProjectsHydrated).toBe(true);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+  });
+
+  it('reads on its own a project the revalidated replies lack too', async () => {
+    const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    freshBranches.resolve(branchesOf('fresh', ['p1', 'p2', 'p3']));
+    freshRepos.resolve(reposOf('fresh', ['p1', 'p2', 'p3']));
+    await sweep;
+
+    expect(listBranchesForProject.mock.calls).toEqual([['p4']]);
+    expect(listProjectRepos.mock.calls).toEqual([['p4']]);
+    expect(branchNames(store)).toEqual({ p1: 'fresh', p2: 'fresh', p3: 'fresh', p4: 'single' });
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it.each([
+    ['repo', branchesOf('fresh'), reposOf('fresh', ['p1', 'p2', 'p3'])],
+    ['branch', branchesOf('fresh', ['p1', 'p2', 'p3']), reposOf('fresh')],
+  ])(
+    'settles neither list of a project that only the revalidated %s reply lacks',
+    async (_which, branches, repos) => {
+      const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+      const own = deferred<SwrResult<Branch[]>>();
+      listBranchesForProject.mockReturnValue(own.promise);
+      const { store } = await loadedStore();
+      const sweep = store.ensureProjectsHydrated();
+      await settle();
+
+      freshBranches.resolve(branches);
+      freshRepos.resolve(repos);
+      await settle();
+
+      // p4 is left whole to its own read, which is still out.
+      expect(listBranchesForProject.mock.calls).toEqual([['p4']]);
+      expect(branchNames(store)).toEqual({ p1: 'fresh', p2: 'fresh', p3: 'fresh', p4: undefined });
+      expect(store.reposByProject.has('p4')).toBe(false);
+      expect(store.isProjectHydrated('p4')).toBe(false);
+      expect([store.isProjectHydrated('p2'), store.isProjectHydrated('p3')]).toEqual([true, true]);
+
+      own.resolve(swr([branch('p4', { branchName: 'single' })]));
+      await sweep;
+      expect(branchNames(store).p4).toBe('single');
+      expect(store.allProjectsHydrated).toBe(true);
+    }
+  );
+
+  it('reads each on its own when a revalidation fails', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    freshRepos.resolve(reposOf('fresh'));
+    freshBranches.reject(new Error('offline'));
+    await sweep;
+
+    expect(listBranchesForProject.mock.calls.map(([id]) => id)).toEqual(LACKING);
+    expect(branchNames(store)).toEqual({ p1: 'cached', p2: 'single', p3: 'single', p4: 'single' });
+    expect(repoBranchNames(store)).toEqual({
+      p1: 'fresh',
+      p2: 'single',
+      p3: 'single',
+      p4: 'single',
+    });
+    expect(store.allProjectsHydrated).toBe(true);
+    // Reported once, where the reply would have been applied.
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(
+      '[projectsData] Failed to revalidate the branches of all projects:',
+      expect.any(Error)
+    );
+  });
+
+  it('reads each on its own, at once, when no reply is being revalidated', async () => {
+    // The desktop app, or cached replies that are still fresh.
+    listBranchesByProject.mockResolvedValue(swr(branchesOf('bulk', CACHED)));
+    listProjectReposByProject.mockResolvedValue(swr(reposOf('bulk', CACHED)));
+    const { store } = await loadedStore();
+
+    await store.ensureProjectsHydrated();
+
+    expect(listBranchesByProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject.mock.calls.map(([id]) => id)).toEqual(LACKING);
+    expect(branchNames(store)).toEqual({ p1: 'bulk', p2: 'single', p3: 'single', p4: 'single' });
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('does not wait for the revalidation when the replies lack one or two', async () => {
+    const freshBranches = deferred<Record<string, Branch[]>>();
+    listBranchesByProject.mockResolvedValueOnce(
+      swr(branchesOf('cached', ['p1', 'p2']), freshBranches.promise)
+    );
+    listProjectReposByProject.mockResolvedValueOnce(swr(reposOf('cached', ['p1', 'p2'])));
+    const { store } = await loadedStore();
+
+    // Settles with the revalidation still out.
+    await store.ensureProjectsHydrated();
+
+    expect(listBranchesForProject.mock.calls.map(([id]) => id)).toEqual(['p3', 'p4']);
+    expect(branchNames(store)).toEqual({
+      p1: 'cached',
+      p2: 'cached',
+      p3: 'single',
+      p4: 'single',
+    });
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('counts them as read: none is owed a read afterwards', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Their first hydration failed, retry included, so each is owed a read.
+    listBranchesByProject
+      .mockRejectedValueOnce(new Error('store is locked'))
+      .mockRejectedValueOnce(new Error('store is locked'));
+    const { store } = await loadedStore();
+    await store.ensureProjectsHydrated();
+    const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+    freshBranches.resolve(branchesOf('fresh'));
+    freshRepos.resolve(reposOf('fresh'));
+
+    await store.ensureProjectsHydrated();
+    expect(branchNames(store).p4).toBe('fresh');
+    expect(listBranchesByProject).toHaveBeenCalledTimes(3);
+
+    await store.ensureProjectsHydrated();
+    await store.ensureProjectHydrated('p4');
+    expect(listBranchesByProject).toHaveBeenCalledTimes(3);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+  });
+
+  it('keeps a refresh of one of them that was sent while it waited', async () => {
+    const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    // Sent after the revalidation, so what it read is the newer.
+    await store.refreshProject('p2');
+    expect(branchNames(store).p2).toBe('single');
+    freshBranches.resolve(branchesOf('fresh'));
+    freshRepos.resolve(reposOf('fresh'));
+    await sweep;
+
+    // The revalidated replies are ordered as the bulk read that asked for
+    // them: older than that refresh, for p2 alone.
+    const names = { p1: 'fresh', p2: 'single', p3: 'fresh', p4: 'fresh' };
+    expect(branchNames(store)).toEqual(names);
+    expect(repoBranchNames(store)).toEqual(names);
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('sends no read for a load that was replaced while it waited', async () => {
+    const { freshBranches, freshRepos } = cachedRepliesLackingThree();
+    const { store, idle } = await loadedStore();
+    store.startListeners();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    // A hard reload hydrates every project itself.
+    emit('project-changed', { projectId: null });
+    await settle();
+    idle.run();
+    await settle();
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    // The replaced load's revalidation lacks a project still.
+    freshBranches.resolve(branchesOf('fresh', ['p1', 'p2', 'p3']));
+    freshRepos.resolve(reposOf('fresh', ['p1', 'p2', 'p3']));
+    await sweep;
+    await settle();
+
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+    expect(branchNames(store)).toEqual({ p1: 'bulk', p2: 'bulk', p3: 'bulk', p4: 'bulk' });
+    store.stopListeners();
+  });
+
+  it('applies neither list of a project the cached replies lack when a revalidated one lists it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // p4 is missing from the cached replies, and its own read fails. The
+    // revalidated replies list it, but one project is not settled from them.
+    const freshBranches = deferred<Record<string, Branch[]>>();
+    const freshRepos = deferred<Record<string, ProjectRepo[]>>();
+    listBranchesByProject.mockResolvedValueOnce(
+      swr(branchesOf('cached', ['p1', 'p2', 'p3']), freshBranches.promise)
+    );
+    listProjectReposByProject.mockResolvedValueOnce(
+      swr(reposOf('cached', ['p1', 'p2', 'p3']), freshRepos.promise)
+    );
+    listBranchesForProject.mockRejectedValueOnce(new Error('offline'));
+    const { store } = await loadedStore();
+    await store.ensureProjectsHydrated();
+
+    freshBranches.resolve(branchesOf('fresh'));
+    await settle();
+    expect(branchNames(store)).toEqual({ p1: 'fresh', p2: 'fresh', p3: 'fresh', p4: undefined });
+    freshRepos.resolve(reposOf('fresh'));
+    await settle();
+
+    // Its lists come from one read of the project, and that read is owed.
+    expect(store.reposByProject.has('p4')).toBe(false);
+    expect(branchNames(store).p4).toBeUndefined();
+    await store.ensureProjectHydrated('p4');
+    expect(branchNames(store).p4).toBe('single');
+    expect(repoBranchNames(store).p4).toBe('single');
+  });
+});
+
 describe('bulk hydration: reloads', () => {
   it('rehydrates every project with one bulk read after a hard reload', async () => {
     const { store, idle } = await loadedStore();
@@ -956,6 +1352,101 @@ describe('bulk hydration: a read that fails', () => {
     // Their lists landed, so nothing is left to recover.
     await store.ensureProjectsHydrated();
     expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits before the second try, and stays in flight meanwhile', async () => {
+    quiet();
+    retryDelay.held = true;
+    listBranchesByProject.mockRejectedValueOnce(failure());
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    // Not in the tick the read failed in, nor in the next few: a failure
+    // that takes a moment to pass is still recovered.
+    expect(listBranchesByProject).toHaveBeenCalledTimes(1);
+    expect(listProjectReposByProject).toHaveBeenCalledTimes(1);
+    expect(retryDelay.waiting).toBe(1);
+    // Still in flight: the views gated on it wait, and a caller that asks
+    // meanwhile joins it.
+    expect(store.allProjectsHydrated).toBe(false);
+    const joined = store.ensureProjectHydrated('p2');
+    await settle();
+    expect(listBranchesByProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+
+    retryDelay.fire();
+    await Promise.all([sweep, joined]);
+
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    expect(listProjectReposByProject).toHaveBeenCalledTimes(2);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+    expect(branchNames(store)).toEqual(ALL_BULK);
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('waits once: a second failure is not followed by another wait', async () => {
+    quiet();
+    retryDelay.held = true;
+    listBranchesByProject.mockRejectedValue(failure());
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    retryDelay.fire();
+    await sweep;
+
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    expect(retryDelay.waiting).toBe(0);
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('orders the second reply as sent after the wait, not before it', async () => {
+    quiet();
+    retryDelay.held = true;
+    listBranchesByProject.mockRejectedValueOnce(failure());
+    const { store } = await loadedStore();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    // Sent and landed during the wait.
+    await store.refreshProject('p1');
+    expect(branchNames(store).p1).toBe('single');
+    retryDelay.fire();
+    await sweep;
+
+    // The second read went out after that refresh, so its list is the newer.
+    expect(branchNames(store)).toEqual(ALL_BULK);
+  });
+
+  it('does not send the second try when a newer load started during the wait', async () => {
+    quiet();
+    retryDelay.held = true;
+    listBranchesByProject.mockRejectedValueOnce(failure());
+    const { store, idle } = await loadedStore();
+    store.startListeners();
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+    expect(retryDelay.waiting).toBe(1);
+
+    // A hard reload hydrates every project itself.
+    emit('project-changed', { projectId: null });
+    await settle();
+    idle.run();
+    await settle();
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    retryDelay.fire();
+    await sweep;
+    await settle();
+
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    expect(branchNames(store)).toEqual(ALL_BULK);
+    // The replaced load left no mark: the next event is still targeted.
+    emit('project-changed', { projectId: 'p1' });
+    await settle();
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    expect(listBranchesForProject.mock.calls).toEqual([['p1', { force: true }]]);
+    store.stopListeners();
   });
 
   it('retries when it is the repo read that failed', async () => {
@@ -1605,6 +2096,81 @@ describe('bulk hydration: projects a soft reload discovers', () => {
     expect(listBranchesByProject).toHaveBeenCalledTimes(1);
     expect(listBranchesForProject.mock.calls).toEqual([['n1'], ['n2']]);
     expect(branchNames(store, ['n1', 'n2'])).toEqual({ n1: 'single', n2: 'single' });
+  });
+
+  it('does not read again those a view fetched before the idle step ran', async () => {
+    const { store, idle } = await storeAboutToDiscover(NEW_IDS);
+    await store.ensureLoaded();
+    await settle();
+
+    // The list change that queued the step also wakes the grid and the
+    // board, which hydrate at once.
+    await store.ensureProjectsHydrated();
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    expect(store.allProjectsHydrated).toBe(true);
+    idle.run();
+    await settle();
+
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    expect(listProjectReposByProject).toHaveBeenCalledTimes(2);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+  });
+
+  it('does not read again one or two that a view fetched first', async () => {
+    const { store, idle } = await storeAboutToDiscover(['n1', 'n2']);
+    await store.ensureLoaded();
+    await settle();
+
+    await store.ensureProjectHydrated('n1');
+    expect(listBranchesForProject.mock.calls).toEqual([['n1']]);
+    idle.run();
+    await settle();
+
+    // n2 is still the step's to read.
+    expect(listBranchesForProject.mock.calls).toEqual([['n1'], ['n2']]);
+    expect(listProjectRepos.mock.calls).toEqual([['n1'], ['n2']]);
+  });
+
+  it('joins a view’s hydration of them that is still in flight', async () => {
+    const { store, idle } = await storeAboutToDiscover(NEW_IDS);
+    await store.ensureLoaded();
+    await settle();
+    const reply = deferred<SwrResult<Record<string, Branch[]>>>();
+    listBranchesByProject.mockReturnValueOnce(reply.promise);
+    const sweep = store.ensureProjectsHydrated();
+    await settle();
+
+    idle.run();
+    await settle();
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    reply.resolve(swr(branchesOf('later', [...NEW_IDS, ...IDS])));
+    await sweep;
+
+    expect(listBranchesByProject).toHaveBeenCalledTimes(2);
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('still reads those whose hydration by a view failed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { store, idle } = await storeAboutToDiscover(NEW_IDS);
+    await store.ensureLoaded();
+    await settle();
+    listBranchesByProject
+      .mockRejectedValueOnce(new Error('store is locked'))
+      .mockRejectedValueOnce(new Error('store is locked'));
+    await store.ensureProjectsHydrated();
+    // Settled, so no view hangs, but on the seeded empty lists.
+    expect(store.allProjectsHydrated).toBe(true);
+    expect(branchNames(store, NEW_IDS)).toEqual({});
+    expect(listBranchesByProject).toHaveBeenCalledTimes(3);
+
+    idle.run();
+    await settle();
+
+    expect(listBranchesByProject).toHaveBeenCalledTimes(4);
+    expect(branchNames(store, NEW_IDS)).toEqual({ n1: 'later', n2: 'later', n3: 'later' });
   });
 
   it('does not read one that was deleted before the idle step ran', async () => {

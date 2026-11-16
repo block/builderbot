@@ -364,8 +364,9 @@ export function listProjectRepos(
  * invalidation of one project's repo list takes that project out of the
  * cached reply and keeps the rest, so a cached reply can also lack a project
  * the backend holds; a wider invalidation drops it (see
- * `ALL_PROJECTS_COMMAND` in cache.ts). Either way the caller reads a project
- * the reply lacks on its own.
+ * `ALL_PROJECTS_COMMAND` in cache.ts). Either way the caller settles a
+ * project the reply lacks from another read (see projectsData's bulk
+ * hydration).
  */
 export function listProjectReposByProject(
   options: ForceRefreshOptions = {}

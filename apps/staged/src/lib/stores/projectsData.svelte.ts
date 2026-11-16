@@ -57,6 +57,7 @@ import * as commands from '../commands';
 import { repoBadgeStore } from './repoBadges.svelte';
 import { LatestWins } from '../shared/latestWins';
 import { reuseUnchangedRows } from '../shared/reuseUnchangedRows';
+import type { SwrResult } from '../cache';
 import type {
   Branch,
   BranchChangedEvent,
@@ -88,6 +89,15 @@ const BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS = 3000;
  * selected project, a project a soft revalidation just discovered).
  */
 const BULK_HYDRATION_MIN_PROJECTS = 3;
+
+/**
+ * How long a bulk hydration waits before the one retry of a read that
+ * failed. A retry in the same tick only helps when the failure was over
+ * within that tick; this is long enough for a store that was locked or a
+ * backend that was still starting. The hydration stays in flight meanwhile,
+ * so a view gated on it waits this much longer when a read fails, once.
+ */
+const BULK_HYDRATION_RETRY_DELAY_MS = 1500;
 
 /**
  * The readOrder key under which the feed's lag recovery is recorded as it
@@ -211,6 +221,11 @@ function scheduleFrame(callback: () => void): () => void {
   }
   const handle = setTimeout(callback, 0);
   return () => clearTimeout(handle);
+}
+
+/** Resolve once `ms` have passed. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 class ProjectsDataStore {
@@ -928,8 +943,17 @@ class ProjectsDataStore {
       scheduleDeferredTask(() => {
         // A no-op once a newer load has started (see hydrateProjects).
         void this.hydrateProjects(
-          // Deleted while it waited its turn: reading it would only fail.
-          unseededProjectIds.filter((projectId) => this.hasProject(projectId)),
+          unseededProjectIds.filter(
+            (projectId) =>
+              // Deleted while it waited its turn: reading it would only fail.
+              this.hasProject(projectId) &&
+              // Fetched while it waited: the list change that queued this
+              // step also wakes the grid, the board and the sidebar search,
+              // which hydrate at once. Reading it here as well would be a
+              // second read, as in the hard load's idle step. One still in
+              // flight is joined.
+              !this.hasFetchedLists(projectId)
+          ),
           generation
         );
       }, BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS);
@@ -971,9 +995,10 @@ class ProjectsDataStore {
    * refetchBranchesIfHydrated). `force` reads past the web cache, for a
    * caller that knows the lists it holds are out of date.
    *
-   * Never rejects, like hydrateOnce. A read that fails is tried once more.
-   * If that fails too it is logged and the projects are still marked
-   * settled, but not left that way for good: see hydrateInBulkInternal.
+   * Never rejects, like hydrateOnce. A read that fails is tried once more,
+   * after BULK_HYDRATION_RETRY_DELAY_MS. If that fails too it is logged and
+   * the projects are still marked settled, but not left that way for good:
+   * see hydrateInBulkInternal.
    */
   private hydrateInBulk(
     projectIds: string[],
@@ -1009,8 +1034,11 @@ class ProjectsDataStore {
    * whole read: the project list could not be read, or the call did not get
    * through. Three things keep that from sticking:
    *
-   * - The two reads are sent once more, at once. A failure that was passing
-   *   costs nothing more than that.
+   * - The two reads are sent once more, after BULK_HYDRATION_RETRY_DELAY_MS:
+   *   not in the same tick, where only a failure already over would be
+   *   recovered. Nothing else may be about to ask again: an idle window with
+   *   its views mounted re-asks only when the list changes, and an unchanged
+   *   list is not reassigned.
    * - If they fail again, the projects are recorded in hydrationFailed, so
    *   whoever next asks for them to be fetched reads them again: a view
    *   mounting, a list change, the project-delete check.
@@ -1041,9 +1069,9 @@ class ProjectsDataStore {
     let ticket = sentAt;
     // Covered projects missing from either reply; see below.
     let unlisted: string[] = [];
+    let replies: Awaited<ReturnType<typeof read>>;
     let outcome: 'read' | 'failed' = 'read';
     try {
-      let replies: Awaited<ReturnType<typeof read>>;
       try {
         replies = await read();
       } catch (e) {
@@ -1052,6 +1080,9 @@ class ProjectsDataStore {
           `[projectsData] Reading ${covered.size} projects in bulk failed, trying once more:`,
           e
         );
+        await delay(BULK_HYDRATION_RETRY_DELAY_MS);
+        // A newer load that started meanwhile reads every project itself.
+        if (generation !== this.loadGeneration) return;
         // Sent later than the first read, so ordered later.
         ticket = this.readOrder.issue();
         replies = await read();
@@ -1067,19 +1098,28 @@ class ProjectsDataStore {
             (branchesResult.data[projectId] === undefined ||
               reposResult.data[projectId] === undefined)
         );
-      this.applyBranchesByProject(branchesResult.data, covered, generation, ticket);
-      this.applyReposByProject(reposResult.data, covered, generation, ticket);
+      // A project missing from one reply is left out of both applies, so the
+      // store never holds one of its lists without the other. Holding a
+      // project's repos is what says its fetch succeeded (the project-delete
+      // check in projectActions reads it so), and such a project is recorded
+      // as not fetched until its own read lands.
+      const unlistedIds = new Set(unlisted);
+      const listed: ReadonlySet<string> = new Set(
+        [...covered].filter((projectId) => !unlistedIds.has(projectId))
+      );
+      this.applyBranchesByProject(branchesResult.data, listed, generation, ticket);
+      this.applyReposByProject(reposResult.data, listed, generation, ticket);
 
       if (branchesResult.revalidating) {
         branchesResult.revalidating
-          .then((fresh) => this.applyBranchesByProject(fresh, covered, generation, ticket))
+          .then((fresh) => this.applyBranchesByProject(fresh, listed, generation, ticket))
           .catch((e) => {
             console.error('[projectsData] Failed to revalidate the branches of all projects:', e);
           });
       }
       if (reposResult.revalidating) {
         reposResult.revalidating
-          .then((fresh) => this.applyReposByProject(fresh, covered, generation, ticket))
+          .then((fresh) => this.applyReposByProject(fresh, listed, generation, ticket))
           .catch((e) => {
             console.error('[projectsData] Failed to revalidate the repos of all projects:', e);
           });
@@ -1104,9 +1144,13 @@ class ProjectsDataStore {
     // read failed there, or the reply is a cached copy that does not carry
     // it (web: from before the project existed, or with the project taken
     // out when its list changed). Either way that reply says nothing about
-    // it: read the project on its own, which settles it as well, and reports
-    // its error if it has one. Still under this hydration, so it stays in
-    // flight until then.
+    // it. Enough of them are first settled together from the replies read
+    // past the cache, when those are on their way. Any other is read on its
+    // own, which settles it as well, and reports its error if it has one.
+    // Still under this hydration, so each stays in flight until then.
+    if (unlisted.length >= BULK_HYDRATION_MIN_PROJECTS) {
+      unlisted = await this.settleFromRevalidation(unlisted, replies, generation, ticket);
+    }
     await Promise.all(
       unlisted.map((projectId) =>
         this.hydrateProjectInternal(projectId, generation).catch((e) => {
@@ -1114,6 +1158,67 @@ class ProjectsDataStore {
         })
       )
     );
+  }
+
+  /**
+   * Settle together the projects that the cached replies of a bulk hydration
+   * did not list, from the replies read past the cache that are already in
+   * flight. Resolves to the projects it could not settle, which are then
+   * read on their own.
+   *
+   * On the web the cached all-projects entry loses a project every time one
+   * of its lists changes (see ALL_PROJECTS_COMMAND in cache.ts), and gets
+   * them back only from an all-projects read of the network. A tab open for
+   * a while can so leave many out, and the next load would read each on its
+   * own: two reads and three whole-map assignments per project, the pattern
+   * bulk hydration exists to remove, while the revalidation that lists them
+   * all is already out. Here they cost no read, and one assignment to each
+   * map. They do wait for that reply, where a project's own cached lists
+   * might have painted sooner.
+   *
+   * A reply that came without a revalidation is used as it is: it may hold
+   * the list that the other, cached, reply lacked. Only a project that both
+   * lists are now in hand for is settled, so its lists stay paired, and
+   * under the bulk read's place in the read order, as the revalidated
+   * replies are applied for every other project. Nothing is settled when
+   * neither reply is revalidating (the desktop app, or cached copies still
+   * fresh), or when a revalidation fails: the cache then answers with the
+   * copy it had, which lacks the projects still.
+   */
+  private async settleFromRevalidation(
+    unlisted: string[],
+    [branchesResult, reposResult]: [
+      SwrResult<Record<string, Branch[]>>,
+      SwrResult<Record<string, ProjectRepo[]>>,
+    ],
+    generation: number,
+    ticket: number
+  ): Promise<string[]> {
+    if (!branchesResult.revalidating && !reposResult.revalidating) return unlisted;
+    let branches: Record<string, Branch[]>;
+    let repos: Record<string, ProjectRepo[]>;
+    try {
+      [branches, repos] = await Promise.all([
+        branchesResult.revalidating ?? branchesResult.data,
+        reposResult.revalidating ?? reposResult.data,
+      ]);
+    } catch {
+      // Reported where the reply would have been applied
+      // (hydrateInBulkInternal).
+      return unlisted;
+    }
+    // A newer load reads every project itself: nothing is left to read here.
+    if (generation !== this.loadGeneration) return [];
+    const settled = new Set(
+      unlisted.filter(
+        (projectId) => branches[projectId] !== undefined && repos[projectId] !== undefined
+      )
+    );
+    this.applyBranchesByProject(branches, settled, generation, ticket);
+    this.applyReposByProject(repos, settled, generation, ticket);
+    this.markProjectsHydrated([...settled], generation);
+    this.recordHydrationOutcome(settled, generation, 'read');
+    return unlisted.filter((projectId) => !settled.has(projectId));
   }
 
   /** Hydrate a project unless the same hydration is already in flight, so the

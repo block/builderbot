@@ -47,7 +47,9 @@ function isPersisted(command: string): boolean {
  *   as one it says nothing about, and reads it on its own (projectsData's
  *   bulk hydration), from the per-project entry the post-change refetch
  *   wrote. So one change costs the next cold start one project's read, not
- *   every project's cached paint.
+ *   every project's cached paint. When the reply lacks several, the reader
+ *   takes them together from the revalidated reply instead, if one is in
+ *   flight.
  * - The whole command: the all-projects entry is dropped.
  *
  * Taking one project out is sound because the value is nothing but the
@@ -72,11 +74,18 @@ const PROJECT_ARG = 'projectId';
  * project out, anything wider drops the entry (see ALL_PROJECTS_COMMAND).
  *
  * Called first, and never awaited before the caller's own stamps. Both paths
- * stamp the all-projects key and start their IndexedDB transaction
- * synchronously, in the same step as the caller's: an all-projects read in
- * flight is blocked from caching what it read before the change (see
- * `invalidationSequence`), and a read started after this call is queued
- * behind the transaction, so it never sees the project's old list.
+ * stamp the all-projects key synchronously, in the same step as the
+ * caller's, so an all-projects read in flight is blocked from caching what
+ * it read before the change (see `invalidationSequence`).
+ *
+ * The IndexedDB transaction is not started in that step. Both paths request
+ * it synchronously, but idb-keyval opens it only once its database promise
+ * has resolved: a microtask later, or when the database has finished opening
+ * on first use. What holds is the order. Every cache read and write waits on
+ * that same promise, and its continuations run in the order they were
+ * added, so the transaction of a read started after this call is opened
+ * after this one, and IndexedDB runs it after this one has committed. That
+ * read never sees the project's old list.
  */
 function invalidateAllProjectsEntry(
   command: string,

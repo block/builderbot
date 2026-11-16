@@ -221,6 +221,22 @@ export function sortKeyLabel(key: ProjectSortKey, catalog: Pick<TagCatalog, 'gro
 }
 
 /**
+ * What a direction means for a key of `kind`, as its menu words it: newest or
+ * oldest first, most or least recent first, and for a group its tag order or
+ * the reverse.
+ */
+export function sortDirectionLabel(kind: ProjectSortKind, direction: SortDirection): string {
+  if (kind === 'created') return direction === 'desc' ? 'Newest first' : 'Oldest first';
+  if (kind === 'updated') return direction === 'desc' ? 'Most recent first' : 'Least recent first';
+  return direction === 'asc' ? 'Tag order' : 'Reverse tag order';
+}
+
+/** Both directions for a key of `kind`, the one it starts in first. */
+export function sortDirections(kind: ProjectSortKind): [SortDirection, SortDirection] {
+  return defaultSortDirection(kind) === 'asc' ? ['asc', 'desc'] : ['desc', 'asc'];
+}
+
+/**
  * The sort in a few words, for the control that opens its menu: its keys'
  * names in order ("Priority, Last updated"), or "Newest" with none.
  */

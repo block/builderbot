@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { focusIfDropped, neighbourAfterRemove } from './focusAfterRemove';
+import { focusIfDropped, focusThroughMove, neighbourAfterRemove } from './focusAfterRemove';
 
 let layerHost: HTMLElement;
 let cards: Map<string, HTMLButtonElement>;
@@ -103,5 +103,111 @@ describe('focusIfDropped', () => {
 
     focusIfDropped(() => cards.get('c')!);
     expect(document.activeElement).toBe(cards.get('a'));
+  });
+});
+
+describe('focusThroughMove', () => {
+  /** Re-insert a card elsewhere, as a keyed list does when its order changes. */
+  function moveToEnd(id: string) {
+    layerHost.appendChild(cards.get(id)!);
+  }
+
+  /** The render and the menu's focus return have both happened. */
+  async function settled() {
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  async function nextFrame() {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  }
+
+  const shown = (id: string) => (cards.get(id)?.isConnected ? cards.get(id) : null);
+
+  it('puts focus back on a row that lost it by moving', async () => {
+    const focus = focusThroughMove(shown);
+    focus.moving(['a', 'b', 'c'], 'a');
+    // The menu hands focus back to the row, then the list re-sorts.
+    cards.get('a')!.focus();
+    moveToEnd('a');
+    expect(document.activeElement).toBe(document.body);
+
+    focus.menuClosed();
+    await settled();
+    expect(document.activeElement).toBe(cards.get('a'));
+    await nextFrame();
+    expect(document.activeElement).toBe(cards.get('a'));
+  });
+
+  it('waits for the menu to close', async () => {
+    const focus = focusThroughMove(shown);
+    focus.moving(['a', 'b', 'c'], 'a');
+    await settled();
+    await nextFrame();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('goes to the row that took its place when the move took it off the list', async () => {
+    const focus = focusThroughMove(shown);
+    focus.moving(['a', 'b', 'c'], 'b');
+    remove('b');
+
+    focus.menuClosed();
+    await settled();
+    expect(document.activeElement).toBe(cards.get('c'));
+    await nextFrame();
+    expect(document.activeElement).toBe(cards.get('c'));
+  });
+
+  it('leaves focus the menu gave back to something else', async () => {
+    const focus = focusThroughMove(shown);
+    focus.moving(['a', 'b', 'c'], 'a');
+    moveToEnd('a');
+    cards.get('c')!.focus();
+
+    focus.menuClosed();
+    await settled();
+    await nextFrame();
+    expect(document.activeElement).toBe(cards.get('c'));
+  });
+
+  it('catches focus that drops a frame after the menu closed', async () => {
+    const focus = focusThroughMove(shown);
+    focus.moving(['a', 'b', 'c'], 'a');
+    cards.get('a')!.focus();
+
+    focus.menuClosed();
+    await settled();
+    expect(document.activeElement).toBe(cards.get('a'));
+    moveToEnd('a');
+    expect(document.activeElement).toBe(document.body);
+
+    await nextFrame();
+    expect(document.activeElement).toBe(cards.get('a'));
+  });
+
+  it('does nothing when the menu closes without a pick', async () => {
+    const focus = focusThroughMove(shown);
+
+    focus.menuClosed();
+    await settled();
+    await nextFrame();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('acts once per pick', async () => {
+    const focus = focusThroughMove(shown);
+    focus.moving(['a', 'b', 'c'], 'a');
+    focus.menuClosed();
+    await settled();
+    await nextFrame();
+    expect(document.activeElement).toBe(cards.get('a'));
+
+    // The next menu closes with nothing picked: focus is not pulled back.
+    (document.activeElement as HTMLElement).blur();
+    focus.menuClosed();
+    await settled();
+    await nextFrame();
+    expect(document.activeElement).toBe(document.body);
   });
 });

@@ -12,6 +12,8 @@ import {
   normalizeProjectSort,
   resolveProjectSort,
   sortKeyId,
+  sortDirectionLabel,
+  sortDirections,
   sortKeyLabel,
   sortProjects,
   sortSummary,
@@ -674,6 +676,28 @@ describe('sortKeyLabel', () => {
 
   it('has no name for a group the catalog doesn’t have', () => {
     expect(sortKeyLabel(byGroup('gone', 'asc'), catalog)).toBe('');
+  });
+});
+
+describe('sortDirectionLabel', () => {
+  it('words each direction for the kind of key', () => {
+    expect(sortDirectionLabel('created', 'desc')).toBe('Newest first');
+    expect(sortDirectionLabel('created', 'asc')).toBe('Oldest first');
+    expect(sortDirectionLabel('updated', 'desc')).toBe('Most recent first');
+    expect(sortDirectionLabel('updated', 'asc')).toBe('Least recent first');
+    expect(sortDirectionLabel('group', 'asc')).toBe('Tag order');
+    expect(sortDirectionLabel('group', 'desc')).toBe('Reverse tag order');
+  });
+});
+
+describe('sortDirections', () => {
+  it('leads with the direction a key of that kind starts in', () => {
+    expect(sortDirections('created')).toEqual(['desc', 'asc']);
+    expect(sortDirections('updated')).toEqual(['desc', 'asc']);
+    expect(sortDirections('group')).toEqual(['asc', 'desc']);
+    for (const kind of ['created', 'updated', 'group'] as const) {
+      expect(sortDirections(kind)[0]).toBe(defaultSortDirection(kind));
+    }
   });
 });
 

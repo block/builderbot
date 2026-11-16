@@ -6,10 +6,12 @@
 
   The group is fixed by the route, so there is no "Board by" picker; the
   "Hidden columns (n)" control stays, and the collapsed and hidden columns are
-  the same per-group preferences the home board keeps. The search field is
-  the shared project query (the sidebar's and the home grid's), and the
-  filter chips are the home page's, so the board shows the same cards the
-  grid would: the columns code already takes the filtered list.
+  the same per-group preferences the home board keeps. The sort menu is the
+  window's (ProjectSortMenu), with this group's key marked as doing nothing
+  here. The search field is the shared project query (the sidebar's and the
+  home grid's), and the filter chips are the home page's, so the board shows
+  the same cards the grid would: the columns code already takes the filtered
+  list.
 
   Once the group is deleted, or its board unpinned, the view leaves the board
   route (navigation.leaveBoard): home, or home under the settings view the
@@ -35,6 +37,7 @@
   } from '../layout/navigation.svelte';
   import NewProjectModal from '../projects/NewProjectModal.svelte';
   import ProjectFilterChips from '../projects/ProjectFilterChips.svelte';
+  import ProjectSortMenu from '../projects/ProjectSortMenu.svelte';
   import { repoSeedFromNewProjectEvent } from '../projects/newProjectEvent';
   import { projectFiltersStore } from '../projects/projectFilters.svelte';
   import { projectOrderStore } from '../projects/projectOrder.svelte';
@@ -150,6 +153,7 @@
             clearable
             onfocus={() => projectSearchIndex.ensureLoaded()}
           />
+          <ProjectSortMenu boardGroupId={group.id} />
           {#if !viewport.isMobile}
             <BoardToolbar {group} groupPicker={false} />
           {/if}

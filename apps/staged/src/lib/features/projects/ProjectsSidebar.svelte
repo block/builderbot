@@ -48,6 +48,7 @@
   import SidebarSectionHead from './SidebarSectionHead.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
   import { projectOrderStore } from './projectOrder.svelte';
+  import { projectSortPrefs } from './projectSortPrefs.svelte';
   import {
     matchingRepoKeys,
     resultsLabel,
@@ -62,6 +63,7 @@
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
   import { focusThroughMove, neighbourAfterRemove } from './focusAfterRemove';
+  import { keepFocusThroughReorder } from './focusThroughReorder.svelte';
   import { createScrollIfActive } from './activeRowScroll';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
@@ -147,8 +149,8 @@
   // Matched on branches, PRs, repo labels and titles too (projectSearch),
   // prepared once per data change and only while searching, like the grid;
   // rows found that way say why on their meta line. Ranked like the grid,
-  // too, and like it re-ranked only when the query or the chips are edited
-  // (searchOrderHold).
+  // too, and like it re-ranked only when the query, the chips or the sort
+  // are edited (searchOrderHold).
   const searchSnapshot = projectSearchSnapshots();
   let searchData = $derived(searching ? searchSnapshot() : null);
   const holdOrder = searchOrderHold();
@@ -156,6 +158,7 @@
     holdOrder(
       searchQuery.current,
       projectFiltersStore.activeFilters,
+      projectSortPrefs.sort,
       sidebarProjectMatches(sidebarProjects, searchQuery.current, searchData)
     )
   );
@@ -246,6 +249,23 @@
   // that tag's group, or takes it off the list when a tag filter rules it
   // out. Focus stays with the row, or goes to the one that took its place.
   const movedRowFocus = focusThroughMove(shownRow);
+
+  /** The project whose row holds focus, if one of the list's does. */
+  function focusedRowId(): string | null {
+    const row = document.activeElement?.closest<HTMLElement>('.project-row');
+    return row && sidebarBodyEl?.contains(row) ? (row.dataset.projectId ?? null) : null;
+  }
+
+  // A row reached from the keyboard keeps focus when the list re-sorts
+  // under it: its project's activity moved, or its tags changed elsewhere.
+  // The pointer needs nothing here, since the order holds through a press
+  // (projectActivity).
+  keepFocusThroughReorder({
+    shownIds: shownRowIds,
+    rendered: () => rowOrder.rows,
+    focusedId: focusedRowId,
+    elementFor: shownRow,
+  });
 
   function openAllProjects() {
     goHome();

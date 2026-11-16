@@ -204,7 +204,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-describe('ProjectSortMenu before the tags load', () => {
+describe('ProjectSortMenu before the tags are known', () => {
   it('waits, since an edit would take every group key for deleted', async () => {
     // First in the file: the store has no way back to unloaded.
     expect(tagsStore.loaded).toBe(false);
@@ -215,9 +215,21 @@ describe('ProjectSortMenu before the tags load', () => {
     await settle();
     expect(trigger().disabled).toBe(true);
 
+    // A first read that fails settles the tags as loaded, with the catalog
+    // still empty: no group is known yet, so there is still nothing to edit
+    // against.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    commandsMock.getTagState.mockRejectedValueOnce(new Error('backend down'));
+    await tagsStore.load();
+    await settle();
+    expect(tagsStore.loaded).toBe(true);
+    expect(tagsStore.groups).toEqual([]);
+    expect(trigger().disabled).toBe(true);
+
     await loadTags(tagState());
     expect(trigger().disabled).toBe(false);
     expect(trigger().textContent).toContain('Priority');
+    expect(saved()).toBeUndefined();
   });
 });
 

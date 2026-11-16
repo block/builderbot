@@ -55,6 +55,36 @@ export function focusIfDropped(resolve: () => HTMLElement | null): void {
 }
 
 /**
+ * Where focus belongs for a project whose row may move or leave its list:
+ * its row while the list still shows it, else the row that took its place
+ * (neighbourAfterRemove). `shownIds` is the list in screen order as it stood
+ * before the change.
+ */
+export function rowOrNeighbour(
+  shownIds: readonly string[],
+  projectId: string,
+  elementFor: (projectId: string) => HTMLElement | null | undefined
+): () => HTMLElement | null {
+  const neighbour = neighbourAfterRemove(shownIds, projectId, elementFor);
+  return () => {
+    const row = elementFor(projectId);
+    return row?.isConnected ? row : neighbour(null);
+  };
+}
+
+/**
+ * Give dropped focus back to what `resolve` names once the list has
+ * re-rendered: after the render in flight, then once more a frame later,
+ * since WebKit can drop the focus a moved node was just given.
+ */
+export function refocusAfterRender(resolve: () => HTMLElement | null): void {
+  void tick().then(() => {
+    focusIfDropped(resolve);
+    requestAnimationFrame(() => focusIfDropped(resolve));
+  });
+}
+
+/**
  * Keeps focus with a card or row through a change that moves it in its list.
  *
  * A tag picked from a project's context menu can move its card or row: the
@@ -71,6 +101,10 @@ export function focusIfDropped(resolve: () => HTMLElement | null): void {
  * project's row, or to the row that took its place when it left the list.
  * Focus that went anywhere else is left alone (focusIfDropped). A menu
  * closed without a pick does nothing.
+ *
+ * This is for a move picked from a menu, where focus is in the menu while
+ * the list re-renders. A row that holds focus when its list re-sorts for
+ * any other reason is keepFocusThroughReorder's.
  */
 export interface FocusThroughMove {
   /** `projectId` is about to move; `shownIds` is the list in screen order as it stands. */
@@ -86,23 +120,14 @@ export function focusThroughMove(
   let pending: (() => HTMLElement | null) | null = null;
   return {
     moving(shownIds, projectId) {
-      const neighbour = neighbourAfterRemove(shownIds, projectId, elementFor);
-      pending = () => {
-        const moved = elementFor(projectId);
-        return moved?.isConnected ? moved : neighbour(null);
-      };
+      pending = rowOrNeighbour(shownIds, projectId, elementFor);
     },
     menuClosed() {
       const resolve = pending;
       pending = null;
-      if (!resolve) return;
       // After the render that moves the row, and after the menu's own focus
-      // return, which follows this call. Then once more a frame later:
-      // WebKit can drop the focus a moved node was just given.
-      void tick().then(() => {
-        focusIfDropped(resolve);
-        requestAnimationFrame(() => focusIfDropped(resolve));
-      });
+      // return, which follows this call.
+      if (resolve) refocusAfterRender(resolve);
     },
   };
 }

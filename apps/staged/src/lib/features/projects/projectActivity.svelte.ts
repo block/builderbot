@@ -22,14 +22,21 @@
  *
  * A failed read keeps the last map and is retried, backing off, for as long
  * as the sort uses it. Nothing else would ask again: unlike a search, a
- * sort has no keystrokes.
+ * sort has no keystrokes. The retry is the next read whatever else asks for
+ * one meanwhile, so a write during the failing read does not skip the wait.
+ * A sign that the backend is reachable again (a listener going live, a
+ * socket reconnect, `cache-stale`) ends the wait and starts the backoff
+ * over.
  *
  * Two things keep rows still. A read that changes no timestamp keeps the
  * same map, so nothing re-sorts. And nothing moves under the pointer: a
  * fresh map is held while a pointer is down or a card is being dragged, and
  * applied once it is released. WebKit drops the click on a row that moves between
  * press and release (searchRowOrder holds its re-key for the same reason),
- * and a card reordered mid-drag loses its drag.
+ * and a card reordered mid-drag loses its drag. Every press and drag this
+ * sees start is also seen to end, including a drag refused at its start and
+ * a press whose release a context menu takes, so the hold never outlasts
+ * them.
  */
 
 import { getProjectActivity } from '../../commands';
@@ -49,8 +56,19 @@ export const MAX_RETRY_DELAY_MS = 60_000;
 /** The change-feed events after which a project's last activity may have moved. */
 const STALE_EVENTS = ['notes-changed', 'review-changed', 'branch-changed', 'project-changed'];
 
-/** What ends a press: the click it makes, or the release or cancel when there is none. */
-const PRESS_END_EVENTS = ['pointerup', 'pointercancel', 'click'] as const;
+/**
+ * What ends a press: the click it makes, or the release or cancel when there
+ * is none. And a context menu, which can take the release: a native menu
+ * dismissed with Escape sends no pointerup at all. Nothing is clicked by a
+ * press that opened a menu, so there is no click to keep a row still for.
+ */
+const PRESS_END_EVENTS = ['pointerup', 'pointercancel', 'click', 'contextmenu'] as const;
+/**
+ * The press ends that also mean no drag is in flight. A native drag takes
+ * the pointer when it starts (`pointercancel`) and ends with neither of
+ * these, so one arriving after a `dragstart` means that drag never began.
+ */
+const NO_DRAG_EVENTS: ReadonlySet<string> = new Set(['pointerup', 'click']);
 /** What ends a card's drag: the drop, or the drag's own end when it lands nowhere. */
 const DRAG_END_EVENTS = ['dragend', 'drop'] as const;
 
@@ -125,14 +143,15 @@ export class ProjectActivityStore {
   private listen(): void {
     if (this.unlisteners.length > 0) return;
     const markStale = () => this.markStale();
+    const recovered = () => this.recovered();
     for (const event of STALE_EVENTS) {
       // onEstablished: events sent before the listener went live (or while
       // the web socket was down) are gone, and the read may predate them.
-      this.unlisteners.push(listenToEvent(event, markStale, { onEstablished: markStale }));
+      this.unlisteners.push(listenToEvent(event, markStale, { onEstablished: recovered }));
     }
     // A page freeze or socket gap loses change-feed events for good; the
     // recovery for that is this event, which every feed-fed store follows.
-    this.on('cache-stale', markStale);
+    this.on('cache-stale', recovered);
 
     // Window-wide and capturing, so a press or drag is seen wherever it
     // starts and ends, whatever its handlers stop.
@@ -150,7 +169,17 @@ export class ProjectActivityStore {
       this.pressed = false;
       this.release();
     };
-    for (const type of PRESS_END_EVENTS) this.on(type, endPress, true);
+    // A drag refused at its start has no dragend or drop to end it. A column
+    // handle refuses the native drag (pointerDrag), but only after the
+    // capturing listener below has seen its dragstart. The press it came
+    // from then ends as any other does, and that ends the drag here too.
+    const endPressAndDrag = () => {
+      this.dragging = false;
+      endPress();
+    };
+    for (const type of PRESS_END_EVENTS) {
+      this.on(type, NO_DRAG_EVENTS.has(type) ? endPressAndDrag : endPress, true);
+    }
     // A press whose end the page never sees (⌘-Tab away mid-press) ends when
     // the window loses focus. Not capturing: blur doesn't bubble, so a plain
     // listener hears only the window's own, not every element's.
@@ -206,6 +235,22 @@ export class ProjectActivityStore {
     this.scheduleRefetch(REFETCH_DELAY_MS);
   }
 
+  /**
+   * Events may have been lost, and the backend can be reached again: a
+   * listener went live, the socket reconnected or the page resumed. Stale as
+   * after any write. A retry that was backing off also stops waiting, since
+   * the gap that just ended is the likeliest cause of its failures: without
+   * this a list could stay out of date for up to MAX_RETRY_DELAY_MS after
+   * the connection came back.
+   */
+  private recovered(): void {
+    if (this.retryDelay !== null) {
+      this.retryDelay = null;
+      this.clearRefetchTimer();
+    }
+    this.markStale();
+  }
+
   /** Refetch after `delay`, unless a refetch is already waiting or nobody sorts by the map. */
   private scheduleRefetch(delay: number): void {
     if (this.refetchTimer || !this.wanted()) return;
@@ -232,24 +277,30 @@ export class ProjectActivityStore {
     // Cleared at the start, not the end: a write that lands during the read
     // marks it stale again, which is right, since the read may predate it.
     this.stale = false;
+    let failed = false;
     this.inFlight = getProjectActivity()
       .then((rows) => {
         this.retryDelay = null;
         this.landed(rows);
       })
       .catch((e) => {
+        failed = true;
         this.stale = true;
         console.error('[projectActivity] Failed to load project activity:', e);
         const delay = this.retryDelay ?? RETRY_DELAY_MS;
         this.retryDelay = Math.min(delay * 2, MAX_RETRY_DELAY_MS);
+        // In place of a refetch a write scheduled during the read, which
+        // would otherwise be the retry, without the wait.
+        this.clearRefetchTimer();
         this.scheduleRefetch(delay);
       })
       .finally(() => {
         this.inFlight = null;
-        if (this.queued) {
-          this.queued = false;
-          this.load();
-        }
+        const queued = this.queued;
+        this.queued = false;
+        // After a failure the retry is the next read, and it covers whatever
+        // was queued: running that now would skip the wait.
+        if (queued && !failed) this.load();
       });
   }
 }

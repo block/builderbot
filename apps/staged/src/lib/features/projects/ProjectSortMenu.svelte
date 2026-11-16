@@ -26,8 +26,11 @@
 
   Edits resolve against the catalog with its pending reorders, as the sorted
   list does, and prune keys for deleted groups on the way (projectSort). The
-  trigger waits for the tags to load: before that no group is known, and an
-  edit would drop every group key as deleted.
+  trigger waits for a tag snapshot from the backend: before that no group is
+  known, and an edit would drop every group key as deleted. A first read
+  that fails settles the tags as loaded with the catalog still empty, so
+  `tagsStore.loaded` is not the test; the trigger stays off until a read
+  lands.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -158,7 +161,7 @@
       class="sidebar-sort-trigger {sorting ? 'sorting' : ''}"
       title={sorting ? `Sort: ${summary}` : 'Sort projects'}
       aria-label={`Sort projects: ${summary}`}
-      disabled={!tagsStore.loaded}
+      disabled={!tagsStore.hasSnapshot}
     >
       <ArrowUpDown size={12} />
       {#if sorting}<span class="sort-dot"></span>{/if}
@@ -168,7 +171,7 @@
       class="board-toolbar-trigger project-sort-trigger touch-hit"
       title="Sort projects"
       aria-label={`Sort projects: ${summary}`}
-      disabled={!tagsStore.loaded}
+      disabled={!tagsStore.hasSnapshot}
     >
       <ArrowUpDown size={13} class="board-toolbar-chevron" />
       <span class="trigger-label">Sort</span>

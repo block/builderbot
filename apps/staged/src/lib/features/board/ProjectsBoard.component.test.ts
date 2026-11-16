@@ -525,6 +525,32 @@ async function moveWithMenu(root: ParentNode, projectId: string, tagName: string
   await settle();
 }
 
+/** Pick `tagName` from another group's submenu in a card's menu, opened from the keyboard. */
+async function pickGroupTag(root: ParentNode, projectId: string, groupId: string, tagName: string) {
+  const el = card(root, projectId);
+  el.focus();
+  el.dispatchEvent(
+    new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })
+  );
+  await settle();
+  const menu = document.querySelector<HTMLElement>('[data-slot="context-menu-content"]')!;
+  const trigger = [...menu.querySelectorAll<HTMLElement>('[data-tag-group-trigger]')].find(
+    (t) => t.dataset.tagGroupTrigger === groupId
+  )!;
+  trigger.focus();
+  trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  await settle();
+  const subs = document.querySelectorAll<HTMLElement>('[data-slot="context-menu-sub-content"]');
+  menuItem(subs[subs.length - 1], tagName).click();
+  await settle();
+}
+
+/** A frame has passed: the focus checks that wait for one have run. */
+async function nextFrame() {
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  await settle();
+}
+
 async function openColumnMenu(root: ParentNode, key: string): Promise<HTMLElement> {
   column(root, key)
     .querySelector<HTMLElement>('.board-column-menu-trigger')!
@@ -2867,6 +2893,30 @@ describe('ProjectsBoard under the tag filters', () => {
     expect(cardsIn(root, 'done')).toEqual([]);
     expect(document.activeElement).toBe(card(root, 'p2'));
   });
+
+  it('focuses the neighbour of a card that another group’s tag takes off the board', async () => {
+    const root = await mountFiltered(
+      tagState([
+        { projectId: 'p1', tagId: 'doing' },
+        { projectId: 'p1', tagId: 'p0' },
+        { projectId: 'p2', tagId: 'doing' },
+        { projectId: 'p2', tagId: 'p0' },
+        { projectId: 'p3', tagId: 'idea' },
+      ])
+    );
+    projectFiltersStore.toggleFilter({ tagId: 'p0' });
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p2']);
+
+    // Not a column change, so "Move to" has no say: the card leaves because
+    // the P0 chip no longer keeps it.
+    await pickGroupTag(root, 'p1', 'priority', 'P1');
+    await nextFrame();
+
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p1', 'priority', 'p1');
+    expect(cardsIn(root, 'doing')).toEqual(['p2']);
+    expect(document.activeElement).toBe(card(root, 'p2'));
+  });
 });
 
 describe('ProjectsBoard under the window sort', () => {
@@ -2966,5 +3016,79 @@ describe('ProjectsBoard under the window sort', () => {
     await settle();
     expect(cardsIn(root, 'doing')).toEqual(['p2', 'p1']);
     expect(cardsIn(root, 'idea')).toEqual(['p3']);
+  });
+
+  /** Every project Doing; p2 is P1, p3 is P0 and p1 has no priority. */
+  const ALL_DOING = [
+    { projectId: 'p1', tagId: 'doing' },
+    { projectId: 'p2', tagId: 'doing' },
+    { projectId: 'p2', tagId: 'p1' },
+    { projectId: 'p3', tagId: 'doing' },
+    { projectId: 'p3', tagId: 'p0' },
+  ];
+
+  it('keeps focus on a card that a tag picked from its menu moves within its column', async () => {
+    const root = await mountSorted(tagState(ALL_DOING));
+    setProjectSort(BY_PRIORITY);
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p3', 'p2', 'p1']);
+
+    // Priority is not the board's group: the card stays in Doing and the
+    // sort moves it to the top.
+    const moved = card(root, 'p1');
+    await pickGroupTag(root, 'p1', 'priority', 'P0');
+    await nextFrame();
+
+    expect(commandsMock.setProjectGroupTag).toHaveBeenCalledWith('p1', 'priority', 'p0');
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p3', 'p2']);
+    expect(card(root, 'p1')).toBe(moved);
+    expect(document.activeElement).toBe(moved);
+  });
+
+  it('keeps focus on a card that a re-sort nobody picked moves', async () => {
+    const root = await mountSorted(tagState(ALL_DOING));
+    setProjectSort(BY_PRIORITY);
+    await settle();
+    expect(cardsIn(root, 'doing')).toEqual(['p3', 'p2', 'p1']);
+    const focused = card(root, 'p1');
+    focused.focus();
+
+    // p1 is made P0 somewhere else: another window, or an agent.
+    backend.state = withGroupTag(backend.state, 'p1', 'priority', 'p0');
+    await tagsStore.load({ force: true });
+    await settle();
+
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p3', 'p2']);
+    expect(card(root, 'p1')).toBe(focused);
+    expect(document.activeElement).toBe(focused);
+  });
+
+  it('follows a focused card to the column a change elsewhere puts it in', async () => {
+    const root = await mountSorted(tagState(ALL_DOING));
+    card(root, 'p2').focus();
+
+    backend.state = withGroupTag(backend.state, 'p2', 'status', 'done');
+    await tagsStore.load({ force: true });
+    await settle();
+
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p3']);
+    expect(cardsIn(root, 'done')).toEqual(['p2']);
+    expect(document.activeElement).toBe(card(root, 'p2'));
+  });
+
+  it('leaves focus alone when the re-sort moves cards and none of them held it', async () => {
+    const root = await mountSorted(tagState(ALL_DOING));
+    setProjectSort(BY_PRIORITY);
+    await settle();
+    const menuTrigger = columnMenuTrigger(root, 'doing');
+    menuTrigger.focus();
+
+    backend.state = withGroupTag(backend.state, 'p1', 'priority', 'p0');
+    await tagsStore.load({ force: true });
+    await settle();
+    await nextFrame();
+
+    expect(cardsIn(root, 'doing')).toEqual(['p1', 'p3', 'p2']);
+    expect(document.activeElement).toBe(menuTrigger);
   });
 });

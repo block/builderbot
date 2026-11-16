@@ -32,6 +32,7 @@
   import ProjectCardLabels from './ProjectCardLabels.svelte';
   import { projectActions } from './projectActions.svelte';
   import { focusThroughMove, neighbourAfterRemove } from './focusAfterRemove';
+  import { keepFocusThroughReorder } from './focusThroughReorder.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
   import SearchField from '../../shared/SearchField.svelte';
@@ -51,6 +52,7 @@
   } from './projectsListViewState.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
   import { projectOrderStore } from './projectOrder.svelte';
+  import { projectSortPrefs } from './projectSortPrefs.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
   import ProjectsViewToggle from './ProjectsViewToggle.svelte';
   import ProjectSortMenu from './ProjectSortMenu.svelte';
@@ -162,14 +164,16 @@
   let searchData = $derived(searchActive ? searchSnapshot() : null);
   // The cards left on screen, best match first, and why each matched when
   // its name and repos don't say, from one pass. See visibleProjects for the
-  // composition. Ranked when the query or the chips are edited and only then:
-  // a data change under a held query, a visit's read-state change included,
-  // hides or appends cards but never moves one (searchOrderHold).
+  // composition. Ranked when the query, the chips or the sort are edited and
+  // only then: a data change under a held query, a visit's read-state change
+  // or a re-sort as activity moves included, hides or appends cards but
+  // never moves one (searchOrderHold).
   const holdOrder = searchOrderHold();
   let search = $derived(
     holdOrder(
       gridQuery.current,
       projectFiltersStore.activeFilters,
+      projectSortPrefs.sort,
       visibleProjects(
         projects,
         projectFiltersStore.filteredProjects,
@@ -381,6 +385,28 @@
   // that tag's group, or takes it off the grid when a tag chip filters it
   // out. Focus stays with the card, or goes to the one that took its place.
   const movedCardFocus = focusThroughMove(shownCard);
+
+  /** The project whose card holds focus, if one of the grid's does. */
+  function focusedCardId(): string | null {
+    // Most renders find focus in the search field or nowhere: no card to look up.
+    const focused = document.activeElement?.closest('.project-card-wrapper');
+    if (!focused) return null;
+    for (const [projectId, wrapper] of projectCardElements) {
+      if (wrapper === focused) return projectId;
+    }
+    return null;
+  }
+
+  // A card reached from the keyboard keeps focus when the grid re-sorts
+  // under it: its project's activity moved, or its tags changed elsewhere.
+  // The pointer needs nothing here, since the order holds through a press
+  // (projectActivity).
+  keepFocusThroughReorder({
+    shownIds: () => filteredProjects.map((p) => p.id),
+    rendered: () => cardOrder.rows,
+    focusedId: focusedCardId,
+    elementFor: shownCard,
+  });
 
   function openProject(projectId: string) {
     if (isProjectDeleting(projectId)) return;

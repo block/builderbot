@@ -41,6 +41,7 @@
   import { repoSeedFromNewProjectEvent } from '../projects/newProjectEvent';
   import { projectFiltersStore } from '../projects/projectFilters.svelte';
   import { projectOrderStore } from '../projects/projectOrder.svelte';
+  import { projectSortPrefs } from '../projects/projectSortPrefs.svelte';
   import { searchOrderHold, visibleProjects } from '../projects/projectSearch';
   import { projectSearchSnapshots } from '../projects/projectSearchContext';
   import { projectSearchIndex } from '../projects/projectSearchIndex.svelte';
@@ -77,6 +78,7 @@
     holdOrder(
       query.current,
       projectFiltersStore.activeFilters,
+      projectSortPrefs.sort,
       visibleProjects(projects, boardProjects, null, query.current, searchData)
     )
   );

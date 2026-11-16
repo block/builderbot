@@ -396,6 +396,130 @@ describe('ProjectActivityStore after a failed load', () => {
   });
 });
 
+describe('ProjectActivityStore backing off', () => {
+  /** Fail the refetch a write causes and both retries after it: the next is 8 s out. */
+  async function failThreeTimes() {
+    const { REFETCH_DELAY_MS, RETRY_DELAY_MS } = await import('./projectActivity.svelte');
+    getProjectActivity.mockRejectedValue(new Error('offline'));
+    emit('notes-changed');
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS + RETRY_DELAY_MS + RETRY_DELAY_MS * 2);
+    expect(getProjectActivity).toHaveBeenCalledTimes(4);
+  }
+
+  it.each([
+    ['a listener going live again', () => established.forEach((onEstablished) => onEstablished())],
+    ['cache-stale', () => fire('cache-stale')],
+  ])('%s ends a retry’s wait', async (_name, recover) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const store = await loadedStore();
+    const { REFETCH_DELAY_MS } = await import('./projectActivity.svelte');
+    await failThreeTimes();
+
+    // The connection is back: read after the usual delay, not in 8 s.
+    getProjectActivity.mockResolvedValue([row('p1', 99)]);
+    recover();
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS - 1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(5);
+    expect(store.activity?.get('p1')).toBe(99);
+
+    // That read covered the retry, which doesn't run on top of it.
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(getProjectActivity).toHaveBeenCalledTimes(5);
+  });
+
+  it('a recovery starts the backoff over', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await loadedStore();
+    const { REFETCH_DELAY_MS, RETRY_DELAY_MS } = await import('./projectActivity.svelte');
+    await failThreeTimes();
+
+    // Reconnected, but the read still fails: the first delay again, not 8 s.
+    fire('cache-stale');
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    expect(getProjectActivity).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS - 1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(6);
+  });
+
+  it('a write does not end a retry’s wait', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await loadedStore();
+    const { RETRY_DELAY_MS } = await import('./projectActivity.svelte');
+    await failThreeTimes();
+
+    // Writes say nothing about whether the backend answers again.
+    emit('notes-changed');
+    emit('branch-changed');
+    await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS * 4 - 1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(5);
+  });
+
+  /** A refetch in flight that the test fails when it chooses. */
+  async function slowRefetch() {
+    const { REFETCH_DELAY_MS } = await import('./projectActivity.svelte');
+    let fail!: () => void;
+    getProjectActivity.mockImplementationOnce(
+      () => new Promise<ProjectActivity[]>((_, reject) => (fail = () => reject(new Error('boom'))))
+    );
+    emit('notes-changed');
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    expect(getProjectActivity).toHaveBeenCalledTimes(2);
+    return fail;
+  }
+
+  it('a reload queued behind a read that fails waits out the retry', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const store = await loadedStore();
+    const { REFETCH_DELAY_MS, RETRY_DELAY_MS } = await import('./projectActivity.svelte');
+    const fail = await slowRefetch();
+
+    // Another write lands mid-read. Its refetch comes due while the read is
+    // still out, and queues behind it.
+    emit('review-changed');
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    expect(getProjectActivity).toHaveBeenCalledTimes(2);
+
+    getProjectActivity.mockResolvedValue([row('p1', 99)]);
+    fail();
+    await flush();
+    // Not at once: that would be the retry, without the wait.
+    expect(getProjectActivity).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS - 1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getProjectActivity).toHaveBeenCalledTimes(3);
+    expect(store.activity?.get('p1')).toBe(99);
+
+    // One retry covers both the failure and the queued reload.
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(getProjectActivity).toHaveBeenCalledTimes(3);
+  });
+
+  it('a refetch still waiting when a read fails gives way to the retry', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await loadedStore();
+    const { REFETCH_DELAY_MS, RETRY_DELAY_MS } = await import('./projectActivity.svelte');
+    const fail = await slowRefetch();
+
+    // A write just before the read fails: its refetch has yet to come due.
+    emit('review-changed');
+    await vi.advanceTimersByTimeAsync(1);
+    fail();
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    expect(getProjectActivity).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS - REFETCH_DELAY_MS);
+    expect(getProjectActivity).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe('ProjectActivityStore map identity', () => {
   it('keeps the same map when a refetch changes nothing', async () => {
     const store = await loadedStore();
@@ -529,6 +653,55 @@ describe('ProjectActivityStore under the pointer', () => {
     fire('pointerup');
     await flush();
 
+    expect(store.activity?.get('p1')).toBe(99);
+  });
+
+  it.each([['pointerup'], ['click']])(
+    'a drag refused at its start stops holding at the %s that follows',
+    async (type) => {
+      const store = await loadedStore();
+      // A column's handle refuses the native drag, after its dragstart was
+      // seen here. No dragend or drop follows; the press ends as usual.
+      fire('pointerdown');
+      fire('dragstart');
+      fire(type);
+      await flush();
+
+      // Neither pressed nor dragging: a map that lands now is not held.
+      await refetch([row('p1', 99)]);
+      expect(store.activity?.get('p1')).toBe(99);
+    }
+  );
+
+  it('applies a map held through a refused drag once its press ends', async () => {
+    const store = await loadedStore();
+    const before = store.activity;
+    fire('pointerdown');
+    fire('dragstart');
+    await refetch([row('p1', 99)]);
+    expect(store.activity).toBe(before);
+
+    // In a task of its own, as for any press: the click comes after.
+    fire('pointerup');
+    expect(store.activity).toBe(before);
+    await flush();
+    expect(store.activity?.get('p1')).toBe(99);
+  });
+
+  it('a context menu ends the press whose release it takes', async () => {
+    const store = await loadedStore();
+    const before = store.activity;
+    fire('pointerdown');
+    await refetch([row('p1', 50)]);
+    expect(store.activity).toBe(before);
+
+    // A native menu dismissed with Escape: no pointerup, no click.
+    fire('contextmenu');
+    await flush();
+    expect(store.activity?.get('p1')).toBe(50);
+
+    // Nor is anything held after it.
+    await refetch([row('p1', 99)]);
     expect(store.activity?.get('p1')).toBe(99);
   });
 

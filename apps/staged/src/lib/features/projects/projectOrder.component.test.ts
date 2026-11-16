@@ -468,6 +468,45 @@ describe('sorted by last updated', () => {
     expect(filtered()).toEqual(['c', 'd', 'b']);
   });
 
+  it('a held search keeps its order through a live re-sort, and takes a sort edit', async () => {
+    // The grid's and the sidebar's wiring: the hold is keyed on the query,
+    // the filter Set and the stored sort, each as its store hands it out.
+    storedSort = BY_UPDATED;
+    const { world, projectFiltersStore, activityChanged, setProjectSort } = await setup();
+    const { searchOrderHold, searchProjects } = await import('./projectSearch');
+    const { projectSortPrefs } = await import('./projectSortPrefs.svelte');
+    // Named alike, so every project matches "proj" equally and the order of
+    // the list searched decides.
+    world.projects = [a, b, c, d].map((p) => ({ ...p, name: `proj ${p.id}` }));
+    flushSync();
+    const hold = searchOrderHold();
+    const shown = () =>
+      ids(
+        hold(
+          'proj',
+          projectFiltersStore.activeFilters,
+          projectSortPrefs.sort,
+          searchProjects(projectFiltersStore.filteredProjects, 'proj')
+        ).projects
+      );
+    expect(shown()).toEqual(['a', 'b', 'c', 'd']);
+
+    // A session on d writes its note: the list re-sorts, the search holds.
+    await activityChanged([{ projectId: 'd', lastActivityAt: 900 }]);
+    expect(ids(projectFiltersStore.filteredProjects)).toEqual(['d', 'a', 'b', 'c']);
+    expect(shown()).toEqual(['a', 'b', 'c', 'd']);
+
+    // The same sort set again is no edit, and writes no new preference.
+    setProjectSort(BY_UPDATED);
+    flushSync();
+    expect(shown()).toEqual(['a', 'b', 'c', 'd']);
+
+    // "Least recent first" picked from the menu: ranked afresh.
+    setProjectSort([{ kind: 'updated', direction: 'asc' }]);
+    flushSync();
+    expect(shown()).toEqual(['c', 'b', 'a', 'd']);
+  });
+
   it('activity that moves no project hands both readers nothing new', async () => {
     storedSort = BY_UPDATED;
     activityRows = [{ projectId: 'd', lastActivityAt: 900 }];

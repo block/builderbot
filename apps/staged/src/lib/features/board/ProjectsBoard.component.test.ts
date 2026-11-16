@@ -2936,6 +2936,7 @@ describe('ProjectsBoard under the window sort', () => {
       props: { group: tagsStore.catalog.groupsById.get('status') ?? null, onOpen: openProject },
     });
     await settle();
+    layOutBoard(target);
     return target;
   }
 

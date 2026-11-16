@@ -20,6 +20,27 @@
 
 import type { DraftContent } from '../../shared/draftCache';
 
+/**
+ * Where in its note a quote was selected, so the note can mark that passage
+ * and tell it from the same words elsewhere (see notes/noteQuoteLocation.ts).
+ * All of it is read from the note's rendered text with whitespace left out,
+ * which is how the note is searched for the passage again.
+ */
+export type QuoteAnchor = {
+  /** The note's text just before the selection. */
+  prefix: string;
+  /** The note's text just after the selection. */
+  suffix: string;
+  /** How many characters of the note come before the selection. */
+  offset: number;
+  /**
+   * The selected passage as the note's text nodes spell it, kept only when
+   * that differs from `quote` (the browser's reading of the selection, which
+   * may add or leave out text the nodes do not).
+   */
+  text?: string;
+};
+
 export type DraftQuote = {
   /** Stable identity for keyed rendering and removal. */
   id: string;
@@ -31,6 +52,11 @@ export type DraftQuote = {
   headings: string[];
   /** The user's reply to this quote. */
   reply: string;
+  /**
+   * Where the quote was selected. Absent on quotes stored before notes
+   * marked their quoted passages, which are found by their text alone.
+   */
+  anchor?: QuoteAnchor;
 };
 
 export type ComposerDraft = {
@@ -40,7 +66,7 @@ export type ComposerDraft = {
 };
 
 /** What a selection contributes; the draft supplies `id` and `before`. */
-export type NewDraftQuote = Pick<DraftQuote, 'quote' | 'headings' | 'reply'>;
+export type NewDraftQuote = Pick<DraftQuote, 'quote' | 'headings' | 'reply' | 'anchor'>;
 
 /** Joins a quote's heading path, for display and in the sent message. */
 export const HEADING_PATH_SEPARATOR = ' › ';
@@ -66,9 +92,23 @@ export function isComposerDraftEmpty(draft: ComposerDraft): boolean {
 /** Plain copies, safe to persist or compare (the pane's draft is a `$state` proxy). */
 export function cloneComposerDraft(draft: ComposerDraft): ComposerDraft {
   return {
-    quotes: draft.quotes.map((quote) => ({ ...quote, headings: [...quote.headings] })),
+    quotes: draft.quotes.map(cloneDraftQuote),
     text: draft.text,
   };
+}
+
+function cloneDraftQuote(quote: DraftQuote): DraftQuote {
+  const copy: DraftQuote = { ...quote, headings: [...quote.headings] };
+  if (quote.anchor) copy.anchor = { ...quote.anchor };
+  else delete copy.anchor;
+  return copy;
+}
+
+function quoteAnchorsEqual(a: QuoteAnchor | undefined, b: QuoteAnchor | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return (
+    a.prefix === b.prefix && a.suffix === b.suffix && a.offset === b.offset && a.text === b.text
+  );
 }
 
 export function composerDraftsEqual(a: ComposerDraft, b: ComposerDraft): boolean {
@@ -81,7 +121,8 @@ export function composerDraftsEqual(a: ComposerDraft, b: ComposerDraft): boolean
       quote.quote === other.quote &&
       quote.reply === other.reply &&
       quote.headings.length === other.headings.length &&
-      quote.headings.every((heading, i) => heading === other.headings[i])
+      quote.headings.every((heading, i) => heading === other.headings[i]) &&
+      quoteAnchorsEqual(quote.anchor, other.anchor)
     );
   });
 }
@@ -97,26 +138,24 @@ export function newDraftQuoteId(): string {
  * Add a quote at the end of the draft. Whatever was in the main input was
  * written before this quote, so it becomes the quote's `before` text and the
  * main input starts empty below the new block — the draft reads top to
- * bottom in the order it was built.
+ * bottom in the order it was built. A draft that already holds a block with
+ * this id is returned as it was, so an add that is retried never doubles it.
  */
 export function appendDraftQuote(
   draft: ComposerDraft,
   quote: NewDraftQuote,
   id = newDraftQuoteId()
 ): ComposerDraft {
-  return {
-    quotes: [
-      ...draft.quotes,
-      {
-        id,
-        before: draft.text,
-        quote: quote.quote,
-        headings: [...quote.headings],
-        reply: quote.reply,
-      },
-    ],
-    text: '',
+  if (draft.quotes.some((existing) => existing.id === id)) return draft;
+  const added: DraftQuote = {
+    id,
+    before: draft.text,
+    quote: quote.quote,
+    headings: [...quote.headings],
+    reply: quote.reply,
   };
+  if (quote.anchor) added.anchor = { ...quote.anchor };
+  return { quotes: [...draft.quotes, added], text: '' };
 }
 
 /**
@@ -156,7 +195,7 @@ export function takeDraftQuote(
   if (next) quotes[index] = { ...next, before: merged };
   return {
     draft: { quotes, text: next ? draft.text : merged },
-    removed: { quote: { ...quote, headings: [...quote.headings] }, index, unmerged, merged },
+    removed: { quote: cloneDraftQuote(quote), index, unmerged, merged },
   };
 }
 
@@ -178,7 +217,7 @@ export function restoreDraftQuote(draft: ComposerDraft, removed: RemovedDraftQuo
   const untouched = target === removed.merged;
   const quote = untouched ? removed.quote : { ...removed.quote, before: '' };
   const after = untouched ? removed.unmerged : target;
-  quotes.splice(index, 0, { ...quote, headings: [...quote.headings] });
+  quotes.splice(index, 0, cloneDraftQuote(quote));
   if (next) {
     quotes[index + 1] = { ...next, before: after };
     return { quotes, text: draft.text };
@@ -432,13 +471,40 @@ function parseStoredQuote(value: unknown): DraftQuote | null {
   ) {
     return null;
   }
-  return {
+  const parsed: DraftQuote = {
     id: quote.id,
     before: quote.before,
     quote: quote.quote,
     headings: [...quote.headings],
     reply: quote.reply,
   };
+  // An anchor that doesn't read is left out rather than costing the quote:
+  // the passage is then found by its text, as for a quote stored without one.
+  const anchor = parseStoredAnchor(quote.anchor);
+  if (anchor) parsed.anchor = anchor;
+  return parsed;
+}
+
+function parseStoredAnchor(value: unknown): QuoteAnchor | null {
+  if (!value || typeof value !== 'object') return null;
+  const anchor = value as Partial<QuoteAnchor>;
+  if (
+    typeof anchor.prefix !== 'string' ||
+    typeof anchor.suffix !== 'string' ||
+    typeof anchor.offset !== 'number' ||
+    !Number.isInteger(anchor.offset) ||
+    anchor.offset < 0 ||
+    (anchor.text !== undefined && typeof anchor.text !== 'string')
+  ) {
+    return null;
+  }
+  const parsed: QuoteAnchor = {
+    prefix: anchor.prefix,
+    suffix: anchor.suffix,
+    offset: anchor.offset,
+  };
+  if (anchor.text !== undefined) parsed.text = anchor.text;
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------

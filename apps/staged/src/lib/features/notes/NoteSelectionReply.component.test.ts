@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import NoteSelectionReply from './NoteSelectionReply.svelte';
-import type { NewDraftQuote } from '../sessions/composerDraft';
+import type { DraftQuote, NewDraftQuote } from '../sessions/composerDraft';
 import type { LiveQuoteReply } from '../sessions/replyDrafts';
 import { viewport } from '../../shared/viewport.svelte';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
@@ -14,6 +14,9 @@ import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 // tap that presses the button collapses the page selection first, and the
 // captured quote has to survive that. On a phone the button is docked above
 // the bottom bar instead of beside the selection, and the field is a sheet.
+// The same field reopens on a block already in the draft (`editQuote`, from
+// the passage the note marks for it), holding its reply, with a Remove
+// button, and typing there edits that block (`onEdit`) rather than adding one.
 
 const SETTLE_MS = 150;
 const TOUCH_SETTLE_MS = 350;
@@ -25,22 +28,57 @@ let host: HTMLElement;
 let scrollEl: HTMLElement;
 let contentEl: HTMLElement;
 
-type Live = { [K in keyof LiveQuoteReply]: Mock<LiveQuoteReply[K]> };
+type Live = {
+  id: string;
+  setReply: Mock<LiveQuoteReply['setReply']>;
+  finish: Mock<LiveQuoteReply['finish']>;
+  remove: Mock<LiveQuoteReply['remove']>;
+};
 
-function liveReply(): Live {
+function liveReply(id = 'new-quote'): Live {
   return {
+    id,
     setReply: vi.fn<LiveQuoteReply['setReply']>(),
     finish: vi.fn<LiveQuoteReply['finish']>(async () => {}),
+    remove: vi.fn<LiveQuoteReply['remove']>(async () => {}),
   };
+}
+
+/** The component's exports, as NoteModal calls them. */
+type Reply = { editQuote(quote: DraftQuote, range: Range, stop?: HTMLElement | null): boolean };
+
+/** Where the fixture's passage sits in its note (noteQuoteLocation). */
+const PASSAGE_ANCHOR = { prefix: 'RolloutplanArchitecture', suffix: '', offset: 23 };
+
+/** A block already in the draft, quoting the fixture's passage. */
+const existing: DraftQuote = {
+  id: 'q7',
+  before: '',
+  quote: 'The cache is invalidated on every write.',
+  headings: ['Architecture'],
+  reply: 'Why on every write?',
+  anchor: PASSAGE_ANCHOR,
+};
+
+function passageRange(): Range {
+  const range = document.createRange();
+  range.selectNodeContents(contentEl.querySelector('#flow-p')!);
+  return range;
+}
+
+function removeButton(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>('.selection-reply-remove');
 }
 
 function render(
   overrides: Partial<{
+    enabled: boolean;
     chatOpen: boolean;
     chatVisible: boolean;
     sheetHost: HTMLElement | null;
     dockHost: HTMLElement | null;
     onDockedChange: (docked: boolean) => void;
+    markedQuoteIds: string[];
   }> = {}
 ) {
   host = document.createElement('div');
@@ -57,8 +95,11 @@ function render(
   document.body.appendChild(host);
 
   const live = liveReply();
+  const editLive = liveReply(existing.id);
   const onAdd = vi.fn<(quote: NewDraftQuote) => Promise<boolean>>(async () => true);
   const onReply = vi.fn(() => live);
+  const onEdit = vi.fn((_quote: DraftQuote) => editLive);
+  const onActiveQuoteChange = vi.fn<(quoteId: string | null) => void>();
   const props = reactiveProps({
     scrollEl,
     contentEl,
@@ -71,11 +112,15 @@ function render(
     ignoreHeading: (heading: Element) => heading.tagName === 'H1',
     onAdd,
     onReply,
+    onEdit,
+    markedQuoteIds: [] as string[],
+    onActiveQuoteChange,
     ...overrides,
   });
   component = mount(NoteSelectionReply, { target: scrollEl, props });
   flushSync();
-  return { props, onAdd, onReply, live };
+  const reply = component as unknown as Reply;
+  return { props, onAdd, onReply, live, onEdit, editLive, onActiveQuoteChange, reply };
 }
 
 /** Select the text of `#flow-p` and let the page know, as a drag or handles would. */
@@ -235,6 +280,8 @@ describe('NoteSelectionReply with the chat beside the note', () => {
       quote: 'The cache is invalidated on every write.',
       headings: ['Architecture'],
       reply: '',
+      // Where it was selected, for the note to mark the passage by.
+      anchor: PASSAGE_ANCHOR,
     });
     expect(onReply).not.toHaveBeenCalled();
     expect(field()).toBeNull();
@@ -267,6 +314,7 @@ describe('NoteSelectionReply reply field', () => {
       quote: 'The cache is invalidated on every write.',
       headings: ['Architecture'],
       reply: '',
+      anchor: PASSAGE_ANCHOR,
     });
     const input = field();
     expect(input).not.toBeNull();
@@ -376,6 +424,217 @@ describe('NoteSelectionReply reply field', () => {
     component = null;
 
     expect(live.finish).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('NoteSelectionReply reopened from a marked passage', () => {
+  it('opens the same field by the passage, holding the reply written so far', () => {
+    const { reply, onEdit, onReply, onAdd, editLive, onActiveQuoteChange } = render();
+
+    expect(reply.editQuote(existing, passageRange())).toBe(true);
+    flushSync();
+
+    expect(onEdit).toHaveBeenCalledWith(existing);
+    // Not a new block: nothing is added anywhere.
+    expect(onReply).not.toHaveBeenCalled();
+    expect(onAdd).not.toHaveBeenCalled();
+    const input = field()!;
+    expect(input.value).toBe('Why on every write?');
+    // Anchored as a new reply's field is: hung from the button by the passage.
+    expect(button()).not.toBeNull();
+    expect(button()!.classList.contains('is-open')).toBe(true);
+    expect(document.querySelector('[data-slot="popover-content"]')!.textContent).toContain(
+      'The cache is invalidated on every write.'
+    );
+    expect(onActiveQuoteChange).toHaveBeenLastCalledWith('q7');
+
+    input.value = 'Why on every write? Batch them.';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(editLive.setReply).toHaveBeenCalledWith('Why on every write? Batch them.');
+
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    );
+    flushSync();
+    expect(editLive.finish).toHaveBeenCalledTimes(1);
+    expect(editLive.remove).not.toHaveBeenCalled();
+    expect(field()).toBeNull();
+    expect(button()).toBeNull();
+    expect(onActiveQuoteChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it('removes the block from its Remove button, without writing what was typed', () => {
+    const { reply, editLive } = render();
+    reply.editQuote(existing, passageRange());
+    flushSync();
+
+    const input = field()!;
+    input.value = 'Never mind';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    click(removeButton()!);
+
+    expect(editLive.remove).toHaveBeenCalledTimes(1);
+    expect(editLive.finish).not.toHaveBeenCalled();
+    expect(field()).toBeNull();
+    expect(button()).toBeNull();
+  });
+
+  it("has no Remove button in a new reply's field", () => {
+    const { live } = render();
+    selectPassage();
+    settle();
+    click(button()!);
+
+    expect(field()).not.toBeNull();
+    expect(removeButton()).toBeNull();
+    expect(live.remove).not.toHaveBeenCalled();
+  });
+
+  it("writes an open field's reply before reopening on another block", () => {
+    const { reply, live, onEdit } = render();
+    selectPassage();
+    settle();
+    click(button()!);
+    expect(field()!.value).toBe('');
+
+    reply.editQuote(existing, passageRange());
+    flushSync();
+
+    expect(live.finish).toHaveBeenCalledTimes(1);
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    expect(field()!.value).toBe('Why on every write?');
+    expect(removeButton()).not.toBeNull();
+  });
+
+  it('gives focus back to the mark a key press came from when a key closes the field', async () => {
+    const { reply } = render();
+    const stop = document.createElement('span');
+    stop.tabIndex = 0;
+    contentEl.querySelector('#flow-p')!.prepend(stop);
+
+    reply.editQuote(existing, passageRange(), stop);
+    flushSync();
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    field()!.dispatchEvent(escape);
+    flushSync();
+
+    expect(escape.defaultPrevented).toBe(true);
+    expect(field()).toBeNull();
+    // Once the field has closed and let go of focus.
+    await flushAsync();
+    expect(document.activeElement).toBe(stop);
+  });
+
+  it('leaves focus alone when something other than a key closes the field', async () => {
+    const { reply, props } = render();
+    const stop = document.createElement('span');
+    stop.tabIndex = 0;
+    contentEl.querySelector('#flow-p')!.prepend(stop);
+
+    reply.editQuote(existing, passageRange(), stop);
+    flushSync();
+    props.chatOpen = true;
+    flushSync();
+    await flushAsync();
+
+    expect(field()).toBeNull();
+    expect(document.activeElement).not.toBe(stop);
+  });
+
+  it('closes, keeping the edit, when the chat opens', () => {
+    const { reply, props, editLive } = render();
+    reply.editQuote(existing, passageRange());
+    flushSync();
+
+    props.chatOpen = true;
+    flushSync();
+
+    expect(editLive.finish).toHaveBeenCalledTimes(1);
+    expect(field()).toBeNull();
+  });
+
+  it('does not open while the note is hidden', () => {
+    const { reply, onEdit } = render({ enabled: false });
+
+    expect(reply.editQuote(existing, passageRange())).toBe(false);
+    flushSync();
+
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(field()).toBeNull();
+  });
+
+  it("on a phone opens the sheet, with no docked Reply row for a selection that isn't one", () => {
+    const hosts = phoneHosts();
+    try {
+      const { reply, editLive } = render(hosts);
+
+      expect(reply.editQuote(existing, passageRange())).toBe(true);
+      flushSync();
+
+      const sheet = hosts.sheetHost.querySelector('.selection-reply-sheet');
+      expect(sheet).not.toBeNull();
+      expect(document.activeElement).toBe(field());
+      expect(field()!.value).toBe('Why on every write?');
+      expect(dockButton()).toBeNull();
+
+      click(removeButton()!);
+      expect(editLive.remove).toHaveBeenCalledTimes(1);
+      expect(hosts.sheetHost.querySelector('.selection-reply-sheet')).toBeNull();
+    } finally {
+      hosts.cleanup();
+    }
+  });
+});
+
+describe("NoteSelectionReply and the note's marks", () => {
+  class FakeHighlight {
+    constructor(public range: Range) {}
+  }
+
+  function stubHighlights() {
+    const registry = new Map<string, FakeHighlight>();
+    vi.stubGlobal('CSS', { highlights: registry });
+    vi.stubGlobal('Highlight', FakeHighlight);
+    return registry;
+  }
+
+  it('reports the block a new reply is written on', () => {
+    const { onActiveQuoteChange } = render();
+    selectPassage();
+    settle();
+    click(button()!);
+
+    expect(onActiveQuoteChange).toHaveBeenLastCalledWith('new-quote');
+  });
+
+  it('paints the frozen selection only until the note marks the passage itself', () => {
+    const registry = stubHighlights();
+    const { props } = render();
+    selectPassage();
+    settle();
+    click(button()!);
+    expect(registry.has('note-reply-selection')).toBe(true);
+
+    // The block landed in the draft and the note marked it.
+    props.markedQuoteIds = ['new-quote'];
+    flushSync();
+    expect(registry.has('note-reply-selection')).toBe(false);
+
+    // The mark went (the note re-rendered without the text): painted again.
+    props.markedQuoteIds = [];
+    flushSync();
+    expect(registry.has('note-reply-selection')).toBe(true);
+  });
+
+  it('never paints over a mark it was reopened from', () => {
+    const registry = stubHighlights();
+    const { reply } = render({ markedQuoteIds: ['q7'] });
+
+    reply.editQuote(existing, passageRange());
+    flushSync();
+
+    expect(field()).not.toBeNull();
+    expect(registry.has('note-reply-selection')).toBe(false);
   });
 });
 
@@ -508,6 +767,7 @@ describe('NoteSelectionReply docked on a phone', () => {
         quote: 'The cache is invalidated on every write.',
         headings: ['Architecture'],
         reply: '',
+        anchor: PASSAGE_ANCHOR,
       });
       expect(hosts.sheetHost.querySelector('.selection-reply-sheet')).not.toBeNull();
     } finally {

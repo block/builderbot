@@ -29,9 +29,11 @@ import { saveDraft, DRAFT_TTL_MS } from '../../shared/draftCache';
 import { serializeComposerDraft } from './composerDraft';
 import {
   addQuoteToReplyDraft,
+  editLiveQuoteReply,
   focusReplyDraftQuote,
   loadReplyDraft,
   registerReplyComposer,
+  removeQuoteFromReplyDraft,
   replyDraftKey,
   replyDraftPresence,
   replyDraftWriter,
@@ -183,6 +185,7 @@ function fakeComposer(): { [K in keyof ReplyComposerTarget]: Mock<ReplyComposerT
   return {
     addQuote: vi.fn<ReplyComposerTarget['addQuote']>(),
     setQuoteReply: vi.fn<ReplyComposerTarget['setQuoteReply']>(),
+    removeQuote: vi.fn<ReplyComposerTarget['removeQuote']>(),
     focusQuoteReply: vi.fn<ReplyComposerTarget['focusQuoteReply']>(),
   };
 }
@@ -222,6 +225,132 @@ describe('setReplyDraftQuoteReply', () => {
   });
 });
 
+describe('removeQuoteFromReplyDraft', () => {
+  beforeEach(() => {
+    store.clear();
+  });
+
+  it('takes the block out of the stored draft and keeps the text around it', async () => {
+    await saveDraft(replyDraftKey('x1'), 'Before.');
+    const first = await addQuoteToReplyDraft('x1', quote);
+    const second = await addQuoteToReplyDraft('x1', { ...quote, reply: 'Kept.' });
+
+    await removeQuoteFromReplyDraft('x1', first);
+    await removeQuoteFromReplyDraft('x1', 'never-there');
+
+    const draft = await loadReplyDraft('x1');
+    expect(draft.quotes.map((q) => [q.id, q.before, q.reply])).toEqual([
+      [second, 'Before.', 'Kept.'],
+    ]);
+  });
+
+  it('goes to every open composer rather than the store under it', async () => {
+    const older = fakeComposer();
+    const newer = fakeComposer();
+    const unregisterOlder = registerReplyComposer('x2', older);
+    const unregisterNewer = registerReplyComposer('x2', newer);
+
+    await removeQuoteFromReplyDraft('x2', 'q');
+
+    expect(older.removeQuote).toHaveBeenCalledWith('q');
+    expect(newer.removeQuote).toHaveBeenCalledWith('q');
+    expect(store.has(replyDraftKey('x2'))).toBe(false);
+
+    unregisterOlder();
+    unregisterNewer();
+  });
+});
+
+describe('editLiveQuoteReply', () => {
+  beforeEach(() => {
+    store.clear();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('updates the block it was opened on and never adds another', async () => {
+    const id = await addQuoteToReplyDraft('e1', quote);
+    await addQuoteToReplyDraft('e1', { ...quote, reply: 'Other.' }, 'other');
+
+    const live = editLiveQuoteReply('e1', id, 'Why?', 100);
+    expect(live.id).toBe(id);
+    live.setReply('Why so');
+    live.setReply('Why so often?');
+    await vi.advanceTimersByTimeAsync(99);
+    expect((await loadReplyDraft('e1')).quotes[0].reply).toBe('Why?');
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.runAllTimersAsync();
+    expect((await loadReplyDraft('e1')).quotes[0].reply).toBe('Why so often?');
+
+    live.setReply('Because.');
+    await live.finish();
+
+    const draft = await loadReplyDraft('e1');
+    expect(draft.quotes.map((q) => [q.id, q.reply])).toEqual([
+      [id, 'Because.'],
+      ['other', 'Other.'],
+    ]);
+  });
+
+  it('writes nothing when the field closes on an unchanged reply', async () => {
+    const id = await addQuoteToReplyDraft('e2', quote);
+    vi.mocked(setStoreValue).mockClear();
+
+    const live = editLiveQuoteReply('e2', id, 'Why?', 100);
+    live.setReply('Why?');
+    await live.finish();
+
+    expect(setStoreValue).not.toHaveBeenCalled();
+  });
+
+  it('leaves a block removed in the composer meanwhile removed', async () => {
+    const id = await addQuoteToReplyDraft('e3', quote);
+    const live = editLiveQuoteReply('e3', id, 'Why?', 100);
+    await removeQuoteFromReplyDraft('e3', id);
+
+    live.setReply('Typed after it went');
+    await live.finish();
+
+    expect((await loadReplyDraft('e3')).quotes).toEqual([]);
+  });
+
+  it('removes its block, dropping what was typed and not yet written', async () => {
+    const id = await addQuoteToReplyDraft('e4', quote);
+    await addQuoteToReplyDraft('e4', { ...quote, reply: 'Other.' }, 'other');
+    const live = editLiveQuoteReply('e4', id, 'Why?', 100);
+
+    live.setReply('About to go');
+    await live.remove();
+    // Nothing typed, or finished, after the removal brings it back.
+    live.setReply('Too late');
+    await live.finish();
+    await vi.runAllTimersAsync();
+
+    expect((await loadReplyDraft('e4')).quotes.map((q) => q.id)).toEqual(['other']);
+  });
+
+  it('retries from finish when its write failed', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const id = await addQuoteToReplyDraft('e5', quote);
+      const live = editLiveQuoteReply('e5', id, 'Why?', 100);
+      live.setReply('Edited');
+      vi.mocked(setStoreValue).mockRejectedValueOnce(new Error('store unavailable'));
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.runAllTimersAsync();
+      expect((await loadReplyDraft('e5')).quotes[0].reply).toBe('Why?');
+
+      await live.finish();
+      expect((await loadReplyDraft('e5')).quotes[0].reply).toBe('Edited');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+});
+
 describe('startLiveQuoteReply', () => {
   beforeEach(() => {
     store.clear();
@@ -250,6 +379,18 @@ describe('startLiveQuoteReply', () => {
     const draft = await loadReplyDraft('l1');
     expect(draft.quotes).toHaveLength(1);
     expect(draft.quotes[0].reply).toBe('Why not?');
+    // The id it reports is the block's, known before the add has landed.
+    expect(draft.quotes[0].id).toBe(live.id);
+  });
+
+  it('removes the block it added, even before the add has landed', async () => {
+    const live = startLiveQuoteReply('l5', { ...quote, reply: '' }, 100);
+    live.setReply('Second thoughts');
+    await live.remove();
+    await vi.runAllTimersAsync();
+
+    expect((await loadReplyDraft('l5')).quotes).toEqual([]);
+    expect(replyDraftPresence.quotes('l5')).toEqual([]);
   });
 
   it('keeps one block when the chat opens mid-reply, finishing into its composer', async () => {
@@ -368,5 +509,76 @@ describe('replyDraftPresence', () => {
     expect(replyDraftPresence.has('remote')).toBe(true);
     for (const listener of changeListeners) listener(replyDraftKey('remote'), undefined);
     expect(replyDraftPresence.has('remote')).toBe(false);
+  });
+
+  it("holds each draft's quote blocks, for the note to mark their passages", async () => {
+    replyDraftPresence.start();
+    await settle();
+    expect(replyDraftPresence.quotes('marks')).toEqual([]);
+    expect(replyDraftPresence.quotes(null)).toEqual([]);
+
+    const anchor = { prefix: 'before', suffix: 'after', offset: 12 };
+    const first = await addQuoteToReplyDraft('marks', { ...quote, anchor });
+    const second = await addQuoteToReplyDraft('marks', { ...quote, reply: '' });
+    const held = replyDraftPresence.quotes('marks');
+    expect(held.map((q) => [q.id, q.reply, q.anchor])).toEqual([
+      [first, 'Why?', anchor],
+      [second, '', undefined],
+    ]);
+
+    // The same array while no block changes, so a reader isn't re-run...
+    await replyDraftWriter.saveNow(replyDraftKey('marks'), {
+      value: 'whatever',
+      structured: { version: 1, quotes: [...held], text: 'Free text typed below.' },
+    });
+    expect(replyDraftPresence.quotes('marks')).toBe(held);
+    // ...and a new one when a reply is edited or a block goes.
+    await setReplyDraftQuoteReply('marks', second, 'Edited.');
+    expect(replyDraftPresence.quotes('marks')).not.toBe(held);
+    expect(replyDraftPresence.quotes('marks')[1].reply).toBe('Edited.');
+    await removeQuoteFromReplyDraft('marks', first);
+    expect(replyDraftPresence.quotes('marks').map((q) => q.id)).toEqual([second]);
+
+    // Another client's write, structure and all.
+    const now = Date.now();
+    for (const listener of changeListeners) {
+      listener(replyDraftKey('marks'), {
+        value: 'elsewhere',
+        updatedAt: now,
+        expiresAt: now + DRAFT_TTL_MS,
+        structured: {
+          version: 1,
+          quotes: [{ id: 'remote', before: '', quote: 'x', headings: [], reply: '' }],
+          text: '',
+        },
+      });
+    }
+    expect(replyDraftPresence.quotes('marks').map((q) => q.id)).toEqual(['remote']);
+
+    // Sent: the draft is cleared and its quotes go with it.
+    await replyDraftWriter.clearNow(replyDraftKey('marks'));
+    expect(replyDraftPresence.quotes('marks')).toEqual([]);
+    expect(replyDraftPresence.has('marks')).toBe(false);
+  });
+
+  it("takes an open composer's draft ahead of its debounced write", async () => {
+    replyDraftPresence.start();
+    await settle();
+    const block = { id: 'live', before: '', quote: 'x', headings: [], reply: '' };
+
+    replyDraftPresence.preview('shown', {
+      value: 'x',
+      structured: { version: 1, quotes: [block], text: '' },
+    });
+    expect(replyDraftPresence.quotes('shown')).toEqual([block]);
+    expect(replyDraftPresence.summary('shown')).toEqual({ quotes: 1, hasText: false });
+    expect(store.has(replyDraftKey('shown'))).toBe(false);
+
+    // The block removed in the composer, leaving plain text; then nothing.
+    replyDraftPresence.preview('shown', 'Just text now.');
+    expect(replyDraftPresence.quotes('shown')).toEqual([]);
+    expect(replyDraftPresence.has('shown')).toBe(true);
+    replyDraftPresence.preview('shown', '');
+    expect(replyDraftPresence.has('shown')).toBe(false);
   });
 });

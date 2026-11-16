@@ -13,16 +13,24 @@
   Showing a note marks it read, and the header's toggle marks it read or
   unread; see `NoteReadTracker` for when the viewer marks it on its own.
 
-  A note with a chat can be replied to a passage at a time: selecting text
-  offers a Reply button (`NoteSelectionReply`; on a phone it is docked above
-  the bottom bar, out of the way of the system's edit menu), and each reply
-  lands in the chat's draft as a quote block (see sessions/replyDrafts.ts) —
-  straight into the composer when the chat shows beside the note, otherwise
-  typed in the note and written to the stored draft as it goes, the user
-  staying on the note to select the next passage. While the chat is hidden
+  A note with a chat can be replied to a passage at a time (`NoteReplyQuotes`):
+  selecting text offers a Reply button (`NoteSelectionReply`; on a phone it is
+  docked above the bottom bar, out of the way of the system's edit menu), and
+  each reply lands in the chat's draft as a quote block (see
+  sessions/replyDrafts.ts) — straight into the composer when the chat shows
+  beside the note, otherwise typed in the note and written to the stored
+  draft as it goes, the user staying on the note to select the next passage. While the chat is hidden
   and the draft holds anything, the note's bottom bar offers it: one button
   that opens the chat with the composer. The docked Reply button stands in
   for it while a selection is being offered a reply.
+
+  Every passage the draft quotes stays marked in the note
+  (`NoteQuoteHighlights`, from `replyDraftPresence.quotes`) for as long as
+  its block is in the draft: through a re-render and a reopen, until the
+  block is removed or the draft is sent. Pressing a mark goes back to its
+  reply: with the chat beside the note the caret lands in the block's reply
+  in the composer, otherwise the reply field reopens by the passage with
+  what was written, to edit or remove.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -36,7 +44,6 @@
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import PencilLine from '@lucide/svelte/icons/pencil-line';
-  import { toast } from 'svelte-sonner';
   import * as Dialog from '$lib/components/ui/dialog';
   import {
     createDialogWidth,
@@ -94,15 +101,8 @@
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
-  import NoteSelectionReply from './NoteSelectionReply.svelte';
-  import type { NewDraftQuote } from '../sessions/composerDraft';
-  import {
-    addQuoteToReplyDraft,
-    focusReplyDraftQuote,
-    replyDraftPresence,
-    startLiveQuoteReply,
-    type LiveQuoteReply,
-  } from '../sessions/replyDrafts';
+  import NoteReplyQuotes from './NoteReplyQuotes.svelte';
+  import { replyDraftPresence } from '../sessions/replyDrafts';
   import { formatReplyDraftLabel } from './replyDraftLabel';
   import { isSessionActive } from '../../shared/sessionStatus';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
@@ -200,6 +200,13 @@
   let canOpenSession = $derived(Boolean(sessionId));
   let replyDraftSummary = $derived(replyDraftPresence.summary(sessionId));
   let replyDraftLabel = $derived(formatReplyDraftLabel(replyDraftSummary));
+  /** Bumped when find-in-note has rewritten text under the quotes' marks, so they are put back. */
+  let quoteMarkRefresh = $state(0);
+  let quoteMarkRefreshes = 0;
+  /** Written without being read, so an effect that clears a search isn't re-run by it. */
+  function refreshQuoteMarks() {
+    quoteMarkRefresh = ++quoteMarkRefreshes;
+  }
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0 && !chatOpen);
   let displayTitle = $derived(liveNote?.title ?? title);
   let displayContent = $derived(liveNote?.content ?? content);
@@ -633,53 +640,6 @@
     );
   }
 
-  /**
-   * With the composer showing beside the note, a selected passage goes
-   * straight into it as a quote block and the caret lands in the block's
-   * reply. Returns whether it was added: on failure the Reply button stays
-   * for another try.
-   */
-  async function handleQuoteAdd(quote: NewDraftQuote): Promise<boolean> {
-    const sid = sessionId;
-    if (!sid) return false;
-    let id: string;
-    try {
-      id = await addQuoteToReplyDraft(sid, quote);
-    } catch (error) {
-      console.error('Failed to add quote to reply draft', error);
-      toast.error('Could not add the quote to your reply draft');
-      return false;
-    }
-    focusReplyDraftQuote(sid, id);
-    return true;
-  }
-
-  /**
-   * With the chat hidden, the reply to a selected passage is typed in the
-   * note and the draft follows it (see replyDrafts.startLiveQuoteReply).
-   * Closing the field leaves the user on the note, whatever the width, so
-   * the next passage can be selected without the view changing underfoot;
-   * the bottom bar's draft button offers the chat (`showReplyDraft`).
-   */
-  function handleQuoteReply(quote: NewDraftQuote): LiveQuoteReply {
-    const sid = sessionId;
-    if (!sid) {
-      return { setReply() {}, finish: async () => {} };
-    }
-    const live = startLiveQuoteReply(sid, quote);
-    return {
-      setReply: live.setReply,
-      finish: async () => {
-        try {
-          await live.finish();
-        } catch (error) {
-          console.error('Failed to save the reply draft', error);
-          toast.error('Could not save your reply draft');
-        }
-      },
-    };
-  }
-
   function handleChatToggle() {
     if (!canOpenSession) return;
     if (chatOpen && !viewport.canSplit) {
@@ -713,13 +673,16 @@
     matchCount = 0;
     currentMatchIndex = 0;
     matchElements = [];
+    refreshQuoteMarks();
   }
 
   function performSearch(query: string) {
     if (!contentEl) return;
 
-    // Clear previous highlights
+    // Clear previous highlights. A match cleared from around a quote's mark
+    // takes the mark with it, so the marks are put back afterwards.
     clearHighlights(contentEl);
+    refreshQuoteMarks();
     matchElements = [];
     matchCount = 0;
     currentMatchIndex = 0;
@@ -1005,10 +968,13 @@
             {:else}
               <p class="empty-note">This note has no content.</p>
             {/if}
-            {#if canOpenSession && hasNoteContent}
-              <NoteSelectionReply
+            {#if sessionId && hasNoteContent}
+              <NoteReplyQuotes
+                {sessionId}
                 scrollEl={contentEl}
                 contentEl={markdownEl}
+                renderKey={renderedNoteHtml}
+                refreshKey={quoteMarkRefresh}
                 enabled={open && !chatOnly && renderedNoteHtml !== null}
                 {chatOpen}
                 chatVisible={splitChatOpen}
@@ -1016,8 +982,6 @@
                 dockHost={dockEl}
                 onDockedChange={(docked) => (replyDocked = docked)}
                 ignoreHeading={isTitleHeading}
-                onAdd={handleQuoteAdd}
-                onReply={handleQuoteReply}
               />
             {/if}
           </div>

@@ -95,7 +95,7 @@ vi.mock('../../commands', async (importOriginal) => ({
 
 import SessionChatPane from './SessionChatPane.svelte';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
-import { addQuoteToReplyDraft } from './replyDrafts';
+import { addQuoteToReplyDraft, removeQuoteFromReplyDraft, replyDraftPresence } from './replyDrafts';
 import { composerDraftFromContent, serializeComposerDraft } from './composerDraft';
 
 function replyKey(id: string): string {
@@ -302,6 +302,30 @@ describe('SessionChatPane quoted replies', () => {
     expect(draft.quotes[0]).toMatchObject({ before: 'Before the quote', ...quote });
     expect(draft.text).toBe('');
     expect(saved.value).toBe(serializeComposerDraft(draft));
+
+    unmount(pane);
+  });
+
+  it('tells the note at once which passages the open composer quotes, and drops one the note removes', async () => {
+    const { pane } = mountPane('session-marks');
+    flushSync();
+    await settle();
+
+    const first = await addQuoteToReplyDraft('session-marks', { ...quote, quote: 'First.' });
+    const second = await addQuoteToReplyDraft('session-marks', { ...quote, quote: 'Second.' });
+    flushSync();
+
+    // Ahead of the debounced write: the note marks from this.
+    expect(replyDraftPresence.quotes('session-marks').map((q) => q.id)).toEqual([first, second]);
+
+    // The note's reply field removing a block it reopened.
+    await removeQuoteFromReplyDraft('session-marks', first);
+    await settle();
+
+    expect(quoteCount()).toBe(1);
+    expect(replyDraftPresence.quotes('session-marks').map((q) => q.id)).toEqual([second]);
+    const saved = composerDraftFromContent(lastSaved(replyKey('session-marks')));
+    expect(saved.quotes.map((q) => q.quote)).toEqual(['Second.']);
 
     unmount(pane);
   });

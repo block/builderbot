@@ -58,6 +58,24 @@ describe('appendDraftQuote', () => {
     expect(draft.text).toBe('Thanks!');
   });
 
+  it('returns the draft as it was when it already holds a block with that id', () => {
+    const draft = review();
+
+    expect(appendDraftQuote(draft, { ...rollout, reply: 'Again?' }, 'q1')).toBe(draft);
+  });
+
+  it('keeps where the quote was selected, as a copy', () => {
+    const anchor = { prefix: 'before', suffix: 'after', offset: 40, text: 'thecache' };
+    const draft = appendDraftQuote(emptyComposerDraft(), { ...dataFlow, anchor }, 'q1');
+
+    expect(draft.quotes[0].anchor).toEqual(anchor);
+    expect(draft.quotes[0].anchor).not.toBe(anchor);
+    // A quote added without one has no `anchor` key at all.
+    expect('anchor' in appendDraftQuote(emptyComposerDraft(), dataFlow, 'q2').quotes[0]).toBe(
+      false
+    );
+  });
+
   it('copies the headings rather than sharing the caller’s array', () => {
     const headings = ['A'];
     const draft = appendDraftQuote(emptyComposerDraft(), { quote: 'x', headings, reply: '' });
@@ -324,6 +342,50 @@ describe('persisted content', () => {
     // Through JSON, as the store does.
     const restored = composerDraftFromContent(JSON.parse(JSON.stringify(content)));
     expect(composerDraftsEqual(restored, draft)).toBe(true);
+  });
+
+  it('round-trips where each quote was selected, and tells drafts apart by it', () => {
+    const anchor = { prefix: 'Dataflow', suffix: 'Rollout', offset: 31 };
+    const withText = { ...anchor, text: 'Thecacheisinvalidatedoneverywrite.' };
+    let draft = appendDraftQuote(emptyComposerDraft(), { ...dataFlow, anchor }, 'q1');
+    draft = appendDraftQuote(draft, { ...rollout, anchor: withText }, 'q2');
+    draft = appendDraftQuote(draft, rollout, 'q3');
+
+    const restored = composerDraftFromContent(
+      JSON.parse(JSON.stringify(composerDraftContent(draft)))
+    );
+
+    expect(restored.quotes.map((quote) => quote.anchor)).toEqual([anchor, withText, undefined]);
+    expect(composerDraftsEqual(restored, draft)).toBe(true);
+    const moved = structuredClone(draft);
+    moved.quotes[0].anchor!.offset = 32;
+    expect(composerDraftsEqual(moved, draft)).toBe(false);
+    const unanchored = structuredClone(draft);
+    delete unanchored.quotes[0].anchor;
+    expect(composerDraftsEqual(unanchored, draft)).toBe(false);
+  });
+
+  it('reads a quote stored before anchors existed, and one whose anchor is unreadable', () => {
+    const stored = { id: 'q1', before: '', quote: 'x', headings: ['A'], reply: 'y' };
+    const draft = composerDraftFromContent({
+      value: 'serialized',
+      structured: {
+        version: 1,
+        quotes: [
+          stored,
+          { ...stored, id: 'q2', anchor: { prefix: 'a', suffix: 'b', offset: -1 } },
+          { ...stored, id: 'q3', anchor: { prefix: 'a', suffix: 'b', offset: 3, text: 7 } },
+          { ...stored, id: 'q4', anchor: 'nonsense' },
+        ],
+        text: 'tail',
+      },
+    });
+
+    // Every quote is kept, as it was; none carries an anchor.
+    expect(draft).toEqual({
+      quotes: [stored, { ...stored, id: 'q2' }, { ...stored, id: 'q3' }, { ...stored, id: 'q4' }],
+      text: 'tail',
+    });
   });
 
   it('falls back to the text form when the structure is unreadable', () => {

@@ -240,6 +240,7 @@
     amendStoredReplyDraft,
     registerReplyComposer,
     replyDraftKey,
+    replyDraftPresence,
     replyDraftWriter,
   } from './replyDrafts';
   import {
@@ -251,6 +252,7 @@
     hasQuotedParts,
     isComposerDraftEmpty,
     parseQuotedMessage,
+    removeDraftQuote,
     restoreDraftQuote,
     serializeComposerDraft,
     setDraftQuoteReply,
@@ -1234,6 +1236,10 @@
       suppressNextReplySave = false;
       return;
     }
+    // What the write below will store, told at once to whatever shows the
+    // draft elsewhere: the note marks a quoted passage as its block lands
+    // here, and unmarks it as the block goes, not a debounce later.
+    replyDraftPresence.preview(id, content);
     replyDraftWriter.scheduleSave(replyDraftKey(id), content);
   });
 
@@ -1249,6 +1255,7 @@
         receiveDraftEdit(id, (draft) => appendDraftQuote(draft, quote, quoteId)),
       setQuoteReply: (quoteId, reply) =>
         receiveDraftEdit(id, (draft) => setDraftQuoteReply(draft, quoteId, reply)),
+      removeQuote: (quoteId) => receiveDraftEdit(id, (draft) => removeDraftQuote(draft, quoteId)),
       focusQuoteReply: (quoteId) => whenDraftLoaded(id, () => focusDraftQuoteReply(quoteId)),
     });
     return () => {

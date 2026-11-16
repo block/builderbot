@@ -1,9 +1,24 @@
 /**
  * Lightweight client-side navigation state.
  *
- * Detail views are modeled as an app-owned stack. Compatibility fields are
- * still exposed for existing callers, but they are synchronized from the
- * current route instead of owning navigation.
+ * Navigation is a browser-style history (navigationHistory.ts), held here in
+ * `navigation.history` and nowhere else. Each entry is a location: the
+ * workspace route (the projects grid, a project, the repos list, a board)
+ * with any settings / diff routes showing over it. Going somewhere adds an
+ * entry after the current one and drops the ones forward of it; Back and
+ * Forward step through them (goBack, goForward). No view sits "above"
+ * another: Back from a project is wherever the user was before it, which is
+ * the grid only when that is where they came from. The grid is reached by
+ * going to it (goHome), like any other view.
+ *
+ * Back and Forward never land on something that is gone. Entries for deleted
+ * projects, unpinned boards and diffs of deleted branches or reviews are
+ * dropped before the step (stepHistory), and a diff entry is brought up to
+ * date with its branch before it is shown again (diffRouteRefresh.ts).
+ *
+ * The other fields of `navigation` are still exposed for existing callers,
+ * but they are synchronized from the current entry instead of owning
+ * navigation.
  *
  * The last viewed project is persisted so the user returns to it on relaunch.
  * Only the first window (label `main`) and web mode persist it; secondary
@@ -25,8 +40,23 @@ import type { DiffScope } from '../../commands';
 import type { CommitTimelineItem } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
+import { tagsStore } from '../../stores/tags.svelte';
+import { viewport } from '../../shared/viewport.svelte';
+import { refreshDiffRoute } from './diffRouteRefresh';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
 import { useWorkspaceLayer } from './workspaceLayer';
+import {
+  canGoBack,
+  canGoForward,
+  createHistory,
+  currentEntry,
+  goBack as historyBack,
+  goForward as historyForward,
+  replaceCurrent,
+  rewriteEntries,
+  visit,
+  type NavigationHistory,
+} from './navigationHistory';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
@@ -67,6 +97,13 @@ export type DetailRoute =
   | { kind: 'settings'; section: SettingsSection }
   | DiffDetailRoute;
 
+/**
+ * A view the app can show, and one history entry. Bottom first: the workspace
+ * route, then any settings / diff routes showing over it. A project is
+ * `[project]`, and Settings opened from it is `[project, settings]`.
+ */
+export type ViewLocation = DetailRoute[];
+
 function rootRoute(): DetailRoute {
   return { kind: 'projects' };
 }
@@ -81,10 +118,28 @@ function initialProjectId(): string | null {
   return readSnapshot<string>(SNAPSHOT_KEYS.lastProject);
 }
 
+/**
+ * The history of a window that opens on a project: restored from the last
+ * session, or seeded by the window that opened it.
+ *
+ * With a sidebar the project is the only entry. The grid was never visited,
+ * so it is not a step Back, and the sidebar's "All projects" is how it is
+ * reached. The mobile layout has no sidebar, so there the grid is put under
+ * the project and Back reaches it in one tap, as the labelled Back button
+ * that used to be in the bar's place did. The layout is read once, as the
+ * window opens: a history is not rewritten because the window was resized.
+ */
+function openingHistory(projectId: string): NavigationHistory<ViewLocation> {
+  const project: ViewLocation = [{ kind: 'project', projectId }];
+  if (!viewport.isMobile) return createHistory(project);
+  return { entries: [[rootRoute()], project], index: 1 };
+}
+
 const initialProject = initialProjectId();
-const initialDetailStack: DetailRoute[] = initialProject
-  ? [rootRoute(), { kind: 'project', projectId: initialProject }]
-  : [rootRoute()];
+const initialHistory: NavigationHistory<ViewLocation> = initialProject
+  ? openingHistory(initialProject)
+  : createHistory([rootRoute()]);
+const initialLocation = currentEntry(initialHistory);
 
 /**
  * The non-home view the workspace's project layer holds: the last project,
@@ -97,16 +152,22 @@ export type ProjectLayer =
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
   // Web mode seeds synchronously from the localStorage mirror so <ProjectHome>
-  // and the Back affordance can paint on the first frame. The snapshot is a
-  // no-op under Tauri (webSnapshot.ts), where the stack starts at the root and
-  // restoreInitialRoute pushes the persisted project before the workspace
+  // can paint on the first frame. The snapshot is a no-op under Tauri
+  // (webSnapshot.ts), where the history starts at the root and
+  // restoreInitialRoute swaps in the persisted project before the workspace
   // renders; `listProjects()` validation follows in initNavigation.
   selectedProjectId: initialProject,
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
-  detailStack: initialDetailStack,
-  currentRoute: initialDetailStack[initialDetailStack.length - 1] ?? rootRoute(),
-  canGoBack: initialDetailStack.length > 1,
+  // The one history. It starts at the location the window opens on, with
+  // nothing to go Back to (but see openingHistory for the mobile layout).
+  history: initialHistory,
+  // The location on screen: the history's current entry.
+  detailStack: initialLocation,
+  currentRoute: initialLocation[initialLocation.length - 1],
+  // Whether there is an earlier / a later history entry to step to.
+  canGoBack: canGoBack(initialHistory),
+  canGoForward: false,
   // Settings and the diff route render over the workspace, which stays mounted
   // underneath (App.svelte). The one predicate for "covered", so the gates on
   // window-level requests the parked views would otherwise still answer can't
@@ -125,8 +186,8 @@ export const navigation = $state({
   homeActive: !initialProject,
   // homeLayerRetained: sticky once home has been the base route of a rendered
   // workspace; the grid stays mounted (covered) under later projects. Seeded
-  // false even when the stack starts at the root: under Tauri it sits there
-  // until restoreInitialRoute pushes the persisted project, and counting that
+  // false even when the history starts at the root: under Tauri it sits there
+  // until restoreInitialRoute restores the persisted project, and counting that
   // would mount the grid under a project it was never shown before.
   homeLayerRetained: false,
   // projectLayer: the last project / repos base route, kept while home is
@@ -135,6 +196,12 @@ export const navigation = $state({
     ? { kind: 'project', projectId: initialProject }
     : null) as ProjectLayer | null,
 });
+
+// The history holds the initial location too. Read it back out so
+// `detailStack` and the history's entry are one (proxied) array from the
+// start, as they are after every navigation: routes are compared by identity.
+navigation.detailStack = currentEntry(navigation.history);
+navigation.currentRoute = navigation.detailStack[navigation.detailStack.length - 1];
 
 /**
  * Run `close` when the view calling this leaves the screen while it stays
@@ -239,11 +306,14 @@ function workspaceRoute(stack = navigation.detailStack): DetailRoute {
   return rootRoute();
 }
 
-function syncCompatibilityState(): void {
+function syncNavigationState(): void {
+  const history = navigation.history;
+  navigation.detailStack = currentEntry(history);
+  navigation.canGoBack = canGoBack(history);
+  navigation.canGoForward = canGoForward(history);
   const route = currentRoute();
   const base = workspaceRoute();
   navigation.currentRoute = route;
-  navigation.canGoBack = navigation.detailStack.length > 1;
   navigation.workspaceParked = route.kind === 'settings' || route.kind === 'diff';
   navigation.activeView = route.kind === 'settings' ? 'settings' : 'workspace';
   if (route.kind === 'settings') navigation.settingsSection = route.section;
@@ -274,7 +344,7 @@ function syncCompatibilityState(): void {
 /**
  * Home becomes retained the first time it is the base route of a workspace
  * that renders — i.e. once the initial route has settled (App.svelte gates
- * <main> on that), so a root stack waiting on restoreInitialRoute doesn't count.
+ * <main> on that), so a root entry waiting on restoreInitialRoute doesn't count.
  */
 function retainHomeLayerIfActive(): void {
   if (navigation.homeActive && navigation.initialRouteSettled) navigation.homeLayerRetained = true;
@@ -285,7 +355,7 @@ function retainHomeLayerIfActive(): void {
  * base route at that point. Every settle path must go through here: a window
  * that settles at the root without retaining the grid — e.g. a secondary
  * window whose seed never lands — renders two empty layers and stays blank,
- * with no Back affordance at the root to trigger the goHome that would.
+ * with nothing at the root to trigger the goHome that would.
  */
 function settleInitialRoute(): void {
   navigation.initialRouteSettled = true;
@@ -316,22 +386,352 @@ export function releaseBoardLayer(groupId: string): void {
   navigation.projectLayer = null;
 }
 
-function setDetailStack(routes: DetailRoute[]): void {
-  navigation.detailStack = routes.length > 0 ? routes : [rootRoute()];
-  syncCompatibilityState();
+// ── The history ──
+
+/** Whether two routes show the same view. A diff route is only ever the same
+ *  as itself: opening one diff twice is two visits. */
+function sameRoute(a: DetailRoute, b: DetailRoute): boolean {
+  if (a === b) return true;
+  if (a.kind === 'project') return b.kind === 'project' && a.projectId === b.projectId;
+  if (a.kind === 'board') return b.kind === 'board' && a.groupId === b.groupId;
+  if (a.kind === 'settings') return b.kind === 'settings' && a.section === b.section;
+  if (a.kind === 'diff') return false;
+  return a.kind === b.kind;
 }
 
-function replaceCurrentRoute(route: DetailRoute): void {
-  setDetailStack([...navigation.detailStack.slice(0, -1), route]);
+function sameLocation(a: ViewLocation, b: ViewLocation): boolean {
+  return a.length === b.length && a.every((route, i) => sameRoute(route, b[i]));
 }
 
-function pushOrReplaceRoute(route: DetailRoute): void {
-  const current = currentRoute();
-  if (current.kind === route.kind) {
-    replaceCurrentRoute(route);
-  } else {
-    setDetailStack([...navigation.detailStack, route]);
+/** Whether the location shows the project: as its workspace route, or in a
+ *  diff of one of its branches. */
+function locationShowsProject(location: ViewLocation, gone: (projectId: string) => boolean) {
+  return location.some(
+    (route) =>
+      (route.kind === 'project' || route.kind === 'diff') &&
+      !!route.projectId &&
+      gone(route.projectId)
+  );
+}
+
+function isDiffRoute(route: DetailRoute): route is DiffDetailRoute {
+  return route.kind === 'diff';
+}
+
+/** Whether the window is still on the single root entry it started with:
+ *  nothing restored or seeded, and the user hasn't navigated. */
+function atPristineRoot(): boolean {
+  return navigation.history.entries.length === 1 && currentRoute().kind === 'projects';
+}
+
+/**
+ * Start the history over. For the route the window opens on (restored,
+ * seeded or corrected at startup), which is not a navigation: nothing is
+ * persisted or announced.
+ */
+function resetHistory(history: NavigationHistory<ViewLocation>): void {
+  navigation.history = history;
+  syncNavigationState();
+}
+
+/**
+ * Make `next` the history, and do what arriving at its current location
+ * calls for. Every navigation ends here, whether it added an entry, replaced
+ * one, stepped Back or Forward or dropped entries, so these follow the view
+ * on screen rather than the function that changed it:
+ *
+ * - A diff route that left the screen announces itself, `diffExit` saying
+ *   how. `replaced` (`staged:diff-route-replaced`): the user went somewhere
+ *   else, even if that is the project the diff was over. `closed`
+ *   (`staged:diff-route-popped`): the diff was closed or stepped Back from,
+ *   and the view is now what was under it, so a reference that led to the
+ *   diff can come back; a step that lands anywhere else is `replaced`.
+ *   `silent`: one diff standing in for another.
+ * - The grid coming on screen restores its scroll position to the project
+ *   the user came from.
+ * - A change of workspace route is persisted as the last viewed project (the
+ *   project, or none for the grid; the repos list and boards leave it), and
+ *   a project coming on screen is marked read.
+ */
+function applyHistory(
+  next: NavigationHistory<ViewLocation>,
+  diffExit: 'replaced' | 'closed' | 'silent' = 'replaced'
+): void {
+  if (next === navigation.history) return;
+  const previous = navigation.detailStack;
+  const previousProjectId = navigation.selectedProjectId;
+  navigation.history = next;
+  syncNavigationState();
+  const location = navigation.detailStack;
+  if (location === previous) return;
+
+  if (diffExit !== 'silent') {
+    const closed = diffExit === 'closed' && sameLocation(location, previous.slice(0, -1));
+    for (const route of previous) {
+      if (route.kind !== 'diff' || location.some((other) => other === route)) continue;
+      const type = closed ? 'staged:diff-route-popped' : 'staged:diff-route-replaced';
+      window.dispatchEvent(new CustomEvent(type, { detail: { route } }));
+    }
   }
+
+  if (currentRoute().kind === 'projects' && previous[previous.length - 1].kind !== 'projects') {
+    requestProjectsListRestore(previousProjectId);
+  }
+
+  const base = workspaceRoute(location);
+  if (sameRoute(workspaceRoute(previous), base)) return;
+  if (base.kind === 'projects') {
+    persistLastProject(null);
+  } else if (base.kind === 'project') {
+    persistLastProject(base.projectId);
+    if (projectStateStore.isUnread(base.projectId)) projectStateStore.markAsRead(base.projectId);
+  }
+}
+
+/** Go to a location: a new history entry, unless it is the one on screen. */
+function visitLocation(location: ViewLocation): void {
+  applyHistory(visit(navigation.history, location, sameLocation));
+}
+
+/** Show a location in place of the current one, without a new history entry. */
+function replaceLocation(location: ViewLocation, diffExit?: 'silent'): void {
+  if (sameLocation(navigation.detailStack, location)) return;
+  applyHistory(replaceCurrent(navigation.history, location), diffExit);
+}
+
+/**
+ * Close the settings / diff route on top, showing what was under it. That is
+ * a step Back when the user came from there, as they nearly always did, so
+ * Forward reopens what was closed. Otherwise (a diff opened over a project
+ * other than the one the user was on) it is a visit to what was under it.
+ */
+function closeTopRoute(): void {
+  const location = navigation.detailStack;
+  if (location.length <= 1) return;
+  const beneath = location.slice(0, -1);
+  const history = navigation.history;
+  const earlier = history.entries[history.index - 1];
+  if (earlier && sameLocation(earlier, beneath)) applyHistory(historyBack(history), 'closed');
+  else applyHistory(visit(history, beneath, sameLocation), 'closed');
+}
+
+/** Drop the history entries that show a project `gone` says no longer
+ *  exists, so Back and Forward never land on one. */
+function forgetProjects(gone: (projectId: string) => boolean, keep?: ViewLocation): void {
+  applyHistory(
+    rewriteEntries(
+      navigation.history,
+      (location) => (location !== keep && locationShowsProject(location, gone) ? null : location),
+      [rootRoute()],
+      sameLocation
+    )
+  );
+}
+
+/**
+ * Drop a project that is gone (deleted, here or elsewhere) from the history.
+ * Callers showing the project navigate away first; if it is still the view
+ * on screen, the nearest earlier entry takes its place, or the grid.
+ */
+export function forgetProject(projectId: string): void {
+  forgetProjects((id) => id === projectId);
+}
+
+/**
+ * The project a mounted project view shows is gone: deleted in another
+ * window, or by anything else that didn't navigate away first. `onScreen`
+ * says whether that view is the one showing. If so the window goes to the
+ * grid; a view only retained under the grid has its layer released instead,
+ * so it unmounts rather than show a missing project, and the view on screen
+ * doesn't move. Either way the project leaves the history, so Back and
+ * Forward don't return to it.
+ */
+export function leaveGoneProject(projectId: string, onScreen: boolean): void {
+  if (onScreen) goHome();
+  else releaseProjectLayer(projectId);
+  forgetProject(projectId);
+}
+
+/**
+ * Take the boards `gone` says are no longer offered out of the history.
+ *
+ * An entry that is the board alone is dropped. One with something over the
+ * board (settings, where the unpinning most likely happened, or a diff)
+ * keeps that over the grid instead, so the user isn't thrown out of what
+ * they were doing. When the board itself is the view on screen, the nearest
+ * earlier entry takes its place, as Back would, or the grid when there is
+ * none. Whichever workspace route that leaves is what's persisted.
+ */
+function forgetBoards(gone: (groupId: string) => boolean): void {
+  applyHistory(
+    rewriteEntries(
+      navigation.history,
+      (location) => {
+        const rest = location.filter((route) => !(route.kind === 'board' && gone(route.groupId)));
+        if (rest.length === location.length) return location;
+        if (rest.length === 0) return null;
+        return [rootRoute(), ...rest];
+      },
+      [rootRoute()],
+      sameLocation
+    )
+  );
+}
+
+/** Whether the board is one the sidebar offers: its group exists and its
+ *  board is pinned, BoardView's rule for showing one. A tag catalog that has
+ *  not loaded refuses nothing. */
+function boardOffered(groupId: string): boolean {
+  if (!tagsStore.loaded) return true;
+  return !!tagsStore.catalog.groupsById.get(groupId)?.showInSidebar;
+}
+
+/** Drop the history entries showing a diff `gone` says can no longer be
+ *  shown, other than the one on screen (the diff view there is the user's
+ *  to close). */
+function forgetDiffs(gone: (route: DiffDetailRoute) => boolean): void {
+  const onScreen = navigation.detailStack;
+  applyHistory(
+    rewriteEntries(
+      navigation.history,
+      (location) =>
+        location !== onScreen && location.some((route) => isDiffRoute(route) && gone(route))
+          ? null
+          : location,
+      [rootRoute()],
+      sameLocation
+    )
+  );
+}
+
+/**
+ * Put `next` in the place of the diff route `stale`, in every history entry
+ * that holds it. For a diff brought up to date before a step lands on it
+ * (stepHistory), which is never the diff on screen.
+ *
+ * One diff route is shared by every entry built over it: Settings opened
+ * from a diff leaves `[project, diff]` and `[project, diff, settings]`
+ * holding the same object, and a diff route is the same as another only by
+ * identity (sameRoute). Swapping it in one entry alone made those two
+ * disagree: stepping between them announced a diff leaving the screen that
+ * never left it, and closing Settings added an entry where it should have
+ * stepped Back. So all of them get the one replacement.
+ *
+ * That replacement is made a state proxy here, once, before it goes into the
+ * entries. `navigation` proxies what it holds lazily and per holder, so a
+ * plain object put into two entries would be read back out of them as two
+ * different proxies, and no longer be identical to itself.
+ *
+ * The swap is one diff standing in for another: no diff event is fired, so a
+ * reference trail that led to the diff is still there to come back to.
+ */
+function replaceDiffRoute(stale: DiffDetailRoute, next: DiffDetailRoute): void {
+  const route = $state(next);
+  applyHistory(
+    rewriteEntries(
+      navigation.history,
+      (location) =>
+        location.includes(stale) ? location.map((r) => (r === stale ? route : r)) : location,
+      [rootRoute()],
+      sameLocation
+    ),
+    'silent'
+  );
+}
+
+/**
+ * One step Back or Forward, for goBack / goForward. Does nothing, and
+ * resolves false, when there is no entry that way, and when stepping would
+ * pull the view out from under something:
+ *
+ * - A dialog is open. Navigating would unmount the view that owns it along
+ *   with whatever was typed into it (the rule openProjectExternally follows).
+ * - The diff view could not save the comment being typed, so the text is
+ *   still there to retry. Like the ⌘K palette, the step waits for that save
+ *   first, and is dropped if the user navigated or opened a dialog meanwhile.
+ *
+ * A step never lands on something that is gone. Before it is taken:
+ *
+ * - Entries for projects deleted in another window are dropped (this
+ *   window's own deletes drop theirs at once, see forgetProject), and so are
+ *   entries for boards that are no longer offered. A board unpinned while it
+ *   is mounted leaves through BoardView (leaveBoard); one that is only in
+ *   the history has nothing mounted to notice, so it is caught here.
+ * - When the entry the step would land on shows a diff, the backend is asked
+ *   about it (refreshDiffRoute). A diff whose branch or review is gone is
+ *   dropped, along with every other entry for that branch or review, and the
+ *   step goes to the entry beyond it. Otherwise the diff is brought up to
+ *   date with the branch, in every entry that shows it (replaceDiffRoute),
+ *   so the diff view opens on today's commits rather than the ones it was
+ *   first opened with. This is the one case where a step from a view other
+ *   than the diff is not taken in the caller's tick.
+ * - Not when the diff is already part of the view on screen: Settings over
+ *   the diff stepping Back onto it, or the diff stepping Forward to Settings
+ *   over it. The step leaves that route where it is, so nothing is asked
+ *   and the step is taken in the caller's tick.
+ */
+async function stepHistory(
+  step: (history: NavigationHistory<ViewLocation>) => NavigationHistory<ViewLocation>
+): Promise<boolean> {
+  if (dialogOpen()) return false;
+  if (projectsDataStore.loaded) {
+    forgetProjects((projectId) => !projectOpenable(projectId), navigation.detailStack);
+  }
+  forgetBoards((groupId) => !boardOffered(groupId));
+
+  for (;;) {
+    const from = navigation.history;
+    const ahead = step(from);
+    if (ahead === from) return false;
+    const target = currentEntry(ahead);
+    const diff = target.find(isDiffRoute);
+    if (!diff || navigation.detailStack.includes(diff)) break;
+
+    const refreshed = await refreshDiffRoute(diff);
+    if (navigation.history !== from || dialogOpen()) return false;
+    if (refreshed.status === 'unknown') break;
+    if (refreshed.status === 'current') {
+      replaceDiffRoute(diff, refreshed.route);
+      break;
+    }
+    // Gone: drop it and look at the entry that is now ahead.
+    const { branchId, reviewId } = diff;
+    forgetDiffs(
+      refreshed.what === 'branch'
+        ? (route) => route.branchId === branchId
+        : (route) => route.reviewId === reviewId
+    );
+    // Nothing was dropped, which cannot happen: the entry ahead holds the
+    // diff and is not the one on screen. Stop rather than ask again forever.
+    if (navigation.history === from) return false;
+  }
+
+  const diffSaved = diffLeaveCheck();
+  if (diffSaved) {
+    const from = navigation.history;
+    let saved = false;
+    try {
+      saved = await diffSaved();
+    } catch (e) {
+      console.error('[Navigation] Could not save the diff comment before leaving:', e);
+    }
+    if (!saved || navigation.history !== from || dialogOpen()) return false;
+  }
+
+  applyHistory(step(navigation.history), 'closed');
+  return true;
+}
+
+/** Step Back to the previous history entry, as a browser's Back button does.
+ *  Resolves whether the view changed (see stepHistory for when it doesn't). */
+export function goBack(): Promise<boolean> {
+  return stepHistory(historyBack);
+}
+
+/** Step Forward to the next history entry: the one Back was last pressed on.
+ *  Resolves whether the view changed. */
+export function goForward(): Promise<boolean> {
+  return stepHistory(historyForward);
 }
 
 /**
@@ -356,10 +756,13 @@ function persistLastProject(projectId: string | null): void {
 /**
  * Put the persisted route in place before the first workspace render.
  *
- * Only the first window (label `main`) and web mode restore. A stack already
+ * Only the first window (label `main`) and web mode restore. A history already
  * seeded from the web snapshot is final; otherwise the persisted project is
  * read from the store (initialising it if initPreferences hasn't yet — the two
- * share one init) and pushed if the user hasn't navigated meanwhile. Settles
+ * share one init) and becomes the window's first history entry if the user
+ * hasn't navigated meanwhile. It replaces the root entry rather than being
+ * visited from it: the window opens on the project, and Back has nowhere to
+ * go (except in the mobile layout, see openingHistory). Settles
  * `navigation.initialRouteSettled` whatever happens.
  *
  * Store init is awaited unbounded: `<main>` is also gated on
@@ -367,12 +770,12 @@ function persistLastProject(projectId: string | null): void {
  * early during init would only revert to the home-grid flash without
  * rendering anything sooner. Only the key read itself is bounded by
  * INITIAL_ROUTE_TIMEOUT_MS; a read that lands later is left to
- * initNavigation, which restores a pristine stack the slow way.
+ * initNavigation, which restores a pristine history the slow way.
  */
 export async function restoreInitialRoute(): Promise<void> {
   if (navigation.initialRouteSettled) return;
   const label = getWindowLabel();
-  if ((label && label !== 'main') || navigation.detailStack.length > 1) {
+  if ((label && label !== 'main') || !atPristineRoot()) {
     settleInitialRoute();
     return;
   }
@@ -392,15 +795,15 @@ export async function restoreInitialRoute(): Promise<void> {
       console.warn('[Navigation] Persisted route not read in time, rendering the first route');
       // Swallow the late result; initNavigation re-reads it.
       read.catch(() => {});
-    } else if (lastProjectId && navigation.detailStack.length === 1) {
-      setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
+    } else if (lastProjectId && atPristineRoot()) {
+      resetHistory(openingHistory(lastProjectId));
     }
   } catch (e) {
     console.warn('[Navigation] Could not read the persisted route:', e);
   } finally {
     clearTimeout(timer);
-    // Same synchronous step as the push above, so no render can observe the
-    // settled flag with the stack still at the root.
+    // Same synchronous step as the restore above, so no render can observe
+    // the settled flag with the history still at the root.
     settleInitialRoute();
   }
 }
@@ -410,7 +813,7 @@ export async function restoreInitialRoute(): Promise<void> {
  *
  * Must be called after `initPersistentStore()` (which is done inside
  * `initPreferences()`) and after `restoreInitialRoute()`, which normally has
- * already pushed the persisted project so this only validates it. If the
+ * already restored the persisted project so this only validates it. If the
  * stored project no longer exists the user is sent to the home screen instead.
  *
  * Only the first window (label `main`) restores the persisted route on cold
@@ -426,11 +829,11 @@ export async function initNavigation(): Promise<void> {
     await projectsDataStore.whenLoaded();
     if (projectsDataStore.loaded && !projectsDataStore.projects.some((p) => p.id === seedProjectId))
       return;
-    setDetailStack([rootRoute(), { kind: 'project', projectId: seedProjectId }]);
+    resetHistory(openingHistory(seedProjectId));
     return;
   }
 
-  const seeded = navigation.detailStack.length > 1;
+  const seeded = !atPristineRoot();
   // `selectedProjectId` is normally already set, from the localStorage mirror
   // (web cold boot) or by restoreInitialRoute. Fall back to the async persistent
   // store otherwise (it is the source of truth) — e.g. the restore timed out.
@@ -450,19 +853,19 @@ export async function initNavigation(): Promise<void> {
   }
   const existingIds = new Set(projectsDataStore.projects.map((p) => p.id));
   if (existingIds.has(lastProjectId)) {
-    // Web: the seeded stack is already right. Tauri: push the restored route,
+    // Web: the seeded history is already right. Tauri: restore the route,
     // but only if the user hasn't navigated while we were validating.
-    if (!seeded && navigation.detailStack.length === 1) {
-      setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
+    if (!seeded && atPristineRoot()) {
+      resetHistory(openingHistory(lastProjectId));
     }
   } else if (
-    (!seeded && navigation.detailStack.length === 1) ||
+    (!seeded && atPristineRoot()) ||
     navigation.detailStack.some(
       (route) => route.kind === 'project' && route.projectId === lastProjectId
     )
   ) {
-    // Project was deleted — back out to home and clear the persisted values.
-    setDetailStack([rootRoute()]);
+    // Project was deleted — start over at home and clear the persisted values.
+    resetHistory(createHistory([rootRoute()]));
     await setStoreValue(LAST_PROJECT_STORE_KEY, null);
     clearSnapshot(SNAPSHOT_KEYS.lastProject);
   }
@@ -470,105 +873,55 @@ export async function initNavigation(): Promise<void> {
   await projectStateStore.pruneDeletedProjects(existingIds);
 }
 
-/**
- * Navigate to the repos list view. Over a project it stacks, so Back returns
- * to the project; a board and the repos view are sidebar siblings, so from a
- * board it replaces (board → All repos → board would otherwise grow the stack
- * on every round trip).
- */
+/** Navigate to the repos list view. */
 export function showAllRepos(): void {
-  if (currentRoute().kind === 'board') {
-    replaceCurrentRoute({ kind: 'repos' });
-  } else {
-    pushOrReplaceRoute({ kind: 'repos' });
-  }
+  visitLocation([{ kind: 'repos' }]);
 }
 
 /**
  * Navigate to a tag group's board (its pinned sidebar row). Like the repos
  * view it takes the project layer, and is not persisted as the last route.
- * Mirrors selectProject: the board replaces a project, repos or board route
- * and is pushed only over the root, so clicking between sidebar rows never
- * stacks routes.
  */
 export function selectBoard(groupId: string): void {
-  const current = currentRoute();
-  const route: DetailRoute = { kind: 'board', groupId };
-  if (current.kind === 'project' || current.kind === 'repos' || current.kind === 'board') {
-    replaceCurrentRoute(route);
-  } else if (current.kind === 'settings') {
-    setDetailStack([...navigation.detailStack.slice(0, -1), route]);
-  } else {
-    setDetailStack([rootRoute(), route]);
-  }
+  visitLocation([{ kind: 'board', groupId }]);
 }
 
 /**
  * The board for `groupId` is no longer offered (its group deleted, or its
- * board unpinned, here or in another window). Take every route for it out of
- * the stack, wherever they sit, leaving whatever is above them — settings,
- * where the unpinning most likely happened, or a diff — in place, so the
- * user isn't thrown out of what they were doing. What was under the board
- * becomes the base route: home, or a project when the board was opened over
- * one ([projects, project p1, board] lands back on p1, as Back would), and
- * that is what's persisted. A board only retained under home has no route;
- * its layer is released so it unmounts rather than show a board nobody
- * offers.
+ * board unpinned, here or in another window). Take it out of the history,
+ * so Back and Forward never land on it (forgetBoards says what becomes of
+ * each entry). A board only retained under home has no entry on screen; its
+ * layer is released so it unmounts rather than show a board nobody offers.
+ *
+ * Called by the board's own view, which only notices while it is mounted.
+ * A board that is in the history and nowhere else is dropped by the next
+ * step (stepHistory).
  */
 export function leaveBoard(groupId: string): void {
-  const stack = navigation.detailStack;
-  const rest = stack.filter((route) => !(route.kind === 'board' && route.groupId === groupId));
-  if (rest.length !== stack.length) {
-    setDetailStack(rest);
-    const base = workspaceRoute();
-    if (base.kind === 'projects') persistLastProject(null);
-    else if (base.kind === 'project') persistLastProject(base.projectId);
-  }
+  forgetBoards((id) => id === groupId);
   releaseBoardLayer(groupId);
 }
 
 /**
  * Navigate to a specific project's detail view.
  *
- * The project takes the place of whatever the workspace was showing: from the
- * grid it is pushed, and from a project or the repos list it replaces that
- * route, so Back goes to whatever was under the replaced route. That is home,
- * except for a repos list opened from a project: from `[home, A, repos]`,
- * opening B leaves `[home, A, B]`, and Back goes to A.
+ * The project is a new history entry, wherever it is opened from: Back
+ * returns to the view the user was on, be that the grid, another project,
+ * the repos list or a board. Opening the project already on screen changes
+ * nothing.
  *
- * Settings and the diff view sit over the workspace rather than in it, so
- * from either one the project replaces the workspace route underneath and the
- * routes over it go: with Settings open over project A
- * (`[home, A, settings]`), opening B leaves `[home, B]` as a sidebar switch
- * from A would, not `[home, A, B]`, and opening A itself leaves `[home, A]`.
- * Over the repos list the same rule gives what a pick from that list gives:
- * with a diff over `[home, A, repos]`, opening B leaves `[home, A, B]`, and
- * Back goes to A, not home. The ⌘K palette is how a project gets opened from
- * there.
+ * Settings and the diff view sit over the workspace rather than in it, and
+ * the project is not opened under them: from Settings over project A, the
+ * location becomes B alone, and Back returns to Settings over A. The ⌘K
+ * palette is how a project gets opened from there.
  *
- * A diff route dropped this way announces itself (`staged:diff-route-replaced`)
- * like a popped one does. Callers leaving the diff view from outside it await
- * diffLeaveCheck first.
+ * A diff route left this way announces itself (`staged:diff-route-replaced`),
+ * where one that was closed or stepped Back from says
+ * `staged:diff-route-popped`. Callers leaving the diff view from outside it
+ * await diffLeaveCheck first.
  */
 export function selectProject(projectId: string): void {
-  const stack = navigation.detailStack;
-  let end = stack.length;
-  while (end > 1 && (stack[end - 1].kind === 'settings' || stack[end - 1].kind === 'diff')) end--;
-  const dropped = stack.slice(end);
-  const base = stack[end - 1] ?? rootRoute();
-  const route: DetailRoute = { kind: 'project', projectId };
-  if (base.kind === 'project' || base.kind === 'repos' || base.kind === 'board') {
-    setDetailStack([...stack.slice(0, end - 1), route]);
-  } else {
-    setDetailStack([rootRoute(), route]);
-  }
-  for (const droppedRoute of dropped) {
-    if (droppedRoute.kind !== 'diff') continue;
-    window.dispatchEvent(
-      new CustomEvent('staged:diff-route-replaced', { detail: { route: droppedRoute } })
-    );
-  }
-  persistLastProject(projectId);
+  visitLocation([{ kind: 'project', projectId }]);
   // Mark the project as read when navigating to it, but only if it's not already read
   if (projectStateStore.isUnread(projectId)) {
     projectStateStore.markAsRead(projectId);
@@ -622,82 +975,76 @@ export function selectNextProject(): void {
   }
 }
 
-/** Navigate back to the projects list (landing page). */
+/**
+ * Navigate to the projects list (landing page). A visit like any other: Back
+ * from the grid returns to the view it was opened from.
+ */
 export function goHome(): void {
-  requestProjectsListRestore(navigation.selectedProjectId);
-  setDetailStack([rootRoute()]);
-  persistLastProject(null);
+  visitLocation([rootRoute()]);
 }
 
-/** Show the dedicated settings view and select a settings section. */
+/**
+ * Show the dedicated settings view and select a settings section. Opening
+ * Settings is a history entry; switching sections inside it is not, so Back
+ * leaves Settings rather than stepping through the sections looked at.
+ */
 export function openSettings(section: SettingsSection = 'general'): void {
-  pushOrReplaceRoute({ kind: 'settings', section });
-}
-
-/** Return from settings to the workspace view (project or home). */
-export function closeSettings(): void {
+  const location = navigation.detailStack;
+  const route: DetailRoute = { kind: 'settings', section };
   if (currentRoute().kind === 'settings') {
-    popDetailRoute();
+    replaceLocation([...location.slice(0, -1), route]);
+  } else {
+    visitLocation([...location, route]);
   }
 }
 
-/** Open the diff detail route from a branch card or timeline item. */
+/** Return from settings to the workspace view under it (project or home). */
+export function closeSettings(): void {
+  if (currentRoute().kind === 'settings') {
+    closeTopRoute();
+  }
+}
+
+/**
+ * Open the diff detail route from a branch card or timeline item.
+ *
+ * The diff shows over its project: over the view on screen when that is the
+ * project (or the diff names none), and otherwise over the project's own
+ * view, which the workspace switches to. From the diff view itself the new
+ * diff takes the old one's place, in the same history entry (stepping
+ * through references is the reference history's job, not this one's).
+ */
 export function openDiffRoute(route: Omit<DiffDetailRoute, 'kind'>): void {
   const diffRoute: DiffDetailRoute = { kind: 'diff', ...route };
+  const location = navigation.detailStack;
   const current = currentRoute();
 
   if (current.kind === 'diff') {
-    replaceCurrentRoute(diffRoute);
-  } else if (current.kind === 'project' && route.projectId === current.projectId) {
-    setDetailStack([...navigation.detailStack, diffRoute]);
-  } else if (route.projectId) {
-    setDetailStack([rootRoute(), { kind: 'project', projectId: route.projectId }, diffRoute]);
+    replaceLocation([...location.slice(0, -1), diffRoute], 'silent');
+  } else if (
+    route.projectId &&
+    !(current.kind === 'project' && current.projectId === route.projectId)
+  ) {
+    visitLocation([{ kind: 'project', projectId: route.projectId }, diffRoute]);
   } else {
-    setDetailStack([...navigation.detailStack, diffRoute]);
-  }
-
-  if (route.projectId) {
-    persistLastProject(route.projectId);
+    visitLocation([...location, diffRoute]);
   }
 }
 
-/** Pop one app-level detail route when possible. */
-export function popDetailRoute(): void {
-  if (navigation.detailStack.length <= 1) return;
-
-  const poppedRoute = currentRoute();
-  const previousProjectId = navigation.selectedProjectId;
-  const nextStack = navigation.detailStack.slice(0, -1);
-  setDetailStack(nextStack);
-
-  const nextRoute = currentRoute();
-  if (nextRoute.kind === 'projects') {
-    requestProjectsListRestore(previousProjectId);
-    persistLastProject(null);
-  } else if (nextRoute.kind === 'project') {
-    persistLastProject(nextRoute.projectId);
-  }
-
-  if (poppedRoute.kind === 'diff') {
-    window.dispatchEvent(
-      new CustomEvent('staged:diff-route-popped', { detail: { route: poppedRoute } })
-    );
-  }
-}
-
-/** Pop the diff route only if the provided route is still the current route. */
+/** Close the diff route only if the provided route is still the current route. */
 export function closeDiffRouteIfCurrent(expectedRoute: DiffDetailRoute): void {
   if (currentRoute() !== expectedRoute) return;
-  popDetailRoute();
+  closeTopRoute();
 }
 
 // ── Leaving the diff view from outside it ──
 //
 // Comments typed into the diff view save as they are written, and the view's
-// own ways out (Escape, ⌘←, its close button) wait for the last save and stay
-// on the diff when it fails, so the text is still there to retry. A
-// navigation the diff view didn't start (the ⌘K palette opening a project)
-// has to make the same check, or a failed save would go with the view.
+// own ways out (Escape, its close button) wait for the last save and stay on
+// the diff when it fails, so the text is still there to retry. A navigation
+// the diff view didn't start (Back and Forward, the ⌘K palette opening a
+// project) has to make the same check, or a failed save would go with the
+// view.
 
 /** Resolves true once what is typed into the diff view is saved, false when
  *  a save failed and the view should stay. */
@@ -809,8 +1156,8 @@ function answerWithoutNavigating(projectId: string): ProjectOpenAnswer | null {
  * resolving true and the navigation. When it rejects, so does this, and
  * nothing is navigated.
  *
- * From Settings or the diff view the project replaces the workspace route
- * underneath, as selectProject describes.
+ * From Settings or the diff view the project takes their place, as
+ * selectProject describes.
  */
 export async function openProjectExternally(
   projectId: string,

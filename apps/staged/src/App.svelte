@@ -51,7 +51,6 @@
     restoreInitialRoute,
     closeDiffRouteIfCurrent,
     openSettings,
-    popDetailRoute,
     selectPreviousProject,
     selectNextProject,
   } from './lib/features/layout/navigation.svelte';
@@ -61,6 +60,7 @@
     triggerShortcut,
   } from './lib/features/keyboard/shortcuts';
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
+  import { historyShortcuts } from './lib/features/layout/historyShortcuts';
   import { applyWindowTitle, formatWindowTitle } from './lib/features/layout/windowTitle';
   import { projectFiltersStore } from './lib/features/projects/projectFilters.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
@@ -253,12 +253,6 @@
     void commands.newWindow(navigation.selectedProjectId ?? null).catch((e) => {
       console.error('Failed to open new window:', e);
     });
-  }
-
-  function navigateBack(): boolean {
-    if (!navigation.canGoBack) return false;
-    popDetailRoute();
-    return true;
   }
 
   function isTextInputActive(): boolean {
@@ -524,14 +518,10 @@
             },
           ]
         : []),
-      {
-        id: 'app-go-back',
-        description: 'Back',
-        category: 'app',
-        keys: ['ArrowLeft'],
-        modifiers: { meta: true },
-        handler: navigateBack,
-      },
+      // Back and Forward through the views visited (⌘[ / ⌘], ⌘← / ⌘→). The
+      // definitions, and why the keys are swallowed with nowhere to go, are
+      // historyShortcuts'.
+      ...historyShortcuts(),
       {
         id: 'app-delete-project',
         description: 'Remove current project',
@@ -784,7 +774,7 @@
   {:else if navigation.initialRouteSettled}
     <!-- Held back until the persisted route is in place (bounded by
          INITIAL_ROUTE_TIMEOUT_MS): the whole main, not just the workspace,
-         so the top bar's Back affordance doesn't flip in either. -->
+         so the top bar's title and actions don't flip in either. -->
     <main>
       <TopBar />
       <div class="content">

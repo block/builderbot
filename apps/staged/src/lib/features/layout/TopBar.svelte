@@ -1,19 +1,19 @@
 <!--
   TopBar.svelte - Persistent app bar with drag region and route content
 
-  Provides a drag region for window movement while detail routes register the
-  page-specific title, status, navigation, and actions rendered inside it.
+  Provides a drag region for window movement. The history and search buttons
+  (TopBarNavControls) are the bar's own and sit at its left on every view,
+  after the room kept for the traffic lights; views register the
+  page-specific title, status, and actions rendered beside them.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import { getWindowSync } from '../../transport';
-  import { navigation, popDetailRoute } from './navigation.svelte';
   import { topBar } from './topBarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import { getTrafficLightSpacerWidth, watchWindowChrome } from '../../shared/windowChrome.svelte';
-  import { Button } from '$lib/components/ui/button';
   import { centerSlotRoom } from './topBarCenter';
+  import TopBarNavControls from './TopBarNavControls.svelte';
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
@@ -24,10 +24,14 @@
     };
   });
 
+  // A press on the bar drags the window, except on a control. The history
+  // and search group counts as one whole: a disabled button takes no pointer
+  // events, so a press on it lands on the group, and Back pressed once more
+  // than there are entries must not start moving the window.
   function startDrag(e: PointerEvent) {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
-    const isInteractive = target.closest('button, a, input, [role="button"]');
+    const isInteractive = target.closest('button, a, input, [role="button"], .top-bar-nav');
     if (!isInteractive) {
       e.preventDefault();
       getWindowSync().startDragging();
@@ -37,7 +41,7 @@
   let hasTitle = $derived(
     !!topBar.title || !!topBar.subtitle || !!topBar.leading || !!topBar.badges
   );
-  let trafficLightSpacerWidth = $derived(getTrafficLightSpacerWidth(viewport.isMobile));
+  let trafficLightSpacerWidth = $derived(getTrafficLightSpacerWidth(viewport.hasCoarsePointer));
 
   // The desktop centre slot's room (see centerSlotRoom), measured whenever
   // the bar or anything beside the slot changes size. The left and right
@@ -104,18 +108,7 @@
 >
   <div class="traffic-light-spacer" class:collapsed={trafficLightSpacerWidth === 0}></div>
   <div class="left-actions" use:besideCenter={'left'}>
-    {#if navigation.canGoBack}
-      <Button
-        variant="ghost"
-        size="sm"
-        class="top-bar-action h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
-        title={viewport.showShortcutHints ? 'Back (⌘← / Esc)' : 'Back'}
-        onclick={popDetailRoute}
-      >
-        <ArrowLeft size={14} />
-        <span class="top-bar-action-label">Back</span>
-      </Button>
-    {/if}
+    <TopBarNavControls />
 
     {#if topBar.leftActions}
       {@render topBar.leftActions()}

@@ -15,9 +15,15 @@
   (the sidebar keeps the selected project's row visible on its own).
 
   It opens over Settings and the diff view too. A project opened from there
-  replaces the workspace route underneath (selectProject), and the diff view
-  first saves what was typed into it (diffLeaveCheck) while the row being
-  opened shows the wait and the palette takes nothing but a dismissal.
+  takes their place (selectProject), and the diff view first saves what was
+  typed into it (diffLeaveCheck) while the row being opened shows the wait
+  and the palette takes nothing but a dismissal.
+
+  Beside the field is "All projects", which goes to the projects grid
+  (goHome), with the same wait over the diff view. No view is a step Back
+  from the grid any more (Back is the history's), and the mobile layout has
+  no sidebar to offer it, so this is the way there from any view. It is not
+  offered while the grid is the view on screen.
 
   What the panel shows is one value, `view`, which stops changing when the
   palette closes: the dialog stays mounted for its exit animation, and it
@@ -31,13 +37,21 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { toast } from 'svelte-sonner';
+  import LayoutGrid from '@lucide/svelte/icons/layout-grid';
   import Search from '@lucide/svelte/icons/search';
+  import { Button } from '$lib/components/ui/button';
   import * as Dialog from '$lib/components/ui/dialog';
   import { isImeKeydown } from '../../shared/imeKeydown';
   import { activeDescendantId, listboxOptionId } from '../../shared/listboxIds';
   import { revealWithin } from '../../shared/revealWithin';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { diffLeaveCheck, navigation, selectProject } from '../layout/navigation.svelte';
+  import {
+    diffLeaveCheck,
+    goHome,
+    navigation,
+    selectProject,
+    type DiffLeaveCheck,
+  } from '../layout/navigation.svelte';
   import { activeLayerHost } from '../layout/workspaceLayer';
   import { projectFiltersStore } from '../projects/projectFilters.svelte';
   import { projectSearchSnapshots, repoBadgeShortName } from '../projects/projectSearchContext';
@@ -67,6 +81,10 @@
     currentId: string | null;
     /** The project the palette is waiting to open. */
     busyId: string | null;
+    /** Whether the palette is waiting to open anything, the grid included. */
+    waiting: boolean;
+    /** Whether "All projects" is offered: the grid isn't the view on screen. */
+    homeOffered: boolean;
   }
 
   const NO_IDS: ReadonlySet<string> = new Set();
@@ -75,9 +93,15 @@
     filteredOutIds: NO_IDS,
     currentId: null,
     busyId: null,
+    waiting: false,
+    homeOffered: false,
   };
 
+  /** What the palette opens: a project's detail view, or the projects grid. */
+  type OpenTarget = { kind: 'project'; id: string } | { kind: 'home' };
+
   let inputEl = $state<HTMLInputElement | null>(null);
+  let homeButtonEl = $state<HTMLButtonElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
   // The highlight starts on the top row and stays there, whichever project
   // that becomes, until the arrow keys or the pointer move it. From then on
@@ -90,10 +114,10 @@
   // Set when a result was opened, so closing sends focus to the view that
   // came up rather than back to a control in the one it replaced.
   let navigated = false;
-  // Which open this is, and the project it is waiting on the diff view to
-  // save before opening (its row shows the wait).
+  // Which open this is, and what it is waiting on the diff view to save
+  // before opening (a project's row shows the wait).
   let openSession = 0;
-  let openingId = $state<string | null>(null);
+  let opening = $state<OpenTarget | null>(null);
   // The highlight was last moved by the pointer (see the reveal effect).
   let movedByPointer = false;
   // Where the pointer was last seen over the list (see handleListPointerMove).
@@ -162,7 +186,9 @@
       results: liveResults,
       filteredOutIds: liveFilteredOutIds,
       currentId: navigation.selectedProjectId,
-      busyId: openingId,
+      busyId: opening?.kind === 'project' ? opening.id : null,
+      waiting: opening !== null,
+      homeOffered: navigation.currentRoute.kind !== 'projects',
     };
     return heldView;
   });
@@ -191,7 +217,7 @@
       selectedId = null;
       selectedIndex = 0;
       navigated = false;
-      openingId = null;
+      opening = null;
       movedByPointer = false;
       pointerAt = null;
       if (listEl) listEl.scrollTop = 0;
@@ -276,7 +302,7 @@
   // One line for screen readers, in a live region that stays mounted (below):
   // how many projects are listed, or why none are.
   let status = $derived.by(() => {
-    if (view.busyId !== null) return 'Saving comment…';
+    if (view.waiting) return 'Saving comment…';
     if (rows.length > 0) {
       if (results.total > rows.length) return `Top ${rows.length} of ${results.total} projects`;
       return `${results.total} ${results.total === 1 ? 'project' : 'projects'}`;
@@ -294,9 +320,9 @@
   }
 
   /** Highlight the project at a row, from the keyboard or the pointer. Not
-   *  while a project is waiting to open (see openRow), nor once closed. */
+   *  while something is waiting to open (see openRow), nor once closed. */
   function highlight(index: number, fromPointer: boolean) {
-    if (!commandPalette.open || openingId !== null) return;
+    if (!commandPalette.open || opening !== null) return;
     const id = rows[index]?.project.id;
     if (!id || index === activeIndex) return;
     movedByPointer = fromPointer;
@@ -333,46 +359,53 @@
     );
   }
 
+  // Over the diff view, opening anything leaves it. Comments typed there
+  // save as they are written; like the diff view's own close, wait for the
+  // last save and stay when it failed, so the text is still there to retry.
+  // A project's row says it is waiting, so a slow save doesn't read as a
+  // palette that ignored the key. Until the save lands the palette holds
+  // still: the field is read-only (typing, pasting, an IME) and the keys and
+  // the pointer leave the highlight where it is, as Enter and clicks already
+  // did nothing. Otherwise a query typed meanwhile could filter the waiting
+  // row out, or the arrows scroll it away, with the open it stands for still
+  // on its way. Escape still closes, which calls the open off.
+  //
+  // Resolves whether to go ahead and open `target`.
+  async function waitForDiffSave(diffSaved: DiffLeaveCheck, target: OpenTarget) {
+    const session = openSession;
+    opening = target;
+    let saved = false;
+    try {
+      saved = await diffSaved();
+    } catch (e) {
+      console.error('[CommandPalette] Could not save the diff comment before leaving:', e);
+    } finally {
+      // Unless the palette was reopened meanwhile: `opening` is that open's
+      // now.
+      if (session === openSession) opening = null;
+    }
+    // Dismissed while the save ran: the user called it off.
+    if (!commandPalette.open || session !== openSession) return false;
+    if (!saved) {
+      // Closing returns focus to the comment that needs another try.
+      closeCommandPalette();
+      toast.error('Comment not saved', {
+        description: 'Still on the diff, so nothing typed there is lost. Try again.',
+      });
+      return false;
+    }
+    return true;
+  }
+
   async function openRow(index: number) {
     // Not from a panel that is only fading out: its rows are still there.
     if (!commandPalette.open) return;
     const project = rows[index]?.project;
-    if (!project || openingId !== null || !openable(project.id)) return;
+    if (!project || opening !== null || !openable(project.id)) return;
 
-    // Over the diff view, opening a project leaves it. Comments typed there
-    // save as they are written; like the diff view's own close, wait for the
-    // last save and stay when it failed, so the text is still there to retry.
-    // The row says it is waiting, so a slow save doesn't read as a palette
-    // that ignored the key. Until the save lands the palette holds still:
-    // the field is read-only (typing, pasting, an IME) and the keys and the
-    // pointer leave the highlight where it is, as Enter and clicks already
-    // did nothing. Otherwise a query typed meanwhile could filter the
-    // waiting row out, or the arrows scroll it away, with the open it stands
-    // for still on its way. Escape still closes, which calls the open off.
     const diffSaved = diffLeaveCheck();
     if (diffSaved) {
-      const session = openSession;
-      openingId = project.id;
-      let saved = false;
-      try {
-        saved = await diffSaved();
-      } catch (e) {
-        console.error('[CommandPalette] Could not save the diff comment before leaving:', e);
-      } finally {
-        // Unless the palette was reopened meanwhile: `openingId` is that
-        // open's now.
-        if (session === openSession) openingId = null;
-      }
-      // Dismissed while the save ran: the user called it off.
-      if (!commandPalette.open || session !== openSession) return;
-      if (!saved) {
-        // Closing returns focus to the comment that needs another try.
-        closeCommandPalette();
-        toast.error('Comment not saved', {
-          description: 'Still on the diff, so nothing typed there is lost. Try again.',
-        });
-        return;
-      }
+      if (!(await waitForDiffSave(diffSaved, { kind: 'project', id: project.id }))) return;
       if (!openable(project.id)) return;
     }
 
@@ -386,21 +419,38 @@
     if (!onScreen) selectProject(project.id);
   }
 
+  /** "All projects": go to the projects grid. */
+  async function openHome() {
+    if (!commandPalette.open || opening !== null) return;
+    const diffSaved = diffLeaveCheck();
+    if (diffSaved && !(await waitForDiffSave(diffSaved, { kind: 'home' }))) return;
+    navigated = true;
+    closeCommandPalette();
+    goHome();
+  }
+
   // On the dialog, not the input: the keys are the palette's wherever focus
   // sits inside it.
   function handleKeydown(e: KeyboardEvent) {
     if (isImeKeydown(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+    // Except on the All projects button, reached with Tab: Enter and Space
+    // press it, as on any button. Stopped, not prevented, so the press goes
+    // through and the views under the dialog don't hear the key.
+    if (e.target === homeButtonEl && (e.key === 'Enter' || e.key === ' ')) {
+      e.stopPropagation();
+      return;
+    }
     // Focus that ended up on the dialog itself (it is focusable, for the
     // focus trap) goes back to the field, where this key's text belongs.
     if (document.activeElement !== inputEl && e.key !== 'Tab' && e.key !== 'Escape') {
       inputEl?.focus();
     }
-    // Waiting to open a project (openRow): the palette holds still, and
-    // only the keys that leave it get through. The field is read-only
-    // meanwhile, and a key a read-only field has no use for falls to the
-    // browser (WebKit takes Backspace there as "back" in the page history),
-    // so the rest are taken here.
-    if (openingId !== null) {
+    // Waiting to open something (openRow, openHome): the palette holds
+    // still, and only the keys that leave it get through. The field is
+    // read-only meanwhile, and a key a read-only field has no use for falls
+    // to the browser (WebKit takes Backspace there as "back" in the page
+    // history), so the rest are taken here.
+    if (opening !== null) {
       if (e.key !== 'Escape' && e.key !== 'Tab') {
         e.preventDefault();
         e.stopPropagation();
@@ -494,9 +544,23 @@
         autocorrect="off"
         autocapitalize="off"
         spellcheck="false"
-        readonly={openingId !== null}
+        readonly={opening !== null}
         oninput={handleInput}
       />
+      {#if view.homeOffered}
+        <Button
+          bind:ref={homeButtonEl}
+          variant="ghost"
+          size="xs"
+          class="shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground"
+          title="Go to the projects grid"
+          disabled={view.waiting}
+          onclick={() => void openHome()}
+        >
+          <LayoutGrid size={12} />
+          All projects
+        </Button>
+      {/if}
     </div>
 
     {#if rows.length > 0}

@@ -1202,13 +1202,11 @@
   async function handleKeydown(event: KeyboardEvent) {
     const inInput = isEditableTarget(event.target);
 
-    // Command+Left Arrow to go back
-    if (event.key === 'ArrowLeft' && event.metaKey && !inInput) {
-      event.preventDefault();
-      event.stopPropagation();
-      await closeDiffModal();
-      return;
-    }
+    // Back (⌘[ / ⌘←, or whatever it is rebound to) is the app's registered
+    // shortcut here as everywhere (historyShortcuts): it steps the history,
+    // waiting for the comment being typed to save through the leave check
+    // registered above. This view has no Back key of its own.
+
     // Command+Up/Down Arrow to navigate between files
     if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && event.metaKey && !inInput) {
       event.preventDefault();

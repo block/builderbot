@@ -9,7 +9,8 @@ export interface TopBarExtents {
   /** The bar's left and right edges. */
   barLeft: number;
   barRight: number;
-  /** Where the content on the left (back button, title) ends. */
+  /** Where the content on the left (the history and search buttons, any
+   *  route actions, the title) ends. */
   leftEnd: number;
   /** Where the right actions start (the bar's right edge without any). */
   rightStart: number;

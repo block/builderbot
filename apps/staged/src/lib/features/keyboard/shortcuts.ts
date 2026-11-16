@@ -42,11 +42,32 @@ type BindingMap = Record<string, ShortcutBinding>;
 const shortcuts: Map<string, Shortcut> = new Map();
 const defaultBindings: Map<string, ShortcutBinding> = new Map();
 
+/** Told whenever a shortcut is registered or withdrawn, or a binding changes. */
+const changeListeners = new Set<() => void>();
+
 let savedBindings: BindingMap = {};
 let bindingsLoaded = false;
 let listenerAttached = false;
 let suppressionDepth = 0;
 const SHIFT_TYPED_KEYS = new Set(['+', '_', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')']);
+
+function notifyShortcutsChanged(): void {
+  for (const listener of [...changeListeners]) listener();
+}
+
+/**
+ * Call `listener` whenever what the registry would answer changes: a
+ * shortcut is registered or withdrawn, or its keys are rebound, reset or
+ * loaded from the saved bindings. For UI that shows a shortcut's keys
+ * outside Keyboard settings (shortcutHints.svelte.ts). Returns the function
+ * that stops the calls.
+ */
+export function subscribeToShortcutChanges(listener: () => void): () => void {
+  changeListeners.add(listener);
+  return () => {
+    changeListeners.delete(listener);
+  };
+}
 
 function cloneModifiers(modifiers?: ShortcutModifiers): ShortcutModifiers | undefined {
   if (!modifiers) return undefined;
@@ -220,6 +241,51 @@ function applySavedBindingIfPresent(shortcut: Shortcut): void {
   shortcut.modifiers = cloneModifiers(saved.modifiers);
 }
 
+/** The pairs warnOfSavedBindingCollisions has reported, so a view that
+ *  registers its shortcuts on every mount says it once. */
+const reportedCollisions = new Set<string>();
+
+/**
+ * Warn in the console when `shortcut` and another registered shortcut answer
+ * to the same key press and a saved binding is why: one of the two has keys
+ * the user chose, which Keyboard settings checked against the shortcuts
+ * there were at the time. A shortcut added since (Back and Forward took ⌘[,
+ * ⌘] and ⌘→) can have those keys as its default. handleKeydown runs the
+ * first registered match and nothing else, so one of the two is silently
+ * dead. This only makes that diagnosable: nothing is rebound.
+ *
+ * Two defaults sharing a key are not reported: that is the app's own doing,
+ * and where it happens it is meant.
+ */
+function warnOfSavedBindingCollisions(shortcut: Shortcut): void {
+  let first: Shortcut | null = null;
+  for (const other of shortcuts.values()) {
+    if (other.id === shortcut.id) {
+      first ??= shortcut;
+      continue;
+    }
+    if (!savedBindings[shortcut.id] && !savedBindings[other.id]) continue;
+    const key = shortcut.keys.find((candidate) =>
+      other.keys.some(
+        (otherKey) =>
+          normalizeKey(otherKey) === normalizeKey(candidate) &&
+          modifiersCanOverlapForKey(candidate, shortcut.modifiers, other.modifiers)
+      )
+    );
+    if (key === undefined) continue;
+    const pair = [shortcut.id, other.id].sort().join('\n');
+    if (reportedCollisions.has(pair)) continue;
+    reportedCollisions.add(pair);
+    const winner = first ?? other;
+    const label = formatShortcutLabel({ keys: [key], modifiers: shortcut.modifiers });
+    console.warn(
+      `[Shortcuts] ${label} is bound to both "${shortcut.description}" (${shortcut.id}) and ` +
+        `"${other.description}" (${other.id}) because of a saved key binding. Only ` +
+        `"${winner.description}" runs. Rebind or reset one of them in Keyboard settings.`
+    );
+  }
+}
+
 async function persistSavedBindings(): Promise<void> {
   if (Object.keys(savedBindings).length === 0) {
     await deleteStoreValue(KEYBOARD_BINDINGS_STORE_KEY);
@@ -246,6 +312,11 @@ export async function initializeShortcutBindings(): Promise<void> {
   for (const shortcut of shortcuts.values()) {
     applySavedBindingIfPresent(shortcut);
   }
+  // The shortcuts registered before the saved bindings were known.
+  for (const shortcut of shortcuts.values()) {
+    warnOfSavedBindingCollisions(shortcut);
+  }
+  notifyShortcutsChanged();
 }
 
 export function registerShortcut(shortcut: Shortcut): () => void {
@@ -265,10 +336,13 @@ export function registerShortcut(shortcut: Shortcut): () => void {
   };
   applySavedBindingIfPresent(registered);
   shortcuts.set(registered.id, registered);
+  warnOfSavedBindingCollisions(registered);
+  notifyShortcutsChanged();
 
   return () => {
     shortcuts.delete(registered.id);
     maybeDetachListener();
+    notifyShortcutsChanged();
   };
 }
 
@@ -301,6 +375,28 @@ export function getAllShortcuts(): Shortcut[] {
       }
       return a.category.localeCompare(b.category);
     });
+}
+
+/** The keys a registered shortcut is bound to now (the user's, when it has
+ *  been rebound), or null when no shortcut is registered under the id. */
+export function getShortcutBinding(id: string): ShortcutBinding | null {
+  const shortcut = shortcuts.get(id);
+  return shortcut ? cloneBinding(shortcut) : null;
+}
+
+/**
+ * A binding as one piece of text, for a tooltip: `⌘K` on macOS, `Ctrl+K`
+ * elsewhere. A shortcut with several keys is named by its first. Null for a
+ * binding with no keys.
+ */
+export function formatShortcutLabel(
+  binding: Pick<ShortcutBinding, 'keys' | 'modifiers'>
+): string | null {
+  const [first] = formatShortcutKeys(binding);
+  if (!first) return null;
+  return isMac()
+    ? `${first.modifiers.join('')}${first.key}`
+    : [...first.modifiers, first.key].join('+');
 }
 
 export function formatShortcutKeys(
@@ -396,6 +492,7 @@ export async function updateShortcutBinding(
     savedBindings[id] = cloneBinding(nextBinding);
   }
 
+  notifyShortcutsChanged();
   await persistSavedBindings();
   return true;
 }
@@ -408,6 +505,7 @@ export async function resetShortcutBinding(id: string): Promise<boolean> {
   shortcut.keys = [...defaultBinding.keys];
   shortcut.modifiers = cloneModifiers(defaultBinding.modifiers);
   delete savedBindings[id];
+  notifyShortcutsChanged();
   await persistSavedBindings();
   return true;
 }
@@ -421,6 +519,7 @@ export async function resetAllShortcutBindings(): Promise<void> {
   }
 
   savedBindings = {};
+  notifyShortcutsChanged();
   await persistSavedBindings();
 }
 

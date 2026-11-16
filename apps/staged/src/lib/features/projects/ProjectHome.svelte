@@ -24,12 +24,7 @@
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import {
-    goHome,
-    onViewHidden,
-    releaseProjectLayer,
-    selectProject,
-  } from '../layout/navigation.svelte';
+  import { leaveGoneProject, onViewHidden, selectProject } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import ProjectSection from './ProjectSection.svelte';
@@ -85,7 +80,7 @@
   // The store's `loaded` only covers the project list, so wait for the
   // selected project's own branches too. Gated on the project still being in
   // the list: a stale or deleted id must not pin the view in loading forever,
-  // and the "selected project vanished → goHome()" effect below needs
+  // and the "selected project vanished → leaveGoneProject()" effect below needs
   // `loading` to clear so it can fire.
   let selectedProjectPending = $derived(
     !!selectedProjectId &&
@@ -515,13 +510,11 @@
     };
   });
 
-  // The project this view shows is gone (deleted here or elsewhere). On
-  // screen, leave for home; retained under home, just release the layer so it
-  // unmounts rather than show a missing project — navigation must not jump.
+  // The project this view shows is gone (deleted here or elsewhere): leave
+  // it, on screen or retained under home (navigation.leaveGoneProject).
   $effect(() => {
     if (projectsDataStore.loaded && !loading && selectedProjectId && !selectedProject) {
-      if (layer.active) goHome();
-      else releaseProjectLayer(selectedProjectId);
+      leaveGoneProject(selectedProjectId, layer.active);
     }
   });
 
@@ -856,7 +849,12 @@
         >
           <Plus size={12} />
         </span>
-        <span class="top-bar-action-label">Add Repo</span>
+        <span
+          class="top-bar-action-label"
+          class:narrow-window-hidden={selectedProjectTransferLabel !== null}
+        >
+          Add Repo
+        </span>
       </Button>
     </span>
 
@@ -864,8 +862,9 @@
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground mobile:size-10 mobile:p-0"
+        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
         title={selectedProjectTransferLabel}
+        aria-label={selectedProjectTransferLabel}
         onclick={() => projectActions.requestTransferProject(selectedProject)}
         disabled={selectedProjectTransferring}
       >
@@ -878,7 +877,9 @@
             <Laptop size={13} />
           {/if}
         </span>
-        <span class="top-bar-action-label">{selectedProjectTransferLabel}</span>
+        <span class="top-bar-action-label desktop-only">
+          {selectedProjectTransferLabel}
+        </span>
       </Button>
     {/if}
 
@@ -1104,8 +1105,9 @@
     color: var(--ui-danger);
   }
 
-  /* On phones the pill shares the bar with the labelled Back and Add Repo
-     buttons, and its Resume is the only way to resume the workspace. To fit
+  /* On phones the pill shares the bar with the history and search buttons
+     and the labelled Add Repo, and its Resume is the only way to resume the
+     workspace. To fit
      it, "Suspended" is hidden visually (the pause icon shows the state and
      screen readers still read it), and Add Repo, disabled until the workspace
      is running, drops its label (its aria-label still names it). */
@@ -1124,6 +1126,28 @@
 
     .add-repo-action :global(.top-bar-action:disabled .top-bar-action-label) {
       display: none;
+    }
+
+    /* Transfer is its icon in this whole layout: its label is `desktop-only`
+       (TopBar.svelte), as Remove Project's is, and its aria-label and title
+       name it. Measured on a 375px phone, the labelled Add Repo and Transfer
+       ran 24px past the screen's edge, and 68px once Forward showed, which
+       put Remove project off the bar. With Transfer an icon the labelled Add
+       Repo fits, with 15px to spare while Forward shows.
+
+       A narrow desktop window takes this layout too, with a mouse and, on a
+       Mac, 70px of room for the traffic lights ahead of the history and
+       search buttons (TopBar.svelte). That is more than the 15px, so there
+       Add Repo is its icon as well while Transfer is shown, which fits with
+       41px to spare while Forward shows. A mouse has a tooltip to name a
+       button with, which a finger does not, and Add Repo keeps its
+       aria-label. Without Transfer the labelled Add Repo fits (33px to
+       spare) and keeps its label. Nested, so the layout's own query stays
+       the one shared form. */
+    @media (pointer: fine) {
+      .narrow-window-hidden {
+        display: none;
+      }
     }
   }
 

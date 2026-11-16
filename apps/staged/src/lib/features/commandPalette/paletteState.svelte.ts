@@ -7,7 +7,10 @@
  * owning the other.
  */
 
-import type { Shortcut } from '../keyboard/shortcuts';
+import { triggerShortcut, type Shortcut } from '../keyboard/shortcuts';
+
+/** The id the ⌘K shortcut is registered under (commandPaletteShortcut). */
+export const COMMAND_PALETTE_SHORTCUT_ID = 'search-projects';
 
 /** Marks the palette's own dialog (CommandPalette.svelte sets it), so it
  *  doesn't count as "another modal". */
@@ -34,9 +37,9 @@ export const commandPalette = $state({
  * This is the dialog half of the rule ⌘↑/⌘↓ follow (navigation's
  * isModalOpen), and only that half. Their rule also counts the diff view;
  * the palette opens over the diff view and over Settings on purpose, since
- * finding a project from anywhere is what it is for. Opening a result from
- * there replaces the workspace route underneath (selectProject), after the
- * diff view has saved what was typed into it (diffLeaveCheck).
+ * finding a project from anywhere is what it is for. A result opened from
+ * there takes their place (selectProject), after the diff view has saved
+ * what was typed into it (diffLeaveCheck).
  */
 export function otherModalOpen(root: ParentNode = document): boolean {
   for (const modal of root.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
@@ -86,7 +89,7 @@ export function toggleCommandPalette(): void {
  */
 export function commandPaletteShortcut(enabled: () => boolean = () => true): Shortcut {
   return {
-    id: 'search-projects',
+    id: COMMAND_PALETTE_SHORTCUT_ID,
     description: 'Search projects',
     category: 'search',
     keys: ['k'],
@@ -97,4 +100,15 @@ export function commandPaletteShortcut(enabled: () => boolean = () => true): Sho
       if (enabled()) toggleCommandPalette();
     },
   };
+}
+
+/**
+ * Do what pressing ⌘K does, for a control that stands in for the key (the
+ * top bar's Search button). It runs the handler the app registered for the
+ * shortcut rather than a copy of it, so the two can't drift apart: the same
+ * toggle, the same refusal while another modal is open, and the same
+ * `enabled` gate. Does nothing where the shortcut isn't registered.
+ */
+export function runCommandPaletteShortcut(): void {
+  triggerShortcut(COMMAND_PALETTE_SHORTCUT_ID);
 }

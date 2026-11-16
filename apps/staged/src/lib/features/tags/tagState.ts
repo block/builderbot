@@ -1,13 +1,15 @@
 /**
  * Pure tag-state logic behind tagsStore: indexing the `get_tag_state`
- * snapshot, layering pending assignment writes (intents) over it, and the
- * per-project lookups every tag surface reads.
+ * snapshot, reconciling a fetched one with the one shown, layering pending
+ * assignment writes (intents) over it, and the per-project lookups every tag
+ * surface reads.
  *
  * Kept free of runes so the rules are unit-testable; the store only holds the
  * snapshot and the intent overlay in `$state` and derives through these.
  */
 
-import type { Tag, TagGroup, TagState } from '../../types';
+import { reuseUnchangedRows } from '../../shared/reuseUnchangedRows';
+import type { ProjectTag, Tag, TagGroup, TagState } from '../../types';
 
 export const EMPTY_TAG_STATE: TagState = { groups: [], tags: [], assignments: [] };
 
@@ -121,6 +123,48 @@ export function indexAssignments(
     ids.add(tagId);
   }
   return byProject;
+}
+
+// =============================================================================
+// Snapshot reconciliation
+// =============================================================================
+
+function rowId(row: { id: string }): string {
+  return row.id;
+}
+
+/** NUL can't occur in an id, so no two assignments share a key. */
+function assignmentKey({ projectId, tagId }: ProjectTag): string {
+  return `${projectId}\u0000${tagId}`;
+}
+
+/**
+ * A fetched snapshot with every unchanged group, tag and assignment
+ * replaced by the object `current` holds for it. A list that comes out with
+ * the same objects in the same order is `current`'s list, and when all three
+ * do the result is `current` itself. The result always equals `fetched`
+ * value for value, in `fetched`'s order: only object identity differs.
+ * Every field of a group, a tag and an assignment is a primitive, which is
+ * what the shared one-level comparison needs (see reuseUnchangedRows).
+ *
+ * Every read of the backend builds new objects, so a snapshot applied as
+ * fetched hands every reader a new tag, group and assignment for a change to
+ * one, or to none. With the objects kept, a card whose tags did not change
+ * is given the tags it already has, and an unchanged snapshot wakes nothing.
+ */
+export function reconcileTagState(current: TagState, fetched: TagState): TagState {
+  // Spelled out, not spread, so a field added to TagState fails to compile
+  // here until it is reconciled too.
+  const next: TagState = {
+    groups: reuseUnchangedRows(current.groups, fetched.groups, rowId),
+    tags: reuseUnchangedRows(current.tags, fetched.tags, rowId),
+    assignments: reuseUnchangedRows(current.assignments, fetched.assignments, assignmentKey),
+  };
+  const unchanged =
+    next.groups === current.groups &&
+    next.tags === current.tags &&
+    next.assignments === current.assignments;
+  return unchanged ? current : next;
 }
 
 // =============================================================================

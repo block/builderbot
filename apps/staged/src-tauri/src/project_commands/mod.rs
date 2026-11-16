@@ -4,6 +4,7 @@
 mod add_repo;
 mod branch_in_use;
 mod branch_name;
+mod bulk_lists;
 mod control;
 mod create;
 mod creation_limit;
@@ -15,6 +16,7 @@ mod setup;
 pub(crate) use add_repo::{
     add_project_repo_and_setup, add_project_repo_impl, AddProjectRepoRequest,
 };
+pub(crate) use bulk_lists::{list_branches_by_project_impl, list_project_repos_by_project_impl};
 pub(crate) use control::{
     control_add_repo_request, control_create_project_request, ControlAddRepo, ControlCreateProject,
 };

@@ -1223,6 +1223,16 @@ pub(crate) async fn dispatch(
             let project_id: String = arg(&args, "projectId")?;
             blocking_store_json(move || store.list_project_repos(&project_id)).await
         }
+        // Every project's repos in one reply. Not a control command: a
+        // control caller is confined to the projects in its reach, and reads
+        // them one at a time.
+        "list_project_repos_by_project" => {
+            let store = get_store(store_mutex)?;
+            blocking_json(move || {
+                crate::project_commands::list_project_repos_by_project_impl(&store)
+            })
+            .await
+        }
         "list_recent_repos" => {
             let store = get_store(store_mutex)?;
             let limit: Option<usize> = opt_arg(&args, "limit")?;
@@ -1973,18 +1983,20 @@ pub(crate) async fn dispatch(
         "list_branches_for_project" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
-            blocking_store_json(move || {
-                let branches = store.list_branches_for_project(&project_id)?;
-                let enriched: Vec<crate::BranchWithWorkdir> = branches
-                    .into_iter()
-                    .map(|b| {
-                        let workdir = store.get_workdir_for_branch(&b.id).ok().flatten();
-                        crate::branches::to_branch_with_workdir_public(b, workdir.map(|w| w.path))
-                    })
-                    .collect();
-                Ok(enriched)
+            // The desktop command's list, commit counts included, so a
+            // branch reads the same from this arm and from the all-projects
+            // one below. An unknown project still lists nothing here.
+            blocking_json(move || {
+                crate::branches::project_branches_with_workdirs(&store, &project_id)
             })
             .await
+        }
+        // Every project's branches in one reply. Not a control command, as
+        // for `list_project_repos_by_project`.
+        "list_branches_by_project" => {
+            let store = get_store(store_mutex)?;
+            blocking_json(move || crate::project_commands::list_branches_by_project_impl(&store))
+                .await
         }
         "create_branch" => {
             let store = get_store(store_mutex)?;
@@ -5141,6 +5153,59 @@ mod tests {
             assert!(
                 arm.contains(body),
                 "the web `{command}` arm must call `{body}`, not delete inline: {arm}"
+            );
+        }
+    }
+
+    /// The all-projects lists and the one-project branch list must read a
+    /// branch the same way on both transports, or a card's status would
+    /// change with whichever read painted it last. The arms can't run in a
+    /// unit test, so pin that each calls the body the desktop command does.
+    #[test]
+    fn web_project_list_arms_share_the_tauri_bodies() {
+        let source = include_str!("web_server.rs");
+        for (command, body) in [
+            (
+                "list_branches_by_project",
+                "project_commands::list_branches_by_project_impl(",
+            ),
+            (
+                "list_project_repos_by_project",
+                "project_commands::list_project_repos_by_project_impl(",
+            ),
+            (
+                "list_branches_for_project",
+                "branches::project_branches_with_workdirs(",
+            ),
+        ] {
+            let arm = dispatch_arm_body(source, command);
+            assert!(
+                arm.contains(body),
+                "the web `{command}` arm must call `{body}`: {arm}"
+            );
+        }
+    }
+
+    /// The all-projects lists carry every project's rows, so they must stay
+    /// off the control surface, where a caller is confined to its own
+    /// projects: no scope rule means `check` refuses them, and the control
+    /// server's allowlist never lets them that far.
+    #[test]
+    fn all_projects_lists_are_not_control_commands() {
+        use super::control_scope::check_with_store;
+        use crate::control_server::{ControlGrant, ALLOWED_COMMANDS};
+        use crate::store::Store;
+
+        let store = Store::in_memory().unwrap();
+        let grant = ControlGrant::test_all_projects();
+        for command in ["list_branches_by_project", "list_project_repos_by_project"] {
+            assert!(
+                !ALLOWED_COMMANDS.contains(&command),
+                "{command} must not be reachable through the control server"
+            );
+            assert!(
+                check_with_store(command, &serde_json::json!({}), &grant, &store).is_err(),
+                "{command} must have no control scope rule"
             );
         }
     }

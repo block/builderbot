@@ -67,6 +67,8 @@ pub mod web_server;
 pub mod window_commands;
 
 #[cfg(test)]
+mod board_load_bench;
+#[cfg(test)]
 pub mod test_utils;
 
 use serde::Serialize;
@@ -603,6 +605,21 @@ async fn list_project_repos(
     })
     .await
     .map_err(|e| format!("list_project_repos task failed: {e}"))?
+}
+
+/// Every project's repo list in one reply, keyed by project id: what
+/// [`list_project_repos`] returns for each project, for the views that show
+/// all of them at once. On the blocking pool like [`list_project_repos`].
+#[tauri::command]
+async fn list_project_repos_by_project(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<std::collections::BTreeMap<String, Vec<store::ProjectRepo>>, String> {
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project_commands::list_project_repos_by_project_impl(&store)
+    })
+    .await
+    .map_err(|e| format!("list_project_repos_by_project task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2376,6 +2393,7 @@ pub fn run() {
             create_project,
             rename_project,
             list_project_repos,
+            list_project_repos_by_project,
             list_recent_repos,
             get_suggested_repos,
             add_project_repo,
@@ -2425,6 +2443,7 @@ pub fn run() {
             // Branches
             branches::get_branch,
             branches::list_branches_for_project,
+            branches::list_branches_by_project,
             branches::create_branch,
             branches::setup_worktree,
             branches::setup_worktree_and_run_prerun,

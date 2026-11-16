@@ -317,7 +317,7 @@ mod tests {
     }
 
     /// Tag writes reach the frontend as their own id-less event, never as
-    /// `project-changed` (which hard-reloads the project list), and the lag
+    /// `project-changed` (which reloads the project list), and the lag
     /// flush covers them.
     #[test]
     fn tag_changes_map_to_an_empty_tags_changed_event() {

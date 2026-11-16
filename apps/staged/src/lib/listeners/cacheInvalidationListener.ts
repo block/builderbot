@@ -38,7 +38,9 @@ import type {
 export function listenForCacheInvalidation(): UnlistenFn {
   const unlisteners: UnlistenFn[] = [];
 
-  // PR status changed → invalidate branch listings (they embed PR state)
+  // PR status changed → invalidate branch listings (they embed PR state).
+  // The event names a branch, not its project, so this is the whole command:
+  // every project's list, and the all-projects list with them.
   unlisteners.push(
     listenToEvent<PrStatusChangedEvent>('pr-status-changed', () => {
       invalidateCacheByCommand('list_branches_for_project');
@@ -52,7 +54,9 @@ export function listenForCacheInvalidation(): UnlistenFn {
   // key is stamped synchronously and deleted directly, with no IDB key scan
   // for an in-flight response to slip past or a post-call write to be lost to.
   // The repo lists scope to the named project when the payload names one,
-  // widening only on the feed's lag recovery.
+  // widening only on the feed's lag recovery. Scoped, the drop also takes
+  // that project out of the cached all-projects repo list and leaves the
+  // rest of it (see ALL_PROJECTS_COMMAND in cache.ts).
   unlisteners.push(
     listenToEvent<ProjectChangedEvent>('project-changed', (payload) => {
       invalidateCache('list_projects');
@@ -93,7 +97,11 @@ export function listenForCacheInvalidation(): UnlistenFn {
   // → invalidate that branch's list, timeline and diff caches. Three tiers,
   // widening as the payload names less:
   //   - a named project scopes the branch-list drop to that one project, so
-  //     every other project keeps its instant cached paint. A mutation
+  //     every other project keeps its instant cached paint. That holds for
+  //     the all-projects list a load of many projects reads, too: the drop
+  //     takes the one project out of it and keeps the rest, and the load
+  //     reads that project from its own entry, which the store's forced
+  //     refetch rewrites (see ALL_PROJECTS_COMMAND in cache.ts). A mutation
   //     touching two projects' lists (a move) publishes once per project,
   //     so scoping loses nothing;
   //   - an unresolved project widens to every project's list, matching the

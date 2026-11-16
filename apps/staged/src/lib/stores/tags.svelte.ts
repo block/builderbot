@@ -6,8 +6,13 @@
  * snapshot — small enough to refetch on every `tags-changed` — plus an
  * overlay of pending assignment writes, so a pick repaints every surface at
  * once. Tags live apart from the project list on purpose: a tag write
- * publishes `tags-changed`, never `project-changed`, whose hard reload
- * restarts every project's branch and repo hydration.
+ * publishes `tags-changed`, never `project-changed`, which reloads the
+ * project list and refetches the project's branches and repos.
+ *
+ * A snapshot is reconciled with the one held as it is applied (see
+ * reconcileTagState): the groups, tags and assignments it left unchanged
+ * keep their objects, so a write to one project's tags does not hand every
+ * other surface new ones, and a refetch that changed nothing is a no-op.
  *
  * Freshness is a seq-guarded snapshot. Each `get_tag_state` request takes
  * the next `fetchSeq`, and its response applies only when it is newer than
@@ -33,6 +38,7 @@ import {
   indexTagCatalog,
   intentSlot,
   pruneConfirmedIntents,
+  reconcileTagState,
   usageCounts,
   withConfirmedIntent,
   withIntent,
@@ -235,7 +241,10 @@ class TagsStore {
       // A cached value is only a stand-in until the network answers.
       return;
     }
-    this._snapshot = state;
+    // Keeps the object of every group, tag and assignment the fetch left
+    // unchanged. A fetch that changed nothing comes back as the snapshot
+    // already held, and assigning that wakes no reader.
+    this._snapshot = reconcileTagState(this._snapshot, state);
     this._loaded = true;
     this._hasSnapshot = true;
   }

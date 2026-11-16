@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -1850,9 +1850,26 @@ pub async fn list_branches_for_project(
     .map_err(|e| format!("list_branches_for_project task failed: {e}"))?
 }
 
+/// Every project's branch list in one reply, keyed by project id: what
+/// [`list_branches_for_project`] returns for each project, for the views that
+/// show all of them at once. Asking per project cost the frontend one reply,
+/// and one pass over every card, per project. Offloaded for the same reason
+/// as `list_branches_for_project`.
+#[tauri::command]
+pub async fn list_branches_by_project(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<BTreeMap<String, Vec<BranchWithWorkdir>>, String> {
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::project_commands::list_branches_by_project_impl(&store)
+    })
+    .await
+    .map_err(|e| format!("list_branches_by_project task failed: {e}"))?
+}
+
 /// The body of [`list_branches_for_project`]: store reads only, each taking
 /// and releasing the store lock on its own.
-fn list_branches_for_project_impl(
+pub(crate) fn list_branches_for_project_impl(
     store: &Store,
     project_id: &str,
 ) -> Result<Vec<BranchWithWorkdir>, String> {
@@ -1861,6 +1878,17 @@ fn list_branches_for_project_impl(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
+    project_branches_with_workdirs(store, project_id)
+}
+
+/// A project's branches as the frontend lists them: each with its worktree
+/// path and its count of finalized commits. An unknown project has none.
+/// Shared by the one-project and all-projects lists, on both transports, so
+/// a branch reads the same whichever of them returned it.
+pub(crate) fn project_branches_with_workdirs(
+    store: &Store,
+    project_id: &str,
+) -> Result<Vec<BranchWithWorkdir>, String> {
     let branches = store
         .list_branches_for_project(project_id)
         .map_err(|e| e.to_string())?;
@@ -4082,6 +4110,64 @@ mod tests {
         let error = list_branches_for_project_impl(&store, "no-such-project").unwrap_err();
 
         assert_eq!(error, "Project not found: no-such-project");
+    }
+
+    /// What the web and control `list_branches_for_project` arm returns: it
+    /// calls this body directly (`web_project_list_arms_share_the_tauri_bodies`
+    /// pins that), where it used to build the rows itself without commit
+    /// counts. So a `stagedctl` or web caller now gets `commitCount` on every
+    /// branch, as the desktop command always sent. Unlike the desktop
+    /// command, the arm keeps answering an unknown project with an empty
+    /// list: a control caller is scoped before it gets here, and the web
+    /// client reads a project it has just seen deleted.
+    #[test]
+    fn the_shared_branch_list_counts_commits_and_lists_nothing_for_an_unknown_project() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let committed = store::Branch::new(&project.id, "committed", "main");
+        store.create_branch(&committed).unwrap();
+        store
+            .create_workdir(
+                &store::Workdir::new(&project.id, "/tmp/wt/committed").with_branch(&committed.id),
+            )
+            .unwrap();
+        store
+            .create_commit(&store::Commit::new_with_sha(&committed.id, "abc123"))
+            .unwrap();
+        let fresh = store::Branch::new(&project.id, "fresh", "main");
+        store.create_branch(&fresh).unwrap();
+
+        let listed = project_branches_with_workdirs(&store, &project.id).unwrap();
+
+        assert_eq!(
+            listed
+                .iter()
+                .map(|branch| (branch.id.as_str(), branch.commit_count))
+                .collect::<Vec<_>>(),
+            vec![
+                (committed.id.as_str(), Some(1)),
+                (fresh.id.as_str(), Some(0))
+            ]
+        );
+        assert_eq!(
+            listed[0].worktree_path.as_deref(),
+            Some("/tmp/wt/committed")
+        );
+        // On the wire the count is `commitCount`, present even when zero.
+        let wire = serde_json::to_value(&listed).unwrap();
+        assert_eq!(wire[0]["commitCount"], 1);
+        assert_eq!(wire[1]["commitCount"], 0);
+        // The same rows the desktop command returns for a project it knows.
+        assert_eq!(
+            wire,
+            serde_json::to_value(list_branches_for_project_impl(&store, &project.id).unwrap())
+                .unwrap()
+        );
+
+        assert!(project_branches_with_workdirs(&store, "no-such-project")
+            .unwrap()
+            .is_empty());
     }
 
     /// A shared workstation outlives a teardown that leaves another branch

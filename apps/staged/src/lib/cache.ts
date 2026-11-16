@@ -36,6 +36,110 @@ function isPersisted(command: string): boolean {
 }
 
 /**
+ * Per-project list commands, each mapped to the argless command that returns
+ * the same list for every project in one reply, as an object keyed by
+ * project id. The all-projects entry embeds every per-project entry, so each
+ * invalidation of the per-project command has to reach it too:
+ *
+ * - One project's list (by key, or by args that name a `projectId`): that
+ *   project is taken out of the all-projects value, and every other
+ *   project's list stays cached. A reader treats a project the reply lacks
+ *   as one it says nothing about, and reads it on its own (projectsData's
+ *   bulk hydration), from the per-project entry the post-change refetch
+ *   wrote. So one change costs the next cold start one project's read, not
+ *   every project's cached paint. When the reply lacks several, the reader
+ *   takes them together from the revalidated reply instead, if one is in
+ *   flight.
+ * - The whole command: the all-projects entry is dropped.
+ *
+ * Taking one project out is sound because the value is nothing but the
+ * per-project lists side by side: what remains is exactly as valid as those
+ * projects' own entries, which the same invalidation leaves in place.
+ *
+ * Kept here, not at the call sites, so a mutation or change-feed handler that
+ * invalidates a project's list cannot leave its old list behind in the
+ * all-projects copy, to be served on the next load.
+ */
+const ALL_PROJECTS_COMMAND: Readonly<Record<string, string>> = {
+  list_branches_for_project: 'list_branches_by_project',
+  list_project_repos: 'list_project_repos_by_project',
+};
+
+/** The argument that names the project in the per-project commands above. */
+const PROJECT_ARG = 'projectId';
+
+/**
+ * Carry an invalidation of `command` over to the all-projects entry that
+ * embeds its entries, when it has one: `args` that name a project take that
+ * project out, anything wider drops the entry (see ALL_PROJECTS_COMMAND).
+ *
+ * Called first, and never awaited before the caller's own stamps. Both paths
+ * stamp the all-projects key synchronously, in the same step as the
+ * caller's, so an all-projects read in flight is blocked from caching what
+ * it read before the change (see `invalidationSequence`).
+ *
+ * The IndexedDB transaction is not started in that step. Both paths request
+ * it synchronously, but idb-keyval opens it only once its database promise
+ * has resolved: a microtask later, or when the database has finished opening
+ * on first use. What holds is the order. Every cache read and write waits on
+ * that same promise, and its continuations run in the order they were
+ * added, so the transaction of a read started after this call is opened
+ * after this one, and IndexedDB runs it after this one has committed. That
+ * read never sees the project's old list.
+ */
+function invalidateAllProjectsEntry(
+  command: string,
+  args?: Record<string, unknown>
+): Promise<void> {
+  const allProjects = ALL_PROJECTS_COMMAND[command];
+  if (!allProjects) return Promise.resolve();
+  const projectId = args?.[PROJECT_ARG];
+  return typeof projectId === 'string'
+    ? removeProjectFromAllProjectsEntry(allProjects, projectId)
+    : invalidateCache(allProjects);
+}
+
+/**
+ * Take one project's list out of an all-projects entry, in one transaction,
+ * leaving the entry's other fields (when it was fetched, whether it is
+ * stale) as they are. An entry that does not hold the project is not
+ * rewritten. One that is not an object keyed by project cannot be patched,
+ * and neither can one the transaction fails on: those are deleted, as the
+ * whole entry was before this kept the rest of it.
+ */
+async function removeProjectFromAllProjectsEntry(
+  allProjectsCommand: string,
+  projectId: string
+): Promise<void> {
+  const key = cacheKey(allProjectsCommand);
+  markInvalidated(key, nextInvalidationSequence());
+  try {
+    await getStore()('readwrite', (os) => {
+      const read = os.get(key);
+      read.onsuccess = () => {
+        const entry = read.result as CacheEntry<unknown> | undefined;
+        if (entry == null) return;
+        const lists = entry.data;
+        if (lists == null || typeof lists !== 'object' || Array.isArray(lists)) {
+          os.delete(key);
+        } else if (Object.prototype.hasOwnProperty.call(lists, projectId)) {
+          const others = { ...(lists as Record<string, unknown>) };
+          delete others[projectId];
+          os.put({ ...entry, data: others }, key);
+        }
+      };
+      return promisifyRequest(os.transaction);
+    });
+  } catch {
+    try {
+      await del(key, getStore());
+    } catch {
+      // Best-effort: the stamp above already blocks an in-flight write.
+    }
+  }
+}
+
+/**
  * Every invalidation call takes the next sequence number synchronously and
  * stamps the keys it covers with it. A fetch captures the current number as
  * its network call goes out, and skips its cache write when its key carries a
@@ -532,6 +636,7 @@ export async function invalidateCache(
   args?: Record<string, unknown>
 ): Promise<void> {
   if (!isPersisted(command)) return;
+  const allProjects = invalidateAllProjectsEntry(command, args);
   const key = cacheKey(command, args);
   markInvalidated(key, nextInvalidationSequence());
   try {
@@ -539,6 +644,7 @@ export async function invalidateCache(
   } catch {
     // Best-effort: the stamp above already blocks an in-flight write.
   }
+  await allProjects;
 }
 
 /**
@@ -572,8 +678,10 @@ async function invalidateMatching(matches: (key: string) => boolean): Promise<vo
 /** Invalidate all entries for a command (regardless of args). */
 export async function invalidateCacheByCommand(command: string): Promise<void> {
   if (!isPersisted(command)) return;
+  const allProjects = invalidateAllProjectsEntry(command);
   const prefix = `${command}:`;
   await invalidateMatching((key) => key.startsWith(prefix));
+  await allProjects;
 }
 
 function parseCacheArgs(key: string, command: string): Record<string, unknown> | undefined {
@@ -595,11 +703,13 @@ export async function invalidateCacheByArgs(
   partialArgs: Record<string, unknown>
 ): Promise<void> {
   if (!isPersisted(command)) return;
+  const allProjects = invalidateAllProjectsEntry(command, partialArgs);
   await invalidateMatching((key) => {
     const args = parseCacheArgs(key, command);
     if (!args) return false;
     return Object.entries(partialArgs).every(([argKey, argValue]) => args[argKey] === argValue);
   });
+  await allProjects;
 }
 
 /** Mark all entries as stale so SWR serves them while revalidating. */

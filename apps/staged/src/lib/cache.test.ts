@@ -595,6 +595,247 @@ describe('invalidateCacheByArgs', () => {
   });
 });
 
+describe('all-projects entries', () => {
+  // The all-projects reply embeds every project's list, keyed by project.
+  // Invalidating one project's list takes that project out of it and keeps
+  // the rest cached; anything wider drops the entry.
+  const ttl = { ttl: 60_000 };
+  const PAIRS = [
+    ['list_branches_for_project', 'list_branches_by_project'],
+    ['list_project_repos', 'list_project_repos_by_project'],
+  ] as const;
+
+  function everyProject(): Record<string, string[]> {
+    return { p1: ['p1 list'], p2: ['p2 list'], p3: [] };
+  }
+
+  /** Cache p1's own entry and the all-projects entry, then answer `fresh`. */
+  async function cacheBoth(perProject: string, allProjects: string): Promise<void> {
+    mockInvoke.mockResolvedValue(['p1 list']);
+    await cachedCommand(perProject, { projectId: 'p1' }, ttl);
+    mockInvoke.mockResolvedValue(everyProject());
+    await cachedCommand(allProjects, undefined, ttl);
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue('fresh');
+  }
+
+  /** What a plain read of the argless entry is answered with from the cache,
+   *  or `null` when it has to go to the network. */
+  async function cached(command: string): Promise<unknown> {
+    const before = mockInvoke.mock.calls.length;
+    const { data } = await cachedCommand(command, undefined, ttl);
+    return mockInvoke.mock.calls.length === before ? data : null;
+  }
+
+  async function storedEntry(command: string): Promise<Record<string, unknown> | undefined> {
+    const all = await entries<string, Record<string, unknown>>(
+      createStore('staged-cache', 'responses')
+    );
+    return all.find(([key]) => key === _cacheKey(command))?.[1];
+  }
+
+  it.each(PAIRS)(
+    'dropping one project’s %s entry takes that project out of the %s entry',
+    async (perProject, allProjects) => {
+      const others = { p2: ['p2 list'], p3: [] };
+
+      await cacheBoth(perProject, allProjects);
+      await invalidateCache(perProject, { projectId: 'p1' });
+      expect(await cached(allProjects)).toEqual(others);
+
+      await cacheBoth(perProject, allProjects);
+      await invalidateCacheByArgs(perProject, { projectId: 'p1' });
+      expect(await cached(allProjects)).toEqual(others);
+
+      // The project's own entry went too, as it always did.
+      mockInvoke.mockResolvedValue(['p1 fresh']);
+      const own = await cachedCommand(perProject, { projectId: 'p1' }, ttl);
+      expect(own.data).toEqual(['p1 fresh']);
+    }
+  );
+
+  it.each(PAIRS)('dropping every %s entry drops the %s entry', async (perProject, allProjects) => {
+    await cacheBoth(perProject, allProjects);
+
+    await invalidateCacheByCommand(perProject);
+
+    expect(await cached(allProjects)).toBeNull();
+  });
+
+  it('drops the entry for an invalidation that names no project', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    await invalidateCacheByArgs('list_branches_for_project', { branchId: 'b1' });
+    expect(await cached('list_branches_by_project')).toBeNull();
+  });
+
+  it('drops the entry when every project’s list is dropped by key', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+
+    await invalidateCache('list_branches_for_project');
+
+    expect(await storedEntry('list_branches_by_project')).toBeUndefined();
+  });
+
+  it('drops the entry for a project id that is not a string, which names no project', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    expect((await storedEntry('list_branches_by_project'))?.data).toEqual(everyProject());
+
+    await invalidateCacheByArgs('list_branches_for_project', { projectId: 7 });
+
+    expect(await storedEntry('list_branches_by_project')).toBeUndefined();
+  });
+
+  it('takes out a project that has no per-project entry of its own', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+
+    // p2 was only ever read as part of the all-projects reply.
+    await invalidateCacheByArgs('list_branches_for_project', { projectId: 'p2' });
+
+    expect(await cached('list_branches_by_project')).toEqual({ p1: ['p1 list'], p3: [] });
+  });
+
+  it('takes out each project invalidated, one after another', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+
+    // Not awaited one by one: a burst of events invalidates in one dispatch.
+    await Promise.all([
+      invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' }),
+      invalidateCacheByArgs('list_branches_for_project', { projectId: 'p3' }),
+      invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' }),
+    ]);
+
+    expect(await cached('list_branches_by_project')).toEqual({ p2: ['p2 list'] });
+  });
+
+  it('leaves the entry as it was for a project it does not hold', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    const before = await storedEntry('list_branches_by_project');
+
+    await invalidateCacheByArgs('list_branches_for_project', { projectId: 'unknown' });
+
+    expect(await storedEntry('list_branches_by_project')).toEqual(before);
+    expect(await cached('list_branches_by_project')).toEqual(everyProject());
+  });
+
+  it('keeps when the entry was fetched and whether it is stale', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    const before = await storedEntry('list_branches_by_project');
+    await invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+    const after = await storedEntry('list_branches_by_project');
+    expect(after).toEqual({ ...before, data: { p2: ['p2 list'], p3: [] } });
+
+    // A stale entry stays stale: it is served, then revalidated.
+    await markAllStale();
+    await invalidateCacheByArgs('list_branches_for_project', { projectId: 'p2' });
+    expect((await storedEntry('list_branches_by_project'))?.stale).toBe(true);
+    mockInvoke.mockResolvedValue(everyProject());
+    const { data, revalidating } = await cachedCommand('list_branches_by_project', undefined, ttl);
+    expect(data).toEqual({ p3: [] });
+    await expect(revalidating).resolves.toEqual(everyProject());
+  });
+
+  it('drops an entry that is not keyed by project, which it cannot patch', async () => {
+    for (const value of ['every project', ['a', 'list'], null]) {
+      mockInvoke.mockResolvedValue(value);
+      await cachedCommand('list_branches_by_project', undefined, ttl);
+      mockInvoke.mockReset();
+      mockInvoke.mockResolvedValue('fresh');
+
+      await invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+
+      expect(await storedEntry('list_branches_by_project')).toBeUndefined();
+    }
+  });
+
+  it('does not create an entry where there was none', async () => {
+    await invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+
+    expect(await storedEntry('list_branches_by_project')).toBeUndefined();
+  });
+
+  it('keeps the other all-projects entry, and both for an unrelated command', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    mockInvoke.mockResolvedValue(everyProject());
+    await cachedCommand('list_project_repos_by_project', undefined, ttl);
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue('fresh');
+
+    await invalidateCacheByCommand('list_branches_for_project');
+    expect(await cached('list_project_repos_by_project')).toEqual(everyProject());
+
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    await invalidateCacheByArgs('list_project_repos', { projectId: 'p1' });
+    await invalidateCacheByCommand('list_projects');
+    await invalidateCache('get_tag_state');
+    await invalidateCacheByArgs('get_diff_files', { projectId: 'p1' });
+    expect(await cached('list_branches_by_project')).toEqual(everyProject());
+  });
+
+  it('is gone from a read started right after the invalidation, before it settles', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+
+    // Not awaited: the change-feed handlers invalidate and move on, and the
+    // next read may be issued in the same dispatch.
+    const invalidation = invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+    const read = cachedCommand('list_branches_by_project', undefined, ttl);
+
+    expect((await read).data).toEqual({ p2: ['p2 list'], p3: [] });
+    await invalidation;
+  });
+
+  it('blocks an all-projects read in flight from caching what it read before the change', async () => {
+    const pending = deferred<Record<string, string[]>>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const inFlight = cachedCommand('list_branches_by_project', undefined, ttl);
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    // A branch of one project changes while the all-projects read is out.
+    // Not awaited: the stamp has to be in place as soon as the call returns.
+    const invalidation = invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+    pending.resolve(everyProject());
+    await expect(inFlight).resolves.toEqual({ data: everyProject(), revalidating: null });
+    await invalidation;
+
+    mockInvoke.mockResolvedValue('fresh');
+    expect(await cached('list_branches_by_project')).toBeNull();
+  });
+
+  it('keeps the entry it held, less the project, when a read in flight is blocked', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+    const pending = deferred<Record<string, string[]>>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    // A forced read, sent before the change.
+    const inFlight = cachedCommand('list_branches_by_project', undefined, {
+      ...ttl,
+      bypassRead: true,
+    });
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    const invalidation = invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+    pending.resolve({ p1: ['read before the change'], p2: ['p2 newer'], p3: [] });
+    await inFlight;
+    await invalidation;
+
+    // Neither p1's old list from the entry nor the one the blocked read carried.
+    expect(await cached('list_branches_by_project')).toEqual({ p2: ['p2 list'], p3: [] });
+  });
+
+  it('keeps the project in an all-projects reply read after the change', async () => {
+    await cacheBoth('list_branches_for_project', 'list_branches_by_project');
+
+    const invalidation = invalidateCacheByArgs('list_branches_for_project', { projectId: 'p1' });
+    // Sent after the change, so what it read for p1 is current.
+    mockInvoke.mockResolvedValue({ ...everyProject(), p1: ['p1 after the change'] });
+    await cachedCommand('list_branches_by_project', undefined, { ...ttl, bypassRead: true });
+    await invalidation;
+
+    expect(await cached('list_branches_by_project')).toEqual({
+      ...everyProject(),
+      p1: ['p1 after the change'],
+    });
+  });
+});
+
 describe('first-load race protection', () => {
   it('invalidateCacheByCommand blocks a cache write from an in-flight first-load fetch', async () => {
     const pending = deferred<string>();

@@ -14,6 +14,7 @@ import {
   MAX_TAG_NAME_CHARS,
   numberedName,
   pruneConfirmedIntents,
+  reconcileTagState,
   tagNameKey,
   usageCounts,
   withConfirmedIntent,
@@ -176,6 +177,391 @@ describe('indexAssignments', () => {
     );
     expect(ids(byProject.get('a'))).toEqual(['idea', 'q4']);
     expect(byProject.has('b')).toBe(false);
+  });
+});
+
+// ── Snapshot reconciliation ──
+
+describe('reconcileTagState', () => {
+  const ASSIGNMENTS = [
+    { projectId: 'a', tagId: 'idea' },
+    { projectId: 'a', tagId: 'q4' },
+    { projectId: 'b', tagId: 'idea' },
+    { projectId: 'c', tagId: 'done' },
+  ];
+
+  /** The snapshot held: frozen, so reconciling can't have edited it. */
+  function held(): TagState {
+    const current = state(ASSIGNMENTS.map((assignment) => ({ ...assignment })));
+    for (const list of [current.groups, current.tags, current.assignments]) {
+      list.forEach((row) => Object.freeze(row));
+      Object.freeze(list);
+    }
+    return Object.freeze(current);
+  }
+
+  /** What a fetch returns for `current` after `edit`: new objects throughout. */
+  function fetchedFrom(current: TagState, edit: (draft: TagState) => void = () => {}): TagState {
+    const draft = structuredClone(current);
+    edit(draft);
+    return draft;
+  }
+
+  /**
+   * Reconcile, checking what holds for every input: the result equals the
+   * fetched snapshot value for value and in its order, and the fetched
+   * snapshot is left as it was.
+   */
+  function reconcile(current: TagState, fetched: TagState): TagState {
+    const asFetched = structuredClone(fetched);
+    const next = reconcileTagState(current, fetched);
+    expect(next).toEqual(asFetched);
+    expect(fetched).toEqual(asFetched);
+    return next;
+  }
+
+  const byId = <T extends { id: string }>(rows: T[], id: string) =>
+    rows.find((row) => row.id === id)!;
+  const assignmentOf = (rows: TagState['assignments'], projectId: string, tagId: string) =>
+    rows.find((row) => row.projectId === projectId && row.tagId === tagId)!;
+
+  /** Which of the three lists `next` took from `current` as they were. */
+  function keptLists(current: TagState, next: TagState) {
+    return {
+      groups: next.groups === current.groups,
+      tags: next.tags === current.tags,
+      assignments: next.assignments === current.assignments,
+    };
+  }
+
+  describe('nothing changed', () => {
+    it('returns the snapshot held, not a copy', () => {
+      const current = held();
+      expect(reconcile(current, fetchedFrom(current))).toBe(current);
+    });
+
+    it('returns the snapshot held when both are empty', () => {
+      const current: TagState = { groups: [], tags: [], assignments: [] };
+      expect(reconcile(current, { groups: [], tags: [], assignments: [] })).toBe(current);
+    });
+
+    it('returns the snapshot held when given it back', () => {
+      const current = held();
+      expect(reconcile(current, current)).toBe(current);
+    });
+  });
+
+  describe('tags', () => {
+    it.each([
+      ['name', { name: 'Shipped' }],
+      ['colour', { color: 'green' }],
+      ['icon', { icon: 'check' }],
+      ['position', { position: 7 }],
+      ['group', { groupId: 'priority' }],
+      ['group, to ungrouped', { groupId: null }],
+      ['creation time', { createdAt: 5 }],
+      ['update time', { updatedAt: 5 }],
+    ] as const)('takes the fetched tag when its %s changed, and keeps the rest', (_, change) => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        Object.assign(byId(draft.tags, 'done'), change);
+      });
+      const next = reconcile(current, fetched);
+
+      expect(byId(next.tags, 'done')).toBe(byId(fetched.tags, 'done'));
+      for (const id of ['idea', 'p1', 'p0', 'q4', 'infra']) {
+        expect(byId(next.tags, id)).toBe(byId(current.tags, id));
+      }
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: false, assignments: true });
+    });
+
+    it('takes the fetched tag when a field was added to it or dropped from it', () => {
+      const current = held();
+      const gained = fetchedFrom(current, (draft) => {
+        Object.assign(byId(draft.tags, 'done'), { archived: false });
+      });
+      expect(byId(reconcile(current, gained).tags, 'done')).toBe(byId(gained.tags, 'done'));
+      // And the other way round: the held tag carries a field the fetch lacks.
+      const lost = fetchedFrom(current);
+      expect(byId(reconcile(gained, lost).tags, 'done')).toBe(byId(lost.tags, 'done'));
+    });
+
+    it('tells a field that is null from one that is missing', () => {
+      const current = held();
+      expect(byId(current.tags, 'done').icon).toBeNull();
+      const fetched = fetchedFrom(current, (draft) => {
+        delete (byId(draft.tags, 'done') as Partial<Tag>).icon;
+      });
+      expect(byId(reconcile(current, fetched).tags, 'done')).toBe(byId(fetched.tags, 'done'));
+    });
+
+    it('adds a new tag and keeps every existing one', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.tags.splice(2, 0, tag('blocked', 'status', 2));
+      });
+      const next = reconcile(current, fetched);
+
+      expect(byId(next.tags, 'blocked')).toBe(byId(fetched.tags, 'blocked'));
+      for (const existing of current.tags) expect(byId(next.tags, existing.id)).toBe(existing);
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: false, assignments: true });
+    });
+
+    it.each([
+      ['first', 'done'],
+      ['last', 'infra'],
+    ])('drops a removed tag (the %s) and keeps the others', (_, removed) => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.tags = draft.tags.filter((t) => t.id !== removed);
+      });
+      const next = reconcile(current, fetched);
+
+      expect(next.tags).toHaveLength(current.tags.length - 1);
+      for (const kept of next.tags) expect(kept).toBe(byId(current.tags, kept.id));
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: false, assignments: true });
+    });
+
+    it('follows the fetched order when tags only swapped places, keeping every object', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.tags.reverse();
+      });
+      const next = reconcile(current, fetched);
+
+      expect(next.tags.map((t) => t.id)).toEqual(fetched.tags.map((t) => t.id));
+      for (const kept of next.tags) expect(kept).toBe(byId(current.tags, kept.id));
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: false, assignments: true });
+    });
+
+    it('gives a reordered scope new objects for the tags whose position moved only', () => {
+      // What a real reorder fetches: idea and done swap positions in Status.
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        byId(draft.tags, 'idea').position = 1;
+        byId(draft.tags, 'done').position = 0;
+      });
+      const next = reconcile(current, fetched);
+
+      for (const id of ['idea', 'done']) {
+        expect(byId(next.tags, id)).toBe(byId(fetched.tags, id));
+      }
+      for (const id of ['p1', 'p0', 'q4', 'infra']) {
+        expect(byId(next.tags, id)).toBe(byId(current.tags, id));
+      }
+    });
+  });
+
+  describe('groups', () => {
+    it.each([
+      ['name', { name: 'Stage' }],
+      ['position', { position: 4 }],
+      ['icon flag', { isIconGroup: false }],
+      ['sidebar flag', { showInSidebar: true }],
+      ['creation time', { createdAt: 5 }],
+      ['update time', { updatedAt: 5 }],
+    ] as const)('takes the fetched group when its %s changed, and keeps the rest', (_, change) => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        Object.assign(byId(draft.groups, 'status'), change);
+      });
+      const next = reconcile(current, fetched);
+
+      expect(byId(next.groups, 'status')).toBe(byId(fetched.groups, 'status'));
+      expect(byId(next.groups, 'priority')).toBe(byId(current.groups, 'priority'));
+      expect(keptLists(current, next)).toEqual({ groups: false, tags: true, assignments: true });
+    });
+
+    it('adds a new group and keeps every existing one', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.groups.unshift(group('area', 2));
+      });
+      const next = reconcile(current, fetched);
+
+      expect(byId(next.groups, 'area')).toBe(byId(fetched.groups, 'area'));
+      for (const existing of current.groups) expect(byId(next.groups, existing.id)).toBe(existing);
+      expect(keptLists(current, next)).toEqual({ groups: false, tags: true, assignments: true });
+    });
+
+    it.each([
+      ['first', 'priority'],
+      ['last', 'status'],
+    ])('drops a removed group (the %s) and keeps the other', (_, removed) => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.groups = draft.groups.filter((g) => g.id !== removed);
+      });
+      const next = reconcile(current, fetched);
+
+      expect(next.groups).toHaveLength(1);
+      expect(next.groups[0]).toBe(byId(current.groups, next.groups[0].id));
+      expect(keptLists(current, next)).toEqual({ groups: false, tags: true, assignments: true });
+    });
+
+    it('follows the fetched order when groups only swapped places, keeping every object', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.groups.reverse();
+      });
+      const next = reconcile(current, fetched);
+
+      expect(next.groups.map((g) => g.id)).toEqual(['status', 'priority']);
+      for (const kept of next.groups) expect(kept).toBe(byId(current.groups, kept.id));
+      expect(keptLists(current, next)).toEqual({ groups: false, tags: true, assignments: true });
+    });
+
+    it('gives reordered groups new objects, since their positions changed', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        byId(draft.groups, 'status').position = 1;
+        byId(draft.groups, 'priority').position = 0;
+      });
+      const next = reconcile(current, fetched);
+
+      for (const id of ['status', 'priority']) {
+        expect(byId(next.groups, id)).toBe(byId(fetched.groups, id));
+      }
+      expect(keptLists(current, next)).toEqual({ groups: false, tags: true, assignments: true });
+    });
+  });
+
+  describe('assignments', () => {
+    it('replaces a retagged project’s assignment and keeps every other project’s', () => {
+      // A card moved to another column: b goes from idea to done.
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        assignmentOf(draft.assignments, 'b', 'idea').tagId = 'done';
+      });
+      const next = reconcile(current, fetched);
+
+      expect(assignmentOf(next.assignments, 'b', 'done')).toBe(
+        assignmentOf(fetched.assignments, 'b', 'done')
+      );
+      expect(assignmentOf(next.assignments, 'b', 'idea')).toBeUndefined();
+      for (const [projectId, tagId] of [
+        ['a', 'idea'],
+        ['a', 'q4'],
+        ['c', 'done'],
+      ]) {
+        expect(assignmentOf(next.assignments, projectId, tagId)).toBe(
+          assignmentOf(current.assignments, projectId, tagId)
+        );
+      }
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: true, assignments: false });
+    });
+
+    it('adds a new assignment and keeps every existing one', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.assignments.splice(1, 0, { projectId: 'a', tagId: 'p0' });
+      });
+      const next = reconcile(current, fetched);
+
+      expect(assignmentOf(next.assignments, 'a', 'p0')).toBe(
+        assignmentOf(fetched.assignments, 'a', 'p0')
+      );
+      for (const existing of current.assignments) {
+        expect(assignmentOf(next.assignments, existing.projectId, existing.tagId)).toBe(existing);
+      }
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: true, assignments: false });
+    });
+
+    it.each([
+      ['first', 0],
+      ['last', ASSIGNMENTS.length - 1],
+    ])('drops a removed assignment (the %s) and keeps the others', (_, index) => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.assignments.splice(index, 1);
+      });
+      const next = reconcile(current, fetched);
+
+      expect(next.assignments).toHaveLength(ASSIGNMENTS.length - 1);
+      for (const kept of next.assignments) {
+        expect(kept).toBe(assignmentOf(current.assignments, kept.projectId, kept.tagId));
+      }
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: true, assignments: false });
+    });
+
+    it('follows the fetched order when assignments only swapped places, keeping every object', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.assignments.reverse();
+      });
+      const next = reconcile(current, fetched);
+
+      expect(next.assignments).toEqual([...ASSIGNMENTS].reverse());
+      for (const kept of next.assignments) {
+        expect(kept).toBe(assignmentOf(current.assignments, kept.projectId, kept.tagId));
+      }
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: true, assignments: false });
+    });
+
+    it('tells apart assignments whose project and tag ids run together the same', () => {
+      const current: TagState = {
+        groups: [],
+        tags: [],
+        assignments: [
+          { projectId: 'ab', tagId: 'c' },
+          { projectId: 'a', tagId: 'bc' },
+        ],
+      };
+      expect(reconcile(current, fetchedFrom(current))).toBe(current);
+    });
+
+    it('takes the fetched assignment when a field was added to it', () => {
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        Object.assign(assignmentOf(draft.assignments, 'c', 'done'), { pinned: true });
+      });
+      const next = reconcile(current, fetched);
+      expect(assignmentOf(next.assignments, 'c', 'done')).toBe(
+        assignmentOf(fetched.assignments, 'c', 'done')
+      );
+      expect(assignmentOf(next.assignments, 'a', 'idea')).toBe(
+        assignmentOf(current.assignments, 'a', 'idea')
+      );
+    });
+  });
+
+  describe('several lists at once', () => {
+    it('reconciles each list on its own', () => {
+      // Deleting a tag: it goes, its assignments go, its scope is renumbered.
+      const current = held();
+      const fetched = fetchedFrom(current, (draft) => {
+        draft.tags = draft.tags.filter((t) => t.id !== 'idea');
+        byId(draft.tags, 'done').position = 0;
+        draft.assignments = draft.assignments.filter((a) => a.tagId !== 'idea');
+      });
+      const next = reconcile(current, fetched);
+
+      expect(byId(next.tags, 'done')).toBe(byId(fetched.tags, 'done'));
+      expect(byId(next.tags, 'q4')).toBe(byId(current.tags, 'q4'));
+      expect(next.assignments).toEqual([
+        { projectId: 'a', tagId: 'q4' },
+        { projectId: 'c', tagId: 'done' },
+      ]);
+      expect(assignmentOf(next.assignments, 'a', 'q4')).toBe(
+        assignmentOf(current.assignments, 'a', 'q4')
+      );
+      expect(keptLists(current, next)).toEqual({ groups: true, tags: false, assignments: false });
+    });
+
+    it('takes everything from the fetch when nothing is held', () => {
+      const fetched = fetchedFrom(held());
+      const next = reconcile({ groups: [], tags: [], assignments: [] }, fetched);
+      expect(next.groups.every((g, i) => g === fetched.groups[i])).toBe(true);
+      expect(next.tags.every((t, i) => t === fetched.tags[i])).toBe(true);
+      expect(next.assignments.every((a, i) => a === fetched.assignments[i])).toBe(true);
+    });
+
+    it('empties every list when the fetch is empty', () => {
+      const current = held();
+      const next = reconcile(current, { groups: [], tags: [], assignments: [] });
+      expect(next).not.toBe(current);
+      expect(keptLists(current, next)).toEqual({ groups: false, tags: false, assignments: false });
+    });
   });
 });
 

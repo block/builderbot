@@ -14,10 +14,26 @@ const SESSION_ID = 'video-session';
 const MEDIA_ID = '3f2a9c1e-1234-4567-8123-123456789abc';
 
 /** What the backend holds: the pane loads it, and polls it while `running`. */
-const { transcript, sessionStatus } = vi.hoisted(() => ({
-  transcript: { current: [] as SessionMessage[] },
-  sessionStatus: { current: 'completed' },
-}));
+const { transcript, sessionStatus, sessionRow, pollSessionMock } = vi.hoisted(() => {
+  const transcript = { current: [] as SessionMessage[] };
+  const sessionStatus = { current: 'completed' };
+  const sessionRow = (id: string) =>
+    ({ id, status: sessionStatus.current, provider: null, workingDir: null }) as unknown as Session;
+  return {
+    transcript,
+    sessionStatus,
+    sessionRow,
+    // One tick of a running session: the last row the pane holds, which may
+    // have grown, and any after it. A mock, so a test can tell that the pane's
+    // poll ran.
+    pollSessionMock: vi.fn(async (id: string, request: SessionPollRequest) => ({
+      session: sessionRow(id),
+      queuedMessages: [],
+      messages: transcript.current.filter((message) => message.id >= request.sinceId),
+      acpMetadataMessages: [],
+    })),
+  };
+});
 
 vi.mock('./ChatComposer.svelte', async () => {
   const { default: PromptInputStub } = await import('./testStubs/PromptInputStub.svelte');
@@ -54,29 +70,18 @@ vi.mock('../../transport', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../transport')>()),
   listenToEvent: () => () => {},
 }));
-vi.mock('../../commands', async (importOriginal) => {
-  const session = (id: string) =>
-    ({ id, status: sessionStatus.current, provider: null, workingDir: null }) as unknown as Session;
-  return {
-    ...(await importOriginal<typeof import('../../commands')>()),
-    getSession: async (id: string) => session(id),
-    // One tick of a running session: the last row the pane holds, which may
-    // have grown, and any after it.
-    pollSession: async (id: string, request: SessionPollRequest) => ({
-      session: session(id),
-      queuedMessages: [],
-      messages: transcript.current.filter((message) => message.id >= request.sinceId),
-      acpMetadataMessages: [],
-    }),
-    getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
-    getLatestSessionMessages: async () => ({ data: transcript.current }),
-    getSessionMessages: async () => ({ data: [] }),
-    getSessionMessagesSince: async () => [],
-    getSessionAcpMetadataMessages: async () => [],
-    getSessionAcpMetadataMessagesSince: async () => [],
-    listQueuedSessionMessages: async () => [],
-  };
-});
+vi.mock('../../commands', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../commands')>()),
+  getSession: async (id: string) => sessionRow(id),
+  pollSession: pollSessionMock,
+  getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
+  getLatestSessionMessages: async () => ({ data: transcript.current }),
+  getSessionMessages: async () => ({ data: [] }),
+  getSessionMessagesSince: async () => [],
+  getSessionAcpMetadataMessages: async () => [],
+  getSessionAcpMetadataMessagesSince: async () => [],
+  listQueuedSessionMessages: async () => [],
+}));
 
 import SessionChatPane from './SessionChatPane.svelte';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
@@ -99,6 +104,7 @@ describe('SessionChatPane video in an assistant message', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     sessionStatus.current = 'completed';
+    pollSessionMock.mockClear();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
       cb(0);
@@ -163,11 +169,18 @@ describe('SessionChatPane video in an assistant message', () => {
     await mountPane();
     const first = messageVideo();
     const content = first.closest('.markdown-content');
+    // The pane arms its poll once the load has finished, which is later than
+    // the first video appears. Nothing has polled yet.
+    expect(pollSessionMock).not.toHaveBeenCalled();
 
     // The next chunk: the same row, longer. The poll brings it in, and the
     // message's `{@html}` is given the whole markup again.
     transcript.current = [transcript.current[0], row(2, 'assistant', `${ANSWER}\n\nThat is all.`)];
     vi.advanceTimersByTime(500);
+    // One tick of the interval, so the poll was armed and it ran. Without this
+    // a load that had not finished would fail below, as if rendering had.
+    expect(pollSessionMock).toHaveBeenCalledTimes(1);
+    expect(pollSessionMock.mock.calls[0][0]).toBe(SESSION_ID);
     await settle();
 
     const second = messageVideo();

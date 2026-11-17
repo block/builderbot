@@ -126,7 +126,7 @@ describe('a note video rendered with {@html}', () => {
     expect(editorVideo.hasAttribute('src')).toBe(true);
   });
 
-  it('leaves a video that is not in a page yet alone, and says so', () => {
+  it('leaves a video in a document with no window alone, and says so', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const template = document.createElement('template');
     template.innerHTML = `<div>${renderMarkdown(NOTE)}</div>`;

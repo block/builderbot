@@ -41,17 +41,20 @@ const madeByPage = new WeakSet<HTMLVideoElement>();
  *
  * Only a video in its `figure` (mediaRendering.ts) is replaced, so the nodes
  * swapped are never the first or last of the markup, which Svelte keeps hold
- * of. Nothing is done under a root that is not in a page yet: a copy made
- * there would be one more element to adopt. The attachment runs once per
- * render and does not come back, so a video left that way is reported: it
- * would play blank with nothing else to say why.
+ * of. Nothing is done under a root owned by a document with no window, such
+ * as a template's: a copy made there would be one more element to adopt.
+ * Which document owns the root is the test, not whether the root is attached:
+ * a detached root that the page's document owns is remade like any other, and
+ * nothing is reported. The attachment runs once per render and does not come
+ * back, so a video left in a windowless document is reported: it would play
+ * blank with nothing else to say why.
  */
 export function remakeVideosInPage(root: Element): void {
   const page = root.ownerDocument;
   if (!page.defaultView) {
     if (root.querySelector(NOTE_VIDEO)) {
       console.warn(
-        '[pageVideos] A note video was rendered outside the page and was not remade; WebKit may play it with a blank picture'
+        "[pageVideos] A note video was rendered in a document with no window, such as a template's, and was not remade; WebKit may play it with a blank picture"
       );
     }
     return;

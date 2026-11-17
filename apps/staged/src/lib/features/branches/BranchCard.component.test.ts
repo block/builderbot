@@ -426,8 +426,19 @@ describe('BranchCard header parent pill', () => {
       expect(pills[0].textContent?.replace(/\s+/g, '')).toBe('main+2');
     });
 
-    // Resting the pointer on the pill opens the upstream commits hover.
-    header.querySelector('.hover-anchor')!.dispatchEvent(new MouseEvent('mouseenter'));
+    // Resting the pointer on the pill opens the upstream commits hover after
+    // a short delay. The clock is faked for the hover alone and its timers
+    // are run by hand, so a busy machine cannot stretch that delay past the
+    // wait below, which then rides on mocked promises like the others here.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      header.querySelector('.hover-anchor')!.dispatchEvent(new MouseEvent('mouseenter'));
+      vi.runOnlyPendingTimers();
+      // Nothing may be left on the fake clock: restoring the real one drops it.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
     await vi.waitFor(() => {
       flushSync();
       expect(header.querySelector('.commits-popover .popover-status')?.textContent).toBe(

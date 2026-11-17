@@ -18,10 +18,12 @@ mod worktree;
 
 pub use branch_config::{read_branch_config_snapshot, BranchConfigSnapshot};
 pub(crate) use cli::configure_captured;
+pub(crate) use cli::invalidate_shell_env;
 pub(crate) use cli::prewarm_shell_env;
 pub(crate) use cli::run as cli_run;
 pub(crate) use cli::run_lite_or_captured as cli_run_lite_or_captured;
 pub(crate) use cli::run_smart as cli_run_smart;
+pub(crate) use cli::wait_for_shell_env;
 pub use cli::{EnvSource, GitError};
 pub use commit::commit;
 pub use diff::{get_file_diff, get_unified_diff, list_diff_files};
@@ -59,7 +61,8 @@ pub use types::*;
 pub use upstream::{upstream_branch_name, upstream_branch_name_with};
 pub(crate) use worktree::force_delete_branch;
 pub use worktree::{
-    branch_exists, create_worktree, create_worktree_at_path, create_worktree_for_existing_branch,
+    branch_exists, create_detached_worktree_without_hooks, create_worktree,
+    create_worktree_at_path, create_worktree_for_existing_branch,
     create_worktree_for_existing_branch_at_path,
     create_worktree_for_existing_branch_without_lfs_smudge, create_worktree_from_pr,
     create_worktree_from_pr_at_path, discard_worktree_changes, fetch_origin_branch,
@@ -68,6 +71,7 @@ pub use worktree::{
     list_worktrees, move_worktree, parse_branch_commit_line, parse_worktree_status_paths,
     project_worktree_path_for, project_worktree_root_for, remote_branch_exists, remove_worktree,
     reset_to_commit, set_upstream_to_origin, set_upstream_to_origin_or_unset, switch_branch,
-    update_branch_from_pr, worktree_path_for, BranchCommitFields, CommitInfo, UpdateFromPrResult,
-    WorktreeChangePaths, BRANCH_COMMIT_LOG_FORMAT,
+    switch_detached_worktree_to_branch, update_branch_from_pr, worktree_path_for,
+    BranchCommitFields, CommitInfo, UpdateFromPrResult, WorktreeChangePaths,
+    BRANCH_COMMIT_LOG_FORMAT,
 };

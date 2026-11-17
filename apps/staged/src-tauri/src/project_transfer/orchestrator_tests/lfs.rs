@@ -8,7 +8,7 @@ use super::*;
 
 /// A single-repo project whose scripts see no git config but the clones'
 /// own, like Blox: git-lfs installed, no LFS filter set up anywhere.
-fn lfs_project() -> Fixture {
+pub(super) fn lfs_project() -> Fixture {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
     for (key, value) in isolated_config(&f.host.root) {
         f.host

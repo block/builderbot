@@ -280,6 +280,33 @@ pub(crate) fn prewarm_shell_env(repo: &Path) {
     warm_shell_env(repo);
 }
 
+/// Wait for the captured shell env of `repo`, starting the capture if
+/// nothing has: what the first captured-env op there would wait for, as a
+/// step of its own so a caller can time it apart from that op. A capture that
+/// fails is that op's to report.
+///
+/// A no-op under unit tests, like [`prewarm_shell_env`].
+#[cfg(not(test))]
+pub(crate) fn wait_for_shell_env(repo: &Path) {
+    let _ = crate::session_runner::shell_env_cache().get_blocking(repo);
+}
+
+#[cfg(test)]
+pub(crate) fn wait_for_shell_env(_repo: &Path) {}
+
+/// Drop the captured shell env `repo` uses, or the capture in flight for
+/// it, so the next captured-env op there captures afresh. For a caller that
+/// changed what the capture reads after it started.
+///
+/// A no-op under unit tests, like [`prewarm_shell_env`].
+#[cfg(not(test))]
+pub(crate) fn invalidate_shell_env(repo: &Path) {
+    crate::session_runner::shell_env_cache().invalidate(repo);
+}
+
+#[cfg(test)]
+pub(crate) fn invalidate_shell_env(_repo: &Path) {}
+
 /// Which environment to pass to the spawned git process.
 ///
 /// Also surfaces at the `state::compute_local_branch_git_state` boundary as a

@@ -430,8 +430,9 @@ fn restore_branch_config(
 }
 
 /// Remove a worktree the transfer added, without `remove_worktree`'s branch
-/// deletion: the branch is the rollback's to decide about.
-fn remove_worktree_keeping_branch(clone: &Path, worktree: &Path) -> Result<(), String> {
+/// deletion: the branch is the rollback's to decide about. A directory git
+/// does not know as a worktree, such as an add left part way, goes too.
+pub(super) fn remove_worktree_keeping_branch(clone: &Path, worktree: &Path) -> Result<(), String> {
     let Some(path) = worktree.to_str() else {
         return Err(format!("not a UTF-8 path: {}", worktree.display()));
     };

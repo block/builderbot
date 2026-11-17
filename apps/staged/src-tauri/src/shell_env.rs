@@ -51,6 +51,7 @@ mod leftover_group;
 mod capture_limit_tests;
 
 use capture_slots::{CaptureSlots, Urgency, CAPTURE_LIMIT};
+pub(crate) use env_root::env_root_inputs;
 use env_root::resolve_env_root;
 use leftover_group::{LeftoverState, Leftovers};
 

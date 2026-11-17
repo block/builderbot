@@ -1,6 +1,7 @@
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Branch, BranchTimeline, WorkspaceStatus } from '../../types';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { Branch, BranchGitState, BranchTimeline, WorkspaceStatus } from '../../types';
+import type { ParentBranchCommit } from '../../commands';
 import type { DragDropSubscription } from './dragDrop';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 
@@ -57,6 +58,10 @@ const { subscribeDragDrop, toast, cmd, emptyTimeline, noteModal, headerInfo } = 
           _provider?: string,
           _imageIds?: string[]
         ) => ({ sessionId: 'session-new', sessionStatus: 'running' })
+      ),
+      // What the header's upstream commits hover lists once it opens.
+      listParentBranchCommits: vi.fn(
+        async (_branchId: string): Promise<ParentBranchCommit[]> => []
       ),
     },
   };
@@ -173,6 +178,30 @@ function localBranch(worktreePath: string | null): Branch {
     workspaceStatus: null,
     worktreePath,
   };
+}
+
+/** A timeline whose branch is `behind` commits behind its base branch. */
+function timelineBehindBase(behind: number): BranchTimeline {
+  const gitState: BranchGitState = {
+    headSha: 'head',
+    currentBranch: 'feature',
+    detachedHead: false,
+    expectedBranchMatches: true,
+    upstream: {
+      ref: 'origin/feature',
+      exists: true,
+      sha: 'head',
+      relation: 'inSync',
+      ahead: 0,
+      behind: 0,
+      mergeBaseSha: 'fork',
+      behindBase: behind,
+    },
+    base: { ref: 'origin/main', sha: 'base', commitsSinceFork: behind },
+    worktree: { dirty: false, modified: 0, added: 0, deleted: 0, untracked: 0, conflicted: 0 },
+    fetch: { status: 'fresh', fetchedAt: 1, error: null },
+  };
+  return { ...emptyTimeline, gitState };
 }
 
 /** The card's one drag-drop subscription. */
@@ -354,7 +383,17 @@ describe('BranchCard file drops', () => {
 });
 
 describe('BranchCard header parent pill', () => {
-  it('names the base branch on a remote card, not the Blox workstation', () => {
+  beforeAll(() => {
+    // jsdom has no Web Animations, which the behind count's fade-in starts.
+    Element.prototype.animate = () => ({ cancel: () => {} }) as unknown as Animation;
+  });
+
+  afterAll(() => {
+    delete (Element.prototype as Partial<Element>).animate;
+  });
+
+  /** Mounts a running remote card with the real header, and returns the header. */
+  function mountRemoteHeader() {
     headerInfo.real = true;
     const { card } = mountCard({
       ...remoteBranch('running'),
@@ -362,12 +401,47 @@ describe('BranchCard header parent pill', () => {
       // Shaped like a sibling git branch, which is what made it misleading.
       workspaceName: 'feature-cdb498',
     });
+    return card.querySelector<HTMLElement>('.card-header')!;
+  }
 
-    const header = card.querySelector<HTMLElement>('.card-header')!;
+  it('names the base branch on a remote card, not the Blox workstation', () => {
+    const header = mountRemoteHeader();
+
     const pills = [...header.querySelectorAll<HTMLElement>('.branch-capsule')];
     expect(pills.map((pill) => pill.textContent?.trim())).toEqual(['main']);
     expect(pills[0].title).toBe('main');
     expect(header.textContent).not.toContain('feature-cdb498');
+  });
+
+  it('names the base branch in the behind count tooltip and the upstream commits hover', async () => {
+    cmd.getBranchTimeline.mockResolvedValue(timelineBehindBase(2));
+    const header = mountRemoteHeader();
+
+    // The count arrives with the timeline. Its tooltip says "checking for
+    // updates" until the git state refresh that follows the load settles.
+    await vi.waitFor(() => {
+      flushSync();
+      const pills = [...header.querySelectorAll<HTMLElement>('.branch-capsule')];
+      expect(pills.map((pill) => pill.title)).toEqual(['main \u00b7 2 commits behind']);
+      expect(pills[0].textContent?.replace(/\s+/g, '')).toBe('main+2');
+    });
+
+    // Resting the pointer on the pill opens the upstream commits hover.
+    header.querySelector('.hover-anchor')!.dispatchEvent(new MouseEvent('mouseenter'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(header.querySelector('.commits-popover .popover-status')?.textContent).toBe(
+        'No upstream commits available.'
+      );
+    });
+    const popover = header.querySelector<HTMLElement>('.commits-popover')!;
+    expect(cmd.listParentBranchCommits).toHaveBeenCalledWith('branch-1');
+    expect(popover.getAttribute('aria-label')).toBe('Upstream commits on main');
+    expect(popover.querySelector('.popover-title')!.textContent).toBe('Upstream changes in main');
+    expect(popover.querySelector('.popover-count')!.textContent).toBe('+2');
+
+    // Not in the text, and not in a tooltip or an aria-label either.
+    expect(header.outerHTML).not.toContain('feature-cdb498');
   });
 });
 

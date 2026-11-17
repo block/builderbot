@@ -13,7 +13,10 @@ use crate::session_commands::{fail_claimed_queued_start, QueuedSessionClaim, Que
 use crate::session_runner;
 use crate::store::{self, FailureStrategy, PipelineExecution, PipelineKind, PipelineStep, Store};
 
-use super::context::{base_branch_name, resolve_branch_pipeline_context, BranchPipelineContext};
+use super::context::{
+    base_branch_name, ensure_pipeline_checkout, resolve_branch_pipeline_context,
+    BranchPipelineContext,
+};
 use super::git_commands::git_fetch_with_fallback;
 use super::pipeline::{
     branch_has_work_in_flight, find_queued_pipeline, launch_running_pipeline_session,
@@ -410,6 +413,9 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     }
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    // The branch is idle, so the pipeline runs now. Held until this returns,
+    // by when its row is `running`.
+    let _checkout = ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, None).await?;
     let base_branch = base_branch_name(&ctx.branch).to_string();
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
     let rebase_ref = rebase_ref_for_target(&ctx.branch, &remote_branch, target.as_deref());
@@ -510,6 +516,10 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         .map(|_| "origin");
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    // Before the claim, like everything else here that awaits. Held until
+    // this returns, by when the row is claimed `running`.
+    let _checkout =
+        ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, Some(&session.id)).await?;
     let base_branch = base_branch_name(&ctx.branch).to_string();
     let remote_branch = if target.is_some() {
         crate::branches::resolve_remote_branch(&store, &ctx.branch).await

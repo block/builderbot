@@ -2646,6 +2646,37 @@ fn a_resume_honours_cancel_and_leaves_the_rows_running() {
     assert_eq!(status(), Some(WorkspaceStatus::Running), "resumed");
 }
 
+/// A resume vouches for the workstation being up, not for what its clone
+/// has checked out, and `Running` means both. A row whose clone the
+/// transfer's own inspection read as on another branch keeps its status:
+/// the status pollers find the workstation running and put the branch
+/// through setup, which is what checks it out.
+#[test]
+fn a_resumed_row_whose_clone_is_on_another_branch_is_not_marked_running() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer(true).result.expect("to remote");
+    git(&f.checkout(0), &["checkout", "-b", "elsewhere"]);
+    f.host.set_state(&f.workspace(), WorkspaceState::Suspended);
+    f.store
+        .update_workspace_status_by_workspace_name(&f.workspace(), &WorkspaceStatus::Suspended)
+        .unwrap();
+
+    let err = f.transfer(true).result.unwrap_err();
+
+    assert!(f
+        .host
+        .calls()
+        .contains(&format!("resume {}", f.workspace())));
+    assert!(err.contains("has elsewhere checked out"), "{err}");
+    let status = f
+        .store
+        .get_branch(&f.branches[0].id)
+        .unwrap()
+        .unwrap()
+        .workspace_status;
+    assert_eq!(status, Some(WorkspaceStatus::Suspended));
+}
+
 // ---------------------------------------------------------------------------
 // Panics
 // ---------------------------------------------------------------------------

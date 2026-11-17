@@ -7,12 +7,12 @@
 //!
 //! - at the end of setup, before `Running` is written
 //!   ([`confirm_checked_out`]);
-//! - at every branch session start on a remote branch, a fresh session or
-//!   a resumed one, before the agent is launched
-//!   ([`ensure_session_checkout`]). A branch can be `Running` over a clone
-//!   setup never put there: a poller promotes a `Stopped` or `Suspended` row
-//!   when the workstation is resumed outside Staged, two branches of one
-//!   repo share a clone, someone switches branches in a terminal.
+//! - at every start on a remote branch of something that runs git in the
+//!   clone, before it is launched ([`ensure_session_checkout`]): an agent
+//!   session, fresh or resumed, and a pipeline session (commit, push,
+//!   rebase, squash, PR). A branch can be `Running` over a clone that has
+//!   since moved: two branches of one repo share a clone, someone switches
+//!   branches in a terminal.
 //!
 //! The read is one transient exec and no fetch. It answers through stdout
 //! ([`CLONE_HEAD_PROBE_SCRIPT`]), so an exec that failed is not an answer:
@@ -20,26 +20,35 @@
 //! need) and never "right branch" (which would start the agent unchecked).
 //! [`read_head`] tries once more after a short pause and then fails.
 //!
-//! A session start that finds the clone somewhere else repairs it rather
-//! than failing: it runs the shared setup under the guard
-//! ([`SetupTrigger::Repair`]) and starts once the clone reads right. Failing
-//! instead would end every session queued on the branch one after another
-//! with the same error and leave nothing that puts the clone right, since
-//! nothing asks for setup of a `Running` branch. The repair moves the row to
-//! `Starting` for as long as it runs and to `Error` when it fails, so the
-//! session queue's own gate holds whatever else is queued until the branch
-//! is usable. The one case that fails without a repair is a clone another
-//! live session is working in: a checkout there would move that session's
-//! work onto this branch.
+//! A start that finds the clone somewhere else repairs it rather than
+//! failing: it runs the shared setup under the guard
+//! ([`SetupTrigger::Repair`]) and starts once the clone reads right. The
+//! repair moves the row to `Starting` for as long as it runs, so the session
+//! queue's own gate holds whatever else is queued. A repair that fails
+//! leaves the row in `Error`, with its reason and a retry timer; one that is
+//! refused, because switching would lose or move work or because another
+//! live session is working in the clone, puts the row back to `Running` and
+//! fails only the session that asked.
+//!
+//! The read and the start it allows are one step as far as other starts and
+//! checkouts in the same clone go: the caller holds the clone's gate
+//! ([`CheckoutHold`]) from the read until its session row is `running`.
+//! Setup takes the same gate around its look for live sessions and its
+//! checkout, so it either sees this session as live and leaves the clone
+//! alone, or finishes before this session reads the clone.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::OwnedMutexGuard;
+
 use crate::branches;
 use crate::store::{self, Store};
 
-use super::guard::SetupGuard;
-use super::{checkout_for, run_guarded, BloxHost, Checkout, SetupHost, SetupTrigger};
+use super::clone::checkout_for;
+use super::guard::{Patience, SetupGuard};
+use super::host::{blox_host, Checkout, SetupHost};
+use super::{run_guarded, SetupRequest};
 
 /// What a clone has checked out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,11 +182,11 @@ async fn read_head_once(
     }
 }
 
-fn is_on_branch(head: &CloneHead, checkout: &Checkout) -> bool {
+pub(super) fn is_on_branch(head: &CloneHead, checkout: &Checkout) -> bool {
     matches!(head, CloneHead::Branch(name) if *name == checkout.branch_name)
 }
 
-fn unverified(checkout: &Checkout, error: &str) -> String {
+pub(super) fn unverified(checkout: &Checkout, error: &str) -> String {
     format!(
         "Could not verify that branch '{}' is checked out in workspace '{}': {error}",
         checkout.branch_name, checkout.workspace
@@ -201,114 +210,101 @@ pub(crate) async fn confirm_checked_out(
     }
 }
 
-/// Make sure `branch`'s clone is on the branch before `session_id`'s agent
-/// is launched in it. A no-op for a local branch.
+/// The clone's gate, held by a start that has read the clone as on its
+/// branch. While it is held no checkout runs in that clone and no other
+/// start reads it.
+///
+/// Keep it until the session's row is `running`, which is what setup looks
+/// for before it touches a clone, and drop it then. Nothing may ask for
+/// setup while holding one ([`SetupGuard::clone_gate`]'s lock order).
+#[must_use = "the clone is only held while this is alive; bind it until the session row is running"]
+pub(crate) struct CheckoutHold(#[allow(dead_code)] Option<OwnedMutexGuard<()>>);
+
+impl CheckoutHold {
+    /// For a start with no remote clone to hold: a local branch.
+    pub(crate) fn none() -> Self {
+        CheckoutHold(None)
+    }
+}
+
+/// Make sure `branch`'s clone is on the branch before `session_id` starts
+/// running git in it. A no-op for a local branch.
 ///
 /// Call it before anything else reads the clone for the session (the branch
 /// context in its prompt, its pre-run HEAD) and before the row is claimed:
-/// it can wait on a repair.
+/// it can wait on a repair. Bind what it returns until the row is `running`
+/// ([`CheckoutHold`]).
 pub(crate) async fn ensure_session_checkout<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     store: &Arc<Store>,
     branch: &store::Branch,
     session_id: &str,
-) -> Result<(), String> {
+) -> Result<CheckoutHold, String> {
     if branch.branch_type != store::BranchType::Remote || branch.workspace_name.is_none() {
-        return Ok(());
+        return Ok(CheckoutHold::none());
     }
-    let host: Arc<dyn SetupHost> = Arc::new(BloxHost {
-        app_handle: app_handle.clone(),
-    });
+    let host = blox_host(app_handle, store);
     verify_session_checkout(SetupGuard::global(), store, &host, branch, session_id).await
 }
 
 /// [`ensure_session_checkout`] for a remote branch, against any host.
 ///
-/// Returns `Ok` only after a read that says the clone is on the branch:
-/// the first one, or the one after a repair.
+/// Returns `Ok` only after a read, made with the clone's gate held, that
+/// says the clone is on the branch: the first one, or the one after a
+/// repair.
 pub(crate) async fn verify_session_checkout(
     guard: &Arc<SetupGuard>,
     store: &Arc<Store>,
     host: &Arc<dyn SetupHost>,
     branch: &store::Branch,
     session_id: &str,
-) -> Result<(), String> {
+) -> Result<CheckoutHold, String> {
     let checkout = checkout_for(store, branch)?;
-    let found = match read_head(host.as_ref(), &checkout).await {
-        Ok(head) if is_on_branch(&head, &checkout) => return Ok(()),
-        Ok(head) => head,
-        Err(e) => return Err(unverified(&checkout, &e)),
-    };
+    let clone_dir = checkout.clone_dir.as_deref();
     let (workspace, expected) = (&checkout.workspace, &checkout.branch_name);
+
+    let found = {
+        let gate = guard.clone_gate(workspace, clone_dir).await;
+        match read_head(host.as_ref(), &checkout).await {
+            Ok(head) if is_on_branch(&head, &checkout) => return Ok(CheckoutHold(Some(gate))),
+            Ok(head) => head,
+            Err(e) => return Err(unverified(&checkout, &e)),
+        }
+        // The gate is let go here: the repair takes it for its checkout.
+    };
     log::warn!(
         "[workspace_setup] session {session_id}: workspace '{workspace}' has {found} checked \
-         out, where branch '{expected}' was expected; checking the branch out before the agent \
-         starts"
+         out, where branch '{expected}' was expected; checking the branch out before the \
+         session starts"
     );
 
-    if let Some(busy) = live_session_in_clone(store, branch, &checkout, session_id)? {
-        return Err(format!(
-            "Workspace '{workspace}' has {found} checked out, where this session's branch \
-             '{expected}' was expected. It was not switched because a session of branch \
-             '{busy}' is running in the same clone; start this session again once that one \
-             has finished."
-        ));
-    }
-
-    run_guarded(guard, store, host, &branch.id, SetupTrigger::Repair)
-        .await
-        .map_err(|e| {
-            format!(
-                "Workspace '{workspace}' had {found} checked out, where this session's branch \
-                 '{expected}' was expected, and checking the branch out failed: {e}"
-            )
-        })?;
+    run_guarded(
+        guard,
+        store,
+        host,
+        &branch.id,
+        SetupRequest::repair_for(session_id),
+        Patience::ToTheEnd,
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "Workspace '{workspace}' had {found} checked out, where this session's branch \
+             '{expected}' was expected, and it could not be switched: {e}"
+        )
+    })?;
 
     // The repair's own word is not taken for it: a run this one joined, or a
     // row that had left `Running` and so had nothing to repair, says nothing
-    // about where the clone is now.
+    // about where the clone is now. Neither does a repair that did its work:
+    // the gate was free between its checkout and this read.
+    let gate = guard.clone_gate(workspace, clone_dir).await;
     match read_head(host.as_ref(), &checkout).await {
-        Ok(head) if is_on_branch(&head, &checkout) => Ok(()),
+        Ok(head) if is_on_branch(&head, &checkout) => Ok(CheckoutHold(Some(gate))),
         Ok(head) => Err(format!(
             "Workspace '{workspace}' has {head} checked out, where this session's branch \
              '{expected}' was expected"
         )),
         Err(e) => Err(unverified(&checkout, &e)),
     }
-}
-
-/// The branch whose live session works in `checkout`'s clone, if there is
-/// one besides `session_id`: a session that is `running`, or `disconnected`
-/// with its remote turn possibly still going.
-///
-/// A project's remote branches share one workstation, and those of one
-/// repository (the same repo added under two subpaths) share one clone
-/// there. A checkout under a live agent would move the commits it goes on to
-/// make onto another branch.
-fn live_session_in_clone(
-    store: &Arc<Store>,
-    branch: &store::Branch,
-    checkout: &Checkout,
-    session_id: &str,
-) -> Result<Option<String>, String> {
-    let branches_in_project = store
-        .list_branches_for_project(&branch.project_id)
-        .map_err(|e| e.to_string())?;
-    for other in branches_in_project {
-        if other.workspace_name.as_deref() != Some(checkout.workspace.as_str()) {
-            continue;
-        }
-        if other.id != branch.id
-            && branches::resolve_branch_clone_dir(store, &other)? != checkout.clone_dir
-        {
-            continue;
-        }
-        let live = store
-            .get_busy_sessions_for_branch(&other.id)
-            .map_err(|e| e.to_string())?;
-        if live.iter().any(|session| session.id != session_id) {
-            return Ok(Some(other.branch_name));
-        }
-    }
-    Ok(None)
 }

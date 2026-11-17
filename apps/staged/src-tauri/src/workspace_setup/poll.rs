@@ -3,13 +3,23 @@
 //!
 //! A poll reconciles a branch row with what Blox reports for its
 //! workstation. It owns every transition but one: it never writes `Running`
-//! over `Starting`. A running workstation says nothing about whether the
-//! branch is checked out in it, so a poll that finds one behind a `Starting`
-//! row triggers branch setup (see the parent module) and reports `Starting`
-//! until setup has written `Running` itself. Nor does it write `Running`
-//! over `Error`: a setup that failed left the row there, and a client still
-//! polling on a stale `starting` must be told so, not handed a branch whose
-//! checkout never happened.
+//! over a row that doesn't already say so. A running workstation says
+//! nothing about whether the branch is checked out in it, so what a poll
+//! does on finding one depends on the row:
+//!
+//! - `Starting`: it triggers branch setup (see the parent module) and
+//!   reports `Starting` until setup has written `Running` itself;
+//! - `Stopped`, `Suspended` or no status (a workstation resumed outside
+//!   Staged, or by another window): it writes `Starting` and triggers setup,
+//!   so the row reaches `Running` the same way a new branch does. That also
+//!   covers a `Starting` row a poll moved to `Suspended` while its
+//!   workstation was down: its way back is through setup again;
+//! - `Error`: it leaves the row, which a client still polling on a stale
+//!   `starting` must be told about, and makes sure a retry timer is set.
+//!
+//! A poll that writes `Error` itself (a signed-out `sq`, a workstation Blox
+//! reports failed) records why and sets the timer too, so no `Error` is
+//! without a reason or a way out.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,11 +35,21 @@ use crate::PollWorkspaceResult;
 /// reported for a status write (see [`branches::workspace_status_written`]).
 pub(crate) type StatusWritten<'a> = Box<dyn Fn(&str, bool, &WorkspaceStatus) + 'a>;
 
+/// Told a branch id and why a poll moved its row to `Error`.
+pub(crate) type BranchFailed<'a> = Box<dyn Fn(&str, &str) + 'a>;
+
 /// What a poll does besides writing the row, injected so tests can watch it.
 pub(crate) struct PollEffects<'a> {
     pub(crate) status_written: StatusWritten<'a>,
-    /// Called for a `Starting` branch whose workstation is running.
+    /// Called for a branch whose workstation is running and whose row says
+    /// (or has just been made to say) `Starting`.
     pub(crate) trigger_setup: Box<dyn Fn(&str) + 'a>,
+    /// Called for an `Error` branch whose workstation is running: its retry
+    /// timer should be set.
+    pub(crate) arm_retry: Box<dyn Fn(&str) + 'a>,
+    /// Called with a branch id and the reason when the poll itself moved the
+    /// row to `Error`.
+    pub(crate) failed: BranchFailed<'a>,
 }
 
 /// What Blox said about one workstation.
@@ -96,15 +116,36 @@ pub(crate) fn settle_reported(
     let mapped = branches::map_blox_status_to_workspace_status(reported.status, row);
     if mapped == WorkspaceStatus::Running {
         match row {
+            // Setup said so, over a clone it read.
+            Some(WorkspaceStatus::Running) => {}
             // The workstation is up; the branch may not be checked out in
             // it. Setup finds out, and is the one to say `Running`.
             Some(WorkspaceStatus::Starting) => {
                 (effects.trigger_setup)(&branch.id);
                 return Ok(WorkspaceStatus::Starting);
             }
-            // Setup failed here. Only another setup can clear that.
-            Some(WorkspaceStatus::Error) => return Ok(WorkspaceStatus::Error),
-            _ => {}
+            // Setup failed here. Only another setup can clear that, and the
+            // workstation being up is what a retry waits for.
+            Some(WorkspaceStatus::Error) => {
+                (effects.arm_retry)(&branch.id);
+                return Ok(WorkspaceStatus::Error);
+            }
+            // The workstation came back without Staged resuming it. Where
+            // its clone is now is anyone's guess, so the row goes through
+            // setup like a new branch's rather than straight to `Running`.
+            Some(WorkspaceStatus::Stopped) | Some(WorkspaceStatus::Suspended) | None => {
+                log::debug!(
+                    "[workspace_poll] branch={} ws={workspace} is running behind a {} row, setting it up",
+                    branch.id,
+                    row.map(|s| s.as_str()).unwrap_or("statusless"),
+                );
+                let changed = store
+                    .update_branch_workspace_status(&branch.id, &WorkspaceStatus::Starting)
+                    .map_err(|e| e.to_string())?;
+                (effects.status_written)(&branch.id, changed, &WorkspaceStatus::Starting);
+                (effects.trigger_setup)(&branch.id);
+                return Ok(WorkspaceStatus::Starting);
+            }
         }
     }
 
@@ -121,6 +162,15 @@ pub(crate) fn settle_reported(
         .update_branch_workspace_status(&branch.id, &mapped)
         .map_err(|e| e.to_string())?;
     (effects.status_written)(&branch.id, changed, &mapped);
+    if mapped == WorkspaceStatus::Error && row != Some(&WorkspaceStatus::Error) {
+        (effects.failed)(
+            &branch.id,
+            &format!(
+                "Blox reports workspace '{workspace}' as {}",
+                reported.status.unwrap_or("failed")
+            ),
+        );
+    }
     Ok(mapped)
 }
 
@@ -136,10 +186,12 @@ pub(crate) fn settle_one(
         Ok(reported) => reported,
         Err(BloxError::NotAuthenticated) => {
             // Auth errors are definitive — stop polling and surface the error.
+            let reason = "Not authenticated with Blox. Run: sq login";
             store
                 .update_branch_workspace_status(&branch.id, &WorkspaceStatus::Error)
                 .ok();
-            return Err("Not authenticated with Blox. Run: sq login".to_string());
+            (effects.failed)(&branch.id, reason);
+            return Err(reason.to_string());
         }
         Err(e) => {
             // During initial creation, `blox ws start` may still be running
@@ -358,7 +410,8 @@ pub(crate) async fn poll_all_workspace_statuses(
 }
 
 /// The effects a real poll has: kick the session queue on a `Running` write,
-/// and hand a `Starting` branch on a running workstation to setup.
+/// hand a branch on a running workstation to setup, and give a failed one
+/// its reason and its retry timer.
 fn app_effects<'a>(store: &'a Arc<Store>, app_handle: &'a AppHandle) -> PollEffects<'a> {
     PollEffects {
         status_written: Box::new(move |branch_id, changed, status| {
@@ -366,6 +419,12 @@ fn app_effects<'a>(store: &'a Arc<Store>, app_handle: &'a AppHandle) -> PollEffe
         }),
         trigger_setup: Box::new(move |branch_id| {
             super::trigger_branch_setup(app_handle, store, branch_id);
+        }),
+        arm_retry: Box::new(move |branch_id| {
+            super::arm_retry(app_handle, store, branch_id);
+        }),
+        failed: Box::new(move |branch_id, reason| {
+            super::branch_failed(app_handle, store, branch_id, reason);
         }),
     }
 }

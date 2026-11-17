@@ -10,6 +10,15 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
   let transferringProjects: Set<string>;
   let projectLocations: Map<string, string>;
   let refreshTransferredProject: Mock<(projectId: string) => Promise<void>>;
+  let eventListeners: Map<string, Array<(payload: unknown) => void>>;
+
+  /** Deliver a backend event to the controller's listeners. */
+  function emit(event: string, payload: unknown) {
+    for (const listener of eventListeners.get(event) ?? []) listener(payload);
+  }
+
+  const RUNNING = { status: 'running', workstationId: null };
+  const STARTING = { status: 'starting', workstationId: null };
 
   beforeEach(() => {
     vi.resetModules();
@@ -25,10 +34,30 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     commandsMock = {
       setupWorktree: vi.fn(),
       setupWorktreeAndRunPrerun,
-      startWorkspace: vi.fn(async () => {}),
+      startWorkspace: vi.fn(async () => RUNNING),
       pollAllWorkspaceStatuses: vi.fn(async () => ({})),
+      getWorkspaceSetupErrors: vi.fn(async () => ({})),
     };
     vi.doMock('../../api/commands', () => commandsMock);
+    eventListeners = new Map();
+    vi.doMock('../../transport', () => ({
+      listenToEvent: (
+        event: string,
+        callback: (payload: unknown) => void,
+        opts?: { onEstablished?: () => void }
+      ) => {
+        const listeners = eventListeners.get(event) ?? [];
+        listeners.push(callback);
+        eventListeners.set(event, listeners);
+        void Promise.resolve().then(() => opts?.onEstablished?.());
+        return () => {
+          eventListeners.set(
+            event,
+            (eventListeners.get(event) ?? []).filter((l) => l !== callback)
+          );
+        };
+      },
+    }));
     vi.doMock('svelte-sonner', () => ({ toast: { error: vi.fn() } }));
     vi.doMock('../settings/preferences.svelte', () => ({
       getPreferredAgent: () => 'claude',
@@ -45,6 +74,7 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.doUnmock('../../api/commands');
+    vi.doUnmock('../../transport');
     vi.doUnmock('svelte-sonner');
     vi.doUnmock('../settings/preferences.svelte');
     vi.doUnmock('../agents/agent.svelte');
@@ -257,9 +287,9 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
   // it would show an error over a setup that then succeeds.
   it('does not time out a starting branch while its setup call is in flight', async () => {
     vi.useFakeTimers();
-    let finishSetup!: () => void;
+    let finishSetup!: (result: typeof RUNNING) => void;
     commandsMock.startWorkspace.mockReturnValue(
-      new Promise<void>((resolve) => (finishSetup = resolve))
+      new Promise<typeof RUNNING>((resolve) => (finishSetup = resolve))
     );
     // The poll never promotes it: only setup does.
     commandsMock.pollAllWorkspaceStatuses.mockResolvedValue({
@@ -276,7 +306,7 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     expect(branchesByProject.get('project-1')?.[0].workspaceStatus).toBe('starting');
     expect(lifecycle.getWorkspaceErrors().size).toBe(0);
 
-    finishSetup();
+    finishSetup(RUNNING);
     await settle();
     expect(branchesByProject.get('project-1')?.[0].workspaceStatus).toBe('running');
     lifecycle.stop();
@@ -341,10 +371,147 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     expect(branchesByProject.get('project-1')).toEqual([
       { id: 'branch-1', branchType: 'remote', workspaceStatus: 'running' },
     ]);
+    // The setup-error snapshot taken at start is a read, not a drain.
     const issued = Object.entries(commandsMock)
-      .filter(([, fn]) => fn.mock.calls.length > 0)
+      .filter(([name, fn]) => fn.mock.calls.length > 0 && name !== 'getWorkspaceSetupErrors')
       .map(([name]) => name);
     expect(issued).toEqual(['pollAllWorkspaceStatuses']);
     lifecycle.stop();
+  });
+  /** Remote branches in `starting`, as the store would hold them. */
+  function startingBranches(...ids: string[]) {
+    return ids.map((id) => ({ id, branchType: 'remote', workspaceStatus: 'starting' }));
+  }
+
+  function statusOf(branchId: string) {
+    return branchesByProject.get('project-1')?.find((b) => b.id === branchId)?.workspaceStatus;
+  }
+
+  // The resolved status is the row's, not an inference: a setup call can
+  // come back with the branch suspended (or anything else) as well.
+  it('applies the status startWorkspace resolves with', async () => {
+    vi.useFakeTimers();
+    commandsMock.startWorkspace.mockImplementation(async (branchId: string) =>
+      branchId === 'branch-1'
+        ? { status: 'running', workstationId: 7 }
+        : { status: 'suspended', workstationId: null }
+    );
+    branchesByProject = new Map([['project-1', startingBranches('branch-1', 'branch-2')]]);
+    const lifecycle = await newController();
+    await kickoff(lifecycle);
+
+    expect(branchesByProject.get('project-1')).toEqual([
+      { id: 'branch-1', branchType: 'remote', workspaceStatus: 'running', workstationId: 7 },
+      { id: 'branch-2', branchType: 'remote', workspaceStatus: 'suspended' },
+    ]);
+    lifecycle.stop();
+  });
+
+  // `starting` means the backend returned early while the workstation boots
+  // and carries on with the setup itself. The call must not keep a setup
+  // slot, be re-issued on the next kickoff, or let the timeout fire under
+  // the backend's run; the poll reports how it ends.
+  it('releases the slot on a starting answer and leaves the outcome to the poll', async () => {
+    vi.useFakeTimers();
+    const ids = ['branch-1', 'branch-2', 'branch-3', 'branch-4', 'branch-5'];
+    commandsMock.startWorkspace.mockImplementation((branchId: string) =>
+      branchId === 'branch-5' ? new Promise(() => {}) : Promise.resolve(STARTING)
+    );
+    let polled: Record<string, { status: string; workstationId: number | null }> =
+      Object.fromEntries(ids.map((id) => [id, STARTING]));
+    commandsMock.pollAllWorkspaceStatuses.mockImplementation(async () => polled);
+    branchesByProject = new Map([['project-1', startingBranches(...ids)]]);
+    const lifecycle = await newController();
+    await kickoff(lifecycle);
+
+    expect(commandsMock.startWorkspace.mock.calls.map(([id]) => id)).toEqual(ids);
+    await kickoff(lifecycle);
+    expect(commandsMock.startWorkspace).toHaveBeenCalledTimes(5);
+
+    await vi.advanceTimersByTimeAsync(7 * 60 * 1000);
+    expect(ids.map(statusOf)).toEqual(ids.map(() => 'starting'));
+    expect(lifecycle.getWorkspaceErrors().size).toBe(0);
+
+    polled = { ...polled, 'branch-1': { status: 'running', workstationId: 3 } };
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(statusOf('branch-1')).toBe('running');
+    lifecycle.stop();
+  });
+
+  // A list refetched after the backend retried a branch on its own (error to
+  // starting) joins that run and polls it, even with the poller stopped.
+  it('joins and polls a branch a refetched list shows starting again', async () => {
+    vi.useFakeTimers();
+    commandsMock.startWorkspace.mockResolvedValue(STARTING);
+    branchesByProject = new Map([
+      ['project-1', [{ id: 'branch-1', branchType: 'remote', workspaceStatus: 'error' }]],
+    ]);
+    const lifecycle = await newController();
+    await kickoff(lifecycle);
+    expect(commandsMock.startWorkspace).not.toHaveBeenCalled();
+    expect(commandsMock.pollAllWorkspaceStatuses).not.toHaveBeenCalled();
+
+    branchesByProject = new Map([['project-1', startingBranches('branch-1')]]);
+    await kickoff(lifecycle);
+    expect(commandsMock.startWorkspace).toHaveBeenCalledWith('branch-1');
+    expect(commandsMock.pollAllWorkspaceStatuses).toHaveBeenCalledWith(['branch-1']);
+    lifecycle.stop();
+  });
+
+  it('retryWorkspace reruns setup for a branch in error, once at a time', async () => {
+    vi.useFakeTimers();
+    commandsMock.startWorkspace.mockRejectedValueOnce(new Error('could not fetch'));
+    branchesByProject = new Map([['project-1', startingBranches('branch-1')]]);
+    const lifecycle = await newController();
+    await kickoff(lifecycle);
+    expect(statusOf('branch-1')).toBe('error');
+    expect(lifecycle.getWorkspaceErrors().get('branch-1')).toBe('could not fetch');
+
+    let finishSetup!: (result: typeof RUNNING) => void;
+    commandsMock.startWorkspace.mockReturnValueOnce(
+      new Promise((resolve) => (finishSetup = resolve))
+    );
+    lifecycle.retryWorkspace('project-1', 'branch-1');
+    await settle();
+    expect(statusOf('branch-1')).toBe('starting');
+    expect(lifecycle.getWorkspaceErrors().has('branch-1')).toBe(false);
+    expect(commandsMock.startWorkspace).toHaveBeenCalledTimes(2);
+
+    lifecycle.retryWorkspace('project-1', 'branch-1');
+    await settle();
+    expect(commandsMock.startWorkspace).toHaveBeenCalledTimes(2);
+
+    finishSetup(RUNNING);
+    await settle();
+    expect(statusOf('branch-1')).toBe('running');
+    lifecycle.stop();
+  });
+
+  // The backend reports failures of runs nothing here joined (its startup
+  // pass, poll triggers, automatic retries), and a snapshot covers the ones
+  // from before the window mounted.
+  it('keeps setup reasons from the error event and the snapshot taken at start', async () => {
+    let finishSnapshot!: (errors: Record<string, string>) => void;
+    commandsMock.getWorkspaceSetupErrors.mockReturnValue(
+      new Promise((resolve) => (finishSnapshot = resolve))
+    );
+    const lifecycle = await newController();
+    await settle();
+    expect(commandsMock.getWorkspaceSetupErrors).toHaveBeenCalledTimes(1);
+
+    // An event since the snapshot was asked for is newer than it.
+    emit('workspace-setup-error', { branchId: 'branch-2', error: null });
+    finishSnapshot({ 'branch-1': 'workstation never booted', 'branch-2': 'stale' });
+    await settle();
+    expect([...lifecycle.getWorkspaceErrors()]).toEqual([['branch-1', 'workstation never booted']]);
+
+    emit('workspace-setup-error', { branchId: 'branch-3', error: 'could not fetch' });
+    expect(lifecycle.getWorkspaceErrors().get('branch-3')).toBe('could not fetch');
+    emit('workspace-setup-error', { branchId: 'branch-3', error: null });
+    expect(lifecycle.getWorkspaceErrors().has('branch-3')).toBe(false);
+
+    // Stopped: the listener is gone.
+    lifecycle.stop();
+    expect(eventListeners.get('workspace-setup-error')).toEqual([]);
   });
 });

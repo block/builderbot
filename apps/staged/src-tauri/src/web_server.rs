@@ -2246,16 +2246,16 @@ pub(crate) async fn dispatch(
             let branch_id: String = arg(&args, "branchId")?;
             let app_handle = app_handle.clone();
             detached(async move {
-                crate::workspace_setup::ensure_branch_set_up(
-                    &app_handle,
-                    &store,
-                    &branch_id,
-                    crate::workspace_setup::SetupTrigger::Requested,
-                )
-                .await?;
-                Ok(Value::Null)
+                let result =
+                    crate::workspace_setup::request_branch_setup(&app_handle, &store, &branch_id)
+                        .await?;
+                Ok(serde_json::to_value(result).unwrap())
             })
             .await
+        }
+        "get_workspace_setup_errors" => {
+            let errors = crate::workspace_setup::failures::get_workspace_setup_errors();
+            Ok(serde_json::to_value(errors).unwrap())
         }
         "resume_workspace" => {
             let store = get_store(store_mutex)?;
@@ -5086,7 +5086,7 @@ mod tests {
             "resume_or_queue_session_for_store(",
             "start_project_session_for_store(",
             // The shared workspace bodies: branch setup, resume, the pollers.
-            "workspace_setup::ensure_branch_set_up(",
+            "workspace_setup::request_branch_setup(",
             "resume_workspace_impl(",
             "workspace_setup::poll::",
         ];

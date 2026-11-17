@@ -5,36 +5,39 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use super::super::checkout::{local_branch_exists, BranchCheckout};
 use super::super::guard::SetupGuard;
+use super::super::host::SetupHost;
 use super::super::verify::{parse_clone_head, verify_session_checkout, CloneHead};
-use super::super::{run_guarded, SetupHost, SetupTrigger};
+use super::super::SetupTrigger;
 use super::{
-    head_branch, origin_and_workstation_clone, probe_clone_head, set_status, set_up,
+    head_branch, origin_and_workstation_clone, probe_clone_head, set_status, set_up, set_up_under,
     starting_branch, status_of, store_with_project, FakeHost, Head, Info, Start,
 };
 use crate::branches;
 use crate::store::{self, Store, WorkspaceStatus};
 use crate::test_utils::{run_git_in, TempDir};
 
-/// A branch whose row says `Running`, the way setup or a poller left it.
-fn running_branch(store: &Store, project: &store::Project, name: &str) -> store::Branch {
+/// A branch whose row says `Running`, the way setup left it.
+pub(super) fn running_branch(store: &Store, project: &store::Project, name: &str) -> store::Branch {
     let branch = starting_branch(store, project, name);
     set_status(store, &branch, WorkspaceStatus::Running)
 }
 
-fn running_host(clone: &Path) -> FakeHost {
+pub(super) fn running_host(clone: &Path) -> FakeHost {
     FakeHost::new(clone, &[Info::Status("running")], Start::Succeeds)
 }
 
 /// A session row in flight on `branch`.
-fn live_session(store: &Store, branch: &store::Branch) -> store::Session {
+pub(super) fn live_session(store: &Store, branch: &store::Branch) -> store::Session {
     let session = store::Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
     store.create_session(&session).unwrap();
     session
 }
 
-/// The session-start check, as `ensure_session_checkout` runs it.
-async fn start_session_on(
+/// The session-start check, as `ensure_session_checkout` runs it, with the
+/// clone let go of as soon as it has answered.
+pub(super) async fn start_session_on(
     store: &Arc<Store>,
     host: &Arc<FakeHost>,
     branch: &store::Branch,
@@ -42,7 +45,9 @@ async fn start_session_on(
 ) -> Result<(), String> {
     let guard = Arc::new(SetupGuard::default());
     let host: Arc<dyn SetupHost> = host.clone();
-    verify_session_checkout(&guard, store, &host, branch, session_id).await
+    verify_session_checkout(&guard, store, &host, branch, session_id)
+        .await
+        .map(drop)
 }
 
 fn calls(host: &FakeHost) -> Vec<&'static str> {
@@ -208,8 +213,8 @@ async fn a_session_on_a_checked_out_branch_starts_after_one_read() {
     assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Running));
 }
 
-/// The gap setup alone can't close: a branch that was never set up, resumed
-/// outside Staged and promoted to `Running` by a poller, still on `main`.
+/// The gap setup alone can't close: a `Running` branch whose clone has
+/// since been left on `main` (a sibling branch's setup, a terminal).
 /// The session start checks the branch out through the shared setup and
 /// only then lets the agent start. The session being started is itself
 /// `running` on the branch by then and does not stand in the way.
@@ -256,9 +261,11 @@ async fn a_session_start_repairs_a_missing_clone() {
     assert_eq!(head_branch(clone.path()), "feature-new");
 }
 
-/// When the repair fails the agent is not started: the session fails with
-/// both branch names and the cause, and the branch stops saying `Running`,
-/// so whatever is queued behind it waits instead of failing in turn.
+/// When the repair fails for a reason that is not a refusal (here a fetch
+/// that never reached origin) the agent is not started: the session fails
+/// with both branch names and the cause, and the branch stops saying
+/// `Running`, so whatever is queued behind it waits instead of failing in
+/// turn. The reason is on show and a retry is set.
 #[tokio::test]
 async fn a_failed_repair_fails_the_session_and_the_branch() {
     let (_origin, clone) = origin_and_workstation_clone();
@@ -278,6 +285,9 @@ async fn a_failed_repair_fails_the_session_and_the_branch() {
     assert_eq!(head_branch(clone.path()), "main");
     assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Error));
     assert_eq!(host.written(), vec![]);
+    let reason = host.failure_of(&branch).expect("a recorded reason");
+    assert!(reason.contains("network unreachable"), "{reason}");
+    assert_eq!(host.retries().len(), 1);
 }
 
 /// A read that doesn't answer is not "wrong branch" (no checkout runs) and
@@ -430,7 +440,11 @@ async fn concurrent_session_starts_share_one_repair() {
                 branch.clone(),
             );
             tokio::spawn(async move {
-                verify_session_checkout(&guard, &store, &host, &branch, session_id).await
+                // Let go of at once: a start that kept the clone would
+                // hold the other one's read.
+                verify_session_checkout(&guard, &store, &host, &branch, session_id)
+                    .await
+                    .map(drop)
             })
         })
         .collect();
@@ -454,13 +468,13 @@ async fn a_repair_runs_the_shared_setup_under_the_guard() {
     let (store, project) = store_with_project();
     let branch = running_branch(&store, &project, "feature-new");
     let host = Arc::new(running_host(clone.path()));
-    let dyn_host: Arc<dyn SetupHost> = host.clone();
     let guard = Arc::new(SetupGuard::default());
 
-    run_guarded(&guard, &store, &dyn_host, &branch.id, SetupTrigger::Repair)
+    let status = set_up_under(&guard, &store, &host, &branch, SetupTrigger::Repair)
         .await
         .unwrap();
 
+    assert_eq!(status, Some(WorkspaceStatus::Running));
     assert_eq!(host.count("check_auth"), 1);
     assert_eq!(host.count("check_out"), 1);
     assert_eq!(head_branch(clone.path()), "feature-new");
@@ -497,8 +511,12 @@ fn a_failed_local_branch_probe_is_not_read_as_a_missing_branch() {
         real(args)
     });
 
-    let error = branches::check_out_workspace_branch(&git, "main", "feature-x").unwrap_err();
+    let error =
+        branches::check_out_workspace_branch(&git, &BranchCheckout::new("main", "feature-x"))
+            .unwrap_err();
 
+    assert!(!error.is_refusal());
+    let error = error.to_string();
     assert!(error.contains("already has branch 'feature-x'"), "{error}");
     assert!(error.contains("workstation disconnected"), "{error}");
     let ran = ran.lock().unwrap();
@@ -520,21 +538,18 @@ fn the_local_branch_probe_answers_through_its_output() {
     let (_origin, clone, unpushed) = clone_with_an_unpushed_feature_branch();
     let git = branches::git_runner(clone.path(), None, None);
 
-    assert_eq!(branches::local_branch_exists(&git, "feature-x"), Ok(true));
-    assert_eq!(branches::local_branch_exists(&git, "feature-y"), Ok(false));
+    assert_eq!(local_branch_exists(&git, "feature-x"), Ok(true));
+    assert_eq!(local_branch_exists(&git, "feature-y"), Ok(false));
     // A prefix of a branch name is not that branch.
     run_git_in(clone.path(), &["branch", "team/feature-z"]);
-    assert_eq!(branches::local_branch_exists(&git, "team"), Ok(false));
-    assert_eq!(
-        branches::local_branch_exists(&git, "team/feature-z"),
-        Ok(true)
-    );
+    assert_eq!(local_branch_exists(&git, "team"), Ok(false));
+    assert_eq!(local_branch_exists(&git, "team/feature-z"), Ok(true));
 
-    branches::check_out_workspace_branch(&git, "main", "feature-x").unwrap();
+    branches::check_out_workspace_branch(&git, &BranchCheckout::new("main", "feature-x")).unwrap();
     assert_eq!(head_branch(clone.path()), "feature-x");
     assert_eq!(run_git_in(clone.path(), &["rev-parse", "HEAD"]), unpushed);
 
-    branches::check_out_workspace_branch(&git, "main", "feature-y").unwrap();
+    branches::check_out_workspace_branch(&git, &BranchCheckout::new("main", "feature-y")).unwrap();
     assert_eq!(head_branch(clone.path()), "feature-y");
     assert_eq!(
         run_git_in(clone.path(), &["rev-parse", "HEAD"]),

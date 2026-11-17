@@ -105,6 +105,7 @@
     get_blox_env: () => null,
     get_interrupted_sessions: () => null,
     get_session_reconcile_states: () => [],
+    get_workspace_setup_errors: () => ({}),
     list_pending_control_authorizations: () => [],
     list_pending_project_opens: () => [],
     set_foreground_project: () => null,

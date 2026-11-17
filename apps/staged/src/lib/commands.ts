@@ -785,9 +785,25 @@ export function createRemoteBranch(
   });
 }
 
-/** Start the Blox workspace for a remote branch. */
-export function startWorkspace(branchId: string): Promise<void> {
+/**
+ * Set up a remote branch on its Blox workstation (or retry a branch in
+ * `error`). Resolves with the status the branch row holds afterwards:
+ * `running` once it is checked out and verified, `starting` when the backend
+ * returned early while the workstation boots (setup carries on there and its
+ * outcome lands on the row), or whatever else the row holds now. Rejects with
+ * the reason when setup failed and left the branch in `error`.
+ */
+export function startWorkspace(branchId: string): Promise<PollWorkspaceResult> {
   return invokeCommand('start_workspace', { branchId });
+}
+
+/**
+ * Why each remote branch's last setup run failed, by branch id, for a window
+ * that missed the `workspace-setup-error` events. Held in memory by the
+ * backend, so it is empty after an app restart.
+ */
+export function getWorkspaceSetupErrors(): Promise<Record<string, string>> {
+  return invokeCommand('get_workspace_setup_errors');
 }
 
 /** Resume a suspended Blox workspace. Returns IDs of all affected branches. */

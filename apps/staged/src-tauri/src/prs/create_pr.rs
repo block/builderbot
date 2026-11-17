@@ -7,7 +7,7 @@ use crate::git;
 use crate::session_runner;
 use crate::store::{FailureStrategy, PipelineStep, Store};
 
-use super::context::{base_branch_name, resolve_branch_pipeline_context};
+use super::context::{base_branch_name, ensure_pipeline_checkout, resolve_branch_pipeline_context};
 use super::git_commands::{git_fetch_with_fallback, git_push_with_fallback, push_refspec};
 use super::pipeline::start_pipeline_for_branch;
 
@@ -126,6 +126,8 @@ pub(crate) async fn start_create_pr_pipeline_for_branch(
 ) -> Result<String, String> {
     crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    // Held until this returns, by when the pipeline's row is `running`.
+    let _checkout = ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, None).await?;
     let base_branch = base_branch_name(&ctx.branch);
 
     let is_draft = draft.unwrap_or(false);

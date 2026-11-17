@@ -2599,6 +2599,7 @@ pub fn run() {
             session_commands::get_session_background_hold,
             session_runner::reconcile::reconcile_session,
             session_runner::reconcile::get_session_reconcile_states,
+            workspace_setup::failures::get_workspace_setup_errors,
             session_commands::delete_session,
             session_commands::start_branch_session,
             session_commands::start_or_queue_branch_session,

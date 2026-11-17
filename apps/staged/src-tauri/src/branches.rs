@@ -748,11 +748,14 @@ pub(crate) async fn clone_repo_into_workspace(
     ws_name: &str,
     clone_dir: &str,
     repo_slug: &str,
-    base_ref: &str,
-    branch_name: &str,
-) -> Result<(), String> {
-    let repo_path = resolve_workspace_repo_path(ws_name, clone_dir)
-        .map_err(|e| format!("Failed to resolve workspace repo path '{clone_dir}': {e}"))?;
+    checkout: &BranchCheckout<'_>,
+) -> Result<(), CheckoutError> {
+    let failed = CheckoutError::Failed;
+    let repo_path = resolve_workspace_repo_path(ws_name, clone_dir).map_err(|e| {
+        failed(format!(
+            "Failed to resolve workspace repo path '{clone_dir}': {e}"
+        ))
+    })?;
 
     // Clone only if the repo directory doesn't already exist.
     let probe = ws_exec_async(
@@ -762,7 +765,9 @@ pub(crate) async fn clone_repo_into_workspace(
     )
     .await;
     let needs_clone = needs_clone(probe).map_err(|e| {
-        format!("Failed to verify repo path '{clone_dir}' in workspace '{ws_name}': {e}")
+        failed(format!(
+            "Failed to verify repo path '{clone_dir}' in workspace '{ws_name}': {e}"
+        ))
     })?;
     if needs_clone {
         let repo_url = format!("https://github.com/{repo_slug}.git");
@@ -774,7 +779,11 @@ pub(crate) async fn clone_repo_into_workspace(
             &["sh", "-c", GUARDED_CLONE_SCRIPT, "_", &repo_url, &repo_path],
         )
         .await
-        .map_err(|e| format!("Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}"))?;
+        .map_err(|e| {
+            failed(format!(
+                "Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}"
+            ))
+        })?;
     }
 
     // Apply staged-managed git config. Idempotent — also serves as the
@@ -782,9 +791,13 @@ pub(crate) async fn clone_repo_into_workspace(
     // workstations, so we redo the cheap config check on every visit).
     crate::git::config_apply::apply_to_blox_clone(ws_name, &repo_path).await;
 
-    check_out_branch_in_workspace(ws_name, Some(clone_dir), base_ref, branch_name)
+    check_out_branch_in_workspace(ws_name, Some(clone_dir), checkout)
         .await
-        .map_err(|e| format!("Failed to set up '{repo_slug}' in workspace '{ws_name}': {e}"))
+        .map_err(|e| {
+            e.map_message(|m| {
+                format!("Failed to set up '{repo_slug}' in workspace '{ws_name}': {m}")
+            })
+        })
 }
 
 /// [`check_out_workspace_branch`] in a workstation's clone, on the blocking
@@ -794,22 +807,29 @@ pub(crate) async fn clone_repo_into_workspace(
 pub(crate) async fn check_out_branch_in_workspace(
     ws_name: &str,
     remote_dir: Option<&str>,
-    base_ref: &str,
-    branch_name: &str,
-) -> Result<(), String> {
+    checkout: &BranchCheckout<'_>,
+) -> Result<(), CheckoutError> {
     let workspace = ws_name.to_string();
     let remote_dir = remote_dir.map(str::to_string);
-    let base = base_ref.to_string();
-    let branch = branch_name.to_string();
+    let base = checkout.base_ref.to_string();
+    let branch = checkout.branch_name.to_string();
+    let base_is_worked_on = checkout.base_is_worked_on;
     tauri::async_runtime::spawn_blocking(move || {
-        // Tracked for everything but the ref reads (`rev-parse`, and the
-        // `for-each-ref` that asks whether the clone has the branch): Blox
-        // SIGKILLs a transient git at 60 s, which a fetch on a large repo can
-        // outlast, and a checkout or fast-forward far from where the tree is
-        // (or smudging LFS files) can outlast it too, leaving
+        // Tracked for everything but the reads (`rev-parse`, the
+        // `for-each-ref` that asks whether the clone has the branch, and the
+        // `log` and `status` that ask what a switch would leave behind):
+        // Blox SIGKILLs a transient git at 60 s, which a fetch on a large
+        // repo can outlast, and a checkout or fast-forward far from where
+        // the tree is (or smudging LFS files) can outlast it too, leaving
         // `.git/index.lock` and a half-updated worktree.
         let git: GitRunner<'_> = Box::new(move |args: &[&str]| {
-            let mode = if matches!(args.first(), Some(&"rev-parse") | Some(&"for-each-ref")) {
+            let mode = if matches!(
+                args.first(),
+                Some(&"rev-parse")
+                    | Some(&"for-each-ref")
+                    | Some(&"log")
+                    | Some(&"--no-optional-locks")
+            ) {
                 ExecMode::Transient
             } else {
                 ExecMode::Tracked
@@ -817,105 +837,22 @@ pub(crate) async fn check_out_branch_in_workspace(
             run_workspace_git_with_mode(&workspace, remote_dir.as_deref(), mode, args)
                 .map_err(|e| e.to_string())
         });
-        check_out_workspace_branch(&git, &base, &branch)
+        check_out_workspace_branch(
+            &git,
+            &BranchCheckout {
+                base_ref: &base,
+                branch_name: &branch,
+                base_is_worked_on,
+            },
+        )
     })
     .await
-    .map_err(|e| format!("Branch checkout task failed: {e}"))?
+    .map_err(|e| CheckoutError::Failed(format!("Branch checkout task failed: {e}")))?
 }
 
-/// Fetch `base_ref` into the clone `git` runs in, and put the clone on
-/// `branch_name`.
-///
-/// A branch the clone already has is checked out as it is, never recreated.
-/// Every remote branch of a repo shares one clone, and this runs again
-/// whenever any of them re-enters `Starting` (e.g. after `resume_workspace`),
-/// so `checkout -B` would reset a branch onto origin and drop its unpushed
-/// commits, whichever branch HEAD happened to be on. When origin has the
-/// branch too, it is then fast-forwarded if it can be: a branch that is only
-/// behind picks up what was pushed, and one that has diverged keeps its local
-/// commits. Only a branch the clone doesn't have yet is created, from origin's
-/// copy or from the base.
-pub(crate) fn check_out_workspace_branch(
-    git: &GitRunner<'_>,
-    base_ref: &str,
-    branch_name: &str,
-) -> Result<(), String> {
-    git(&["fetch", "origin", base_ref])
-        .map_err(|e| format!("could not fetch base branch '{base_ref}': {e}"))?;
-
-    // If the branch already exists on the remote (e.g. from an existing PR),
-    // fetch it so we pick up its commits: a new branch starts from there and
-    // an existing one fast-forwards to it. Otherwise a new branch falls back
-    // to starting from the base branch.
-    //
-    // Whether it exists is read from `ls-remote`'s output, not from a fetch
-    // failing: a fetch that never reached origin (a dropped exec, a network
-    // blip) would otherwise read as "not on origin" and branch from the base,
-    // leaving the PR's commits behind. Any failure here is a failure.
-    let local_ref = format!("refs/heads/{branch_name}");
-    let has_remote_branch = branch_name != base_ref
-        && !git(&["ls-remote", "--heads", "origin", &local_ref])
-            .map_err(|e| format!("could not check whether '{branch_name}' is on origin: {e}"))?
-            .trim()
-            .is_empty();
-    if has_remote_branch {
-        git(&["fetch", "origin", branch_name])
-            .map_err(|e| format!("could not fetch branch '{branch_name}': {e}"))?;
-    }
-    let remote_branch = format!("origin/{branch_name}");
-
-    // Whether the clone has the branch decides between checking it out as it
-    // is and creating it with `checkout -B`. A failed exec is neither answer:
-    // read as "missing", it would recreate a branch the clone does have from
-    // the base, moving it off its unpushed commits.
-    if local_branch_exists(git, branch_name)? {
-        git(&["checkout", branch_name])
-            .map_err(|e| format!("could not check out branch '{branch_name}': {e}"))?;
-        if has_remote_branch {
-            // Fails when the branch has diverged from origin (or local
-            // changes are in the way). The branch then stays as it is, local
-            // commits and all, which is the point: never reset it.
-            let _ = git(&["merge", "--ff-only", &remote_branch]);
-        }
-        return Ok(());
-    }
-
-    // `checkout -B <branch> origin/<branch>` makes the checkout track the
-    // branch it pushes to. A fresh branch must not track `origin/<base>`
-    // instead — git's upstream is read back as the push target.
-    let checkout = if has_remote_branch {
-        git(&["checkout", "-B", branch_name, &remote_branch])
-    } else {
-        git(&[
-            "checkout",
-            "--no-track",
-            "-B",
-            branch_name,
-            &format!("origin/{base_ref}"),
-        ])
-    };
-    checkout
-        .map(|_| ())
-        .map_err(|e| format!("could not create branch '{branch_name}': {e}"))
-}
-
-/// Whether the clone `git` runs in has a local branch `branch_name`.
-///
-/// Answered through stdout, the way [`GIT_DIR_PROBE_SCRIPT`] answers:
-/// `for-each-ref` exits 0 whether or not the ref exists and prints it only
-/// when it does, so "missing" is an empty answer from a command that ran. A
-/// probe that answers through its exit status (`rev-parse --verify --quiet`)
-/// can't be told apart from an exec that never reached the workstation, and
-/// here that failure is an error.
-pub(crate) fn local_branch_exists(git: &GitRunner<'_>, branch_name: &str) -> Result<bool, String> {
-    let local_ref = format!("refs/heads/{branch_name}");
-    let refs = git(&["for-each-ref", "--format=%(refname)", &local_ref]).map_err(|e| {
-        format!("could not check whether the clone already has branch '{branch_name}': {e}")
-    })?;
-    // The pattern also matches refs under `<branch>/`, so only an exact line
-    // counts.
-    Ok(refs.lines().any(|line| line.trim() == local_ref))
-}
+pub(crate) use crate::workspace_setup::checkout::{
+    check_out_workspace_branch, BranchCheckout, CheckoutError,
+};
 
 /// Kick the branch's session queue when a workspace-status write moved it to
 /// `Running`.
@@ -2439,24 +2376,23 @@ pub(crate) async fn create_remote_branch_impl(
 /// dialog immediately and show the card in its "Provisioning…" state while
 /// this runs in the background.
 ///
-/// Returns once the branch is checked out on the workstation and marked
-/// `Running`, or with the error that left it in `Error`: the shared routine
-/// in [`crate::workspace_setup`], which a concurrent call for the same
-/// branch joins.
+/// Also the error view's Retry: a branch in `Error` is set up again.
+///
+/// Returns the status the branch's row holds, so the caller does not infer
+/// one from the call having resolved: `running` once the branch is checked
+/// out on the workstation, or `starting` when setup is still waiting for the
+/// workstation to boot, which it goes on doing after this returns. An error
+/// is the failure that left the branch in `Error`. The shared routine in
+/// [`crate::workspace_setup`], which a concurrent call for the same branch
+/// joins.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_workspace(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: AppHandle,
     branch_id: String,
-) -> Result<(), String> {
+) -> Result<PollWorkspaceResult, String> {
     let store = get_store(&store)?;
-    crate::workspace_setup::ensure_branch_set_up(
-        &app_handle,
-        &store,
-        &branch_id,
-        crate::workspace_setup::SetupTrigger::Requested,
-    )
-    .await
+    crate::workspace_setup::request_branch_setup(&app_handle, &store, &branch_id).await
 }
 
 /// Return the value of the `BLOX_ENV` environment variable, if set.
@@ -2680,6 +2616,12 @@ pub(crate) async fn resume_workspace_impl(
                 &store::WorkspaceStatus::Error,
             )
             .ok();
+        // `Error` with its reason on show and a retry timer, which sets the
+        // branches up once the workstation does come back.
+        let reason = format!("Could not resume workspace '{workspace_name}': {e}");
+        for branch_id in &branch_ids {
+            crate::workspace_setup::branch_failed(app_handle, store, branch_id, &reason);
+        }
         return Err(e.to_string());
     }
 
@@ -5893,8 +5835,11 @@ mod upstream_tracking_tests {
     fn an_existing_clone_already_on_the_branch_is_not_reset() {
         let (_origin, clone, unpushed) = clone_on_feature_x_with_an_unpushed_commit();
 
-        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
-            .unwrap();
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            &BranchCheckout::new("main", "feature-x"),
+        )
+        .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -5915,8 +5860,11 @@ mod upstream_tracking_tests {
             &["checkout", "-b", "feature-y", "origin/main"],
         );
 
-        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
-            .unwrap();
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            &BranchCheckout::new("main", "feature-x"),
+        )
+        .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -5949,8 +5897,11 @@ mod upstream_tracking_tests {
         git(clone.path(), &["branch", "feature-x", "origin/feature-x"]);
         let pushed = push_to_origin_feature_x(&origin);
 
-        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
-            .unwrap();
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            &BranchCheckout::new("main", "feature-x"),
+        )
+        .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -5972,8 +5923,11 @@ mod upstream_tracking_tests {
         git(clone.path(), &["checkout", "main"]);
         let pushed = push_to_origin_feature_x(&origin);
 
-        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
-            .unwrap();
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            &BranchCheckout::new("main", "feature-x"),
+        )
+        .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -5994,8 +5948,11 @@ mod upstream_tracking_tests {
         let origin = bare_origin();
         let clone = clone_of(&origin, &[]);
 
-        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-x")
-            .unwrap();
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            &BranchCheckout::new("main", "feature-x"),
+        )
+        .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -6018,8 +5975,11 @@ mod upstream_tracking_tests {
         let origin = bare_origin();
         let clone = clone_of(&origin, &[]);
 
-        check_out_workspace_branch(&git_runner(clone.path(), None, None), "main", "feature-new")
-            .unwrap();
+        check_out_workspace_branch(
+            &git_runner(clone.path(), None, None),
+            &BranchCheckout::new("main", "feature-new"),
+        )
+        .unwrap();
 
         assert_eq!(
             git(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),

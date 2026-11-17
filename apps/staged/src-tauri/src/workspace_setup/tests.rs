@@ -2,6 +2,13 @@
 //! driven without `sq`: a [`FakeHost`] answers for Blox, and a local clone
 //! of a bare origin stands in for the workstation's, reached through the
 //! same [`branches::GitRunner`] the real checkout runs on.
+//!
+//! The rest is in the submodules: what the checkout does to the clone
+//! ([`checkout`]), the status pollers ([`poll`]), what a caller of setup
+//! gets back ([`requests`]), retries
+//! and failure reasons ([`retry`]), the sessions sharing a clone
+//! ([`sessions`]), the reads of the clone ([`verify`]), and that every
+//! trigger and check is still called from where it should be ([`wiring`]).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -12,18 +19,28 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
-use super::guard::SetupGuard;
-use super::poll::{self, PollEffects, Reported};
+use super::checkout::{BranchCheckout, CheckoutError};
+use super::guard::{Patience, SetupGuard};
+use super::host::{Checkout, ReadyWait, SetupHost};
 use super::verify::{parse_clone_head, CloneHead, HeadRead, CLONE_HEAD_PROBE_SCRIPT};
-use super::{branches_awaiting_setup, run_guarded, Checkout, ReadyWait, SetupHost, SetupTrigger};
-use crate::blox::{BloxError, WorkspaceListEntry};
+use super::{
+    branches_awaiting_setup, run_guarded, startup_action, SetupOutcome, SetupRequest, SetupTrigger,
+    StartupAction,
+};
+use crate::blox::BloxError;
 use crate::branches;
 use crate::store::{self, Store, WorkspaceStatus};
 use crate::test_utils::{run_git_in, TempDir, TempGitRepo};
 
+mod checkout;
+mod poll;
+mod requests;
+mod retry;
+mod sessions;
 /// The checks that the clone is on the branch: at the end of setup, at
 /// session start, and the checkout routine's own local-branch probe.
 mod verify;
+mod wiring;
 
 const WORKSPACE: &str = "widgets-setup-test";
 
@@ -149,6 +166,17 @@ struct FakeHost {
     meanwhile: Option<Box<dyn Fn() + Send + Sync>>,
     calls: Mutex<Vec<&'static str>>,
     written: Mutex<Vec<(String, bool, WorkspaceStatus)>>,
+    /// Every change of a branch's failure reason, in order.
+    failures: Mutex<Vec<(String, Option<String>)>>,
+    /// Every retry timer asked for: branch, delay, ticket. Nothing sleeps;
+    /// a test fires the ones it wants.
+    retries: Mutex<Vec<(String, Duration, u64)>>,
+    /// Run when the reconcile service is asked to look at a disconnected
+    /// session: what the service then does about it.
+    on_check_disconnected: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    checked_sessions: Mutex<Vec<String>>,
+    /// How long a workstation that isn't running yet is waited for.
+    ready_wait: ReadyWait,
     in_checkout: AtomicUsize,
     most_in_checkout: AtomicUsize,
 }
@@ -165,6 +193,14 @@ impl FakeHost {
             meanwhile: None,
             calls: Mutex::new(Vec::new()),
             written: Mutex::new(Vec::new()),
+            failures: Mutex::new(Vec::new()),
+            retries: Mutex::new(Vec::new()),
+            on_check_disconnected: None,
+            checked_sessions: Mutex::new(Vec::new()),
+            ready_wait: ReadyWait {
+                timeout: Duration::from_millis(200),
+                interval: Duration::from_millis(5),
+            },
             in_checkout: AtomicUsize::new(0),
             most_in_checkout: AtomicUsize::new(0),
         }
@@ -194,15 +230,51 @@ impl FakeHost {
         self.written.lock().unwrap().clone()
     }
 
+    /// The failure reasons announced, oldest first.
+    fn failures(&self) -> Vec<(String, Option<String>)> {
+        self.failures.lock().unwrap().clone()
+    }
+
+    /// The reason the branch is left with: the last one announced for it.
+    fn failure_of(&self, branch: &store::Branch) -> Option<String> {
+        self.failures()
+            .into_iter()
+            .rev()
+            .find(|(id, _)| *id == branch.id)
+            .and_then(|(_, reason)| reason)
+    }
+
+    fn retries(&self) -> Vec<(String, Duration, u64)> {
+        self.retries.lock().unwrap().clone()
+    }
+
+    fn checked_sessions(&self) -> Vec<String> {
+        self.checked_sessions.lock().unwrap().clone()
+    }
+
     async fn wait_for_checkouts(&self, count: usize) {
+        self.wait_for_calls("check_out", count).await;
+    }
+
+    async fn wait_for_calls(&self, call: &str, count: usize) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while self.count("check_out") < count {
+        while self.count(call) < count {
             assert!(
                 std::time::Instant::now() < deadline,
-                "checkout never started"
+                "{call} was never called {count} time(s)"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+}
+
+/// Wait for `condition`, which something running beside the test brings
+/// about.
+async fn eventually(what: &str, condition: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !condition() {
+        assert!(std::time::Instant::now() < deadline, "never: {what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
@@ -241,7 +313,7 @@ impl SetupHost for FakeHost {
         }
     }
 
-    async fn check_out(&self, checkout: &Checkout) -> Result<(), String> {
+    async fn check_out(&self, checkout: &Checkout) -> Result<(), CheckoutError> {
         self.calls.lock().unwrap().push("check_out");
         if let Some(gate) = &self.gate {
             gate.acquire().await.unwrap().forget();
@@ -252,11 +324,10 @@ impl SetupHost for FakeHost {
         // this one would be counted.
         tokio::time::sleep(Duration::from_millis(20)).await;
         let result = match self.checkout_error {
-            Some(error) => Err(error.to_string()),
+            Some(error) => Err(CheckoutError::Failed(error.to_string())),
             None => branches::check_out_workspace_branch(
                 &branches::git_runner(&self.clone, None, None),
-                &checkout.base_ref,
-                &checkout.branch_name,
+                &checkout.branch_checkout(),
             ),
         };
         self.in_checkout.fetch_sub(1, Ordering::SeqCst);
@@ -280,9 +351,37 @@ impl SetupHost for FakeHost {
             .push((branch_id.to_string(), changed, status.clone()));
     }
 
+    fn failure_changed(&self, branch_id: &str, error: Option<&str>) {
+        self.failures
+            .lock()
+            .unwrap()
+            .push((branch_id.to_string(), error.map(str::to_string)));
+    }
+
+    fn retry_later(&self, branch_id: &str, delay: Duration, ticket: u64) {
+        self.retries
+            .lock()
+            .unwrap()
+            .push((branch_id.to_string(), delay, ticket));
+    }
+
+    fn check_disconnected_session(&self, session_id: &str) {
+        self.checked_sessions
+            .lock()
+            .unwrap()
+            .push(session_id.to_string());
+        if let Some(settle) = &self.on_check_disconnected {
+            settle(session_id);
+        }
+    }
+
     fn ready_wait(&self) -> ReadyWait {
+        self.ready_wait
+    }
+
+    fn disconnected_session_wait(&self) -> ReadyWait {
         ReadyWait {
-            timeout: Duration::from_millis(200),
+            timeout: Duration::from_millis(100),
             interval: Duration::from_millis(5),
         }
     }
@@ -295,15 +394,35 @@ impl SetupHost for FakeHost {
     }
 }
 
+/// One request for setup, waited for to its end. Returns the status the
+/// row holds afterwards.
 async fn set_up(
     store: &Arc<Store>,
     host: &Arc<FakeHost>,
     branch: &store::Branch,
     trigger: SetupTrigger,
-) -> Result<(), String> {
+) -> Result<Option<WorkspaceStatus>, String> {
     let guard = Arc::new(SetupGuard::default());
+    set_up_under(&guard, store, host, branch, trigger).await
+}
+
+async fn set_up_under(
+    guard: &Arc<SetupGuard>,
+    store: &Arc<Store>,
+    host: &Arc<FakeHost>,
+    branch: &store::Branch,
+    trigger: SetupTrigger,
+) -> Result<Option<WorkspaceStatus>, String> {
     let host: Arc<dyn SetupHost> = host.clone();
-    run_guarded(&guard, store, &host, &branch.id, trigger).await
+    run_guarded(
+        guard,
+        store,
+        &host,
+        &branch.id,
+        SetupRequest::new(trigger),
+        Patience::ToTheEnd,
+    )
+    .await
 }
 
 // ── The setup routine ───────────────────────────────────────────────────────
@@ -638,8 +757,12 @@ fn a_failed_origin_probe_is_not_read_as_a_new_branch() {
         real(args)
     });
 
-    let error = branches::check_out_workspace_branch(&git, "main", "feature-new").unwrap_err();
+    let error =
+        branches::check_out_workspace_branch(&git, &BranchCheckout::new("main", "feature-new"))
+            .unwrap_err();
 
+    assert!(!error.is_refusal());
+    let error = error.to_string();
     assert!(error.contains("is on origin"), "{error}");
     assert_eq!(head_branch(clone.path()), "main");
 }
@@ -673,7 +796,10 @@ async fn concurrent_callers_join_one_setup() {
             Arc::clone(&dyn_host),
             branch.id.clone(),
         );
-        tokio::spawn(async move { run_guarded(&guard, &store, &host, &id, trigger).await })
+        tokio::spawn(async move {
+            let request = SetupRequest::new(trigger);
+            run_guarded(&guard, &store, &host, &id, request, Patience::ToTheEnd).await
+        })
     })
     .collect();
 
@@ -682,7 +808,7 @@ async fn concurrent_callers_join_one_setup() {
     // Room for every caller to run its own checkout, were it going to.
     gate.add_permits(4);
     for caller in callers {
-        assert_eq!(caller.await.unwrap(), Ok(()));
+        assert_eq!(caller.await.unwrap(), Ok(Some(WorkspaceStatus::Running)));
     }
 
     assert_eq!(host.count("check_out"), 1);
@@ -715,7 +841,8 @@ async fn joined_callers_share_a_failure() {
                 branch.id.clone(),
             );
             tokio::spawn(async move {
-                run_guarded(&guard, &store, &host, &id, SetupTrigger::Requested).await
+                let request = SetupRequest::new(SetupTrigger::Requested);
+                run_guarded(&guard, &store, &host, &id, request, Patience::ToTheEnd).await
             })
         })
         .collect();
@@ -743,27 +870,15 @@ async fn setups_in_one_workstation_take_turns() {
         &[Info::Status("running")],
         Start::Succeeds,
     ));
-    let dyn_host: Arc<dyn SetupHost> = host.clone();
     let guard = Arc::new(SetupGuard::default());
 
     let (a, b) = tokio::join!(
-        run_guarded(
-            &guard,
-            &store,
-            &dyn_host,
-            &first.id,
-            SetupTrigger::Requested
-        ),
-        run_guarded(
-            &guard,
-            &store,
-            &dyn_host,
-            &second.id,
-            SetupTrigger::Requested
-        ),
+        set_up_under(&guard, &store, &host, &first, SetupTrigger::Requested),
+        set_up_under(&guard, &store, &host, &second, SetupTrigger::Requested),
     );
 
-    assert_eq!((a, b), (Ok(()), Ok(())));
+    let running = Ok(Some(WorkspaceStatus::Running));
+    assert_eq!((a, b), (running.clone(), running));
     assert_eq!(host.count("check_out"), 2);
     assert_eq!(host.most_in_checkout.load(Ordering::SeqCst), 1);
     assert_eq!(status_of(&store, &first), Some(WorkspaceStatus::Running));
@@ -776,250 +891,38 @@ async fn setups_in_one_workstation_take_turns() {
 async fn a_panicked_setup_releases_the_branch() {
     let guard = Arc::new(SetupGuard::default());
 
-    let outcome = guard
-        .run(WORKSPACE, "branch", || async { panic!("setup blew up") })
+    let ended = guard
+        .run(WORKSPACE, "branch", Patience::ToTheEnd, |_| async {
+            panic!("setup blew up")
+        })
         .await;
-    assert!(outcome.is_err());
+    assert!(matches!(ended.result, Some(Err(_))), "{ended:?}");
+    assert!(!ended.joined);
     assert!(!guard.is_in_flight("branch"));
 
-    let retry = guard.run(WORKSPACE, "branch", || async { Ok(()) }).await;
-    assert_eq!(retry, Ok(()));
-}
-
-// ── The pollers ─────────────────────────────────────────────────────────────
-
-/// What a poll did besides writing the row.
-#[derive(Default)]
-struct Seen {
-    written: Mutex<Vec<(String, bool, WorkspaceStatus)>>,
-    triggered: Mutex<Vec<String>>,
-}
-
-impl Seen {
-    fn effects(&self) -> PollEffects<'_> {
-        PollEffects {
-            status_written: Box::new(|branch_id, changed, status| {
-                self.written
-                    .lock()
-                    .unwrap()
-                    .push((branch_id.to_string(), changed, status.clone()));
-            }),
-            trigger_setup: Box::new(|branch_id| {
-                self.triggered.lock().unwrap().push(branch_id.to_string());
-            }),
-        }
-    }
-
-    fn triggered(&self) -> Vec<String> {
-        self.triggered.lock().unwrap().clone()
-    }
-
-    fn written(&self) -> Vec<(String, bool, WorkspaceStatus)> {
-        self.written.lock().unwrap().clone()
-    }
-}
-
-fn listed(status: &str) -> Vec<WorkspaceListEntry> {
-    vec![WorkspaceListEntry {
-        name: WORKSPACE.to_string(),
-        workstation_id: Some(42),
-        status: Some(status.to_string()),
-        extra: serde_json::Value::Null,
-    }]
-}
-
-fn poll_batch(store: &Store, branch: &store::Branch, blox_status: &str, seen: &Seen) -> String {
-    let settled = poll::settle_all(
-        store,
-        &[branch.id.clone()],
-        &listed(blox_status),
-        &seen.effects(),
-    );
-    settled.results[&branch.id].status.clone()
-}
-
-fn poll_single(store: &Store, branch: &store::Branch, blox_status: &str, seen: &Seen) -> String {
-    poll::settle_one(
-        store,
-        branch,
-        WORKSPACE,
-        Ok(Reported {
-            status: Some(blox_status),
-            workstation_id: Some(42),
-        }),
-        &seen.effects(),
-    )
-    .unwrap()
-    .status
-}
-
-/// The other half of the bug: a poll saw the workstation running and marked
-/// the branch `Running` with nothing checked out. Both pollers now leave the
-/// row in `Starting` and ask for setup.
-#[test]
-fn a_poll_triggers_setup_instead_of_promoting_a_starting_branch() {
-    for poll in [poll_batch, poll_single] {
-        for blox_status in ["running", "ready", "active"] {
-            let (store, project) = store_with_project();
-            let branch = starting_branch(&store, &project, "feature-new");
-            let seen = Seen::default();
-
-            let reported = poll(&store, &branch, blox_status, &seen);
-
-            assert_eq!(reported, "starting");
-            assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Starting));
-            assert_eq!(seen.triggered(), vec![branch.id.clone()]);
-            // Nothing was written, so no session queue was kicked.
-            assert_eq!(seen.written(), vec![]);
-        }
-    }
-}
-
-/// A batch poll also keeps fetching bootstrap progress for such a branch.
-#[test]
-fn a_batch_poll_keeps_a_branch_awaiting_setup_among_the_starting() {
-    let (store, project) = store_with_project();
-    let branch = starting_branch(&store, &project, "feature-new");
-    let seen = Seen::default();
-
-    let settled = poll::settle_all(
-        &store,
-        &[branch.id.clone()],
-        &listed("running"),
-        &seen.effects(),
-    );
-
-    assert_eq!(
-        settled.starting_workspaces.get(WORKSPACE),
-        Some(&vec![branch.id.clone()])
-    );
-}
-
-/// A setup that failed left the row in `Error`. A client still polling on a
-/// stale `starting` is told so, rather than handed a `Running` branch whose
-/// checkout never happened.
-#[test]
-fn a_poll_does_not_clear_a_failed_setup() {
-    for poll in [poll_batch, poll_single] {
-        let (store, project) = store_with_project();
-        let branch = starting_branch(&store, &project, "feature-new");
-        let branch = set_status(&store, &branch, WorkspaceStatus::Error);
-        let seen = Seen::default();
-
-        let reported = poll(&store, &branch, "running", &seen);
-
-        assert_eq!(reported, "error");
-        assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Error));
-        assert_eq!(seen.triggered(), Vec::<String>::new());
-        assert_eq!(seen.written(), vec![]);
-    }
-}
-
-/// Every other transition is still the pollers'.
-#[test]
-fn a_poll_still_owns_the_other_transitions() {
-    use WorkspaceStatus::*;
-    for poll in [poll_batch, poll_single] {
-        for (row, blox_status, expected) in [
-            (Running, "suspended", Suspended),
-            (Running, "stopped", Stopped),
-            (Running, "degraded", Error),
-            (Running, "running", Running),
-            (Starting, "suspended", Suspended),
-            (Starting, "failed", Error),
-            (Starting, "provisioning", Starting),
-            // Blox briefly reports a new workstation as stopped.
-            (Starting, "stopped", Starting),
-            // Resumed outside Staged: it was set up before it was suspended.
-            (Suspended, "running", Running),
-            (Stopped, "running", Running),
-        ] {
-            let (store, project) = store_with_project();
-            let branch = starting_branch(&store, &project, "feature-new");
-            let branch = set_status(&store, &branch, row.clone());
-            let seen = Seen::default();
-
-            let reported = poll(&store, &branch, blox_status, &seen);
-
-            assert_eq!(reported, expected.as_str(), "{row:?} + {blox_status}");
-            assert_eq!(status_of(&store, &branch), Some(expected.clone()));
-            assert_eq!(seen.triggered(), Vec::<String>::new());
-            let changed = row != expected;
-            assert_eq!(
-                seen.written(),
-                vec![(branch.id.clone(), changed, expected)],
-                "{row:?} + {blox_status}"
-            );
-        }
-    }
-}
-
-/// A repo joining a workstation a peer already runs on is still held at
-/// `Starting` by the pollers, and left to the setup that is cloning it.
-#[test]
-fn a_secondary_clone_is_still_held_at_starting() {
-    let (store, project) = store_with_project();
-    let peer = starting_branch(&store, &project, "feature-one");
-    set_status(&store, &peer, WorkspaceStatus::Running);
-    let repo = store::ProjectRepo::new(&project.id, "acme/gadgets", "feature-two", None);
-    store.create_project_repo(&repo).unwrap();
-    let secondary = store::Branch::new_remote(&project.id, "feature-two", "main", WORKSPACE)
-        .with_project_repo(&repo.id);
-    store.create_branch(&secondary).unwrap();
-    let seen = Seen::default();
-
-    assert_eq!(poll::is_secondary_clone_setup(&store, &secondary), Ok(true));
-    assert_eq!(poll_batch(&store, &secondary, "running", &seen), "starting");
-
-    assert_eq!(
-        status_of(&store, &secondary),
-        Some(WorkspaceStatus::Starting)
-    );
-    assert_eq!(seen.triggered(), Vec::<String>::new());
-    assert_eq!(seen.written(), vec![]);
-}
-
-/// The poll's trigger, followed through: the branch a poll refused to
-/// promote ends up checked out and `Running` by setup's hand.
-#[tokio::test]
-async fn a_polled_starting_branch_is_set_up_and_then_reported_running() {
-    let (_origin, clone) = origin_and_workstation_clone();
-    let (store, project) = store_with_project();
-    let branch = starting_branch(&store, &project, "feature-new");
-    let host = Arc::new(FakeHost::new(
-        clone.path(),
-        &[Info::Status("running")],
-        Start::Succeeds,
-    ));
-    let seen = Seen::default();
-
-    assert_eq!(poll_batch(&store, &branch, "running", &seen), "starting");
-    for branch_id in seen.triggered() {
-        assert_eq!(branch_id, branch.id);
-        set_up(&store, &host, &branch, SetupTrigger::Observed)
-            .await
-            .unwrap();
-    }
-
-    assert_eq!(host.count("start_workspace"), 0);
-    assert_eq!(head_branch(clone.path()), "feature-new");
-    let branch = store.get_branch(&branch.id).unwrap().unwrap();
-    assert_eq!(poll_batch(&store, &branch, "running", &seen), "running");
-    assert_eq!(seen.triggered().len(), 1);
+    let retry = guard
+        .run(WORKSPACE, "branch", Patience::ToTheEnd, |_| async {
+            Ok(SetupOutcome::SetUp)
+        })
+        .await;
+    assert_eq!(retry.result, Some(Ok(SetupOutcome::SetUp)));
 }
 
 // ── The startup pass ────────────────────────────────────────────────────────
 
 /// The startup pass takes the remote branches a previous run left in
-/// `Starting` and nothing else.
+/// `Starting`, to set up, and the ones it left in `Error`, to retry on the
+/// timer. Nothing else.
 #[test]
-fn the_startup_pass_picks_up_only_branches_left_starting() {
+fn the_startup_pass_picks_up_branches_left_starting_or_failed() {
     let (store, project) = store_with_project();
     let left_starting = starting_branch(&store, &project, "feature-starting");
+    let left_failed = starting_branch(&store, &project, "feature-error");
+    set_status(&store, &left_failed, WorkspaceStatus::Error);
     for (name, status) in [
         ("feature-running", WorkspaceStatus::Running),
-        ("feature-error", WorkspaceStatus::Error),
         ("feature-suspended", WorkspaceStatus::Suspended),
+        ("feature-stopped", WorkspaceStatus::Stopped),
     ] {
         let branch = starting_branch(&store, &project, name);
         set_status(&store, &branch, status);
@@ -1028,13 +931,20 @@ fn the_startup_pass_picks_up_only_branches_left_starting() {
         .create_branch(&store::Branch::new(&project.id, "feature-local", "main"))
         .unwrap();
 
-    let pending: Vec<String> = branches_awaiting_setup(&store)
+    let mut pending: Vec<(String, Option<StartupAction>)> = branches_awaiting_setup(&store)
         .unwrap()
         .into_iter()
-        .map(|branch| branch.id)
+        .map(|branch| (branch.id.clone(), startup_action(&branch)))
         .collect();
+    pending.sort_by_key(|(_, action)| *action != Some(StartupAction::SetUp));
 
-    assert_eq!(pending, vec![left_starting.id]);
+    assert_eq!(
+        pending,
+        vec![
+            (left_starting.id, Some(StartupAction::SetUp)),
+            (left_failed.id, Some(StartupAction::ArmRetry)),
+        ]
+    );
 }
 
 /// A run that quit between a workstation coming up and its checkout left
@@ -1052,6 +962,7 @@ async fn the_startup_pass_finishes_a_setup_the_last_run_dropped() {
     ));
 
     for pending in branches_awaiting_setup(&store).unwrap() {
+        assert_eq!(startup_action(&pending), Some(StartupAction::SetUp));
         set_up(&store, &host, &pending, SetupTrigger::Observed)
             .await
             .unwrap();

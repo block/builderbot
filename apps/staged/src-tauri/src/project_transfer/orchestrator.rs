@@ -519,6 +519,35 @@ impl Run<'_> {
         Ok(self.result(&inspection, legs, warnings))
     }
 
+    /// The rows of a workspace this transfer resumed say `Running` from here
+    /// on, whatever the transfer comes to, rather than the state it was
+    /// resumed from — each one once the inspection has read its clone as on
+    /// its branch ([`preflight::RepoPreflight::is_on_its_branch`]).
+    ///
+    /// `Running` means the clone is on the branch as well as the workstation
+    /// being up (`workspace_setup`), and the resume alone vouches only for
+    /// the second. A row whose clone was not read, or read as somewhere
+    /// else, keeps its status: the status pollers find its workstation
+    /// running and put it through branch setup, which is what checks the
+    /// branch out.
+    fn mark_resumed_rows_running(
+        &self,
+        inspection: &Inspection,
+        resumed: &BTreeMap<String, Option<String>>,
+    ) -> Result<(), Failure> {
+        for (source, row) in inspection.branches.iter().zip(&inspection.preflight.repos) {
+            let came_back = source
+                .workspace
+                .as_deref()
+                .is_some_and(|workspace| matches!(resumed.get(workspace), Some(None)));
+            if came_back && row.is_on_its_branch() {
+                self.store
+                    .update_branch_workspace_status(&source.branch.id, &WorkspaceStatus::Running)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The preflight, again, now that the transfer is registered — with any
     /// suspended, stopped or failed source workspace resumed first, so its
     /// checkouts can be read. One that won't come back blocks the transfer.
@@ -557,16 +586,8 @@ impl Run<'_> {
                     .err();
                 self.guard_not_cancelled()?;
                 let failed = error.is_some();
-                match &error {
-                    Some(e) => log::warn!("[project_transfer] cannot resume {workspace}: {e}"),
-                    // Running now, whatever the transfer comes to: the rows
-                    // say so, rather than the state it was resumed from.
-                    None => {
-                        self.store.update_workspace_status_by_workspace_name(
-                            &workspace,
-                            &WorkspaceStatus::Running,
-                        )?;
-                    }
+                if let Some(e) = &error {
+                    log::warn!("[project_transfer] cannot resume {workspace}: {e}");
                 }
                 resumed.insert(workspace, error);
                 // One is enough to block the transfer: spare the others.
@@ -577,6 +598,7 @@ impl Run<'_> {
             inspection = preflight::inspect_after_resuming(
                 self.store, self.host, project_id, &resumed, &observer,
             )?;
+            self.mark_resumed_rows_running(&inspection, &resumed)?;
         }
         let preflight = &inspection.preflight;
         if !preflight.can_transfer {

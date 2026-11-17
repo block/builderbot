@@ -1892,7 +1892,9 @@ pub(crate) async fn resume_session_for_store(
     }
 
     let plan = prepare_resume(&store, &session, branch_id, acp_config_selection).await?;
-    ensure_resume_checkout(&app_handle, &store, &plan, &session_id).await?;
+    // Held until this returns, by when the row is `running` and visible to
+    // any checkout that would otherwise run in the clone.
+    let _checkout = ensure_resume_checkout(&app_handle, &store, &plan, &session_id).await?;
 
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
@@ -1970,20 +1972,24 @@ fn ensure_claimed_resume_still_running(store: &Store, session_id: &str) -> Resul
 /// clone can't be read fails, since the turn would otherwise run unchecked.
 /// Its waits are bounded (two capped reads; a repair's execs each carry
 /// their own limit), so a claimed row is not held `running` without end.
+///
+/// The caller keeps what this returns until the row is `running` (see
+/// `workspace_setup::verify::CheckoutHold`).
 async fn ensure_resume_checkout(
     app_handle: &tauri::AppHandle,
     store: &Arc<Store>,
     plan: &ResumePlan,
     session_id: &str,
-) -> Result<(), String> {
+) -> Result<crate::workspace_setup::verify::CheckoutHold, String> {
+    use crate::workspace_setup::verify::CheckoutHold;
     if plan.workspace_name.is_none() {
-        return Ok(());
+        return Ok(CheckoutHold::none());
     }
     let Some(branch_id) = plan.event_branch_id.as_deref() else {
-        return Ok(());
+        return Ok(CheckoutHold::none());
     };
     let Some(branch) = store.get_branch(branch_id).map_err(|e| e.to_string())? else {
-        return Ok(());
+        return Ok(CheckoutHold::none());
     };
     crate::workspace_setup::verify::ensure_session_checkout(app_handle, store, &branch, session_id)
         .await
@@ -2700,11 +2706,14 @@ pub(crate) async fn resume_claimed_session_for_store(
     let prepared = match prepare_resume(&store, &session, None, None).await {
         Ok(plan) => ensure_resume_checkout(&app_handle, &store, &plan, &session.id)
             .await
-            .map(|()| plan),
+            .map(|checkout| (plan, checkout)),
         Err(e) => Err(e),
     };
+    // The row has been `running` since the claim, so a checkout elsewhere in
+    // the clone already sees this session; the hold only has to outlast the
+    // read.
     let plan = match prepared {
-        Ok(plan) => plan,
+        Ok((plan, _checkout)) => plan,
         Err(e) => {
             let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
             let project_id = store.get_project_id_for_session(&session.id).ok().flatten();
@@ -5343,9 +5352,14 @@ async fn prepare_branch_session_start(
 
     // A remote branch's clone is read to be on the branch before the context
     // below is built from it and an agent is started in it (a no-op for a
-    // local branch). See `workspace_setup::verify`.
-    crate::workspace_setup::verify::ensure_session_checkout(app_handle, store, branch, session_id)
-        .await?;
+    // local branch). See `workspace_setup::verify`. The immediate start's
+    // row is `running` already, so a checkout elsewhere in the clone sees
+    // this session without the hold outliving the read.
+    let _checkout = crate::workspace_setup::verify::ensure_session_checkout(
+        app_handle, store, branch, session_id,
+    )
+    .await?;
+    drop(_checkout);
 
     // Remote branches use ws_exec for git operations; local branches use the
     // worktree directly.
@@ -6900,8 +6914,9 @@ async fn start_queued_session_for_branch(
     // local branch; see `workspace_setup::verify`). Before the claim, like
     // everything else here that awaits: a read that fails leaves the row
     // queued for the drain's bounded retries, and a repair that fails leaves
-    // the branch in `Error`, where the queue holds its rows.
-    crate::workspace_setup::verify::ensure_session_checkout(
+    // the branch in `Error`, where the queue holds its rows. The clone stays
+    // held until this returns, by when the row is claimed `running`.
+    let _checkout = crate::workspace_setup::verify::ensure_session_checkout(
         &app_handle,
         &store,
         &branch,
@@ -7204,8 +7219,9 @@ async fn start_requeued_session_for_branch(
     // neither holds this branch's drain open nor spends a retry.
     let plan = prepare_resume(&store, &session, Some(branch_id.clone()), None).await?;
     // Before the claim too: a failed read spends one of the drain's retries
-    // and leaves the row queued.
-    ensure_resume_checkout(&app_handle, &store, &plan, &session_id).await?;
+    // and leaves the row queued. Held until this returns, by when the row is
+    // claimed `running`.
+    let _checkout = ensure_resume_checkout(&app_handle, &store, &plan, &session_id).await?;
 
     // Live from before the claim flips the row to `running` until
     // `start_session` has registered it (see `SessionRegistry::hold`).

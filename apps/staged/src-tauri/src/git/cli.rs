@@ -277,6 +277,8 @@ pub fn run_smart(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 /// Use this when a caller has already resolved the directory a future
 /// captured-env operation will need, but has no git read to run there yet.
 pub(crate) fn prewarm_shell_env(repo: &Path) {
+    #[cfg(test)]
+    shell_env_calls::record("prewarm", repo);
     warm_shell_env(repo);
 }
 
@@ -292,11 +294,14 @@ pub(crate) fn wait_for_shell_env(repo: &Path) {
 }
 
 #[cfg(test)]
-pub(crate) fn wait_for_shell_env(_repo: &Path) {}
+pub(crate) fn wait_for_shell_env(repo: &Path) {
+    shell_env_calls::record("wait", repo);
+}
 
 /// Drop the captured shell env `repo` uses, or the capture in flight for
-/// it, so the next captured-env op there captures afresh. For a caller that
-/// changed what the capture reads after it started.
+/// it, so the next captured-env op there captures afresh. A capture in
+/// flight runs on, uncounted; a caller that changed what it reads, or is
+/// about to delete `repo`, wants [`wait_out_and_invalidate_shell_env`].
 ///
 /// A no-op under unit tests, like [`prewarm_shell_env`].
 #[cfg(not(test))]
@@ -305,7 +310,91 @@ pub(crate) fn invalidate_shell_env(repo: &Path) {
 }
 
 #[cfg(test)]
-pub(crate) fn invalidate_shell_env(_repo: &Path) {}
+pub(crate) fn invalidate_shell_env(repo: &Path) {
+    shell_env_calls::record("invalidate", repo);
+}
+
+/// [`invalidate_shell_env`] once the capture in flight for `repo`, if there
+/// is one, has finished: its shell is running in `repo`, so this is for a
+/// caller about to delete the directory, or to capture it again. Never
+/// starts a capture. A capture can't be stopped early, so this can take as
+/// long as one does (see
+/// [`ShellEnvCache::wait_out_and_invalidate`](crate::shell_env::ShellEnvCache::wait_out_and_invalidate)).
+///
+/// A no-op under unit tests, like [`prewarm_shell_env`].
+#[cfg(not(test))]
+pub(crate) fn wait_out_and_invalidate_shell_env(repo: &Path) {
+    crate::session_runner::shell_env_cache().wait_out_and_invalidate(repo);
+}
+
+#[cfg(test)]
+pub(crate) fn wait_out_and_invalidate_shell_env(repo: &Path) {
+    shell_env_calls::record("wait out and invalidate", repo);
+}
+
+/// What the shell-env entry points above were asked for, since they do
+/// nothing under unit tests: a test that cares in what order a caller used
+/// them, and whether a directory was still there when it did, watches a
+/// directory of its own.
+#[cfg(test)]
+pub(crate) mod shell_env_calls {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// One call, for a path under a watched directory.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Call {
+        /// `prewarm`, `wait`, `invalidate` or `wait out and invalidate`.
+        pub(crate) what: &'static str,
+        pub(crate) path: PathBuf,
+        /// Whether `path` existed when the call was made.
+        pub(crate) existed: bool,
+    }
+
+    static WATCHED: Mutex<Vec<(PathBuf, Vec<Call>)>> = Mutex::new(Vec::new());
+
+    /// While it lives, calls for paths under its directory are kept, from
+    /// whichever thread makes them.
+    pub(crate) struct Watch(PathBuf);
+
+    impl Watch {
+        pub(crate) fn under(dir: &Path) -> Self {
+            let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            watched.push((dir.to_path_buf(), Vec::new()));
+            Self(dir.to_path_buf())
+        }
+
+        /// The calls so far, in order.
+        pub(crate) fn calls(&self) -> Vec<Call> {
+            let watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            watched
+                .iter()
+                .find(|(dir, _)| *dir == self.0)
+                .map(|(_, calls)| calls.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            watched.retain(|(dir, _)| *dir != self.0);
+        }
+    }
+
+    pub(super) fn record(what: &'static str, path: &Path) {
+        let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+        for (dir, calls) in watched.iter_mut() {
+            if path.starts_with(dir.as_path()) {
+                calls.push(Call {
+                    what,
+                    path: path.to_path_buf(),
+                    existed: path.exists(),
+                });
+            }
+        }
+    }
+}
 
 /// Which environment to pass to the spawned git process.
 ///

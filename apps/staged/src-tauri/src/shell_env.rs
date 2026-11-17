@@ -49,6 +49,8 @@ mod leftover_group;
 
 #[cfg(all(test, unix))]
 mod capture_limit_tests;
+#[cfg(all(test, unix))]
+mod wait_out_tests;
 
 use capture_slots::{CaptureSlots, Urgency, CAPTURE_LIMIT};
 pub(crate) use env_root::env_root_inputs;
@@ -1341,6 +1343,44 @@ impl ShellEnvCache {
         let key = self.env_key(working_dir);
         self.env_keys.lock().unwrap().remove(working_dir);
         self.inner.lock().unwrap().remove(&key);
+    }
+
+    /// [`invalidate`] for a caller about to delete `working_dir`, or one that
+    /// must not have two captures of it running: first wait for the capture
+    /// in flight for its env root, if there is one, since that capture's
+    /// shell is running in the directory. It never starts a capture.
+    ///
+    /// A capture can't be stopped early (it "never belongs to a caller"; see
+    /// the module docs), so this waits it out: for at most its queue time
+    /// plus [`SHELL_CAPTURE_TIMEOUT`], and as a waiter without a bound, which
+    /// moves a queued capture ahead of prewarms. What a shell killed at that
+    /// timeout started may still be running afterwards, until
+    /// [`LEFTOVER_GROUP_TIMEOUT`]; this doesn't wait for that. Nor can it
+    /// see a capture whose entry [`invalidate`] dropped while it ran.
+    ///
+    /// [`invalidate`]: ShellEnvCache::invalidate
+    pub fn wait_out_and_invalidate(&self, working_dir: &Path) {
+        let key = self.env_key(working_dir);
+        loop {
+            let promise = {
+                let mut map = self.inner.lock().unwrap();
+                match map.get(&key) {
+                    Some(CachedEntry::InFlight(handle)) => Arc::clone(&handle.promise),
+                    _ => {
+                        // Dropped under the lock that found nothing in
+                        // flight, so no capture starts in between.
+                        map.remove(&key);
+                        break;
+                    }
+                }
+            };
+            // The capture replaces its `InFlight` entry before it wakes
+            // its waiters, so the next look finds its result, or a capture
+            // someone has started since.
+            let _waiter = promise.register_unbounded_waiter(&self.slots);
+            let _ = promise.wait_blocking();
+        }
+        self.env_keys.lock().unwrap().remove(working_dir);
     }
 
     /// Drop all cached snapshots and resolved env roots.

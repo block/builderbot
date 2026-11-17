@@ -5,14 +5,19 @@
 //!
 //! A worktree that went the early way shows it in its `HEAD` reflog: one
 //! added on the branch never moved from another commit.
+//!
+//! The shell-environment calls do nothing under test, so what these tests
+//! see of them is which were made for the worktree, in what order, and
+//! whether the worktree was there at the time.
 
 use std::time::{Duration, Instant};
 
-use super::super::orchestrator::FailingEarlyAdds;
+use super::super::orchestrator::{FailingEarlyAdds, GatedEarlyAdds, GitWithoutHookRun};
 use super::super::tests::lfs::{lfs_installed, track_psd, POINTER_PREFIX};
 use super::super::undo::AddedWorktree;
 use super::lfs::lfs_project;
 use super::*;
+use crate::git::shell_env_calls::Watch;
 
 /// Take `f`'s one branch, `feature`, to a workspace: pushed, then a commit
 /// ahead of origin, with an untracked file. Returns the pushed tip and the
@@ -55,6 +60,80 @@ fn hold_the_snapshot_for(f: &Fixture, worktree: &Path) -> Arc<Mutex<Vec<bool>>> 
     seen
 }
 
+/// Make the early add and the snapshot wait for each other (see
+/// [`super::super::orchestrator::GatedEarlyAdds`]). Returns, per snapshot,
+/// whether the add finished while it was held.
+fn gate_the_early_add(f: &Fixture) -> (GatedEarlyAdds, Arc<Mutex<Vec<bool>>>) {
+    let gated = GatedEarlyAdds::for_this_thread();
+    let finished = Arc::new(Mutex::new(Vec::new()));
+    let (gate, seen) = (gated.gate(), Arc::clone(&finished));
+    f.host.on_every_script(move |side, script| {
+        if side == Side::Workspace && script == SNAPSHOT_SCRIPT {
+            let finished = gate.snapshot_started();
+            seen.lock().unwrap().push(finished);
+        }
+    });
+    (gated, finished)
+}
+
+/// Give the clone a `post-checkout` hook that logs its three arguments and
+/// then runs `then`. Returns the log.
+fn record_post_checkout(f: &Fixture, then: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hooks = f.host.root.join("hooks");
+    let log = f.host.root.join("post-checkout.log");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-checkout");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho \"$1 $2 $3\" >> '{}'\n{then}\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.host.clone_of(WIDGETS),
+        &["config", "core.hooksPath", path(&hooks)],
+    );
+    log
+}
+
+fn lines(log: &Path) -> Vec<String> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// What `post-checkout` is told of a worktree new on a branch at `head`.
+fn new_worktree_at(head: &str) -> String {
+    format!("{} {head} 1", "0".repeat(head.len()))
+}
+
+/// The shell-environment calls made for `worktree`, in order, each with
+/// whether the worktree existed then.
+fn shell_env_calls(watch: &Watch, worktree: &Path) -> Vec<(&'static str, bool)> {
+    watch
+        .calls()
+        .into_iter()
+        .filter(|call| call.path == worktree)
+        .map(|call| (call.what, call.existed))
+        .collect()
+}
+
+/// A commit made in the workspace's checkout, which the clone has never
+/// seen: the early worktree starts at what origin has, and the switch has
+/// files to rewrite. `file` is one the commit adds.
+fn commit_in_the_workspace(f: &Fixture, file: &str) -> String {
+    let checkout = f.checkout(0);
+    write(&checkout, file, "made remotely\n");
+    commit(&checkout, "made remotely")
+}
+
 /// Every move of the worktree's `HEAD`, as its reflog words them.
 fn head_moves(worktree: &Path) -> Vec<String> {
     git(worktree, &["reflog", "--format=%gs", "HEAD"])
@@ -90,16 +169,19 @@ fn worktree_on_feature_at(f: &Fixture, head: &str) -> PathBuf {
     worktree
 }
 
-/// The snapshot waits here for the worktree, so it only finishes because
-/// the worktree is added beside it. The workspace's head is new to the
+/// The add and the snapshot wait for each other: the add does nothing
+/// until the snapshot has started, and the snapshot goes no further until
+/// the add is done. So the transfer only gets through with the add running
+/// inside the snapshot, on a thread of its own: an add made before the
+/// capture would never see the snapshot start, and one made after it would
+/// not finish while the snapshot waits. The workspace's head is new to the
 /// clone, so the worktree starts at what origin has of the branch.
 #[test]
 fn the_worktree_is_added_while_the_snapshot_runs() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
     let (pushed, _) = send_to_a_workspace(&f);
     let checkout = f.checkout(0);
-    write(&checkout, "remote.txt", "made remotely\n");
-    let head = commit(&checkout, "made remotely");
+    let head = commit_in_the_workspace(&f, "remote.txt");
     write(
         &checkout,
         "partial.txt",
@@ -107,11 +189,21 @@ fn the_worktree_is_added_while_the_snapshot_runs() {
     );
     let expected = observe(&checkout);
     let worktree = worktree_path(&f);
-    let seen = hold_the_snapshot_for(&f, &worktree);
+    let watch = Watch::under(&f.host.root);
+    let (gated, finished_in_the_snapshot) = gate_the_early_add(&f);
 
     f.transfer(true).result.expect("to local");
 
-    assert_eq!(*seen.lock().unwrap(), vec![true], "added by the snapshot");
+    assert_eq!(
+        gated.gate().add_began_in_the_snapshot(),
+        Some(true),
+        "the add did not wait for the snapshot to start"
+    );
+    assert_eq!(
+        *finished_in_the_snapshot.lock().unwrap(),
+        vec![true],
+        "the add did not finish while the snapshot was held"
+    );
     assert_eq!(worktree_on_feature_at(&f, &head), worktree);
     assert_eq!(observe(&worktree), expected);
     assert!(
@@ -120,6 +212,196 @@ fn the_worktree_is_added_while_the_snapshot_runs() {
         head_moves(&worktree)
     );
     assert_eq!(temp_refs(&worktree), "");
+    // The capture started by the add is the one the finish waits for:
+    // nothing between the two commits changes what a capture reads.
+    assert_eq!(
+        shell_env_calls(&watch, &worktree),
+        [("invalidate", true), ("prewarm", true), ("wait", true)]
+    );
+}
+
+/// `post-checkout` hears of the early worktree once, after it is on its
+/// branch, and is told what git tells it of a worktree added on a branch:
+/// no previous head. Neither the detached add nor the switch from the start
+/// commit reaches it.
+#[test]
+fn post_checkout_fires_once_for_an_early_worktree_as_for_a_new_one() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
+        eprintln!("skipping: this git has no `git hook run`");
+        return;
+    }
+    let (pushed, _) = send_to_a_workspace(&f);
+    let head = commit_in_the_workspace(&f, "remote.txt");
+    let log = record_post_checkout(&f, "");
+
+    f.transfer(true).result.expect("to local");
+
+    let worktree = worktree_on_feature_at(&f, &head);
+    assert!(
+        switched_from(&worktree, &pushed),
+        "{:?}",
+        head_moves(&worktree)
+    );
+    assert_eq!(lines(&log), [new_worktree_at(&head)]);
+}
+
+/// The commonest case: the clone already holds the head, so the worktree
+/// is added at it and the switch moves no file. The hook is still told the
+/// worktree is new, not that it went from the head to the head.
+#[test]
+fn post_checkout_sees_a_new_worktree_when_the_start_commit_is_the_head() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
+        eprintln!("skipping: this git has no `git hook run`");
+        return;
+    }
+    let (_, head) = send_to_a_workspace(&f);
+    let log = record_post_checkout(&f, "");
+
+    f.transfer(true).result.expect("to local");
+
+    let worktree = worktree_on_feature_at(&f, &head);
+    assert!(
+        switched_from(&worktree, &head),
+        "{:?}",
+        head_moves(&worktree)
+    );
+    assert_eq!(lines(&log), [new_worktree_at(&head)]);
+}
+
+/// A git that cannot fire a hook on request gets no early worktree: the
+/// worktree is added on the branch once that has landed, and git fires the
+/// hook itself, the same once and with the same arguments.
+#[test]
+fn a_git_that_cannot_fire_hooks_on_request_adds_the_worktree_late() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    send_to_a_workspace(&f);
+    let head = commit_in_the_workspace(&f, "remote.txt");
+    let expected = observe(&f.checkout(0));
+    let log = record_post_checkout(&f, "");
+    let watch = Watch::under(&f.host.root);
+    let old_git = GitWithoutHookRun::for_this_thread();
+
+    let transfer = f.transfer(true);
+    drop(old_git);
+
+    transfer.result.expect("to local");
+    let worktree = worktree_on_feature_at(&f, &head);
+    assert_eq!(observe(&worktree), expected);
+    assert!(
+        added_on_its_branch(&worktree),
+        "{:?}",
+        head_moves(&worktree)
+    );
+    assert_eq!(lines(&log), [new_worktree_at(&head)]);
+    // What is cached for the path is dropped before the worktree is there,
+    // as on the early path, and nothing is started ahead of the finish.
+    assert_eq!(
+        shell_env_calls(&watch, &worktree),
+        [("invalidate", false), ("wait", true)]
+    );
+}
+
+/// A `post-checkout` that fails fails the transfer, as it does when it
+/// fails `git worktree add`. It is not taken for a reason to fall back,
+/// which would fire it a second time.
+#[test]
+fn a_post_checkout_that_fails_fails_the_transfer_having_fired_once() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
+        eprintln!("skipping: this git has no `git hook run`");
+        return;
+    }
+    send_to_a_workspace(&f);
+    let head = commit_in_the_workspace(&f, "remote.txt");
+    let source = source_fingerprint(&f.checkout(0));
+    let log = record_post_checkout(&f, "echo no good >&2\nexit 1");
+
+    let transfer = f.transfer(true);
+
+    let err = transfer.result.unwrap_err();
+    assert!(err.contains("Cannot add the worktree for feature"), "{err}");
+    assert!(err.contains("no good"), "{err}");
+    assert_eq!(lines(&log), [new_worktree_at(&head)]);
+    assert!(f.worktree_dirs().is_empty(), "{:?}", f.worktree_dirs());
+    assert_eq!(source_fingerprint(&f.checkout(0)), source);
+    let manifest = f.manifest(&transfer.transfer_id).expect("manifest");
+    assert_eq!(manifest.status, "rolledBack");
+}
+
+/// The capture the early add started ran at the start commit. When the
+/// branch's head differs from it in something a capture reads, that capture
+/// is waited out and dropped before the finish asks for a new one, so two
+/// are never running in the worktree and none is left untracked.
+#[test]
+fn a_stale_capture_is_waited_out_before_the_finish_captures_again() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let (pushed, _) = send_to_a_workspace(&f);
+    let head = commit_in_the_workspace(&f, ".nvmrc");
+    let watch = Watch::under(&f.host.root);
+
+    f.transfer(true).result.expect("to local");
+
+    let worktree = worktree_on_feature_at(&f, &head);
+    assert!(
+        switched_from(&worktree, &pushed),
+        "{:?}",
+        head_moves(&worktree)
+    );
+    assert_eq!(
+        shell_env_calls(&watch, &worktree),
+        [
+            ("invalidate", true),
+            ("prewarm", true),
+            ("wait out and invalidate", true),
+            ("wait", true)
+        ]
+    );
+}
+
+/// A switch that fails after the early add went well: an untracked file
+/// turned up in the worktree where the branch has one. The leg falls back,
+/// and the capture the early add started is waited out while the worktree
+/// is still there, before it is removed and added again on the branch.
+#[test]
+fn a_switch_that_fails_waits_out_the_capture_before_the_worktree_is_replaced() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    send_to_a_workspace(&f);
+    let head = commit_in_the_workspace(&f, "remote.txt");
+    let expected = observe(&f.checkout(0));
+    let worktree = worktree_path(&f);
+    let watch = Watch::under(&f.host.root);
+    let gated = GatedEarlyAdds::for_this_thread();
+    let (gate, early) = (gated.gate(), worktree.clone());
+    f.host.on_every_script(move |side, script| {
+        if side == Side::Workspace && script == SNAPSHOT_SCRIPT {
+            assert!(gate.snapshot_started(), "no early worktree");
+            write(&early, "remote.txt", "in the way\n");
+            write(&early, "scratch.txt", "left by something else\n");
+        }
+    });
+
+    f.transfer(true).result.expect("to local");
+
+    assert_eq!(worktree_on_feature_at(&f, &head), worktree);
+    assert_eq!(f.worktree_dirs(), vec![worktree.clone()]);
+    assert!(
+        added_on_its_branch(&worktree),
+        "{:?}",
+        head_moves(&worktree)
+    );
+    assert_eq!(observe(&worktree), expected);
+    assert!(!worktree.join("scratch.txt").exists());
+    assert_eq!(
+        shell_env_calls(&watch, &worktree),
+        [
+            ("invalidate", true),
+            ("prewarm", true),
+            ("wait out and invalidate", true),
+            ("wait", true)
+        ]
+    );
 }
 
 /// The worktree is in the undo list before it is made, which is now before
@@ -150,7 +432,9 @@ fn the_undo_list_names_the_worktree_before_the_snapshot_starts() {
 }
 
 /// The snapshot fails once the early worktree is there: the leg waits for
-/// the add, and the rollback removes what it made.
+/// the add, and the rollback removes what it made. The capture the add
+/// started in the worktree is waited out first, while the worktree is
+/// still there, and nothing asks for another.
 #[test]
 fn a_snapshot_that_fails_after_the_early_add_leaves_no_worktree() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
@@ -158,6 +442,7 @@ fn a_snapshot_that_fails_after_the_early_add_leaves_no_worktree() {
     let clone = f.host.clone_of(WIDGETS);
     let (db, before) = (f.db_state(), clone_state(&clone));
     let source = source_fingerprint(&f.checkout(0));
+    let watch = Watch::under(&f.host.root);
     let seen = hold_the_snapshot_for(&f, &worktree_path(&f));
     f.host
         .arm(Fault::Script(Side::Workspace, SNAPSHOT_SCRIPT, 1));
@@ -168,6 +453,14 @@ fn a_snapshot_that_fails_after_the_early_add_leaves_no_worktree() {
     assert!(f.host.fired(), "{err}");
     assert_eq!(*seen.lock().unwrap(), vec![true], "the worktree was there");
     assert!(f.worktree_dirs().is_empty(), "{:?}", f.worktree_dirs());
+    assert_eq!(
+        shell_env_calls(&watch, &worktree_path(&f)),
+        [
+            ("invalidate", true),
+            ("prewarm", true),
+            ("wait out and invalidate", true)
+        ]
+    );
     assert_eq!(clone_state(&clone), before);
     assert_eq!(f.db_state(), db);
     assert_eq!(source_fingerprint(&f.checkout(0)), source);
@@ -213,6 +506,7 @@ fn an_early_add_that_fails_falls_back_to_adding_the_worktree_late() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
     let (_, head) = send_to_a_workspace(&f);
     let expected = observe(&f.checkout(0));
+    let watch = Watch::under(&f.host.root);
     let failing = FailingEarlyAdds::for_this_thread();
 
     let transfer = f.transfer(true);
@@ -229,6 +523,12 @@ fn an_early_add_that_fails_falls_back_to_adding_the_worktree_late() {
         head_moves(&worktree)
     );
     assert!(!worktree.join("half-added").exists());
+    // No capture was started in what the add left, so the removal had
+    // nothing to wait for; it still asks, with the directory there.
+    assert_eq!(
+        shell_env_calls(&watch, &worktree),
+        [("wait out and invalidate", true), ("wait", true)]
+    );
 }
 
 /// The inspection saw no LFS objects, so the early worktree was added with

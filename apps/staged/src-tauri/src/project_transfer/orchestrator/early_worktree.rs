@@ -9,13 +9,21 @@
 //! it only switches the worktree onto it, which rewrites the files that
 //! differ.
 //!
+//! Hooks see none of that. They are off for the add and for the switch,
+//! and `post-checkout` is then fired once, by `git hook run`, with what
+//! `git worktree add <path> <branch>` tells it: no previous head. A hook
+//! that sets a new worktree up on seeing that still does.
+//!
 //! This is an optimisation with a complete fallback. A leg with no commit
-//! to start from, an early add or a switch that fails, or a guess about
-//! Git LFS the snapshot contradicts, all end in the sequence without it:
-//! `git worktree add <path> <branch>` once the branch has landed. The
-//! worktree is recorded in the undo list before the thread starts and the
-//! thread is joined before the leg returns, so rollback and startup recovery
-//! find it as they find a worktree added late.
+//! to start from, a git too old to fire a hook on request, an early add or
+//! a switch that fails, or a guess about Git LFS the snapshot contradicts,
+//! all end in the sequence without it: `git worktree add <path> <branch>`
+//! once the branch has landed. The worktree is recorded in the undo list
+//! before the thread starts and the thread is joined before the leg
+//! returns, so rollback and startup recovery find it as they find a
+//! worktree added late. The capture of its shell environment runs on past
+//! that join, in the worktree, so whatever removes the worktree waits for
+//! it first ([`undo::remove_worktree_keeping_branch`]).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -25,32 +33,10 @@ use super::super::undo::{self, AddedWorktree};
 use super::{origin_tip_names, Failure, Leg, Run};
 
 #[cfg(test)]
-thread_local! {
-    /// A test's request that early adds planned from this thread fail.
-    static FAIL_EARLY_ADDS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// While it lives, the early worktree adds of legs run from this thread
-/// fail part way, leaving a directory git knows nothing of — for a test of
-/// the fallback. The legs of a one-repository transfer, or of one under
-/// [`super::SerialLegs`], run on the thread that runs the transfer.
-#[cfg(test)]
-pub(crate) struct FailingEarlyAdds;
+mod seams;
 
 #[cfg(test)]
-impl FailingEarlyAdds {
-    pub(crate) fn for_this_thread() -> Self {
-        FAIL_EARLY_ADDS_FOR_TEST.with(|f| f.set(true));
-        Self
-    }
-}
-
-#[cfg(test)]
-impl Drop for FailingEarlyAdds {
-    fn drop(&mut self) {
-        FAIL_EARLY_ADDS_FOR_TEST.with(|f| f.set(false));
-    }
-}
+pub(crate) use seams::{FailingEarlyAdds, GatedEarlyAdds, GitWithoutHookRun};
 
 /// A worktree to add before its branch exists. Owns all it needs, so the
 /// thread adding it borrows nothing from the leg.
@@ -63,7 +49,7 @@ pub(super) struct EarlyWorktree {
     /// LFS files check out as pointers for the finish to replace.
     skip_lfs_smudge: bool,
     #[cfg(test)]
-    fail: bool,
+    seams: seams::Seams,
 }
 
 /// How an early add went.
@@ -75,7 +61,7 @@ pub(super) struct EarlyAdd {
 impl EarlyWorktree {
     /// Add the worktree, and start capturing its shell environment so the
     /// finish finds it cached or waits only for the rest. Hooks stay off:
-    /// `post-checkout` fires once, when the worktree goes onto its branch.
+    /// `post-checkout` fires once, when the worktree is on its branch.
     pub(super) fn add(&self) -> EarlyAdd {
         let started = Instant::now();
         let result = self.add_detached();
@@ -85,6 +71,10 @@ impl EarlyWorktree {
             crate::git::invalidate_shell_env(&self.path);
             crate::git::prewarm_shell_env(&self.path);
         }
+        #[cfg(test)]
+        if let Some(gate) = &self.seams.gate {
+            gate.add_finished();
+        }
         EarlyAdd {
             result,
             took: started.elapsed(),
@@ -93,7 +83,11 @@ impl EarlyWorktree {
 
     fn add_detached(&self) -> Result<(), String> {
         #[cfg(test)]
-        if self.fail {
+        if let Some(gate) = &self.seams.gate {
+            gate.hold_the_add();
+        }
+        #[cfg(test)]
+        if self.seams.fail_add {
             std::fs::create_dir_all(&self.path).map_err(|e| e.to_string())?;
             std::fs::write(self.path.join("half-added"), "").map_err(|e| e.to_string())?;
             return Err("injected failure".to_string());
@@ -115,6 +109,8 @@ pub(super) struct WorktreeTimings {
     /// The early add and the commit it started from.
     early_add: Option<(Duration, String)>,
     switch: Option<Duration>,
+    /// The `post-checkout` fired once the early worktree was on its branch.
+    hook: Option<Duration>,
     /// The add once the branch had landed: the only one, or the fallback's.
     late_add: Option<Duration>,
     /// Why the early worktree was discarded, when it was.
@@ -131,6 +127,9 @@ impl WorktreeTimings {
         }
         if let Some(took) = self.switch {
             parts.push(format!("switch {took:.1?}"));
+        }
+        if let Some(took) = self.hook {
+            parts.push(format!("post-checkout {took:.1?}"));
         }
         if let Some(took) = self.late_add {
             parts.push(format!("late add {took:.1?}"));
@@ -177,6 +176,16 @@ pub(super) fn start_commit(clone: &Path, head: Option<&str>, refs: &[String]) ->
         .or_else(|| refs.iter().find_map(|r| commit(r)))
 }
 
+/// Whether `clone`'s git can fire the `post-checkout` an early worktree
+/// leaves for the end ([`crate::git::can_run_hooks_on_request`]).
+fn fires_hooks_on_request(clone: &Path) -> bool {
+    #[cfg(test)]
+    if seams::Seams::of_this_thread().no_hook_run {
+        return false;
+    }
+    crate::git::can_run_hooks_on_request(clone)
+}
+
 /// Whether a shell environment captured in a worktree at `start` may differ
 /// from one captured after it moved to `head`: whether the two commits
 /// differ in anything a capture at the worktree's root reads
@@ -210,6 +219,15 @@ impl Run<'_> {
     pub(super) fn plan_early_worktree(&self, leg: &Leg, clone: &Path) -> Option<EarlyWorktree> {
         let branch = &leg.dest_branch;
         let start = start_commit(clone, leg.row.head.as_deref(), &start_refs(leg))?;
+        if !fires_hooks_on_request(clone) {
+            // Without it `post-checkout` could only fire from the switch,
+            // which tells it the worktree came from the start commit.
+            log::info!(
+                "[project_transfer] no early worktree for {branch}: this git has no \
+                 `git hook run` to fire post-checkout with"
+            );
+            return None;
+        }
         let planned = self.free_worktree_path(leg).and_then(|path| {
             self.record(|undo| {
                 undo.worktrees.push(AddedWorktree {
@@ -232,15 +250,19 @@ impl Run<'_> {
             start,
             skip_lfs_smudge: leg.row.lfs_present + leg.row.lfs_missing > 0,
             #[cfg(test)]
-            fail: FAIL_EARLY_ADDS_FOR_TEST.with(|f| f.get()),
+            seams: seams::Seams::of_this_thread(),
         })
     }
 
     /// Once the leg's branch has landed: put it in its worktree. The early
-    /// worktree is switched onto the branch; without one, or when it or the
-    /// switch failed, or its LFS guess was wrong, the worktree is added on
-    /// the branch as it always was — at the early one's path, once that is
-    /// cleared.
+    /// worktree is switched onto the branch and `post-checkout` fired as for
+    /// a new worktree; without one, or when it or the switch failed, or its
+    /// LFS guess was wrong, the worktree is added on the branch as it always
+    /// was — at the early one's path, once that is cleared.
+    ///
+    /// `post-checkout` fires once either way. So a hook that fails after
+    /// the switch fails the leg, as it fails `git worktree add`, rather
+    /// than falling back to an add that would fire it again.
     pub(super) fn settle_worktree(
         &self,
         leg: &Leg,
@@ -259,7 +281,6 @@ impl Run<'_> {
         let worktree = match early {
             Some((early, add)) => {
                 timings.early_add = Some((add.took, early.start.clone()));
-                let added = add.result.is_ok();
                 let switching = Instant::now();
                 let switched = add
                     .result
@@ -295,8 +316,20 @@ impl Run<'_> {
                 match switched {
                     Ok(()) => {
                         timings.switch = Some(switching.elapsed());
+                        let firing = Instant::now();
+                        crate::git::run_post_checkout_as_for_a_new_worktree(
+                            &clone,
+                            &early.path,
+                            skip_lfs_smudge,
+                        )
+                        .map_err(|e| format!("Cannot add the worktree for {branch}: {e}"))?;
+                        timings.hook = Some(firing.elapsed());
                         if env_capture_is_stale(&clone, &early.start, &outcome.snapshot.head) {
-                            crate::git::invalidate_shell_env(&early.path);
+                            // The capture may still be running. Dropped now
+                            // it would run on beside the one the finish
+                            // starts, where nothing that removes the
+                            // worktree could wait for it.
+                            crate::git::wait_out_and_invalidate_shell_env(&early.path);
                         }
                         return Ok((early.path, timings));
                     }
@@ -307,14 +340,11 @@ impl Run<'_> {
                             self.guard.transfer_id(),
                             early.path.display()
                         );
-                        if added {
-                            // The capture it started runs in the directory
-                            // about to go.
-                            crate::git::wait_for_shell_env(&early.path);
-                        }
+                        // Waits out the capture the early add started,
+                        // which runs in the directory about to go, and
+                        // drops its result.
                         undo::remove_worktree_keeping_branch(&clone, &early.path)
                             .map_err(|e| format!("Cannot add the worktree for {branch}: {e}"))?;
-                        crate::git::invalidate_shell_env(&early.path);
                         timings.fell_back = Some(why);
                         early.path
                     }
@@ -328,6 +358,9 @@ impl Run<'_> {
                         worktree: worktree.clone(),
                     })
                 })?;
+                // As the early add does: whatever is cached for the path
+                // is from a worktree that was there before.
+                crate::git::invalidate_shell_env(&worktree);
                 worktree
             }
         };

@@ -35,7 +35,7 @@ mod parallel;
 mod teardown;
 
 #[cfg(test)]
-pub(crate) use early_worktree::FailingEarlyAdds;
+pub(crate) use early_worktree::{FailingEarlyAdds, GatedEarlyAdds, GitWithoutHookRun};
 #[cfg(test)]
 pub(crate) use parallel::SerialLegs;
 
@@ -900,7 +900,9 @@ impl Run<'_> {
             (carried, early_add)
         });
         // A capture that failed or was cancelled: what the early add made
-        // is in the undo list, for the rollback.
+        // is in the undo list, for the rollback. The capture of its shell
+        // environment may still be running in it; the rollback waits for
+        // that before it removes the worktree.
         let mut outcome = match (carried, not_recorded) {
             (Err(_), Some(e)) => return Err(e.into()),
             (carried, _) => carried?,

@@ -9,31 +9,39 @@
 //! it only switches the worktree onto it, which rewrites the files that
 //! differ.
 //!
-//! Hooks see none of that. They are off for the add and for the switch,
-//! and `post-checkout` is then fired once, by `git hook run`, with what
-//! `git worktree add <path> <branch>` tells it: no previous head. A hook
-//! that sets a new worktree up on seeing that still does.
+//! Hooks see none of that. The hook directory is off for the add and for
+//! the switch, and `post-checkout` is then fired once, by `git hook run`,
+//! with what `git worktree add <path> <branch>` tells it: no previous
+//! head. A hook that sets a new worktree up on seeing that still does.
+//! Turning the hook directory off does not quiet a hook that config names
+//! (`hook.<name>.event`), which the add and the switch would each fire, so
+//! a clone whose config names a `post-checkout` hook gets no early
+//! worktree.
 //!
-//! Such a hook may change what a shell picks up in the worktree: allow its
+//! A hook may change what a shell picks up in the worktree: allow its
 //! `.envrc`, trust or write a tool-versions file. A worktree added late is
 //! first captured after the hook, inside `git worktree add`, has run. So
-//! when a hook is about to run here, the capture the early add started is
-//! waited out and dropped before it does, and the finish captures after
-//! it; the hook never runs beside that capture's shell. A repo with no
-//! `post-checkout` hook keeps the head start, as does one whose only hook
-//! is the one `git lfs install` writes
-//! ([`crate::git::PostCheckoutHooks`]).
+//! the capture of the early worktree's environment is only started when no
+//! such hook is known to be coming, which the clone can tell before the
+//! add unless its `core.hooksPath` is relative and the hook is the
+//! branch's own ([`crate::git::PostCheckoutHooksToCome`]). When a hook
+//! turns out to be about to run all the same, the capture is waited out
+//! and dropped before it does, and the finish captures after it; the hook
+//! never runs beside that capture's shell. A repo with no `post-checkout`
+//! hook keeps the head start, as does one whose only hook is the one `git
+//! lfs install` writes ([`crate::git::PostCheckoutHooks`]).
 //!
 //! This is an optimisation with a complete fallback. A leg with no commit
-//! to start from, a git too old to fire a hook on request, an early add or
-//! a switch that fails, or a guess about Git LFS the snapshot contradicts,
-//! all end in the sequence without it: `git worktree add <path> <branch>`
-//! once the branch has landed. The worktree is recorded in the undo list
-//! before the thread starts and the thread is joined before the leg
-//! returns, so rollback and startup recovery find it as they find a
-//! worktree added late. The capture of its shell environment runs on past
-//! that join, in the worktree, so whatever removes the worktree waits for
-//! it first ([`undo::remove_worktree_keeping_branch`]).
+//! to start from, a git too old to fire a hook on request, a hook named in
+//! config, an early add or a switch that fails, or a guess about Git LFS
+//! the snapshot contradicts, all end in the sequence without it: `git
+//! worktree add <path> <branch>` once the branch has landed. The worktree
+//! is recorded in the undo list before the thread starts and the thread is
+//! joined before the leg returns, so rollback and startup recovery find it
+//! as they find a worktree added late. The capture of its shell
+//! environment runs on past that join, in the worktree, so whatever
+//! removes the worktree waits for it first
+//! ([`undo::remove_worktree_keeping_branch`]).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -41,7 +49,7 @@ use std::time::{Duration, Instant};
 use super::super::carry::{CarryOutcome, CarryPlan};
 use super::super::undo::{self, AddedWorktree};
 use super::{origin_tip_names, Failure, Leg, Run};
-use crate::git::PostCheckoutHooks;
+use crate::git::{PostCheckoutHooks, PostCheckoutHooksToCome};
 
 #[cfg(test)]
 mod seams;
@@ -59,6 +67,11 @@ pub(super) struct EarlyWorktree {
     /// Whether the snapshot is expected to bring LFS objects, in which case
     /// LFS files check out as pointers for the finish to replace.
     skip_lfs_smudge: bool,
+    /// Whether to start capturing its shell environment once it is added.
+    /// Not when a `post-checkout` hook that may change it is already known
+    /// to be coming: the capture could only be dropped before the hook
+    /// ran, having held a login shell and the hook up for nothing.
+    prewarm: bool,
     #[cfg(test)]
     seams: seams::Seams,
 }
@@ -70,8 +83,9 @@ pub(super) struct EarlyAdd {
 }
 
 impl EarlyWorktree {
-    /// Add the worktree, and start capturing its shell environment so the
-    /// finish finds it cached or waits only for the rest. Hooks stay off:
+    /// Add the worktree and, unless a hook is known to be coming that
+    /// would cost it, start capturing its shell environment so the finish
+    /// finds it cached or waits only for the rest. Hooks stay off:
     /// `post-checkout` fires once, when the worktree is on its branch, and
     /// this capture is kept only if that changes nothing it read
     /// ([`early_capture_unusable`]).
@@ -82,7 +96,9 @@ impl EarlyWorktree {
             // Whatever is cached for the path is from a worktree that was
             // there before.
             crate::git::invalidate_shell_env(&self.path);
-            crate::git::prewarm_shell_env(&self.path);
+            if self.prewarm {
+                crate::git::prewarm_shell_env(&self.path);
+            }
         }
         #[cfg(test)]
         if let Some(gate) = &self.seams.gate {
@@ -122,6 +138,9 @@ pub(super) struct WorktreeTimings {
     /// The early add and the commit it started from.
     early_add: Option<(Duration, String)>,
     switch: Option<Duration>,
+    /// Whether the early add started no capture, a hook being known to be
+    /// coming.
+    no_early_capture: bool,
     /// The wait for the capture the early add started, when it could not
     /// serve the finish, and why it could not.
     early_capture_dropped: Option<(Duration, &'static str)>,
@@ -143,6 +162,9 @@ impl WorktreeTimings {
         }
         if let Some(took) = self.switch {
             parts.push(format!("switch {took:.1?}"));
+        }
+        if self.no_early_capture {
+            parts.push("no early environment (a post-checkout hook is coming)".to_string());
         }
         if let Some((took, why)) = self.early_capture_dropped {
             parts.push(format!("early environment dropped {took:.1?} ({why})"));
@@ -257,6 +279,15 @@ impl Run<'_> {
     /// its worktree and record it, as the late add would have. `None` leaves
     /// the worktree to the late add, which reports whatever stood in the
     /// way here.
+    ///
+    /// What the clone can tell of the worktree's `post-checkout` hooks
+    /// ([`crate::git::post_checkout_hooks_to_come`]) decides two things. A
+    /// hook its config names would fire at the early add and again at the
+    /// switch, each time told of the wrong commits, before it is fired on
+    /// request: such a clone gets no early worktree, and the late add
+    /// fires the hook once. A hook already known to be one that may do
+    /// anything leaves the early worktree without a capture of its
+    /// environment, which that hook would cost it.
     pub(super) fn plan_early_worktree(&self, leg: &Leg, clone: &Path) -> Option<EarlyWorktree> {
         let branch = &leg.dest_branch;
         let start = start_commit(clone, leg.row.head.as_deref(), &start_refs(leg))?;
@@ -269,6 +300,21 @@ impl Run<'_> {
             );
             return None;
         }
+        let prewarm = match crate::git::post_checkout_hooks_to_come(clone) {
+            PostCheckoutHooksToCome::NamedInConfig => {
+                log::info!(
+                    "[project_transfer] no early worktree for {branch}: the config of {} \
+                     names a post-checkout hook, which nothing keeps from firing at the \
+                     early add and the switch",
+                    clone.display()
+                );
+                return None;
+            }
+            PostCheckoutHooksToCome::Known(PostCheckoutHooks::Other) => false,
+            // A relative `core.hooksPath` is the branch's to decide, once
+            // the worktree is on it.
+            PostCheckoutHooksToCome::Known(_) | PostCheckoutHooksToCome::OfTheBranch => true,
+        };
         let planned = self.free_worktree_path(leg).and_then(|path| {
             self.record(|undo| {
                 undo.worktrees.push(AddedWorktree {
@@ -290,6 +336,7 @@ impl Run<'_> {
             path,
             start,
             skip_lfs_smudge: leg.row.lfs_present + leg.row.lfs_missing > 0,
+            prewarm,
             #[cfg(test)]
             seams: seams::Seams::of_this_thread(),
         })
@@ -360,6 +407,7 @@ impl Run<'_> {
                 match switched {
                     Ok(()) => {
                         timings.switch = Some(switching.elapsed());
+                        timings.no_early_capture = !early.prewarm;
                         if let Some(why) = early_capture_unusable(
                             &clone,
                             &early.path,
@@ -370,10 +418,14 @@ impl Run<'_> {
                             // waited out, not just dropped: its shell would
                             // run on beside the hook, and beside the capture
                             // the finish starts, where nothing that removes
-                            // the worktree could wait for it.
+                            // the worktree could wait for it. An add that
+                            // started none asks all the same, at the cost
+                            // of nothing, for one something else started.
                             let waiting = Instant::now();
                             crate::git::wait_out_and_invalidate_shell_env(&early.path);
-                            timings.early_capture_dropped = Some((waiting.elapsed(), why));
+                            if early.prewarm {
+                                timings.early_capture_dropped = Some((waiting.elapsed(), why));
+                            }
                         }
                         let firing = Instant::now();
                         crate::git::run_post_checkout_as_for_a_new_worktree(

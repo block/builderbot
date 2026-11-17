@@ -233,7 +233,19 @@ pub struct GitOutput {
 /// [`GitOutput`] for the caller to interpret. A git that cannot be spawned, a
 /// path that is not a repository, and non-UTF-8 stdout are still errors.
 pub fn run_lite_output(repo: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
-    let output = spawn_git(repo, args, EnvSource::Lite)?;
+    output_with_env(repo, args, EnvSource::Lite)
+}
+
+/// [`run`] without the success check, as [`run_lite_output`] is to
+/// [`run_lite`]: for a question whose answer is in the exit status and
+/// depends on which git answers and with what config, so it is asked with
+/// the env the commands it is about will run with.
+pub fn run_output(repo: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
+    output_with_env(repo, args, EnvSource::Captured)
+}
+
+fn output_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<GitOutput, GitError> {
+    let output = spawn_git(repo, args, source)?;
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() && stderr.contains("not a git repository") {
         return Err(GitError::NotARepo(repo.display().to_string()));
@@ -418,6 +430,50 @@ pub(crate) mod shell_env_calls {
                     noted: entry.note.as_deref().is_some_and(Path::exists),
                 });
             }
+        }
+    }
+}
+
+/// Keeps the machine's git config out of a test. The git this module runs
+/// reads the user's and the system's config like any other, so a test of
+/// something that config decides (which hooks fire, say, on a machine whose
+/// hook manager owns `core.hooksPath`) would pass or fail by where it ran.
+#[cfg(test)]
+pub(crate) mod own_config_only {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    static DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// While it lives, the git this module runs for a repo under its
+    /// directory, from whichever thread, reads no config but the repo's
+    /// own. Git a test runs itself is not touched.
+    pub(crate) struct OwnConfigOnly(PathBuf);
+
+    impl OwnConfigOnly {
+        pub(crate) fn under(dir: &Path) -> Self {
+            let mut dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
+            dirs.push(dir.to_path_buf());
+            Self(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for OwnConfigOnly {
+        fn drop(&mut self) {
+            let mut dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(at) = dirs.iter().position(|dir| *dir == self.0) {
+                dirs.remove(at);
+            }
+        }
+    }
+
+    pub(super) fn apply(command: &mut Command, repo: &Path) {
+        let dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
+        if dirs.iter().any(|dir| repo.starts_with(dir)) {
+            command
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1");
         }
     }
 }
@@ -696,8 +752,9 @@ fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) -> AppliedEn
 }
 
 #[cfg(test)]
-fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) -> AppliedEnv {
+fn apply_env(command: &mut Command, repo: &Path, _source: EnvSource) -> AppliedEnv {
     strip_git_env(command);
+    own_config_only::apply(command, repo);
     pin_c_locale(command);
     AppliedEnv::Lite
 }

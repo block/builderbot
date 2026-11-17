@@ -10,10 +10,12 @@
 //! see of them is which were made for the worktree, in what order, and
 //! whether the worktree was there at the time.
 //!
-//! Whether the capture the early add starts is kept depends on the
-//! `post-checkout` hooks git finds, and a machine may have a hook directory
-//! of its own for every repo. A test that looks at those calls therefore
-//! gives the clone its own: a hook, or an empty directory.
+//! Whether a leg gets an early worktree, and whether the capture its add
+//! starts is kept, depend on the `post-checkout` hooks git finds, and a
+//! machine may have a hook directory of its own for every repo, or name a
+//! hook in its config. So the git each transfer here runs reads no config
+//! but the repos' own ([`own_config_only`]): a clone has the hooks a test
+//! gives it, and otherwise the default hook directory with none in it.
 
 use std::time::{Duration, Instant};
 
@@ -23,6 +25,13 @@ use super::super::undo::AddedWorktree;
 use super::lfs::lfs_project;
 use super::*;
 use crate::git::shell_env_calls::Watch;
+use crate::git::OwnConfigOnly;
+
+/// Keep the machine's git config out of the git `f`'s transfers run,
+/// while what this returns lives.
+fn own_config_only(f: &Fixture) -> OwnConfigOnly {
+    OwnConfigOnly::under(&f.host.root)
+}
 
 /// Take `f`'s one branch, `feature`, to a workspace: pushed, then a commit
 /// ahead of origin, with an untracked file. Returns the pushed tip and the
@@ -111,15 +120,60 @@ fn install_post_checkout(f: &Fixture, script: &str) {
     );
 }
 
-/// Give the clone an empty hook directory: no hook of its own, and none of
-/// the machine's.
-fn without_hooks(f: &Fixture) {
-    let hooks = f.host.root.join("no-hooks");
+/// Put a `post-checkout` hook that logs its three arguments among the
+/// files of the branch's worktree, in `.githooks`, for the next commit
+/// there to take, and have the clone look for its hooks in that
+/// directory of whichever worktree git runs in. Returns the log.
+fn record_post_checkout_from_the_branch(f: &Fixture) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let log = f.host.root.join("post-checkout.log");
+    let hooks = f.worktree(0).join(".githooks");
     fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-checkout");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\necho \"$1 $2 $3\" >> '{}'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     git(
         &f.host.clone_of(WIDGETS),
-        &["config", "core.hooksPath", path(&hooks)],
+        &["config", "core.hooksPath", ".githooks"],
     );
+    log
+}
+
+/// Name a `post-checkout` hook in the clone's config, one that logs its
+/// three arguments each time git runs it. Returns the log, and whether
+/// this git runs hooks that config names at all (git 2.54 and later).
+fn record_post_checkout_named_in_config(f: &Fixture) -> (PathBuf, bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let clone = f.host.clone_of(WIDGETS);
+    let log = f.host.root.join("post-checkout.log");
+    let script = f.host.root.join("record-post-checkout.sh");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\necho \"$1 $2 $3\" >> '{}'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    git(&clone, &["config", "hook.record.event", "post-checkout"]);
+    git(
+        &clone,
+        &[
+            "config",
+            "hook.record.command",
+            &format!("'{}'", path(&script)),
+        ],
+    );
+
+    // Asked of the git the transfer will run, the way it will run it.
+    let probe = ["hook", "run", "post-checkout", "--", "a", "probe", "run"];
+    let runs = crate::git::cli_run(&clone, &probe).is_ok() && lines(&log) == ["a probe run"];
+    let _ = fs::remove_file(&log);
+    (log, runs)
 }
 
 fn lines(log: &Path) -> Vec<String> {
@@ -214,8 +268,8 @@ fn worktree_on_feature_at(f: &Fixture, head: &str) -> PathBuf {
 #[test]
 fn the_worktree_is_added_while_the_snapshot_runs() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     let (pushed, _) = send_to_a_workspace(&f);
-    without_hooks(&f);
     let checkout = f.checkout(0);
     let head = commit_in_the_workspace(&f, "remote.txt");
     write(
@@ -264,6 +318,7 @@ fn the_worktree_is_added_while_the_snapshot_runs() {
 #[test]
 fn post_checkout_fires_once_for_an_early_worktree_as_for_a_new_one() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
         eprintln!("skipping: this git has no `git hook run`");
         return;
@@ -289,6 +344,7 @@ fn post_checkout_fires_once_for_an_early_worktree_as_for_a_new_one() {
 #[test]
 fn post_checkout_sees_a_new_worktree_when_the_start_commit_is_the_head() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
         eprintln!("skipping: this git has no `git hook run`");
         return;
@@ -308,21 +364,71 @@ fn post_checkout_sees_a_new_worktree_when_the_start_commit_is_the_head() {
 }
 
 /// A `post-checkout` hook may change what a shell picks up in the worktree,
-/// and the capture the early add started ran before it. So that capture is
-/// waited out and dropped before the hook fires, and the finish captures
-/// after it: the order a worktree added late has, with no shell of an
-/// earlier capture in the directory while the hook works. The clone holds
-/// the head, so the two commits are the same and the hook is the only
-/// reason.
+/// so a capture made before it runs is no use to the finish. The clone's
+/// hook directory is an absolute one, the same from every worktree, so the
+/// hook is known before the add: the worktree is still added early, but no
+/// capture is started in it, and the finish's is the first, after the
+/// hook. The leg still asks for any capture to be waited out before the
+/// hook fires, and finds none.
 #[test]
-fn a_post_checkout_hook_runs_after_the_early_capture_and_before_the_finishs() {
+fn a_post_checkout_hook_known_before_the_add_starts_no_early_capture() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
         eprintln!("skipping: this git has no `git hook run`");
         return;
     }
     let (_, head) = send_to_a_workspace(&f);
     let log = record_post_checkout(&f, "");
+    let worktree = worktree_path(&f);
+    let watch = Watch::under(&f.host.root).noting(&log);
+
+    f.transfer(true).result.expect("to local");
+
+    assert_eq!(worktree_on_feature_at(&f, &head), worktree);
+    assert!(
+        switched_from(&worktree, &head),
+        "{:?}",
+        head_moves(&worktree)
+    );
+    assert_eq!(lines(&log), [new_worktree_at(&head)]);
+    assert_eq!(
+        shell_env_calls(&watch, &worktree),
+        [
+            ("invalidate", true),
+            ("wait out and invalidate", true),
+            ("wait", true)
+        ]
+    );
+    // Each call with whether the hook had run by then.
+    assert_eq!(
+        shell_env_calls_noting(&watch, &worktree),
+        [
+            ("invalidate", false),
+            ("wait out and invalidate", false),
+            ("wait", true)
+        ]
+    );
+}
+
+/// A relative `core.hooksPath` makes the hook the branch's own file, which
+/// the clone cannot know of before the worktree is on its branch, so the
+/// early add starts its capture. Once the hook is found, that capture is
+/// waited out and dropped before the hook fires, and the finish captures
+/// after it: the order a worktree added late has, with no shell of an
+/// earlier capture in the directory while the hook works. The clone holds
+/// the head, so the two commits are the same and the hook is the only
+/// reason.
+#[test]
+fn a_branchs_own_post_checkout_hook_runs_after_the_early_capture_and_before_the_finishs() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
+    if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
+        eprintln!("skipping: this git has no `git hook run`");
+        return;
+    }
+    let log = record_post_checkout_from_the_branch(&f);
+    let (_, head) = send_to_a_workspace(&f);
     let worktree = worktree_path(&f);
     let watch = Watch::under(&f.host.root).noting(&log);
 
@@ -356,14 +462,57 @@ fn a_post_checkout_hook_runs_after_the_early_capture_and_before_the_finishs() {
     );
 }
 
+/// Turning the hook directory off, as the early add and the switch do,
+/// does not quiet a `post-checkout` hook that config names: git would run
+/// it at the add, told of the start commit, at the switch, told the
+/// worktree came from there, and a third time on request. So a clone whose
+/// config names one gets no early worktree. The worktree is added on the
+/// branch once that has landed, and the hook hears of it once, as new.
+///
+/// The workspace's head is new to the clone, so an early worktree would
+/// have started at another commit and had files to switch.
+#[test]
+fn a_post_checkout_hook_named_in_config_fires_once_for_a_worktree_added_late() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
+    send_to_a_workspace(&f);
+    let head = commit_in_the_workspace(&f, "remote.txt");
+    let expected = observe(&f.checkout(0));
+    let (log, git_runs_it) = record_post_checkout_named_in_config(&f);
+    let watch = Watch::under(&f.host.root);
+
+    f.transfer(true).result.expect("to local");
+
+    let worktree = worktree_on_feature_at(&f, &head);
+    assert_eq!(observe(&worktree), expected);
+    assert!(
+        added_on_its_branch(&worktree),
+        "{:?}",
+        head_moves(&worktree)
+    );
+    // Nothing was started ahead of the finish, in a worktree that was not
+    // there yet.
+    assert_eq!(
+        shell_env_calls(&watch, &worktree),
+        [("invalidate", false), ("wait", true)]
+    );
+    if git_runs_it {
+        assert_eq!(lines(&log), [new_worktree_at(&head)]);
+    } else {
+        // The plan is made from config, whatever this git does with it.
+        eprintln!("this git runs no hooks named in config: only the late add was checked");
+        assert_eq!(lines(&log), [""; 0]);
+    }
+}
+
 /// A clone with no `post-checkout` hook keeps the capture the early add
 /// started, in the commonest case too: the clone holds the head, the switch
 /// moves no file, and nothing fires.
 #[test]
 fn without_a_post_checkout_hook_the_early_capture_serves_the_finish() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     let (_, head) = send_to_a_workspace(&f);
-    without_hooks(&f);
     let worktree = worktree_path(&f);
     let watch = Watch::under(&f.host.root);
 
@@ -388,6 +537,7 @@ fn a_post_checkout_git_would_ignore_keeps_the_early_capture() {
     use std::os::unix::fs::PermissionsExt;
 
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     let (_, head) = send_to_a_workspace(&f);
     let log = record_post_checkout(&f, "");
     let hook = f.host.root.join("hooks").join("post-checkout");
@@ -414,6 +564,7 @@ fn the_stock_git_lfs_post_checkout_keeps_the_early_capture() {
         return;
     }
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
         eprintln!("skipping: this git has no `git hook run`");
         return;
@@ -443,6 +594,7 @@ fn the_stock_git_lfs_post_checkout_keeps_the_early_capture() {
 #[test]
 fn a_git_that_cannot_fire_hooks_on_request_adds_the_worktree_late() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     send_to_a_workspace(&f);
     let head = commit_in_the_workspace(&f, "remote.txt");
     let expected = observe(&f.checkout(0));
@@ -476,6 +628,7 @@ fn a_git_that_cannot_fire_hooks_on_request_adds_the_worktree_late() {
 #[test]
 fn a_post_checkout_that_fails_fails_the_transfer_having_fired_once() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     if !crate::git::can_run_hooks_on_request(&f.host.clone_of(WIDGETS)) {
         eprintln!("skipping: this git has no `git hook run`");
         return;
@@ -505,8 +658,8 @@ fn a_post_checkout_that_fails_fails_the_transfer_having_fired_once() {
 #[test]
 fn a_stale_capture_is_waited_out_before_the_finish_captures_again() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     let (pushed, _) = send_to_a_workspace(&f);
-    without_hooks(&f);
     let head = commit_in_the_workspace(&f, ".nvmrc");
     let watch = Watch::under(&f.host.root);
 
@@ -536,6 +689,7 @@ fn a_stale_capture_is_waited_out_before_the_finish_captures_again() {
 #[test]
 fn a_switch_that_fails_waits_out_the_capture_before_the_worktree_is_replaced() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     send_to_a_workspace(&f);
     let head = commit_in_the_workspace(&f, "remote.txt");
     let expected = observe(&f.checkout(0));
@@ -578,6 +732,7 @@ fn a_switch_that_fails_waits_out_the_capture_before_the_worktree_is_replaced() {
 #[test]
 fn the_undo_list_names_the_worktree_before_the_snapshot_starts() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     send_to_a_workspace(&f);
     let recorded = Mutex::new(None);
 
@@ -607,6 +762,7 @@ fn the_undo_list_names_the_worktree_before_the_snapshot_starts() {
 #[test]
 fn a_snapshot_that_fails_after_the_early_add_leaves_no_worktree() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     send_to_a_workspace(&f);
     let clone = f.host.clone_of(WIDGETS);
     let (db, before) = (f.db_state(), clone_state(&clone));
@@ -643,6 +799,7 @@ fn a_snapshot_that_fails_after_the_early_add_leaves_no_worktree() {
 #[test]
 fn a_head_that_moves_after_the_inspection_still_lands_in_the_worktree() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     let (_, inspected) = send_to_a_workspace(&f);
     let checkout = f.checkout(0);
     let moved = Arc::new(Mutex::new(None));
@@ -673,6 +830,7 @@ fn a_head_that_moves_after_the_inspection_still_lands_in_the_worktree() {
 #[test]
 fn an_early_add_that_fails_falls_back_to_adding_the_worktree_late() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let _own_config = own_config_only(&f);
     let (_, head) = send_to_a_workspace(&f);
     let expected = observe(&f.checkout(0));
     let watch = Watch::under(&f.host.root);
@@ -710,6 +868,7 @@ fn a_wrong_guess_about_lfs_falls_back_to_adding_the_worktree_late() {
         return;
     }
     let f = lfs_project();
+    let _own_config = own_config_only(&f);
     let (_, head) = send_to_a_workspace(&f);
     assert_eq!(f.preflight().repos[0].lfs_present, 0);
     let art = noise(1800, 41);

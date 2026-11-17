@@ -20,6 +20,8 @@ mod worktree;
 pub use branch_config::{read_branch_config_snapshot, BranchConfigSnapshot};
 pub(crate) use cli::configure_captured;
 pub(crate) use cli::invalidate_shell_env;
+#[cfg(test)]
+pub(crate) use cli::own_config_only::OwnConfigOnly;
 pub(crate) use cli::prewarm_shell_env;
 pub(crate) use cli::run as cli_run;
 pub(crate) use cli::run_lite_or_captured as cli_run_lite_or_captured;
@@ -48,7 +50,10 @@ pub use github::{
 };
 #[cfg(test)]
 pub(crate) use post_checkout_hook::STOCK_GIT_LFS_POST_CHECKOUT;
-pub use post_checkout_hook::{post_checkout_hooks_for_worktree, PostCheckoutHooks};
+pub use post_checkout_hook::{
+    post_checkout_hooks_for_worktree, post_checkout_hooks_to_come, PostCheckoutHooks,
+    PostCheckoutHooksToCome,
+};
 pub use rebase::{rebase_preserving_merge_edits_command, HAND_EDIT_COMMIT_SUBJECT_PREFIX};
 pub use refs::{
     branch_name_without_origin, detect_default_branch, detect_default_branch_from_remote,

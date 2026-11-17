@@ -206,7 +206,10 @@ fn add_worktree_for_existing_branch(
 }
 
 /// Add a worktree detached at `commit`, which `repo` must already hold,
-/// without firing hooks.
+/// without firing the hook directory's hooks. A hook that config names
+/// fires all the same ([`HOOKS_OFF`]): a caller first checks that
+/// [`post_checkout_hooks_to_come`](super::post_checkout_hooks_to_come) is
+/// not [`NamedInConfig`](super::PostCheckoutHooksToCome::NamedInConfig).
 ///
 /// For a worktree made before its branch exists:
 /// [`switch_detached_worktree_to_branch`] puts it on the branch later, and
@@ -248,7 +251,9 @@ pub fn create_detached_worktree_without_hooks(
 /// Check `branch_name` out in `worktree_path`, a clean worktree of `repo`
 /// detached at some other commit: only the files that differ are rewritten.
 ///
-/// Hooks stay off. The `post-checkout` this checkout would fire names the
+/// The hook directory's hooks stay off, as for
+/// [`create_detached_worktree_without_hooks`] and with the same exception.
+/// The `post-checkout` this checkout would fire names the
 /// commit the worktree was detached at as the previous head, where a
 /// worktree added on the branch names none, so a hook that sets a new
 /// worktree up on seeing that would do nothing.
@@ -361,7 +366,9 @@ pub fn run_post_checkout_as_for_a_new_worktree(
     Ok(())
 }
 
-/// `-c` value that keeps every hook from firing.
+/// `-c` value that keeps the hook directory's hooks from firing. It is no
+/// use against a hook that config names (`hook.<name>.event`, git 2.54 and
+/// later), which git runs wherever the hook directory is.
 const HOOKS_OFF: &str = "core.hooksPath=/dev/null";
 
 fn lfs_smudge_vars(skip: bool) -> &'static [(&'static str, &'static str)] {

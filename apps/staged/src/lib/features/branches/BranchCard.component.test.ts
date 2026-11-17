@@ -15,7 +15,7 @@ interface NoteModalProps {
   startSessionFromChatDisabled?: boolean;
 }
 
-const { subscribeDragDrop, toast, cmd, emptyTimeline, noteModal } = vi.hoisted(() => {
+const { subscribeDragDrop, toast, cmd, emptyTimeline, noteModal, headerInfo } = vi.hoisted(() => {
   const emptyTimeline: BranchTimeline = {
     commits: [],
     notes: [],
@@ -26,6 +26,7 @@ const { subscribeDragDrop, toast, cmd, emptyTimeline, noteModal } = vi.hoisted((
   return {
     emptyTimeline,
     noteModal: { props: null as NoteModalProps | null },
+    headerInfo: { real: false },
     subscribeDragDrop: vi.fn((_sub: DragDropSubscription) => () => {}),
     toast: { success: vi.fn(), error: vi.fn() },
     cmd: {
@@ -101,7 +102,16 @@ vi.mock(
   '../../shared/ConfirmDeleteDialog.svelte',
   () => import('../sessions/testStubs/ConfirmDeleteDialogStub.svelte')
 );
-vi.mock('./BranchCardHeaderInfo.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
+// The header renders nothing, unless a test sets `headerInfo.real` to mount
+// the real one and read what it shows.
+vi.mock('./BranchCardHeaderInfo.svelte', async (importOriginal) => {
+  const { default: RealHeaderInfo } =
+    await importOriginal<typeof import('./BranchCardHeaderInfo.svelte')>();
+  return {
+    default: (...args: Parameters<typeof RealHeaderInfo>) =>
+      headerInfo.real ? RealHeaderInfo(...args) : undefined,
+  };
+});
 vi.mock('./BranchCardActionsBar.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock('./BranchCardPrButton.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock(
@@ -221,6 +231,7 @@ afterEach(() => {
   for (const card of mounted.splice(0)) unmount(card);
   document.body.innerHTML = '';
   noteModal.props = null;
+  headerInfo.real = false;
   subscribeDragDrop.mockClear();
   toast.success.mockClear();
   toast.error.mockClear();
@@ -339,6 +350,24 @@ describe('BranchCard file drops', () => {
     landReload();
     await settle(() => expect(cmd.getBranchTimeline).toHaveResolvedTimes(2));
     expect(toast.error).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BranchCard header parent pill', () => {
+  it('names the base branch on a remote card, not the Blox workstation', () => {
+    headerInfo.real = true;
+    const { card } = mountCard({
+      ...remoteBranch('running'),
+      baseBranch: 'origin/main',
+      // Shaped like a sibling git branch, which is what made it misleading.
+      workspaceName: 'feature-cdb498',
+    });
+
+    const header = card.querySelector<HTMLElement>('.card-header')!;
+    const pills = [...header.querySelectorAll<HTMLElement>('.branch-capsule')];
+    expect(pills.map((pill) => pill.textContent?.trim())).toEqual(['main']);
+    expect(pills[0].title).toBe('main');
+    expect(header.textContent).not.toContain('feature-cdb498');
   });
 });
 

@@ -2202,9 +2202,7 @@
         branchName={branch.branchName}
         {remoteRef}
         {repoLabel}
-        baseBranch={isRemote
-          ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
-          : formatBaseBranch(branch.baseBranch)}
+        baseBranch={formatBaseBranch(branch.baseBranch)}
         parentAheadCount={timeline?.gitState?.base.commitsSinceFork ?? 0}
         onRebase={rebaseAlreadyInFlight ? undefined : () => startBranchCommandPipeline('rebase')}
         onRebaseAndForcePush={() =>

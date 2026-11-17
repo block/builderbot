@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
 
 use tauri::{AppHandle, Manager};
 
@@ -42,8 +41,8 @@ pub(crate) fn emit_setup_progress<R: tauri::Runtime>(
 pub(crate) const WORKSPACE_IDLE_TIMEOUT_MINUTES: u32 = 10080;
 
 // In-memory cache: workspace name → numeric workstation ID.
-// Populated by `poll_workspace_status` and `start_workspace` when `blox ws info`
-// returns an ID; read by `to_branch_with_workdir` when serializing for the frontend.
+// Populated by the status pollers and branch setup when `blox ws info` or
+// `ws list` returns an ID; read by `to_branch_with_workdir` when serializing for the frontend.
 pub(crate) fn workstation_id_cache() -> &'static Mutex<HashMap<String, u64>> {
     static CACHE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -740,11 +739,11 @@ fn needs_clone(probe: Result<String, blox::BloxError>) -> Result<bool, blox::Blo
 /// into it fails on a workstation that already has the repo (or nests a
 /// second clone under the first on one that doesn't).
 ///
-/// This is used both by `start_workspace` (secondary repo in a shared
-/// workspace, or a branch re-entering `Starting` on a workstation that
-/// already has its clone, e.g. after `resume_workspace`) and by
-/// `add_project_repo` (adding a repo to a remote project whose workspace is
-/// already running).
+/// This is the checkout step of branch setup ([`crate::workspace_setup`]),
+/// whatever led to it: a workstation Blox just bootstrapped (whose clone is
+/// already there), a branch re-entering `Starting` on a workstation that has
+/// its clone (e.g. after `resume_workspace`), or a repo added to a remote
+/// project whose workspace is already running.
 pub(crate) async fn clone_repo_into_workspace(
     ws_name: &str,
     clone_dir: &str,
@@ -783,14 +782,28 @@ pub(crate) async fn clone_repo_into_workspace(
     // workstations, so we redo the cheap config check on every visit).
     crate::git::config_apply::apply_to_blox_clone(ws_name, &repo_path).await;
 
+    check_out_branch_in_workspace(ws_name, Some(clone_dir), base_ref, branch_name)
+        .await
+        .map_err(|e| format!("Failed to set up '{repo_slug}' in workspace '{ws_name}': {e}"))
+}
+
+/// [`check_out_workspace_branch`] in a workstation's clone, on the blocking
+/// pool. `remote_dir` is the clone to run in (`home:<clone>`), or `None` for
+/// a branch with no project repo, whose git runs bare in the workstation's
+/// default directory.
+pub(crate) async fn check_out_branch_in_workspace(
+    ws_name: &str,
+    remote_dir: Option<&str>,
+    base_ref: &str,
+    branch_name: &str,
+) -> Result<(), String> {
     let workspace = ws_name.to_string();
-    let remote_dir = clone_dir.to_string();
+    let remote_dir = remote_dir.map(str::to_string);
     let base = base_ref.to_string();
     let branch = branch_name.to_string();
     tauri::async_runtime::spawn_blocking(move || {
         // Tracked for everything but `rev-parse`: Blox SIGKILLs a transient
-        // git at 60 s, which a fetch on a large repo can outlast (reading as
-        // "no remote branch" and silently branching from base), and a
+        // git at 60 s, which a fetch on a large repo can outlast, and a
         // checkout or fast-forward far from where the tree is (or smudging LFS
         // files) can outlast it too, leaving `.git/index.lock` and a half-updated worktree.
         let git: GitRunner<'_> = Box::new(move |args: &[&str]| {
@@ -799,14 +812,13 @@ pub(crate) async fn clone_repo_into_workspace(
             } else {
                 ExecMode::Tracked
             };
-            run_workspace_git_with_mode(&workspace, Some(&remote_dir), mode, args)
+            run_workspace_git_with_mode(&workspace, remote_dir.as_deref(), mode, args)
                 .map_err(|e| e.to_string())
         });
         check_out_workspace_branch(&git, &base, &branch)
     })
     .await
     .map_err(|e| format!("Branch checkout task failed: {e}"))?
-    .map_err(|e| format!("Failed to set up '{repo_slug}' in workspace '{ws_name}': {e}"))
 }
 
 /// Fetch `base_ref` into the clone `git` runs in, and put the clone on
@@ -821,7 +833,7 @@ pub(crate) async fn clone_repo_into_workspace(
 /// behind picks up what was pushed, and one that has diverged keeps its local
 /// commits. Only a branch the clone doesn't have yet is created, from origin's
 /// copy or from the base.
-fn check_out_workspace_branch(
+pub(crate) fn check_out_workspace_branch(
     git: &GitRunner<'_>,
     base_ref: &str,
     branch_name: &str,
@@ -833,11 +845,23 @@ fn check_out_workspace_branch(
     // fetch it so we pick up its commits: a new branch starts from there and
     // an existing one fast-forwards to it. Otherwise a new branch falls back
     // to starting from the base branch.
-    let has_remote_branch =
-        branch_name != base_ref && git(&["fetch", "origin", branch_name]).is_ok();
+    //
+    // Whether it exists is read from `ls-remote`'s output, not from a fetch
+    // failing: a fetch that never reached origin (a dropped exec, a network
+    // blip) would otherwise read as "not on origin" and branch from the base,
+    // leaving the PR's commits behind. Any failure here is a failure.
+    let local_ref = format!("refs/heads/{branch_name}");
+    let has_remote_branch = branch_name != base_ref
+        && !git(&["ls-remote", "--heads", "origin", &local_ref])
+            .map_err(|e| format!("could not check whether '{branch_name}' is on origin: {e}"))?
+            .trim()
+            .is_empty();
+    if has_remote_branch {
+        git(&["fetch", "origin", branch_name])
+            .map_err(|e| format!("could not fetch branch '{branch_name}': {e}"))?;
+    }
     let remote_branch = format!("origin/{branch_name}");
 
-    let local_ref = format!("refs/heads/{branch_name}");
     if git(&["rev-parse", "--verify", "--quiet", &local_ref]).is_ok() {
         git(&["checkout", branch_name])
             .map_err(|e| format!("could not check out branch '{branch_name}': {e}"))?;
@@ -894,55 +918,24 @@ pub(crate) fn workspace_status_written<R: tauri::Runtime>(
     }
 }
 
-/// Clone a repo into an already-running remote workspace for a given branch.
+/// Clone a repo into an already-running remote workspace for a given branch,
+/// check its branch out and mark it `Running`.
 ///
-/// Resolves the workspace name, repo slug, subpath, and base ref from the
-/// branch and project, then delegates to `clone_repo_into_workspace`. Updates
-/// the branch's workspace status to Running on success.
+/// The shared branch setup ([`crate::workspace_setup`]) under its guard, so
+/// the frontend's `start_workspace` for the same `Starting` branch joins this
+/// run instead of cloning beside it.
 pub(crate) async fn setup_remote_repo_clone<R: tauri::Runtime>(
     store: &Arc<Store>,
     app_handle: &tauri::AppHandle<R>,
     branch_id: &str,
 ) -> Result<(), String> {
-    let branch = store
-        .get_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-    let ws_name = branch
-        .workspace_name
-        .as_deref()
-        .ok_or("Branch has no workspace name")?;
-    let clone_dir =
-        resolve_branch_clone_dir(store, &branch)?.ok_or("Branch has no project repo to clone")?;
-    let ref_name = normalize_branch_ref(&branch.base_branch);
-    let repo_slug = resolve_branch_repo_slug(store, &project, &branch)?;
-
-    clone_repo_into_workspace(
-        ws_name,
-        &clone_dir,
-        &repo_slug,
-        &ref_name,
-        &branch.branch_name,
-    )
-    .await?;
-
-    let changed = store
-        .update_branch_workspace_status(branch_id, &store::WorkspaceStatus::Running)
-        .map_err(|e| e.to_string())?;
-    workspace_status_written(
+    crate::workspace_setup::ensure_branch_set_up(
         app_handle,
+        store,
         branch_id,
-        changed,
-        &store::WorkspaceStatus::Running,
-    );
-
-    Ok(())
+        crate::workspace_setup::SetupTrigger::Requested,
+    )
+    .await
 }
 
 /// Result of searching for an existing worktree for a branch name.
@@ -2416,11 +2409,16 @@ pub(crate) async fn create_remote_branch_impl(
     .map_err(|e| e.to_string())?
 }
 
-/// Start the Blox workspace for a remote branch.
+/// Start the Blox workspace for a remote branch and set its branch up.
 ///
 /// Separated from `create_remote_branch` so the frontend can dismiss the
 /// dialog immediately and show the card in its "Provisioning…" state while
 /// this runs in the background.
+///
+/// Returns once the branch is checked out on the workstation and marked
+/// `Running`, or with the error that left it in `Error`: the shared routine
+/// in [`crate::workspace_setup`], which a concurrent call for the same
+/// branch joins.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_workspace(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2428,207 +2426,13 @@ pub async fn start_workspace(
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
-
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-    let ws_name = branch
-        .workspace_name
-        .as_deref()
-        .ok_or("Branch has no workspace name")?;
-    let repo_subpath = resolve_branch_workspace_subpath(&store, &branch)?;
-    let clone_dir = resolve_branch_clone_dir(&store, &branch)?;
-    let ref_name = normalize_branch_ref(&branch.base_branch);
-    let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
-
-    // Pre-flight: verify the user is authenticated with Blox before starting
-    // a workspace. Without this check, `blox ws start` can hang or fail
-    // opaquely, leaving the frontend spinning for minutes (issue #99).
-    if let Err(e) = run_blox_blocking(blox::check_auth).await {
-        store
-            .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-            .ok();
-        return Err(e.to_string());
-    }
-
-    // Secondary repo setup in an already-running shared workspace — or a
-    // branch re-entering `Starting` (e.g. after `resume_workspace`) on a
-    // workstation that already has this clone.
-    if let Some(clone_dir) = clone_dir.as_deref() {
-        if let Ok(info) = run_blox_blocking({
-            let ws_name = ws_name.to_string();
-            move || blox::ws_info(&ws_name)
-        })
-        .await
-        {
-            let ws_status = info
-                .status
-                .as_deref()
-                .map(|s| s.to_ascii_lowercase())
-                .unwrap_or_default();
-            if let Some(ws_id) = info.workstation_id {
-                if let Ok(mut cache) = workstation_id_cache().lock() {
-                    cache.insert(ws_name.to_string(), ws_id);
-                }
-            }
-            if ws_status == "running" {
-                clone_repo_into_workspace(
-                    ws_name,
-                    clone_dir,
-                    &repo_slug,
-                    &ref_name,
-                    &branch.branch_name,
-                )
-                .await?;
-                let changed = store
-                    .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Running)
-                    .map_err(|e| e.to_string())?;
-                workspace_status_written(
-                    &app_handle,
-                    &branch_id,
-                    changed,
-                    &store::WorkspaceStatus::Running,
-                );
-
-                return Ok(());
-            }
-        }
-    }
-
-    // Construct the HTTPS git URL directly from github_repo.
-    let resolved_source = Some(format!(
-        "https://github.com/{}.git?ref={}",
-        repo_slug, ref_name
-    ));
-    let start_command_preview = match resolved_source.as_deref() {
-        Some(source) => format!(
-            "sq blox ws start {} --idle-timeout {} {}",
-            ws_name, WORKSPACE_IDLE_TIMEOUT_MINUTES, source
-        ),
-        None => format!(
-            "sq blox ws start {} --idle-timeout {}",
-            ws_name, WORKSPACE_IDLE_TIMEOUT_MINUTES
-        ),
-    };
-    log::info!(
-        "[start_workspace] branch={} workspace={} invoking command=\"{}\"",
-        branch_id,
-        ws_name,
-        start_command_preview
-    );
-    let ws_start_started_at = Instant::now();
-
-    match run_blox_blocking({
-        let ws_name = ws_name.to_string();
-        let source = resolved_source.clone();
-        move || {
-            blox::ws_start(
-                &ws_name,
-                source.as_deref(),
-                Some(WORKSPACE_IDLE_TIMEOUT_MINUTES),
-            )
-        }
-    })
+    crate::workspace_setup::ensure_branch_set_up(
+        &app_handle,
+        &store,
+        &branch_id,
+        crate::workspace_setup::SetupTrigger::Requested,
+    )
     .await
-    {
-        Ok(_) => {
-            log::info!(
-                "[start_workspace] branch={} workspace={} ws_start completed elapsed_ms={}",
-                branch_id,
-                ws_name,
-                ws_start_started_at.elapsed().as_millis()
-            );
-            // If the branch already exists on the remote (e.g. from an
-            // existing PR), fetch it and start from there so we pick up its
-            // commits. Otherwise create a fresh branch from the base ref.
-            // Tracked: a transient fetch killed at 60 s would read as "no
-            // remote branch" and silently branch from base.
-            let has_remote_branch = run_workspace_git_async(
-                ws_name,
-                repo_subpath.as_deref(),
-                ExecMode::Tracked,
-                &["fetch", "origin", &branch.branch_name],
-            )
-            .await
-            .is_ok();
-
-            let remote_ref = format!("origin/{}", branch.branch_name);
-            let checkout_args: &[&str] = if has_remote_branch {
-                &["checkout", "-B", &branch.branch_name, &remote_ref]
-            } else {
-                &["checkout", "-b", &branch.branch_name]
-            };
-            // Tracked: Blox SIGKILLs a transient git at 60 s, and a killed
-            // checkout leaves `.git/index.lock` and a half-updated worktree.
-            let checkout_result = run_workspace_git_async(
-                ws_name,
-                repo_subpath.as_deref(),
-                ExecMode::Tracked,
-                checkout_args,
-            )
-            .await;
-
-            if let Err(e) = checkout_result {
-                log::warn!(
-                    "failed to create branch '{}' in workspace '{}': {e}",
-                    branch.branch_name,
-                    ws_name
-                );
-            }
-
-            Ok(())
-        }
-        Err(blox::BloxError::NotAuthenticated) => {
-            log::warn!(
-                "[start_workspace] branch={} workspace={} ws_start failed elapsed_ms={} error=NotAuthenticated",
-                branch_id,
-                ws_name,
-                ws_start_started_at.elapsed().as_millis()
-            );
-            // Auth errors are definitive — mark as Error so the frontend
-            // stops polling and shows an actionable message.
-            store
-                .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-                .ok();
-            Err("Not authenticated with Blox. Run: sq login".to_string())
-        }
-        Err(e) => {
-            log::warn!(
-                "[start_workspace] branch={} workspace={} ws_start failed elapsed_ms={} error={}",
-                branch_id,
-                ws_name,
-                ws_start_started_at.elapsed().as_millis(),
-                e
-            );
-            if is_blox_onboarding_precondition_error(&e) {
-                // Blox onboarding precondition failures are definitive.
-                // Keep the exact CLI error text so the user sees the
-                // onboarding URL and required action.
-                store
-                    .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-                    .ok();
-                return Err(e.to_string());
-            }
-            // Don't set Error status here — `blox ws start` can fail (e.g.
-            // timeout, transient network issue) even though the workspace was
-            // created and is still booting. Let the frontend's status polling
-            // determine the real state; it will keep polling while the DB says
-            // Starting and will eventually converge on the correct status.
-            log::warn!(
-                "blox ws start failed for '{}', leaving status as Starting for polling to resolve: {e}",
-                ws_name
-            );
-            Ok(())
-        }
-    }
 }
 
 /// Return the value of the `BLOX_ENV` environment variable, if set.
@@ -2659,6 +2463,15 @@ pub async fn get_workspace_info(
         .map_err(|e| e.to_string())
 }
 
+/// Whether a raw Blox status string says the workstation exists and is
+/// coming up: being created and bootstrapped, or resumed.
+pub(crate) fn is_blox_booting_status(blox_status: &str) -> bool {
+    matches!(
+        blox_status.to_ascii_lowercase().as_str(),
+        "starting" | "provisioning" | "creating"
+    )
+}
+
 /// Map a raw Blox status string to our `WorkspaceStatus` enum.
 ///
 /// During initial startup, Blox may briefly report "stopped" before the
@@ -2678,9 +2491,7 @@ pub(crate) fn map_blox_status_to_workspace_status(
                 store::WorkspaceStatus::Stopped
             }
         }
-        Some("starting") | Some("provisioning") | Some("creating") => {
-            store::WorkspaceStatus::Starting
-        }
+        Some(status) if is_blox_booting_status(status) => store::WorkspaceStatus::Starting,
         Some("suspended") => store::WorkspaceStatus::Suspended,
         Some("deleted") => store::WorkspaceStatus::Stopped,
         Some("shutting_down") => {
@@ -2698,10 +2509,11 @@ pub(crate) fn map_blox_status_to_workspace_status(
 
 /// Poll a remote branch's workspace status, update the DB, and return the new status.
 ///
-/// This is the primary mechanism for the frontend to detect when a workspace
-/// transitions from `Starting` to `Running` (or `Error`). It queries the
-/// Blox CLI, maps the reported status to our `WorkspaceStatus` enum, persists
-/// the change, and returns the updated status string.
+/// Queries the Blox CLI, maps the reported status to our `WorkspaceStatus`
+/// enum, persists the change, and returns the updated status string. It
+/// never moves a branch from `Starting` to `Running`: a workstation that is
+/// up while its row is still `Starting` gets branch setup triggered instead
+/// (see [`crate::workspace_setup::poll`]).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn poll_workspace_status(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2709,171 +2521,7 @@ pub async fn poll_workspace_status(
     branch_id: String,
 ) -> Result<PollWorkspaceResult, String> {
     let store = get_store(&store)?;
-
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let ws_name = branch
-        .workspace_name
-        .as_deref()
-        .ok_or("Branch is not a remote workspace branch")?;
-
-    // Secondary repo setup uses `workspace_status=Starting` as a per-branch
-    // loading state while clone/fetch/checkout runs inside an already-running
-    // shared workspace. Keep it in Starting until that setup command marks
-    // this branch as Running.
-    //
-    // Important: this must apply only to "secondary clone" branches. Initial
-    // remote branches also have a workspace subpath, so keying only on
-    // `resolve_branch_workspace_subpath().is_some()` would pin them in
-    // Starting forever and block normal status polling.
-    let is_secondary_clone_setup = if branch.workspace_status
-        == Some(store::WorkspaceStatus::Starting)
-        && resolve_branch_workspace_subpath(&store, &branch)?.is_some()
-    {
-        if let Some(ws_name) = branch.workspace_name.as_deref() {
-            let peers = store
-                .list_branches_for_project(&branch.project_id)
-                .map_err(|e| e.to_string())?;
-            peers.into_iter().any(|peer| {
-                peer.id != branch.id
-                    && peer.branch_type == store::BranchType::Remote
-                    && peer.workspace_name.as_deref() == Some(ws_name)
-                    && peer.workspace_status == Some(store::WorkspaceStatus::Running)
-            })
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if is_secondary_clone_setup {
-        log::debug!(
-            "[poll_workspace_status] branch={} ws={} held at Starting for secondary clone setup",
-            branch_id,
-            ws_name
-        );
-        return Ok(PollWorkspaceResult {
-            status: store::WorkspaceStatus::Starting.as_str().to_string(),
-            workstation_id: cached_workstation_id(ws_name),
-        });
-    }
-
-    let info = match run_blox_blocking({
-        let ws_name = ws_name.to_string();
-        move || blox::ws_info(&ws_name)
-    })
-    .await
-    {
-        Ok(info) => info,
-        Err(blox::BloxError::NotAuthenticated) => {
-            // Auth errors are definitive — stop polling and surface the error.
-            store
-                .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-                .ok();
-            return Err("Not authenticated with Blox. Run: sq login".to_string());
-        }
-        Err(e) => {
-            let is_not_found = matches!(&e, blox::BloxError::CommandFailed(msg) if msg.to_lowercase().contains("not found"));
-
-            // During initial creation, `blox ws start` may still be running
-            // when the frontend's first poll fires `blox ws info`. The
-            // workspace doesn't exist yet, so the CLI returns "not found".
-            // If the DB still says Starting, swallow the error and tell the
-            // frontend to keep polling.
-            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
-                log::debug!(
-                    "blox ws info failed for '{}' while still Starting, treating as Starting: {e}",
-                    ws_name
-                );
-                return Ok(PollWorkspaceResult {
-                    status: store::WorkspaceStatus::Starting.as_str().to_string(),
-                    workstation_id: cached_workstation_id(ws_name),
-                });
-            }
-            // If the workspace was Running but Blox explicitly says "not
-            // found" (e.g. deleted externally), transition to Stopped.
-            // Other errors (network blips, timeouts, etc.) are transient —
-            // keep the Running status so the poller retries.
-            if branch.workspace_status == Some(store::WorkspaceStatus::Running) {
-                if is_not_found {
-                    log::debug!(
-                        "blox ws info returned not-found for '{}' while Running, treating as Stopped: {e}",
-                        ws_name
-                    );
-                    store
-                        .update_branch_workspace_status(
-                            &branch_id,
-                            &store::WorkspaceStatus::Stopped,
-                        )
-                        .ok();
-                    return Ok(PollWorkspaceResult {
-                        status: store::WorkspaceStatus::Stopped.as_str().to_string(),
-                        workstation_id: cached_workstation_id(ws_name),
-                    });
-                }
-                log::warn!(
-                    "blox ws info failed for '{}' while Running, keeping Running status: {e}",
-                    ws_name
-                );
-                return Ok(PollWorkspaceResult {
-                    status: store::WorkspaceStatus::Running.as_str().to_string(),
-                    workstation_id: cached_workstation_id(ws_name),
-                });
-            }
-            return Err(e.to_string());
-        }
-    };
-
-    log::debug!(
-        "[poll_workspace_status] branch={} ws={} db_status={:?} blox_status={:?}",
-        branch_id,
-        ws_name,
-        branch.workspace_status,
-        info.status
-    );
-
-    let new_status = map_blox_status_to_workspace_status(
-        info.status.as_deref(),
-        branch.workspace_status.as_ref(),
-    );
-
-    let previous = branch
-        .workspace_status
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("none");
-    if previous != new_status.as_str() {
-        log::debug!(
-            "[poll_workspace_status] branch={} ws={} transition {} -> {} (raw={:?})",
-            branch_id,
-            ws_name,
-            previous,
-            new_status.as_str(),
-            info.status
-        );
-    }
-    // Cache the numeric workstation ID for proxy URL construction.
-    if let Some(ws_id) = info.workstation_id {
-        if let Some(name) = branch.workspace_name.as_deref() {
-            if let Ok(mut cache) = workstation_id_cache().lock() {
-                cache.insert(name.to_string(), ws_id);
-            }
-        }
-    }
-
-    let changed = store
-        .update_branch_workspace_status(&branch_id, &new_status)
-        .map_err(|e| e.to_string())?;
-    workspace_status_written(&app_handle, &branch_id, changed, &new_status);
-
-    Ok(PollWorkspaceResult {
-        status: new_status.as_str().to_string(),
-        workstation_id: cached_workstation_id(ws_name),
-    })
+    crate::workspace_setup::poll::poll_workspace_status(&store, &app_handle, &branch_id).await
 }
 
 /// Map a blox orchestrator `CommandType` to a stable string identifier that
@@ -2942,7 +2590,9 @@ pub(crate) fn emit_workspace_setup_progress(
 ///
 /// Returns a map from branch ID to `PollWorkspaceResult`. Branches that cannot be
 /// resolved (e.g. missing workspace name, not found in store) are silently omitted
-/// from the result rather than failing the entire batch.
+/// from the result rather than failing the entire batch. Like
+/// [`poll_workspace_status`], it triggers branch setup rather than promoting
+/// a `Starting` branch.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn poll_all_workspace_statuses(
     app_handle: AppHandle,
@@ -2950,202 +2600,8 @@ pub async fn poll_all_workspace_statuses(
     branch_ids: Vec<String>,
 ) -> Result<HashMap<String, PollWorkspaceResult>, String> {
     let store = get_store(&store)?;
-
-    // Fetch all workspaces in one CLI call.
-    let entries = run_blox_blocking(blox::ws_list).await.map_err(|e| {
-        if matches!(e, blox::BloxError::NotAuthenticated) {
-            "Not authenticated with Blox. Run: sq login".to_string()
-        } else {
-            e.to_string()
-        }
-    })?;
-
-    // Build a lookup from workspace name → list entry.
-    let ws_map: HashMap<String, &blox::WorkspaceListEntry> =
-        entries.iter().map(|e| (e.name.clone(), e)).collect();
-
-    // Map workspace name → branch IDs for workspaces in "starting" state so we
-    // can fetch their bootstrap command progress and emit events.
-    let mut starting_workspaces: HashMap<String, Vec<String>> = HashMap::new();
-
-    let mut results = HashMap::new();
-
-    for branch_id in &branch_ids {
-        let branch = match store.get_branch(branch_id) {
-            Ok(Some(b)) => b,
-            _ => continue,
-        };
-
-        let ws_name = match branch.workspace_name.as_deref() {
-            Some(n) => n,
-            None => continue,
-        };
-
-        // Secondary clone setup: if this branch is Starting and shares a workspace
-        // with a Running peer (multi-repo setup), hold it at Starting until the
-        // setup command marks it as Running. This mirrors the individual
-        // poll_workspace_status logic.
-        if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
-            && resolve_branch_workspace_subpath(&store, &branch)
-                .unwrap_or_else(|e| {
-                    log::warn!(
-                        "Failed to resolve workspace subpath for branch {}: {e}",
-                        branch_id
-                    );
-                    None
-                })
-                .is_some()
-        {
-            let is_secondary = if let Some(ws) = branch.workspace_name.as_deref() {
-                store
-                    .list_branches_for_project(&branch.project_id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .any(|peer| {
-                        peer.id != *branch_id
-                            && peer.branch_type == store::BranchType::Remote
-                            && peer.workspace_name.as_deref() == Some(ws)
-                            && peer.workspace_status == Some(store::WorkspaceStatus::Running)
-                    })
-            } else {
-                false
-            };
-
-            if is_secondary {
-                log::debug!(
-                    "[poll_all_workspace_statuses] branch={} ws={} held at Starting for secondary clone setup",
-                    branch_id,
-                    ws_name
-                );
-                results.insert(
-                    branch_id.clone(),
-                    PollWorkspaceResult {
-                        status: store::WorkspaceStatus::Starting.as_str().to_string(),
-                        workstation_id: cached_workstation_id(ws_name),
-                    },
-                );
-                continue;
-            }
-        }
-
-        // Look up the workspace in the list.
-        match ws_map.get(ws_name) {
-            Some(entry) => {
-                let new_status = map_blox_status_to_workspace_status(
-                    entry.status.as_deref(),
-                    branch.workspace_status.as_ref(),
-                );
-
-                let previous = branch
-                    .workspace_status
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("none");
-                if previous != new_status.as_str() {
-                    log::debug!(
-                        "[poll_all_workspace_statuses] branch={} ws={} transition {} -> {} (raw={:?})",
-                        branch_id,
-                        ws_name,
-                        previous,
-                        new_status.as_str(),
-                        entry.status
-                    );
-                }
-
-                // Cache the numeric workstation ID.
-                if let Some(ws_id) = entry.workstation_id {
-                    if let Ok(mut cache) = workstation_id_cache().lock() {
-                        cache.insert(ws_name.to_string(), ws_id);
-                    }
-                }
-
-                if let Ok(changed) = store.update_branch_workspace_status(branch_id, &new_status) {
-                    workspace_status_written(&app_handle, branch_id, changed, &new_status);
-                }
-
-                // Track workspaces still starting so we can fetch bootstrap progress.
-                if new_status == store::WorkspaceStatus::Starting {
-                    starting_workspaces
-                        .entry(ws_name.to_string())
-                        .or_default()
-                        .push(branch_id.clone());
-                }
-
-                results.insert(
-                    branch_id.clone(),
-                    PollWorkspaceResult {
-                        status: new_status.as_str().to_string(),
-                        workstation_id: cached_workstation_id(ws_name),
-                    },
-                );
-            }
-            None => {
-                // Workspace not in list — same "not found" logic as individual polling.
-                if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
-                    log::debug!(
-                        "[poll_all_workspace_statuses] branch={} ws={} not in list while Starting, keeping Starting",
-                        branch_id,
-                        ws_name
-                    );
-                    starting_workspaces
-                        .entry(ws_name.to_string())
-                        .or_default()
-                        .push(branch_id.clone());
-                    results.insert(
-                        branch_id.clone(),
-                        PollWorkspaceResult {
-                            status: store::WorkspaceStatus::Starting.as_str().to_string(),
-                            workstation_id: cached_workstation_id(ws_name),
-                        },
-                    );
-                } else if branch.workspace_status == Some(store::WorkspaceStatus::Running) {
-                    log::debug!(
-                        "[poll_all_workspace_statuses] branch={} ws={} not in list while Running, treating as Stopped",
-                        branch_id,
-                        ws_name
-                    );
-                    store
-                        .update_branch_workspace_status(branch_id, &store::WorkspaceStatus::Stopped)
-                        .ok();
-                    results.insert(
-                        branch_id.clone(),
-                        PollWorkspaceResult {
-                            status: store::WorkspaceStatus::Stopped.as_str().to_string(),
-                            workstation_id: cached_workstation_id(ws_name),
-                        },
-                    );
-                }
-                // Other statuses (Stopped, Error, etc.) — omit from results, no change needed.
-            }
-        }
-    }
-
-    // For workspaces that are still starting, fetch bootstrap command progress
-    // and emit events so the UI can show which step is running.
-    if !starting_workspaces.is_empty() {
-        let app_handle_clone = app_handle.clone();
-
-        // Fetch commands for each starting workspace in a blocking task to
-        // avoid holding up the response.
-        tauri::async_runtime::spawn_blocking(move || {
-            for (ws_name, branch_ids) in &starting_workspaces {
-                match blox::ws_commands(ws_name) {
-                    Ok(cmds) => {
-                        emit_workspace_setup_progress(&app_handle_clone, branch_ids, &cmds);
-                    }
-                    Err(e) => {
-                        log::debug!(
-                            "[poll_all_workspace_statuses] ws_commands({}) failed: {}",
-                            ws_name,
-                            e
-                        );
-                    }
-                }
-            }
-        });
-    }
-
-    Ok(results)
+    crate::workspace_setup::poll::poll_all_workspace_statuses(&store, &app_handle, &branch_ids)
+        .await
 }
 
 /// Resume a suspended Blox workspace.
@@ -3155,15 +2611,30 @@ pub async fn poll_all_workspace_statuses(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn resume_workspace(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: AppHandle,
     workspace_name: String,
 ) -> Result<Vec<String>, String> {
     let store = get_store(&store)?;
-    crate::project_transfer::ensure_workspace_not_transferring(&workspace_name)?;
+    resume_workspace_impl(&store, &app_handle, &workspace_name).await
+}
+
+/// [`resume_workspace`], shared with the web server arm.
+///
+/// The branches stay `Starting` when this returns: resuming brings the
+/// workstation back, and only branch setup marks a branch `Running`, once
+/// its checkout has succeeded. Setup is triggered here for each branch so a
+/// resume finishes without depending on a window to ask for it.
+pub(crate) async fn resume_workspace_impl(
+    store: &Arc<Store>,
+    app_handle: &AppHandle,
+    workspace_name: &str,
+) -> Result<Vec<String>, String> {
+    crate::project_transfer::ensure_workspace_not_transferring(workspace_name)?;
 
     // Transition all peer branches to Starting so the UI begins polling.
     let branch_ids = store
         .update_workspace_status_by_workspace_name(
-            &workspace_name,
+            workspace_name,
             &store::WorkspaceStatus::Starting,
         )
         .map_err(|e| e.to_string())?;
@@ -3172,8 +2643,7 @@ pub async fn resume_workspace(
         return Err(format!("No branches found for workspace: {workspace_name}"));
     }
 
-    // Call resume in the background (it may take a while).
-    let ws = workspace_name.clone();
+    let ws = workspace_name.to_string();
     if let Err(e) = run_blox_blocking(move || blox::ws_resume(&ws)).await {
         log::warn!(
             "[resume_workspace] workspace={} resume failed: {}",
@@ -3182,11 +2652,15 @@ pub async fn resume_workspace(
         );
         store
             .update_workspace_status_by_workspace_name(
-                &workspace_name,
+                workspace_name,
                 &store::WorkspaceStatus::Error,
             )
             .ok();
         return Err(e.to_string());
+    }
+
+    for branch_id in &branch_ids {
+        crate::workspace_setup::trigger_branch_setup(app_handle, store, branch_id);
     }
 
     Ok(branch_ids)

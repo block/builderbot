@@ -66,6 +66,7 @@ mod upstream_repair;
 pub mod util_commands;
 pub mod web_server;
 pub mod window_commands;
+pub(crate) mod workspace_setup;
 
 #[cfg(test)]
 mod board_load_bench;
@@ -2280,6 +2281,11 @@ pub fn run() {
                         store,
                         session_queue::KickSource::Startup,
                     );
+                    // Remote branches a previous run left in `Starting`: the
+                    // workstation may be up with nothing checked out in it.
+                    // After the transfer recovery, whose branches are its own
+                    // to provision.
+                    workspace_setup::resume_pending_setups(&transfer_app, store);
                 }
                 project_transfer::prune_backups(transfer_store.as_deref());
             });

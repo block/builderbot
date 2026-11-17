@@ -60,6 +60,12 @@ class WorkspaceLifecycleController {
   // any is running, stopped otherwise.
   private readonly STARTING_POLL_MS = 3000;
   private readonly RUNNING_POLL_MS = 30_000;
+  // How long a branch may sit in `starting` with nothing here setting it up
+  // before it is shown as failed. A branch stays `starting` until the
+  // backend has checked it out on the workstation, not just until the
+  // workstation is up, and that setup is bounded and reports its own
+  // failure through `startWorkspace`. So the clock only runs for a branch
+  // this controller has no setup call queued or in flight for.
   private readonly STARTING_TIMEOUT_MS = 5 * 60 * 1000;
 
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -290,6 +296,11 @@ class WorkspaceLifecycleController {
     );
   }
 
+  /** Whether a setup call for the branch is queued or in flight here. */
+  private isSetupOwned(branchId: string): boolean {
+    return this.pendingSetupBranches.has(branchId) || this.queuedSetupBranches.has(branchId);
+  }
+
   private errorMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
   }
@@ -339,11 +350,14 @@ class WorkspaceLifecycleController {
       return;
     }
 
-    // Apply 5-minute timeout to starting workspaces before polling.
+    // Apply 5-minute timeout to starting workspaces before polling. Not to
+    // one whose setup call is still out: its answer settles the branch, and
+    // timing out under it would show an error over a setup that then
+    // succeeds.
     const now = Date.now();
     const activeBranchIds: string[] = [];
     for (const target of targets) {
-      if (target.status === 'starting') {
+      if (target.status === 'starting' && !this.isSetupOwned(target.branchId)) {
         const startedAt = this.startingTimestamps.get(target.branchId);
         if (startedAt && now - startedAt > this.STARTING_TIMEOUT_MS) {
           this.startingTimestamps.delete(target.branchId);
@@ -469,7 +483,12 @@ class WorkspaceLifecycleController {
           }
 
           try {
+            // Resolves once the backend has the branch checked out on the
+            // workstation and marked `running`; rejects with why it is in
+            // `error`. A poll never promotes a `starting` branch, so this
+            // answer is what moves the branch on.
             await commands.startWorkspace(branchId);
+            this.handleWorkspaceStatusChange(projectId, branchId, 'running');
           } catch (e) {
             console.error('[workspaceLifecycle] Failed to start workspace:', e);
             const message = this.errorMessage(e);

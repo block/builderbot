@@ -14,11 +14,16 @@ use tokio::sync::Semaphore;
 
 use super::guard::SetupGuard;
 use super::poll::{self, PollEffects, Reported};
+use super::verify::{parse_clone_head, CloneHead, HeadRead, CLONE_HEAD_PROBE_SCRIPT};
 use super::{branches_awaiting_setup, run_guarded, Checkout, ReadyWait, SetupHost, SetupTrigger};
 use crate::blox::{BloxError, WorkspaceListEntry};
 use crate::branches;
 use crate::store::{self, Store, WorkspaceStatus};
 use crate::test_utils::{run_git_in, TempDir, TempGitRepo};
+
+/// The checks that the clone is on the branch: at the end of setup, at
+/// session start, and the checkout routine's own local-branch probe.
+mod verify;
 
 const WORKSPACE: &str = "widgets-setup-test";
 
@@ -93,6 +98,33 @@ enum Info {
     Unreachable,
 }
 
+/// What the fake workstation answers a read of the clone's HEAD with, in
+/// place of what the clone is really on.
+#[derive(Clone)]
+enum Head {
+    /// The exec didn't answer.
+    Unanswered(&'static str),
+    /// The clone reads as this, whatever it is on.
+    Reads(CloneHead),
+}
+
+/// What `clone` has checked out, asked the way the workstation is asked:
+/// the real probe script, run here.
+fn probe_clone_head(clone: &Path) -> Result<CloneHead, String> {
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(CLONE_HEAD_PROBE_SCRIPT)
+        .arg("_")
+        .arg(clone);
+    // Under a git hook `GIT_DIR` names the hook's repository, and the
+    // script's git would answer for that one.
+    crate::git::strip_git_env(&mut command);
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    parse_clone_head(&String::from_utf8_lossy(&output.stdout))
+}
+
 #[derive(Clone, Copy)]
 enum Start {
     Succeeds,
@@ -108,6 +140,9 @@ struct FakeHost {
     info: Mutex<VecDeque<Info>>,
     start: Start,
     checkout_error: Option<&'static str>,
+    /// Answers to successive reads of the clone's HEAD. Once they run out
+    /// the clone itself is read.
+    heads: Mutex<VecDeque<Head>>,
     /// When set, a checkout waits for a permit before touching the clone.
     gate: Option<Arc<Semaphore>>,
     /// Run at each status lookup: what else happens while setup is out.
@@ -125,6 +160,7 @@ impl FakeHost {
             info: Mutex::new(info.iter().copied().collect()),
             start,
             checkout_error: None,
+            heads: Mutex::new(VecDeque::new()),
             gate: None,
             meanwhile: None,
             calls: Mutex::new(Vec::new()),
@@ -132,6 +168,11 @@ impl FakeHost {
             in_checkout: AtomicUsize::new(0),
             most_in_checkout: AtomicUsize::new(0),
         }
+    }
+
+    fn with_heads(self, heads: &[Head]) -> Self {
+        *self.heads.lock().unwrap() = heads.iter().cloned().collect();
+        self
     }
 
     fn gated(mut self) -> (Self, Arc<Semaphore>) {
@@ -222,6 +263,16 @@ impl SetupHost for FakeHost {
         result
     }
 
+    async fn clone_head(&self, _checkout: &Checkout) -> Result<CloneHead, String> {
+        self.calls.lock().unwrap().push("clone_head");
+        let scripted = self.heads.lock().unwrap().pop_front();
+        match scripted {
+            Some(Head::Unanswered(error)) => Err(error.to_string()),
+            Some(Head::Reads(head)) => Ok(head),
+            None => probe_clone_head(&self.clone),
+        }
+    }
+
     fn status_written(&self, branch_id: &str, changed: bool, status: &WorkspaceStatus) {
         self.written
             .lock()
@@ -233,6 +284,13 @@ impl SetupHost for FakeHost {
         ReadyWait {
             timeout: Duration::from_millis(200),
             interval: Duration::from_millis(5),
+        }
+    }
+
+    fn head_read(&self) -> HeadRead {
+        HeadRead {
+            attempt_cap: Duration::from_secs(10),
+            retry_after: Duration::from_millis(5),
         }
     }
 }

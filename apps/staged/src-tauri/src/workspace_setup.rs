@@ -4,10 +4,11 @@
 //! running, and the workstation's clone is on the branch. Blox only knows
 //! about the first. This module owns the second, and with it the one write
 //! that says both hold: it is the only code that moves a branch from
-//! `Starting` to `Running`, and it does so only after the checkout succeeded.
-//! A failure leaves the branch in `Error` and is returned, never logged and
-//! dropped — a branch marked `Running` on a workstation still on its base
-//! branch has its sessions commit onto the base.
+//! `Starting` to `Running`, and it does so only after the checkout succeeded
+//! and the clone reads as on the branch ([`verify`]). A failure leaves the
+//! branch in `Error` and is returned, never logged and dropped — a branch
+//! marked `Running` on a workstation still on its base branch has its
+//! sessions commit onto the base.
 //!
 //! Setup is level-triggered. Whoever sees a `Starting` branch asks for it:
 //!
@@ -19,6 +20,10 @@
 //! - the startup pass ([`resume_pending_setups`]), for branches a previous
 //!   run left in `Starting`.
 //!
+//! One more caller asks for a branch that is already `Running`: an agent
+//! start that read the clone and found it off the branch
+//! ([`verify::ensure_session_checkout`], [`SetupTrigger::Repair`]).
+//!
 //! All of them go through one [`guard::SetupGuard`], so a second request for
 //! a branch joins the run in flight, and two branches never run setup in one
 //! workstation at once. The guard is per process: a second Staged instance
@@ -28,6 +33,7 @@ pub(crate) mod guard;
 pub(crate) mod poll;
 #[cfg(test)]
 mod tests;
+pub(crate) mod verify;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +45,7 @@ use crate::branches;
 use crate::store::{self, Store, WorkspaceStatus};
 
 use guard::SetupGuard;
+use verify::{CloneHead, HeadRead};
 
 /// Who asked for a branch to be set up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +58,12 @@ pub(crate) enum SetupTrigger {
     /// the startup pass. It acts only while the row still says so, so a
     /// trigger that arrives after setup settled the branch is a no-op.
     Observed,
+    /// An agent start that read the clone of a `Running` branch and found it
+    /// off the branch (see [`verify`]). The only trigger that acts on a
+    /// `Running` row, and only while the clone still reads wrong when its
+    /// turn comes. The row goes back to `Starting` for the run, so nothing
+    /// else starts on the branch meanwhile, and to `Error` if it fails.
+    Repair,
 }
 
 /// How long setup waits for a workstation to report running after `sq blox
@@ -104,12 +117,21 @@ pub(crate) trait SetupHost: Send + Sync + 'static {
     /// ([`branches::check_out_workspace_branch`]).
     async fn check_out(&self, checkout: &Checkout) -> Result<(), String>;
 
+    /// What the clone has checked out: one cheap read, no fetch
+    /// ([`verify::read_clone_head`]). `Err` when the read didn't answer,
+    /// which says nothing about the clone.
+    async fn clone_head(&self, checkout: &Checkout) -> Result<CloneHead, String>;
+
     /// Called with what [`Store::update_branch_workspace_status`] reported
     /// for the `Running` write (see [`branches::workspace_status_written`]).
     fn status_written(&self, branch_id: &str, changed: bool, status: &WorkspaceStatus);
 
     fn ready_wait(&self) -> ReadyWait {
         ReadyWait::DEFAULT
+    }
+
+    fn head_read(&self) -> HeadRead {
+        HeadRead::DEFAULT
     }
 }
 
@@ -175,6 +197,10 @@ impl<R: tauri::Runtime> SetupHost for BloxHost<R> {
                 )
             }),
         }
+    }
+
+    async fn clone_head(&self, checkout: &Checkout) -> Result<CloneHead, String> {
+        verify::read_clone_head(&checkout.workspace, checkout.clone_dir.as_deref()).await
     }
 
     fn status_written(&self, branch_id: &str, changed: bool, status: &WorkspaceStatus) {
@@ -321,12 +347,17 @@ pub(crate) async fn run_guarded(
 
 /// Whether `trigger` has anything to do for a branch in this state. A
 /// `Running` branch is set up already, and may have a session in its clone:
-/// nothing touches it. An observed trigger acts only on `Starting`.
+/// nothing touches it but a repair, which an agent start asks for after
+/// reading the clone off the branch. An observed trigger acts only on
+/// `Starting`. A repair acts on nothing else either: a branch that has
+/// stopped, or failed, since the session read its clone is not one to start
+/// a workstation for from a session start.
 fn wants_setup(branch: &store::Branch, trigger: SetupTrigger) -> bool {
     match (&branch.workspace_status, trigger) {
+        (Some(WorkspaceStatus::Running), SetupTrigger::Repair) => true,
         (Some(WorkspaceStatus::Running), _) => false,
-        (Some(WorkspaceStatus::Starting), SetupTrigger::Observed) => true,
-        (_, SetupTrigger::Observed) => false,
+        (Some(WorkspaceStatus::Starting), SetupTrigger::Observed | SetupTrigger::Repair) => true,
+        (_, SetupTrigger::Observed | SetupTrigger::Repair) => false,
         (_, SetupTrigger::Requested) => true,
     }
 }
@@ -338,7 +369,9 @@ fn wants_setup(branch: &store::Branch, trigger: SetupTrigger) -> bool {
 /// already running (a resumed workstation, a repo joining a shared one, a
 /// retry after a restart). Both end in
 /// [`branches::check_out_workspace_branch`], which is idempotent and never
-/// resets a branch the clone already has.
+/// resets a branch the clone already has, and then in
+/// [`verify::confirm_checked_out`]: `Running` is written only over a clone
+/// that reads as on the branch.
 ///
 /// Every failure past the first lookups leaves the row in `Error` and is
 /// returned. Callers go through [`run_guarded`].
@@ -361,10 +394,29 @@ pub(crate) async fn set_up_branch(
         return Ok(());
     }
 
+    // A repair was asked for by a session that read the clone off the
+    // branch. The run ahead of this one (another session's repair, a
+    // sibling branch's setup) may have changed that; when the clone reads
+    // right now there is nothing to repair, and a `Running` branch is left
+    // exactly as it is. A read that fails here settles nothing: the repair
+    // goes ahead and ends in its own read.
+    if trigger == SetupTrigger::Repair && branch.workspace_status == Some(WorkspaceStatus::Running)
+    {
+        if let Ok(checkout) = checkout_for(store, &branch) {
+            if matches!(
+                host.clone_head(&checkout).await,
+                Ok(CloneHead::Branch(name)) if name == checkout.branch_name
+            ) {
+                return Ok(());
+            }
+        }
+    }
+
     // A request for a branch that had settled somewhere else (a failed
-    // setup, a stale `starting` in the window that asked) puts it back in
-    // `Starting`, where the pollers hold it rather than promote it under
-    // this run.
+    // setup, a stale `starting` in the window that asked, a repair of a
+    // `Running` one) puts it back in `Starting`, where the pollers hold it
+    // rather than promote it under this run and the session queue holds
+    // whatever else would start on the branch.
     if branch.workspace_status != Some(WorkspaceStatus::Starting) {
         store
             .update_branch_workspace_status(branch_id, &WorkspaceStatus::Starting)
@@ -402,11 +454,9 @@ pub(crate) async fn set_up_branch(
     result
 }
 
-async fn provision_and_check_out(
-    store: &Arc<Store>,
-    host: &dyn SetupHost,
-    branch: &store::Branch,
-) -> Result<(), String> {
+/// Where `branch` is checked out and what its clone should be on, from its
+/// row and its project's.
+pub(crate) fn checkout_for(store: &Arc<Store>, branch: &store::Branch) -> Result<Checkout, String> {
     let project = store
         .get_project(&branch.project_id)
         .map_err(|e| e.to_string())?
@@ -415,13 +465,22 @@ async fn provision_and_check_out(
         .workspace_name
         .as_deref()
         .ok_or("Branch has no workspace name")?;
-    let checkout = Checkout {
+    Ok(Checkout {
         workspace: workspace.to_string(),
         clone_dir: branches::resolve_branch_clone_dir(store, branch)?,
         repo_slug: branches::resolve_branch_repo_slug(store, &project, branch)?,
         base_ref: branches::normalize_branch_ref(&branch.base_branch),
         branch_name: branch.branch_name.clone(),
-    };
+    })
+}
+
+async fn provision_and_check_out(
+    store: &Arc<Store>,
+    host: &dyn SetupHost,
+    branch: &store::Branch,
+) -> Result<(), String> {
+    let checkout = checkout_for(store, branch)?;
+    let workspace = checkout.workspace.as_str();
 
     // Pre-flight: without it `blox ws start` can hang or fail opaquely,
     // leaving the frontend spinning for minutes (issue #99).
@@ -445,7 +504,11 @@ async fn provision_and_check_out(
         start_workstation(store, host, branch, &checkout).await?;
     }
 
-    host.check_out(&checkout).await
+    host.check_out(&checkout).await?;
+
+    // The checkout said it worked. `Running` rests on where the clone is,
+    // so that is read, not inferred.
+    verify::confirm_checked_out(host, &checkout).await
 }
 
 /// `sq blox ws start`, and when that fails without ruling the workstation

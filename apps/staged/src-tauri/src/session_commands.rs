@@ -1892,6 +1892,7 @@ pub(crate) async fn resume_session_for_store(
     }
 
     let plan = prepare_resume(&store, &session, branch_id, acp_config_selection).await?;
+    ensure_resume_checkout(&app_handle, &store, &plan, &session_id).await?;
 
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
@@ -1954,6 +1955,38 @@ fn ensure_claimed_resume_still_running(store: &Store, session_id: &str) -> Resul
         Some(row) if row.status == store::SessionStatus::Running => Ok(()),
         _ => Err(RESUME_CLAIM_LOST_ERROR.to_string()),
     }
+}
+
+/// A resume's share of the checkout check every agent start on a remote
+/// branch makes (`workspace_setup::verify`): the clone the resumed turn runs
+/// in is read to be on the session's branch, and repaired when it is not.
+/// A no-op for a local branch and for a session with no branch.
+///
+/// Not part of `prepare_resume`, which a reattach also reads its config
+/// through: a reattach joins an agent that is already running in the clone,
+/// so there is no start to hold back and no checkout to run under it.
+///
+/// Unlike the pre-run HEAD snapshot this does not degrade: a resume whose
+/// clone can't be read fails, since the turn would otherwise run unchecked.
+/// Its waits are bounded (two capped reads; a repair's execs each carry
+/// their own limit), so a claimed row is not held `running` without end.
+async fn ensure_resume_checkout(
+    app_handle: &tauri::AppHandle,
+    store: &Arc<Store>,
+    plan: &ResumePlan,
+    session_id: &str,
+) -> Result<(), String> {
+    if plan.workspace_name.is_none() {
+        return Ok(());
+    }
+    let Some(branch_id) = plan.event_branch_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(branch) = store.get_branch(branch_id).map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    crate::workspace_setup::verify::ensure_session_checkout(app_handle, store, &branch, session_id)
+        .await
 }
 
 /// Everything a resume reads before the row is claimed: the session's
@@ -2643,12 +2676,15 @@ pub(crate) async fn send_session_message_now_for_store(
 ///
 /// The row is `running` and ours from the claim on, under a liveness hold the
 /// stranded-session sweep respects, so nothing in the preparation may wait
-/// without bound: its one wait, the pre-run HEAD read, runs under
-/// [`RESUME_HEAD_READ_CAP`] inside `prepare_resume` and degrades to no
-/// snapshot, so a slow checkout delays the resume by at most the cap and does
-/// not fail it. A preparation or launch that does fail is recorded on the
-/// row as `error`, and the hold is released when this returns either way, so
-/// the branch drains.
+/// without bound: the pre-run HEAD read runs under [`RESUME_HEAD_READ_CAP`]
+/// inside `prepare_resume` and degrades to no snapshot, so a slow checkout
+/// delays the resume by at most the cap and does not fail it. The check that
+/// a remote clone is on the session's branch ([`ensure_resume_checkout`]) is
+/// bounded too but does not degrade: a clone that can't be read, or can't be
+/// put on the branch, fails the resume rather than run the turn somewhere
+/// else. A preparation or launch that does fail is recorded on the row as
+/// `error`, and the hold is released when this returns either way, so the
+/// branch drains.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resume_claimed_session_for_store(
     store: Arc<Store>,
@@ -2661,7 +2697,13 @@ pub(crate) async fn resume_claimed_session_for_store(
     image_ids: Vec<String>,
 ) -> Result<(), String> {
     let ClaimedResume { session, _liveness } = claim;
-    let plan = match prepare_resume(&store, &session, None, None).await {
+    let prepared = match prepare_resume(&store, &session, None, None).await {
+        Ok(plan) => ensure_resume_checkout(&app_handle, &store, &plan, &session.id)
+            .await
+            .map(|()| plan),
+        Err(e) => Err(e),
+    };
+    let plan = match prepared {
         Ok(plan) => plan,
         Err(e) => {
             let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
@@ -5299,6 +5341,12 @@ async fn prepare_branch_session_start(
     let working_dir = target.working_dir.clone();
     let is_remote = branch.workspace_name.is_some();
 
+    // A remote branch's clone is read to be on the branch before the context
+    // below is built from it and an agent is started in it (a no-op for a
+    // local branch). See `workspace_setup::verify`.
+    crate::workspace_setup::verify::ensure_session_checkout(app_handle, store, branch, session_id)
+        .await?;
+
     // Remote branches use ws_exec for git operations; local branches use the
     // worktree directly.
     let (branch_context, pikchr_grammar_reference, note_draft_path) = if is_remote {
@@ -6847,6 +6895,20 @@ async fn start_queued_session_for_branch(
         session.provider.clone().or(provider)
     };
 
+    // A remote branch's clone is read to be on the branch before the context
+    // below is built from it and an agent is started in it (a no-op for a
+    // local branch; see `workspace_setup::verify`). Before the claim, like
+    // everything else here that awaits: a read that fails leaves the row
+    // queued for the drain's bounded retries, and a repair that fails leaves
+    // the branch in `Error`, where the queue holds its rows.
+    crate::workspace_setup::verify::ensure_session_checkout(
+        &app_handle,
+        &store,
+        &branch,
+        &session_id,
+    )
+    .await?;
+
     // Resolve working directory and branch context.
     let (working_dir, branch_context, pikchr_grammar_reference, note_draft_path) = if is_remote {
         let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
@@ -7141,6 +7203,9 @@ async fn start_requeued_session_for_branch(
     // (`RESUME_HEAD_READ_CAP`) and degrades to no snapshot, so a slow checkout
     // neither holds this branch's drain open nor spends a retry.
     let plan = prepare_resume(&store, &session, Some(branch_id.clone()), None).await?;
+    // Before the claim too: a failed read spends one of the drain's retries
+    // and leaves the row queued.
+    ensure_resume_checkout(&app_handle, &store, &plan, &session_id).await?;
 
     // Live from before the claim flips the row to `running` until
     // `start_session` has registered it (see `SessionRegistry::hold`).

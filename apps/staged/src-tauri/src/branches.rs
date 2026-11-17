@@ -802,12 +802,14 @@ pub(crate) async fn check_out_branch_in_workspace(
     let base = base_ref.to_string();
     let branch = branch_name.to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        // Tracked for everything but `rev-parse`: Blox SIGKILLs a transient
-        // git at 60 s, which a fetch on a large repo can outlast, and a
-        // checkout or fast-forward far from where the tree is (or smudging LFS
-        // files) can outlast it too, leaving `.git/index.lock` and a half-updated worktree.
+        // Tracked for everything but the ref reads (`rev-parse`, and the
+        // `for-each-ref` that asks whether the clone has the branch): Blox
+        // SIGKILLs a transient git at 60 s, which a fetch on a large repo can
+        // outlast, and a checkout or fast-forward far from where the tree is
+        // (or smudging LFS files) can outlast it too, leaving
+        // `.git/index.lock` and a half-updated worktree.
         let git: GitRunner<'_> = Box::new(move |args: &[&str]| {
-            let mode = if args.first() == Some(&"rev-parse") {
+            let mode = if matches!(args.first(), Some(&"rev-parse") | Some(&"for-each-ref")) {
                 ExecMode::Transient
             } else {
                 ExecMode::Tracked
@@ -862,7 +864,11 @@ pub(crate) fn check_out_workspace_branch(
     }
     let remote_branch = format!("origin/{branch_name}");
 
-    if git(&["rev-parse", "--verify", "--quiet", &local_ref]).is_ok() {
+    // Whether the clone has the branch decides between checking it out as it
+    // is and creating it with `checkout -B`. A failed exec is neither answer:
+    // read as "missing", it would recreate a branch the clone does have from
+    // the base, moving it off its unpushed commits.
+    if local_branch_exists(git, branch_name)? {
         git(&["checkout", branch_name])
             .map_err(|e| format!("could not check out branch '{branch_name}': {e}"))?;
         if has_remote_branch {
@@ -891,6 +897,24 @@ pub(crate) fn check_out_workspace_branch(
     checkout
         .map(|_| ())
         .map_err(|e| format!("could not create branch '{branch_name}': {e}"))
+}
+
+/// Whether the clone `git` runs in has a local branch `branch_name`.
+///
+/// Answered through stdout, the way [`GIT_DIR_PROBE_SCRIPT`] answers:
+/// `for-each-ref` exits 0 whether or not the ref exists and prints it only
+/// when it does, so "missing" is an empty answer from a command that ran. A
+/// probe that answers through its exit status (`rev-parse --verify --quiet`)
+/// can't be told apart from an exec that never reached the workstation, and
+/// here that failure is an error.
+pub(crate) fn local_branch_exists(git: &GitRunner<'_>, branch_name: &str) -> Result<bool, String> {
+    let local_ref = format!("refs/heads/{branch_name}");
+    let refs = git(&["for-each-ref", "--format=%(refname)", &local_ref]).map_err(|e| {
+        format!("could not check whether the clone already has branch '{branch_name}': {e}")
+    })?;
+    // The pattern also matches refs under `<branch>/`, so only an exact line
+    // counts.
+    Ok(refs.lines().any(|line| line.trim() == local_ref))
 }
 
 /// Kick the branch's session queue when a workspace-status write moved it to

@@ -126,7 +126,8 @@ describe('a note video rendered with {@html}', () => {
     expect(editorVideo.hasAttribute('src')).toBe(true);
   });
 
-  it('waits for the markup to be in a page', () => {
+  it('leaves a video that is not in a page yet alone, and says so', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const template = document.createElement('template');
     template.innerHTML = `<div>${renderMarkdown(NOTE)}</div>`;
     const root = template.content.firstElementChild as HTMLElement;
@@ -138,6 +139,21 @@ describe('a note video rendered with {@html}', () => {
     expect(adopted.hasAttribute('src')).toBe(true);
     expect(importNode).not.toHaveBeenCalled();
     expect(load).not.toHaveBeenCalled();
+    // Nothing runs it again for this render, so this is the only sign.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('[pageVideos]');
+  });
+
+  it('says nothing when there is no video to leave alone, or when it remakes one', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const template = document.createElement('template');
+    template.innerHTML = `<div>${renderMarkdown('Just text')}</div>`;
+
+    remakeVideosInPage(template.content.firstElementChild as HTMLElement);
+    remakeVideosInPage(mountLikeSvelte());
+
+    expect(importNode).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('gives each render its own attachment, so Svelte runs it again', () => {

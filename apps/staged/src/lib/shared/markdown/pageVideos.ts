@@ -28,6 +28,9 @@
  */
 import type { Attachment } from 'svelte/attachments';
 
+/** A video in its `figure`, as mediaRendering.ts writes it. */
+const NOTE_VIDEO = '.markdown-media-video video';
+
 /** The copies, which a later pass leaves alone: one may be playing by then. */
 const madeByPage = new WeakSet<HTMLVideoElement>();
 
@@ -39,12 +42,21 @@ const madeByPage = new WeakSet<HTMLVideoElement>();
  * Only a video in its `figure` (mediaRendering.ts) is replaced, so the nodes
  * swapped are never the first or last of the markup, which Svelte keeps hold
  * of. Nothing is done under a root that is not in a page yet: a copy made
- * there would be one more element to adopt.
+ * there would be one more element to adopt. The attachment runs once per
+ * render and does not come back, so a video left that way is reported: it
+ * would play blank with nothing else to say why.
  */
 export function remakeVideosInPage(root: Element): void {
   const page = root.ownerDocument;
-  if (!page.defaultView) return;
-  for (const video of root.querySelectorAll<HTMLVideoElement>('.markdown-media-video video')) {
+  if (!page.defaultView) {
+    if (root.querySelector(NOTE_VIDEO)) {
+      console.warn(
+        '[pageVideos] A note video was rendered outside the page and was not remade; WebKit may play it with a blank picture'
+      );
+    }
+    return;
+  }
+  for (const video of root.querySelectorAll<HTMLVideoElement>(NOTE_VIDEO)) {
     if (madeByPage.has(video)) continue;
     const copy = page.importNode(video, true);
     madeByPage.add(copy);

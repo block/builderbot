@@ -26,6 +26,10 @@ const EXPAND_BUTTON =
  * `token.text` is the alt source as typed (`a\_b`, `**Before**`); like
  * marked's own image renderer, flatten the inline tokens to plain text first.
  * The flattened text is unescaped, so escaping still happens afterwards.
+ *
+ * Wherever this markup is mounted with `{@html}`, the element around it takes
+ * `{@attach pageVideos(html)}` (pageVideos.ts), or WebKit plays the video
+ * with a blank picture.
  */
 export function renderMarkdownMedia(
   token: Tokens.Image,

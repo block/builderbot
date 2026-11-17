@@ -6,6 +6,7 @@ mod diff;
 mod env;
 mod files;
 pub mod github;
+mod post_checkout_hook;
 mod rebase;
 mod refs;
 mod state;
@@ -45,6 +46,9 @@ pub use github::{
     CreatePrResult, FailedCheck, GitHubAuthStatus, GitHubCommentResult, GitHubRepo, HeadBranchPr,
     Issue, PrListState, PrStatus, PullRequest,
 };
+#[cfg(test)]
+pub(crate) use post_checkout_hook::STOCK_GIT_LFS_POST_CHECKOUT;
+pub use post_checkout_hook::{post_checkout_hooks_for_worktree, PostCheckoutHooks};
 pub use rebase::{rebase_preserving_merge_edits_command, HAND_EDIT_COMMIT_SUBJECT_PREFIX};
 pub use refs::{
     branch_name_without_origin, detect_default_branch, detect_default_branch_from_remote,

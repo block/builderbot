@@ -304,16 +304,29 @@ fn lists_hook_command(builtins: &str) -> bool {
 /// the worktree's head, and `1` for a branch checkout. Hooks tell a new
 /// worktree by that null id, and some do their setup only then.
 ///
-/// The hook is found and run by `git hook run`, so `core.hooksPath` and the
-/// rest apply as they would have; check [`can_run_hooks_on_request`] before
+/// The hook is found and run by `git hook run`, so `core.hooksPath` and
+/// hooks named in config apply; check [`can_run_hooks_on_request`] before
 /// building a worktree this way. It runs at the worktree's root with
 /// `repo`'s captured env, and `GIT_LFS_SKIP_SMUDGE` when the checkout had
-/// it, as under `git worktree add`. One difference remains: git exports
-/// `GIT_DIR` to it, as it does to every hook it fires from inside a linked
-/// worktree, where `git worktree add` clears it.
+/// it, as under `git worktree add`.
 ///
-/// No hook is success. A hook that fails is the error, as it fails `git
-/// worktree add`; the worktree stays as it is.
+/// Two differences from `git worktree add <path> <branch>` remain:
+///
+/// - Git exports `GIT_DIR` to the hook, as it does to every hook it fires
+///   from inside a linked worktree, where `git worktree add` clears it.
+/// - A relative `core.hooksPath`, `.githooks` say, is resolved from where
+///   git runs. `git -C <repo> worktree add` takes the hook from `repo`'s
+///   main checkout, whatever that has checked out; this takes it from the
+///   new worktree, so it is the branch's copy that runs. A branch without
+///   that directory has no hook here, and none fires, silently, where the
+///   add would have fired the main checkout's. Every later checkout in the
+///   worktree finds its hook the way this does. An absolute path, and the
+///   default hook directory, are the same from both.
+///
+/// [`post_checkout_hooks_for_worktree`](super::post_checkout_hooks_for_worktree)
+/// tells what this is about to run. No hook is success. A hook that fails
+/// is the error, as it fails `git worktree add`; the worktree stays as it
+/// is.
 pub fn run_post_checkout_as_for_a_new_worktree(
     repo: &Path,
     worktree_path: &Path,

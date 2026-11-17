@@ -349,9 +349,18 @@ pub(crate) mod shell_env_calls {
         pub(crate) path: PathBuf,
         /// Whether `path` existed when the call was made.
         pub(crate) existed: bool,
+        /// Whether the file the watch was told to note
+        /// ([`Watch::noting`]) existed then; `false` with none to note.
+        pub(crate) noted: bool,
     }
 
-    static WATCHED: Mutex<Vec<(PathBuf, Vec<Call>)>> = Mutex::new(Vec::new());
+    struct Watched {
+        dir: PathBuf,
+        note: Option<PathBuf>,
+        calls: Vec<Call>,
+    }
+
+    static WATCHED: Mutex<Vec<Watched>> = Mutex::new(Vec::new());
 
     /// While it lives, calls for paths under its directory are kept, from
     /// whichever thread makes them.
@@ -360,8 +369,24 @@ pub(crate) mod shell_env_calls {
     impl Watch {
         pub(crate) fn under(dir: &Path) -> Self {
             let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
-            watched.push((dir.to_path_buf(), Vec::new()));
+            watched.push(Watched {
+                dir: dir.to_path_buf(),
+                note: None,
+                calls: Vec::new(),
+            });
             Self(dir.to_path_buf())
+        }
+
+        /// Also keep, per call, whether `file` existed when it was made:
+        /// a file something else writes when it runs places that run
+        /// among the calls.
+        pub(crate) fn noting(self, file: &Path) -> Self {
+            let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = watched.iter_mut().find(|entry| entry.dir == self.0) {
+                entry.note = Some(file.to_path_buf());
+            }
+            drop(watched);
+            self
         }
 
         /// The calls so far, in order.
@@ -369,8 +394,8 @@ pub(crate) mod shell_env_calls {
             let watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
             watched
                 .iter()
-                .find(|(dir, _)| *dir == self.0)
-                .map(|(_, calls)| calls.clone())
+                .find(|entry| entry.dir == self.0)
+                .map(|entry| entry.calls.clone())
                 .unwrap_or_default()
         }
     }
@@ -378,18 +403,19 @@ pub(crate) mod shell_env_calls {
     impl Drop for Watch {
         fn drop(&mut self) {
             let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
-            watched.retain(|(dir, _)| *dir != self.0);
+            watched.retain(|entry| entry.dir != self.0);
         }
     }
 
     pub(super) fn record(what: &'static str, path: &Path) {
         let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
-        for (dir, calls) in watched.iter_mut() {
-            if path.starts_with(dir.as_path()) {
-                calls.push(Call {
+        for entry in watched.iter_mut() {
+            if path.starts_with(entry.dir.as_path()) {
+                entry.calls.push(Call {
                     what,
                     path: path.to_path_buf(),
                     existed: path.exists(),
+                    noted: entry.note.as_deref().is_some_and(Path::exists),
                 });
             }
         }

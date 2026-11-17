@@ -27,6 +27,11 @@
  * Neither step touches how media is served: a fragment never reaches the
  * server, and the script seeks are ordinary ranged reads. Both were measured
  * in a WKWebView; jsdom has no media pipeline to show either.
+ *
+ * Step 2 asks for a frame callback, and WebKit stops drawing a video that
+ * was created in another document once one has been asked for. Markup that
+ * goes in with `{@html}` is created that way, so those render sites swap the
+ * video for one the page made (pageVideos.ts).
  */
 import { resolveStagedVideoUrl } from './mediaUrl';
 import {

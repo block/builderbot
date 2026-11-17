@@ -85,6 +85,7 @@
     resolveStagedMediaUrl,
   } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
+  import { pageVideos } from '../../shared/markdown/pageVideos';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -960,7 +961,11 @@
           >
             {#if hasNoteContent}
               {#if renderedNoteHtml !== null}
-                <div class="markdown-content" bind:this={markdownEl}>
+                <div
+                  class="markdown-content"
+                  bind:this={markdownEl}
+                  {@attach pageVideos(renderedNoteHtml)}
+                >
                   {@html renderedNoteHtml}
                 </div>
               {/if}

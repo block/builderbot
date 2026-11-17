@@ -219,6 +219,7 @@
   import { getMarkdownMediaFromEvent, type MarkdownMedia } from '../../shared/markdown/mediaViewer';
   import { resolveStagedMediaUrl } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
+  import { pageVideos } from '../../shared/markdown/pageVideos';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -3571,8 +3572,9 @@
                   class:assistant-content-has-copy={showAssistantCopy}
                 >
                   {#if hasPreamble}
-                    <div class="markdown-content">
-                      {@html renderMarkdown(split.preamble)}
+                    {@const preambleHtml = renderMarkdown(split.preamble)}
+                    <div class="markdown-content" {@attach pageVideos(preambleHtml)}>
+                      {@html preambleHtml}
                     </div>
                   {/if}
                   {#if split.hasNote}

@@ -7,13 +7,14 @@ use std::sync::Arc;
 
 use super::super::checkout::{local_branch_exists, BranchCheckout, CheckoutError};
 use super::super::SetupTrigger;
+use super::verify::running_branch;
 use super::{
     head_branch, origin_and_workstation_clone, set_up, starting_branch, status_of,
     store_with_project, FakeHost, Info, Start,
 };
 use crate::branches;
 use crate::store::WorkspaceStatus;
-use crate::test_utils::run_git_in;
+use crate::test_utils::{run_git_in, TempDir};
 
 fn rev(clone: &Path, name: &str) -> String {
     run_git_in(clone, &["rev-parse", name]).trim().to_string()
@@ -39,12 +40,12 @@ fn has_branch(clone: &Path, name: &str) -> bool {
     local_branch_exists(&branches::git_runner(clone, None, None), name).unwrap()
 }
 
-fn check_out(clone: &Path, checkout: &BranchCheckout<'_>) -> Result<(), CheckoutError> {
+fn check_out(clone: &Path, checkout: &BranchCheckout<'_>) -> Result<Option<String>, CheckoutError> {
     branches::check_out_workspace_branch(&branches::git_runner(clone, None, None), checkout)
 }
 
 /// A refusal, as the text the user reads.
-fn refusal(result: Result<(), CheckoutError>) -> String {
+fn refusal(result: Result<Option<String>, CheckoutError>) -> String {
     let error = result.unwrap_err();
     assert!(error.is_refusal(), "not a refusal: {error}");
     error.to_string()
@@ -55,7 +56,8 @@ fn refusal(result: Result<(), CheckoutError>) -> String {
 /// The state the original bug left behind: the agent ran in a clone still on
 /// `main` and committed there. The branch exists nowhere, so it is created
 /// where the clone stands and the commits are on it. Local `main` is not
-/// reset or moved, and the new branch does not track `origin/main`.
+/// reset or moved, and the new branch does not track `origin/main`. The
+/// caller is handed a notice naming the commits, for the user.
 #[test]
 fn commits_stranded_on_the_base_branch_come_along_to_a_new_branch() {
     let (_origin, clone) = origin_and_workstation_clone();
@@ -64,7 +66,19 @@ fn commits_stranded_on_the_base_branch_come_along_to_a_new_branch() {
     commit(clone, "one.txt", "agent work one");
     let stranded = commit(clone, "two.txt", "agent work two");
 
-    check_out(clone, &BranchCheckout::new("main", "feature-new")).unwrap();
+    let notice = check_out(clone, &BranchCheckout::new("main", "feature-new"))
+        .unwrap()
+        .expect("a notice that commits were brought along");
+
+    for part in [
+        "'feature-new'",
+        "local 'main'",
+        "2 commit(s)",
+        "agent work one",
+        "agent work two",
+    ] {
+        assert!(notice.contains(part), "{part}: {notice}");
+    }
 
     assert_eq!(head_branch(clone), "feature-new");
     assert_eq!(rev(clone, "HEAD"), stranded);
@@ -110,7 +124,11 @@ fn a_later_branch_starts_from_origins_base_not_from_the_brought_along_commits() 
     let stranded = commit(clone, "one.txt", "agent work");
     check_out(clone, &BranchCheckout::new("main", "feature-new")).unwrap();
 
-    check_out(clone, &BranchCheckout::new("main", "feature-second")).unwrap();
+    // Nothing was brought along, so there is nothing to tell the user.
+    assert_eq!(
+        check_out(clone, &BranchCheckout::new("main", "feature-second")),
+        Ok(None)
+    );
     assert_eq!(head_branch(clone), "feature-second");
     assert_eq!(rev(clone, "HEAD"), origin_main);
 
@@ -192,6 +210,7 @@ fn commits_on_a_base_branch_that_is_worked_on_stay_on_it() {
         base_ref: "main",
         branch_name: "feature-child",
         base_is_worked_on: true,
+        siblings: &[],
     };
 
     std::fs::write(clone.join("file.txt"), "base\nin progress\n").unwrap();
@@ -209,6 +228,123 @@ fn commits_on_a_base_branch_that_is_worked_on_stay_on_it() {
     assert_eq!(head_branch(clone), "feature-child");
     assert_eq!(rev(clone, "HEAD"), origin_main);
     assert_eq!(rev(clone, "main"), parents_own);
+}
+
+// ── Commits on the base branch that can't be told to be this branch's ───────
+
+/// Two branches of one repository share the clone and neither was ever
+/// checked out in it, so the commits on `main` could be either's. The first
+/// to be set up does not take them: the checkout is refused, naming the
+/// other branch, and the clone is untouched. Once the clone has the other
+/// branch, that branch holds its own commits and what is left on `main`
+/// has one possible owner.
+#[test]
+fn stranded_commits_another_branch_could_own_are_not_brought_along() {
+    let (_origin, clone) = origin_and_workstation_clone();
+    let clone = clone.path();
+    let stranded = commit(clone, "one.txt", "agent work");
+    let siblings = ["feature-a".to_string()];
+    let checkout = BranchCheckout {
+        base_ref: "main",
+        branch_name: "feature-b",
+        base_is_worked_on: false,
+        siblings: &siblings,
+    };
+
+    let error = refusal(check_out(clone, &checkout));
+
+    for part in [
+        "the clone is on 'main'",
+        "agent work",
+        "no branch 'feature-a' either",
+        "'feature-b'",
+    ] {
+        assert!(error.contains(part), "{part}: {error}");
+    }
+    assert_eq!(head_branch(clone), "main");
+    assert_eq!(rev(clone, "main"), stranded);
+    assert!(!has_branch(clone, "feature-b"));
+
+    run_git_in(clone, &["branch", "feature-a", "origin/main"]);
+    let notice = check_out(clone, &checkout).unwrap();
+    assert!(notice.is_some_and(|notice| notice.contains("agent work")));
+    assert_eq!(head_branch(clone), "feature-b");
+    assert_eq!(rev(clone, "HEAD"), stranded);
+}
+
+/// A clone of `origin` that stands for everyone else pushing to it.
+fn upstream_clone(origin: &Path) -> TempDir {
+    let upstream = TempDir::new("upstream");
+    let (from, to) = (origin.to_str().unwrap(), upstream.path().to_str().unwrap());
+    run_git_in(origin, &["clone", from, to]);
+    run_git_in(upstream.path(), &["config", "user.email", "up@example.com"]);
+    run_git_in(upstream.path(), &["config", "user.name", "Upstream"]);
+    upstream
+}
+
+/// Origin's base was force-pushed after the clone had pulled it. The
+/// commits origin dropped are still on local `main`, on no remote ref and
+/// no other branch, exactly like commits an agent made there. They were not
+/// committed in this clone, which its reflog shows, so a new branch is not
+/// created from them, with or without an agent's commit on top. Once local
+/// `main` is reset the branch starts from origin's base.
+#[test]
+fn commits_a_force_pushed_base_left_behind_are_not_brought_along() {
+    let (origin, clone) = origin_and_workstation_clone();
+    let clone = clone.path();
+    let upstream = upstream_clone(origin.path());
+    commit(upstream.path(), "up.txt", "upstream work");
+    run_git_in(upstream.path(), &["push", "origin", "main"]);
+    run_git_in(clone, &["pull", "--ff-only", "origin", "main"]);
+    run_git_in(upstream.path(), &["reset", "--hard", "HEAD~1"]);
+    commit(upstream.path(), "other.txt", "rewritten base");
+    run_git_in(upstream.path(), &["push", "--force", "origin", "main"]);
+    let left_behind = rev(clone, "main");
+    let checkout = BranchCheckout::new("main", "feature-new");
+
+    let error = refusal(check_out(clone, &checkout));
+
+    for part in [
+        "upstream work",
+        "not all of them were committed in this clone",
+        "force-push of 'main'",
+        "'feature-new'",
+    ] {
+        assert!(error.contains(part), "{part}: {error}");
+    }
+    assert_eq!(head_branch(clone), "main");
+    assert_eq!(rev(clone, "main"), left_behind);
+    assert!(!has_branch(clone, "feature-new"));
+
+    let on_top = commit(clone, "one.txt", "agent work");
+    let error = refusal(check_out(clone, &checkout));
+    assert!(error.contains("2 commit(s)"), "{error}");
+    assert_eq!(rev(clone, "main"), on_top);
+    assert!(!has_branch(clone, "feature-new"));
+
+    run_git_in(clone, &["reset", "--hard", "origin/main"]);
+    assert_eq!(check_out(clone, &checkout), Ok(None));
+    assert_eq!(head_branch(clone), "feature-new");
+    assert_eq!(rev(clone, "HEAD"), rev(clone, "origin/main"));
+}
+
+/// A base that only moved on, with no force-push, leaves local `main`
+/// behind origin's and the agent's commits on top of the old tip. Those
+/// were committed here and still come along.
+#[test]
+fn commits_made_here_come_along_when_origins_base_has_moved_on() {
+    let (origin, clone) = origin_and_workstation_clone();
+    let clone = clone.path();
+    let stranded = commit(clone, "one.txt", "agent work");
+    let upstream = upstream_clone(origin.path());
+    commit(upstream.path(), "up.txt", "upstream work");
+    run_git_in(upstream.path(), &["push", "origin", "main"]);
+
+    let notice = check_out(clone, &BranchCheckout::new("main", "feature-new")).unwrap();
+
+    assert!(notice.is_some_and(|notice| notice.contains("1 commit(s)")));
+    assert_eq!(head_branch(clone), "feature-new");
+    assert_eq!(rev(clone, "HEAD"), stranded);
 }
 
 // ── Other states the clone can't leave ──────────────────────────────────────
@@ -287,6 +423,58 @@ async fn setup_brings_the_commits_an_agent_left_on_the_base_branch() {
     assert_eq!(rev(clone.path(), "HEAD"), stranded);
     assert_eq!(rev(clone.path(), "main"), stranded);
     assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Running));
+    // The user is told, not only the log.
+    let notices = host.notices();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].0, branch.id);
+    assert!(notices[0].1.contains("agent work"), "{notices:?}");
+}
+
+/// The incident with a second branch in the clone. `feature-a` was marked
+/// `Running` over a clone still on `main` and its agent committed there.
+/// `feature-b` is added and set up first. It used to be created from `main`
+/// with the other branch's work on it; now its setup fails where the user
+/// can see why, with no timer, and nothing is moved. Once the commits are
+/// on their branch in the workstation, `feature-b` starts from origin's
+/// base without them.
+#[tokio::test]
+async fn two_branches_that_could_own_stranded_commits_are_not_guessed_between() {
+    let (_origin, clone) = origin_and_workstation_clone();
+    let origin_main = rev(clone.path(), "origin/main");
+    let stranded = commit(clone.path(), "one.txt", "agent work");
+    let (store, project) = store_with_project();
+    let _first = running_branch(&store, &project, "feature-a");
+    let second = starting_branch(&store, &project, "feature-b");
+    let host = Arc::new(FakeHost::new(
+        clone.path(),
+        &[Info::Status("running")],
+        Start::Succeeds,
+    ));
+
+    let error = set_up(&store, &host, &second, SetupTrigger::Requested)
+        .await
+        .unwrap_err();
+
+    for part in ["agent work", "no branch 'feature-a' either", "'feature-b'"] {
+        assert!(error.contains(part), "{part}: {error}");
+    }
+    assert_eq!(head_branch(clone.path()), "main");
+    assert!(!has_branch(clone.path(), "feature-b"));
+    assert_eq!(status_of(&store, &second), Some(WorkspaceStatus::Error));
+    assert_eq!(host.failure_of(&second), Some(error));
+    assert_eq!(host.retries(), vec![]);
+    assert_eq!(host.notices(), vec![]);
+
+    run_git_in(clone.path(), &["checkout", "-b", "feature-a"]);
+    set_up(&store, &host, &second, SetupTrigger::Requested)
+        .await
+        .unwrap();
+
+    assert_eq!(head_branch(clone.path()), "feature-b");
+    assert_eq!(rev(clone.path(), "HEAD"), origin_main);
+    assert_eq!(rev(clone.path(), "feature-a"), stranded);
+    assert_eq!(status_of(&store, &second), Some(WorkspaceStatus::Running));
+    assert_eq!(host.notices(), vec![]);
 }
 
 /// A branch that was never `Running` and can't be checked out without

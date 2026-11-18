@@ -126,8 +126,20 @@ pub(crate) async fn start_create_pr_pipeline_for_branch(
 ) -> Result<String, String> {
     crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    // The clone is read and, when it can be, put on the branch, so the
+    // steps that describe the branch look at it. The pipeline does not fail
+    // on that: its push names the local branch in an explicit refspec and
+    // works from any HEAD, a sibling branch with a live session included.
     // Held until this returns, by when the pipeline's row is `running`.
-    let _checkout = ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, None).await?;
+    let _checkout = ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, None)
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!(
+                "[create_pr] branch {branch_id}: creating the pull request from a clone that \
+                 is not on the branch: {e}"
+            );
+            crate::workspace_setup::verify::CheckoutHold::none()
+        });
     let base_branch = base_branch_name(&ctx.branch);
 
     let is_draft = draft.unwrap_or(false);

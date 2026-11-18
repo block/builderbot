@@ -103,10 +103,12 @@ pub(crate) fn resolve_branch_pipeline_context(
 
 /// A pipeline's share of the checkout check every start on a remote branch
 /// makes (`workspace_setup::verify`): the clone its git steps run in is read
-/// to be on the branch, and put there when it is not. A rebase, squash or
-/// commit in a clone that is on the base branch rewrites the base; a push
-/// from one sends whatever the local branch last held. A no-op for a local
-/// branch.
+/// to be on the branch, and put there when it is not. A rebase, squash,
+/// commit or pull in a clone that is on the base branch acts on the base. A
+/// push does not ask: it names its local branch in an explicit refspec and
+/// works from any HEAD. The pull request pipeline asks, so the steps that
+/// describe the branch look at it, and goes on whatever the answer. A no-op
+/// for a local branch.
 ///
 /// Call it once the pipeline is known to run now, before its row goes
 /// `running`, and keep what it returns until it has

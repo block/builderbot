@@ -92,9 +92,13 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     // Before the claim, like everything else here that awaits. Held until
-    // this returns, by when the row is claimed `running`.
-    let _checkout =
-        ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, Some(&session.id)).await?;
+    // this returns, by when the row is claimed `running`. Only a pull needs
+    // the clone on the branch: a push names its local branch in an explicit
+    // refspec and works from any HEAD.
+    let _checkout = match queued_pipeline.kind {
+        Some(PipelineKind::Push) => crate::workspace_setup::verify::CheckoutHold::none(),
+        _ => ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, Some(&session.id)).await?,
+    };
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
     let RebuiltGitPipeline {
         steps,

@@ -60,6 +60,9 @@ pub(crate) struct Checkout {
     /// Whether another branch in this clone is the base branch itself (see
     /// [`BranchCheckout::base_is_worked_on`]).
     pub(crate) base_is_worked_on: bool,
+    /// The other branches whose checkout is this clone (see
+    /// [`BranchCheckout::siblings`]).
+    pub(crate) siblings: Vec<String>,
 }
 
 impl Checkout {
@@ -68,6 +71,7 @@ impl Checkout {
             base_ref: &self.base_ref,
             branch_name: &self.branch_name,
             base_is_worked_on: self.base_is_worked_on,
+            siblings: &self.siblings,
         }
     }
 }
@@ -88,8 +92,9 @@ pub(crate) trait SetupHost: Send + Sync + 'static {
     async fn start_workspace(&self, workspace: &str, source: &str) -> Result<(), BloxError>;
 
     /// Make sure the clone exists and put it on the branch
-    /// ([`checkout::check_out_workspace_branch`]).
-    async fn check_out(&self, checkout: &Checkout) -> Result<(), CheckoutError>;
+    /// ([`checkout::check_out_workspace_branch`], whose notice this hands
+    /// on).
+    async fn check_out(&self, checkout: &Checkout) -> Result<Option<String>, CheckoutError>;
 
     /// What the clone has checked out: one cheap read, no fetch
     /// ([`verify::read_clone_head`]). `Err` when the read didn't answer,
@@ -104,6 +109,10 @@ pub(crate) trait SetupHost: Send + Sync + 'static {
     /// whether the user had asked for that run, `None` when it has none any
     /// more ([`failures`]).
     fn failure_changed(&self, branch_id: &str, error: Option<&str>, user_asked: bool);
+
+    /// Something a setup that worked has to tell the user: commits it
+    /// brought along onto the branch ([`failures::notify`]).
+    fn notice(&self, branch_id: &str, notice: &str);
 
     /// Call [`retry::fire`] for `branch_id` with `ticket` once `delay` has
     /// passed.
@@ -177,7 +186,7 @@ impl<R: tauri::Runtime> SetupHost for BloxHost<R> {
         .map(|_| ())
     }
 
-    async fn check_out(&self, checkout: &Checkout) -> Result<(), CheckoutError> {
+    async fn check_out(&self, checkout: &Checkout) -> Result<Option<String>, CheckoutError> {
         match checkout.clone_dir.as_deref() {
             Some(clone_dir) => {
                 branches::clone_repo_into_workspace(
@@ -215,6 +224,10 @@ impl<R: tauri::Runtime> SetupHost for BloxHost<R> {
 
     fn failure_changed(&self, branch_id: &str, error: Option<&str>, user_asked: bool) {
         failures::set(&self.app_handle, &self.store, branch_id, error, user_asked);
+    }
+
+    fn notice(&self, branch_id: &str, notice: &str) {
+        failures::notify(&self.app_handle, branch_id, notice);
     }
 
     fn retry_later(&self, branch_id: &str, delay: Duration, ticket: u64) {

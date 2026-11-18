@@ -12,6 +12,7 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
   let refreshTransferredProject: Mock<(projectId: string) => Promise<void>>;
   let eventListeners: Map<string, Array<(payload: unknown) => void>>;
   let toastError: ReturnType<typeof vi.fn>;
+  let toastWarning: ReturnType<typeof vi.fn>;
 
   /** Deliver a backend event to the controller's listeners. */
   function emit(event: string, payload: unknown) {
@@ -60,7 +61,8 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     }));
     vi.doMock('svelte-sonner', () => {
       toastError = vi.fn();
-      return { toast: { error: toastError } };
+      toastWarning = vi.fn();
+      return { toast: { error: toastError, warning: toastWarning } };
     });
     vi.doMock('../settings/preferences.svelte', () => ({
       getPreferredAgent: () => 'claude',
@@ -455,6 +457,33 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     expect(toastError.mock.calls).toEqual([
       ['Unable to start workspace', { description: 'still could not fetch', duration: Infinity }],
     ]);
+    lifecycle.stop();
+  });
+
+  // A setup that put commits it found on the base branch on this branch
+  // worked, so there is no reason for the card. The user is still told,
+  // since the log is all that said so before.
+  it('tells the user when a setup brought commits along to the branch', async () => {
+    const lifecycle = await newController();
+    await settle();
+    emit('workspace-setup-error', { branchId: 'branch-1', error: 'could not fetch' });
+
+    const notice = "Branch 'feature' was created from the workstation's local 'main'";
+    emit('workspace-setup-error', {
+      branchId: 'branch-1',
+      error: null,
+      userRequested: false,
+      notice,
+    });
+    expect(lifecycle.getWorkspaceErrors().has('branch-1')).toBe(false);
+    expect(toastWarning.mock.calls).toEqual([
+      ['Workspace branch was given existing commits', { description: notice, duration: Infinity }],
+    ]);
+    expect(toastError).not.toHaveBeenCalled();
+
+    // A reason cleared with nothing to tell raises nothing.
+    emit('workspace-setup-error', { branchId: 'branch-1', error: null });
+    expect(toastWarning).toHaveBeenCalledTimes(1);
     lifecycle.stop();
   });
 

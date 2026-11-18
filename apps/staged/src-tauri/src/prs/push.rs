@@ -13,9 +13,7 @@ use crate::git;
 use crate::session_runner;
 use crate::store::{self, FailureStrategy, PipelineExecution, PipelineKind, PipelineStep, Store};
 
-use super::context::{
-    ensure_pipeline_checkout, resolve_branch_pipeline_context, BranchPipelineContext,
-};
+use super::context::{resolve_branch_pipeline_context, BranchPipelineContext};
 use super::git_commands::{git_push_with_fallback, push_refspec};
 use super::pipeline::{
     branch_has_work_in_flight, find_queued_pipeline, launch_running_pipeline_session,
@@ -391,9 +389,10 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
     }
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
-    // The branch is idle, so the push runs now. Held until this returns, by
-    // when its row is `running`.
-    let _checkout = ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, None).await?;
+    // No check that the clone is on the branch (`ensure_pipeline_checkout`):
+    // the push names its local branch in an explicit refspec, so it works
+    // from whatever the clone has checked out, a sibling branch with a live
+    // session included.
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
     let steps = build_push_pipeline_steps(&ctx.branch.branch_name, &remote_branch, variant);
 

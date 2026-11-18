@@ -4517,6 +4517,51 @@ fn retry_or_fail_queued_start_before_claim<R: tauri::Runtime>(
     )
 }
 
+/// Hold a remote branch's queue while a session of another branch is at
+/// work in the clone the two share, and say whether it is held.
+///
+/// A start on this branch would need the clone switched under that session,
+/// which branch setup refuses (`workspace_setup::clone`). That is not the
+/// row's failure and clears on its own, so the row keeps its place and its
+/// attempts, the rows behind it wait with it, and the branch is looked at
+/// again shortly: the queue moves once the other session is done.
+fn hold_queue_behind_sibling_session(
+    store: &Store,
+    kicker: &Arc<crate::session_queue::BranchQueueKicker>,
+    branch: &store::Branch,
+    session_id: &str,
+) -> bool {
+    use crate::session_queue::retry::QUEUE_HOLD_RECHECK;
+
+    let live = match crate::workspace_setup::clone::sibling_session_in_clone(store, branch) {
+        Ok(Some(live)) => live,
+        Ok(None) => return false,
+        Err(e) => {
+            log::warn!(
+                "[session_queue] could not look for sessions sharing the clone of branch {}: {e}",
+                branch.id
+            );
+            return false;
+        }
+    };
+    log::info!(
+        "[session_queue] queued session {session_id} on branch {} waits, and the queue with \
+         it: {live}",
+        branch.id
+    );
+    kicker.start_attempts().hold(
+        &branch.id,
+        session_id,
+        std::time::Instant::now() + QUEUE_HOLD_RECHECK,
+    );
+    kicker.kick_after(
+        &branch.id,
+        QUEUE_HOLD_RECHECK,
+        crate::session_queue::KickSource::StartRetry,
+    );
+    true
+}
+
 fn note_session_schedule() -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Note,
@@ -6411,6 +6456,14 @@ pub(crate) async fn drain_branch_queue(
             );
             break;
         }
+        // A row held behind a sibling branch's session is not tried again
+        // while that session lasts: asked of the database, not the clone.
+        if kicker.as_ref().is_some_and(|kicker| {
+            kicker.start_attempts().is_held(&branch_id, &session.id)
+                && hold_queue_behind_sibling_session(&store, kicker, &branch, &session.id)
+        }) {
+            break;
+        }
 
         // The entry gate, re-checked before each claim: every start below
         // awaits, so a shutdown claimed mid-drain would otherwise keep being
@@ -6487,7 +6540,29 @@ pub(crate) async fn drain_branch_queue(
                     // scheduled kick, then end the row with the cause, where
                     // `wait_for_repo_session` and the UI read it, and move
                     // on — an errored row is no barrier.
+                    //
+                    // Two failures are not the row's and spend none of its
+                    // attempts, or every row queued here would be ended in
+                    // turn by a cause none of them has. A start whose check
+                    // of the clone left the branch out of `Running` (a
+                    // repair that failed or was refused): the queue waits
+                    // for the kick `Running` sends, as it does for any
+                    // branch not provisioned. And a start in a clone where
+                    // a sibling branch's session is at work.
                     FailedQueuedStart::StillQueued => {
+                        if branch_session_start_waits_for_provisioning(&store, &branch_id)? {
+                            log::info!(
+                                "[session_queue] queued session {session_id} on branch \
+                                 {branch_id} could not start and the branch is no longer \
+                                 running; its queue waits: {e}"
+                            );
+                            break;
+                        }
+                        if kicker.as_ref().is_some_and(|kicker| {
+                            hold_queue_behind_sibling_session(&store, kicker, &branch, &session_id)
+                        }) {
+                            break;
+                        }
                         match retry_or_fail_queued_start_before_claim(
                             &store,
                             &app_handle,
@@ -6914,8 +6989,10 @@ async fn start_queued_session_for_branch(
     // local branch; see `workspace_setup::verify`). Before the claim, like
     // everything else here that awaits: a read that fails leaves the row
     // queued for the drain's bounded retries, and a repair that fails leaves
-    // the branch in `Error`, where the queue holds its rows. The clone stays
-    // held until this returns, by when the row is claimed `running`.
+    // the branch in `Error`, where the queue holds its rows. A clone a
+    // sibling branch's session works in is not repaired: the drain holds the
+    // row while that session lasts and spends no retry on it. The clone
+    // stays held until this returns, by when the row is claimed `running`.
     let _checkout = crate::workspace_setup::verify::ensure_session_checkout(
         &app_handle,
         &store,
@@ -12509,6 +12586,80 @@ mod tests {
             row.completion_reason,
             Some(store::CompletionReason::Interrupted)
         );
+    }
+
+    /// A queued start in a clone where a sibling branch's session is at work
+    /// can't have the clone switched under that session. That used to end
+    /// the row after its three attempts, then the next row the same way.
+    /// The row is held instead, as often as it is asked about: it stays
+    /// `queued`, in backoff, with no failure counted, and the branch is
+    /// kicked again shortly. Once the sibling's session is done nothing
+    /// holds it, and a start that then fails for a reason of its own counts
+    /// from one.
+    #[test]
+    fn a_queued_row_behind_a_sibling_branchs_session_is_held_without_spending_attempts() {
+        use crate::session_queue::retry::{
+            QueuedStartRetry, MAX_QUEUED_START_ATTEMPTS, QUEUED_START_RETRY_DELAYS,
+            QUEUE_HOLD_RECHECK,
+        };
+        use crate::session_queue::{BranchQueueKicker, KickSource};
+
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Running);
+        let mut sibling =
+            store::Branch::new_remote(&branch.project_id, "sibling", "main", "test-workspace");
+        sibling.workspace_status = Some(store::WorkspaceStatus::Running);
+        store.create_branch(&sibling).unwrap();
+        let kicker = Arc::new(BranchQueueKicker::recording());
+        let first = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&first).unwrap();
+        let second = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&second).unwrap();
+        let hold = || hold_queue_behind_sibling_session(&store, &kicker, &branch, &first.id);
+
+        // Nobody else in the clone: whatever failed is the row's own.
+        assert!(!hold());
+        assert!(kicker.scheduled().is_empty());
+        assert!(kicker.start_attempts().is_empty());
+
+        let agent = store::Session::new_running("work", Path::new("/tmp")).with_branch(&sibling.id);
+        store.create_session(&agent).unwrap();
+        for _ in 0..MAX_QUEUED_START_ATTEMPTS + 2 {
+            assert!(hold());
+        }
+        let attempts = kicker.start_attempts();
+        let now = std::time::Instant::now();
+        assert!(attempts.is_held(&branch.id, &first.id));
+        assert!(attempts.in_backoff(&branch.id, &first.id, now));
+        assert_eq!(attempts.failures(&branch.id, &first.id), 0);
+        assert_eq!(
+            kicker.scheduled().last(),
+            Some(&(
+                branch.id.clone(),
+                QUEUE_HOLD_RECHECK,
+                KickSource::StartRetry
+            ))
+        );
+        for row in [&first, &second] {
+            let row = store.get_session(&row.id).unwrap().unwrap();
+            assert_eq!(row.status, store::SessionStatus::Queued);
+            assert_eq!(row.error_message, None);
+        }
+
+        store
+            .update_session_status(&agent.id, store::SessionStatus::Completed, None, None)
+            .unwrap();
+        let scheduled = kicker.scheduled().len();
+        assert!(!hold());
+        assert_eq!(kicker.scheduled().len(), scheduled);
+        assert!(!attempts.in_backoff(&branch.id, &first.id, now + QUEUE_HOLD_RECHECK * 2));
+        assert_eq!(
+            attempts.record_failure(&branch.id, &first.id, now),
+            QueuedStartRetry::After {
+                failures: 1,
+                delay: QUEUED_START_RETRY_DELAYS[0],
+            }
+        );
+        assert!(!attempts.is_held(&branch.id, &first.id));
     }
 
     /// A pre-claim start failure is retried before it is recorded: the first

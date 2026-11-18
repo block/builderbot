@@ -17,6 +17,10 @@
 //! fail into the card only, and a reason that has not changed is not
 //! announced again.
 //!
+//! The same event carries the one thing a setup that worked has to say: a
+//! `notice` that commits found on the base branch were brought along onto
+//! the new branch ([`notify`]). It is not a reason and is not kept.
+//!
 //! In memory, per process: the branch row keeps only its status. After a
 //! restart the reasons are gone until the next attempt fails, which the
 //! startup pass's retries ([`super::retry`]) bring about on their own.
@@ -37,6 +41,8 @@ struct SetupErrorEvent<'a> {
     branch_id: &'a str,
     error: Option<&'a str>,
     user_requested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<&'a str>,
 }
 
 fn reasons() -> &'static Mutex<HashMap<String, String>> {
@@ -63,6 +69,7 @@ pub(crate) fn set<R: tauri::Runtime>(
             branch_id,
             error,
             user_requested: user_requested && error.is_some(),
+            notice: None,
         };
         crate::web_server::emit_to_all(app_handle, EVENT, event);
     };
@@ -82,6 +89,22 @@ pub(crate) fn set<R: tauri::Runtime>(
             emit(stale, None);
         }
     }
+}
+
+/// Tell every window and web client something about a setup of `branch_id`
+/// that worked. The branch has no reason to show, so `error` is `null`.
+pub(crate) fn notify<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+    notice: &str,
+) {
+    let event = SetupErrorEvent {
+        branch_id,
+        error: None,
+        user_requested: false,
+        notice: Some(notice),
+    };
+    crate::web_server::emit_to_all(app_handle, EVENT, event);
 }
 
 fn lock() -> std::sync::MutexGuard<'static, HashMap<String, String>> {

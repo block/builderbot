@@ -10,7 +10,10 @@
 //! one exception that brings work along on purpose: a clone on the base
 //! branch, ahead of origin's base, whose branch exists nowhere gets the
 //! branch created from where it stands, so the commits made there come with
-//! it. Local base is left pointing at them, never reset or moved.
+//! it. Local base is left pointing at them, never reset or moved. That is
+//! done only when the commits can be told to be this branch's
+//! ([`refuse_unless_adoptable`]), and the caller is handed a notice to show
+//! the user.
 //!
 //! A switch that would lose work or move it between branches is
 //! [`CheckoutError::Refused`], with the clone untouched and a message that
@@ -38,8 +41,15 @@ pub(crate) enum CheckoutError {
 
 impl CheckoutError {
     /// Whether the clone was left exactly as it was.
+    #[cfg(test)]
     pub(crate) fn is_refusal(&self) -> bool {
         !matches!(self, CheckoutError::Failed(_))
+    }
+
+    /// Whether something outside the clone was in the way, with the clone
+    /// itself in order.
+    pub(crate) fn is_blocked(&self) -> bool {
+        matches!(self, CheckoutError::Blocked(_))
     }
 
     /// Whether trying again on its own could end differently. Not after a
@@ -83,6 +93,9 @@ pub(crate) struct BranchCheckout<'a> {
     /// behind on the base by mistake, and they are neither brought along
     /// nor a reason to refuse.
     pub(crate) base_is_worked_on: bool,
+    /// The other branches Staged works on in this clone. Commits stranded
+    /// on the base could be any of theirs that the clone doesn't have yet.
+    pub(crate) siblings: &'a [String],
 }
 
 impl<'a> BranchCheckout<'a> {
@@ -93,6 +106,7 @@ impl<'a> BranchCheckout<'a> {
             base_ref,
             branch_name,
             base_is_worked_on: false,
+            siblings: &[],
         }
     }
 }
@@ -137,10 +151,13 @@ fn failed(what: impl std::fmt::Display, error: impl std::fmt::Display) -> Checko
 ///
 /// Before the clone leaves what it has checked out, [`guard_leaving`] makes
 /// sure nothing is lost or carried across by the switch.
+///
+/// `Ok(Some(notice))` when commits stranded on the base branch were brought
+/// along onto the new branch: what the user is to be told.
 pub(crate) fn check_out_workspace_branch(
     git: &GitRunner<'_>,
     checkout: &BranchCheckout<'_>,
-) -> Result<(), CheckoutError> {
+) -> Result<Option<String>, CheckoutError> {
     let BranchCheckout {
         base_ref,
         branch_name,
@@ -202,7 +219,7 @@ pub(crate) fn check_out_workspace_branch(
             // commits and all, which is the point: never reset it.
             let _ = git(&["merge", "--ff-only", &remote_branch]);
         }
-        return Ok(());
+        return Ok(None);
     }
 
     if has_remote_branch {
@@ -216,23 +233,29 @@ pub(crate) fn check_out_workspace_branch(
             &head,
             branch_name,
             &["checkout", "-B", branch_name, &remote_branch],
-        );
+        )
+        .map(|()| None);
     }
 
     if !stranded.is_empty() {
         // The branch exists nowhere and the base branch here holds commits
         // origin's doesn't: work made on the base because the branch was
         // never checked out. The branch is created where the clone stands,
-        // so that work is on it. `checkout -b` keeps the worktree as it is
-        // (it cannot conflict) and leaves local base where it was.
-        log::warn!(
-            "[workspace_setup] creating '{branch_name}' from local '{base_ref}', which holds {} \
-             commit(s) that are on no other branch and not on origin: {}",
+        // so that work is on it, once it is clear whose it is. `checkout
+        // -b` keeps the worktree as it is (it cannot conflict) and leaves
+        // local base where it was.
+        refuse_unless_adoptable(git, checkout, &stranded)?;
+        let notice = format!(
+            "Branch '{branch_name}' was created from the workstation's local '{base_ref}', \
+             which held {} commit(s) that were on no other branch and not on origin: {}. They \
+             are on '{branch_name}' now. If they are not this branch's work, remove them from \
+             it before you push.",
             stranded.len(),
             describe_commits(&stranded)
         );
+        log::warn!("[workspace_setup] {notice}");
         return git(&["checkout", "--no-track", "-b", branch_name])
-            .map(|_| ())
+            .map(|_| Some(notice))
             .map_err(|e| failed(format!("could not create branch '{branch_name}'"), e));
     }
 
@@ -250,6 +273,7 @@ pub(crate) fn check_out_workspace_branch(
             &format!("origin/{base_ref}"),
         ],
     )
+    .map(|()| None)
 }
 
 /// Whether the clone `git` runs in has a local branch `branch_name`.
@@ -306,6 +330,7 @@ fn guard_leaving(
         base_ref,
         branch_name,
         base_is_worked_on,
+        ..
     } = *checkout;
     match head {
         Head::Detached => {
@@ -325,16 +350,9 @@ fn guard_leaving(
         // Commits that only local base holds: on no remote ref and on no
         // other local branch. Once a branch has been created from them they
         // are that branch's, and no longer stranded here.
-        Head::Branch(name) if name == base_ref && !base_is_worked_on => list_commits(
-            git,
-            &[
-                "HEAD",
-                "--not",
-                "--remotes",
-                &format!("--exclude={base_ref}"),
-                "--branches",
-            ],
-        ),
+        Head::Branch(name) if name == base_ref && !base_is_worked_on => {
+            list_commits(git, &stranded_range(&format!("--exclude={base_ref}")))
+        }
         Head::Branch(name) => {
             let changed = uncommitted_changes(git)?;
             if changed == 0 {
@@ -347,6 +365,90 @@ fn guard_leaving(
             )))
         }
     }
+}
+
+/// The commits only local base holds, as revision arguments. `exclude_base`
+/// is `--exclude=<base>`.
+fn stranded_range(exclude_base: &str) -> [&str; 5] {
+    ["HEAD", "--not", "--remotes", exclude_base, "--branches"]
+}
+
+/// Whether the commits stranded on local base may be brought along onto a
+/// new `branch_name`: only when they can be told to be this branch's work.
+/// Refused otherwise, with the clone as it was.
+///
+/// Two things have to hold.
+///
+/// - Every one of them was made in this clone by `git commit`: HEAD's
+///   reflog has it as the result of a `commit` entry (an amend included).
+///   A commit that reached local base any other way (the clone itself, a
+///   pull, a merge, a reset) was on origin's base once. Such commits on no
+///   remote ref now are what a force-pushed base leaves behind, and a
+///   branch created from them would start from a base origin has dropped.
+///   The reflog is the evidence because ancestry is not: a base that was
+///   force-pushed and one that simply moved on both leave local base
+///   diverged from origin's.
+/// - No other branch Staged works on in this clone is missing from it. A
+///   branch the clone doesn't have was never checked out here, so its
+///   sessions committed on the base as well, and the commits could be its.
+fn refuse_unless_adoptable(
+    git: &GitRunner<'_>,
+    checkout: &BranchCheckout<'_>,
+    stranded: &[String],
+) -> Result<(), CheckoutError> {
+    let BranchCheckout {
+        base_ref,
+        branch_name,
+        siblings,
+        ..
+    } = *checkout;
+    let found = format!(
+        "the clone is on '{base_ref}' with {} commit(s) that are on no other branch and not on \
+         origin ({})",
+        stranded.len(),
+        describe_commits(stranded)
+    );
+
+    let made_here =
+        git(&["log", "-g", "--grep-reflog=^commit", "--format=%H", "HEAD"]).map_err(|e| {
+            failed(
+                "could not read where the clone's local commits came from",
+                e,
+            )
+        })?;
+    let shas = git(&[
+        &["rev-list"][..],
+        &stranded_range(&format!("--exclude={base_ref}")),
+    ]
+    .concat())
+    .map_err(|e| failed("could not list the clone's local commits", e))?;
+    let made_here = |sha: &str| made_here.lines().any(|line| line.trim() == sha);
+    if !shas.split_whitespace().all(made_here) {
+        return Err(CheckoutError::Refused(format!(
+            "{found}, and not all of them were committed in this clone: they may be what a \
+             force-push of '{base_ref}' on origin left behind. They were not put on \
+             '{branch_name}' and the clone was left as it is. If they are this branch's work, \
+             run `git checkout -b {branch_name}` in the workstation; if not, reset \
+             '{base_ref}' to 'origin/{base_ref}'. Then try again."
+        )));
+    }
+
+    let mut missing = Vec::new();
+    for sibling in siblings.iter().filter(|name| *name != branch_name) {
+        if !local_branch_exists(git, sibling).map_err(CheckoutError::Failed)? {
+            missing.push(format!("'{sibling}'"));
+        }
+    }
+    if !missing.is_empty() {
+        return Err(CheckoutError::Refused(format!(
+            "{found}, and the clone has no branch {} either, so they can't be told to be the \
+             work of '{branch_name}'. They were not put on it and the clone was left as it \
+             is. Put them on the branch they belong to in the workstation (`git checkout -b \
+             <branch>`), then try again.",
+            missing.join(" or ")
+        )));
+    }
+    Ok(())
 }
 
 /// The refusal for a clone on the base branch whose local commits can't be

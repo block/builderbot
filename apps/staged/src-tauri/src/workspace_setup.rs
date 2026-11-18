@@ -269,6 +269,28 @@ pub(crate) fn branch_failed<R: tauri::Runtime>(
     arm_retry(app_handle, store, branch_id);
 }
 
+/// Trigger setup for those of `branch_ids` that are remote and in
+/// `Starting`: the rows a project transfer left that way when it ended
+/// without moving the project. It resumed their workstation and could not
+/// read their clone as on the branch, and setup leaves a transferring
+/// branch alone until the transfer is over.
+pub(crate) fn set_up_branches_left_starting<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    store: &Arc<Store>,
+    branch_ids: &[String],
+) {
+    for branch_id in branch_ids {
+        let left_starting = matches!(
+            store.get_branch(branch_id),
+            Ok(Some(branch)) if branch.branch_type == store::BranchType::Remote
+                && startup_action(&branch) == Some(StartupAction::SetUp)
+        );
+        if left_starting {
+            trigger_branch_setup(app_handle, store, branch_id, false);
+        }
+    }
+}
+
 /// The startup pass: set up every remote branch a previous run left in
 /// `Starting`, so recovery doesn't wait for a window to load the project,
 /// and set the retry timer of every one it left in `Error`.
@@ -428,11 +450,18 @@ fn wants_setup(branch: &store::Branch, trigger: SetupTrigger) -> bool {
 /// Every failure past the first lookups is returned, and leaves the row in
 /// `Error` with its reason recorded and, unless the checkout refused over
 /// what is in the clone, a retry timer set. One exception: a repair of a
-/// `Running` branch that was refused (a worktree with changes in the way,
-/// commits that would be left behind, a live session in the clone) puts the
-/// row back to `Running`. The branch was usable before the session that
-/// asked came along and is exactly as usable now; only that session fails,
-/// with the reason.
+/// `Running` branch that was blocked by something outside the clone (a live
+/// session working in it, a workstation that is down) puts the row back to
+/// `Running`. The clone is fine and the branch is what it was; only the
+/// session that asked fails, with the reason.
+///
+/// A repair refused over what is in the clone (a worktree with changes in
+/// the way, commits that would be left behind) is a failure like any other
+/// and leaves `Error`: no session can start on the branch until someone has
+/// dealt with the clone, and `Running` would have every queued session ask
+/// for the same repair and be ended by the same refusal, one after another.
+/// `Error` holds the queue, shows the reason, and the error view's Retry
+/// releases it.
 ///
 /// Callers go through [`run_guarded`] or [`request_setup`].
 pub(crate) async fn set_up_branch(
@@ -502,12 +531,15 @@ pub(crate) async fn set_up_branch(
     let provisioned =
         provision_and_check_out(guard, store, host, &branch, request, may_start_workstation).await;
     let error = match provisioned {
-        Ok(()) => {
+        Ok(notice) => {
             let changed = store
                 .update_branch_workspace_status(branch_id, &WorkspaceStatus::Running)
                 .map_err(|e| e.to_string())?;
             host.status_written(branch_id, changed, &WorkspaceStatus::Running);
             host.failure_changed(branch_id, None, false);
+            if let Some(notice) = &notice {
+                host.notice(branch_id, notice);
+            }
             guard.forget_retries(branch_id);
             log::info!(
                 "[workspace_setup] branch={branch_id} checked out '{}' and running",
@@ -525,11 +557,12 @@ pub(crate) async fn set_up_branch(
     let row = store.get_branch(branch_id).ok().flatten();
     match row.and_then(|row| row.workspace_status) {
         Some(WorkspaceStatus::Starting)
-            if trigger == SetupTrigger::Repair && was_running && error.is_refusal() =>
+            if trigger == SetupTrigger::Repair && was_running && error.is_blocked() =>
         {
-            // Nothing was touched, so the branch is what it was. The write
-            // kicks the session queue, which held while the row said
-            // `Starting`.
+            // Nothing was touched and nothing is wrong with the clone, so
+            // the branch is what it was. The write kicks the session queue,
+            // which held while the row said `Starting` and holds on while a
+            // sibling's session has the clone (`drain_branch_queue`).
             if let Ok(changed) =
                 store.update_branch_workspace_status(branch_id, &WorkspaceStatus::Running)
             {
@@ -563,7 +596,7 @@ async fn provision_and_check_out(
     branch: &store::Branch,
     request: &SetupRequest,
     may_start_workstation: bool,
-) -> Result<(), CheckoutError> {
+) -> Result<Option<String>, CheckoutError> {
     let failed = CheckoutError::Failed;
     let checkout = checkout_for(store, branch).map_err(failed)?;
     let workspace = checkout.workspace.as_str();

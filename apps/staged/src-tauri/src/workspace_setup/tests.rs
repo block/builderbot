@@ -171,6 +171,8 @@ struct FakeHost {
     failures: Mutex<Vec<(String, Option<String>)>>,
     /// The branches whose failure was announced as one the user asked for.
     user_asked_failures: Mutex<Vec<String>>,
+    /// What setups that worked told the user: branch, notice.
+    notices: Mutex<Vec<(String, String)>>,
     /// Every retry timer asked for: branch, delay, ticket. Nothing sleeps;
     /// a test fires the ones it wants.
     retries: Mutex<Vec<(String, Duration, u64)>>,
@@ -198,6 +200,7 @@ impl FakeHost {
             written: Mutex::new(Vec::new()),
             failures: Mutex::new(Vec::new()),
             user_asked_failures: Mutex::new(Vec::new()),
+            notices: Mutex::new(Vec::new()),
             retries: Mutex::new(Vec::new()),
             on_check_disconnected: None,
             checked_sessions: Mutex::new(Vec::new()),
@@ -246,6 +249,10 @@ impl FakeHost {
             .rev()
             .find(|(id, _)| *id == branch.id)
             .and_then(|(_, reason)| reason)
+    }
+
+    fn notices(&self) -> Vec<(String, String)> {
+        self.notices.lock().unwrap().clone()
     }
 
     fn user_asked_failures(&self) -> Vec<String> {
@@ -321,7 +328,7 @@ impl SetupHost for FakeHost {
         }
     }
 
-    async fn check_out(&self, checkout: &Checkout) -> Result<(), CheckoutError> {
+    async fn check_out(&self, checkout: &Checkout) -> Result<Option<String>, CheckoutError> {
         self.calls.lock().unwrap().push("check_out");
         if let Some(gate) = &self.gate {
             gate.acquire().await.unwrap().forget();
@@ -370,6 +377,13 @@ impl SetupHost for FakeHost {
                 .unwrap()
                 .push(branch_id.to_string());
         }
+    }
+
+    fn notice(&self, branch_id: &str, notice: &str) {
+        self.notices
+            .lock()
+            .unwrap()
+            .push((branch_id.to_string(), notice.to_string()));
     }
 
     fn retry_later(&self, branch_id: &str, delay: Duration, ticket: u64) {

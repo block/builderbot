@@ -29,9 +29,12 @@ pub(crate) fn checkout_for(store: &Arc<Store>, branch: &store::Branch) -> Result
         .ok_or("Branch has no workspace name")?;
     let clone_dir = branches::resolve_branch_clone_dir(store, branch)?;
     let base_ref = branches::normalize_branch_ref(&branch.base_branch);
-    let base_is_worked_on = branches_in_clone(store, workspace, clone_dir.as_deref())?
-        .iter()
-        .any(|other| other.id != branch.id && other.branch_name == base_ref);
+    let siblings: Vec<String> = branches_in_clone(store, workspace, clone_dir.as_deref())?
+        .into_iter()
+        .filter(|other| other.id != branch.id)
+        .map(|other| other.branch_name)
+        .collect();
+    let base_is_worked_on = siblings.contains(&base_ref);
     Ok(Checkout {
         workspace: workspace.to_string(),
         clone_dir,
@@ -39,6 +42,7 @@ pub(crate) fn checkout_for(store: &Arc<Store>, branch: &store::Branch) -> Result
         base_ref,
         branch_name: branch.branch_name.clone(),
         base_is_worked_on,
+        siblings,
     })
 }
 
@@ -80,13 +84,16 @@ pub(crate) fn branches_in_clone(
 /// reads as on the branch there is nothing to do, and that read is the
 /// verification; if not, the checkout is refused rather than run under an
 /// agent, whose commits would land on the wrong branch.
+///
+/// `Ok(Some(notice))` when the checkout brought commits along that the user
+/// is to be told about ([`super::checkout::check_out_workspace_branch`]).
 pub(super) async fn check_out_in_clone(
     guard: &Arc<SetupGuard>,
     store: &Arc<Store>,
     host: &dyn SetupHost,
     checkout: &Checkout,
     request: &SetupRequest,
-) -> Result<(), CheckoutError> {
+) -> Result<Option<String>, CheckoutError> {
     let failed = CheckoutError::Failed;
     // Before the gate: this can wait on the reconcile service.
     settle_disconnected_sessions(store, host, checkout, request).await;
@@ -97,7 +104,7 @@ pub(super) async fn check_out_in_clone(
     if let Some(live) = live_session_in_clone(store, checkout, request).map_err(failed)? {
         let (workspace, expected) = (&checkout.workspace, &checkout.branch_name);
         return match verify::read_head(host, checkout).await {
-            Ok(head) if verify::is_on_branch(&head, checkout) => Ok(()),
+            Ok(head) if verify::is_on_branch(&head, checkout) => Ok(None),
             Ok(head) => Err(CheckoutError::Blocked(format!(
                 "Workspace '{workspace}' has {head} checked out, where branch '{expected}' was \
                  expected. It was not switched because {live}; try again once that session has \
@@ -107,13 +114,14 @@ pub(super) async fn check_out_in_clone(
         };
     }
 
-    host.check_out(checkout).await?;
+    let notice = host.check_out(checkout).await?;
 
     // The checkout said it worked. `Running` rests on where the clone is,
     // so that is read, not inferred.
     verify::confirm_checked_out(host, checkout)
         .await
-        .map_err(failed)
+        .map_err(failed)?;
+    Ok(notice)
 }
 
 /// A session found working in a clone.
@@ -191,6 +199,38 @@ pub(crate) fn live_session_in_clone(
             })
     };
     Ok(live(false).or_else(|| live(true)))
+}
+
+/// A live session of another branch in `branch`'s clone: what a repair of
+/// `branch` would be blocked by, for as long as it lasts. Read from the
+/// database alone, so the session queue can ask whether a branch it holds
+/// over one is still held ([`crate::session_commands::drain_branch_queue`]).
+pub(crate) fn sibling_session_in_clone(
+    store: &Store,
+    branch: &store::Branch,
+) -> Result<Option<LiveSession>, String> {
+    let Some(workspace) = branch.workspace_name.as_deref() else {
+        return Ok(None);
+    };
+    if branch.branch_type != store::BranchType::Remote {
+        return Ok(None);
+    }
+    let clone_dir = branches::resolve_branch_clone_dir(store, branch)?;
+    for sibling in branches_in_clone(store, workspace, clone_dir.as_deref())? {
+        if sibling.id == branch.id {
+            continue;
+        }
+        let busy = store
+            .get_busy_sessions_for_branch(&sibling.id)
+            .map_err(|e| e.to_string())?;
+        if let Some(session) = busy.first() {
+            return Ok(Some(LiveSession {
+                branch_name: sibling.branch_name,
+                disconnected: session.status == store::SessionStatus::Disconnected,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// Give the `disconnected` sessions in `checkout`'s clone a chance to be

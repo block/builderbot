@@ -15,11 +15,14 @@ interface LocalSetupTask {
 /** Payload of the backend's `workspace-setup-error` event: why a setup run
  *  left the branch in `error`, or null once it has no reason any more.
  *  `userRequested` marks the failure of a setup the user asked for (a new
- *  branch, Retry, Resume), as opposed to one the backend ran on its own. */
+ *  branch, Retry, Resume), as opposed to one the backend ran on its own.
+ *  `notice` comes with a setup that worked and did something the user
+ *  should know of: it put commits it found on the base branch on this one. */
 interface WorkspaceSetupErrorEvent {
   branchId: string;
   error: string | null;
   userRequested?: boolean;
+  notice?: string;
 }
 
 interface WorkspaceLifecycleHooks {
@@ -350,6 +353,12 @@ class WorkspaceLifecycleController {
     this.setupErrorEventSeqByBranch.set(branchId, ++this.setupErrorEventSeq);
     if (error == null) {
       this.clearWorkspaceError(branchId);
+      if (event.notice) {
+        toast.warning('Workspace branch was given existing commits', {
+          description: event.notice,
+          duration: Infinity,
+        });
+      }
       return;
     }
     this.setWorkspaceError(branchId, error);

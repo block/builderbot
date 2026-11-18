@@ -281,3 +281,60 @@ fn deduplicated_pr_branch_pushes_to_the_pr_head_not_its_local_name() {
     assert!(!command.contains("origin feature-x-2 "));
     assert!(!command.contains("feature-x-2:feature-x-2"));
 }
+
+/// Why a push makes no check that the clone is on its branch: the step
+/// names the local branch in its refspec, so it sends that branch from
+/// whatever the clone has checked out. Here that is a sibling branch, as it
+/// is while a sibling's session works in a shared clone, where the check
+/// used to fail the push. The pull request pipeline's push is the same
+/// command.
+#[test]
+fn a_push_works_from_a_clone_that_has_a_sibling_branch_checked_out() {
+    use crate::test_utils::{run_git_in, TempDir, TempGitRepo};
+
+    let seed = TempGitRepo::new();
+    seed.write_file("file.txt", "base\n");
+    seed.commit("base");
+    let origin = TempDir::new("origin");
+    let origin_path = origin.path().to_str().unwrap();
+    run_git_in(seed.path(), &["clone", "--bare", ".", origin_path]);
+    let clone = TempDir::new("workstation");
+    run_git_in(
+        origin.path(),
+        &["clone", origin_path, clone.path().to_str().unwrap()],
+    );
+    run_git_in(clone.path(), &["config", "user.email", "test@example.com"]);
+    run_git_in(clone.path(), &["config", "user.name", "Test"]);
+    run_git_in(clone.path(), &["checkout", "-b", "feature-b"]);
+    std::fs::write(clone.path().join("b.txt"), "b\n").unwrap();
+    run_git_in(clone.path(), &["add", "b.txt"]);
+    run_git_in(clone.path(), &["commit", "-m", "feature-b's work"]);
+    let pushed = run_git_in(clone.path(), &["rev-parse", "HEAD"]);
+    run_git_in(
+        clone.path(),
+        &["checkout", "-b", "feature-a", "origin/main"],
+    );
+
+    let push = build_push_pipeline_steps("feature-b", "feature-b", PUSH);
+    let pr = build_create_pr_pipeline_steps("pull request", "main", "", "feature-b", "feature-b");
+    let (_, command, _) = command_at(&push, 0);
+    assert_eq!(command_at(&pr, 3).1, command);
+    let mut sh = std::process::Command::new("sh");
+    sh.arg("-c").arg(command).current_dir(clone.path());
+    crate::git::strip_git_env(&mut sh);
+    // No hooks of the machine the test runs on.
+    sh.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", "/dev/null");
+    let output = sh.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    assert_eq!(
+        run_git_in(origin.path(), &["rev-parse", "refs/heads/feature-b"]),
+        pushed
+    );
+    assert_eq!(
+        run_git_in(clone.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature-a"
+    );
+}

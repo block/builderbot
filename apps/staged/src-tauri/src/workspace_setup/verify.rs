@@ -25,10 +25,12 @@
 //! ([`SetupTrigger::Repair`]) and starts once the clone reads right. The
 //! repair moves the row to `Starting` for as long as it runs, so the session
 //! queue's own gate holds whatever else is queued. A repair that fails
-//! leaves the row in `Error`, with its reason and a retry timer; one that is
-//! refused, because switching would lose or move work or because another
-//! live session is working in the clone, puts the row back to `Running` and
-//! fails only the session that asked.
+//! leaves the row in `Error`, with its reason and a retry timer. So does one
+//! refused because switching would lose or move work, with no timer: the
+//! error view's Retry is for whoever has dealt with the clone. A start that
+//! finds another live session working in the clone asks for no repair and
+//! leaves the row `Running`: only the session that asked fails, and the
+//! session queue holds the branch's queued rows until that session is done.
 //!
 //! The read and the start it allows are one step as far as other starts and
 //! checkouts in the same clone go: the caller holds the clone's gate
@@ -45,7 +47,7 @@ use tokio::sync::OwnedMutexGuard;
 use crate::branches;
 use crate::store::{self, Store};
 
-use super::clone::checkout_for;
+use super::clone::{checkout_for, live_session_in_clone};
 use super::guard::SetupGuard;
 use super::host::{blox_host, Checkout, SetupHost};
 use super::{run_guarded, SetupRequest};
@@ -279,6 +281,20 @@ pub(crate) async fn verify_session_checkout(
     );
 
     let repair = SetupRequest::repair_for(session_id);
+    // A session at work in the clone rules the repair out, and the database
+    // says so. The start fails here, with the cause, rather than take the
+    // row out of `Running` for a run that could only be blocked. A
+    // `disconnected` session is left to the repair, which has it settled
+    // first.
+    if let Some(live) =
+        live_session_in_clone(store, &checkout, &repair)?.filter(|live| !live.disconnected)
+    {
+        return Err(format!(
+            "Workspace '{workspace}' had {found} checked out, where this session's branch \
+             '{expected}' was expected, and it could not be switched: {live}; try again once \
+             that session has finished."
+        ));
+    }
     run_guarded(guard, store, host, &branch.id, repair)
         .await
         .map_err(|e| {

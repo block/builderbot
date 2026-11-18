@@ -527,9 +527,11 @@ impl Run<'_> {
     /// `Running` means the clone is on the branch as well as the workstation
     /// being up (`workspace_setup`), and the resume alone vouches only for
     /// the second. A row whose clone was not read, or read as somewhere
-    /// else, keeps its status: the status pollers find its workstation
-    /// running and put it through branch setup, which is what checks the
-    /// branch out.
+    /// else, says `Starting`: its workstation is up and its branch is still
+    /// to be checked out, which is branch setup's to do. Setup leaves a
+    /// transferring branch alone, so it is asked for once the transfer has
+    /// ended (`workspace_setup::set_up_branches_left_starting`). Nothing
+    /// else would: no poller looks at a `Suspended` or `Stopped` row.
     fn mark_resumed_rows_running(
         &self,
         inspection: &Inspection,
@@ -540,9 +542,14 @@ impl Run<'_> {
                 .workspace
                 .as_deref()
                 .is_some_and(|workspace| matches!(resumed.get(workspace), Some(None)));
-            if came_back && row.is_on_its_branch() {
+            if came_back {
+                let status = if row.is_on_its_branch() {
+                    WorkspaceStatus::Running
+                } else {
+                    WorkspaceStatus::Starting
+                };
                 self.store
-                    .update_branch_workspace_status(&source.branch.id, &WorkspaceStatus::Running)?;
+                    .update_branch_workspace_status(&source.branch.id, &status)?;
             }
         }
         Ok(())

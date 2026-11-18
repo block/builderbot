@@ -749,7 +749,7 @@ pub(crate) async fn clone_repo_into_workspace(
     clone_dir: &str,
     repo_slug: &str,
     checkout: &BranchCheckout<'_>,
-) -> Result<(), CheckoutError> {
+) -> Result<Option<String>, CheckoutError> {
     let failed = CheckoutError::Failed;
     let repo_path = resolve_workspace_repo_path(ws_name, clone_dir).map_err(|e| {
         failed(format!(
@@ -808,16 +808,18 @@ pub(crate) async fn check_out_branch_in_workspace(
     ws_name: &str,
     remote_dir: Option<&str>,
     checkout: &BranchCheckout<'_>,
-) -> Result<(), CheckoutError> {
+) -> Result<Option<String>, CheckoutError> {
     let workspace = ws_name.to_string();
     let remote_dir = remote_dir.map(str::to_string);
     let base = checkout.base_ref.to_string();
     let branch = checkout.branch_name.to_string();
     let base_is_worked_on = checkout.base_is_worked_on;
+    let siblings = checkout.siblings.to_vec();
     tauri::async_runtime::spawn_blocking(move || {
         // Tracked for everything but the reads (`rev-parse`, the
         // `for-each-ref` that asks whether the clone has the branch, and the
-        // `log` and `status` that ask what a switch would leave behind):
+        // `log`, `rev-list` and `status` that ask what a switch would leave
+        // behind):
         // Blox SIGKILLs a transient git at 60 s, which a fetch on a large
         // repo can outlast, and a checkout or fast-forward far from where
         // the tree is (or smudging LFS files) can outlast it too, leaving
@@ -828,6 +830,7 @@ pub(crate) async fn check_out_branch_in_workspace(
                 Some(&"rev-parse")
                     | Some(&"for-each-ref")
                     | Some(&"log")
+                    | Some(&"rev-list")
                     | Some(&"--no-optional-locks")
             ) {
                 ExecMode::Transient
@@ -843,6 +846,7 @@ pub(crate) async fn check_out_branch_in_workspace(
                 base_ref: &base,
                 branch_name: &branch,
                 base_is_worked_on,
+                siblings: &siblings,
             },
         )
     })

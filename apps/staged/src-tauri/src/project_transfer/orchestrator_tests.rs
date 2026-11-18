@@ -2648,11 +2648,12 @@ fn a_resume_honours_cancel_and_leaves_the_rows_running() {
 
 /// A resume vouches for the workstation being up, not for what its clone
 /// has checked out, and `Running` means both. A row whose clone the
-/// transfer's own inspection read as on another branch keeps its status:
-/// the status pollers find the workstation running and put the branch
-/// through setup, which is what checks it out.
+/// transfer's own inspection read as on another branch is left `Starting`
+/// when the transfer is blocked, not `Suspended` on a workstation that is
+/// up: `Starting` is what branch setup, asked for once the transfer has
+/// ended, acts on.
 #[test]
-fn a_resumed_row_whose_clone_is_on_another_branch_is_not_marked_running() {
+fn a_resumed_row_whose_clone_is_on_another_branch_is_left_starting() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
     f.transfer(true).result.expect("to remote");
     git(&f.checkout(0), &["checkout", "-b", "elsewhere"]);
@@ -2668,13 +2669,14 @@ fn a_resumed_row_whose_clone_is_on_another_branch_is_not_marked_running() {
         .calls()
         .contains(&format!("resume {}", f.workspace())));
     assert!(err.contains("has elsewhere checked out"), "{err}");
-    let status = f
-        .store
-        .get_branch(&f.branches[0].id)
-        .unwrap()
-        .unwrap()
-        .workspace_status;
-    assert_eq!(status, Some(WorkspaceStatus::Suspended));
+    let row = f.store.get_branch(&f.branches[0].id).unwrap().unwrap();
+    assert_eq!(row.workspace_status, Some(WorkspaceStatus::Starting));
+    // The transfer is over and the row is one the setup trigger takes.
+    assert!(!crate::project_transfer::is_branch_transferring(&row.id));
+    assert_eq!(
+        crate::workspace_setup::startup_action(&row),
+        Some(crate::workspace_setup::StartupAction::SetUp)
+    );
 }
 
 // ---------------------------------------------------------------------------

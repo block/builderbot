@@ -1,7 +1,8 @@
 //! `Error` has a way out: every failure records why and sets a retry, the
 //! retry sets the branch up once its workstation is running without the
-//! card noticing until it has, and a refused repair does not turn a branch
-//! that was `Running` into a failed one.
+//! card noticing until it has. A repair refused over what is in the clone
+//! fails the branch like any setup, with no timer; one blocked by something
+//! outside the clone leaves a `Running` branch `Running`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -325,12 +326,15 @@ async fn a_branch_seen_failed_gets_one_timer() {
     assert_eq!(host.retries().len(), 2);
 }
 
-/// A repair that is refused changed nothing in the clone, so a branch that
-/// was `Running` is `Running` again: only the session that asked fails,
-/// with the reason. Here the clone is on another branch with uncommitted
-/// changes, which a checkout would carry across.
+/// A repair refused over what is in the clone changed nothing in it, but no
+/// session can start on the branch until someone has dealt with the clone.
+/// The branch goes to `Error` with the reason and no timer, where the
+/// session queue holds its rows instead of ending them one after another on
+/// the same refusal, and the error view's Retry lets them go. The session
+/// that asked fails with the reason. Here the clone is on another branch
+/// with uncommitted changes, which a checkout would carry across.
 #[tokio::test]
-async fn a_refused_repair_leaves_a_running_branch_running() {
+async fn a_repair_refused_over_the_clone_fails_the_branch_with_no_timer() {
     let (_origin, clone) = origin_and_workstation_clone();
     let (store, project) = store_with_project();
     let branch = running_branch(&store, &project, "feature-b");
@@ -349,23 +353,37 @@ async fn a_refused_repair_leaves_a_running_branch_running() {
     ] {
         assert!(error.contains(part), "{part}: {error}");
     }
-    assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Running));
-    assert_eq!(host.failure_of(&branch), None);
-    assert_eq!(host.retries(), vec![]);
-    // The row went through `Starting`; the write back kicks the queue that
-    // held meanwhile.
-    assert_eq!(
-        host.written(),
-        vec![(branch.id.clone(), true, WorkspaceStatus::Running)]
+    assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Error));
+    let reason = host.failure_of(&branch).expect("a reason on the card");
+    assert!(
+        reason.contains("uncommitted changes to 1 file(s)"),
+        "{reason}"
     );
+    assert_eq!(host.retries(), vec![]);
+    assert_eq!(host.written(), vec![]);
     assert_eq!(head_branch(clone.path()), "feature-a");
     let dirty = run_git_in(clone.path(), &["status", "--porcelain"]);
     assert!(dirty.contains("file.txt"), "{dirty}");
+
+    // The changes are committed where they belong and the user retries.
+    run_git_in(clone.path(), &["commit", "-am", "feature-a's work"]);
+    set_up_under(
+        &Arc::new(SetupGuard::default()),
+        &store,
+        &host,
+        &branch,
+        SetupTrigger::Requested,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Running));
+    assert_eq!(head_branch(clone.path()), "feature-b");
+    assert_eq!(host.failure_of(&branch), None);
 }
 
 /// The same for commits a switch would leave behind on the base branch.
 #[tokio::test]
-async fn a_repair_refused_over_stranded_commits_leaves_the_branch_running() {
+async fn a_repair_refused_over_stranded_commits_fails_the_branch() {
     let (_origin, clone) = origin_and_workstation_clone();
     let (store, project) = store_with_project();
     let branch = running_branch(&store, &project, "feature-b");
@@ -380,16 +398,17 @@ async fn a_repair_refused_over_stranded_commits_leaves_the_branch_running() {
     for part in ["'main'", "'feature-b'", "agent work"] {
         assert!(error.contains(part), "{part}: {error}");
     }
-    assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Running));
-    assert_eq!(host.failure_of(&branch), None);
+    assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Error));
+    assert!(host.failure_of(&branch).is_some());
     assert_eq!(host.retries(), vec![]);
     assert_eq!(head_branch(clone.path()), "main");
     let main = run_git_in(clone.path(), &["rev-parse", "main"]);
     assert_eq!(main.trim(), stranded);
 }
 
-/// A repair that finds the workstation down is refused too: what the row of
-/// a stopped workstation should say is the pollers' to settle.
+/// A repair that finds the workstation down is blocked by something outside
+/// the clone and leaves the row `Running`: what the row of a stopped
+/// workstation should say is the pollers' to settle.
 #[tokio::test]
 async fn a_repair_never_starts_a_workstation_for_a_running_row() {
     let (_origin, clone) = origin_and_workstation_clone();

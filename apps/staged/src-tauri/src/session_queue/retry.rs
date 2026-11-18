@@ -15,6 +15,11 @@
 //! a fresh first attempt anyway. Entries are pruned on every drain to the rows
 //! still queued on the branch, so a row a Stop or a forced start took leaves
 //! nothing behind.
+//!
+//! A start that fails over something that is not the row's failure and will
+//! clear on its own is held instead ([`QueuedStartAttempts::hold`]): the
+//! row keeps its place and its attempts, and is looked at again after
+//! [`QUEUE_HOLD_RECHECK`].
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -53,11 +58,18 @@ pub(crate) fn queued_start_retry(failures: u32) -> QueuedStartRetry {
     }
 }
 
+/// How long a held row waits before the drain looks at what holds it again.
+/// The look is a database read, so it is short: the queue moves within
+/// seconds of the cause going away.
+pub(crate) const QUEUE_HOLD_RECHECK: Duration = Duration::from_secs(5);
+
 struct Attempt {
     failures: u32,
     /// When the next start may be tried; a kick before then leaves the row
     /// where it is rather than spending an attempt on it.
     retry_at: Instant,
+    /// The row is waiting on something other than its own failed start.
+    held: bool,
 }
 
 /// Per-row pre-claim start failures, by branch.
@@ -86,6 +98,7 @@ impl QueuedStartAttempts {
                     Attempt {
                         failures,
                         retry_at: now + delay,
+                        held: false,
                     },
                 );
             }
@@ -97,6 +110,32 @@ impl QueuedStartAttempts {
             }
         }
         retry
+    }
+
+    /// Keep `session_id` where it is until `until` without counting a failed
+    /// start against it.
+    pub(crate) fn hold(&self, branch_id: &str, session_id: &str, until: Instant) {
+        let mut by_branch = self.by_branch.lock().unwrap();
+        let rows = by_branch.entry(branch_id.to_string()).or_default();
+        let failures = rows.get(session_id).map_or(0, |a| a.failures);
+        rows.insert(
+            session_id.to_string(),
+            Attempt {
+                failures,
+                retry_at: until,
+                held: true,
+            },
+        );
+    }
+
+    /// Whether `session_id` was last left where it is by [`Self::hold`].
+    pub(crate) fn is_held(&self, branch_id: &str, session_id: &str) -> bool {
+        self.by_branch
+            .lock()
+            .unwrap()
+            .get(branch_id)
+            .and_then(|rows| rows.get(session_id))
+            .is_some_and(|attempt| attempt.held)
     }
 
     /// Whether `session_id` is waiting out the delay from a failed start.

@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use super::super::checkout::{local_branch_exists, BranchCheckout};
+use super::super::clone::sibling_session_in_clone;
 use super::super::guard::SetupGuard;
 use super::super::host::SetupHost;
 use super::super::verify::{parse_clone_head, verify_session_checkout, CloneHead};
@@ -339,8 +340,11 @@ async fn a_session_start_reads_once_more_after_an_unanswered_read() {
 
 /// Two branches of one repository share a clone. While a session of one is
 /// live in it the clone is not switched under that agent: the other
-/// branch's session fails, naming both. Once the clone is free the same
-/// start repairs it.
+/// branch's session, or pipeline, fails, naming both and the cause. The
+/// database already says so, so no repair is run for it: one read of the
+/// clone, and the row never leaves `Running`. The session queue holds the
+/// branch's queued rows on the same fact ([`sibling_session_in_clone`]).
+/// Once the clone is free the same start repairs it.
 #[tokio::test]
 async fn a_clone_another_live_session_works_in_is_not_switched() {
     let (_origin, clone) = origin_and_workstation_clone();
@@ -358,9 +362,18 @@ async fn a_clone_another_live_session_works_in_is_not_switched() {
     assert!(error.contains("branch 'feature-a'"), "{error}");
     assert!(error.contains("'feature-b'"), "{error}");
     assert!(error.contains("running in the same clone"), "{error}");
-    assert_eq!(host.count("check_out"), 0);
+    assert_eq!(calls(&host), vec!["clone_head"]);
+    assert_eq!(host.written(), vec![]);
+    assert_eq!(host.failures(), vec![]);
     assert_eq!(head_branch(clone.path()), "feature-a");
     assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Running));
+    let held_by = sibling_session_in_clone(&store, &branch).unwrap();
+    assert_eq!(
+        held_by.map(|live| live.branch_name).as_deref(),
+        Some("feature-a")
+    );
+    // The sibling is not held by its own session.
+    assert_eq!(sibling_session_in_clone(&store, &sibling), Ok(None));
 
     store
         .update_session_status(
@@ -370,6 +383,7 @@ async fn a_clone_another_live_session_works_in_is_not_switched() {
             None,
         )
         .unwrap();
+    assert_eq!(sibling_session_in_clone(&store, &branch), Ok(None));
     start_session_on(&store, &host, &branch, "session-b")
         .await
         .unwrap();

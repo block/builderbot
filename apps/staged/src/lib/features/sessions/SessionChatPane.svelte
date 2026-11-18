@@ -193,6 +193,7 @@
     type AcpTranscriptEvent,
     type AcpTranscriptGroup,
   } from './acpTranscript';
+  import { hiddenNoteDoneMessageIds } from './noteDoneMessage';
   import PlanCard from './PlanCard.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
@@ -779,10 +780,23 @@
     );
     return previousGrouped;
   });
+  /**
+   * The groups the transcript shows: all of them, less the bare "Done" a note
+   * session sends to close a turn after a saved `write_note` call (see
+   * `noteDoneMessage.ts`). The saved-note row above already says it. The
+   * group is left out of the list rather than rendered empty, so it takes no
+   * gap in the column and is not a scroll anchor. The rule runs on every
+   * rebuild: a message that grows past the word comes back whole.
+   */
+  let renderedGroups = $derived.by(() => {
+    const hidden = hiddenNoteDoneMessageIds(grouped);
+    if (hidden.size === 0) return grouped;
+    return grouped.filter((group) => group.type !== 'assistant' || !hidden.has(group.message.id));
+  });
   /** Number-valued so per-group template expressions can depend on "am I the
    *  last group?" without re-running whenever the grouped array identity
    *  changes — deriveds cut propagation when the value is equal. */
-  let lastGroupIndex = $derived(grouped.length - 1);
+  let lastGroupIndex = $derived(renderedGroups.length - 1);
   /** Latest ACP plan, pinned above the transcript rather than rendered in it. */
   let plan = $derived.by(() => latestPlan(acpMetadataMessages));
   /** Pikchr sources of successful render_pikchr tool calls, shown inline as diagrams. */
@@ -3458,7 +3472,7 @@
             {/if}
           </div>
         {/if}
-        {#each grouped as group, groupIdx (transcriptGroupKey(group))}
+        {#each renderedGroups as group, groupIdx (transcriptGroupKey(group))}
           <div
             in:messageSlide
             class={group.type === 'user' ? 'transcript-group user-group' : 'transcript-group'}

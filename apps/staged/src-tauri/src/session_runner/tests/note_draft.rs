@@ -211,6 +211,7 @@ fn a_session_without_a_note_has_no_seed() {
     store.create_session(&session).unwrap();
     assert_eq!(stored_note_seed(&store, &session.id), None);
     assert_eq!(remote_note_draft_seed(&store, &session.id), None);
+    assert!(!stored_note_has_body(&store, &session.id));
 }
 
 /// Remote run start is the outbox recovery: collect, then clear. The draft
@@ -324,6 +325,90 @@ fn a_failed_draft_seed_leaves_the_recovery_settled() {
         &session_id,
         recovery
     ));
+}
+
+/// The automatic follow-up guards against storing an empty note, so it is
+/// due only for a turn that delivered nothing on a note with no stored
+/// body, and only while the run has its one attempt left.
+#[test]
+fn the_automatic_follow_up_is_due_only_for_an_undelivered_note_with_no_stored_body() {
+    // (turn delivered, stored note has a body, attempts used) -> due
+    let cases = [
+        // A fresh note's silent turn: asked once, then left alone.
+        (false, false, 0, true),
+        (false, false, NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS, false),
+        // A chat answer on a note that has a body: the stored note stands.
+        (false, true, 0, false),
+        (false, true, NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS, false),
+        // A delivered note needs no prompt, fresh or amended.
+        (true, false, 0, false),
+        (true, true, 0, false),
+        (true, false, NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS, false),
+        (true, true, NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS, false),
+    ];
+    for (turn_delivered, stored_note_has_body, attempts_used, due) in cases {
+        assert_eq!(
+            note_write_followup_due(turn_delivered, stored_note_has_body, attempts_used),
+            due,
+            "delivered={turn_delivered} stored_body={stored_note_has_body} \
+             attempts={attempts_used}"
+        );
+    }
+}
+
+/// The decision as the run loop makes it, from the store: a turn that
+/// answered in chat and called nothing. On a fresh note (a blank stored
+/// body) the follow-up is sent; on an amended one it is not, so the hooks
+/// keep the stored note and its timestamp. A branch note and a project note
+/// are read the same way.
+#[test]
+fn a_chat_only_turn_gets_the_follow_up_on_a_fresh_note_and_none_on_an_amended_one() {
+    // (stored body, follow-up due)
+    let notes = [("", true), ("  \n", true), (STORED_NOTE, false)];
+    for project_note in [false, true] {
+        for (content, due) in notes {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let session_id = note_session(&store, project_note, content);
+            let turn_start = store
+                .add_session_message(&session_id, MessageRole::User, "Why does the test pass?")
+                .unwrap();
+            store
+                .add_session_message(
+                    &session_id,
+                    MessageRole::Assistant,
+                    "It never asks for a second page.",
+                )
+                .unwrap();
+            let slot = new_submission_slot();
+            let follow_up = |attempts_used| {
+                note_write_followup_due(
+                    note_turn_delivered(&store, &session_id, turn_start, &slot),
+                    stored_note_has_body(&store, &session_id),
+                    attempts_used,
+                )
+            };
+
+            assert_eq!(
+                stored_note_has_body(&store, &session_id),
+                !due,
+                "project_note={project_note} content={content:?}"
+            );
+            assert_eq!(
+                follow_up(0),
+                due,
+                "project_note={project_note} content={content:?}"
+            );
+            // Fresh or amended, the run never asks twice.
+            assert!(!follow_up(NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS));
+
+            // A turn that did publish is not asked on either kind of note.
+            crate::note_tool::store_submission(&slot, tool_submission(VALID_NOTE_BODY));
+            assert!(
+                !follow_up(0),
+                "project_note={project_note} content={content:?}"
+            );
+        }
+    }
 }
 
 #[test]

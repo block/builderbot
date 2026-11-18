@@ -467,7 +467,8 @@ fills. From there it feeds, with no further round trip:
 - the "did this turn deliver a note" decision behind the `write_note`
   follow-up prompt, so a remote turn that did call the tool is never asked
   to call it again — the follow-up fires only when the outbox has no `done`
-  for this turn _and_ the `---` fallback found nothing;
+  for this turn _and_ the `---` fallback found nothing _and_ the note has
+  no stored body (see _Fallback: no `write_note` call_);
 - the post-completion hooks (`resolve_note_title_and_body`,
   `ingest_note_media`), unchanged.
 
@@ -654,10 +655,11 @@ read had just put in the slot, which the loop never checked. A quit that
 lands during the read is not a Stop: the run settles from the read, and
 the sweep recovers a parked row after the relaunch.
 
-A failed read inside the loop is not final while the `write_note`
-follow-up has an attempt left: the turn counts as one that delivered no
-note, the follow-up runs, and its turn is read again. The rule above
-applies to the read after the run's last turn.
+A failed read inside the loop is not final while a `write_note` follow-up
+is due (a note with no stored body, and an attempt left): the turn counts as
+one that delivered no note, the follow-up runs, and its turn is read again.
+An amendment gets no follow-up, so its failed read is the run's last. The
+rule above applies to the read after the run's last turn.
 
 The outbox is never cleared at start, which is what lets that recovery tell
 an uncollected note from an old one.
@@ -799,13 +801,29 @@ never routes file or terminal access through the laptop.
 ## Fallback: no `write_note` call
 
 If a note session's turn ends with no `write_note` call (and no `---`
-separator text, see below), the session runner sends one follow-up prompt
-(`note_write_followup_prompt`): "Write or finish the draft at `<path>` (the
-full note body in markdown, without the title), then call the `write_note`
-tool with `title` and `suggested_next_steps`". A draft the agent wrote but
-never published is covered by the same prompt: it only has to call the
-tool. It does this once; a second silent turn stores the empty note as
-before, so a session cannot loop.
+separator text, see below) and the note has no stored body yet, the session
+runner sends one follow-up prompt (`note_write_followup_prompt`): "Write or
+finish the draft at `<path>` (the full note body in markdown, without the
+title), then call the `write_note` tool with `title` and
+`suggested_next_steps`". A draft the agent wrote but never published is
+covered by the same prompt: it only has to call the tool. It does this once;
+a second silent turn stores the empty note as before, so a session cannot
+loop.
+
+The follow-up is a guard against storing an empty note, so a note that
+already has a stored body gets none (`note_write_followup_due`,
+`stored_note_has_body`). A turn there that publishes nothing is a chat
+answer, or an amendment the agent chose not to make. The post-completion
+hooks keep the stored note for it, and its `updated_at` does not move. The
+chat pane reads that as a note older than the chat and offers "Ask for the
+note to be updated" (`shouldAskForNoteUpdate`); the user decides whether the
+answer belongs in the note. A forced republish would cost an agent turn for
+every chat question and restamp a note that did not change. "Has a stored
+body" is the reading the draft seed uses (`stored_note_seed`): a run whose
+draft was seeded with the stored note is a run that gets no follow-up. One
+gap is accepted: an agent that edits a seeded draft and never publishes it
+is not prompted, and the next run seeds the draft from the stored note
+again.
 
 A run with no `write_note` tool attached (the local server did not start,
 or the Staged MCP on Blox could not be installed) gets a different
@@ -1334,10 +1352,13 @@ fresh note`. The agent writes that file with its file tool, then calls
    and the stored note must be the repaired one. (Applies to remote sessions
    too: the outbox is collected after every settled turn, so the same
    correction prompt and re-collection happen there.)
-4. Ask the agent (in the prompt) to not call any tools: after the turn, one
-   follow-up user message asking it to write or finish the draft and call
-   `write_note` must appear, and the note must be stored after the second
-   turn.
+4. On a fresh note, ask the agent (in the prompt) to not call any tools:
+   after the turn, one follow-up user message asking it to write or finish
+   the draft and call `write_note` must appear, and the note must be stored
+   after the second turn. Then, on that stored note, ask a chat question
+   that needs no note change ("no need to change the note: …"): no
+   follow-up message must appear, the note's content and timestamp must be
+   unchanged, and the chat pane must offer "Ask for the note to be updated".
 5. Local Claude amendment: on a Claude note session whose note is stored and
    holds an embedded image, send "Please update the note: add a short
    Risks section". The log shows `note draft … seeded with the stored note

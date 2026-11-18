@@ -2564,12 +2564,13 @@ pub fn start_session(
                 // exactly as they would a local one — and a repair turn's
                 // rewrite is picked up the same way on the next pass. A
                 // collection failure is logged and, for the rest of the
-                // loop, treated like a turn that delivered nothing: the
-                // follow-up prompt gives the agent a second chance, and the
-                // read after that turn may go through. It is remembered,
-                // though: a run that would complete with its last turn's
-                // read failed does not store an empty note (see
-                // `completed_run_outbox_unread`).
+                // loop, treated like a turn that delivered nothing: on a
+                // note with no stored body the follow-up prompt gives the
+                // agent a second chance, and the read after that turn may
+                // go through. It is remembered, though: a run that would
+                // complete with its last turn's read failed does not store
+                // an empty note, or keep a stored one over a published
+                // amendment (see `completed_run_outbox_unread`).
                 if let (Some(turn_id), Some(ws_name)) =
                     (remote_note_turn.get(), config.workspace_name.clone())
                 {
@@ -2650,14 +2651,20 @@ pub fn start_session(
                         // `write_note` call (and without the `---` fallback)
                         // gets one follow-up asking for the call before an
                         // empty note is stored. Mirrors Buzz's stance: if it
-                        // wasn't posted, it didn't happen.
+                        // wasn't posted, it didn't happen. A note that
+                        // already has a stored body gets none: the turn was
+                        // a chat answer, and the hooks keep the note as it
+                        // is (`note_write_followup_due`).
                         if is_note_session
-                            && note_followup_attempts < NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS
-                            && !note_turn_delivered(
-                                &store,
-                                &config.session_id,
-                                turn_start_message_id,
-                                &note_slot,
+                            && note_write_followup_due(
+                                note_turn_delivered(
+                                    &store,
+                                    &config.session_id,
+                                    turn_start_message_id,
+                                    &note_slot,
+                                ),
+                                stored_note_has_body(&store, &config.session_id),
+                                note_followup_attempts,
                             )
                         {
                             note_followup_attempts += 1;
@@ -4077,6 +4084,33 @@ impl std::fmt::Display for AgentRunError {
 /// session cannot loop.
 const NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS: u32 = 1;
 
+/// Whether a note session's completed turn is followed by the automatic
+/// prompt asking for the note ([`note_write_followup_prompt`]).
+///
+/// The follow-up exists so that an empty note is not stored. It is therefore
+/// sent only when all three hold:
+///
+/// - the turn delivered no note (`turn_delivered`, see
+///   [`note_turn_delivered`]);
+/// - the note has no stored body yet (`stored_note_has_body`, see
+///   [`stored_note_has_body`]);
+/// - the run has an attempt left (`attempts_used` against
+///   [`NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS`]).
+///
+/// A turn on a note that already has a body and that delivered nothing is a
+/// chat answer, or an amendment the agent chose not to make. The
+/// post-completion hooks keep the stored note for it, timestamp included,
+/// which is what lets the chat pane offer to ask for the note to be updated.
+/// Forcing a republish there would cost an agent turn and restamp a note
+/// that did not change.
+fn note_write_followup_due(
+    turn_delivered: bool,
+    stored_note_has_body: bool,
+    attempts_used: u32,
+) -> bool {
+    !turn_delivered && !stored_note_has_body && attempts_used < NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS
+}
+
 /// Follow-up prompt for a note session whose turn ended without delivering
 /// a note. With a `write_note` tool attached (`note_draft_path` is its
 /// draft): write or finish the draft, then call the tool. With none attached
@@ -4184,6 +4218,16 @@ fn stored_note_seed(store: &Store, session_id: &str) -> Option<String> {
     repo.or(project)
         .as_deref()
         .and_then(crate::note_draft::seed_body)
+}
+
+/// Whether the note this session writes already has a stored body: the
+/// session is amending a note, not writing a fresh one. This is the reading
+/// the draft seed uses ([`stored_note_seed`]), so a run whose draft was
+/// seeded is a run that gets no automatic `write_note` follow-up
+/// ([`note_write_followup_due`]). A note the start-of-run outbox recovery
+/// stored counts, since it is stored by the time a turn ends.
+fn stored_note_has_body(store: &Store, session_id: &str) -> bool {
+    stored_note_seed(store, session_id).is_some()
 }
 
 /// Put a local note session's draft in its run-start state, before the agent
@@ -4619,10 +4663,12 @@ fn debug_string_fields(text: &str, prefix: &str) -> Vec<String> {
 /// turn's output).
 ///
 /// The turn loop carries on after a failed read as if nothing was delivered
-/// (it sends the `write_note` follow-up while it has one), so a run can come
-/// out `Completed` with an empty submission slot while a published note sits
-/// on the workstation. Storing an empty note there would also leave the row
-/// `completed`, with nothing looking for the note until a Resume.
+/// (it sends the `write_note` follow-up when one is due, see
+/// [`note_write_followup_due`]), so a run can come out `Completed` with an
+/// empty submission slot while a published note sits on the workstation.
+/// Storing an empty note there, or keeping the stored note of an amendment,
+/// would also leave the row `completed`, with nothing looking for the note
+/// until a Resume.
 fn completed_run_outbox_unread(
     result: &Result<AgentRunOutcome, AgentRunError>,
     stop_requested: bool,

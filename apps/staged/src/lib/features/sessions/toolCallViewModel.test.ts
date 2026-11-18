@@ -679,6 +679,7 @@ describe('write_note tool rows', () => {
   it.each([
     ['Claude', 'mcp__staged__write_note'],
     ['Goose', 'staged: write note'],
+    ['Codex', 'mcp.staged.write_note'],
   ])(
     'renders the %s form as a note with its title and next steps instead of a command',
     (_, name) => {

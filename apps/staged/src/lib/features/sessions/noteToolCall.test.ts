@@ -13,20 +13,36 @@ const steps = {
 
 describe('isWriteNoteToolName', () => {
   it.each([
-    'mcp__staged__write_note',
-    'staged: write note',
-    'staged.write_note',
-    'staged_write_note',
-  ])('recognises %s', (name) => {
+    ['Claude Code', 'mcp__staged__write_note'],
+    ['Goose', 'staged: write note'],
+    ['Codex', 'mcp.staged.write_note'],
+    ['a bare dotted name', 'staged.write_note'],
+    ['a bare underscored name', 'staged_write_note'],
+    ['Codex in another case, padded', '  MCP.Staged.Write_Note  '],
+    ['Goose in another case, hyphenated', 'Staged: Write-Note'],
+  ])('recognises the %s spelling: %j', (_, name) => {
     expect(isWriteNoteToolName(name)).toBe(true);
   });
 
-  it.each(['mcp__other__write_note', 'write_note', 'Write', '', null, undefined])(
-    'rejects %s',
-    (name) => {
-      expect(isWriteNoteToolName(name)).toBe(false);
-    }
-  );
+  it.each([
+    ["another server's tool, Claude Code form", 'mcp__other__write_note'],
+    ["another server's tool, Codex form", 'mcp.other.write_note'],
+    ["another server's tool, Goose form", 'other: write note'],
+    ['a server whose name only ends in staged', 'mcp.unstaged.write_note'],
+    ['another tool on the staged server, Codex form', 'mcp.staged.read_note'],
+    ['a longer tool name, Codex form', 'mcp.staged.write_notes'],
+    ['a doubled prefix', 'mcp.mcp.staged.write_note'],
+    ['a prefix with no separator', 'mcpstaged.write_note'],
+    ['the tool with no server', 'write_note'],
+    ['the Codex prefix with no server', 'mcp.write_note'],
+    ['the name inside a longer title', 'Ran mcp.staged.write_note'],
+    ['a built-in tool', 'Write'],
+    ['an empty string', ''],
+    ['null', null],
+    ['undefined', undefined],
+  ])('rejects %s: %j', (_, name) => {
+    expect(isWriteNoteToolName(name)).toBe(false);
+  });
 });
 
 describe('writeNoteCallFromInput', () => {
@@ -109,10 +125,24 @@ describe('writeNoteToolCall', () => {
     });
   });
 
+  it('reads a Codex call, whose title is `mcp.staged.write_note`', () => {
+    expect(
+      writeNoteToolCall(content('mcp.staged.write_note', { title: 'From Codex' }), undefined)
+    ).toEqual({
+      title: 'From Codex',
+      suggestedNextCommitStep: null,
+      suggestedNextNoteStep: null,
+    });
+    expect(writeNoteToolCall('mcp.staged.write_note', undefined)?.title).toBe('');
+  });
+
   it('is null for any other tool', () => {
     expect(writeNoteToolCall(content('mcp__other__write_note', { title: 'Plan' }), undefined)).toBe(
       null
     );
+    expect(
+      writeNoteToolCall(content('mcp.other.write_note', { title: 'Plan' }), undefined)
+    ).toBeNull();
     expect(writeNoteToolCall('Bash', { title: 'Plan' })).toBeNull();
   });
 });

@@ -196,9 +196,10 @@ trip is accepted; the rejected empty call is what the wording avoids. The
 Goose wording is unchanged.
 
 In the chat pane a `write_note` call (`mcp__staged__write_note` from Claude,
-`staged: write note` from Goose) is not shown as a generic "Ran" row: it gets
-its own "Saved note" / "Saving note" / "Note rejected" row named after the
-title, with the title and the suggested next steps in its details
+`staged: write note` from Goose, `mcp.staged.write_note` from Codex) is not
+shown as a generic "Ran" row: it gets its own "Saved note" / "Saving note" /
+"Note rejected" row named after the title, with the title and the suggested
+next steps in its details
 (`noteToolCall.ts`, `NoteToolDetails.svelte`). The row has no body preview:
 the call carries no body, and the stored note is where the body is read. A
 `body` on a row recorded before this change is ignored. Tool calls still `pending` or

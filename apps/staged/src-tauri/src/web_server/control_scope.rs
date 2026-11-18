@@ -4,15 +4,15 @@
 //! A `DispatchCaller::Control(grant)` carries the project its credential is
 //! scoped to and whether it may write. Every allowlisted control command
 //! has a row in [`CONTROL_SCOPE`] saying how to find the project a call
-//! addresses — a `projectId` argument, a branch id, a session id, or the
-//! `create_image` pair — and whether the command changes the app. The check
-//! runs before any arm, so a confined credential cannot read or touch the
-//! rows of a project outside its reach however it spells the request, and a
-//! read-only credential never reaches a writing arm. The two commands that
-//! take no identifier (`list_projects`, `get_active_sessions`) are filtered
-//! inside their arms instead, through [`reach`]. `create_project` addresses
-//! no project either, since the project does not exist yet. It has its own
-//! rule, below.
+//! addresses — a `projectId` argument, a branch id, a session id, the
+//! `create_image` pair, or a note and the project it is sent to — and
+//! whether the command changes the app. The check runs before any arm, so a
+//! confined credential cannot read or touch the rows of a project outside
+//! its reach however it spells the request, and a read-only credential
+//! never reaches a writing arm. The two commands that take no identifier
+//! (`list_projects`, `get_active_sessions`) are filtered inside their arms
+//! instead, through [`reach`]. `create_project` addresses no project either,
+//! since the project does not exist yet. It has its own rule, below.
 //!
 //! # Reach
 //!
@@ -60,6 +60,23 @@
 //! create a tag if the call assigns it to a project it reaches in the same
 //! request (`assignProjectId`), which is what the tag picker's "Create tag"
 //! row does. The two deletes are not allowlisted at all.
+//!
+//! # Moving and copying notes
+//!
+//! The four note transfers (`move_note_to_project`, `copy_note_to_project`
+//! and their project-note twins) address two projects: the one the note is
+//! in, found through the note, and the `targetProjectId` it is sent to. Both
+//! must be within reach. A credential that reached only the source could
+//! push a note, its session and its repo into a project it was never given;
+//! one that reached only the destination could pull a note out of a project
+//! it cannot read. A copy into the note's own project names one project
+//! twice and needs no more than that one.
+//!
+//! Nothing else a transfer touches lies outside those two. A moved project
+//! note takes its child notes along, and the transfer refuses a child whose
+//! branch is in another project. The repo it adds to the destination is one
+//! the source already tracks, which `add_project_repo` would let the same
+//! credential attach.
 //!
 //! # Table shape
 //!
@@ -117,6 +134,13 @@ pub(crate) enum ScopeKey {
     /// credential is refused, so an agent cannot pull the user's window to
     /// its project.
     OpenProject,
+    /// A branch note's `noteId` and the `targetProjectId` it moves or copies
+    /// to: the note's project, through its branch, and the destination. Both
+    /// must be within reach.
+    NoteTransfer,
+    /// [`ScopeKey::NoteTransfer`] for a project note: `projectNoteId`, whose
+    /// row names its project, and `targetProjectId`.
+    ProjectNoteTransfer,
 }
 
 /// One row per allowlisted control command: how to resolve its project,
@@ -188,6 +212,26 @@ pub(crate) const CONTROL_SCOPE: &[(&str, ScopeKey, Access)] = &[
     (
         "reorder_tag_groups",
         ScopeKey::Unconfined,
+        Access::ReadWrite,
+    ),
+    (
+        "move_note_to_project",
+        ScopeKey::NoteTransfer,
+        Access::ReadWrite,
+    ),
+    (
+        "copy_note_to_project",
+        ScopeKey::NoteTransfer,
+        Access::ReadWrite,
+    ),
+    (
+        "move_project_note_to_project",
+        ScopeKey::ProjectNoteTransfer,
+        Access::ReadWrite,
+    ),
+    (
+        "copy_project_note_to_project",
+        ScopeKey::ProjectNoteTransfer,
         Access::ReadWrite,
     ),
 ];
@@ -365,6 +409,26 @@ pub(crate) fn check_with_store(
             let project_id: String = arg(args, "projectId")?;
             require_in_scope(store, grant, &project_id, "project")
         }
+        ScopeKey::NoteTransfer => {
+            let note_id: String = arg(args, "noteId")?;
+            let target_project_id: String = arg(args, "targetProjectId")?;
+            if scope.is_some() {
+                let project_id = note_project(store, &note_id)?;
+                require_in_scope(store, grant, &project_id, "note")?;
+                require_destination_in_scope(store, grant, &target_project_id)?;
+            }
+            Ok(())
+        }
+        ScopeKey::ProjectNoteTransfer => {
+            let note_id: String = arg(args, "projectNoteId")?;
+            let target_project_id: String = arg(args, "targetProjectId")?;
+            if scope.is_some() {
+                let project_id = project_note_project(store, &note_id)?;
+                require_in_scope(store, grant, &project_id, "project note")?;
+                require_destination_in_scope(store, grant, &target_project_id)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -394,6 +458,27 @@ fn require_in_scope(
     }
     Err(denied(format!(
         "the {what} belongs to another project; {}",
+        covers(allowed)
+    )))
+}
+
+/// [`require_in_scope`] for the project a note transfer is sent to, which
+/// the caller named itself. A destination that does not exist is refused the
+/// same way, so a confined caller learns nothing about projects it cannot
+/// reach.
+fn require_destination_in_scope(
+    store: &Store,
+    grant: &ControlGrant,
+    target_project_id: &str,
+) -> Result<(), String> {
+    let Some(allowed) = grant.project_scope() else {
+        return Ok(());
+    };
+    if within_reach(store, grant, allowed, target_project_id)? {
+        return Ok(());
+    }
+    Err(denied(format!(
+        "the destination is a project outside this credential's reach; {}",
         covers(allowed)
     )))
 }
@@ -453,6 +538,24 @@ fn branch_project(store: &Store, branch_id: &str) -> Result<String, String> {
         .ok_or_else(|| denied(format!("branch {branch_id} not found")))
 }
 
+/// A branch note's project: its branch's.
+fn note_project(store: &Store, note_id: &str) -> Result<String, String> {
+    let note = store
+        .get_note(note_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| denied(format!("note {note_id} not found")))?;
+    branch_project(store, &note.branch_id)
+}
+
+/// A project note's project, which its row names.
+fn project_note_project(store: &Store, note_id: &str) -> Result<String, String> {
+    store
+        .get_project_note(note_id)
+        .map_err(|e| e.to_string())?
+        .map(|note| note.project_id)
+        .ok_or_else(|| denied(format!("project note {note_id} not found")))
+}
+
 /// A session's project: its project note's or its branch's, else — for a
 /// diagram child, which has neither — its parent session's, one level up.
 fn session_project(store: &Store, session_id: &str) -> Result<String, String> {
@@ -483,7 +586,7 @@ fn session_project(store: &Store, session_id: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::control_server::Scope;
-    use crate::store::{Branch, Image, Project, Session};
+    use crate::store::{Branch, Image, Note, Project, ProjectNote, Session};
     use serde_json::json;
 
     /// Two projects, a branch, a branch session, a diagram child of that
@@ -1686,6 +1789,10 @@ mod tests {
             ),
         ];
         writes.extend(catalog_writes());
+        writes
+            .extend(note_transfers().map(|(cmd, id_arg)| {
+                (cmd, json!({ id_arg: "n", "targetProjectId": f.project_a }))
+            }));
         for (cmd, args) in &writes {
             assert_denied(check_with_store(cmd, args, &g, &f.store), "read-only");
         }
@@ -1758,6 +1865,250 @@ mod tests {
             &f.store,
         )
         .unwrap();
+    }
+
+    // -------------------------------------------------------------------
+    // Note transfers
+    // -------------------------------------------------------------------
+
+    /// The four transfers, each with the argument that names its note.
+    fn note_transfers() -> [(&'static str, &'static str); 4] {
+        [
+            ("move_note_to_project", "noteId"),
+            ("copy_note_to_project", "noteId"),
+            ("move_project_note_to_project", "projectNoteId"),
+            ("copy_project_note_to_project", "projectNoteId"),
+        ]
+    }
+
+    /// A branch note and a project note in each of the fixture's projects.
+    struct Notes {
+        branch_a: String,
+        branch_b: String,
+        project_a: String,
+        project_b: String,
+    }
+
+    impl Notes {
+        fn in_fixture(f: &Fixture) -> Self {
+            let branch_note = |branch_id: &str| {
+                let note = Note::new_standalone(branch_id, "Findings", "body");
+                f.store.create_note(&note).unwrap();
+                note.id
+            };
+            let project_note = |project_id: &str| {
+                let note = ProjectNote::new(project_id, "Plan", "body");
+                f.store.create_project_note(&note).unwrap();
+                note.id
+            };
+            Self {
+                branch_a: branch_note(&f.branch_a),
+                branch_b: branch_note(&f.branch_b),
+                project_a: project_note(&f.project_a),
+                project_b: project_note(&f.project_b),
+            }
+        }
+
+        /// The note of `cmd`'s kind in project A, then the one in B.
+        fn of(&self, id_arg: &str) -> (&str, &str) {
+            match id_arg {
+                "noteId" => (&self.branch_a, &self.branch_b),
+                _ => (&self.project_a, &self.project_b),
+            }
+        }
+    }
+
+    fn transfer(id_arg: &str, note_id: &str, target_project_id: &str) -> serde_json::Value {
+        json!({ id_arg: note_id, "targetProjectId": target_project_id })
+    }
+
+    #[test]
+    fn note_transfers_pass_between_the_own_project_and_a_created_one() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let created = create_project_by(&f, "gamma", CALLER);
+        let created_branch_note = Note::new_standalone(&created.branch, "Created", "body");
+        f.store.create_note(&created_branch_note).unwrap();
+        let created_project_note = ProjectNote::new(&created.project, "Created plan", "body");
+        f.store.create_project_note(&created_project_note).unwrap();
+        let g = scoped(&f.project_a);
+        for (cmd, id_arg) in note_transfers() {
+            let (own, _) = notes.of(id_arg);
+            let from_created = match id_arg {
+                "noteId" => &created_branch_note.id,
+                _ => &created_project_note.id,
+            };
+            for (note_id, target) in [
+                (own, created.project.as_str()),
+                (from_created.as_str(), f.project_a.as_str()),
+                // The note's own project: a duplicate for a copy, and the
+                // transfer's own "already in" refusal for a move.
+                (own, f.project_a.as_str()),
+            ] {
+                check_with_store(cmd, &transfer(id_arg, note_id, target), &g, &f.store)
+                    .unwrap_or_else(|e| panic!("{cmd} {note_id} -> {target}: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn note_transfers_are_refused_when_the_note_is_in_a_project_out_of_reach() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        for (cmd, id_arg) in note_transfers() {
+            let (_, foreign) = notes.of(id_arg);
+            // Into the caller's own project, into one it created, and back
+            // into the note's own: wherever it would land, the note is not
+            // the caller's to take or to copy.
+            for target in [&f.project_a, &created.project, &f.project_b] {
+                assert_denied(
+                    check_with_store(cmd, &transfer(id_arg, foreign, target), &g, &f.store),
+                    "belongs to another project",
+                );
+            }
+            assert_denied(
+                check_with_store(cmd, &transfer(id_arg, "nope", &f.project_a), &g, &f.store),
+                "not found",
+            );
+        }
+    }
+
+    #[test]
+    fn note_transfers_are_refused_when_the_destination_is_out_of_reach() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        // A project another session created is no nearer than one the user
+        // made.
+        let theirs = create_project_by(&f, "delta", "session:other");
+        let g = scoped(&f.project_a);
+        for (cmd, id_arg) in note_transfers() {
+            let (own, _) = notes.of(id_arg);
+            for target in [f.project_b.as_str(), theirs.project.as_str(), "nope"] {
+                assert_denied(
+                    check_with_store(cmd, &transfer(id_arg, own, target), &g, &f.store),
+                    "the destination is a project outside this credential's reach",
+                );
+            }
+        }
+    }
+
+    /// Reach is the actor's: another session reaches neither this one's
+    /// project nor what it created, as source or as destination.
+    #[test]
+    fn note_transfers_follow_the_callers_own_reach() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let created = create_project_by(&f, "gamma", CALLER);
+        let other = session_grant("other", 1, &f.project_b);
+        for (cmd, id_arg) in note_transfers() {
+            let (in_a, in_b) = notes.of(id_arg);
+            assert_denied(
+                check_with_store(cmd, &transfer(id_arg, in_a, &f.project_b), &other, &f.store),
+                "belongs to another project",
+            );
+            assert_denied(
+                check_with_store(
+                    cmd,
+                    &transfer(id_arg, in_b, &created.project),
+                    &other,
+                    &f.store,
+                ),
+                "the destination is a project outside this credential's reach",
+            );
+            // A connected app approved for one project is confined the same
+            // way.
+            let app = app_grant("grant-1", &f.project_a);
+            assert_denied(
+                check_with_store(cmd, &transfer(id_arg, in_a, &f.project_b), &app, &f.store),
+                "the destination is a project outside this credential's reach",
+            );
+        }
+    }
+
+    #[test]
+    fn note_transfers_by_an_unconfined_grant_skip_the_lookups() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let g = ControlGrant::test_all_projects();
+        for (cmd, id_arg) in note_transfers() {
+            let (in_a, in_b) = notes.of(id_arg);
+            for (note_id, target) in [
+                (in_a, f.project_b.as_str()),
+                (in_b, f.project_a.as_str()),
+                // Unknown ids are the transfer's to report.
+                ("nope", f.project_a.as_str()),
+                (in_a, "nope"),
+            ] {
+                check_with_store(cmd, &transfer(id_arg, note_id, target), &g, &f.store)
+                    .unwrap_or_else(|e| panic!("{cmd} {note_id} -> {target}: {e}"));
+            }
+        }
+    }
+
+    /// Both arguments are read before anything is looked up, for every
+    /// grant, so a request that names no destination never reaches the arm.
+    #[test]
+    fn note_transfers_need_both_arguments() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        for g in [scoped(&f.project_a), ControlGrant::test_all_projects()] {
+            for (cmd, id_arg) in note_transfers() {
+                let (own, _) = notes.of(id_arg);
+                let err = check_with_store(cmd, &json!({ id_arg: own }), &g, &f.store).unwrap_err();
+                assert!(
+                    err.contains("missing argument: targetProjectId"),
+                    "{cmd}: {err}"
+                );
+                let err = check_with_store(
+                    cmd,
+                    &json!({ "targetProjectId": f.project_a }),
+                    &g,
+                    &f.store,
+                )
+                .unwrap_err();
+                assert!(
+                    err.contains(&format!("missing argument: {id_arg}")),
+                    "{cmd}: {err}"
+                );
+            }
+        }
+    }
+
+    /// A branch note is found through `noteId` only and a project note
+    /// through `projectNoteId` only: the two live in different tables, and a
+    /// request that names the other kind's id must not be let through on it.
+    #[test]
+    fn note_transfers_look_the_note_up_in_its_own_table() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let g = scoped(&f.project_a);
+        for cmd in ["move_note_to_project", "copy_note_to_project"] {
+            assert_denied(
+                check_with_store(
+                    cmd,
+                    &transfer("noteId", &notes.project_a, &f.project_a),
+                    &g,
+                    &f.store,
+                ),
+                "not found",
+            );
+        }
+        for cmd in [
+            "move_project_note_to_project",
+            "copy_project_note_to_project",
+        ] {
+            assert_denied(
+                check_with_store(
+                    cmd,
+                    &transfer("projectNoteId", &notes.branch_a, &f.project_a),
+                    &g,
+                    &f.store,
+                ),
+                "not found",
+            );
+        }
     }
 
     #[test]

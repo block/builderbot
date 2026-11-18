@@ -1107,6 +1107,8 @@ fn older_app_hint(command: &str) -> Option<&'static str> {
         Some("this Staged cannot create projects or add repos through stagedctl yet; update it")
     } else if command == crate::open::OPEN_PROJECT_COMMAND {
         Some("this Staged cannot open a project from the command line yet; update it")
+    } else if crate::notes::is_note_transfer_command(command) {
+        Some("this Staged cannot move or copy notes through stagedctl yet; update it")
     } else {
         None
     }
@@ -1259,6 +1261,58 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "app_error: Project not found: p1");
+    }
+
+    #[test]
+    fn a_404_on_a_note_transfer_hints_at_updating_staged() {
+        // The four transfer commands reached the control server without a
+        // protocol bump, so an older Staged answers them as it answers any
+        // unknown command.
+        for command in crate::notes::NOTE_TRANSFER_COMMANDS {
+            let err = classify(
+                command,
+                404,
+                serde_json::json!({
+                    "error": format!("command not available through stagedctl: {command}")
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(err.exit_code(), 1);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "app_error: command not available through stagedctl: {command} (this \
+                     Staged cannot move or copy notes through stagedctl yet; update it)"
+                )
+            );
+        }
+        // A current app's refusal of a transfer is passed through as it is.
+        let err = classify(
+            "move_note_to_project",
+            400,
+            serde_json::json!({"error": "\"Findings\" is already in Target."}),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            "app_error: \"Findings\" is already in Target."
+        );
+        // A scope refusal keeps its own code and exit 4.
+        let err = classify(
+            "move_note_to_project",
+            403,
+            serde_json::json!({
+                "code": "scope_denied",
+                "error": "the destination is a project outside this credential's reach",
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 4);
+        assert_eq!(
+            err.to_string(),
+            "scope_denied: the destination is a project outside this credential's reach"
+        );
     }
 
     #[test]

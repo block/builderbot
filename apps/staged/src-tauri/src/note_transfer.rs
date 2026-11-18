@@ -64,6 +64,8 @@
 //! note to have finished once; a session that was resumed does not hold a
 //! copy back, since the copy leaves the session where it is.
 
+pub(crate) mod control;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::ErrorKind;

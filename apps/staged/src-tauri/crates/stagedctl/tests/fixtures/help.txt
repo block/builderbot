@@ -24,6 +24,9 @@ Addressing:
   <tag>       a tag id, <group>/<name>, or a bare tag name when only one
               tag has it, as printed by `stagedctl tag list`
   <group>     a tag group name or id, as printed by `stagedctl tag list`
+  <note>      a note's hashtag reference, #note:<id> or #project-note:<id>,
+              as printed by `stagedctl timeline show`; quote it, or leave
+              the # off (an unquoted # starts a shell comment)
 
 Ids print in hashtag reference form (#note:<id>, #project-note:<id>,
 #review:<id>, #commit:<sha>) so they can be pasted directly into session
@@ -48,6 +51,7 @@ Commands:
   timeline    Read project and repo timelines (commits, notes, reviews, images)
   session     Start, observe, wait for, and cancel agent sessions
   image       Attach images to a repo's timeline
+  note        Move and copy notes between projects
   tag         Read and edit the tag catalog: tag groups, tags, and which projects carry them
   connect     Ask the Staged user to approve this client (outside a spawned session)
   disconnect  Forget this machine's connected-app grants and revoke them in Staged
@@ -788,6 +792,164 @@ Options:
 
       --file <PATH>
           Path to the image file
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl note --help ===
+Move and copy notes between projects
+
+Usage: stagedctl note [OPTIONS] <COMMAND>
+
+Commands:
+  move  Move a note, with its session, to another project
+  copy  Copy a note into a project as a new standalone note
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help
+
+=== stagedctl note move --help ===
+Move a note to another project. <NOTE> is a hashtag reference as
+`stagedctl timeline show` prints it: #note:<id> for a branch note,
+#project-note:<id> for a project note. Quote it, or leave the # off: an
+unquoted # starts a shell comment. --to is the destination, a project
+name or id (see `stagedctl project list`).
+
+This is "Move to project" in the note's menu in the app. The note keeps
+its id, so its reference still resolves, and what comes with it depends
+on its kind:
+
+  branch note    lands on the destination's branch for the repo and
+                 subpath the note's branch tracks (the oldest such
+                 branch, when the destination has several). Its session
+                 comes with it, so the transcript stays with the note,
+                 and so do the images and videos in its body. Its link
+                 to the project note it was written under is dropped,
+                 and moving it back does not restore that link. A title
+                 another note on the landing branch has gets a number:
+                 "<title> (2)".
+  project note   lands in the destination project with its session and
+                 media, and takes its child notes along. Each child
+                 lands, with its own session, on the destination's
+                 branch for its repo and subpath, still linked to the
+                 project note.
+
+Commits and code reviews are not part of a note. They stay on the branch
+they were made on.
+
+A destination that does not track a repo the move needs gets it first,
+the way `stagedctl project add-repo` adds one without --branch: a new
+branch named after the project, set up in the background (a worktree,
+or a clone into a remote project's workspace). The output names each
+repo added this way. Such a repo stays in the project when a later step
+of the move fails. A project note's error names it; a branch note's
+does not, so look at `stagedctl project get`.
+
+The app refuses a move, with the note left where it was (exit 1,
+`app_error`, the app's own message), when:
+  - the note is already in the destination project;
+  - the note is still being written, or its session or a child note's
+    is queued or running. Wait for it with `stagedctl session wait`;
+  - the note's branch, or a child note's, tracks no repo;
+  - a project note has child notes and either project runs on a remote
+    workspace, or a child note is on a remote branch or on a branch
+    outside the project note's own project.
+
+Needs write access to both projects, the one the note is in and the
+destination. A read-only credential is refused (exit 4, `scope_denied`),
+and so is a note in a project the credential does not reach. A
+destination it does not reach is not among its projects and exits 1
+(`not_found`). A session may move notes between its own project and the
+projects it created, in either direction, and nowhere else.
+
+A move shows at once in both projects. The user can move the note back
+in the app, and `stagedctl note move` can too. stagedctl has no delete,
+and cannot remove a repo a move added.
+
+Usage: stagedctl note move [OPTIONS] --to <PROJECT> <NOTE>
+
+Arguments:
+  <NOTE>
+          The note: '#note:<id>' or '#project-note:<id>' (see `stagedctl timeline show`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --to <PROJECT>
+          The destination project, by name or id (see `stagedctl project list`)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl note copy --help ===
+Copy a note into a project. <NOTE> and --to are as in `stagedctl note
+move`: a hashtag reference (#note:<id> or #project-note:<id>, quoted or
+without the #) and a project name or id.
+
+This is "Copy to project" in the note's menu in the app. The original
+is left exactly as it is. The copy is a new note with its own id, which
+this command prints as a hashtag reference. It holds the original's
+title and body as they read now, with its own copies of the images and
+videos in the body, and nothing else:
+
+  - no session. The transcript stays with the original, and the copy is
+    editable in the app like a note the user wrote;
+  - no link to a parent project note and no child notes. Copying a
+    project note copies that one note;
+  - no suggested next steps.
+
+A copy of a branch note lands on the destination's branch for the repo
+and subpath the note's branch tracks. A destination that does not track
+that repo gets it first, as in `stagedctl note move`, and the output
+names it. A title another note on the landing branch has gets a number:
+"<title> (2)". A copy of a project note lands in the destination
+project and never adds a repo.
+
+--to may be the project the note is already in. That duplicates the
+note beside the original, on the same branch for a branch note.
+
+The app refuses a copy (exit 1, `app_error`, the app's own message)
+when the note has never finished being written, or when a branch
+note's branch tracks no repo. A finished note whose session was resumed
+and is running again can be copied, where it could not be moved: the
+copy is the note as it reads now.
+
+Needs write access to both projects, the one the note is in and the
+destination, as `stagedctl note move` does: exit 4 (`scope_denied`)
+under a read-only credential or for a note in a project the credential
+does not reach, exit 1 (`not_found`) for a destination it does not
+reach.
+
+A copy shows at once in the destination, where the user can delete it.
+stagedctl has no delete.
+
+Usage: stagedctl note copy [OPTIONS] --to <PROJECT> <NOTE>
+
+Arguments:
+  <NOTE>
+          The note: '#note:<id>' or '#project-note:<id>' (see `stagedctl timeline show`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then live ~/.staged/control/<pid>/discovery.json files, newest first)
+
+      --to <PROJECT>
+          The destination project, by name or id (see `stagedctl project list`)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
 
   -h, --help
           Print help (see a summary with '-h')

@@ -3246,21 +3246,26 @@ pub(crate) async fn dispatch(
             } else {
                 crate::note_transfer::TransferMode::Copy
             };
+            let added = crate::note_transfer::control::AddedRepos::default();
             let note = crate::note_transfer::transfer_branch_note(
                 &store,
                 &note_id,
                 &target_project_id,
                 mode,
                 |key| {
-                    crate::note_transfer::add_repo_to_project(
-                        app_handle.clone(),
-                        Arc::clone(&store),
-                        target_project_id.clone(),
-                        key,
+                    added.watch(
+                        key.clone(),
+                        crate::note_transfer::add_repo_to_project(
+                            app_handle.clone(),
+                            Arc::clone(&store),
+                            target_project_id.clone(),
+                            key,
+                        ),
                     )
                 },
             )
             .await?;
+            let branch_id = note.branch_id.clone();
             let item = match mode {
                 crate::note_transfer::TransferMode::Move => {
                     crate::note_commands::note_to_timeline_item(&store, note)
@@ -3269,7 +3274,16 @@ pub(crate) async fn dispatch(
                     crate::note_commands::standalone_note_to_timeline_item(note)
                 }
             };
-            Ok(serde_json::to_value(item).unwrap())
+            let item = serde_json::to_value(item).unwrap();
+            Ok(match &caller {
+                // A window has the note open and knows where it sent it. A
+                // control caller is told: the branch the note landed on and
+                // the repos the transfer added.
+                DispatchCaller::Control(_) => crate::note_transfer::control::branch_note_answer(
+                    &store, item, &branch_id, added,
+                ),
+                DispatchCaller::Web => item,
+            })
         }
         "move_project_note_to_project" | "copy_project_note_to_project" => {
             let store = get_store(store_mutex)?;
@@ -3280,22 +3294,34 @@ pub(crate) async fn dispatch(
             } else {
                 crate::note_transfer::TransferMode::Copy
             };
+            let added = crate::note_transfer::control::AddedRepos::default();
             let note = crate::note_transfer::transfer_project_note(
                 &store,
                 &project_note_id,
                 &target_project_id,
                 mode,
                 |key| {
-                    crate::note_transfer::add_repo_to_project(
-                        app_handle.clone(),
-                        Arc::clone(&store),
-                        target_project_id.clone(),
-                        key,
+                    added.watch(
+                        key.clone(),
+                        crate::note_transfer::add_repo_to_project(
+                            app_handle.clone(),
+                            Arc::clone(&store),
+                            target_project_id.clone(),
+                            key,
+                        ),
                     )
                 },
             )
             .await?;
-            Ok(serde_json::to_value(note).unwrap())
+            let note = serde_json::to_value(note).unwrap();
+            Ok(match &caller {
+                // As for a branch note: a control caller is told which repos
+                // the note's children brought along.
+                DispatchCaller::Control(_) => {
+                    crate::note_transfer::control::project_note_answer(note, added)
+                }
+                DispatchCaller::Web => note,
+            })
         }
 
         // =====================================================================
@@ -5413,6 +5439,95 @@ mod tests {
             assert!(
                 !source.contains("control_"),
                 "the {what} must not run the control checks: {source}"
+            );
+        }
+    }
+
+    /// A note moved or copied through the control server goes through the
+    /// transfer the app's windows run: one call, with the app's own
+    /// repo-adding step, whoever asks. The caller decides nothing until the
+    /// transfer has returned, and then only how much the answer says: a
+    /// control caller is told where the note landed and which repos were
+    /// added, a window gets the note alone, as it always has.
+    #[test]
+    fn note_transfers_run_the_one_transfer_whoever_asks() {
+        let source = include_str!("web_server.rs");
+        let desktop = include_str!("note_transfer.rs");
+        for (command, transfer, answer, web) in [
+            (
+                "move_note_to_project",
+                "transfer_branch_note(",
+                "note_transfer::control::branch_note_answer(",
+                "DispatchCaller::Web => item,",
+            ),
+            (
+                "copy_note_to_project",
+                "transfer_branch_note(",
+                "note_transfer::control::branch_note_answer(",
+                "DispatchCaller::Web => item,",
+            ),
+            (
+                "move_project_note_to_project",
+                "transfer_project_note(",
+                "note_transfer::control::project_note_answer(",
+                "DispatchCaller::Web => note,",
+            ),
+            (
+                "copy_project_note_to_project",
+                "transfer_project_note(",
+                "note_transfer::control::project_note_answer(",
+                "DispatchCaller::Web => note,",
+            ),
+        ] {
+            let (_, arm) = dispatch_arms(source)
+                .into_iter()
+                .find(|(patterns, _)| patterns.iter().any(|p| p == command))
+                .unwrap_or_else(|| panic!("dispatch should have a `{command}` arm"));
+            assert_eq!(
+                arm.matches(&format!("note_transfer::{transfer}")).count(),
+                1,
+                "the `{command}` arm must run the transfer once, for every caller: {arm}"
+            );
+            // The repo is added by the app's own step. The arm watches it
+            // and does not stand in for it.
+            assert!(
+                arm.contains("added.watch(")
+                    && arm.contains("crate::note_transfer::add_repo_to_project("),
+                "the `{command}` arm must add a repo through the shared step: {arm}"
+            );
+            // Nothing about the caller comes before the transfer.
+            let transfer_at = arm.find(transfer).unwrap();
+            let caller_at = arm
+                .find("caller")
+                .unwrap_or_else(|| panic!("the `{command}` arm should answer by caller: {arm}"));
+            assert!(
+                transfer_at < caller_at,
+                "the `{command}` arm must not branch on its caller before the transfer: {arm}"
+            );
+            let answers = &arm[caller_at..];
+            assert!(
+                answers.contains("DispatchCaller::Control(_) =>") && answers.contains(answer),
+                "a control `{command}` must be answered through `{answer}`: {arm}"
+            );
+            assert!(
+                answers.contains(web),
+                "a web `{command}` must be answered with the note alone: {arm}"
+            );
+
+            // The desktop command is the same transfer with the same step.
+            let marker = format!("pub async fn {command}(");
+            let start = desktop
+                .find(&marker)
+                .unwrap_or_else(|| panic!("note_transfer.rs should define `{command}`"));
+            let rest = &desktop[start..];
+            let end = rest[1..]
+                .find("#[tauri::command")
+                .or_else(|| rest.find("#[cfg(test)]"))
+                .unwrap_or(rest.len());
+            assert!(
+                rest[..end].contains(transfer),
+                "the `{command}` Tauri command must call `{transfer}`: {}",
+                &rest[..end]
             );
         }
     }

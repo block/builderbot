@@ -100,9 +100,10 @@ pub(crate) trait SetupHost: Send + Sync + 'static {
     /// for a `Running` write (see [`branches::workspace_status_written`]).
     fn status_written(&self, branch_id: &str, changed: bool, status: &WorkspaceStatus);
 
-    /// The reason a branch is in `Error` changed: `Some` when a run failed
-    /// it, `None` when a new run began ([`failures`]).
-    fn failure_changed(&self, branch_id: &str, error: Option<&str>);
+    /// The reason a branch is in `Error`: `Some` when a run failed it, with
+    /// whether the user had asked for that run, `None` when it has none any
+    /// more ([`failures`]).
+    fn failure_changed(&self, branch_id: &str, error: Option<&str>, user_asked: bool);
 
     /// Call [`retry::fire`] for `branch_id` with `ticket` once `delay` has
     /// passed.
@@ -212,8 +213,8 @@ impl<R: tauri::Runtime> SetupHost for BloxHost<R> {
         branches::workspace_status_written(&self.app_handle, branch_id, changed, status);
     }
 
-    fn failure_changed(&self, branch_id: &str, error: Option<&str>) {
-        failures::set(&self.app_handle, branch_id, error);
+    fn failure_changed(&self, branch_id: &str, error: Option<&str>, user_asked: bool) {
+        failures::set(&self.app_handle, &self.store, branch_id, error, user_asked);
     }
 
     fn retry_later(&self, branch_id: &str, delay: Duration, ticket: u64) {

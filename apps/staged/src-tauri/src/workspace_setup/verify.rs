@@ -46,7 +46,7 @@ use crate::branches;
 use crate::store::{self, Store};
 
 use super::clone::checkout_for;
-use super::guard::{Patience, SetupGuard};
+use super::guard::SetupGuard;
 use super::host::{blox_host, Checkout, SetupHost};
 use super::{run_guarded, SetupRequest};
 
@@ -278,21 +278,15 @@ pub(crate) async fn verify_session_checkout(
          session starts"
     );
 
-    run_guarded(
-        guard,
-        store,
-        host,
-        &branch.id,
-        SetupRequest::repair_for(session_id),
-        Patience::ToTheEnd,
-    )
-    .await
-    .map_err(|e| {
-        format!(
-            "Workspace '{workspace}' had {found} checked out, where this session's branch \
+    let repair = SetupRequest::repair_for(session_id);
+    run_guarded(guard, store, host, &branch.id, repair)
+        .await
+        .map_err(|e| {
+            format!(
+                "Workspace '{workspace}' had {found} checked out, where this session's branch \
              '{expected}' was expected, and it could not be switched: {e}"
-        )
-    })?;
+            )
+        })?;
 
     // The repair's own word is not taken for it: a run this one joined, or a
     // row that had left `Running` and so had nothing to repair, says nothing

@@ -9,25 +9,26 @@
 //!
 //! So a run is keyed by branch: a second caller for a branch whose setup is
 //! in flight gets that run's result rather than starting its own, and is
-//! told that it joined ([`RunEnd::joined`]), since the run it joined was
+//! told that it joined ([`Run::joined`]), since the run it joined was
 //! started for someone else's reason. Runs for different branches of one
 //! workstation take turns, since they may share a clone.
 //!
 //! A run is its own task. A caller that goes away — a dropped web request, a
 //! closed window — only stops waiting; the setup still finishes and still
-//! writes the branch's status. A caller can also choose to stop waiting
-//! while the run itself is only waiting, for its turn or for a workstation
-//! to boot ([`Patience::WhileWorking`]).
+//! writes the branch's status. Most callers never wait at all
+//! ([`SetupGuard::start`]): the outcome lands on the row.
 //!
-//! The guard holds two more things that are per process for the same
+//! The guard holds three more things that are per process for the same
 //! reason the runs are:
 //!
 //! - the gate of each clone ([`SetupGuard::clone_gate`]), which a setup
 //!   holds over its checkout and an agent start holds from reading the
 //!   clone until its session is live, so neither happens under the other;
-//! - each failed branch's retry count and timer ticket ([`super::retry`]).
+//! - each failed branch's retry count and timer ticket ([`super::retry`]);
+//! - which branches have a setup the user asked for still to end, so its
+//!   failure is announced as one ([`SetupGuard::user_asked`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -35,55 +36,27 @@ use tokio::sync::{watch, OwnedMutexGuard};
 
 use super::SetupOutcome;
 
-/// Where a run is.
-#[derive(Debug, Clone, PartialEq)]
-enum RunState {
-    /// Behind another branch's run on the same workstation, which may itself
-    /// be waiting for the workstation.
-    Queued,
-    /// Doing something that ends on its own time: an exec, a checkout.
-    Working,
-    /// Waiting for a workstation to report running, for minutes at worst.
-    WaitingForWorkstation,
-    Done(Result<SetupOutcome, String>),
-}
+/// How a run ended. `None` in its channel while it is still going.
+type RunResult = Result<SetupOutcome, String>;
 
-/// How long a caller stays with a run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Patience {
-    /// Until the run has a result.
-    ToTheEnd,
-    /// Until the run has a result or is only waiting — for its turn behind
-    /// another branch's run, or for a workstation to boot — whichever comes
-    /// first. The run goes on either way.
-    WhileWorking,
-}
-
-/// What a caller of [`SetupGuard::run`] came back with.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RunEnd {
+/// A run a caller started or joined ([`SetupGuard::start`]).
+pub(crate) struct Run {
     /// Whether the run was already in flight, started by another caller for
     /// its own reason.
     pub(crate) joined: bool,
-    /// The run's result, or `None` when the caller left it waiting
-    /// ([`Patience::WhileWorking`]).
-    pub(crate) result: Option<Result<SetupOutcome, String>>,
+    result: watch::Receiver<Option<RunResult>>,
 }
 
-/// A run's way of saying what it is doing, for callers deciding whether to
-/// stay ([`Patience`]).
-#[derive(Clone)]
-pub(crate) struct Progress {
-    state: Arc<watch::Sender<RunState>>,
-}
-
-impl Progress {
-    pub(crate) fn waiting_for_workstation(&self) {
-        self.state.send_replace(RunState::WaitingForWorkstation);
-    }
-
-    pub(crate) fn working(&self) {
-        self.state.send_replace(RunState::Working);
+impl Run {
+    /// Wait for the run's result.
+    pub(crate) async fn end(mut self) -> RunResult {
+        // The sender is dropped without a result only if the run panicked;
+        // its entry is gone with it.
+        let lost = || Err("Workspace setup ended without a result".to_string());
+        match self.result.wait_for(Option::is_some).await {
+            Ok(result) => result.clone().unwrap_or_else(lost),
+            Err(_) => lost(),
+        }
     }
 }
 
@@ -104,14 +77,16 @@ type CloneKey = (String, Option<String>);
 
 #[derive(Default)]
 pub(crate) struct SetupGuard {
-    /// Branch id → the state of the run in flight for it.
-    in_flight: Mutex<HashMap<String, watch::Receiver<RunState>>>,
+    /// Branch id → the result of the run in flight for it.
+    in_flight: Mutex<HashMap<String, watch::Receiver<Option<RunResult>>>>,
     /// Workspace name → the lock its runs take turns on.
     workspace_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Clone → its gate.
     clone_gates: Mutex<HashMap<CloneKey, Arc<tokio::sync::Mutex<()>>>>,
     /// Branch id → its retry schedule.
     retries: Mutex<HashMap<String, RetryState>>,
+    /// Branches with a setup the user asked for still to end.
+    user_asked: Mutex<HashSet<String>>,
 }
 
 impl SetupGuard {
@@ -126,94 +101,60 @@ impl SetupGuard {
         self.lock_in_flight().contains_key(branch_id)
     }
 
-    /// Run `setup` for `branch_id` on `workspace`, or wait for the run
-    /// already in flight for that branch, and return how it ended.
+    /// Start `setup` for `branch_id` on `workspace` as its own task, or
+    /// join the run already in flight for that branch. Returns at once;
+    /// [`Run::end`] waits for the result.
     ///
-    /// `setup` is not called when the caller joins.
-    pub(crate) async fn run<F, Fut>(
-        self: &Arc<Self>,
-        workspace: &str,
-        branch_id: &str,
-        patience: Patience,
-        setup: F,
-    ) -> RunEnd
+    /// `setup` is not called when the caller joins. It runs once the
+    /// workstation's turn comes.
+    pub(crate) fn start<F, Fut>(self: &Arc<Self>, workspace: &str, branch_id: &str, setup: F) -> Run
     where
-        F: FnOnce(Progress) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<SetupOutcome, String>> + Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = RunResult> + Send + 'static,
     {
-        let (mut state, joined) = {
-            let mut in_flight = self.lock_in_flight();
-            match in_flight.get(branch_id) {
-                Some(state) => (state.clone(), true),
-                None => {
-                    let turn = self.workspace_lock(workspace);
-                    // Taken here when it is free, so a run that starts at
-                    // once is never seen as queued.
-                    let taken = Arc::clone(&turn).try_lock_owned().ok();
-                    let (tx, rx) = watch::channel(match taken {
-                        Some(_) => RunState::Working,
-                        None => RunState::Queued,
-                    });
-                    let tx = Arc::new(tx);
-                    in_flight.insert(branch_id.to_string(), rx.clone());
-                    let entry = InFlight {
-                        guard: Arc::clone(self),
-                        branch_id: branch_id.to_string(),
-                    };
-                    let progress = Progress {
-                        state: Arc::clone(&tx),
-                    };
-                    tauri::async_runtime::spawn(async move {
-                        let result = {
-                            let _turn = match taken {
-                                Some(turn) => turn,
-                                None => {
-                                    let turn = turn.lock_owned().await;
-                                    progress.working();
-                                    turn
-                                }
-                            };
-                            setup(progress).await
-                        };
-                        // Cleared before the result is published: a caller
-                        // that sees the result must be able to start a fresh
-                        // run, not join a finished one.
-                        drop(entry);
-                        tx.send_replace(RunState::Done(result));
-                    });
-                    (rx, false)
-                }
-            }
-        };
-
-        loop {
-            let seen = state.borrow_and_update().clone();
-            match seen {
-                RunState::Done(result) => {
-                    return RunEnd {
-                        joined,
-                        result: Some(result),
-                    }
-                }
-                RunState::Queued | RunState::WaitingForWorkstation
-                    if patience == Patience::WhileWorking =>
-                {
-                    return RunEnd {
-                        joined,
-                        result: None,
-                    }
-                }
-                RunState::Queued | RunState::Working | RunState::WaitingForWorkstation => {}
-            }
-            // The sender is dropped without a result only if the run
-            // panicked; its entry is gone with it.
-            if state.changed().await.is_err() {
-                return RunEnd {
-                    joined,
-                    result: Some(Err("Workspace setup ended without a result".to_string())),
-                };
-            }
+        let mut in_flight = self.lock_in_flight();
+        if let Some(result) = in_flight.get(branch_id) {
+            return Run {
+                joined: true,
+                result: result.clone(),
+            };
         }
+        let (tx, rx) = watch::channel(None);
+        in_flight.insert(branch_id.to_string(), rx.clone());
+        let turn = self.workspace_lock(workspace);
+        let entry = InFlight {
+            guard: Arc::clone(self),
+            branch_id: branch_id.to_string(),
+        };
+        tauri::async_runtime::spawn(async move {
+            let result = {
+                let _turn = turn.lock_owned().await;
+                setup().await
+            };
+            // Cleared before the result is published: a caller that sees
+            // the result must be able to start a fresh run, not join a
+            // finished one.
+            drop(entry);
+            tx.send_replace(Some(result));
+        });
+        Run {
+            joined: false,
+            result: rx,
+        }
+    }
+
+    /// The user asked for `branch_id` to be set up (a new branch, the error
+    /// view's Retry, a resume). The next failure announced for it is
+    /// announced as theirs, which is what raises a toast
+    /// ([`super::failures`]). Forgotten when the run in flight ends.
+    pub(crate) fn user_asked(&self, branch_id: &str) {
+        self.lock_user_asked().insert(branch_id.to_string());
+    }
+
+    /// Whether the user asked for the setup of `branch_id` that is ending,
+    /// asked once: a later failure is not theirs.
+    pub(crate) fn take_user_asked(&self, branch_id: &str) -> bool {
+        self.lock_user_asked().remove(branch_id)
     }
 
     /// Take the gate of the clone at `clone_dir` on `workspace`.
@@ -284,9 +225,13 @@ impl SetupGuard {
         self.retries.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    fn lock_user_asked(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.user_asked.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn lock_in_flight(
         &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<String, watch::Receiver<RunState>>> {
+    ) -> std::sync::MutexGuard<'_, HashMap<String, watch::Receiver<Option<RunResult>>>> {
         self.in_flight.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -316,5 +261,7 @@ struct InFlight {
 impl Drop for InFlight {
     fn drop(&mut self) {
         self.guard.lock_in_flight().remove(&self.branch_id);
+        // A run that ended without announcing a failure used nobody's ask.
+        self.guard.take_user_asked(&self.branch_id);
     }
 }

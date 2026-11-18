@@ -7,7 +7,6 @@ use crate::blox::BloxError;
 use crate::branches;
 use crate::store::{self, Store, WorkspaceStatus};
 
-use super::guard::Progress;
 use super::host::{reports_running, Checkout, SetupHost};
 
 /// `sq blox ws start`, and when that fails without ruling the workstation
@@ -17,7 +16,6 @@ pub(super) async fn start_workstation(
     host: &dyn SetupHost,
     branch: &store::Branch,
     checkout: &Checkout,
-    progress: &Progress,
 ) -> Result<(), String> {
     let workspace = checkout.workspace.as_str();
     let source = format!(
@@ -55,7 +53,6 @@ pub(super) async fn start_workstation(
         branch,
         workspace,
         &format!("`sq blox ws start` failed: {start_error}"),
-        progress,
     )
     .await
 }
@@ -63,24 +60,7 @@ pub(super) async fn start_workstation(
 /// Wait, within [`SetupHost::ready_wait`], for the workstation to report
 /// running. `why` says what the wait was for, for the error when it never
 /// does.
-///
-/// The run says it is waiting for as long as this takes, so a caller that
-/// only stays while the run is working ([`Patience::WhileWorking`]) leaves.
 pub(super) async fn wait_until_running(
-    store: &Arc<Store>,
-    host: &dyn SetupHost,
-    branch: &store::Branch,
-    workspace: &str,
-    why: &str,
-    progress: &Progress,
-) -> Result<(), String> {
-    progress.waiting_for_workstation();
-    let result = poll_until_running(store, host, branch, workspace, why).await;
-    progress.working();
-    result
-}
-
-async fn poll_until_running(
     store: &Arc<Store>,
     host: &dyn SetupHost,
     branch: &store::Branch,

@@ -2378,21 +2378,19 @@ pub(crate) async fn create_remote_branch_impl(
 ///
 /// Also the error view's Retry: a branch in `Error` is set up again.
 ///
-/// Returns the status the branch's row holds, so the caller does not infer
-/// one from the call having resolved: `running` once the branch is checked
-/// out on the workstation, or `starting` when setup is still waiting for the
-/// workstation to boot, which it goes on doing after this returns. An error
-/// is the failure that left the branch in `Error`. The shared routine in
-/// [`crate::workspace_setup`], which a concurrent call for the same branch
-/// joins.
+/// Only asks: this returns once the setup run is under way, joined to the
+/// one in flight when there is one. The backend carries the run through, its
+/// outcome lands on the branch's row, and a failure's reason is announced as
+/// a `workspace-setup-error` event. An error here means the request could
+/// not be made. See [`crate::workspace_setup::request_setup`].
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_workspace(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: AppHandle,
     branch_id: String,
-) -> Result<PollWorkspaceResult, String> {
+) -> Result<(), String> {
     let store = get_store(&store)?;
-    crate::workspace_setup::request_branch_setup(&app_handle, &store, &branch_id).await
+    crate::workspace_setup::request_branch_setup(&app_handle, &store, &branch_id)
 }
 
 /// Return the value of the `BLOX_ENV` environment variable, if set.
@@ -2625,8 +2623,9 @@ pub(crate) async fn resume_workspace_impl(
         return Err(e.to_string());
     }
 
+    // The user's resume: a setup that fails after it is theirs to hear of.
     for branch_id in &branch_ids {
-        crate::workspace_setup::trigger_branch_setup(app_handle, store, branch_id);
+        crate::workspace_setup::trigger_branch_setup(app_handle, store, branch_id, true);
     }
 
     Ok(branch_ids)

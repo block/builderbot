@@ -418,7 +418,7 @@ fn app_effects<'a>(store: &'a Arc<Store>, app_handle: &'a AppHandle) -> PollEffe
             branches::workspace_status_written(app_handle, branch_id, changed, status);
         }),
         trigger_setup: Box::new(move |branch_id| {
-            super::trigger_branch_setup(app_handle, store, branch_id);
+            super::trigger_branch_setup(app_handle, store, branch_id, false);
         }),
         arm_retry: Box::new(move |branch_id| {
             super::arm_retry(app_handle, store, branch_id);

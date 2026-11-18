@@ -786,14 +786,13 @@ export function createRemoteBranch(
 }
 
 /**
- * Set up a remote branch on its Blox workstation (or retry a branch in
- * `error`). Resolves with the status the branch row holds afterwards:
- * `running` once it is checked out and verified, `starting` when the backend
- * returned early while the workstation boots (setup carries on there and its
- * outcome lands on the row), or whatever else the row holds now. Rejects with
- * the reason when setup failed and left the branch in `error`.
+ * Ask the backend to set up a remote branch on its Blox workstation (or to
+ * retry one in `error`). Only asks: it resolves once the backend's setup run
+ * is under way, the branch's status says how it ends, and a failure's reason
+ * arrives as a `workspace-setup-error` event. Rejects only when the request
+ * itself could not be made.
  */
-export function startWorkspace(branchId: string): Promise<PollWorkspaceResult> {
+export function startWorkspace(branchId: string): Promise<void> {
   return invokeCommand('start_workspace', { branchId });
 }
 

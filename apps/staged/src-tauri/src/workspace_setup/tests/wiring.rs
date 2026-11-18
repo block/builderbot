@@ -94,10 +94,11 @@ fn the_startup_pass_is_run_and_acts_on_what_it_finds() {
         pass,
         "branches_awaiting_setup(store)",
     );
-    assert_calls(
+    assert_before(
         "resume_pending_setups",
         pass,
-        "Some(StartupAction::SetUp) => trigger_branch_setup(app_handle, store, &branch.id)",
+        "Some(StartupAction::SetUp) => {",
+        "trigger_branch_setup(app_handle, store, &branch.id, false)",
     );
     assert_calls(
         "resume_pending_setups",
@@ -111,10 +112,16 @@ fn the_startup_pass_is_run_and_acts_on_what_it_finds() {
 #[test]
 fn a_trigger_runs_setup_and_a_retry_is_armed_on_the_shared_guard() {
     let trigger = body_of(SETUP, "pub(crate) fn trigger_branch_setup<");
+    assert_calls("trigger_branch_setup", trigger, "SetupGuard::global()");
     assert_calls(
         "trigger_branch_setup",
         trigger,
-        "ensure_branch_set_up(&app_handle, &store, &branch_id, SetupTrigger::Observed)",
+        "SetupRequest::new(SetupTrigger::Observed)",
+    );
+    assert_calls(
+        "trigger_branch_setup",
+        trigger,
+        "run_guarded(guard, &store, &host, &branch_id, request)",
     );
     let ensure = body_of(SETUP, "pub(crate) async fn ensure_branch_set_up<");
     assert_calls("ensure_branch_set_up", ensure, "run_guarded(");
@@ -128,7 +135,7 @@ fn a_trigger_runs_setup_and_a_retry_is_armed_on_the_shared_guard() {
     assert_calls(
         "branch_failed",
         failed,
-        "failures::set(app_handle, branch_id, Some(reason))",
+        "failures::set(app_handle, store, branch_id, Some(reason), user_asked)",
     );
     assert_calls(
         "branch_failed",
@@ -143,12 +150,12 @@ fn a_trigger_runs_setup_and_a_retry_is_armed_on_the_shared_guard() {
 fn the_real_host_announces_retries_and_reconciles() {
     let reason = body_of(
         HOST,
-        "    fn failure_changed(&self, branch_id: &str, error: Option<&str>) {\n        failures",
+        "    fn failure_changed(&self, branch_id: &str, error: Option<&str>, user_asked: bool) {\n        failures",
     );
     assert_calls(
         "BloxHost::failure_changed",
         reason,
-        "failures::set(&self.app_handle, branch_id, error)",
+        "failures::set(&self.app_handle, &self.store, branch_id, error, user_asked)",
     );
 
     let later = body_of(
@@ -181,7 +188,7 @@ fn the_pollers_effects_reach_setup() {
     let effects = body_of(POLL, "fn app_effects<");
     for call in [
         "branches::workspace_status_written(app_handle, branch_id, changed, status)",
-        "super::trigger_branch_setup(app_handle, store, branch_id)",
+        "super::trigger_branch_setup(app_handle, store, branch_id, false)",
         "super::arm_retry(app_handle, store, branch_id)",
         "super::branch_failed(app_handle, store, branch_id, reason)",
     ] {
@@ -203,14 +210,15 @@ fn the_pollers_effects_reach_setup() {
 }
 
 /// A resume that worked leaves its branches `Starting` and triggers setup
-/// for each; one that failed gives each its reason and its retry.
+/// for each, as the user's ask; one that failed gives each its reason and
+/// its retry.
 #[test]
 fn a_resume_triggers_setup_or_says_why_it_failed() {
     let resume = body_of(BRANCHES, "pub(crate) async fn resume_workspace_impl(");
     assert_calls(
         "resume_workspace_impl",
         resume,
-        "crate::workspace_setup::trigger_branch_setup(app_handle, store, branch_id)",
+        "crate::workspace_setup::trigger_branch_setup(app_handle, store, branch_id, true)",
     );
     assert_calls(
         "resume_workspace_impl",
@@ -223,35 +231,35 @@ fn a_resume_triggers_setup_or_says_why_it_failed() {
     );
 }
 
-/// The command and its web arm ask for setup the same way and return the
-/// row's resulting status rather than nothing.
+/// The command and its web arm only ask for setup: neither waits for the
+/// run, whose outcome reaches a client through the row and the reason event.
 #[test]
-fn start_workspace_returns_what_setup_left_the_row_in() {
+fn start_workspace_only_asks_for_setup() {
     let command = body_of(BRANCHES, "pub async fn start_workspace(");
+    assert_calls("start_workspace", command, "Result<(), String>");
     assert_calls(
         "start_workspace",
         command,
-        "Result<PollWorkspaceResult, String>",
-    );
-    assert_calls(
-        "start_workspace",
-        command,
-        "crate::workspace_setup::request_branch_setup(&app_handle, &store, &branch_id).await",
-    );
-    assert_calls(
-        "the start_workspace web arm",
-        web_arm("start_workspace"),
         "crate::workspace_setup::request_branch_setup(&app_handle, &store, &branch_id)",
     );
-
-    let request = body_of(SETUP, "pub(crate) async fn request_branch_setup<");
+    let arm = web_arm("start_workspace");
     assert_calls(
-        "request_branch_setup",
+        "the start_workspace web arm",
+        arm,
+        "crate::workspace_setup::request_branch_setup(app_handle, &store, &branch_id)",
+    );
+    for (what, body) in [("start_workspace", command), ("its web arm", arm)] {
+        assert!(!body.contains(".await"), "{what} must not wait on setup");
+    }
+
+    let request = body_of(SETUP, "pub(crate) fn request_setup(");
+    assert_calls(
+        "request_setup",
         request,
         "SetupRequest::new(SetupTrigger::Requested)",
     );
-    // Not held for a workstation's boot.
-    assert_calls("request_branch_setup", request, "Patience::WhileWorking");
+    assert_calls("request_setup", request, "start_run(");
+    assert!(!request.contains(".await"), "a request must not wait");
 
     assert_calls(
         "the invoke handler",

@@ -2244,14 +2244,9 @@ pub(crate) async fn dispatch(
         "start_workspace" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            let app_handle = app_handle.clone();
-            detached(async move {
-                let result =
-                    crate::workspace_setup::request_branch_setup(&app_handle, &store, &branch_id)
-                        .await?;
-                Ok(serde_json::to_value(result).unwrap())
-            })
-            .await
+            // Only asks: the run it starts or joins is its own task.
+            crate::workspace_setup::request_branch_setup(app_handle, &store, &branch_id)?;
+            Ok(Value::Null)
         }
         "get_workspace_setup_errors" => {
             let errors = crate::workspace_setup::failures::get_workspace_setup_errors();
@@ -5092,7 +5087,6 @@ mod tests {
         ];
         /// Arms whose bodies run through `detached`.
         const DETACHED: &[&str] = &[
-            "start_workspace",
             "resume_workspace",
             "pull_or_queue_branch",
             "resume_session",

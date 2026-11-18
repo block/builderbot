@@ -4,9 +4,8 @@
 //! same [`branches::GitRunner`] the real checkout runs on.
 //!
 //! The rest is in the submodules: what the checkout does to the clone
-//! ([`checkout`]), the status pollers ([`poll`]), what a caller of setup
-//! gets back ([`requests`]), retries
-//! and failure reasons ([`retry`]), the sessions sharing a clone
+//! ([`checkout`]), the status pollers ([`poll`]), what asking for setup
+//! does ([`requests`]), retries and failure reasons ([`retry`]), the sessions sharing a clone
 //! ([`sessions`]), the reads of the clone ([`verify`]), and that every
 //! trigger and check is still called from where it should be ([`wiring`]).
 
@@ -20,8 +19,9 @@ use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
 use super::checkout::{BranchCheckout, CheckoutError};
-use super::guard::{Patience, SetupGuard};
+use super::guard::SetupGuard;
 use super::host::{Checkout, ReadyWait, SetupHost};
+use super::retry::RetryPolicy;
 use super::verify::{parse_clone_head, CloneHead, HeadRead, CLONE_HEAD_PROBE_SCRIPT};
 use super::{
     branches_awaiting_setup, run_guarded, startup_action, SetupOutcome, SetupRequest, SetupTrigger,
@@ -33,6 +33,7 @@ use crate::store::{self, Store, WorkspaceStatus};
 use crate::test_utils::{run_git_in, TempDir, TempGitRepo};
 
 mod checkout;
+mod failures;
 mod poll;
 mod requests;
 mod retry;
@@ -168,6 +169,8 @@ struct FakeHost {
     written: Mutex<Vec<(String, bool, WorkspaceStatus)>>,
     /// Every change of a branch's failure reason, in order.
     failures: Mutex<Vec<(String, Option<String>)>>,
+    /// The branches whose failure was announced as one the user asked for.
+    user_asked_failures: Mutex<Vec<String>>,
     /// Every retry timer asked for: branch, delay, ticket. Nothing sleeps;
     /// a test fires the ones it wants.
     retries: Mutex<Vec<(String, Duration, u64)>>,
@@ -194,6 +197,7 @@ impl FakeHost {
             calls: Mutex::new(Vec::new()),
             written: Mutex::new(Vec::new()),
             failures: Mutex::new(Vec::new()),
+            user_asked_failures: Mutex::new(Vec::new()),
             retries: Mutex::new(Vec::new()),
             on_check_disconnected: None,
             checked_sessions: Mutex::new(Vec::new()),
@@ -242,6 +246,10 @@ impl FakeHost {
             .rev()
             .find(|(id, _)| *id == branch.id)
             .and_then(|(_, reason)| reason)
+    }
+
+    fn user_asked_failures(&self) -> Vec<String> {
+        self.user_asked_failures.lock().unwrap().clone()
     }
 
     fn retries(&self) -> Vec<(String, Duration, u64)> {
@@ -351,11 +359,17 @@ impl SetupHost for FakeHost {
             .push((branch_id.to_string(), changed, status.clone()));
     }
 
-    fn failure_changed(&self, branch_id: &str, error: Option<&str>) {
+    fn failure_changed(&self, branch_id: &str, error: Option<&str>, user_asked: bool) {
         self.failures
             .lock()
             .unwrap()
             .push((branch_id.to_string(), error.map(str::to_string)));
+        if user_asked {
+            self.user_asked_failures
+                .lock()
+                .unwrap()
+                .push(branch_id.to_string());
+        }
     }
 
     fn retry_later(&self, branch_id: &str, delay: Duration, ticket: u64) {
@@ -392,6 +406,14 @@ impl SetupHost for FakeHost {
             retry_after: Duration::from_millis(5),
         }
     }
+
+    /// No jitter, so a test can say what each wait is.
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            jitter_percent: 0,
+            ..RetryPolicy::DEFAULT
+        }
+    }
 }
 
 /// One request for setup, waited for to its end. Returns the status the
@@ -414,15 +436,9 @@ async fn set_up_under(
     trigger: SetupTrigger,
 ) -> Result<Option<WorkspaceStatus>, String> {
     let host: Arc<dyn SetupHost> = host.clone();
-    run_guarded(
-        guard,
-        store,
-        &host,
-        &branch.id,
-        SetupRequest::new(trigger),
-        Patience::ToTheEnd,
-    )
-    .await
+    run_guarded(guard, store, &host, &branch.id, SetupRequest::new(trigger))
+        .await
+        .map(|_| status_of(store, branch))
 }
 
 // ── The setup routine ───────────────────────────────────────────────────────
@@ -798,7 +814,7 @@ async fn concurrent_callers_join_one_setup() {
         );
         tokio::spawn(async move {
             let request = SetupRequest::new(trigger);
-            run_guarded(&guard, &store, &host, &id, request, Patience::ToTheEnd).await
+            run_guarded(&guard, &store, &host, &id, request).await
         })
     })
     .collect();
@@ -808,7 +824,7 @@ async fn concurrent_callers_join_one_setup() {
     // Room for every caller to run its own checkout, were it going to.
     gate.add_permits(4);
     for caller in callers {
-        assert_eq!(caller.await.unwrap(), Ok(Some(WorkspaceStatus::Running)));
+        assert_eq!(caller.await.unwrap(), Ok(SetupOutcome::SetUp));
     }
 
     assert_eq!(host.count("check_out"), 1);
@@ -842,7 +858,7 @@ async fn joined_callers_share_a_failure() {
             );
             tokio::spawn(async move {
                 let request = SetupRequest::new(SetupTrigger::Requested);
-                run_guarded(&guard, &store, &host, &id, request, Patience::ToTheEnd).await
+                run_guarded(&guard, &store, &host, &id, request).await
             })
         })
         .collect();
@@ -891,21 +907,13 @@ async fn setups_in_one_workstation_take_turns() {
 async fn a_panicked_setup_releases_the_branch() {
     let guard = Arc::new(SetupGuard::default());
 
-    let ended = guard
-        .run(WORKSPACE, "branch", Patience::ToTheEnd, |_| async {
-            panic!("setup blew up")
-        })
-        .await;
-    assert!(matches!(ended.result, Some(Err(_))), "{ended:?}");
-    assert!(!ended.joined);
+    let run = guard.start(WORKSPACE, "branch", || async { panic!("setup blew up") });
+    assert!(!run.joined);
+    assert!(run.end().await.is_err());
     assert!(!guard.is_in_flight("branch"));
 
-    let retry = guard
-        .run(WORKSPACE, "branch", Patience::ToTheEnd, |_| async {
-            Ok(SetupOutcome::SetUp)
-        })
-        .await;
-    assert_eq!(retry.result, Some(Ok(SetupOutcome::SetUp)));
+    let retry = guard.start(WORKSPACE, "branch", || async { Ok(SetupOutcome::SetUp) });
+    assert_eq!(retry.end().await, Ok(SetupOutcome::SetUp));
 }
 
 // ── The startup pass ────────────────────────────────────────────────────────

@@ -316,5 +316,6 @@ async fn setup_refused_over_stranded_commits_fails_with_the_reason() {
     assert_eq!(rev(clone.path(), "main"), stranded);
     assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Error));
     assert_eq!(host.failure_of(&branch), Some(error));
-    assert_eq!(host.retries().len(), 1);
+    // Left to the error view's Retry: trying again on a timer changes nothing.
+    assert_eq!(host.retries(), vec![]);
 }

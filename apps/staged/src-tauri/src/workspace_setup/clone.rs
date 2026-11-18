@@ -98,7 +98,7 @@ pub(super) async fn check_out_in_clone(
         let (workspace, expected) = (&checkout.workspace, &checkout.branch_name);
         return match verify::read_head(host, checkout).await {
             Ok(head) if verify::is_on_branch(&head, checkout) => Ok(()),
-            Ok(head) => Err(CheckoutError::Refused(format!(
+            Ok(head) => Err(CheckoutError::Blocked(format!(
                 "Workspace '{workspace}' has {head} checked out, where branch '{expected}' was \
                  expected. It was not switched because {live}; try again once that session has \
                  finished."

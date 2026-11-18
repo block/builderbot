@@ -28,18 +28,32 @@ pub(crate) enum CheckoutError {
     /// clone is as it was; trying again changes nothing until someone has
     /// dealt with what is in it.
     Refused(String),
+    /// Something outside the clone is in the way for now: a session working
+    /// in it, a workstation that is not running. The clone is as it was,
+    /// and trying again later is worth it.
+    Blocked(String),
     /// A step failed: a fetch, a probe, the checkout itself.
     Failed(String),
 }
 
 impl CheckoutError {
+    /// Whether the clone was left exactly as it was.
     pub(crate) fn is_refusal(&self) -> bool {
-        matches!(self, CheckoutError::Refused(_))
+        !matches!(self, CheckoutError::Failed(_))
+    }
+
+    /// Whether trying again on its own could end differently. Not after a
+    /// refusal over what is in the clone: that waits for someone to deal
+    /// with it and ask again.
+    pub(crate) fn worth_retrying(&self) -> bool {
+        !matches!(self, CheckoutError::Refused(_))
     }
 
     pub(crate) fn message(&self) -> &str {
         match self {
-            CheckoutError::Refused(message) | CheckoutError::Failed(message) => message,
+            CheckoutError::Refused(message)
+            | CheckoutError::Blocked(message)
+            | CheckoutError::Failed(message) => message,
         }
     }
 
@@ -47,6 +61,7 @@ impl CheckoutError {
     pub(crate) fn map_message(self, f: impl FnOnce(String) -> String) -> Self {
         match self {
             CheckoutError::Refused(message) => CheckoutError::Refused(f(message)),
+            CheckoutError::Blocked(message) => CheckoutError::Blocked(f(message)),
             CheckoutError::Failed(message) => CheckoutError::Failed(f(message)),
         }
     }

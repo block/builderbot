@@ -1,6 +1,7 @@
 //! `Error` has a way out: every failure records why and sets a retry, the
-//! retry sets the branch up once its workstation is running, and a refused
-//! repair does not turn a branch that was `Running` into a failed one.
+//! retry sets the branch up once its workstation is running without the
+//! card noticing until it has, and a refused repair does not turn a branch
+//! that was `Running` into a failed one.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,9 +62,20 @@ fn calls(host: &FakeHost) -> Vec<&'static str> {
 #[test]
 fn the_wait_doubles_from_a_minute_to_half_an_hour() {
     let policy = RetryPolicy::DEFAULT;
-    let waits: Vec<u64> = (0..7).map(|n| policy.delay(n).as_secs()).collect();
+    let waits: Vec<u64> = (0..7).map(|n| policy.delay(n, 0).as_secs()).collect();
     assert_eq!(waits, vec![60, 120, 240, 480, 960, 1800, 1800]);
-    assert_eq!(policy.delay(u32::MAX), Duration::from_secs(1800));
+    assert_eq!(policy.delay(u32::MAX, 0), Duration::from_secs(1800));
+}
+
+/// The timers a restart sets for every failed branch at once do not all
+/// fire in the same instant: each waits up to a fifth longer.
+#[test]
+fn the_wait_is_spread_by_jitter() {
+    let policy = RetryPolicy::DEFAULT;
+    let mut waits = (0..200).map(|random| policy.delay(0, random * 997));
+    assert!(waits.all(|wait| (MINUTE..=MINUTE * 6 / 5).contains(&wait)));
+    assert_eq!(policy.delay(0, 12_000), MINUTE + Duration::from_secs(12));
+    assert_eq!(policy.delay(0, 12_001), MINUTE);
 }
 
 /// A failed setup leaves the row in `Error` with its reason announced and a
@@ -95,6 +107,72 @@ async fn a_failed_setup_says_why_and_sets_a_retry() {
 
     fail_once(&guard, &store, &host, &branch).await;
     assert_eq!(host.retries()[1], (branch.id.clone(), 2 * MINUTE, 2));
+}
+
+/// A retry on its own is not something a window should notice until it has
+/// worked. While it runs and after it fails the row says `Error` and the
+/// reason is never blanked, so the card neither flips to a spinner nor
+/// loses its text, and the failure is not announced as the user's.
+#[tokio::test]
+async fn a_retry_that_fails_leaves_the_card_as_it_was() {
+    let (_origin, clone) = origin_and_workstation_clone();
+    let (store, project) = store_with_project();
+    let branch = starting_branch(&store, &project, "feature-new");
+    let guard = Arc::new(SetupGuard::default());
+    let ticket = fail_once(&guard, &store, &failing_host(clone.path()), &branch).await;
+    let during = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut host = running_host(clone.path());
+    host.checkout_error = Some("could not fetch base branch 'main': connection reset");
+    host.meanwhile = Some(Box::new({
+        let (store, branch, during) = (Arc::clone(&store), branch.clone(), Arc::clone(&during));
+        move || during.lock().unwrap().push(status_of(&store, &branch))
+    }));
+    let host = Arc::new(host);
+
+    fire(&guard, &store, &host, &branch, ticket).await;
+
+    assert_eq!(host.count("check_out"), 1);
+    assert_eq!(
+        *during.lock().unwrap(),
+        vec![Some(WorkspaceStatus::Error); 2]
+    );
+    assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Error));
+    let reasons = host.failures();
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0]
+        .1
+        .as_deref()
+        .unwrap()
+        .contains("connection reset"));
+    assert_eq!(host.user_asked_failures(), Vec::<String>::new());
+    assert_eq!(host.written(), vec![]);
+    assert_eq!(host.retries(), vec![(branch.id.clone(), 2 * MINUTE, 2)]);
+}
+
+/// A checkout refused over what is in the clone is not retried on a timer:
+/// trying again changes nothing until someone has dealt with it, and then
+/// the error view's Retry is theirs to press. The timer that was out for
+/// the branch no longer counts either.
+#[tokio::test]
+async fn a_checkout_refused_over_the_clone_sets_no_timer() {
+    let (_origin, clone) = origin_and_workstation_clone();
+    let (store, project) = store_with_project();
+    let branch = starting_branch(&store, &project, "feature-new");
+    let guard = Arc::new(SetupGuard::default());
+    let ticket = fail_once(&guard, &store, &failing_host(clone.path()), &branch).await;
+    // The clone is on another branch with uncommitted changes.
+    run_git_in(clone.path(), &["checkout", "-b", "feature-a"]);
+    std::fs::write(clone.path().join("file.txt"), "base\nin progress\n").unwrap();
+    let host = Arc::new(running_host(clone.path()));
+
+    fire(&guard, &store, &host, &branch, ticket).await;
+
+    assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Error));
+    let reason = host.failure_of(&branch).unwrap();
+    assert!(reason.contains("uncommitted changes"), "{reason}");
+    assert_eq!(host.retries(), vec![]);
+    assert!(!guard.retry_is_armed(&branch.id));
+    assert_eq!(head_branch(clone.path()), "feature-a");
 }
 
 /// The timer fires with the workstation running: the branch is set up
@@ -196,6 +274,8 @@ async fn a_timer_for_a_branch_that_moved_on_does_nothing() {
     assert_eq!(calls(&host), Vec::<&str>::new());
     assert_eq!(status_of(&store, &branch), Some(WorkspaceStatus::Suspended));
     assert!(!guard.retry_is_armed(&branch.id));
+    // Its reason goes with it, so no later window is handed a stale one.
+    assert_eq!(host.failures(), vec![(branch.id.clone(), None)]);
 
     fail_once(&guard, &store, &failing, &branch).await;
     assert_eq!(failing.retries().last().unwrap().1, MINUTE);
@@ -216,7 +296,7 @@ async fn a_setup_that_works_forgets_the_schedule() {
     let status = set_up_under(&guard, &store, &host, &branch, SetupTrigger::Requested).await;
 
     assert_eq!(status, Ok(Some(WorkspaceStatus::Running)));
-    assert_eq!(host.failures(), vec![(branch.id.clone(), None)]);
+    assert_eq!(host.failure_of(&branch), None);
     assert!(!guard.retry_is_armed(&branch.id));
     let before = calls(&host);
     fire(&guard, &store, &host, &branch, ticket).await;

@@ -182,12 +182,7 @@ pub fn create_worktree_for_existing_branch_without_lfs_smudge(
     branch_name: &str,
     worktree_path: &Path,
 ) -> Result<PathBuf, GitError> {
-    add_worktree_for_existing_branch(
-        repo,
-        branch_name,
-        worktree_path,
-        &[("GIT_LFS_SKIP_SMUDGE", "1")],
-    )
+    add_worktree_for_existing_branch(repo, branch_name, worktree_path, lfs_smudge_vars(true))
 }
 
 fn add_worktree_for_existing_branch(
@@ -208,6 +203,180 @@ fn add_worktree_for_existing_branch(
     cli::run_with_vars(repo, &["worktree", "add", worktree_str, branch_name], vars)?;
 
     Ok(worktree_path.to_path_buf())
+}
+
+/// Add a worktree detached at `commit`, which `repo` must already hold,
+/// without firing the hook directory's hooks. A hook that config names
+/// fires all the same ([`HOOKS_OFF`]): a caller first checks that
+/// [`post_checkout_hooks_to_come`](super::post_checkout_hooks_to_come) is
+/// not [`NamedInConfig`](super::PostCheckoutHooksToCome::NamedInConfig).
+///
+/// For a worktree made before its branch exists:
+/// [`switch_detached_worktree_to_branch`] puts it on the branch later, and
+/// [`run_post_checkout_as_for_a_new_worktree`] then fires the one
+/// `post-checkout` a worktree added on the branch would have. `skip_lfs_smudge`
+/// checks LFS files out as pointers, as
+/// [`create_worktree_for_existing_branch_without_lfs_smudge`] does.
+pub fn create_detached_worktree_without_hooks(
+    repo: &Path,
+    commit: &str,
+    worktree_path: &Path,
+    skip_lfs_smudge: bool,
+) -> Result<PathBuf, GitError> {
+    ensure_worktree_parent_exists(worktree_path)?;
+    ensure_worktree_absent(worktree_path)?;
+
+    let worktree_str = worktree_path
+        .to_str()
+        .ok_or_else(|| GitError::InvalidPath(worktree_path.display().to_string()))?;
+
+    // git -c core.hooksPath=/dev/null worktree add --detach <path> <commit>
+    cli::run_with_vars(
+        repo,
+        &[
+            "-c",
+            HOOKS_OFF,
+            "worktree",
+            "add",
+            "--detach",
+            worktree_str,
+            commit,
+        ],
+        lfs_smudge_vars(skip_lfs_smudge),
+    )?;
+
+    Ok(worktree_path.to_path_buf())
+}
+
+/// Check `branch_name` out in `worktree_path`, a clean worktree of `repo`
+/// detached at some other commit: only the files that differ are rewritten.
+///
+/// The hook directory's hooks stay off, as for
+/// [`create_detached_worktree_without_hooks`] and with the same exception.
+/// The `post-checkout` this checkout would fire names the
+/// commit the worktree was detached at as the previous head, where a
+/// worktree added on the branch names none, so a hook that sets a new
+/// worktree up on seeing that would do nothing.
+/// [`run_post_checkout_as_for_a_new_worktree`] fires it instead.
+///
+/// Runs in the worktree but with `repo`'s captured env, the one
+/// [`create_worktree_for_existing_branch_at_path`] gives the hooks and
+/// filters of its checkout, so it doesn't wait on a capture for the worktree.
+pub fn switch_detached_worktree_to_branch(
+    repo: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    skip_lfs_smudge: bool,
+) -> Result<(), GitError> {
+    let worktree_str = worktree_path
+        .to_str()
+        .ok_or_else(|| GitError::InvalidPath(worktree_path.display().to_string()))?;
+
+    // git -c core.hooksPath=/dev/null -C <worktree> checkout <branch> --
+    // The second `-C` is absolute, so it replaces the `-C <repo>` that
+    // `cli` puts first; `--` keeps a file of the same name out of it.
+    cli::run_with_vars(
+        repo,
+        &[
+            "-c",
+            HOOKS_OFF,
+            "-C",
+            worktree_str,
+            "checkout",
+            branch_name,
+            "--",
+        ],
+        lfs_smudge_vars(skip_lfs_smudge),
+    )?;
+    Ok(())
+}
+
+/// Whether `repo`'s git can fire a hook on request, with `git hook run`
+/// (git 2.36 and later), which [`run_post_checkout_as_for_a_new_worktree`]
+/// needs. A git that cannot say counts as one that can't.
+pub fn can_run_hooks_on_request(repo: &Path) -> bool {
+    cli::run(repo, &["--list-cmds=builtins"]).is_ok_and(|builtins| lists_hook_command(&builtins))
+}
+
+fn lists_hook_command(builtins: &str) -> bool {
+    builtins.lines().any(|command| command.trim() == "hook")
+}
+
+/// Fire `post-checkout` in `worktree_path`, a worktree of `repo` made by
+/// [`create_detached_worktree_without_hooks`] and
+/// [`switch_detached_worktree_to_branch`], with the arguments `git worktree
+/// add <path> <branch>` gives it: the null object id as the previous head,
+/// the worktree's head, and `1` for a branch checkout. Hooks tell a new
+/// worktree by that null id, and some do their setup only then.
+///
+/// The hook is found and run by `git hook run`, so `core.hooksPath` and
+/// hooks named in config apply; check [`can_run_hooks_on_request`] before
+/// building a worktree this way. It runs at the worktree's root with
+/// `repo`'s captured env, and `GIT_LFS_SKIP_SMUDGE` when the checkout had
+/// it, as under `git worktree add`.
+///
+/// Two differences from `git worktree add <path> <branch>` remain:
+///
+/// - Git exports `GIT_DIR` to the hook, as it does to every hook it fires
+///   from inside a linked worktree, where `git worktree add` clears it.
+/// - A relative `core.hooksPath`, `.githooks` say, is resolved from where
+///   git runs. `git -C <repo> worktree add` takes the hook from `repo`'s
+///   main checkout, whatever that has checked out; this takes it from the
+///   new worktree, so it is the branch's copy that runs. A branch without
+///   that directory has no hook here, and none fires, silently, where the
+///   add would have fired the main checkout's. Every later checkout in the
+///   worktree finds its hook the way this does. An absolute path, and the
+///   default hook directory, are the same from both.
+///
+/// [`post_checkout_hooks_for_worktree`](super::post_checkout_hooks_for_worktree)
+/// tells what this is about to run. No hook is success. A hook that fails
+/// is the error, as it fails `git worktree add`; the worktree stays as it
+/// is.
+pub fn run_post_checkout_as_for_a_new_worktree(
+    repo: &Path,
+    worktree_path: &Path,
+    skip_lfs_smudge: bool,
+) -> Result<(), GitError> {
+    let worktree_str = worktree_path
+        .to_str()
+        .ok_or_else(|| GitError::InvalidPath(worktree_path.display().to_string()))?;
+
+    let head = cli::run(repo, &["-C", worktree_str, "rev-parse", "--verify", "HEAD"])?;
+    let head = head.trim();
+    // As long as the repo's object ids are: 40 zeros, or 64 under SHA-256.
+    let no_previous_head = "0".repeat(head.len());
+
+    // git -C <worktree> hook run --ignore-missing post-checkout -- <null> <head> 1
+    cli::run_with_vars(
+        repo,
+        &[
+            "-C",
+            worktree_str,
+            "hook",
+            "run",
+            "--ignore-missing",
+            "post-checkout",
+            "--",
+            &no_previous_head,
+            head,
+            "1",
+        ],
+        lfs_smudge_vars(skip_lfs_smudge),
+    )?;
+    Ok(())
+}
+
+/// `-c` value that keeps the hook directory's hooks from firing. It is no
+/// use against a hook that config names (`hook.<name>.event`, git 2.54 and
+/// later), which git runs wherever the hook directory is.
+const HOOKS_OFF: &str = "core.hooksPath=/dev/null";
+
+fn lfs_smudge_vars(skip: bool) -> &'static [(&'static str, &'static str)] {
+    if skip {
+        &[("GIT_LFS_SKIP_SMUDGE", "1")]
+    } else {
+        &[]
+    }
 }
 
 /// Move an existing worktree to a new path.
@@ -1271,6 +1440,177 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&to);
+    }
+
+    /// Point `repo` at a `post-checkout` hook that appends its three
+    /// arguments and the directory it ran in to a log, then runs `then`.
+    /// Returns the log.
+    #[cfg(unix)]
+    fn recording_post_checkout(
+        repo: &crate::test_utils::TempGitRepo,
+        root: &Path,
+        then: &str,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let hooks = root.join("hooks");
+        let log = root.join("post-checkout.log");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-checkout");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho \"$1 $2 $3 $(pwd -P)\" >> '{}'\n{then}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        repo.run_git(&["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        log
+    }
+
+    #[cfg(unix)]
+    fn logged(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether this machine's git has `git hook run`; says so when not.
+    #[cfg(unix)]
+    fn git_runs_hooks_on_request(repo: &Path, test: &str) -> bool {
+        let can = can_run_hooks_on_request(repo);
+        if !can {
+            eprintln!("skipping {test}: this git has no `git hook run`");
+        }
+        can
+    }
+
+    /// The three steps that build a worktree before its branch exists:
+    /// detached at a commit the repo has, onto the branch, then the hook.
+    /// `post-checkout` fires once, at the end, and is told what `git
+    /// worktree add <path> <branch>` tells it, which is checked here against
+    /// a worktree git added that way.
+    #[cfg(unix)]
+    #[test]
+    fn a_detached_worktree_goes_onto_its_branch_looking_new_to_post_checkout() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        if !git_runs_hooks_on_request(
+            repo.path(),
+            "a_detached_worktree_goes_onto_its_branch_looking_new_to_post_checkout",
+        ) {
+            return;
+        }
+        repo.write_file("tracked.txt", "base\n");
+        // A file named as the branch: the switch must not take it for one.
+        repo.write_file("feature", "a file\n");
+        let base = repo.commit("base");
+        repo.write_file("tracked.txt", "tip\n");
+        let tip = repo.commit("tip");
+
+        let root = crate::test_utils::TempDir::new("detached-worktree");
+        let log = recording_post_checkout(&repo, root.path(), "");
+        let worktree = root.path().join("wt");
+        let on = |wt: &Path| {
+            cli::run(wt, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let real = |wt: &Path| std::fs::canonicalize(wt).unwrap().display().to_string();
+
+        create_detached_worktree_without_hooks(repo.path(), &base, &worktree, false).unwrap();
+
+        assert_eq!(on(&worktree), "HEAD", "detached");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert_eq!(logged(&log), [""; 0], "the detached add fired the hook");
+
+        repo.run_git(&["branch", "feature", &tip]);
+        switch_detached_worktree_to_branch(repo.path(), &worktree, "feature", false).unwrap();
+
+        assert_eq!(on(&worktree), "feature");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
+            "tip\n"
+        );
+        assert_eq!(cli::run(&worktree, &["status", "--porcelain"]).unwrap(), "");
+        assert_eq!(logged(&log), [""; 0], "the switch fired the hook");
+
+        run_post_checkout_as_for_a_new_worktree(repo.path(), &worktree, false).unwrap();
+
+        let null = "0".repeat(tip.len());
+        assert_eq!(
+            logged(&log),
+            [format!("{null} {tip} 1 {}", real(&worktree))],
+            "once, with no previous head, in the worktree"
+        );
+
+        // What git itself tells the hook of a worktree added on a branch.
+        repo.run_git(&["branch", "control", &tip]);
+        let control = root.path().join("control");
+        create_worktree_for_existing_branch_at_path(repo.path(), "control", &control).unwrap();
+        assert_eq!(
+            logged(&log)[1..],
+            [format!("{null} {tip} 1 {}", real(&control))],
+            "git's own arguments for a new worktree"
+        );
+
+        // The repo's own checkout is where it was.
+        assert_eq!(on(repo.path()), "main");
+    }
+
+    /// The hook failing fails the step, as it fails `git worktree add`, and
+    /// it has still fired just the once. No hook at all is success.
+    #[cfg(unix)]
+    #[test]
+    fn a_post_checkout_that_fails_is_an_error_and_none_is_not() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        if !git_runs_hooks_on_request(
+            repo.path(),
+            "a_post_checkout_that_fails_is_an_error_and_none_is_not",
+        ) {
+            return;
+        }
+        repo.write_file("tracked.txt", "base\n");
+        let base = repo.commit("base");
+        repo.run_git(&["branch", "feature", &base]);
+        let root = crate::test_utils::TempDir::new("failing-post-checkout");
+        let worktree = root.path().join("wt");
+        let empty = root.path().join("no-hooks");
+        std::fs::create_dir_all(&empty).unwrap();
+        repo.run_git(&["config", "core.hooksPath", empty.to_str().unwrap()]);
+        create_detached_worktree_without_hooks(repo.path(), &base, &worktree, false).unwrap();
+        switch_detached_worktree_to_branch(repo.path(), &worktree, "feature", false).unwrap();
+
+        run_post_checkout_as_for_a_new_worktree(repo.path(), &worktree, false)
+            .expect("no hook to run");
+
+        let log = recording_post_checkout(&repo, root.path(), "echo no good >&2\nexit 3");
+        let err = run_post_checkout_as_for_a_new_worktree(repo.path(), &worktree, false)
+            .expect_err("the hook failed");
+        assert!(err.to_string().contains("no good"), "{err}");
+        assert_eq!(logged(&log).len(), 1, "{:?}", logged(&log));
+        assert_eq!(
+            cli::run(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "feature",
+            "the worktree is left as it was"
+        );
+    }
+
+    #[test]
+    fn a_git_without_the_hook_command_cannot_run_hooks_on_request() {
+        assert!(lists_hook_command("add\nhook\nworktree\n"));
+        assert!(!lists_hook_command("add\nhooks\nworktree\n"));
+        // An older git that doesn't know the option prints nothing useful.
+        assert!(!lists_hook_command(""));
     }
 
     fn local_branches(repo: &crate::test_utils::TempGitRepo) -> String {

@@ -47,6 +47,15 @@ pub(super) const DIR_ENV_MARKERS: &[&str] = &[
     ".ruby-version",
 ];
 
+/// What a capture at an env root reads from the root itself, as paths
+/// relative to it: Hermit's `bin/`, whose `activate-hermit` and package
+/// stubs decide what the shell gets, and the [`DIR_ENV_MARKERS`]. A root
+/// whose content changes under a snapshot without touching any of these
+/// still has the env that snapshot holds.
+pub(crate) fn env_root_inputs() -> impl Iterator<Item = &'static str> {
+    std::iter::once("bin").chain(DIR_ENV_MARKERS.iter().copied())
+}
+
 /// Resolve the directory whose captured env `dir` can share: its env root.
 ///
 /// Walking up from `dir` itself, the first directory that is a Hermit root

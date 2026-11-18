@@ -233,7 +233,19 @@ pub struct GitOutput {
 /// [`GitOutput`] for the caller to interpret. A git that cannot be spawned, a
 /// path that is not a repository, and non-UTF-8 stdout are still errors.
 pub fn run_lite_output(repo: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
-    let output = spawn_git(repo, args, EnvSource::Lite)?;
+    output_with_env(repo, args, EnvSource::Lite)
+}
+
+/// [`run`] without the success check, as [`run_lite_output`] is to
+/// [`run_lite`]: for a question whose answer is in the exit status and
+/// depends on which git answers and with what config, so it is asked with
+/// the env the commands it is about will run with.
+pub fn run_output(repo: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
+    output_with_env(repo, args, EnvSource::Captured)
+}
+
+fn output_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<GitOutput, GitError> {
+    let output = spawn_git(repo, args, source)?;
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() && stderr.contains("not a git repository") {
         return Err(GitError::NotARepo(repo.display().to_string()));
@@ -277,7 +289,193 @@ pub fn run_smart(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 /// Use this when a caller has already resolved the directory a future
 /// captured-env operation will need, but has no git read to run there yet.
 pub(crate) fn prewarm_shell_env(repo: &Path) {
+    #[cfg(test)]
+    shell_env_calls::record("prewarm", repo);
     warm_shell_env(repo);
+}
+
+/// Wait for the captured shell env of `repo`, starting the capture if
+/// nothing has: what the first captured-env op there would wait for, as a
+/// step of its own so a caller can time it apart from that op. A capture that
+/// fails is that op's to report.
+///
+/// A no-op under unit tests, like [`prewarm_shell_env`].
+#[cfg(not(test))]
+pub(crate) fn wait_for_shell_env(repo: &Path) {
+    let _ = crate::session_runner::shell_env_cache().get_blocking(repo);
+}
+
+#[cfg(test)]
+pub(crate) fn wait_for_shell_env(repo: &Path) {
+    shell_env_calls::record("wait", repo);
+}
+
+/// Drop the captured shell env `repo` uses, or the capture in flight for
+/// it, so the next captured-env op there captures afresh. A capture in
+/// flight runs on, uncounted; a caller that changed what it reads, or is
+/// about to delete `repo`, wants [`wait_out_and_invalidate_shell_env`].
+///
+/// A no-op under unit tests, like [`prewarm_shell_env`].
+#[cfg(not(test))]
+pub(crate) fn invalidate_shell_env(repo: &Path) {
+    crate::session_runner::shell_env_cache().invalidate(repo);
+}
+
+#[cfg(test)]
+pub(crate) fn invalidate_shell_env(repo: &Path) {
+    shell_env_calls::record("invalidate", repo);
+}
+
+/// [`invalidate_shell_env`] once the capture in flight for `repo`, if there
+/// is one, has finished: its shell is running in `repo`, so this is for a
+/// caller about to delete the directory, or to capture it again. Never
+/// starts a capture. A capture can't be stopped early, so this can take as
+/// long as one does (see
+/// [`ShellEnvCache::wait_out_and_invalidate`](crate::shell_env::ShellEnvCache::wait_out_and_invalidate)).
+///
+/// A no-op under unit tests, like [`prewarm_shell_env`].
+#[cfg(not(test))]
+pub(crate) fn wait_out_and_invalidate_shell_env(repo: &Path) {
+    crate::session_runner::shell_env_cache().wait_out_and_invalidate(repo);
+}
+
+#[cfg(test)]
+pub(crate) fn wait_out_and_invalidate_shell_env(repo: &Path) {
+    shell_env_calls::record("wait out and invalidate", repo);
+}
+
+/// What the shell-env entry points above were asked for, since they do
+/// nothing under unit tests: a test that cares in what order a caller used
+/// them, and whether a directory was still there when it did, watches a
+/// directory of its own.
+#[cfg(test)]
+pub(crate) mod shell_env_calls {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// One call, for a path under a watched directory.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Call {
+        /// `prewarm`, `wait`, `invalidate` or `wait out and invalidate`.
+        pub(crate) what: &'static str,
+        pub(crate) path: PathBuf,
+        /// Whether `path` existed when the call was made.
+        pub(crate) existed: bool,
+        /// Whether the file the watch was told to note
+        /// ([`Watch::noting`]) existed then; `false` with none to note.
+        pub(crate) noted: bool,
+    }
+
+    struct Watched {
+        dir: PathBuf,
+        note: Option<PathBuf>,
+        calls: Vec<Call>,
+    }
+
+    static WATCHED: Mutex<Vec<Watched>> = Mutex::new(Vec::new());
+
+    /// While it lives, calls for paths under its directory are kept, from
+    /// whichever thread makes them.
+    pub(crate) struct Watch(PathBuf);
+
+    impl Watch {
+        pub(crate) fn under(dir: &Path) -> Self {
+            let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            watched.push(Watched {
+                dir: dir.to_path_buf(),
+                note: None,
+                calls: Vec::new(),
+            });
+            Self(dir.to_path_buf())
+        }
+
+        /// Also keep, per call, whether `file` existed when it was made:
+        /// a file something else writes when it runs places that run
+        /// among the calls.
+        pub(crate) fn noting(self, file: &Path) -> Self {
+            let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = watched.iter_mut().find(|entry| entry.dir == self.0) {
+                entry.note = Some(file.to_path_buf());
+            }
+            drop(watched);
+            self
+        }
+
+        /// The calls so far, in order.
+        pub(crate) fn calls(&self) -> Vec<Call> {
+            let watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            watched
+                .iter()
+                .find(|entry| entry.dir == self.0)
+                .map(|entry| entry.calls.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            watched.retain(|entry| entry.dir != self.0);
+        }
+    }
+
+    pub(super) fn record(what: &'static str, path: &Path) {
+        let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in watched.iter_mut() {
+            if path.starts_with(entry.dir.as_path()) {
+                entry.calls.push(Call {
+                    what,
+                    path: path.to_path_buf(),
+                    existed: path.exists(),
+                    noted: entry.note.as_deref().is_some_and(Path::exists),
+                });
+            }
+        }
+    }
+}
+
+/// Keeps the machine's git config out of a test. The git this module runs
+/// reads the user's and the system's config like any other, so a test of
+/// something that config decides (which hooks fire, say, on a machine whose
+/// hook manager owns `core.hooksPath`) would pass or fail by where it ran.
+#[cfg(test)]
+pub(crate) mod own_config_only {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    static DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// While it lives, the git this module runs for a repo under its
+    /// directory, from whichever thread, reads no config but the repo's
+    /// own. Git a test runs itself is not touched.
+    pub(crate) struct OwnConfigOnly(PathBuf);
+
+    impl OwnConfigOnly {
+        pub(crate) fn under(dir: &Path) -> Self {
+            let mut dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
+            dirs.push(dir.to_path_buf());
+            Self(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for OwnConfigOnly {
+        fn drop(&mut self) {
+            let mut dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(at) = dirs.iter().position(|dir| *dir == self.0) {
+                dirs.remove(at);
+            }
+        }
+    }
+
+    pub(super) fn apply(command: &mut Command, repo: &Path) {
+        let dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
+        if dirs.iter().any(|dir| repo.starts_with(dir)) {
+            command
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+        }
+    }
 }
 
 /// Which environment to pass to the spawned git process.
@@ -554,8 +752,9 @@ fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) -> AppliedEn
 }
 
 #[cfg(test)]
-fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) -> AppliedEnv {
+fn apply_env(command: &mut Command, repo: &Path, _source: EnvSource) -> AppliedEnv {
     strip_git_env(command);
+    own_config_only::apply(command, repo);
     pin_c_locale(command);
     AppliedEnv::Lite
 }

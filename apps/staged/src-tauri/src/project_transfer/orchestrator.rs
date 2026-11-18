@@ -25,15 +25,22 @@
 //! [`Run::for_each_leg`]). What touches shared state stays sequential: the
 //! inspection, starting and deleting the workspace, the database switch,
 //! and the unchanged check right before the source comes down.
+//!
+//! Within a leg the steps follow one another, but for one: coming to local,
+//! the branch's worktree is added, and its shell environment captured, while
+//! the capture from the workspace still runs (see [`early_worktree`]).
 
+mod early_worktree;
 mod parallel;
 mod teardown;
 
 #[cfg(test)]
+pub(crate) use early_worktree::{FailingEarlyAdds, GatedEarlyAdds, GitWithoutHookRun};
+#[cfg(test)]
 pub(crate) use parallel::SerialLegs;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -61,8 +68,7 @@ use super::preflight::{
 use super::registry::TransferGuard;
 use super::scripts::{ApplyReport, IgnoredFiles, Snapshot, CLONE_SCRIPT};
 use super::undo::{
-    self, AddedExcludes, AddedRemote, AddedWorktree, CreatedBranch, ReplacedConfig, SourceCheckout,
-    Undo,
+    self, AddedExcludes, AddedRemote, CreatedBranch, ReplacedConfig, SourceCheckout, Undo,
 };
 use super::TransferError;
 
@@ -856,24 +862,47 @@ impl Run<'_> {
                 dir: source_dir,
             })
         })?;
+        // Coming to local, the worktree is added at a commit the clone
+        // already has while the capture runs, to be switched onto the branch
+        // once that has landed.
+        let early = match self.direction {
+            TransferDirection::ToLocal => {
+                self.guard_not_cancelled()?;
+                self.plan_early_worktree(leg, Path::new(&plan.dest_dir))
+            }
+            TransferDirection::ToRemote => None,
+        };
         // Why `on_step` stopped the carry, when it was not a cancel.
         let mut not_recorded = None;
-        let carried = carry_repo_with(source.as_ref(), dest.as_ref(), &plan, &mut |step| {
-            let (phase, bytes) = match step {
-                CarryStep::Snapshotting => (TransferPhase::Snapshotting, None),
-                CarryStep::Moving { bytes } => (TransferPhase::Moving, Some(bytes)),
-                CarryStep::Applying { .. } => (TransferPhase::Applying, None),
-            };
-            self.emit(phase, Some(leg), None, bytes);
-            self.guard_not_cancelled()?;
-            if let (CarryStep::Applying { snapshot }, Landing::Branch) = (step, plan.landing) {
-                if let Err(e) = self.record_landing(&plan, snapshot) {
-                    not_recorded = Some(e);
-                    return Err(TransferError::Cancelled);
+        // The scope joins the early add before the leg goes on, whatever
+        // the capture came to — a panic included.
+        let (carried, early_add) = std::thread::scope(|scope| {
+            let adding = early.as_ref().map(|early| scope.spawn(move || early.add()));
+            let carried = carry_repo_with(source.as_ref(), dest.as_ref(), &plan, &mut |step| {
+                let (phase, bytes) = match step {
+                    CarryStep::Snapshotting => (TransferPhase::Snapshotting, None),
+                    CarryStep::Moving { bytes } => (TransferPhase::Moving, Some(bytes)),
+                    CarryStep::Applying { .. } => (TransferPhase::Applying, None),
+                };
+                self.emit(phase, Some(leg), None, bytes);
+                self.guard_not_cancelled()?;
+                if let (CarryStep::Applying { snapshot }, Landing::Branch) = (step, plan.landing) {
+                    if let Err(e) = self.record_landing(&plan, snapshot) {
+                        not_recorded = Some(e);
+                        return Err(TransferError::Cancelled);
+                    }
                 }
-            }
-            Ok(())
+                Ok(())
+            });
+            // A panic in the early add is the leg's, message intact.
+            let early_add =
+                adding.map(|adding| adding.join().unwrap_or_else(|panic| resume_unwind(panic)));
+            (carried, early_add)
         });
+        // A capture that failed or was cancelled: what the early add made
+        // is in the undo list, for the rollback. The capture of its shell
+        // environment may still be running in it; the rollback waits for
+        // that before it removes the worktree.
         let mut outcome = match (carried, not_recorded) {
             (Err(_), Some(e)) => return Err(e.into()),
             (carried, _) => carried?,
@@ -884,24 +913,14 @@ impl Run<'_> {
                 Some(leg),
                 Some("Adding the worktree".to_string()),
             )?;
-            let clone = PathBuf::from(&plan.dest_dir);
-            let worktree = self.free_worktree_path(leg)?;
-            self.record(|undo| {
-                undo.worktrees.push(AddedWorktree {
-                    clone: clone.clone(),
-                    worktree: worktree.clone(),
-                })
-            })?;
-            // LFS files check out as pointers, which `finish` replaces with
-            // the objects that came: a smudge filter would download each one
-            // again, and fail the checkout on any it can't.
-            let add_worktree = if outcome.snapshot.lfs.is_some() {
-                crate::git::create_worktree_for_existing_branch_without_lfs_smudge
-            } else {
-                crate::git::create_worktree_for_existing_branch_at_path
-            };
-            add_worktree(&clone, &leg.dest_branch, &worktree)
-                .map_err(|e| format!("Cannot add the worktree for {}: {e}", leg.dest_branch))?;
+            let (worktree, mut timings) =
+                self.settle_worktree(leg, &plan, &outcome, early.zip(early_add))?;
+            // What the finish would wait for first, apart from it for the
+            // log.
+            let waiting = Instant::now();
+            crate::git::wait_for_shell_env(&worktree);
+            timings.environment = waiting.elapsed();
+            let finishing = Instant::now();
             let endpoint = self.host.local_endpoint(&worktree)?;
             let (finished, added) = self.finish_recording_excludes(
                 endpoint.as_ref(),
@@ -909,6 +928,13 @@ impl Run<'_> {
                 &outcome,
                 &path_str(&worktree)?,
             )?;
+            timings.finish = finishing.elapsed();
+            log::info!(
+                "[project_transfer] transfer {}: the worktree for {}: {}",
+                self.guard.transfer_id(),
+                leg.dest_branch,
+                timings.describe()
+            );
             outcome.applied.warnings.extend(finished.warnings);
             outcome.applied.lfs_unavailable |= finished.lfs_unavailable;
             outcome.applied.ignored = outcome.applied.ignored.take().or(finished.ignored);

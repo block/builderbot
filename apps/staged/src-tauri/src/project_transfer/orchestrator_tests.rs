@@ -41,6 +41,7 @@ use crate::store::{
 };
 use crate::test_utils::TempDir;
 
+mod early_worktree;
 mod ignored;
 mod lfs;
 

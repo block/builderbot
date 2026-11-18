@@ -430,12 +430,27 @@ fn restore_branch_config(
 }
 
 /// Remove a worktree the transfer added, without `remove_worktree`'s branch
-/// deletion: the branch is the rollback's to decide about.
-fn remove_worktree_keeping_branch(clone: &Path, worktree: &Path) -> Result<(), String> {
+/// deletion: the branch is the rollback's to decide about. A directory git
+/// does not know as a worktree, such as an add that failed part way, goes
+/// too, and so does what a `git worktree add` killed part way leaves: an
+/// entry git keeps locked, with the reason `initializing`, which a plain
+/// removal refuses, a prune skips, and a later add at the path trips over.
+///
+/// A worktree added early has had a capture of its shell environment
+/// started in it (see `orchestrator::early_worktree`). That capture's shell
+/// may still be starting there, and whatever it writes would stop the
+/// removal or bring the directory back after it, so the capture is waited
+/// out first and its result dropped. Nothing can stop it sooner.
+pub(super) fn remove_worktree_keeping_branch(clone: &Path, worktree: &Path) -> Result<(), String> {
     let Some(path) = worktree.to_str() else {
         return Err(format!("not a UTF-8 path: {}", worktree.display()));
     };
-    if crate::git::cli_run(clone, &["worktree", "remove", "--force", path]).is_ok() {
+    crate::git::wait_out_and_invalidate_shell_env(worktree);
+    // Forced twice: once past what the worktree holds, once past a lock.
+    // The only lock a worktree the transfer has just added can carry is
+    // the one git holds for the length of the add.
+    let forced = ["worktree", "remove", "--force", "--force", path];
+    if crate::git::cli_run(clone, &forced).is_ok() {
         return Ok(());
     }
     let removed = if worktree.exists() {
@@ -443,6 +458,8 @@ fn remove_worktree_keeping_branch(clone: &Path, worktree: &Path) -> Result<(), S
     } else {
         Ok(())
     };
+    // A prune leaves a locked entry be, whatever became of its directory.
+    let _ = crate::git::cli_run(clone, &["worktree", "unlock", path]);
     let _ = crate::git::cli_run(clone, &["worktree", "prune"]);
     removed
 }
@@ -549,5 +566,155 @@ mod tests {
         std::fs::write(&exclude, "/a\nlater\n").unwrap();
         remove_added_excludes(&made).unwrap();
         assert_eq!(std::fs::read_to_string(&exclude).unwrap(), "later\n");
+    }
+
+    /// Start `git worktree add` for `worktree` in `repo`, whose `held.bin`
+    /// has a smudge filter that never finishes, and kill it outright once
+    /// the checkout has reached that file: what is left is a directory
+    /// with some of the files and an entry git still holds locked.
+    #[cfg(unix)]
+    fn kill_an_add_part_way(repo: &crate::test_utils::TempGitRepo, worktree: &Path) {
+        use std::os::unix::process::CommandExt;
+        use std::time::{Duration, Instant};
+
+        let reached = repo.path().join(".git/reached-the-filter");
+        // Nothing is forked once the marker is there, so the kill below
+        // has no process still being made to miss.
+        let smudge = format!("sh -c ': > \"{}\"; exec sleep 600'", reached.display());
+        repo.run_git(&["config", "filter.held.smudge", &smudge]);
+        let mut add = std::process::Command::new("git");
+        add.arg("-c")
+            .arg("core.hooksPath=/dev/null")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["worktree", "add", "--detach"])
+            .arg(worktree)
+            .arg("HEAD")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            // A group of its own, so the kill takes the checkout git runs
+            // and the filter under it as well.
+            .process_group(0);
+        crate::git::strip_git_env(&mut add);
+        let mut add = add.spawn().unwrap();
+        let group = -libc::pid_t::try_from(add.id()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !reached.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the add never reached the filter"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: `kill` has no memory-safety preconditions, and the group
+        // is this test's own, alive at least in the filter's `sleep`.
+        unsafe { libc::kill(group, libc::SIGKILL) };
+        add.wait().unwrap();
+        // Until the group is gone, so nothing of it is still writing.
+        // SAFETY: as above.
+        while unsafe { libc::kill(group, libc::SIGKILL) } == 0 {
+            assert!(Instant::now() < deadline, "the add's processes outlived it");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        repo.run_git(&["config", "--unset", "filter.held.smudge"]);
+        std::fs::remove_file(&reached).unwrap();
+    }
+
+    /// A repo with a commit whose `held.bin` goes through the `held`
+    /// filter. Returns it with a root for worktrees.
+    #[cfg(unix)]
+    fn repo_with_a_filtered_file() -> (crate::test_utils::TempGitRepo, crate::test_utils::TempDir) {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file(".gitattributes", "held.bin filter=held\n");
+        repo.write_file("a.txt", "alpha\n");
+        repo.write_file("held.bin", "held\n");
+        repo.commit("base");
+        (repo, crate::test_utils::TempDir::new("killed-add"))
+    }
+
+    /// The lock git holds on a worktree for the length of its add.
+    #[cfg(unix)]
+    fn lock_reason(repo: &crate::test_utils::TempGitRepo, name: &str) -> Option<String> {
+        let locked = repo.path().join(".git/worktrees").join(name).join("locked");
+        std::fs::read_to_string(locked)
+            .ok()
+            .map(|reason| reason.trim().to_string())
+    }
+
+    #[cfg(unix)]
+    fn add_detached(repo: &crate::test_utils::TempGitRepo, worktree: &Path) -> Result<(), String> {
+        crate::git::create_detached_worktree_without_hooks(repo.path(), "HEAD", worktree, false)
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_what_a_killed_add_left_so_the_path_can_be_added_again() {
+        let (repo, root) = repo_with_a_filtered_file();
+        let worktree = root.path().join("wt");
+        kill_an_add_part_way(&repo, &worktree);
+        let path = worktree.to_str().unwrap();
+
+        // The state: part of a checkout, and a lock a plain removal and a
+        // new add both stop at.
+        assert!(worktree.join("a.txt").exists());
+        assert!(!worktree.join("held.bin").exists());
+        assert_eq!(lock_reason(&repo, "wt").as_deref(), Some("initializing"));
+        let refused = repo
+            .try_run_git(&["worktree", "remove", "--force", path])
+            .expect_err("git removed a locked worktree");
+        assert!(refused.contains("locked"), "{refused}");
+        assert!(worktree.exists());
+
+        remove_worktree_keeping_branch(repo.path(), &worktree).unwrap();
+
+        assert!(!worktree.exists());
+        assert_eq!(lock_reason(&repo, "wt"), None);
+        assert!(!repo.path().join(".git/worktrees/wt").exists());
+        add_detached(&repo, &worktree).expect("a worktree at the same path");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("held.bin")).unwrap(),
+            "held\n"
+        );
+    }
+
+    /// What a build without the fix left of a killed add: it deleted the
+    /// directory and pruned, which keeps the locked entry, and every later
+    /// add at that path failed on it.
+    #[cfg(unix)]
+    #[test]
+    fn clears_a_locked_entry_whose_directory_is_already_gone() {
+        let (repo, root) = repo_with_a_filtered_file();
+        let worktree = root.path().join("wt");
+        kill_an_add_part_way(&repo, &worktree);
+        std::fs::remove_dir_all(&worktree).unwrap();
+        repo.run_git(&["worktree", "prune"]);
+        assert_eq!(lock_reason(&repo, "wt").as_deref(), Some("initializing"));
+        let refused = add_detached(&repo, &worktree).expect_err("git added over a locked entry");
+        assert!(refused.contains("locked"), "{refused}");
+
+        remove_worktree_keeping_branch(repo.path(), &worktree).unwrap();
+
+        assert_eq!(lock_reason(&repo, "wt"), None);
+        add_detached(&repo, &worktree).expect("a worktree at the same path");
+    }
+
+    /// A directory git never heard of, and a path with nothing at it, are
+    /// removed without complaint, as before.
+    #[test]
+    fn removes_a_directory_git_does_not_know_and_tolerates_none() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("a.txt", "alpha\n");
+        repo.commit("base");
+        let root = crate::test_utils::TempDir::new("stray-worktree");
+        let stray = root.path().join("stray");
+        std::fs::create_dir_all(stray.join("nested")).unwrap();
+        std::fs::write(stray.join("nested/file"), "").unwrap();
+
+        remove_worktree_keeping_branch(repo.path(), &stray).unwrap();
+        assert!(!stray.exists());
+        remove_worktree_keeping_branch(repo.path(), &stray).unwrap();
     }
 }

@@ -2706,7 +2706,9 @@ fn a_reachable_workstation_retries_only_its_failed_rows() {
 /// tried at once when this process never has, and after that once per
 /// [`QUEUE_HOLD_MIN_SPACING`] whatever its failures have backed off to, so the
 /// asks cost a bounded number of Blox calls and the queue waits no longer
-/// than that spacing once the cause has cleared.
+/// than that spacing once the cause has cleared. An attempt made before the
+/// service's own next one was due leaves that schedule as it was, so the row
+/// is not backed off further for having been waited on.
 #[test]
 fn a_held_queue_has_its_holder_tried_once_per_spacing_whatever_the_backoff() {
     let fx = Fixture::new();
@@ -2729,8 +2731,11 @@ fn a_held_queue_has_its_holder_tried_once_per_spacing_whatever_the_backoff() {
             .last_attempt = Some(std::time::Instant::now() - age);
     };
 
-    // Never tried: the first ask is an attempt, the next ones are not.
+    // Never tried: the first ask is an attempt, the next ones are not. The
+    // service would have made that attempt itself, so it counts as a failure.
     assert!(ask());
+    let scheduled = fx.reconciler.states()[0].next_attempt_at;
+    assert!(scheduled.is_some());
     let calls = fx.blox.calls().len();
     for _ in 0..5 {
         assert!(!ask());
@@ -2739,15 +2744,33 @@ fn a_held_queue_has_its_holder_tried_once_per_spacing_whatever_the_backoff() {
     assert!(!ask());
     assert_eq!(fx.blox.calls().len(), calls);
 
-    // Failures have pushed the sweep's next attempt out to the cap. The
-    // hold does not wait for it: one attempt per spacing, and no more.
+    // The hold does not wait for the sweep's next attempt: one attempt per
+    // spacing, and no more. Those fail ahead of the service's schedule and
+    // leave it as it was: no failure counted, the sweep due when it was.
     for _ in 0..6 {
         age_last_attempt(QUEUE_HOLD_MIN_SPACING);
         assert!(ask());
         assert!(!ask());
     }
     assert!(!fx.reconciler.reconcile_blocking(&holder.id, Trigger::Sweep));
-    assert_eq!(fx.reconciler.states()[0].attempts, 7);
+    let state = fx.reconciler.states().remove(0);
+    assert_eq!(state.attempts, 1);
+    assert_eq!(state.next_attempt_at, scheduled);
+
+    // An ask once the service's own attempt is due is that attempt, and
+    // counts as usual.
+    fx.reconciler
+        .rows
+        .lock()
+        .unwrap()
+        .get_mut(&holder.id)
+        .unwrap()
+        .next_attempt = Some(std::time::Instant::now());
+    age_last_attempt(QUEUE_HOLD_MIN_SPACING);
+    assert!(ask());
+    let state = fx.reconciler.states().remove(0);
+    assert_eq!(state.attempts, 2);
+    assert!(state.next_attempt_at > scheduled);
 
     // The cause clears: the ask after the spacing settles the row.
     fx.blox.set_workspace(WorkspaceProbe::Running);

@@ -25,6 +25,8 @@ const PR_CREATE: &str = include_str!("../../prs/create_pr.rs");
 const PR_PULL: &str = include_str!("../../prs/pull.rs");
 const TRANSFER: &str = include_str!("../../project_transfer/orchestrator.rs");
 const TRANSFER_COMMANDS: &str = include_str!("../../project_transfer/commands.rs");
+const FRONTEND_LIFECYCLE: &str =
+    include_str!("../../../../src/lib/features/projects/workspaceLifecycle.svelte.ts");
 
 /// The text of the function whose signature starts with `signature`, to the
 /// closing brace at its own indentation.
@@ -645,4 +647,6 @@ fn the_queue_is_held_not_drained_behind_a_start_that_could_not_check_out() {
         look,
         "crate::workspace_setup::clone::sibling_session_in_clone(store, branch)",
     );
+    // The frontend tells the hold notice from any other by its heading.
+    assert!(FRONTEND_LIFECYCLE.contains(crate::workspace_setup::failures::QUEUE_HELD_TITLE));
 }

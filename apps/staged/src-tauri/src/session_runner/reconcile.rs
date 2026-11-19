@@ -82,8 +82,11 @@ const NUDGE_MIN_SPACING: Duration = Duration::from_secs(30);
 /// plus one of its rechecks. One minute is [`BACKOFF_BASE`] and
 /// [`HELD_WORK_RECHECK`]: the spacing this service keeps by itself after a
 /// row's first failed attempt, so a held queue never has a row tried more
-/// often than that. It only stops the spacing growing, to
-/// [`BACKOFF_CAP`], while something waits on the answer.
+/// often than that. These attempts come on top of the service's own schedule
+/// and leave it alone: one that began before the row's next attempt was due
+/// and failed counts no failure and moves no next attempt
+/// (`RowState::ahead_of_schedule`), so once the hold is over the row is tried
+/// when it would have been without the hold.
 pub(crate) const QUEUE_HOLD_MIN_SPACING: Duration = Duration::from_secs(60);
 /// The wait before checking again on a row whose session is still working
 /// after its turn; it doubles with each further check that finds the work
@@ -200,6 +203,10 @@ struct RowState {
     last_attempt: Option<Instant>,
     next_attempt: Option<Instant>,
     next_attempt_at: Option<i64>,
+    /// The attempt in flight is one a held queue asked for
+    /// ([`Trigger::QueueHold`]) before `next_attempt` was due: if it fails,
+    /// `failures` and `next_attempt` stay as they are.
+    ahead_of_schedule: bool,
     /// How long the session has been working after its turn, as attempts
     /// found it ([`RowOutcome::Held`]), for [`Reconciler::held_work_ran_out`].
     held: Option<HeldClock>,
@@ -434,6 +441,8 @@ impl Reconciler {
         }
         row.in_flight = true;
         row.last_attempt = Some(now);
+        row.ahead_of_schedule =
+            trigger == Trigger::QueueHold && row.next_attempt.is_some_and(|next| next > now);
         true
     }
 
@@ -534,10 +543,19 @@ impl Reconciler {
                     .map(|row| forgotten(session_id, row)),
                 RowOutcome::Backoff(reason) => rows.get_mut(session_id).map(|row| {
                     row.in_flight = false;
-                    row.failures += 1;
-                    let delay = backoff(row.failures);
-                    row.next_attempt = Some(Instant::now() + delay);
-                    row.next_attempt_at = Some(now_timestamp() + delay.as_millis() as i64);
+                    let now = Instant::now();
+                    let delay = match row.next_attempt {
+                        // A held queue's attempt, made before this one was
+                        // due: the service's own schedule stands.
+                        Some(next) if row.ahead_of_schedule => next.saturating_duration_since(now),
+                        _ => {
+                            row.failures += 1;
+                            let delay = backoff(row.failures);
+                            row.next_attempt = Some(now + delay);
+                            row.next_attempt_at = Some(now_timestamp() + delay.as_millis() as i64);
+                            delay
+                        }
+                    };
                     log::info!(
                         "[reconcile] Session {session_id} stays disconnected ({:?}: {}); \
                          retrying in {}s",

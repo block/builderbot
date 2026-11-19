@@ -3,11 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::{
-    admit_for_resume, auto_recovery_from_metadata, claim_for_auto_resume, pause_for_rate_limit,
-    reschedule_after_start_failure, AutoResumeClaim, RateLimitAutoRecovery, RateLimitScheduler,
-    MAX_RESUMES_PER_TICK, NETWORK_PAUSE_KIND,
+    admit_for_resume, auto_recovery_from_metadata, claim_for_auto_resume, network_rows_waiting,
+    pause_for_rate_limit, reschedule_after_start_failure, AutoResumeClaim, RateLimitAutoRecovery,
+    RateLimitScheduler, MAX_RESUMES_PER_TICK, NETWORK_PAUSE_KIND,
 };
 use super::*;
+
+mod triggers;
 use crate::store::{CompletionReason, MessageRole, Session, SessionStatus, Store};
 
 const HOUR_MS: i64 = 60 * 60 * 1_000;
@@ -54,10 +56,26 @@ fn network_paused_sessions(
         .collect()
 }
 
-/// The synchronous part of `run_tick`: settle the probe, then admit and
-/// claim rows oldest pause first. Returns the sessions it started.
+/// The synchronous part of `run_tick` without the wake and network-change
+/// triggers: settle the probe, then admit and claim rows oldest pause first.
+/// Returns the sessions it started.
+///
+/// The tests in this file jump the clock freely to exercise the gate's own
+/// rules; `triggers.rs` drives [`tick_with_triggers`] on a real cadence.
 fn tick(scheduler: &RateLimitScheduler, store: &Arc<Store>, now: i64) -> Vec<String> {
     scheduler.settle_network_probe(store, now);
+    admit_and_claim(scheduler, store, now)
+}
+
+/// The whole synchronous part of `run_tick`, triggers included.
+fn tick_with_triggers(scheduler: &RateLimitScheduler, store: &Arc<Store>, now: i64) -> Vec<String> {
+    let sessions = store.get_rate_limited_paused_sessions().unwrap();
+    scheduler.settle_network_probe(store, now);
+    scheduler.observe_network_tick(now, network_rows_waiting(&sessions));
+    admit_and_claim(scheduler, store, now)
+}
+
+fn admit_and_claim(scheduler: &RateLimitScheduler, store: &Arc<Store>, now: i64) -> Vec<String> {
     let mut started = Vec::new();
     for session in store.get_rate_limited_paused_sessions().unwrap() {
         if started.len() >= MAX_RESUMES_PER_TICK {

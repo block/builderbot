@@ -21,16 +21,39 @@
 //! laptop that sleeps for days gives up on nothing. Failures while it is open
 //! are counted under the existing cap, and close it again.
 //!
+//! Two things make a closed gate probe sooner than its doubling delay, both
+//! derived inside the scheduler tick with no operating-system callbacks:
+//!
+//! - **Wake.** A gap of more than [`WAKE_GAP_MS`] between two ticks means the
+//!   process was suspended. The probe delay resets, so a probe is due at once.
+//! - **Network change.** While the gate is closed, each tick reads the
+//!   machine's [`NetworkFingerprint`]. A change resets the probe delay. An
+//!   empty set means no network, and no probe starts.
+//!
+//! A probe starts only on a tick whose preceding gap was normal. A short
+//! maintenance wake during sleep cannot produce two ticks one interval apart,
+//! so it never starts a probe; after the lid opens, the second tick does.
+//!
 //! Every method takes `now`; the gate never reads a clock of its own.
+
+use std::collections::BTreeSet;
+use std::net::IpAddr;
 
 use crate::store::{SessionStatus, Store};
 
 use super::RateLimitScheduler;
 
+mod fingerprint;
+
+pub(crate) use fingerprint::{InterfaceAddresses, NetworkFingerprint};
+
 /// The delay before the first probe after the gate closes, and the start of
 /// the doubling for probes that fail.
 pub(super) const BASE_PROBE_DELAY_MS: i64 = 15_000;
 pub(super) const MAX_PROBE_DELAY_MS: i64 = 10 * 60_000;
+/// A gap between two ticks longer than this means the process was suspended:
+/// three of the scheduler's 15 second ticks.
+pub(super) const WAKE_GAP_MS: i64 = 45_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GateState {
@@ -61,6 +84,14 @@ pub(super) struct NetworkGate {
     next_probe_at: i64,
     /// The wait that the next failed probe adds before the one after it.
     probe_delay_ms: i64,
+    /// The wall-clock time of the last tick.
+    last_tick_at: Option<i64>,
+    /// Whether the gap before the last tick was normal. A probe starts only
+    /// when it was; the first tick of a process has no gap and counts.
+    settled: bool,
+    /// The fingerprint last read while the gate was closed. `None` until the
+    /// first read, after the gate opens, and when a read fails.
+    addresses: Option<BTreeSet<IpAddr>>,
 }
 
 impl Default for NetworkGate {
@@ -69,6 +100,9 @@ impl Default for NetworkGate {
             state: GateState::Closed,
             next_probe_at: 0,
             probe_delay_ms: BASE_PROBE_DELAY_MS,
+            last_tick_at: None,
+            settled: true,
+            addresses: None,
         }
     }
 }
@@ -78,9 +112,70 @@ impl NetworkGate {
         match self.state {
             GateState::Open => NetworkTurn::Resume,
             GateState::Probing { .. } => NetworkTurn::Hold,
-            GateState::Closed if now >= self.next_probe_at => NetworkTurn::Probe,
+            GateState::Closed
+                if now >= self.next_probe_at && self.settled && !self.network_absent() =>
+            {
+                NetworkTurn::Probe
+            }
             GateState::Closed => NetworkTurn::Hold,
         }
+    }
+
+    /// Record a scheduler tick, and answer whether the gap before it shows
+    /// that the process was suspended.
+    fn observe_tick(&mut self, now: i64) -> bool {
+        let woke = self
+            .last_tick_at
+            .is_some_and(|last| now.saturating_sub(last) > WAKE_GAP_MS);
+        self.last_tick_at = Some(now);
+        self.settled = !woke;
+        if woke {
+            self.reset_probe_delay(now);
+        }
+        woke
+    }
+
+    /// Something suggests the network may be back. A closed gate may probe
+    /// at once, and the next failed probe waits the base delay again. A
+    /// running probe is left to finish.
+    fn reset_probe_delay(&mut self, now: i64) {
+        self.probe_delay_ms = BASE_PROBE_DELAY_MS;
+        if self.state == GateState::Closed {
+            self.next_probe_at = now;
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state == GateState::Closed
+    }
+
+    /// The last fingerprint read held no address: there is no network.
+    fn network_absent(&self) -> bool {
+        self.addresses.as_ref().is_some_and(BTreeSet::is_empty)
+    }
+
+    /// Record the fingerprint read on this tick, and answer whether it
+    /// differs from the one before. The first read is the baseline, not a
+    /// change.
+    fn observe_fingerprint(&mut self, addresses: BTreeSet<IpAddr>, now: i64) -> bool {
+        if !self.is_closed() {
+            return false;
+        }
+        let changed = self
+            .addresses
+            .as_ref()
+            .is_some_and(|previous| *previous != addresses);
+        self.addresses = Some(addresses);
+        if changed {
+            self.reset_probe_delay(now);
+        }
+        changed
+    }
+
+    /// The fingerprint could not be read. Nothing is known about the
+    /// network, so an earlier "no network" answer no longer blocks a probe.
+    fn fingerprint_unreadable(&mut self) {
+        self.addresses = None;
     }
 
     fn probe_started(&mut self, session_id: &str, now: i64) {
@@ -106,6 +201,9 @@ impl NetworkGate {
         if self.is_probing(session_id) {
             self.state = GateState::Open;
             self.probe_delay_ms = BASE_PROBE_DELAY_MS;
+            // The fingerprint is not read while the gate is open, so the
+            // next closed period starts from a fresh baseline.
+            self.addresses = None;
         }
     }
 
@@ -184,6 +282,43 @@ impl RateLimitScheduler {
     /// What the gate lets a due network-paused session do on this tick.
     pub(super) fn network_turn(&self, now: i64) -> NetworkTurn {
         self.network_gate.lock().unwrap().turn(now)
+    }
+
+    /// Apply the wake and network-change triggers for the tick at `now`.
+    ///
+    /// Runs once per tick, before any row is admitted. The fingerprint is
+    /// read only while the gate is closed and `network_rows_waiting`, so a
+    /// machine with nothing paused on the network never lists its interfaces.
+    pub(super) fn observe_network_tick(&self, now: i64, network_rows_waiting: bool) {
+        let closed = {
+            let mut gate = self.network_gate.lock().unwrap();
+            if gate.observe_tick(now) {
+                log::info!("[network_gate] woke from a suspend; probe delay reset");
+            }
+            gate.is_closed()
+        };
+        if !closed || !network_rows_waiting {
+            return;
+        }
+        // The interfaces are read with the gate unlocked; the gate rechecks
+        // that it is still closed before it takes the answer.
+        let addresses = self.network_fingerprint.read();
+        let mut gate = self.network_gate.lock().unwrap();
+        match addresses {
+            Ok(addresses) => {
+                let was_absent = gate.network_absent();
+                let changed = gate.observe_fingerprint(addresses, now);
+                if gate.network_absent() && !was_absent {
+                    log::info!("[network_gate] no network interface has an address; not probing");
+                } else if changed {
+                    log::info!("[network_gate] network interfaces changed; probe delay reset");
+                }
+            }
+            Err(e) => {
+                log::warn!("[network_gate] failed to read network interfaces: {e}");
+                gate.fingerprint_unreadable();
+            }
+        }
     }
 
     /// The scheduler claimed `session_id` as the probe.

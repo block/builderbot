@@ -25,7 +25,7 @@ use crate::store::{MessageRole, Session, Store};
 
 mod network_gate;
 
-use network_gate::{NetworkGate, NetworkTurn};
+use network_gate::{InterfaceAddresses, NetworkFingerprint, NetworkGate, NetworkTurn};
 
 pub(crate) const AUTO_RETRY_RESUME_PROMPT: &str = "Continue where you left off.";
 /// The resume prompt for a session paused by a network failure. The agent's
@@ -75,17 +75,35 @@ const MAX_RESUMES_PER_TICK: usize = 2;
 /// to plain backoff instead.
 pub(crate) const MAX_PLAUSIBLE_RESET_LEAD_MS: i64 = 48 * 60 * 60 * 1_000;
 
-#[derive(Default)]
 pub struct RateLimitScheduler {
     in_flight: Mutex<HashSet<String>>,
     tick_loop_spawned: AtomicBool,
     /// The gate every network-paused session waits behind.
     network_gate: Mutex<NetworkGate>,
+    /// Where the gate reads the machine's interface addresses from.
+    network_fingerprint: Box<dyn NetworkFingerprint>,
+}
+
+impl Default for RateLimitScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RateLimitScheduler {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_network_fingerprint(Box::new(InterfaceAddresses))
+    }
+
+    pub(crate) fn with_network_fingerprint(
+        network_fingerprint: Box<dyn NetworkFingerprint>,
+    ) -> Self {
+        Self {
+            in_flight: Mutex::default(),
+            tick_loop_spawned: AtomicBool::default(),
+            network_gate: Mutex::default(),
+            network_fingerprint,
+        }
     }
 
     fn try_mark_in_flight(&self, session_id: &str) -> bool {
@@ -176,6 +194,7 @@ async fn run_tick(
     let mut started = 0usize;
     let mut drained_branches: HashSet<String> = HashSet::new();
     scheduler.settle_network_probe(&store, now);
+    scheduler.observe_network_tick(now, network_rows_waiting(&sessions));
 
     for session in sessions {
         if started >= MAX_RESUMES_PER_TICK {
@@ -372,6 +391,15 @@ fn admit_for_resume(
         false
     };
     Some(ResumeAdmission { state, probe })
+}
+
+/// Whether any listed session is paused on the network and may still resume
+/// by itself: the rows the network gate could probe with.
+fn network_rows_waiting(sessions: &[Session]) -> bool {
+    sessions.iter().any(|session| {
+        is_network_pause(session.rate_limit_kind.as_deref())
+            && is_actionable_for_auto_resume(session)
+    })
 }
 
 fn is_network_pause(rate_limit_kind: Option<&str>) -> bool {

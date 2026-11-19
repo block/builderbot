@@ -827,7 +827,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running, or disconnected (a remote session Staged lost its connection to; it may still be working). A `failed` session reports `completion_reason` and `error_message`; `remote_agent_lost` means its remote workspace agent died under it (the message names why, such as the workstation restarting), so work it left may be uncommitted on the workspace. A completed session has finished its one goal: follow up with `continue_repo_session` only to answer a question it ended on or to fix that outcome, and start a new repo session for whatever comes next."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running, disconnected (a remote session Staged lost its connection to; it may still be working), or paused (its agent hit a provider limit or lost its network connection; Staged resumes a paused session by itself, so it needs no follow-up). A `failed` session reports `completion_reason` and `error_message`; `remote_agent_lost` means its remote workspace agent died under it (the message names why, such as the workstation restarting), so work it left may be uncommitted on the workspace. A completed session has finished its one goal: follow up with `continue_repo_session` only to answer a question it ended on or to fix that outcome, and start a new repo session for whatever comes next."
     )]
     async fn wait_for_repo_session(
         &self,
@@ -946,11 +946,15 @@ impl ProjectToolsHandler {
                             );
                         }
                     }
-                    // A session parked on a rate limit has no runner and no
-                    // token: the store write is the whole cancel. It drops
-                    // `completion_reason = rate_limited`, so the rate-limit
-                    // scheduler never resumes the child, and settles the
-                    // work queued behind it, as a Stop in the UI does.
+                    // A paused session is parked for automatic resume, on a
+                    // provider limit or, with `rate_limit_kind = "network"`,
+                    // on a prompt that failed on the network. Either kind has
+                    // no runner and no token: the store write is the whole
+                    // cancel. It drops `completion_reason = rate_limited`,
+                    // which both kinds carry, so the rate-limit scheduler
+                    // never resumes the child and a network pause never
+                    // probes with it, and settles the work queued behind it,
+                    // as a Stop in the UI does.
                     Ok(Some(session)) if session.status == SessionStatus::Paused => {
                         crate::session_commands::cancel_session_without_runner(
                             &self.store,
@@ -1782,9 +1786,10 @@ mod tests {
         );
     }
 
-    /// A child parked on a rate limit has no runner, so neither the queued
-    /// transition nor the registry can cancel it; the tool used to fall
-    /// through, report `paused`, and leave the scheduler to restart the child.
+    /// A paused child, parked on a provider limit or a network failure, has
+    /// no runner, so neither the queued transition nor the registry can cancel
+    /// it; the tool used to fall through, report `paused`, and leave the
+    /// scheduler to restart the child.
     /// The store write itself is covered by
     /// `session_commands::tests::cancelling_a_paused_session_without_a_runner_keeps_the_callers_reason_and_stops_auto_resume`;
     /// that the tool reaches it is pinned by source text, because the handler
@@ -1824,6 +1829,20 @@ mod tests {
             .expect("cancel tool description");
 
         assert!(wait_description.contains("Returns the current state"));
+        // A paused child is not finished and Staged restarts it, so the
+        // parent must be told to wait again, for either cause of the pause.
+        let repeat = &wait_description[wait_description
+            .find("repeat the wait if the session is still")
+            .expect("repeat-the-wait clause")..];
+        let repeat = &repeat[..repeat.find("A `failed` session").expect("failed clause")];
+        for state in ["queued", "running", "disconnected", "paused"] {
+            assert!(
+                repeat.contains(state),
+                "the wait description must tell the parent to wait again for `{state}`: {repeat}"
+            );
+        }
+        assert!(repeat.contains("hit a provider limit or lost its network connection"));
+        assert!(repeat.contains("Staged resumes a paused session by itself"));
         assert!(!wait_description.contains("`activity` progress fields"));
         assert!(!wait_description.contains("`last_activity_at`"));
         assert!(!wait_description.contains("`last_tool_result`"));

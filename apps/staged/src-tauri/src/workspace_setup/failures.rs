@@ -22,7 +22,8 @@
 //! worked brought commits found on the base branch along onto the new
 //! branch, or, under a `noticeTitle` of its own, why the branch's queued
 //! session is waiting ([`notify_queue_held`]). It is not a reason and is not
-//! kept.
+//! kept. A `noticeTitle` with no `notice` takes that notice back
+//! ([`notify_queue_released`]).
 //!
 //! In memory, per process: the branch row keeps only its status. After a
 //! restart the reasons are gone until the next attempt fails, which the
@@ -127,11 +128,29 @@ pub(crate) fn notify_queue_held<R: tauri::Runtime>(
     branch_id: &str,
     notice: &str,
 ) {
+    emit_queue_hold(app_handle, branch_id, Some(notice));
+}
+
+/// Tell every window and web client that the queued session of `branch_id`
+/// no longer waits, so what [`notify_queue_held`] said is taken down: the
+/// same heading with no `notice`.
+pub(crate) fn notify_queue_released<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+) {
+    emit_queue_hold(app_handle, branch_id, None);
+}
+
+fn emit_queue_hold<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+    notice: Option<&str>,
+) {
     let event = SetupErrorEvent {
         branch_id,
         error: None,
         user_requested: false,
-        notice: Some(notice),
+        notice,
         notice_title: Some(QUEUE_HELD_TITLE),
     };
     crate::web_server::emit_to_all(app_handle, EVENT, event);

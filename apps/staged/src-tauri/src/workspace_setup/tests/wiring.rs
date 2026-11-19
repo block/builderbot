@@ -609,12 +609,20 @@ fn the_queue_is_held_not_drained_behind_a_start_that_could_not_check_out() {
         "start_queued_session_for_branch(",
     );
     // The hold tells the user why the row waits and has a `disconnected`
-    // holder looked at, on the first look and on each recheck alike: both
-    // drain call sites go through the one function.
+    // holder looked at, once per cause, and takes the notice back when the
+    // row is no longer held: both drain call sites go through the one
+    // function. A held row that left the queue has it taken back too.
+    assert_calls(
+        "drain_branch_queue",
+        drain,
+        "crate::workspace_setup::failures::notify_queue_released(&app_handle, &branch_id)",
+    );
     let hold = body_of(SESSION_COMMANDS, "fn hold_queue_behind_sibling_session<");
     for call in [
         "sibling_session_hold(store, kicker, branch, session_id)",
         "crate::workspace_setup::failures::notify_queue_held(app_handle, &branch.id, notice)",
+        "kicker.start_attempts().release(&branch.id, session_id)",
+        "crate::workspace_setup::failures::notify_queue_released(app_handle, &branch.id)",
         "crate::session_runner::reconcile::reconcile_session(holder.clone())",
     ] {
         assert_calls("hold_queue_behind_sibling_session", hold, call);

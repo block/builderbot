@@ -13,6 +13,7 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
   let eventListeners: Map<string, Array<(payload: unknown) => void>>;
   let toastError: ReturnType<typeof vi.fn>;
   let toastWarning: ReturnType<typeof vi.fn>;
+  let toastDismiss: ReturnType<typeof vi.fn>;
 
   /** Deliver a backend event to the controller's listeners. */
   function emit(event: string, payload: unknown) {
@@ -62,7 +63,8 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     vi.doMock('svelte-sonner', () => {
       toastError = vi.fn();
       toastWarning = vi.fn();
-      return { toast: { error: toastError, warning: toastWarning } };
+      toastDismiss = vi.fn();
+      return { toast: { error: toastError, warning: toastWarning, dismiss: toastDismiss } };
     });
     vi.doMock('../settings/preferences.svelte', () => ({
       getPreferredAgent: () => 'claude',
@@ -481,16 +483,21 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     ]);
     expect(toastError).not.toHaveBeenCalled();
 
-    // A reason cleared with nothing to tell raises nothing.
+    // A reason cleared with nothing to tell raises nothing, and this notice
+    // is not one that is taken down.
     emit('workspace-setup-error', { branchId: 'branch-1', error: null });
     expect(toastWarning).toHaveBeenCalledTimes(1);
+    expect(toastDismiss).not.toHaveBeenCalled();
     lifecycle.stop();
   });
 
   // A queued session held behind a sibling branch's session stays queued
   // with no error. The backend says why on the same event, under a heading
-  // of its own, and the branch is given no reason to show.
-  it('tells the user why a queued session is waiting, under the heading it came with', async () => {
+  // of its own, and the branch is given no reason to show. The toast has
+  // one id per branch, so a new cause replaces the old one, and it is taken
+  // down when the backend says the session no longer waits, or when the
+  // branch's state is cleared.
+  it('tells the user why a queued session is waiting, for as long as it waits', async () => {
     const lifecycle = await newController();
     await settle();
 
@@ -504,11 +511,33 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
       notice,
       noticeTitle: 'Queued session is waiting',
     });
+    const lost = "A queued session of branch 'feature' is waiting: lost its connection.";
+    emit('workspace-setup-error', {
+      branchId: 'branch-1',
+      error: null,
+      notice: lost,
+      noticeTitle: 'Queued session is waiting',
+    });
+    const id = 'queue-held:branch-1';
     expect(toastWarning.mock.calls).toEqual([
-      ['Queued session is waiting', { description: notice, duration: Infinity }],
+      ['Queued session is waiting', { id, description: notice, duration: Infinity }],
+      ['Queued session is waiting', { id, description: lost, duration: Infinity }],
     ]);
     expect(toastError).not.toHaveBeenCalled();
+    expect(toastDismiss).not.toHaveBeenCalled();
     expect(lifecycle.getWorkspaceErrors().has('branch-1')).toBe(false);
+
+    // Released: the heading alone takes the toast down and raises nothing.
+    emit('workspace-setup-error', {
+      branchId: 'branch-1',
+      error: null,
+      noticeTitle: 'Queued session is waiting',
+    });
+    expect(toastDismiss.mock.calls).toEqual([[id]]);
+    expect(toastWarning).toHaveBeenCalledTimes(2);
+
+    lifecycle.clearBranchState('branch-2');
+    expect(toastDismiss).toHaveBeenLastCalledWith('queue-held:branch-2');
     lifecycle.stop();
   });
 

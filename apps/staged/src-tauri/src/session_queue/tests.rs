@@ -326,9 +326,19 @@ fn queued_start_attempts_retry_with_growing_delays_then_give_up() {
 
     // A row that left the queue (stopped, forced, deleted) is forgotten on
     // the next drain's prune; the branch's map goes with its last row.
-    attempts.retain_queued("b", |id| id == "s2");
+    assert!(!attempts.retain_queued("b", |id| id == "s2"));
     assert_eq!(attempts.failures("b", "s2"), 1);
-    attempts.retain_queued("b", |_| false);
+
+    // A hold ends once, keeping the row's attempts; a held row that left
+    // the queue is reported, so what the user was told can be taken back.
+    assert!(!attempts.release("b", "s2"));
+    attempts.hold("b", "s2", t2, "waiting");
+    assert!(attempts.release("b", "s2"));
+    assert!(!attempts.release("b", "s2"));
+    assert!(!attempts.is_held("b", "s2"));
+    assert_eq!(attempts.failures("b", "s2"), 1);
+    attempts.hold("b", "s2", t2, "waiting");
+    assert!(attempts.retain_queued("b", |_| false));
     assert!(attempts.is_empty());
 
     attempts.record_failure("gone", "s3", t2);

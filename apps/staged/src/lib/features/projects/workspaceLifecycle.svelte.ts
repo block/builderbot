@@ -19,13 +19,20 @@ interface LocalSetupTask {
  *  `notice` comes with a setup that worked and did something the user
  *  should know of: it put commits it found on the base branch on this one.
  *  With a `noticeTitle` it is about something else, under that heading: why
- *  the branch's queued session is waiting. */
+ *  the branch's queued session is waiting. That heading with no `notice`
+ *  says the session no longer waits. */
 interface WorkspaceSetupErrorEvent {
   branchId: string;
   error: string | null;
   userRequested?: boolean;
   notice?: string;
   noticeTitle?: string;
+}
+
+/** The one toast a branch has for why its queued session is waiting: a new
+ *  cause replaces the old one, and it is taken down when the wait is over. */
+function queueHeldToastId(branchId: string): string {
+  return `queue-held:${branchId}`;
 }
 
 interface WorkspaceLifecycleHooks {
@@ -302,6 +309,7 @@ class WorkspaceLifecycleController {
     this.pendingSetupBranches.delete(branchId);
     this.queuedSetupBranches.delete(branchId);
     this.prerunOnSetup.delete(branchId);
+    toast.dismiss(queueHeldToastId(branchId));
 
     this.localSetupTaskQueue = this.localSetupTaskQueue.filter(
       (task) => task.branchId !== branchId
@@ -356,8 +364,16 @@ class WorkspaceLifecycleController {
     this.setupErrorEventSeqByBranch.set(branchId, ++this.setupErrorEventSeq);
     if (error == null) {
       this.clearWorkspaceError(branchId);
-      if (event.notice) {
-        toast.warning(event.noticeTitle ?? 'Workspace branch was given existing commits', {
+      if (event.noticeTitle) {
+        // Why the branch's queued session waits: up for as long as it does.
+        const id = queueHeldToastId(branchId);
+        if (event.notice) {
+          toast.warning(event.noticeTitle, { id, description: event.notice, duration: Infinity });
+        } else {
+          toast.dismiss(id);
+        }
+      } else if (event.notice) {
+        toast.warning('Workspace branch was given existing commits', {
           description: event.notice,
           duration: Infinity,
         });

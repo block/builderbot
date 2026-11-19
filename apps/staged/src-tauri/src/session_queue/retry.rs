@@ -59,8 +59,10 @@ pub(crate) fn queued_start_retry(failures: u32) -> QueuedStartRetry {
 }
 
 /// How long a held row waits before the drain looks at what holds it again.
-/// The look is a database read, so it is short: the queue moves within
-/// seconds of the cause going away.
+/// A recheck is a database read and nothing more, so it is short: the queue
+/// moves within seconds of the cause going away. What costs a Blox call,
+/// asking the reconcile service about a `disconnected` holder, is done once
+/// per cause and not on each recheck.
 pub(crate) const QUEUE_HOLD_RECHECK: Duration = Duration::from_secs(5);
 
 struct Attempt {
@@ -140,6 +142,17 @@ impl QueuedStartAttempts {
         news
     }
 
+    /// End `session_id`'s hold, keeping its attempts. Returns whether it
+    /// was held, which is when the user was told it waits.
+    pub(crate) fn release(&self, branch_id: &str, session_id: &str) -> bool {
+        self.by_branch
+            .lock()
+            .unwrap()
+            .get_mut(branch_id)
+            .and_then(|rows| rows.get_mut(session_id))
+            .is_some_and(|attempt| attempt.held.take().is_some())
+    }
+
     /// Whether `session_id` was last left where it is by [`Self::hold`].
     pub(crate) fn is_held(&self, branch_id: &str, session_id: &str) -> bool {
         self.by_branch
@@ -161,14 +174,25 @@ impl QueuedStartAttempts {
     }
 
     /// Drop the branch's entries for rows that are no longer queued.
-    pub(crate) fn retain_queued(&self, branch_id: &str, still_queued: impl Fn(&str) -> bool) {
+    /// Returns whether a held row was among them.
+    pub(crate) fn retain_queued(
+        &self,
+        branch_id: &str,
+        still_queued: impl Fn(&str) -> bool,
+    ) -> bool {
         let mut by_branch = self.by_branch.lock().unwrap();
+        let mut dropped_held = false;
         if let Some(rows) = by_branch.get_mut(branch_id) {
-            rows.retain(|session_id, _| still_queued(session_id));
+            rows.retain(|session_id, attempt| {
+                let keep = still_queued(session_id);
+                dropped_held |= !keep && attempt.held.is_some();
+                keep
+            });
             if rows.is_empty() {
                 by_branch.remove(branch_id);
             }
         }
+        dropped_held
     }
 
     /// Drop every entry for a branch that is gone.

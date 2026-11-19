@@ -218,6 +218,7 @@ mod tests {
         registry.mark_finished(&session.id, epoch);
         assert!(crate::rate_limit_scheduler::pause_for_rate_limit(
             &store,
+            None,
             &session.id,
             Some("rate limit"),
             resets_at,

@@ -3485,8 +3485,14 @@ fn finish_session_run(
         // Status flip and retry bookkeeping land in one write, so a
         // scheduler tick can never see a paused row without bookkeeping
         // and double-count the attempt.
+        use tauri::Manager;
+        let rate_limit_scheduler =
+            app_handle.try_state::<Arc<crate::rate_limit_scheduler::RateLimitScheduler>>();
         crate::rate_limit_scheduler::pause_for_rate_limit(
             &store_for_status,
+            rate_limit_scheduler
+                .as_deref()
+                .map(|scheduler| &**scheduler),
             &session_id_for_status,
             error_msg.as_deref(),
             recovery.resets_at.as_deref(),

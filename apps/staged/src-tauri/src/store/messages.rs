@@ -18,6 +18,16 @@ const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NO
 /// button compares against.
 pub(super) const VISIBLE_ASSISTANT_FILTER: &str =
     "role = 'assistant' AND NOT (content = '' AND acp_event_kind IS NOT NULL)";
+/// A row of the agent's own output for a turn: text, a tool call or its
+/// result, a plan, or the turn's response. Hidden rows tagged with an
+/// `acp_origin` and the rows a connection writes before it sends the prompt
+/// are left out.
+const AGENT_OUTPUT_FILTER: &str = "acp_origin IS NULL
+    AND (role IN ('tool_call', 'tool_result')
+         OR (role = 'assistant'
+             AND (acp_event_kind IS NULL
+                  OR acp_event_kind IN ('agent_message_chunk', 'plan_update',
+                                        'response_result', 'prompt_response'))))";
 /// ACP rows the transcript needs on top of [`Store::get_session_messages`]:
 /// hidden rows of the kinds the frontend reads (`acpTranscript.ts`,
 /// `acpConfigMetadata.ts`), plus visible tool rows still in flight — the
@@ -679,15 +689,37 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM session_messages
-               WHERE session_id = ?1 AND id > ?2 AND acp_origin IS NULL
-                 AND (role IN ('tool_call', 'tool_result')
-                      OR (role = 'assistant'
-                          AND (acp_event_kind IS NULL
-                               OR acp_event_kind IN ('agent_message_chunk', 'plan_update',
-                                                     'response_result', 'prompt_response')))))",
+            &format!(
+                "SELECT EXISTS(
+                   SELECT 1 FROM session_messages
+                   WHERE session_id = ?1 AND id > ?2 AND {AGENT_OUTPUT_FILTER})"
+            ),
             params![session_id, message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Whether a session recorded agent output at or after `since`: text, a
+    /// tool call or its result, a plan, or a turn's response. The rows counted
+    /// are those of [`Self::agent_answered_message`], bounded by time instead
+    /// of by a message id.
+    ///
+    /// Backs the network gate's probe check, which knows when it claimed the
+    /// probe but not which row its prompt will be.
+    pub fn session_has_agent_output_since(
+        &self,
+        session_id: &str,
+        since: i64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT EXISTS(
+                   SELECT 1 FROM session_messages
+                   WHERE session_id = ?1 AND created_at >= ?2 AND {AGENT_OUTPUT_FILTER})"
+            ),
+            params![session_id, since],
             |row| row.get(0),
         )
         .map_err(Into::into)

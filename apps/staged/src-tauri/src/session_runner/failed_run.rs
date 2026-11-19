@@ -168,6 +168,7 @@ mod tests {
         let recovery = decision.recovery.expect("a network failure pauses");
         assert!(crate::rate_limit_scheduler::pause_for_rate_limit(
             &store,
+            None,
             &session.id,
             Some("Can't reach the API server"),
             recovery.resets_at.as_deref(),
@@ -190,8 +191,11 @@ mod tests {
             parked.provider_metadata.as_ref(),
         )
         .expect("the pause writes retry bookkeeping");
-        assert_eq!(bookkeeping.attempt, 1);
-        assert!(bookkeeping.next_retry_at.is_some());
+        // With the network gate not open, the pause spends no attempt and
+        // waits for the gate.
+        assert_eq!(bookkeeping.attempt, 0);
+        assert_eq!(bookkeeping.next_retry_at, Some(NOW_MS));
+        assert_eq!(bookkeeping.reason.as_deref(), Some("network_wait"));
         assert!(!bookkeeping.unsafe_to_auto_resume);
     }
 

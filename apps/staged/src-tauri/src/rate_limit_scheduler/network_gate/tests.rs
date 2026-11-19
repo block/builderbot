@@ -885,3 +885,187 @@ fn a_timed_out_probe_closes_the_gate_like_a_failed_one_but_is_not_counted() {
     assert_eq!(gate.probe_delay_ms, 2 * BASE_PROBE_DELAY_MS);
     assert!(gate.probe_failures.is_empty());
 }
+
+/// The gate stopped waiting for `session_id`'s probe, and only then did the
+/// session fail on the network, at `failed_at`.
+fn fail_a_probe_late(gate: &mut NetworkGate, session_id: &str, failed_at: i64) -> PauseAccounting {
+    let started_at = failed_at - PROBE_TIMEOUT_MS - HOUR_MS;
+    gate.probe_started(session_id, started_at);
+    gate.probe_timed_out(session_id, started_at + PROBE_TIMEOUT_MS);
+    gate.record_failure(session_id, failed_at)
+}
+
+/// A session whose probes always fail after the probe timeout is bounded
+/// like one whose probes fail in time.
+#[test]
+fn a_timed_out_probe_that_fails_late_is_charged_to_the_sessions_probe_failures() {
+    let mut gate = gate_with_a_network();
+    let mut now = 10 * HOUR_MS;
+    for failure in 1..MAX_CONSECUTIVE_PROBE_FAILURES {
+        assert_eq!(
+            fail_a_probe_late(&mut gate, "lone", now),
+            PauseAccounting::Waiting,
+            "failure {failure}"
+        );
+        assert_eq!(gate.probe_failures["lone"], failure);
+        now += 2 * HOUR_MS;
+    }
+    assert_eq!(
+        fail_a_probe_late(&mut gate, "lone", now),
+        PauseAccounting::ProbesExhausted
+    );
+    assert!(gate.timed_out_probes.is_empty());
+}
+
+/// The late failure finds the gate closed with its probe time long past.
+/// The next probe still waits the probe delay, which is not doubled again.
+#[test]
+fn a_late_probe_failure_does_not_start_the_next_probe_at_once() {
+    let mut gate = gate_with_a_network();
+    gate.probe_started("lone", 1_000);
+    let timed_out_at = 1_000 + PROBE_TIMEOUT_MS;
+    gate.probe_timed_out("lone", timed_out_at);
+    assert_eq!(gate.probe_delay_ms, 2 * BASE_PROBE_DELAY_MS);
+
+    let failed_at = timed_out_at + HOUR_MS;
+    assert_eq!(gate.turn(failed_at), NetworkTurn::Probe);
+    assert_eq!(
+        gate.record_failure("lone", failed_at),
+        PauseAccounting::Waiting
+    );
+
+    assert_eq!(gate.turn(failed_at), NetworkTurn::Hold);
+    assert_eq!(gate.next_probe_at, failed_at + 2 * BASE_PROBE_DELAY_MS);
+    assert_eq!(gate.probe_delay_ms, 2 * BASE_PROBE_DELAY_MS);
+    assert_eq!(gate.turn(gate.next_probe_at), NetworkTurn::Probe);
+}
+
+/// A late failure never brings the next probe forward.
+#[test]
+fn a_late_probe_failure_keeps_a_later_probe_time() {
+    let mut gate = gate_with_a_network();
+    gate.probe_started("lone", 1_000);
+    let timed_out_at = 1_000 + PROBE_TIMEOUT_MS;
+    gate.probe_timed_out("lone", timed_out_at);
+    gate.probe_delay_ms = 1_000;
+
+    gate.record_failure("lone", timed_out_at + 1);
+    assert_eq!(gate.next_probe_at, timed_out_at + BASE_PROBE_DELAY_MS);
+}
+
+#[test]
+fn a_late_probe_failure_counts_only_awake_with_a_network_present() {
+    let mut gate = gate_with_a_network();
+    for _ in 1..MAX_CONSECUTIVE_PROBE_FAILURES {
+        fail_a_probe(&mut gate, "lone", 1_000);
+    }
+
+    // The machine slept after the gate stopped waiting for the probe.
+    gate.observe_tick(1_000);
+    gate.probe_started("lone", 1_000);
+    gate.probe_timed_out("lone", 1_000 + PROBE_TIMEOUT_MS);
+    gate.observe_tick(1_000 + PROBE_TIMEOUT_MS);
+    assert!(gate.observe_tick(1_000 + PROBE_TIMEOUT_MS + WAKE_GAP_MS + 1));
+    assert_eq!(
+        gate.record_failure("lone", 2 * HOUR_MS),
+        PauseAccounting::Waiting
+    );
+
+    // It slept while the probe ran, before the timeout.
+    gate.observe_tick(3 * HOUR_MS);
+    gate.probe_started("lone", 3 * HOUR_MS);
+    assert!(gate.observe_tick(3 * HOUR_MS + PROBE_TIMEOUT_MS));
+    gate.probe_timed_out("lone", 3 * HOUR_MS + PROBE_TIMEOUT_MS);
+    assert_eq!(
+        gate.record_failure("lone", 4 * HOUR_MS),
+        PauseAccounting::Waiting
+    );
+
+    // No interface holds an address.
+    assert!(gate.observe_fingerprint(BTreeSet::new()));
+    assert_eq!(
+        fail_a_probe_late(&mut gate, "lone", 6 * HOUR_MS),
+        PauseAccounting::Waiting
+    );
+
+    // None of those added to the run: the next late failure awake with a
+    // network is the twentieth.
+    gate.observe_fingerprint(BTreeSet::from(["192.0.2.10".parse().unwrap()]));
+    assert_eq!(
+        fail_a_probe_late(&mut gate, "lone", 8 * HOUR_MS),
+        PauseAccounting::ProbesExhausted
+    );
+}
+
+/// While another session probes, the late failure is charged and the
+/// running probe is left alone.
+#[test]
+fn a_late_probe_failure_during_another_probe_is_charged_and_leaves_it_alone() {
+    let mut gate = gate_with_a_network();
+    gate.probe_started("hung", 1_000);
+    gate.probe_timed_out("hung", 1_000 + PROBE_TIMEOUT_MS);
+    let probing_at = gate.next_probe_at;
+    gate.probe_started("other", probing_at);
+
+    assert_eq!(
+        gate.record_failure("hung", probing_at + 1_000),
+        PauseAccounting::Waiting
+    );
+    assert_eq!(gate.probe_failures["hung"], 1);
+    assert!(gate.is_probing("other"));
+}
+
+/// Once a probe gets through, an earlier timed-out probe is forgotten: its
+/// failure with the gate open is counted like any other.
+#[test]
+fn a_probe_that_gets_through_forgets_the_timed_out_probes() {
+    let mut gate = gate_with_a_network();
+    gate.probe_started("hung", 1_000);
+    gate.probe_timed_out("hung", 1_000 + PROBE_TIMEOUT_MS);
+    gate.probe_started("other", gate.next_probe_at);
+    gate.probe_succeeded("other");
+    assert!(gate.timed_out_probes.is_empty());
+
+    assert_eq!(
+        gate.record_failure("hung", 2 * HOUR_MS),
+        PauseAccounting::Counted
+    );
+    assert!(gate.probe_failures.is_empty());
+}
+
+/// A lone session whose probe fails after the timeout, through the
+/// scheduler: the failure is charged, and the row, due at once, is not
+/// probed again until the probe delay has passed.
+#[test]
+fn a_lone_session_that_fails_after_the_probe_timeout_waits_the_probe_delay() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let scheduler = RateLimitScheduler::new();
+    let now = crate::store::now_timestamp();
+    let sessions = network_paused_sessions(&store, &scheduler, 1, now);
+    scheduler
+        .network_gate
+        .lock()
+        .unwrap()
+        .observe_fingerprint(BTreeSet::from(["192.0.2.10".parse().unwrap()]));
+    assert_eq!(tick(&scheduler, &store, now), sessions);
+    assert!(tick(&scheduler, &store, now + PROBE_TIMEOUT_MS).is_empty());
+    assert_eq!(scheduler.network_gate.lock().unwrap().probe(), None);
+
+    let failed_at = now + PROBE_TIMEOUT_MS + HOUR_MS;
+    claude_turn_fails_offline(&store, &sessions[0]);
+    fail_on_network(&store, &scheduler, &sessions[0], failed_at);
+
+    let state = recovery(&store, &sessions[0]);
+    assert_eq!(state.attempt, 0);
+    assert_eq!(state.next_retry_at, Some(failed_at));
+    assert_eq!(
+        scheduler.network_gate.lock().unwrap().probe_failures[&sessions[0]],
+        1
+    );
+    assert!(tick(&scheduler, &store, failed_at).is_empty());
+    assert!(tick(&scheduler, &store, failed_at + 2 * BASE_PROBE_DELAY_MS - 1).is_empty());
+    assert_eq!(
+        tick(&scheduler, &store, failed_at + 2 * BASE_PROBE_DELAY_MS),
+        sessions
+    );
+}

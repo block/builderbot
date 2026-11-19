@@ -34,6 +34,13 @@
 //! for a manual resume: with a network evidently present, its failure is not
 //! one that waiting fixes (a dead local proxy, a captive portal).
 //!
+//! A probe that fails only after the gate stopped waiting for it is still
+//! that session's failed probe. The gate remembers each timed-out probe until
+//! the gate opens or the session probes again, charges its late network
+//! failure to the same bound under the same conditions, and holds the next
+//! probe back by the probe delay, so a session that always fails late cannot
+//! be probed again and again without limit.
+//!
 //! Two things make a closed gate probe sooner than its doubling delay, both
 //! derived inside the scheduler tick with no operating-system callbacks:
 //!
@@ -72,8 +79,13 @@ pub(super) const MAX_PROBE_DELAY_MS: i64 = 10 * 60_000;
 /// three of the scheduler's 15 second ticks.
 pub(super) const WAKE_GAP_MS: i64 = 45_000;
 /// How long a probe may run without reaching its provider before the gate
-/// stops waiting for it. Longer than a provider request takes to time out,
-/// so a probe that will fail has normally failed by then.
+/// stops waiting for it, so one hung turn cannot hold the other rows.
+///
+/// It is not known to be longer than an agent's own request timeout: that
+/// was never measured, and an agent that retries a request that timed out
+/// takes longer still. So a probe may fail on the network after this timeout
+/// has passed. Such a late failure is charged to the session as a failed
+/// probe (see [`NetworkGate::record_failure`]).
 pub(super) const PROBE_TIMEOUT_MS: i64 = 10 * 60_000;
 /// How many times in a row one session's own probes may fail, each while the
 /// machine stayed awake and held a network address, before the session is
@@ -123,6 +135,11 @@ pub(super) struct NetworkGate {
     /// Per session, how many of its own probes failed in a row while the
     /// machine was awake with a network address. Cleared when the gate opens.
     probe_failures: HashMap<String, u32>,
+    /// The sessions whose probe timed out and whose turn has not been heard
+    /// of since, each with whether the process was suspended during that
+    /// turn. Cleared when the gate opens; a session leaves when it fails on
+    /// the network or probes again.
+    timed_out_probes: HashMap<String, bool>,
 }
 
 impl Default for NetworkGate {
@@ -135,6 +152,7 @@ impl Default for NetworkGate {
             settled: true,
             addresses: None,
             probe_failures: HashMap::new(),
+            timed_out_probes: HashMap::new(),
         }
     }
 }
@@ -160,6 +178,9 @@ impl NetworkGate {
         self.settled = !woke;
         if woke {
             if let GateState::Probing { slept, .. } = &mut self.state {
+                *slept = true;
+            }
+            for slept in self.timed_out_probes.values_mut() {
                 *slept = true;
             }
         }
@@ -228,6 +249,9 @@ impl NetworkGate {
     }
 
     fn probe_started(&mut self, session_id: &str, now: i64) {
+        // A session that probes again was parked since its probe timed out,
+        // so that turn is over.
+        self.timed_out_probes.remove(session_id);
         self.state = GateState::Probing {
             session_id: session_id.to_string(),
             since: now,
@@ -265,6 +289,7 @@ impl NetworkGate {
             self.state = GateState::Open;
             self.probe_delay_ms = BASE_PROBE_DELAY_MS;
             self.probe_failures.clear();
+            self.timed_out_probes.clear();
             // The fingerprint is not read while the gate is open, so the
             // next closed period starts from a fresh baseline.
             self.addresses = None;
@@ -284,9 +309,19 @@ impl NetworkGate {
     /// The probe has run for [`PROBE_TIMEOUT_MS`] without reaching its
     /// provider. The gate stops waiting for it: the schedule moves on as
     /// after a failed probe, and the session, still running, is left alone.
+    /// It is remembered, so that a network failure it reports later is
+    /// charged as the failed probe it is.
     fn probe_timed_out(&mut self, session_id: &str, now: i64) {
-        if self.is_probing(session_id) {
-            self.close_after_failed_probe(now);
+        if let GateState::Probing {
+            session_id: probe,
+            slept,
+            ..
+        } = &self.state
+        {
+            if probe == session_id {
+                self.timed_out_probes.insert(session_id.to_string(), *slept);
+                self.close_after_failed_probe(now);
+            }
         }
     }
 
@@ -303,7 +338,31 @@ impl NetworkGate {
 
     /// Record that `session_id` failed on the network, and answer how the
     /// failure is charged to that session's retry budget.
+    ///
+    /// A session whose probe timed out earlier fails here as that probe,
+    /// late. Unless the gate has opened since, the failure is charged to the
+    /// session's run of failed probes under the same conditions as a probe
+    /// that failed in time. A closed gate also waits at least the probe
+    /// delay from now: the session's row is due at once, and with the timeout
+    /// long past it would otherwise probe again on the next tick. The delay
+    /// is not doubled a second time, because the timeout already doubled it
+    /// for this probe.
     fn record_failure(&mut self, session_id: &str, now: i64) -> PauseAccounting {
+        if let Some(slept) = self.timed_out_probes.remove(session_id) {
+            if self.state != GateState::Open {
+                if self.is_closed() {
+                    self.next_probe_at = self
+                        .next_probe_at
+                        .max(now.saturating_add(self.probe_delay_ms));
+                }
+                let charged = !slept && self.network_present();
+                return if charged && self.probe_failures_exhausted(session_id) {
+                    PauseAccounting::ProbesExhausted
+                } else {
+                    PauseAccounting::Waiting
+                };
+            }
+        }
         match &self.state {
             GateState::Open => {
                 self.state = GateState::Closed;

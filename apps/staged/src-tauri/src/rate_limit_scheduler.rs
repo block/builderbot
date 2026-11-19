@@ -689,11 +689,14 @@ fn is_actionable_for_auto_resume(session: &Session) -> bool {
 /// - [`PauseAccounting::ProbesExhausted`]: the row gives up and waits for a
 ///   manual resume.
 /// - [`PauseAccounting::Counted`]: the rules below, with one difference. The
-///   24 hour window of a network pause runs from its first counted failure,
-///   not from its first pause: `first_limited_at` is set again when
-///   `attempt` becomes 1. Time spent waiting behind a closed gate (a laptop
-///   asleep for a weekend) therefore never ends a session on the first
-///   failure that counts.
+///   24 hour window of a network pause is measured only across counted
+///   failures, not from its first pause: `first_limited_at` is set again
+///   when `attempt` becomes 1, and when the pause before this one was not
+///   counted (see [`last_pause_was_uncounted`]). Time spent waiting behind a
+///   closed gate (a laptop asleep for a weekend) therefore never ends a
+///   session, whether the wait came before its first counted failure or
+///   between two of them. Counted failures with no wait between them still
+///   give up once they span more than 24 hours.
 fn build_recovery_state(
     existing: Option<&RateLimitAutoRecovery>,
     kind: Option<&str>,
@@ -745,7 +748,7 @@ fn build_recovery_state(
     }
 
     let attempt = existing.map(|s| s.attempt.saturating_add(1)).unwrap_or(1);
-    let first_limited_at = if network && attempt == 1 {
+    let first_limited_at = if network && (attempt == 1 || last_pause_was_uncounted(existing)) {
         now
     } else {
         first_limited_at
@@ -801,6 +804,16 @@ fn build_recovery_state(
         unsafe_to_auto_resume: false,
         reason: Some(reason.to_string()),
     }
+}
+
+/// Whether the bookkeeping left by the pause before this one shows that it
+/// was a network pause not charged to the retry budget: a wait behind the
+/// gate, or the end of the session's probes. The `reason` is that of the
+/// latest pause, so no field is needed to tell.
+fn last_pause_was_uncounted(existing: Option<&RateLimitAutoRecovery>) -> bool {
+    existing
+        .and_then(|state| state.reason.as_deref())
+        .is_some_and(|reason| reason == NETWORK_WAIT_REASON || reason == PROBE_LIMIT_REASON)
 }
 
 /// The outcome of trying to take ownership of a rate-limited session for one
@@ -1880,25 +1893,16 @@ mod tests {
         assert!(counted.next_retry_at.unwrap() > failed_at);
     }
 
-    /// The window still ends a network pause: 24 hours after its first
-    /// counted failure, the next counted one gives up. Waits in between do
-    /// not move the start.
+    /// The window still ends a network pause: counted failures with no wait
+    /// between them give up once they span more than 24 hours.
     #[test]
-    fn the_network_window_runs_from_the_first_counted_failure() {
+    fn the_network_window_runs_across_counted_failures() {
         let first_counted_at = 1_000_000;
         let first = network_state(None, PauseAccounting::Counted, first_counted_at);
         assert_eq!(first.first_limited_at, first_counted_at);
 
-        let waiting = network_state(
-            Some(&first),
-            PauseAccounting::Waiting,
-            first_counted_at + DAY_MS / 2,
-        );
-        assert_eq!(waiting.attempt, 1);
-        assert_eq!(waiting.first_limited_at, first_counted_at);
-
         let inside = network_state(
-            Some(&waiting),
+            Some(&first),
             PauseAccounting::Counted,
             first_counted_at + DAY_MS,
         );
@@ -1907,9 +1911,57 @@ mod tests {
         assert_eq!(inside.first_limited_at, first_counted_at);
 
         let outside_at = first_counted_at + DAY_MS + 1;
-        let outside = network_state(Some(&waiting), PauseAccounting::Counted, outside_at);
+        let outside = network_state(Some(&inside), PauseAccounting::Counted, outside_at);
+        assert_eq!(outside.attempt, 3);
         assert_eq!(outside.gave_up_at, Some(outside_at));
         assert_eq!(outside.reason.as_deref(), Some("retry_window_elapsed"));
+    }
+
+    /// The session that closed the gate when the laptop slept: counted once,
+    /// then waiting behind the gate for more than a day. Its next counted
+    /// failure, on a flaky connection after the wake, restarts the window
+    /// and is scheduled, not given up on.
+    #[test]
+    fn a_wait_between_two_counted_network_failures_restarts_the_window() {
+        let first_counted_at = 1_000_000;
+        let first = network_state(None, PauseAccounting::Counted, first_counted_at);
+
+        let waited_at = first_counted_at + DAY_MS / 2;
+        let waiting = network_state(Some(&first), PauseAccounting::Waiting, waited_at);
+        assert_eq!(waiting.attempt, 1);
+
+        let second_counted_at = first_counted_at + 30 * 60 * 60 * 1_000;
+        let second = network_state(Some(&waiting), PauseAccounting::Counted, second_counted_at);
+        assert_eq!(second.attempt, 2);
+        assert_eq!(second.gave_up_at, None);
+        assert_eq!(second.reason.as_deref(), Some("backoff"));
+        assert_eq!(second.first_limited_at, second_counted_at);
+
+        // The restarted window runs from that failure.
+        let inside = network_state(
+            Some(&second),
+            PauseAccounting::Counted,
+            second_counted_at + DAY_MS,
+        );
+        assert_eq!(inside.gave_up_at, None);
+        assert_eq!(inside.first_limited_at, second_counted_at);
+        let outside_at = second_counted_at + DAY_MS + 1;
+        let outside = network_state(Some(&second), PauseAccounting::Counted, outside_at);
+        assert_eq!(outside.gave_up_at, Some(outside_at));
+        assert_eq!(outside.reason.as_deref(), Some("retry_window_elapsed"));
+    }
+
+    /// The attempt cap is not restarted by a wait.
+    #[test]
+    fn a_wait_between_counted_network_failures_keeps_the_attempt_cap() {
+        let mut state = network_state(None, PauseAccounting::Counted, 1_000_000);
+        for round in 1..=i64::from(MAX_AUTO_RETRY_ATTEMPTS) {
+            let now = 1_000_000 + round * 60_000;
+            state = network_state(Some(&state), PauseAccounting::Waiting, now);
+            state = network_state(Some(&state), PauseAccounting::Counted, now + 1);
+        }
+        assert_eq!(state.attempt, MAX_AUTO_RETRY_ATTEMPTS + 1);
+        assert_eq!(state.reason.as_deref(), Some("retry_cap_exceeded"));
     }
 
     /// An API-limit pause keeps measuring from its first pause.

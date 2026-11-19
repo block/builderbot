@@ -127,11 +127,21 @@ export function containedImageRect(box: Rect, natural: { width: number; height: 
   };
 }
 
+export interface ImagePlace {
+  /** The whole picture, including any part that is scrolled out of view. */
+  rect: Rect;
+  /**
+   * The area the picture shows through when part of it is cut off by the pane
+   * it scrolls in (or the window); null when all of it is in view.
+   */
+  clip: Rect | null;
+}
+
 /**
  * Where an inline image is on screen, or null when there is nowhere to
  * return to: it is gone, not laid out, or scrolled out of view.
  */
-export function visibleImageRect(image: HTMLImageElement | null | undefined): Rect | null {
+export function visibleImagePlace(image: HTMLImageElement | null | undefined): ImagePlace | null {
   if (!image?.isConnected) return null;
   const box = image.getBoundingClientRect();
   if (box.width <= 0 || box.height <= 0) return null;
@@ -151,8 +161,22 @@ export function visibleImageRect(image: HTMLImageElement | null | undefined): Re
     right = Math.min(right, clip.right);
     bottom = Math.min(bottom, clip.bottom);
   }
-  if (box.right <= left || box.left >= right || box.bottom <= top || box.top >= bottom) return null;
-  return containedImageRect(box, { width: image.naturalWidth, height: image.naturalHeight });
+  const rect = containedImageRect(box, { width: image.naturalWidth, height: image.naturalHeight });
+  const rectRight = rect.left + rect.width;
+  const rectBottom = rect.top + rect.height;
+  if (rectRight <= left || rect.left >= right || rectBottom <= top || rect.top >= bottom) {
+    return null;
+  }
+  const whole = rect.left >= left && rect.top >= top && rectRight <= right && rectBottom <= bottom;
+  return {
+    rect,
+    clip: whole ? null : { left, top, width: right - left, height: bottom - top },
+  };
+}
+
+/** The on-screen box of an inline image's picture, or null when none of it is in view. */
+export function visibleImageRect(image: HTMLImageElement | null | undefined): Rect | null {
+  return visibleImagePlace(image)?.rect ?? null;
 }
 
 /** The viewer transform that lays content of `size` exactly over `rect` on screen. */
@@ -214,6 +238,12 @@ function touchSpan(a: Touch, b: Touch) {
  * text beside it the image's own element would see a single touch, which is
  * why this listens above the figure.
  *
+ * Touch events stay with the element a finger landed on. Once two fingers
+ * are down the rest of the sequence is therefore followed on those elements
+ * as well: one of them may be outside this container, and one may be removed
+ * from it mid-gesture (a re-render of the markdown), after which its events
+ * no longer bubble here.
+ *
  * Preventing the moves and Safari's gesture events is what keeps the browser
  * out of it: mobile Safari otherwise zooms the page on a pinch-out, whatever
  * the viewport meta says, and shows its tab overview on a pinch-in. There is
@@ -232,6 +262,13 @@ export function mediaPinchOpen(
     let image: HTMLImageElement | null = null;
     let baseDistance = 0;
     let gesture: MediaPinchGesture | null = null;
+    // The fingers of the sequence and the elements they landed on.
+    let fingers: number[] = [];
+    let targets: EventTarget[] = [];
+    // An event followed on its target is seen again when it bubbles here.
+    let handled: Event | null = null;
+
+    const active = { passive: false } as const;
 
     function finish(cancelled: boolean) {
       gesture?.end(cancelled);
@@ -239,7 +276,43 @@ export function mediaPinchOpen(
       image = null;
     }
 
+    function follow(touches: Touch[]) {
+      fingers = touches.map((touch) => touch.identifier);
+      targets = [...new Set(touches.map((touch) => touch.target))].filter(
+        (target) => target !== node
+      );
+      for (const target of targets) {
+        target.addEventListener('touchmove', handleMove as EventListener, active);
+        target.addEventListener('touchend', handleEnd as EventListener);
+        target.addEventListener('touchcancel', handleEnd as EventListener);
+        target.addEventListener('gesturestart', handleGesture, active);
+        target.addEventListener('gesturechange', handleGesture, active);
+      }
+    }
+
+    function toIdle() {
+      for (const target of targets) {
+        target.removeEventListener('touchmove', handleMove as EventListener);
+        target.removeEventListener('touchend', handleEnd as EventListener);
+        target.removeEventListener('touchcancel', handleEnd as EventListener);
+        target.removeEventListener('gesturestart', handleGesture);
+        target.removeEventListener('gesturechange', handleGesture);
+      }
+      fingers = [];
+      targets = [];
+      state = 'idle';
+    }
+
     function handleStart(event: TouchEvent) {
+      // The fingers of the last sequence are gone without their end having
+      // been seen: start afresh rather than hold the new touch.
+      if (
+        state !== 'idle' &&
+        !Array.from(event.touches).some((touch) => fingers.includes(touch.identifier))
+      ) {
+        finish(true);
+        toIdle();
+      }
       if (state === 'idle' && event.touches.length === 2) {
         const [a, b] = [event.touches[0], event.touches[1]];
         image = inlineImageForTouch(a) ?? inlineImageForTouch(b);
@@ -249,7 +322,9 @@ export function mediaPinchOpen(
           return;
         }
         baseDistance = touchSpan(a, b).distance;
-        state = baseDistance > 0 ? 'pending' : 'idle';
+        if (baseDistance <= 0) return;
+        state = 'pending';
+        follow([a, b]);
       } else if (state !== 'idle' && event.touches.length > 2) {
         finish(true);
         state = 'drained';
@@ -257,7 +332,8 @@ export function mediaPinchOpen(
     }
 
     function handleMove(event: TouchEvent) {
-      if (state === 'idle') return;
+      if (state === 'idle' || event === handled) return;
+      handled = event;
       if (event.cancelable) event.preventDefault();
       if (state === 'drained' || event.touches.length !== 2) return;
       const span = touchSpan(event.touches[0], event.touches[1]);
@@ -280,12 +356,13 @@ export function mediaPinchOpen(
     }
 
     function handleEnd(event: TouchEvent) {
-      if (state === 'idle') return;
+      if (state === 'idle' || event === handled) return;
+      handled = event;
       if (event.touches.length < 2 && state !== 'drained') {
         finish(event.type === 'touchcancel');
         state = 'drained';
       }
-      if (event.touches.length === 0) state = 'idle';
+      if (event.touches.length === 0) toIdle();
     }
 
     // Safari's own pinch recogniser, which the viewport meta does not stop.
@@ -293,7 +370,6 @@ export function mediaPinchOpen(
       if (state !== 'idle' && event.cancelable) event.preventDefault();
     }
 
-    const active = { passive: false } as const;
     node.addEventListener('touchstart', handleStart, { passive: true });
     node.addEventListener('touchmove', handleMove, active);
     node.addEventListener('touchend', handleEnd);
@@ -308,6 +384,7 @@ export function mediaPinchOpen(
       node.removeEventListener('gesturestart', handleGesture);
       node.removeEventListener('gesturechange', handleGesture);
       finish(true);
+      toIdle();
     };
   };
 }

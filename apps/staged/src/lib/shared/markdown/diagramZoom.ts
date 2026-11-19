@@ -28,8 +28,13 @@ interface DiagramZoomOptions {
    * goes below it is a close gesture: the content follows the fingers
    * unconstrained and `onProgress` reports how far below the fit it is. On
    * release `onRelease` says whether to close; the caller then closes, or
-   * returns the view to the fit with `reset()`. A touch gesture that starts
-   * anywhere else stops at the fit, so zooming back out never closes.
+   * returns the view to the fit with `reset()`. A cancelled touch sequence
+   * never closes.
+   *
+   * A touch gesture that starts anywhere else never closes, so zooming back
+   * out cannot overshoot into a close. Pinched in past the fit it meets a
+   * rubber band: the content shrinks a little, with growing resistance, and
+   * on release `onRelease(false)` asks the caller to return it to the fit.
    */
   pinchDismiss?: PinchDismissOptions;
   isEnabled: () => boolean;
@@ -47,6 +52,12 @@ export interface DiagramZoomController {
   reset: () => void;
   /** Place the content programmatically, bypassing the scale limits and the content constraint. */
   setTransform: (transform: DiagramZoomTransform) => void;
+  /**
+   * Bring a programmatic placement to where an ordinary zoom would have left
+   * it: the scale within the limits, scaled about `anchor` (viewport
+   * coordinates) when it has to change, and the content constraint applied.
+   */
+  settleTransform: (transform: DiagramZoomTransform, anchor: [number, number]) => void;
   /** Re-fit after the viewport resized, unless the user has zoomed or panned since the last fit. */
   refit: () => void;
   zoomBy: (multiplier: number) => void;
@@ -67,6 +78,13 @@ const DISMISS_CLOSE_RATIO = 0.82;
 const DISMISS_FLICK_RATIO = 0.95;
 const DISMISS_FLICK_SPEED = 1.2;
 const DISMISS_FLICK_WINDOW_MS = 120;
+// Rubber band at the fit, for a pinch-in that started zoomed in: the most the
+// content gives (as a share of the fit scale, approached but never reached)
+// and how much of the fingers' travel it follows to begin with.
+const RUBBER_MAX_GIVE = 0.2;
+const RUBBER_FOLLOW = 0.55;
+// Far enough below the fit that the fingers never reach the scale floor.
+const RUBBER_MIN_RATIO = 0.01;
 
 export function createDiagramZoomController(
   viewportEl: HTMLDivElement,
@@ -80,6 +98,10 @@ export function createDiagramZoomController(
   // at the fit and may therefore dismiss; null for every other gesture.
   let dismissFit: ZoomTransform | null = null;
   let dismissSamples: Array<{ time: number; k: number }> = [];
+  // The fit of a touch gesture that started away from it. Below this the
+  // gesture is rubber-banded: d3-zoom keeps the scale the fingers ask for and
+  // only what is reported to `onTransform` resists.
+  let rubberFit: ZoomTransform | null = null;
   const behavior = zoom<HTMLDivElement, unknown>()
     .scaleExtent([options.minScale, options.maxScale])
     .constrain((transform, extent) =>
@@ -114,12 +136,12 @@ export function createDiagramZoomController(
       if (event.sourceEvent?.type === 'touchstart') beginTouchGesture();
     })
     .on('zoom', (event: D3ZoomEvent<HTMLDivElement, unknown>) => {
-      options.onTransform(toDiagramTransform(event.transform));
+      options.onTransform(toDiagramTransform(rubberBanded(event.transform)));
       if (dismissFit) trackDismiss(event.transform.k, dismissFit);
     })
     .on('end', (event: D3ZoomEvent<HTMLDivElement, unknown>) => {
       options.onDraggingChange(false);
-      endTouchGesture(event.transform.k);
+      endTouchGesture(event.transform.k, event.sourceEvent?.type === 'touchcancel');
     });
 
   selection.call(behavior);
@@ -175,6 +197,27 @@ export function createDiagramZoomController(
         zoomIdentity.translate(transform.offsetX, transform.offsetY).scale(transform.scale)
       );
     },
+    settleTransform: (transform, anchor) => {
+      syncScaleFloor();
+      const [minScale, maxScale] = behavior.scaleExtent();
+      const k = Math.min(maxScale, Math.max(minScale, transform.scale));
+      const ratio = transform.scale > 0 ? k / transform.scale : 1;
+      const placed = zoomIdentity
+        .translate(
+          anchor[0] - (anchor[0] - transform.offsetX) * ratio,
+          anchor[1] - (anchor[1] - transform.offsetY) * ratio
+        )
+        .scale(k);
+      const extent: [[number, number], [number, number]] = [
+        [0, 0],
+        [viewportEl.clientWidth, viewportEl.clientHeight],
+      ];
+      // transform() does not run the constrain function itself.
+      behavior.transform(
+        selection,
+        options.constrainToContent ? constrainToContent(placed, extent, contentEl) : placed
+      );
+    },
     refit: () => {
       if (isAtLastFit()) {
         reset();
@@ -218,14 +261,37 @@ export function createDiagramZoomController(
 
   // With pinch dismiss on, where a touch gesture starts decides what its
   // pinch-in means. At the fit it may go below, into the dismiss zone;
-  // anywhere else the fit is its floor.
+  // anywhere else the fit is a rubber band.
   function beginTouchGesture() {
     if (!options.pinchDismiss) return;
     const atFit = lastFit !== null && isAtLastFit();
     const fit = atFit && lastFit ? lastFit : getFitTransform(viewportEl, contentEl, options);
     dismissFit = atFit ? fit : null;
+    rubberFit = atFit ? null : fit;
     dismissSamples = [];
-    behavior.scaleExtent([dismissFit ? fit.k * DISMISS_MIN_RATIO : fit.k, options.maxScale]);
+    behavior.scaleExtent([
+      fit.k * (dismissFit ? DISMISS_MIN_RATIO : RUBBER_MIN_RATIO),
+      options.maxScale,
+    ]);
+  }
+
+  function isRubberBanding(k: number): boolean {
+    return rubberFit !== null && k < rubberFit.k - 0.001;
+  }
+
+  // What to show for a rubber-banded transform: centred, as content smaller
+  // than the viewport always is here, at a scale that gives less and less.
+  function rubberBanded(transform: ZoomTransform): ZoomTransform {
+    if (!rubberFit || !isRubberBanding(transform.k)) return transform;
+    const pulled = 1 - transform.k / rubberFit.k;
+    const give = RUBBER_MAX_GIVE * (1 - 1 / ((pulled * RUBBER_FOLLOW) / RUBBER_MAX_GIVE + 1));
+    const k = rubberFit.k * (1 - give);
+    return zoomIdentity
+      .translate(
+        (viewportEl.clientWidth - contentEl.offsetWidth * k) / 2,
+        (viewportEl.clientHeight - contentEl.offsetHeight * k) / 2
+      )
+      .scale(k);
   }
 
   function isDismissing(k: number): boolean {
@@ -241,15 +307,25 @@ export function createDiagramZoomController(
     options.pinchDismiss?.onProgress(clamp01((fit.k - k) / (fit.k * (1 - DISMISS_FULL_RATIO))));
   }
 
-  function endTouchGesture(k: number) {
+  function endTouchGesture(k: number, cancelled: boolean) {
     if (!options.pinchDismiss) return;
     const fit = dismissFit;
     const wasDismissing = isDismissing(k);
+    const wasRubberBanding = isRubberBanding(k);
     dismissFit = null;
+    rubberFit = null;
     syncScaleFloor();
+    if (wasRubberBanding) {
+      options.pinchDismiss.onRelease(false);
+      return;
+    }
     if (!fit || !wasDismissing) return;
+    // A touch sequence the system took away (a call sheet, an edge swipe) is
+    // not a decision to close.
     options.pinchDismiss.onRelease(
-      k < fit.k * DISMISS_CLOSE_RATIO || (k < fit.k * DISMISS_FLICK_RATIO && isShrinkingFast(fit.k))
+      !cancelled &&
+        (k < fit.k * DISMISS_CLOSE_RATIO ||
+          (k < fit.k * DISMISS_FLICK_RATIO && isShrinkingFast(fit.k)))
     );
   }
 

@@ -8,6 +8,7 @@ import {
   pinchOpenProgress,
   pinchTransform,
   transformOverRect,
+  visibleImagePlace,
   visibleImageRect,
   type OpenMarkdownMedia,
   type PinchFrame,
@@ -138,18 +139,20 @@ describe('mediaPinchOpen', () => {
     host.remove();
   });
 
-  type Point = [number, number, Element?];
+  // x, y, the element the finger landed on (the image by default), identifier.
+  type Point = [number, number, Element?, number?];
 
-  function touch(type: string, points: Point[], cancelable = true): TouchEvent {
-    const touches = points.map(([clientX, clientY, target], identifier) => ({
-      identifier,
+  /** Dispatched on `at`, or else on the first finger's element. */
+  function touch(type: string, points: Point[], cancelable = true, at?: Element): TouchEvent {
+    const touches = points.map(([clientX, clientY, target, identifier], index) => ({
+      identifier: identifier ?? index,
       clientX,
       clientY,
       target: target ?? image,
     }));
     const event = new TouchEvent(type, { bubbles: true, cancelable });
     Object.defineProperty(event, 'touches', { value: touches });
-    (points[0]?.[2] ?? image).dispatchEvent(event);
+    (at ?? points[0]?.[2] ?? image).dispatchEvent(event);
     return event;
   }
 
@@ -275,6 +278,71 @@ describe('mediaPinchOpen', () => {
     expect(opened).toEqual([]);
   });
 
+  it('sees a finger outside the container lift, so the next drag scrolls', () => {
+    const outside = document.createElement('header');
+    document.body.append(outside);
+    // The finger outside landed first; the second, on the image, makes two.
+    touch(
+      'touchstart',
+      [
+        [200, 20, outside],
+        [200, 300, image],
+      ],
+      true,
+      image
+    );
+    // The finger on the image lifts first, then the one outside: that end
+    // goes to the outside element and never bubbles through the container.
+    touch('touchend', [[200, 20, outside]], true, image);
+    touch('touchend', [], true, outside);
+    expect(touch('touchmove', [[200, 250]]).defaultPrevented).toBe(false);
+
+    // And nothing is left listening outside.
+    expect(touch('touchmove', [[200, 20, outside]]).defaultPrevented).toBe(false);
+    outside.remove();
+  });
+
+  it('follows a finger whose element is removed mid-gesture', () => {
+    touch('touchstart', [
+      [180, 300],
+      [220, 300],
+    ]);
+    touch('touchmove', [
+      [170, 300],
+      [230, 300],
+    ]);
+    const gesture = opened[0].gesture!;
+
+    // A re-render replaces the markdown: the touches stay with the old image,
+    // whose events no longer reach the container.
+    image.closest('.markdown-media')!.remove();
+    const move = touch('touchmove', [
+      [140, 300],
+      [260, 300],
+    ]);
+    expect(move.defaultPrevented).toBe(true);
+    expect(gesture.latest.scale).toBe(2);
+    touch('touchend', []);
+    expect(gesture.outcome).toBe('open');
+    expect(touch('touchmove', [[200, 250, text]]).defaultPrevented).toBe(false);
+  });
+
+  it('starts afresh when the last fingers went without an end being seen', () => {
+    touch('touchstart', [
+      [180, 300, image, 1],
+      [220, 300, image, 2],
+    ]);
+    touch('touchmove', [
+      [170, 300, image, 1],
+      [230, 300, image, 2],
+    ]);
+    const gesture = opened[0].gesture!;
+    // No touchend arrives. A new finger then lands.
+    touch('touchstart', [[200, 150, text, 3]]);
+    expect(gesture.outcome).toBe('cancel');
+    expect(touch('touchmove', [[200, 100, text, 3]]).defaultPrevented).toBe(false);
+  });
+
   it('ends the gesture when the attachment is removed mid-pinch', () => {
     touch('touchstart', [
       [180, 300],
@@ -311,6 +379,31 @@ describe('visibleImageRect', () => {
     // Above the pane's top edge, though still inside the window.
     image.getBoundingClientRect = () => new DOMRect(20, -20, 200, 100);
     expect(visibleImageRect(image)).toBeNull();
+    pane.remove();
+  });
+
+  it('reports the area a partly hidden image shows through', () => {
+    const pane = document.createElement('div');
+    pane.style.overflowY = 'auto';
+    const image = document.createElement('img');
+    pane.append(image);
+    document.body.append(pane);
+    Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 200 });
+    Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 100 });
+    pane.getBoundingClientRect = () => new DOMRect(0, 100, 400, 500);
+
+    image.getBoundingClientRect = () => new DOMRect(20, 150, 200, 100);
+    expect(visibleImagePlace(image)).toEqual({
+      rect: { left: 20, top: 150, width: 200, height: 100 },
+      clip: null,
+    });
+
+    // Its top 60px are above the pane's top edge.
+    image.getBoundingClientRect = () => new DOMRect(20, 40, 200, 100);
+    expect(visibleImagePlace(image)).toEqual({
+      rect: { left: 20, top: 40, width: 200, height: 100 },
+      clip: { left: 0, top: 100, width: 400, height: 500 },
+    });
     pane.remove();
   });
 });

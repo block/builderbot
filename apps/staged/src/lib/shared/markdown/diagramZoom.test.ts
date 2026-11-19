@@ -207,6 +207,18 @@ describe('createDiagramZoomController', () => {
     expect(transforms.at(-1)).toEqual({ scale: 0.01, offsetX: -40, offsetY: 900 });
   });
 
+  it('settles a programmatic placement like an ordinary zoom', () => {
+    createController({ constrainToContent: true });
+    // Over the limit: brought back to it about the anchor, then kept covering the viewport.
+    controller.setTransform({ scale: 16, offsetX: -700, offsetY: -500 });
+    controller.settleTransform({ scale: 16, offsetX: -700, offsetY: -500 }, [100, 100]);
+    expect(transforms.at(-1)).toEqual({ scale: 8, offsetX: -300, offsetY: -200 });
+
+    // Within the limit but showing a gap at the left edge: only the gap closes.
+    controller.settleTransform({ scale: 6, offsetX: 40, offsetY: -100 }, [250, 200]);
+    expect(transforms.at(-1)).toEqual({ scale: 6, offsetX: 0, offsetY: -100 });
+  });
+
   describe('pinch dismiss', () => {
     let progress: number[];
     let releases: boolean[];
@@ -277,16 +289,52 @@ describe('createDiagramZoomController', () => {
       expect(releases).toEqual([true]);
     });
 
-    it('stops at the fit, without closing, when the pinch starts zoomed in', () => {
+    it('rubber-bands at the fit, without closing, when the pinch starts zoomed in', () => {
       controller.zoomBy(4);
-      pinch([200, 20]);
-      expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 200, offsetY: 150 });
-      expect(releases).toEqual([]);
+      dispatchTouch('touchstart', fingers(200));
+      vi.advanceTimersByTime(200);
+      // The fingers ask for half the fit; the content gives a little.
+      dispatchTouch('touchmove', fingers(25, 30, 20));
+      const half = currentScale();
+      expect(half).toBeLessThan(1);
+      expect(half).toBeGreaterThan(0.85);
+      // Centred, wherever the fingers are.
+      expect(transforms.at(-1)!.offsetX).toBeCloseTo((500 - 100 * half) / 2);
+      expect(transforms.at(-1)!.offsetY).toBeCloseTo((400 - 100 * half) / 2);
+
+      // Much further gives only a little more, and never past the limit.
+      vi.advanceTimersByTime(20);
+      dispatchTouch('touchmove', fingers(1, 30, 20));
+      expect(currentScale()).toBeLessThan(half);
+      expect(currentScale()).toBeGreaterThan(0.8);
       expect(progress).toEqual([]);
+
+      // Released, however far and fast: back to the fit, never a close.
+      dispatchTouch('touchend', fingers(1, 30, 20));
+      vi.advanceTimersByTime(600);
+      expect(releases).toEqual([false]);
+      controller.reset();
+      expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 200, offsetY: 150 });
 
       // Now at the fit, so a second pinch-in closes.
       pinch([200, 100]);
-      expect(releases).toEqual([true]);
+      expect(releases).toEqual([false, true]);
+    });
+
+    it('leaves a zoom back out that stays above the fit alone', () => {
+      controller.zoomBy(4);
+      pinch([200, 100]);
+      expect(currentScale()).toBeCloseTo(2);
+      expect(releases).toEqual([]);
+    });
+
+    it('does not close when the touch sequence is cancelled', () => {
+      dispatchTouch('touchstart', fingers(200));
+      vi.advanceTimersByTime(200);
+      dispatchTouch('touchmove', fingers(100));
+      vi.advanceTimersByTime(300);
+      dispatchTouch('touchcancel', fingers(100));
+      expect(releases).toEqual([false]);
     });
 
     it('leaves a pinch-out from the fit as an ordinary zoom', () => {
@@ -344,7 +392,7 @@ describe('createDiagramZoomController', () => {
 
   // jsdom has no `Touch` constructor; d3-zoom only reads identifier/clientX/clientY.
   function dispatchTouch(
-    type: 'touchstart' | 'touchmove' | 'touchend',
+    type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
     points: [number, number][]
   ) {
     const touches = points.map(([clientX, clientY], identifier) => ({
@@ -354,7 +402,9 @@ describe('createDiagramZoomController', () => {
       target: viewportEl,
     }));
     const event = new TouchEvent(type, { bubbles: true, cancelable: true });
-    Object.defineProperty(event, 'touches', { value: type === 'touchend' ? [] : touches });
+    Object.defineProperty(event, 'touches', {
+      value: type === 'touchend' || type === 'touchcancel' ? [] : touches,
+    });
     Object.defineProperty(event, 'changedTouches', { value: touches });
     viewportEl.dispatchEvent(event);
   }

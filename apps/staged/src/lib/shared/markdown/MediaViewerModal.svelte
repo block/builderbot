@@ -7,8 +7,9 @@
     pinchOpenProgress,
     pinchTransform,
     transformOverRect,
-    visibleImageRect,
+    visibleImagePlace,
     type MediaPinchGesture,
+    type Rect,
   } from './mediaPinch';
 
   interface Props {
@@ -33,6 +34,7 @@
   //   settling    the fingers lifted and it is animating to where it rests
   type Phase = 'idle' | 'opening' | 'dismissing' | 'settling';
   const SETTLE_MS = 220;
+  const SETTLE_EASING = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
   let phase = $state<Phase>(untrack(() => (gesture ? 'opening' : 'idle')));
   // How much of the viewer's surface shows: 0 is the note, 1 the viewer.
   let chrome = $state(untrack(() => (gesture ? 0 : 1)));
@@ -187,8 +189,17 @@
         },
         end: (stayOpen) => {
           if (phase !== 'opening') return;
-          if (stayOpen) settleAtFit(controller);
-          else closeToOrigin(controller, stage, size);
+          if (!stayOpen) {
+            closeToOrigin(controller, stage, size);
+            return;
+          }
+          const stageRect = stage.getBoundingClientRect();
+          const frame = opening.latest;
+          const origin = transformOverRect(opening.startRect, stageRect, size);
+          settleOpened(controller, pinchTransform(origin, opening.start, frame, stageRect), [
+            frame.x - stageRect.left,
+            frame.y - stageRect.top,
+          ]);
         },
       })
     );
@@ -219,9 +230,34 @@
   }
 
   /**
+   * Where an opening pinch leaves the picture. Let go short of the fit it
+   * goes on to the fit. Carried past the fit it stays at the scale under the
+   * fingers, as a zoom in the open viewer would, within the scale limit and
+   * the content constraint.
+   */
+  function settleOpened(
+    controller: DiagramZoomController,
+    underFingers: { scale: number; offsetX: number; offsetY: number },
+    anchor: [number, number]
+  ) {
+    if (underFingers.scale <= controller.getResetTransform().scale) {
+      settleAtFit(controller);
+      return;
+    }
+    settle(() => {
+      phase = 'idle';
+    });
+    chrome = 1;
+    controller.settleTransform(underFingers, anchor);
+  }
+
+  /**
    * Close by returning the picture to the inline image. With nowhere to
    * return to (the image scrolled out of view, or the note re-rendered) it
-   * shrinks about its own centre and fades instead.
+   * shrinks about its own centre and fades instead. An image that is only
+   * partly in view gets the picture back in full, cut off where the image
+   * itself is: the viewer sits above the pane the note scrolls in, and the
+   * picture would otherwise land on top of whatever covers the rest.
    */
   function closeToOrigin(
     controller: DiagramZoomController,
@@ -230,9 +266,11 @@
   ) {
     settle(onClose);
     chrome = 0;
-    const rect = visibleImageRect(originImage);
-    if (rect) {
-      controller.setTransform(transformOverRect(rect, stage.getBoundingClientRect(), size));
+    const place = visibleImagePlace(originImage);
+    if (place) {
+      const stageRect = stage.getBoundingClientRect();
+      controller.setTransform(transformOverRect(place.rect, stageRect, size));
+      if (place.clip) closeClipOver(stage, stageRect, place.clip);
       return;
     }
     const shrunk = scale * 0.6;
@@ -242,6 +280,24 @@
       offsetY: offsetY + ((scale - shrunk) * size.height) / 2,
     });
     surfaceOpacity = 0;
+  }
+
+  // Close a clip in from the window's edges to `clip` while the picture
+  // settles. The stage is removed with the viewer, so nothing is undone.
+  function closeClipOver(stage: HTMLElement, stageRect: DOMRect, clip: Rect) {
+    const view = stage.ownerDocument.defaultView;
+    if (!view || typeof stage.animate !== 'function') return;
+    const inset = (rect: Rect) =>
+      `inset(${rect.top - stageRect.top}px ${stageRect.right - rect.left - rect.width}px ${
+        stageRect.bottom - rect.top - rect.height
+      }px ${rect.left - stageRect.left}px)`;
+    stage.animate(
+      [
+        { clipPath: inset({ left: 0, top: 0, width: view.innerWidth, height: view.innerHeight }) },
+        { clipPath: inset(clip) },
+      ],
+      { duration: SETTLE_MS, easing: SETTLE_EASING, fill: 'forwards' }
+    );
   }
 
   // The fingers of an opening pinch lift on the page behind the viewer; that

@@ -223,7 +223,8 @@ a rejected call, and the saved-note text counts UTF-8 bytes as the laptop
 does; version 5: the saved-note text calls that count bytes, not
 characters; version 6: `write_note` writes a random token into `done`, which
 was an empty file before, so the collector can tell two calls' markers
-apart).
+apart; version 7: the saved-note text and the tool description ask the agent
+to close the turn with a bare "Done" message, which the chat pane hides).
 
 On the laptop:
 

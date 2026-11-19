@@ -56,7 +56,8 @@ pub(crate) const WRITE_NOTE_DESCRIPTION: &str = "Publish the note this session i
 Staged stores the current contents of your note draft file (the path is in your instructions) as the note body, \
 under the title you pass here, and does not read your assistant text. Write the whole note body into the draft \
 file first; calling again republishes the file, and the last call of the turn wins. After the result says the \
-note is saved, end your turn without repeating the note.";
+note is saved, send a simple \"Done\" message with no other text to end your turn, rather than summarising the \
+work done. If the user asked you a question, answer it before making this call.";
 
 /// Structured suggested next steps, the same shape as the former
 /// `suggested-next-steps` JSON block (camelCase keys). Both fields are
@@ -176,10 +177,19 @@ impl NoteSubmission {
 /// The `write_note` result text. Shared with the Staged MCP on Blox's wording so
 /// the agent sees the same instruction on both transports. `body_len` is the
 /// body's UTF-8 length, so the text says bytes.
+///
+/// The text asks the agent to close the turn with the one word "Done" in
+/// place of a recap of the note, unless the user asked a question it has not
+/// answered yet. The chat pane hides that word after a saved call
+/// (`noteDoneMessage.ts`), so the quoted word here and the word the filter
+/// accepts have to stay the same; `noteDoneWording.test.ts` reads this
+/// function to check it.
 pub(crate) fn saved_message(title: &str, body_len: usize) -> String {
     format!(
-        "Saved note \"{title}\" ({body_len} bytes from the draft file). The note is stored; \
-end your turn now without repeating it in your reply."
+        "Saved note \"{title}\" ({body_len} bytes from the draft file). If the user asked you a \
+question this turn and you have not answered it in chat yet, answer it now, briefly. Otherwise \
+send a simple \"Done\" message with no other text to end your turn, rather than summarising the \
+work done."
     )
 }
 
@@ -250,7 +260,8 @@ impl NoteToolsHandler {
 Staged stores the current contents of your note draft file (the path is in your instructions) as the note body, \
 under the title you pass here, and does not read your assistant text. Write the whole note body into the draft \
 file first; calling again republishes the file, and the last call of the turn wins. After the result says the \
-note is saved, end your turn without repeating the note."
+note is saved, send a simple \"Done\" message with no other text to end your turn, rather than summarising the \
+work done. If the user asked you a question, answer it before making this call."
     )]
     async fn write_note(
         &self,
@@ -376,6 +387,15 @@ mod tests {
             Some(WRITE_NOTE_DESCRIPTION),
             "the #[tool] description must match the shared constant"
         );
+        // How the turn ends after a saved call, word for word.
+        assert!(
+            WRITE_NOTE_DESCRIPTION.ends_with(
+                "After the result says the note is saved, send a simple \"Done\" message with no \
+other text to end your turn, rather than summarising the work done. If the user asked you a \
+question, answer it before making this call."
+            ),
+            "{WRITE_NOTE_DESCRIPTION}"
+        );
     }
 
     #[test]
@@ -491,11 +511,20 @@ mod tests {
         assert!(text.contains("Saved note \\\"First\\\""), "{text}");
         assert!(text.contains("from the draft file"), "{text}");
         assert!(text.contains("end your turn"), "{text}");
-        // The count is the body's UTF-8 length, and the text says so.
+        // The handler's text is `saved_message` for the stored title and body.
+        let content = serde_json::to_value(&first.content).unwrap();
+        assert_eq!(
+            content[0]["text"],
+            saved_message("First", "First body ![Shot](staged-media://abc.png)".len())
+        );
+        // The count is the body's UTF-8 length, and the text says so. The
+        // rest asks for a bare "Done" unless a question is still unanswered.
         assert_eq!(
             saved_message("Né", "é→".len()),
-            "Saved note \"Né\" (5 bytes from the draft file). The note is stored; end your \
-turn now without repeating it in your reply."
+            "Saved note \"Né\" (5 bytes from the draft file). If the user asked you a question \
+this turn and you have not answered it in chat yet, answer it now, briefly. Otherwise send a \
+simple \"Done\" message with no other text to end your turn, rather than summarising the work \
+done."
         );
         let current = current_submission(&slot).unwrap();
         assert_eq!(current.body, "First body ![Shot](staged-media://abc.png)");

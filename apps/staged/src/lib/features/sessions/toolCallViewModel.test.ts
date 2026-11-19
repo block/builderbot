@@ -671,7 +671,7 @@ describe('write_note tool rows', () => {
       type: 'content',
       content: {
         type: 'text',
-        text: 'Saved note "README.md: Sandbox repository purpose" (82 bytes from the draft file). The note is stored; end your turn now without repeating it in your reply.',
+        text: 'Saved note "README.md: Sandbox repository purpose" (82 bytes from the draft file). If the user asked you a question this turn and you have not answered it in chat yet, answer it now, briefly. Otherwise send a simple "Done" message with no other text to end your turn, rather than summarising the work done.',
       },
     },
   ];

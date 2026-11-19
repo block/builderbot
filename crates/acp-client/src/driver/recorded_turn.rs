@@ -188,7 +188,7 @@ impl PromptAnswers {
 fn prompt_error_message(error: &serde_json::Value) -> String {
     match serde_json::from_value::<agent_client_protocol::Error>(error.clone()) {
         Ok(error) => describe_prompt_error(error, &[]),
-        Err(_) => format!("Prompt failed: {error}"),
+        Err(_) => format!("{PROMPT_FAILED_PREFIX} {error}"),
     }
 }
 

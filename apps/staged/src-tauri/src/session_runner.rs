@@ -39,6 +39,9 @@
 pub(crate) mod attachments;
 mod disconnect;
 mod late_stop;
+// Nothing calls the classifier until network failures are parked as a pause.
+#[cfg_attr(not(test), allow(dead_code))]
+mod network_failure;
 pub(crate) mod reconcile;
 
 pub(crate) use disconnect::may_still_run_on_workstation;

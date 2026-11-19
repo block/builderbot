@@ -7774,6 +7774,16 @@ async fn record_prompt_error(
         .await;
 }
 
+/// How the driver's error text begins when the agent answered `session/prompt`
+/// with an error other than `auth_required` (see [`describe_prompt_error`]).
+///
+/// This is the driver's own wording, not the agent's, so a caller may test for
+/// it to learn that a run failed on the prompt itself and not during setup,
+/// after a cancel, or on a lost transport. The colon is part of the prefix:
+/// "Prompt failed after interrupt: ..." and "Prompt failed after
+/// cancellation: ..." are different failures and do not match.
+pub const PROMPT_FAILED_PREFIX: &str = "Prompt failed:";
+
 /// The text a failed `session/prompt` surfaces to the user.
 ///
 /// amp, claude, and goose with a native provider accept `session/new` while
@@ -7795,7 +7805,7 @@ fn describe_prompt_error(
         required.log_methods(&format!("required to {operation}"));
         return required.describe(operation);
     }
-    format!("Prompt failed: {error:?}")
+    format!("{PROMPT_FAILED_PREFIX} {error:?}")
 }
 
 /// What an agent said on a `-32000` beyond the schema's stock text, if anything.

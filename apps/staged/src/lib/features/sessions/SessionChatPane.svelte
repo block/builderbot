@@ -192,7 +192,16 @@
     type AcpCommand,
     type AcpTranscriptEvent,
     type AcpTranscriptGroup,
+    type RichToolItem,
   } from './acpTranscript';
+  import {
+    isFirstNoteDeliveryMessage,
+    isNoteCardItem,
+    listNoteDeliveries,
+    noteCallCardLabel,
+    stabilizeNoteDeliveries,
+    type NoteDeliveries,
+  } from './noteDeliveries';
   import { hiddenNoteDoneMessageIds } from './noteDoneMessage';
   import PlanCard from './PlanCard.svelte';
   import { viewport } from '../../shared/viewport.svelte';
@@ -797,6 +806,26 @@
    *  last group?" without re-running whenever the grouped array identity
    *  changes — deriveds cut propagation when the value is equal. */
   let lastGroupIndex = $derived(renderedGroups.length - 1);
+  /**
+   * Where the transcript delivered a note: the saved `write_note` calls shown
+   * as the note card in place of their row, and the assistant messages that
+   * hold the `---` separator (see `noteDeliveries.ts`). In the final turn of
+   * a settled session a saved call is a card only when the stored note is at
+   * least as new as the call; otherwise its row stays and the follow-up
+   * button below the transcript offers the update. The same object is kept
+   * across rebuilds that change no delivery, so the tool groups that read it
+   * are not re-evaluated on every poll tick.
+   */
+  let previousNoteDeliveries: NoteDeliveries | null = null;
+  let noteDeliveries = $derived.by(() => {
+    previousNoteDeliveries = stabilizeNoteDeliveries(
+      previousNoteDeliveries,
+      listNoteDeliveries(grouped, { noteUpdatedAt: noteInfo?.updatedAt, sessionLive: isLive })
+    );
+    return previousNoteDeliveries;
+  });
+  /** Whether a tool item is shown as the note card, so it never folds into a verb group. */
+  const isNoteCard = (item: RichToolItem) => isNoteCardItem(noteDeliveries, item);
   /** Latest ACP plan, pinned above the transcript rather than rendered in it. */
   let plan = $derived.by(() => latestPlan(acpMetadataMessages));
   /** Pikchr sources of successful render_pikchr tool calls, shown inline as diagrams. */
@@ -3279,25 +3308,6 @@
       .slice(0, 6);
   });
 
-  /** Note-indicator scans keyed on the message object: rows keep identity
-   *  across polls except the re-fetched tail, so stale entries self-evict. */
-  const noteIndicatorCache = new WeakMap<SessionMessage, boolean>();
-
-  function messageHasNoteIndicator(message: SessionMessage): boolean {
-    let hasNote = noteIndicatorCache.get(message);
-    if (hasNote === undefined) {
-      hasNote = splitAtNoteIndicator(message.content).hasNote;
-      noteIndicatorCache.set(message, hasNote);
-    }
-    return hasNote;
-  }
-
-  let noteBearingMessageIds = $derived.by(() => {
-    return messages
-      .filter((message) => message.role === 'assistant' && messageHasNoteIndicator(message))
-      .map((message) => message.id);
-  });
-
   let isPipelineRunning = $derived(isLive && !!session?.pipeline);
 
   function insertSlashCommand(command: AcpCommand) {
@@ -3577,7 +3587,6 @@
               {@const split = splitAtNoteIndicator(group.message.content, {
                 streaming: isLive && groupIdx === lastGroupIndex,
               })}
-              {@const firstNoteMessageId = noteBearingMessageIds[0]}
               {@const hasPreamble = split.preamble.trim().length > 0}
               {@const showAssistantCopy = hasPreamble || !split.hasNote}
               <div class="message-row assistant-message">
@@ -3596,7 +3605,10 @@
                       label={noteActivityLabel({
                         isLive,
                         isLastGroup: groupIdx === lastGroupIndex,
-                        isFirstNoteMessage: group.message.id === firstNoteMessageId,
+                        isFirstNoteMessage: isFirstNoteDeliveryMessage(
+                          noteDeliveries,
+                          group.message.id
+                        ),
                       })}
                     />
                   {/if}
@@ -3620,8 +3632,14 @@
               </div>
             {:else if group.type === 'tools'}
               <div class="message-row tool-group">
-                {#each groupRichToolsByVerb(group.items) as verbGroup (verbGroup.key)}
-                  {#if verbGroup.items.length === 1}
+                {#each groupRichToolsByVerb(group.items, isNoteCard) as verbGroup (verbGroup.key)}
+                  {#if verbGroup.items.length === 1 && isNoteCard(verbGroup.items[0])}
+                    <!-- A saved `write_note` call: the card says the note was
+                         delivered, in the row's place. -->
+                    <NoteActivityCard
+                      label={noteCallCardLabel(noteDeliveries, verbGroup.items[0])}
+                    />
+                  {:else if verbGroup.items.length === 1}
                     <ToolCallCard
                       item={verbGroup.items[0]}
                       {displayRoots}
@@ -4370,6 +4388,23 @@
     gap: 2px;
     width: 100%;
     min-width: 0;
+  }
+
+  /* The note card shown in place of a saved `write_note` row. It keeps its
+     own width in the column instead of stretching like a tool row, and is set
+     off from the rows beside it. Alone, first or last in the group, the gap
+     between transcript groups is its spacing. */
+  .tool-group :global(.note-activity-card) {
+    align-self: flex-start;
+    margin: 6px 0;
+  }
+
+  .tool-group :global(.note-activity-card:first-child) {
+    margin-top: 0;
+  }
+
+  .tool-group :global(.note-activity-card:last-child) {
+    margin-bottom: 0;
   }
 
   /* Inline diagram from a successful render_pikchr call — rendered through the

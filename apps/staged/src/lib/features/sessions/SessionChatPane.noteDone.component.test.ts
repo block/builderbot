@@ -6,8 +6,10 @@ import type { Session, SessionMessage, SessionPollRequest } from '../../types';
  * The bare "Done" a note session sends after a saved `write_note` call. The
  * pane leaves that message out of the transcript (see `noteDoneMessage.ts`);
  * any other text after the call is shown as written. These tests go through
- * the real pane and the real tool row, so the rule is checked where the user
- * sees it, on rows shaped as the bridges store them.
+ * the real pane, the real tool row and the real note card, so the rule is
+ * checked where the user sees it, on rows shaped as the bridges store them.
+ * A saved call shows as the note card and any other as its tool row (see
+ * `SessionChatPane.noteCard.component.test.ts`).
  */
 
 const SESSION_ID = 'note-session';
@@ -153,6 +155,12 @@ describe('SessionChatPane after a saved note', () => {
       el.textContent?.trim()
     );
 
+  /** The label of each note card the transcript shows, in order. */
+  const noteCards = () =>
+    [...document.querySelectorAll('.messages .note-activity-card')].map((card) =>
+      card.textContent?.trim()
+    );
+
   /** The header of each tool row: its verb and what it acted on. */
   const toolRows = () =>
     [...document.querySelectorAll('.tool-group .tool-header')].map((header) => [
@@ -181,7 +189,8 @@ describe('SessionChatPane after a saved note', () => {
 
     // The reply before the call and the saved call are there; the Done is not.
     expect(assistantTexts()).toEqual(['The test races the session cookie.']);
-    expect(toolRows()).toEqual([['Saved note', NOTE_TITLE]]);
+    expect(noteCards()).toEqual(['Note created']);
+    expect(toolRows()).toEqual([]);
     // Nothing is rendered for it at all: no empty group to take a gap in the
     // column or to anchor the scroll position.
     expect(groupKeys()).toEqual(['m-1', 'm-2', 't-tool:tc-3']);
@@ -204,7 +213,8 @@ describe('SessionChatPane after a saved note', () => {
     await mountPane();
 
     expect(assistantTexts()).toEqual([]);
-    expect(toolRows()[0]).toEqual(['Saved note', NOTE_TITLE]);
+    expect(noteCards()).toEqual(['Note created']);
+    expect(toolRows()).toEqual([['Ran', 'Guardian Review']]);
     expect(groupKeys()).toHaveLength(2);
   });
 
@@ -255,7 +265,7 @@ describe('SessionChatPane after a saved note', () => {
 
   it('leaves it out after a remote call completed from the outbox', async () => {
     // The call's update was lost with the connection; the session completed
-    // from the workstation outbox, so the row resolves to "Saved note".
+    // from the workstation outbox, so the call resolves to saved.
     transcript.current = [
       row(1, 'user', 'Plan a fix for the flaky login test'),
       noteCall(2, CLAUDE, 'in_progress'),
@@ -263,7 +273,8 @@ describe('SessionChatPane after a saved note', () => {
     ];
     await mountPane();
 
-    expect(toolRows()).toEqual([['Saved note', NOTE_TITLE]]);
+    expect(noteCards()).toEqual(['Note created']);
+    expect(toolRows()).toEqual([]);
     expect(assistantTexts()).toEqual([]);
   });
 

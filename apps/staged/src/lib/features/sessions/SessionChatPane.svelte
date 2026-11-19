@@ -216,7 +216,11 @@
     fencedDiagramMarkdown,
   } from '../../shared/markdown/diagramFormats';
   import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
-  import { getMarkdownMediaFromEvent, type MarkdownMedia } from '../../shared/markdown/mediaViewer';
+  import {
+    getMarkdownMediaFromEvent,
+    getMarkdownMediaImageFromEvent,
+  } from '../../shared/markdown/mediaViewer';
+  import { mediaPinchOpen, type OpenMarkdownMedia } from '../../shared/markdown/mediaPinch';
   import { resolveStagedMediaUrl } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
   import { pageVideos } from '../../shared/markdown/pageVideos';
@@ -809,7 +813,7 @@
   // See the loader effect below: the chat never waits blank on this, so the cap is loose.
   const SESSION_PIKCHR_LOAD_TIMEOUT_MS = 60_000;
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
-  let mediaViewer = $state<MarkdownMedia | null>(null);
+  let mediaViewer = $state<OpenMarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
   let metadataFollowupConfig = $derived.by(() =>
     latestAcpConfigDiscoveryFromMetadata(session?.provider, acpMetadataMessages)
@@ -2695,9 +2699,12 @@
     if (!media) return false;
     event.preventDefault();
     event.stopPropagation();
-    mediaViewer = media;
+    mediaViewer = { ...media, originImage: getMarkdownMediaImageFromEvent(event.target) };
     return true;
   }
+
+  // Pinch-out on an inline image opens it too, following the fingers.
+  const openMediaOnPinch = mediaPinchOpen((media) => (mediaViewer = media));
 
   function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
     const svgMarkup = getMarkdownDiagramSvgMarkup(event.target);
@@ -3417,6 +3424,7 @@
     bind:this={messagesEl}
     onscroll={handleScroll}
     onclick={handleContentClick}
+    {@attach openMediaOnPinch}
     onkeydown={handleContentKeydown}
   >
     {#if session?.pipeline}
@@ -4023,6 +4031,8 @@
     open={true}
     src={resolveStagedMediaUrl(mediaViewer.id, mediaViewer.ext)}
     title={mediaViewer.alt}
+    originImage={mediaViewer.originImage}
+    gesture={mediaViewer.gesture}
     onClose={() => (mediaViewer = null)}
   />
 {/if}

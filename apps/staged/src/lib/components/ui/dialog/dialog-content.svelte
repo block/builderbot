@@ -23,6 +23,7 @@
     class: className,
     style: styleProp,
     portalProps,
+    overlayProps,
     children,
     showCloseButton = true,
     fullScreenOnMobile = true,
@@ -35,6 +36,8 @@
     ...restProps
   }: WithoutChildrenOrChild<DialogPrimitive.ContentProps> & {
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof DialogPortal>>;
+    /** For a dialog that drives its own backdrop, such as a gesture-tracked open. */
+    overlayProps?: ComponentProps<typeof Dialog.Overlay>;
     children: Snippet;
     showCloseButton?: boolean;
     fullScreenOnMobile?: boolean;
@@ -264,7 +267,7 @@
 </script>
 
 <DialogPortal {...portalProps}>
-  <Dialog.Overlay />
+  <Dialog.Overlay {...overlayProps} />
   <!--
     preventOverflowTextSelection is off: bits-ui's selection lock rewrites
     user-select on <body> and the content on pointerup, and WKWebView collapses

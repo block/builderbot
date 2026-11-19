@@ -201,6 +201,132 @@ describe('createDiagramZoomController', () => {
     expect(transforms.at(-1)).toEqual(zoomed);
   });
 
+  it('places the content programmatically, outside the scale limits and the constraint', () => {
+    createController({ constrainToContent: true });
+    controller.setTransform({ scale: 0.01, offsetX: -40, offsetY: 900 });
+    expect(transforms.at(-1)).toEqual({ scale: 0.01, offsetX: -40, offsetY: 900 });
+  });
+
+  describe('pinch dismiss', () => {
+    let progress: number[];
+    let releases: boolean[];
+
+    beforeEach(() => {
+      progress = [];
+      releases = [];
+      createController({
+        constrainToContent: true,
+        pinchDismiss: {
+          onProgress: (value) => progress.push(value),
+          onRelease: (close) => releases.push(close),
+        },
+      });
+    });
+
+    // Two fingers on a horizontal line through (250, 200), `gap` px apart.
+    const fingers = (gap: number, dx = 0, dy = 0): [number, number][] => [
+      [250 - gap / 2 + dx, 200 + dy],
+      [250 + gap / 2 + dx, 200 + dy],
+    ];
+
+    function pinch(gaps: number[], { stepMs = 200, holdMs = 300 } = {}) {
+      dispatchTouch('touchstart', fingers(gaps[0]));
+      for (const gap of gaps.slice(1)) {
+        vi.advanceTimersByTime(stepMs);
+        dispatchTouch('touchmove', fingers(gap));
+      }
+      vi.advanceTimersByTime(holdMs);
+      dispatchTouch('touchend', fingers(gaps.at(-1)!));
+      // d3-zoom's own double-tap window.
+      vi.advanceTimersByTime(600);
+    }
+
+    it('follows the fingers below the fit and closes on release', () => {
+      dispatchTouch('touchstart', fingers(200));
+      vi.advanceTimersByTime(200);
+      // Half the gap, and both fingers 30px right and 20px down.
+      dispatchTouch('touchmove', fingers(100, 30, 20));
+      expect(currentScale()).toBeCloseTo(0.5);
+      // Unconstrained: the content centre stays under the pinch centre.
+      expect(transforms.at(-1)!.offsetX).toBeCloseTo(280 - 50 * 0.5);
+      expect(transforms.at(-1)!.offsetY).toBeCloseTo(220 - 50 * 0.5);
+      expect(progress.at(-1)).toBe(1);
+      expect(releases).toEqual([]);
+
+      vi.advanceTimersByTime(300);
+      dispatchTouch('touchend', fingers(100, 30, 20));
+      expect(releases).toEqual([true]);
+    });
+
+    it('reports partial progress and does not close a small pinch-in', () => {
+      pinch([200, 180]);
+      expect(currentScale()).toBeCloseTo(0.9);
+      expect(progress.at(-1)).toBeCloseTo(0.25);
+      expect(releases).toEqual([false]);
+
+      // The caller springs back with reset(); the next pinch-in is a close again.
+      controller.reset();
+      expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 200, offsetY: 150 });
+      pinch([200, 100]);
+      expect(releases).toEqual([false, true]);
+    });
+
+    it('closes a small pinch-in that is still moving fast when released', () => {
+      pinch([200, 190, 180], { stepMs: 20, holdMs: 0 });
+      expect(currentScale()).toBeCloseTo(0.9);
+      expect(releases).toEqual([true]);
+    });
+
+    it('stops at the fit, without closing, when the pinch starts zoomed in', () => {
+      controller.zoomBy(4);
+      pinch([200, 20]);
+      expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 200, offsetY: 150 });
+      expect(releases).toEqual([]);
+      expect(progress).toEqual([]);
+
+      // Now at the fit, so a second pinch-in closes.
+      pinch([200, 100]);
+      expect(releases).toEqual([true]);
+    });
+
+    it('leaves a pinch-out from the fit as an ordinary zoom', () => {
+      pinch([100, 300]);
+      expect(currentScale()).toBeCloseTo(3);
+      expect(progress.every((value) => value === 0)).toBe(true);
+      expect(releases).toEqual([]);
+    });
+
+    it('does not report a pinch that went below the fit and came back', () => {
+      pinch([200, 100, 200]);
+      expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 200, offsetY: 150 });
+      expect(progress.at(-1)).toBe(0);
+      expect(releases).toEqual([]);
+    });
+
+    it('keeps the wheel floor below the fit', () => {
+      controller.zoomBy(0.5);
+      expect(currentScale()).toBeCloseTo(0.5);
+      expect(releases).toEqual([]);
+    });
+  });
+
+  it('lets a pinch-in rest below the fit without pinch dismiss', () => {
+    createController({ constrainToContent: true });
+    dispatchTouch('touchstart', [
+      [150, 200],
+      [350, 200],
+    ]);
+    dispatchTouch('touchmove', [
+      [200, 200],
+      [300, 200],
+    ]);
+    dispatchTouch('touchend', [
+      [200, 200],
+      [300, 200],
+    ]);
+    expect(transforms.at(-1)).toEqual({ scale: 0.5, offsetX: 225, offsetY: 175 });
+  });
+
   function createController(overrides: Partial<ControllerOptions> = {}) {
     controller?.destroy();
     controller = createDiagramZoomController(viewportEl, contentEl, {

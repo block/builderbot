@@ -13,8 +13,20 @@ export interface MarkdownMedia {
 export function getMarkdownMediaFromEvent(target: EventTarget | null): MarkdownMedia | null {
   if (!(target instanceof Element)) return null;
   const trigger = target.closest('.markdown-media-image :is(img, .markdown-media-expand)');
-  if (!trigger) return null;
-  const figure = trigger.closest('.markdown-media');
+  return trigger && getMarkdownMedia(trigger);
+}
+
+/** The inline image a click on it, or on its expand button, opens the viewer from. */
+export function getMarkdownMediaImageFromEvent(
+  target: EventTarget | null
+): HTMLImageElement | null {
+  if (!(target instanceof Element)) return null;
+  return target.closest('.markdown-media-image')?.querySelector('img') ?? null;
+}
+
+/** The media of the figure `element` is in, when that is an image. */
+export function getMarkdownMedia(element: Element): MarkdownMedia | null {
+  const figure = element.closest('.markdown-media');
   if (!figure) return null;
   const media = parseStagedMediaReference(
     `staged-media://${figure.getAttribute('data-media-id')}.${figure.getAttribute('data-media-ext')}`

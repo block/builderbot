@@ -4530,10 +4530,12 @@ fn retry_or_fail_queued_start_before_claim<R: tauri::Runtime>(
 /// waits, once per cause, as a notice on the branch's setup event
 /// (`workspace_setup::failures::notify_queue_held`), and that notice is
 /// taken back when a look finds the row no longer held. A `disconnected`
-/// holder is handed to the reconcile service once per cause as well, not on
-/// each recheck: asking skips every spacing that service keeps, and a
-/// recheck comes every few seconds for as long as the hold lasts. After the
-/// first ask the service's own sweep and nudges look at the session.
+/// holder is named for the reconcile service on every look, with a trigger
+/// of the hold's own (`reconcile::note_queue_held_behind`): the service
+/// tries the session only when its last attempt is a minute old, so the
+/// rechecks cost one Blox call a minute at most, and the row waits no
+/// longer than that once whatever kept the holder from settling is over,
+/// instead of as long as the service's failure backoff had grown.
 fn hold_queue_behind_sibling_session<R: tauri::Runtime>(
     store: &Store,
     app_handle: &tauri::AppHandle<R>,
@@ -4550,10 +4552,8 @@ fn hold_queue_behind_sibling_session<R: tauri::Runtime>(
     if let Some(notice) = &hold.announce {
         crate::workspace_setup::failures::notify_queue_held(app_handle, &branch.id, notice);
     }
-    if let Some(holder) = hold.disconnected_holder {
-        if let Err(e) = crate::session_runner::reconcile::reconcile_session(holder.clone()) {
-            log::debug!("[session_queue] could not ask for a check of session {holder}: {e}");
-        }
+    if let Some(holder) = &hold.disconnected_holder {
+        crate::session_runner::reconcile::note_queue_held_behind(holder);
     }
     true
 }
@@ -4563,8 +4563,8 @@ fn hold_queue_behind_sibling_session<R: tauri::Runtime>(
 struct SiblingHold {
     /// Why the row waits, when the user has not been told this yet.
     announce: Option<String>,
-    /// The session holding the clone, when it is `disconnected` and that
-    /// is news: the reconcile service is to look at it now.
+    /// The session holding the clone, when it is `disconnected`: the
+    /// reconcile service is told the queue waits on it, on every look.
     disconnected_holder: Option<String>,
 }
 
@@ -4613,7 +4613,7 @@ fn sibling_session_hold(
     );
     Some(SiblingHold {
         announce: news.then_some(reason),
-        disconnected_holder: (news && live.disconnected).then_some(live.session_id),
+        disconnected_holder: live.disconnected.then_some(live.session_id),
     })
 }
 
@@ -6446,8 +6446,12 @@ pub(crate) async fn drain_branch_queue(
         .map(|kicker| Arc::clone(&kicker));
     let Some(branch) = store.get_branch(&branch_id).map_err(|e| e.to_string())? else {
         log::debug!("[session_queue] branch {branch_id} is gone; nothing to drain");
+        // A held row went with its branch. The window that deleted it has
+        // dropped the notice; every other client is told here.
         if let Some(kicker) = &kicker {
-            kicker.start_attempts().forget_branch(&branch_id);
+            if kicker.start_attempts().forget_branch(&branch_id) {
+                crate::workspace_setup::failures::notify_queue_released(&app_handle, &branch_id);
+            }
         }
         return Ok(false);
     };
@@ -12737,12 +12741,13 @@ mod tests {
     /// A held row stays `queued` with no error, and its reason used to go to
     /// the log alone. The user is told why it waits as a notice on the
     /// branch's setup event, once per cause and not on every recheck. A
-    /// holder that is `disconnected` is named for the reconcile service once
-    /// per cause too: a recheck comes every few seconds, and asking on each
-    /// would skip the spacing that service keeps between its Blox calls.
+    /// holder that is `disconnected` is named for the reconcile service on
+    /// every look, whichever session of the sibling it is: that service
+    /// spaces the attempts (`Trigger::QueueHold`), so the row's wait is
+    /// bounded by that spacing and not by a failure backoff.
     /// When nothing holds the row any more the notice is taken back, once.
     #[test]
-    fn a_held_queue_says_why_and_has_a_disconnected_holder_checked_once_per_cause() {
+    fn a_held_queue_says_why_once_per_cause_and_names_a_disconnected_holder_on_every_look() {
         use crate::session_queue::BranchQueueKicker;
         use tauri::Listener;
 
@@ -12793,7 +12798,7 @@ mod tests {
         assert_eq!(row.error_message, None);
 
         // The holder loses its connection: a new cause, told once, and the
-        // session is named for the reconcile service on that look alone.
+        // session is named for the reconcile service on every look.
         store
             .update_session_status(&agent.id, store::SessionStatus::Disconnected, None, None)
             .unwrap();
@@ -12811,13 +12816,13 @@ mod tests {
                 look(),
                 SiblingHold {
                     announce: None,
-                    disconnected_holder: None,
+                    disconnected_holder: Some(agent.id.clone()),
                 }
             );
         }
 
-        // Back to running and lost again: each is a new cause, and the
-        // second loss is asked about once more.
+        // Back to running: nobody to ask about. Lost again: asked about
+        // again.
         store
             .update_session_status(&agent.id, store::SessionStatus::Running, None, None)
             .unwrap();
@@ -12829,7 +12834,28 @@ mod tests {
             look().disconnected_holder.as_deref(),
             Some(agent.id.as_str())
         );
-        assert_eq!(look().disconnected_holder, None);
+
+        // That session settles and another `disconnected` session of the
+        // same sibling branch has the clone. The reason reads the same, so
+        // the user is told nothing new, and the new holder is still named.
+        let other = store::Session::new_running("more", Path::new("/tmp")).with_branch(&sibling.id);
+        store.create_session(&other).unwrap();
+        store
+            .update_session_status(&other.id, store::SessionStatus::Disconnected, None, None)
+            .unwrap();
+        store
+            .update_session_status(&agent.id, store::SessionStatus::Completed, None, None)
+            .unwrap();
+        assert_eq!(
+            look(),
+            SiblingHold {
+                announce: None,
+                disconnected_holder: Some(other.id.clone()),
+            }
+        );
+        store
+            .update_session_status(&other.id, store::SessionStatus::Completed, None, None)
+            .unwrap();
 
         // Settled: nothing holds the row, nobody is asked about, and the
         // notice is taken back with the same heading and no text, once.

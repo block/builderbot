@@ -608,14 +608,26 @@ fn the_queue_is_held_not_drained_behind_a_start_that_could_not_check_out() {
         "kicker.start_attempts().is_held(&branch_id, &session.id)\n                && hold_queue_behind_sibling_session(",
         "start_queued_session_for_branch(",
     );
-    // The hold tells the user why the row waits and has a `disconnected`
-    // holder looked at, once per cause, and takes the notice back when the
-    // row is no longer held: both drain call sites go through the one
-    // function. A held row that left the queue has it taken back too.
-    assert_calls(
-        "drain_branch_queue",
-        drain,
-        "crate::workspace_setup::failures::notify_queue_released(&app_handle, &branch_id)",
+    // The hold tells the user why the row waits, once per cause, names a
+    // `disconnected` holder for the reconcile service with the hold's own
+    // spaced trigger, and takes the notice back when the row is no longer
+    // held: both drain call sites go through the one function. A held row
+    // that left the queue has it taken back too, and so has one whose
+    // branch is gone.
+    for released in [
+        "if kicker.start_attempts().forget_branch(&branch_id) {",
+        ".retain_queued(&branch_id, |id| queued.iter().any(|s| s.id == id))",
+    ] {
+        assert_calls("drain_branch_queue", drain, released);
+    }
+    assert_eq!(
+        drain
+            .matches(
+                "crate::workspace_setup::failures::notify_queue_released(&app_handle, &branch_id)"
+            )
+            .count(),
+        2,
+        "one take-back for a branch that is gone, one for a row that left the queue"
     );
     let hold = body_of(SESSION_COMMANDS, "fn hold_queue_behind_sibling_session<");
     for call in [
@@ -623,7 +635,7 @@ fn the_queue_is_held_not_drained_behind_a_start_that_could_not_check_out() {
         "crate::workspace_setup::failures::notify_queue_held(app_handle, &branch.id, notice)",
         "kicker.start_attempts().release(&branch.id, session_id)",
         "crate::workspace_setup::failures::notify_queue_released(app_handle, &branch.id)",
-        "crate::session_runner::reconcile::reconcile_session(holder.clone())",
+        "crate::session_runner::reconcile::note_queue_held_behind(holder)",
     ] {
         assert_calls("hold_queue_behind_sibling_session", hold, call);
     }

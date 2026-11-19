@@ -29,6 +29,11 @@ interface WorkspaceSetupErrorEvent {
   noticeTitle?: string;
 }
 
+/** The heading the backend sends with why a branch's queued session is
+ *  waiting, and alone when it no longer is (`QUEUE_HELD_TITLE` in
+ *  `workspace_setup/failures.rs`). */
+const QUEUE_HELD_TITLE = 'Queued session is waiting';
+
 /** The one toast a branch has for why its queued session is waiting: a new
  *  cause replaces the old one, and it is taken down when the wait is over. */
 function queueHeldToastId(branchId: string): string {
@@ -364,7 +369,7 @@ class WorkspaceLifecycleController {
     this.setupErrorEventSeqByBranch.set(branchId, ++this.setupErrorEventSeq);
     if (error == null) {
       this.clearWorkspaceError(branchId);
-      if (event.noticeTitle) {
+      if (event.noticeTitle === QUEUE_HELD_TITLE) {
         // Why the branch's queued session waits: up for as long as it does.
         const id = queueHeldToastId(branchId);
         if (event.notice) {
@@ -373,7 +378,8 @@ class WorkspaceLifecycleController {
           toast.dismiss(id);
         }
       } else if (event.notice) {
-        toast.warning('Workspace branch was given existing commits', {
+        // Any other heading is a notice of its own, not the hold's.
+        toast.warning(event.noticeTitle ?? 'Workspace branch was given existing commits', {
           description: event.notice,
           duration: Infinity,
         });

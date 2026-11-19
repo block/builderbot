@@ -28,8 +28,10 @@
 //!
 //! Reconcile runs on launch ([`reconcile_all`]), from a sweep every
 //! [`SWEEP_INTERVAL`] that respects each row's backoff, after a successful
-//! Blox call for the row's workstation ([`note_workspace_reachable`]), and on
-//! request ([`reconcile_session`], for a "Check now"). Every write is a
+//! Blox call for the row's workstation ([`note_workspace_reachable`]), while
+//! a queued session of another branch waits on the row
+//! ([`note_queue_held_behind`]), and on request ([`reconcile_session`], for a
+//! "Check now"). Every write is a
 //! compare-and-swap on the row as it was read, so a Stop, or another Staged
 //! instance's reconcile, that got there first wins, and running the same
 //! snapshot twice changes nothing the second time.
@@ -73,6 +75,16 @@ const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 /// The least time between two attempts a successful Blox call can set off for
 /// one row: a burst of `ws exec`s (a diff load) should not attach once each.
 const NUDGE_MIN_SPACING: Duration = Duration::from_secs(30);
+/// The least time between two attempts for a row that a queued session of
+/// another branch waits on ([`Trigger::QueueHold`]). The queue asks every few
+/// seconds for as long as it is held; this is what bounds that to one attempt
+/// a minute per row, and the queue's wait after the cause has cleared to this
+/// plus one of its rechecks. One minute is [`BACKOFF_BASE`] and
+/// [`HELD_WORK_RECHECK`]: the spacing this service keeps by itself after a
+/// row's first failed attempt, so a held queue never has a row tried more
+/// often than that. It only stops the spacing growing, to
+/// [`BACKOFF_CAP`], while something waits on the answer.
+pub(crate) const QUEUE_HOLD_MIN_SPACING: Duration = Duration::from_secs(60);
 /// The wait before checking again on a row whose session is still working
 /// after its turn; it doubles with each further check that finds the work
 /// still going, up to [`HELD_WORK_RECHECK_CAP`]. Not a failure backoff: the
@@ -165,6 +177,9 @@ pub(crate) enum Trigger {
     /// A Blox call for the row's workstation just succeeded: rows that have
     /// failed before, spaced by [`NUDGE_MIN_SPACING`].
     WorkspaceReachable,
+    /// A queued session of another branch waits on the row: regardless of
+    /// backoff, spaced by [`QUEUE_HOLD_MIN_SPACING`].
+    QueueHold,
     /// The user asked ("Check now"): regardless of backoff.
     CheckNow,
 }
@@ -410,6 +425,9 @@ impl Reconciler {
                         .last_attempt
                         .map_or(true, |last| now.duration_since(last) >= NUDGE_MIN_SPACING)
             }
+            Trigger::QueueHold => row.last_attempt.map_or(true, |last| {
+                now.duration_since(last) >= QUEUE_HOLD_MIN_SPACING
+            }),
         };
         if !allowed {
             return false;
@@ -705,6 +723,17 @@ pub(crate) fn reconcile_all() {
 pub(crate) fn note_workspace_reachable(workspace_name: &str) {
     if let Some(reconciler) = active() {
         reconciler.workspace_reachable(workspace_name);
+    }
+}
+
+/// A queued session of another branch cannot start until `session_id`, which
+/// is `disconnected`, has settled. Called on every look the queue takes at
+/// its hold, which is every few seconds: an attempt starts only when the
+/// row's last one began at least [`QUEUE_HOLD_MIN_SPACING`] ago, whatever its
+/// backoff says. A map lookup otherwise.
+pub(crate) fn note_queue_held_behind(session_id: &str) {
+    if let Some(reconciler) = active() {
+        reconciler.spawn_reconcile(session_id, Trigger::QueueHold);
     }
 }
 

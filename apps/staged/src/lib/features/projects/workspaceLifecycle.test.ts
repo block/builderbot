@@ -541,6 +541,33 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     lifecycle.stop();
   });
 
+  // Only the hold's own heading is the hold notice. Another heading is a
+  // notice of its own: it does not take the hold toast's id, so it neither
+  // replaces that toast nor is taken down with it, and alone it does nothing.
+  it('does not treat a notice under another heading as the queue hold', async () => {
+    const lifecycle = await newController();
+    await settle();
+
+    emit('workspace-setup-error', {
+      branchId: 'branch-1',
+      error: null,
+      notice: 'Something else happened.',
+      noticeTitle: 'Something else',
+    });
+    expect(toastWarning.mock.calls).toEqual([
+      ['Something else', { description: 'Something else happened.', duration: Infinity }],
+    ]);
+
+    emit('workspace-setup-error', {
+      branchId: 'branch-1',
+      error: null,
+      noticeTitle: 'Something else',
+    });
+    expect(toastWarning).toHaveBeenCalledTimes(1);
+    expect(toastDismiss).not.toHaveBeenCalled();
+    lifecycle.stop();
+  });
+
   // The backend reports every failed run, and a snapshot covers the ones
   // from before the window mounted.
   it('keeps setup reasons from the error event and the snapshot taken at start', async () => {

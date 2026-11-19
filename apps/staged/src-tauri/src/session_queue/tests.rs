@@ -341,8 +341,14 @@ fn queued_start_attempts_retry_with_growing_delays_then_give_up() {
     assert!(attempts.retain_queued("b", |_| false));
     assert!(attempts.is_empty());
 
+    // A branch that is gone takes its rows with it, and says whether one
+    // of them was held, for the same reason.
     attempts.record_failure("gone", "s3", t2);
-    attempts.forget_branch("gone");
+    assert!(!attempts.forget_branch("gone"));
+    attempts.record_failure("gone", "s3", t2);
+    attempts.hold("gone", "s4", t2, "waiting");
+    assert!(attempts.forget_branch("gone"));
+    assert!(!attempts.forget_branch("gone"));
     assert!(attempts.is_empty());
 }
 

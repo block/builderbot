@@ -59,10 +59,11 @@ pub(crate) fn queued_start_retry(failures: u32) -> QueuedStartRetry {
 }
 
 /// How long a held row waits before the drain looks at what holds it again.
-/// A recheck is a database read and nothing more, so it is short: the queue
-/// moves within seconds of the cause going away. What costs a Blox call,
-/// asking the reconcile service about a `disconnected` holder, is done once
-/// per cause and not on each recheck.
+/// A recheck is a database read, so it is short: the queue moves within
+/// seconds of the cause going away. It also tells the reconcile service
+/// that the queue waits on a `disconnected` holder, which costs a Blox call
+/// only when that service lets the ask through: once per
+/// `reconcile::QUEUE_HOLD_MIN_SPACING` for the holder, not on each recheck.
 pub(crate) const QUEUE_HOLD_RECHECK: Duration = Duration::from_secs(5);
 
 struct Attempt {
@@ -195,9 +196,14 @@ impl QueuedStartAttempts {
         dropped_held
     }
 
-    /// Drop every entry for a branch that is gone.
-    pub(crate) fn forget_branch(&self, branch_id: &str) {
-        self.by_branch.lock().unwrap().remove(branch_id);
+    /// Drop every entry for a branch that is gone. Returns whether a held
+    /// row was among them.
+    pub(crate) fn forget_branch(&self, branch_id: &str) -> bool {
+        self.by_branch
+            .lock()
+            .unwrap()
+            .remove(branch_id)
+            .is_some_and(|rows| rows.values().any(|attempt| attempt.held.is_some()))
     }
 
     #[cfg(test)]

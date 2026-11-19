@@ -2702,6 +2702,60 @@ fn a_reachable_workstation_retries_only_its_failed_rows() {
         .reconcile_blocking(&failed.id, Trigger::WorkspaceReachable));
 }
 
+/// A queue held behind a row asks about it every few seconds. The row is
+/// tried at once when this process never has, and after that once per
+/// [`QUEUE_HOLD_MIN_SPACING`] whatever its failures have backed off to, so the
+/// asks cost a bounded number of Blox calls and the queue waits no longer
+/// than that spacing once the cause has cleared.
+#[test]
+fn a_held_queue_has_its_holder_tried_once_per_spacing_whatever_the_backoff() {
+    let fx = Fixture::new();
+    let holder = fx.disconnected_commit_session();
+    fx.blox.set_workspace(WorkspaceProbe::Unreachable {
+        kind: UnreachableKind::Unreachable,
+        message: "timed out".to_string(),
+    });
+    let ask = || {
+        fx.reconciler
+            .reconcile_blocking(&holder.id, Trigger::QueueHold)
+    };
+    let age_last_attempt = |age: Duration| {
+        fx.reconciler
+            .rows
+            .lock()
+            .unwrap()
+            .get_mut(&holder.id)
+            .unwrap()
+            .last_attempt = Some(std::time::Instant::now() - age);
+    };
+
+    // Never tried: the first ask is an attempt, the next ones are not.
+    assert!(ask());
+    let calls = fx.blox.calls().len();
+    for _ in 0..5 {
+        assert!(!ask());
+    }
+    age_last_attempt(QUEUE_HOLD_MIN_SPACING - Duration::from_secs(5));
+    assert!(!ask());
+    assert_eq!(fx.blox.calls().len(), calls);
+
+    // Failures have pushed the sweep's next attempt out to the cap. The
+    // hold does not wait for it: one attempt per spacing, and no more.
+    for _ in 0..6 {
+        age_last_attempt(QUEUE_HOLD_MIN_SPACING);
+        assert!(ask());
+        assert!(!ask());
+    }
+    assert!(!fx.reconciler.reconcile_blocking(&holder.id, Trigger::Sweep));
+    assert_eq!(fx.reconciler.states()[0].attempts, 7);
+
+    // The cause clears: the ask after the spacing settles the row.
+    fx.blox.set_workspace(WorkspaceProbe::Running);
+    age_last_attempt(QUEUE_HOLD_MIN_SPACING);
+    assert!(ask());
+    assert!(fx.reconciler.states().is_empty());
+}
+
 #[test]
 fn states_report_rows_being_reconciled() {
     let fx = Fixture::new();

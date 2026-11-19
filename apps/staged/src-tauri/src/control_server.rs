@@ -75,12 +75,25 @@
 //! commands as the user, so that adds no reach to the machine, and a
 //! session may hold only a fixed number of created projects. A caller's
 //! request is checked in the app the way the desktop forms check theirs
-//! (`project_commands::control`). No deletes — `delete_project` and
-//! `remove_project_repo` stay off the table, and `delete_tag` and
-//! `delete_tag_group` drop assignments on every project carrying the tag,
-//! which nothing in the UI undoes — no history rewrites, no `create_pr` /
-//! `push_branch`. Exposing a destructive verb reopens the auth design and
-//! must come with a [`PROTOCOL_VERSION`] bump.
+//! (`project_commands::control`).
+//!
+//! It includes moving and copying a note to another project too
+//! (`move_note_to_project`, `copy_note_to_project` and their project-note
+//! twins): the transfer behind the note dialogs' "Move to project…" and
+//! "Copy to project…", with its rules and refusals as they are (see
+//! [`note_transfer`](crate::note_transfer)). The user undoes a copy by
+//! deleting it and a move by moving the note back, and removes a repo the
+//! transfer added like any other. One link does not come back with the
+//! note: a branch note moved on its own is detached from its parent project
+//! note. The note's project and the destination must both be within the
+//! caller's reach, and so must the media the note's body embeds, which
+//! the transfer carries with it.
+//!
+//! No deletes — `delete_project` and `remove_project_repo` stay off the
+//! table, and `delete_tag` and `delete_tag_group` drop assignments on every
+//! project carrying the tag, which nothing in the UI undoes — no history
+//! rewrites, no `create_pr` / `push_branch`. Exposing a destructive verb
+//! reopens the auth design and must come with a [`PROTOCOL_VERSION`] bump.
 //!
 //! One verb reaches past the data into the user's view: `open_project`
 //! raises a window and asks it to show a project (see
@@ -211,6 +224,11 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "set_icon_tag_group",
     "set_tag_group_sidebar",
     "reorder_tag_groups",
+    // note move / copy
+    "move_note_to_project",
+    "copy_note_to_project",
+    "move_project_note_to_project",
+    "copy_project_note_to_project",
 ];
 
 /// Request body cap for `POST /api/invoke/{command}`. Control payloads are
@@ -1641,6 +1659,8 @@ mod tests {
         let expected = [
             "add_project_repo",
             "cancel_session",
+            "copy_note_to_project",
+            "copy_project_note_to_project",
             "create_image",
             "create_project",
             "create_tag",
@@ -1654,6 +1674,8 @@ mod tests {
             "list_project_notes",
             "list_project_repos",
             "list_projects",
+            "move_note_to_project",
+            "move_project_note_to_project",
             "move_tag",
             "open_project",
             "rename_tag_group",

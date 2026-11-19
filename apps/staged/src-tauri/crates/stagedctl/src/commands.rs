@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cli::{
-    Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, TagGroupVerb, TagVerb,
+    Cli, ImageVerb, NoteVerb, Noun, ProjectVerb, SessionType, SessionVerb, TagGroupVerb, TagVerb,
     TimelineVerb,
 };
 use crate::client::{
@@ -22,6 +22,7 @@ use crate::client::{
 };
 use crate::grants::{self, GrantFile};
 use crate::launch;
+use crate::notes;
 use crate::open;
 use crate::projects;
 use crate::tags;
@@ -245,6 +246,18 @@ pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
             branch,
             file,
         }) => image_add(&client, &project, &repo, branch.as_deref(), &file),
+        Noun::Note(NoteVerb::Move { note, to }) => notes::note_transfer(
+            &client,
+            notes::Transfer::Move,
+            &notes::NoteRef::parse(&note)?,
+            &to,
+        ),
+        Noun::Note(NoteVerb::Copy { note, to }) => notes::note_transfer(
+            &client,
+            notes::Transfer::Copy,
+            &notes::NoteRef::parse(&note)?,
+            &to,
+        ),
         Noun::Project(ProjectVerb::Open { .. })
         | Noun::Connect { .. }
         | Noun::Disconnect { .. } => {
@@ -361,6 +374,9 @@ fn validate(command: &Noun) -> Result<(), CtlError> {
         },
         Noun::Tag(TagVerb::Group(TagGroupVerb::SetSidebar { on, off, .. })) if !on && !off => {
             invalid("pass --on to pin the group's board to the sidebar, or --off to unpin it")
+        }
+        Noun::Note(NoteVerb::Move { note, .. } | NoteVerb::Copy { note, .. }) => {
+            notes::NoteRef::parse(note).map(|_| ())
         }
         Noun::Connect { client, .. } if client.trim().is_empty() => {
             invalid("--client must not be empty")
@@ -2446,6 +2462,15 @@ mod tests {
                 &["stagedctl", "project", "add-repo", "p", "--repo", "widgets"],
                 "--repo must look like <owner>/<repo>[:<subpath>]",
             ),
+            // A <NOTE> that is not a note reference needs no app to refuse.
+            (
+                &["stagedctl", "note", "move", "n1", "--to", "p"],
+                "<NOTE> must be '#note:<id>' or '#project-note:<id>'",
+            ),
+            (
+                &["stagedctl", "note", "copy", "#review:r1", "--to", "p"],
+                "only notes move between projects",
+            ),
         ];
         for (args, expected) in cases {
             let err = validate(&parse_cli(args)).unwrap_err();
@@ -2581,6 +2606,8 @@ mod tests {
             &["stagedctl", "project", "tag", "p", "q4", "--create"],
             &["stagedctl", "project", "untag", "p", "q4", "Status/Done"],
             &["stagedctl", "project", "untag", "p", "--group", "Status"],
+            &["stagedctl", "note", "move", "#note:n1", "--to", "p"],
+            &["stagedctl", "note", "copy", "project-note:pn1", "--to", "p"],
         ];
         for args in good {
             assert!(validate(&parse_cli(args)).is_ok(), "{args:?}");

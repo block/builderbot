@@ -4,15 +4,15 @@
 //! A `DispatchCaller::Control(grant)` carries the project its credential is
 //! scoped to and whether it may write. Every allowlisted control command
 //! has a row in [`CONTROL_SCOPE`] saying how to find the project a call
-//! addresses — a `projectId` argument, a branch id, a session id, or the
-//! `create_image` pair — and whether the command changes the app. The check
-//! runs before any arm, so a confined credential cannot read or touch the
-//! rows of a project outside its reach however it spells the request, and a
-//! read-only credential never reaches a writing arm. The two commands that
-//! take no identifier (`list_projects`, `get_active_sessions`) are filtered
-//! inside their arms instead, through [`reach`]. `create_project` addresses
-//! no project either, since the project does not exist yet. It has its own
-//! rule, below.
+//! addresses — a `projectId` argument, a branch id, a session id, the
+//! `create_image` pair, or a note and the project it is sent to — and
+//! whether the command changes the app. The check runs before any arm, so a
+//! confined credential cannot read or touch the rows of a project outside
+//! its reach however it spells the request, and a read-only credential
+//! never reaches a writing arm. The two commands that take no identifier
+//! (`list_projects`, `get_active_sessions`) are filtered inside their arms
+//! instead, through [`reach`]. `create_project` addresses no project either,
+//! since the project does not exist yet. It has its own rule, below.
 //!
 //! # Reach
 //!
@@ -61,6 +61,47 @@
 //! request (`assignProjectId`), which is what the tag picker's "Create tag"
 //! row does. The two deletes are not allowlisted at all.
 //!
+//! # Moving and copying notes
+//!
+//! The four note transfers (`move_note_to_project`, `copy_note_to_project`
+//! and their project-note twins) address two projects: the one the note is
+//! in, found through the note, and the `targetProjectId` it is sent to. Both
+//! must be within reach. A credential that reached only the source could
+//! push a note, its session and its repo into a project it was never given;
+//! one that reached only the destination could pull a note out of a project
+//! it cannot read. A copy into the note's own project names one project
+//! twice and needs no more than that one.
+//!
+//! One thing a transfer carries can come from outside those two: media. A
+//! note's body embeds stored images and videos by id
+//! (`staged-media://<id>`), and the transfer puts each one in the
+//! destination whichever project its row is in. A confined caller that knew
+//! an id could otherwise have a note of its own embed it, and copy the file
+//! into a project it reaches. So the media a note embeds must be within
+//! reach as well, as the `imageIds` of a start command must
+//! ([`require_note_media_in_scope`]). A moved project note's child notes are
+//! held to the same, since their bodies travel with it. A reference with no
+//! row carries nothing and is let through, as the transfer leaves it.
+//!
+//! The check goes by the row and does not look for the file. A row whose
+//! file is gone carries nothing either: the transfer leaves that reference
+//! as it is, and the row in the project it is in. So a note the user moved
+//! after such a file was lost still embeds a row of the project it left. If
+//! that project is out of reach, a transfer of the note is refused for
+//! media that would not have travelled. It takes a lost file to get there,
+//! and the check keeps to the row.
+//!
+//! The bodies are read when the request arrives. A transfer that has to add
+//! a repo reads them again once the repo is in, so a body saved during that
+//! add is carried unchecked. Closing that takes a check inside the
+//! transfer, which this module does not reach into.
+//!
+//! Nothing else a transfer touches lies outside those two. A moved project
+//! note takes its child notes along, and the transfer refuses a child whose
+//! branch is in another project. The repo it adds to the destination is one
+//! the source already tracks, which `add_project_repo` would let the same
+//! credential attach.
+//!
 //! # Table shape
 //!
 //! `open_project` is the one command decided by who holds the grant as well
@@ -80,6 +121,7 @@ use serde_json::Value;
 
 use super::{arg, control_create_image_args, get_store, opt_arg, DispatchCaller};
 use crate::control_server::{Access, Actor, ControlGrant};
+use crate::note_media::refs;
 use crate::store::Store;
 
 /// Prefix on a `dispatch` error that denotes a scope refusal, so the control
@@ -117,6 +159,15 @@ pub(crate) enum ScopeKey {
     /// credential is refused, so an agent cannot pull the user's window to
     /// its project.
     OpenProject,
+    /// A branch note's `noteId` and the `targetProjectId` it moves or copies
+    /// to: the note's project, through its branch, and the destination. Both
+    /// must be within reach.
+    NoteTransfer,
+    /// [`ScopeKey::NoteTransfer`] for a project note: `projectNoteId`, whose
+    /// row names its project, and `targetProjectId`. A move takes the note's
+    /// child notes along (`with_children`), so the media their bodies embed
+    /// is checked with the note's own.
+    ProjectNoteTransfer { with_children: bool },
 }
 
 /// One row per allowlisted control command: how to resolve its project,
@@ -190,6 +241,30 @@ pub(crate) const CONTROL_SCOPE: &[(&str, ScopeKey, Access)] = &[
         ScopeKey::Unconfined,
         Access::ReadWrite,
     ),
+    (
+        "move_note_to_project",
+        ScopeKey::NoteTransfer,
+        Access::ReadWrite,
+    ),
+    (
+        "copy_note_to_project",
+        ScopeKey::NoteTransfer,
+        Access::ReadWrite,
+    ),
+    (
+        "move_project_note_to_project",
+        ScopeKey::ProjectNoteTransfer {
+            with_children: true,
+        },
+        Access::ReadWrite,
+    ),
+    (
+        "copy_project_note_to_project",
+        ScopeKey::ProjectNoteTransfer {
+            with_children: false,
+        },
+        Access::ReadWrite,
+    ),
 ];
 
 /// The projects a caller's results are confined to.
@@ -225,7 +300,7 @@ impl Reach {
 /// unconfined caller (a web caller, or an all-projects grant), else the
 /// grant's own project and the projects its actor created. Lists the
 /// actor's created projects, so it is for the arms. The check ahead of them
-/// does single-row reads only (see [`require_in_scope`]).
+/// lists no projects (see [`check_with_store`]).
 pub(super) fn reach(caller: &DispatchCaller, store: &Store) -> Result<Reach, String> {
     let DispatchCaller::Control(grant) = caller else {
         return Ok(Reach::All);
@@ -255,8 +330,10 @@ pub(super) fn check(
     check_with_store(cmd, args, grant, &store)
 }
 
-/// The scope decision. Store reads here are single-row lookups only: this
-/// runs inline on the runtime, ahead of the arm.
+/// The scope decision. Store reads here are single-row lookups, since this
+/// runs inline on the runtime, ahead of the arm. The one exception is a
+/// project-note move, which lists the note's child notes: their bodies
+/// travel with it.
 pub(crate) fn check_with_store(
     cmd: &str,
     args: &Value,
@@ -278,7 +355,7 @@ pub(crate) fn check_with_store(
         ScopeKey::ResultFilter => Ok(()),
         ScopeKey::ProjectArg => {
             let project_id: String = arg(args, "projectId")?;
-            require_in_scope(store, grant, &project_id, "project")?;
+            require_in_scope(store, grant, &project_id, &elsewhere("project"))?;
             require_images_in_scope(store, args, grant)
         }
         ScopeKey::NewProject => match (&grant.actor, scope) {
@@ -293,7 +370,7 @@ pub(crate) fn check_with_store(
             let branch_id: String = arg(args, "branchId")?;
             if scope.is_some() {
                 let project_id = branch_project(store, &branch_id)?;
-                require_in_scope(store, grant, &project_id, "branch")?;
+                require_in_scope(store, grant, &project_id, &elsewhere("branch"))?;
             }
             require_images_in_scope(store, args, grant)
         }
@@ -301,7 +378,7 @@ pub(crate) fn check_with_store(
             let session_id: String = arg(args, "sessionId")?;
             if scope.is_some() {
                 let project_id = session_project(store, &session_id)?;
-                require_in_scope(store, grant, &project_id, "session")?;
+                require_in_scope(store, grant, &project_id, &elsewhere("session"))?;
             }
             Ok(())
         }
@@ -317,7 +394,7 @@ pub(crate) fn check_with_store(
                      {project_id}"
                 )));
             }
-            require_in_scope(store, grant, &project_id, "project")
+            require_in_scope(store, grant, &project_id, &elsewhere("project"))
         }
         ScopeKey::Catalog => Ok(()),
         ScopeKey::CreateTag => {
@@ -337,7 +414,9 @@ pub(crate) fn check_with_store(
             }
             let assign_project_id: Option<String> = opt_arg(args, "assignProjectId")?;
             match assign_project_id {
-                Some(project_id) => require_in_scope(store, grant, &project_id, "project"),
+                Some(project_id) => {
+                    require_in_scope(store, grant, &project_id, &elsewhere("project"))
+                }
                 None => Err(denied(format!(
                     "{cmd} edits the shared tag catalog; {}, and it may only create a tag it \
                      assigns to one of them (assignProjectId)",
@@ -363,7 +442,57 @@ pub(crate) fn check_with_store(
                 )));
             }
             let project_id: String = arg(args, "projectId")?;
-            require_in_scope(store, grant, &project_id, "project")
+            require_in_scope(store, grant, &project_id, &elsewhere("project"))
+        }
+        ScopeKey::NoteTransfer => {
+            let note_id: String = arg(args, "noteId")?;
+            let target_project_id: String = arg(args, "targetProjectId")?;
+            if scope.is_some() {
+                let note = store
+                    .get_note(&note_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| denied(format!("note {note_id} not found")))?;
+                let project_id = branch_project(store, &note.branch_id)?;
+                require_in_scope(store, grant, &project_id, &elsewhere("note"))?;
+                require_in_scope(store, grant, &target_project_id, DESTINATION_OUT_OF_REACH)?;
+                require_note_media_in_scope(store, grant, &project_id, "the note", &note.content)?;
+            }
+            Ok(())
+        }
+        ScopeKey::ProjectNoteTransfer { with_children } => {
+            let note_id: String = arg(args, "projectNoteId")?;
+            let target_project_id: String = arg(args, "targetProjectId")?;
+            if scope.is_some() {
+                let note = store
+                    .get_project_note(&note_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| denied(format!("project note {note_id} not found")))?;
+                let project_id = &note.project_id;
+                require_in_scope(store, grant, project_id, &elsewhere("project note"))?;
+                require_in_scope(store, grant, &target_project_id, DESTINATION_OUT_OF_REACH)?;
+                require_note_media_in_scope(
+                    store,
+                    grant,
+                    project_id,
+                    "the project note",
+                    &note.content,
+                )?;
+                if *with_children {
+                    for child in store
+                        .list_child_notes(&note.id)
+                        .map_err(|e| e.to_string())?
+                    {
+                        require_note_media_in_scope(
+                            store,
+                            grant,
+                            project_id,
+                            &format!("its child note #note:{}", child.id),
+                            &child.content,
+                        )?;
+                    }
+                }
+            }
+            Ok(())
         }
     }
 }
@@ -378,44 +507,46 @@ fn covers(allowed: &str) -> String {
     format!("this credential covers project {allowed} and the projects it created")
 }
 
-/// `Ok` when the grant is unconfined, `project_id` is its own project, or
-/// its actor created `project_id` (see the module docs).
+/// The refusal for a row the caller named that is in a project outside its
+/// reach: "the branch belongs to another project".
+fn elsewhere(what: &str) -> String {
+    format!("the {what} belongs to another project")
+}
+
+/// The refusal for the project a note transfer is sent to, which the caller
+/// named itself. A destination that does not exist is refused in the same
+/// words, so a confined caller learns nothing about projects it cannot
+/// reach.
+const DESTINATION_OUT_OF_REACH: &str =
+    "the destination is a project outside this credential's reach";
+
+/// The reach test, for every check that needs one: `Ok` when the grant is
+/// unconfined, `project_id` is its own project, or its actor created
+/// `project_id` (see the module docs). Anything else is refused with
+/// `refusal`, followed by what the credential does cover.
+///
+/// The read is one row, and only for a project other than the grant's own.
+/// A project that does not exist is outside every reach.
 fn require_in_scope(
     store: &Store,
     grant: &ControlGrant,
     project_id: &str,
-    what: &str,
+    refusal: &str,
 ) -> Result<(), String> {
     let Some(allowed) = grant.project_scope() else {
         return Ok(());
     };
-    if within_reach(store, grant, allowed, project_id)? {
-        return Ok(());
-    }
-    Err(denied(format!(
-        "the {what} belongs to another project; {}",
-        covers(allowed)
-    )))
-}
-
-/// Whether a grant confined to `allowed` reaches `project_id`: it is that
-/// project, or one whose `created_by` is the grant's actor. The read is one
-/// row, and only for a project other than the grant's own. A project that
-/// does not exist is outside every reach.
-fn within_reach(
-    store: &Store,
-    grant: &ControlGrant,
-    allowed: &str,
-    project_id: &str,
-) -> Result<bool, String> {
     if allowed == project_id {
-        return Ok(true);
+        return Ok(());
     }
     let creator = store
         .get_project(project_id)
         .map_err(|e| e.to_string())?
         .and_then(|project| project.created_by);
-    Ok(creator.is_some_and(|creator| creator == grant.actor.started_by()))
+    if creator.is_some_and(|creator| creator == grant.actor.started_by()) {
+        return Ok(());
+    }
+    Err(denied(format!("{refusal}; {}", covers(allowed))))
 }
 
 /// The project of each `imageIds` entry, for the two start commands: an
@@ -426,21 +557,61 @@ fn require_images_in_scope(
     args: &Value,
     grant: &ControlGrant,
 ) -> Result<(), String> {
-    let Some(allowed) = grant.project_scope() else {
+    if grant.project_scope().is_none() {
         return Ok(());
-    };
+    }
     let image_ids: Option<Vec<String>> = opt_arg(args, "imageIds")?;
     for image_id in image_ids.unwrap_or_default() {
         let image = store
             .get_image(&image_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| denied(format!("image {image_id} not found")))?;
-        if !within_reach(store, grant, allowed, &image.project_id)? {
-            return Err(denied(format!(
-                "image {image_id} belongs to another project; {}",
-                covers(allowed)
-            )));
+        require_in_scope(
+            store,
+            grant,
+            &image.project_id,
+            &format!("image {image_id} belongs to another project"),
+        )?;
+    }
+    Ok(())
+}
+
+/// The project of each stored image or video `content` embeds, for the note
+/// transfers: the transfer puts every one of them in the destination, so
+/// media from a project outside the grant's reach cannot ride along in a
+/// note's body. `content` is the body of `whose` ("the note"), a note in
+/// `home_project_id`, which the caller has been found to reach.
+///
+/// A reference with no row is passed over. The transfer leaves it as it is
+/// and carries nothing for it. A row whose file is gone is not passed over,
+/// though the transfer carries nothing for that either (see the module
+/// docs).
+fn require_note_media_in_scope(
+    store: &Store,
+    grant: &ControlGrant,
+    home_project_id: &str,
+    whose: &str,
+    content: &str,
+) -> Result<(), String> {
+    if grant.project_scope().is_none() {
+        return Ok(());
+    }
+    // Sorted, so the refusal names the same id every time.
+    let mut media_ids: Vec<String> = refs::media_ids(content).into_iter().collect();
+    media_ids.sort();
+    for media_id in media_ids {
+        let Some(image) = store.get_image(&media_id).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        if image.project_id == home_project_id {
+            continue;
         }
+        require_in_scope(
+            store,
+            grant,
+            &image.project_id,
+            &format!("{whose} embeds media {media_id}, which belongs to another project"),
+        )?;
     }
     Ok(())
 }
@@ -483,7 +654,7 @@ fn session_project(store: &Store, session_id: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::control_server::Scope;
-    use crate::store::{Branch, Image, Project, Session};
+    use crate::store::{Branch, Image, Note, Project, ProjectNote, Session};
     use serde_json::json;
 
     /// Two projects, a branch, a branch session, a diagram child of that
@@ -1686,6 +1857,10 @@ mod tests {
             ),
         ];
         writes.extend(catalog_writes());
+        writes
+            .extend(note_transfers().map(|(cmd, id_arg)| {
+                (cmd, json!({ id_arg: "n", "targetProjectId": f.project_a }))
+            }));
         for (cmd, args) in &writes {
             assert_denied(check_with_store(cmd, args, &g, &f.store), "read-only");
         }
@@ -1758,6 +1933,408 @@ mod tests {
             &f.store,
         )
         .unwrap();
+    }
+
+    // -------------------------------------------------------------------
+    // Note transfers
+    // -------------------------------------------------------------------
+
+    /// The four transfers, each with the argument that names its note.
+    fn note_transfers() -> [(&'static str, &'static str); 4] {
+        [
+            ("move_note_to_project", "noteId"),
+            ("copy_note_to_project", "noteId"),
+            ("move_project_note_to_project", "projectNoteId"),
+            ("copy_project_note_to_project", "projectNoteId"),
+        ]
+    }
+
+    /// A branch note and a project note in each of the fixture's projects.
+    struct Notes {
+        branch_a: String,
+        branch_b: String,
+        project_a: String,
+        project_b: String,
+    }
+
+    impl Notes {
+        fn in_fixture(f: &Fixture) -> Self {
+            let branch_note = |branch_id: &str| {
+                let note = Note::new_standalone(branch_id, "Findings", "body");
+                f.store.create_note(&note).unwrap();
+                note.id
+            };
+            let project_note = |project_id: &str| {
+                let note = ProjectNote::new(project_id, "Plan", "body");
+                f.store.create_project_note(&note).unwrap();
+                note.id
+            };
+            Self {
+                branch_a: branch_note(&f.branch_a),
+                branch_b: branch_note(&f.branch_b),
+                project_a: project_note(&f.project_a),
+                project_b: project_note(&f.project_b),
+            }
+        }
+
+        /// The note of `cmd`'s kind in project A, then the one in B.
+        fn of(&self, id_arg: &str) -> (&str, &str) {
+            match id_arg {
+                "noteId" => (&self.branch_a, &self.branch_b),
+                _ => (&self.project_a, &self.project_b),
+            }
+        }
+    }
+
+    fn transfer(id_arg: &str, note_id: &str, target_project_id: &str) -> serde_json::Value {
+        json!({ id_arg: note_id, "targetProjectId": target_project_id })
+    }
+
+    #[test]
+    fn note_transfers_pass_between_the_own_project_and_a_created_one() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let created = create_project_by(&f, "gamma", CALLER);
+        let created_branch_note = Note::new_standalone(&created.branch, "Created", "body");
+        f.store.create_note(&created_branch_note).unwrap();
+        let created_project_note = ProjectNote::new(&created.project, "Created plan", "body");
+        f.store.create_project_note(&created_project_note).unwrap();
+        let g = scoped(&f.project_a);
+        for (cmd, id_arg) in note_transfers() {
+            let (own, _) = notes.of(id_arg);
+            let from_created = match id_arg {
+                "noteId" => &created_branch_note.id,
+                _ => &created_project_note.id,
+            };
+            for (note_id, target) in [
+                (own, created.project.as_str()),
+                (from_created.as_str(), f.project_a.as_str()),
+                // The note's own project: a duplicate for a copy, and the
+                // transfer's own "already in" refusal for a move.
+                (own, f.project_a.as_str()),
+            ] {
+                check_with_store(cmd, &transfer(id_arg, note_id, target), &g, &f.store)
+                    .unwrap_or_else(|e| panic!("{cmd} {note_id} -> {target}: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn note_transfers_are_refused_when_the_note_is_in_a_project_out_of_reach() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        for (cmd, id_arg) in note_transfers() {
+            let (_, foreign) = notes.of(id_arg);
+            // Into the caller's own project, into one it created, and back
+            // into the note's own: wherever it would land, the note is not
+            // the caller's to take or to copy.
+            for target in [&f.project_a, &created.project, &f.project_b] {
+                assert_denied(
+                    check_with_store(cmd, &transfer(id_arg, foreign, target), &g, &f.store),
+                    "belongs to another project",
+                );
+            }
+            assert_denied(
+                check_with_store(cmd, &transfer(id_arg, "nope", &f.project_a), &g, &f.store),
+                "not found",
+            );
+        }
+    }
+
+    #[test]
+    fn note_transfers_are_refused_when_the_destination_is_out_of_reach() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        // A project another session created is no nearer than one the user
+        // made.
+        let theirs = create_project_by(&f, "delta", "session:other");
+        let g = scoped(&f.project_a);
+        for (cmd, id_arg) in note_transfers() {
+            let (own, _) = notes.of(id_arg);
+            for target in [f.project_b.as_str(), theirs.project.as_str(), "nope"] {
+                assert_denied(
+                    check_with_store(cmd, &transfer(id_arg, own, target), &g, &f.store),
+                    "the destination is a project outside this credential's reach",
+                );
+            }
+        }
+    }
+
+    /// Reach is the actor's: another session reaches neither this one's
+    /// project nor what it created, as source or as destination.
+    #[test]
+    fn note_transfers_follow_the_callers_own_reach() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let created = create_project_by(&f, "gamma", CALLER);
+        let other = session_grant("other", 1, &f.project_b);
+        for (cmd, id_arg) in note_transfers() {
+            let (in_a, in_b) = notes.of(id_arg);
+            assert_denied(
+                check_with_store(cmd, &transfer(id_arg, in_a, &f.project_b), &other, &f.store),
+                "belongs to another project",
+            );
+            assert_denied(
+                check_with_store(
+                    cmd,
+                    &transfer(id_arg, in_b, &created.project),
+                    &other,
+                    &f.store,
+                ),
+                "the destination is a project outside this credential's reach",
+            );
+            // A connected app approved for one project is confined the same
+            // way.
+            let app = app_grant("grant-1", &f.project_a);
+            assert_denied(
+                check_with_store(cmd, &transfer(id_arg, in_a, &f.project_b), &app, &f.store),
+                "the destination is a project outside this credential's reach",
+            );
+        }
+    }
+
+    #[test]
+    fn note_transfers_by_an_unconfined_grant_skip_the_lookups() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let g = ControlGrant::test_all_projects();
+        for (cmd, id_arg) in note_transfers() {
+            let (in_a, in_b) = notes.of(id_arg);
+            for (note_id, target) in [
+                (in_a, f.project_b.as_str()),
+                (in_b, f.project_a.as_str()),
+                // Unknown ids are the transfer's to report.
+                ("nope", f.project_a.as_str()),
+                (in_a, "nope"),
+            ] {
+                check_with_store(cmd, &transfer(id_arg, note_id, target), &g, &f.store)
+                    .unwrap_or_else(|e| panic!("{cmd} {note_id} -> {target}: {e}"));
+            }
+        }
+    }
+
+    /// Both arguments are read before anything is looked up, for every
+    /// grant, so a request that names no destination never reaches the arm.
+    #[test]
+    fn note_transfers_need_both_arguments() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        for g in [scoped(&f.project_a), ControlGrant::test_all_projects()] {
+            for (cmd, id_arg) in note_transfers() {
+                let (own, _) = notes.of(id_arg);
+                let err = check_with_store(cmd, &json!({ id_arg: own }), &g, &f.store).unwrap_err();
+                assert!(
+                    err.contains("missing argument: targetProjectId"),
+                    "{cmd}: {err}"
+                );
+                let err = check_with_store(
+                    cmd,
+                    &json!({ "targetProjectId": f.project_a }),
+                    &g,
+                    &f.store,
+                )
+                .unwrap_err();
+                assert!(
+                    err.contains(&format!("missing argument: {id_arg}")),
+                    "{cmd}: {err}"
+                );
+            }
+        }
+    }
+
+    /// A branch note is found through `noteId` only and a project note
+    /// through `projectNoteId` only: the two live in different tables, and a
+    /// request that names the other kind's id must not be let through on it.
+    #[test]
+    fn note_transfers_look_the_note_up_in_its_own_table() {
+        let f = fixture();
+        let notes = Notes::in_fixture(&f);
+        let g = scoped(&f.project_a);
+        for cmd in ["move_note_to_project", "copy_note_to_project"] {
+            assert_denied(
+                check_with_store(
+                    cmd,
+                    &transfer("noteId", &notes.project_a, &f.project_a),
+                    &g,
+                    &f.store,
+                ),
+                "not found",
+            );
+        }
+        for cmd in [
+            "move_project_note_to_project",
+            "copy_project_note_to_project",
+        ] {
+            assert_denied(
+                check_with_store(
+                    cmd,
+                    &transfer("projectNoteId", &notes.branch_a, &f.project_a),
+                    &g,
+                    &f.store,
+                ),
+                "not found",
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // The media a transferred note embeds
+    // -------------------------------------------------------------------
+
+    fn embedding(image_ids: &[&str]) -> String {
+        image_ids
+            .iter()
+            .map(|id| format!("![shot](staged-media://{id}.png)"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// A branch note and a project note in project A whose bodies are
+    /// `body`, as (`cmd`, id argument, note id) for each of the four
+    /// transfers.
+    fn notes_embedding(f: &Fixture, body: &str) -> Vec<(&'static str, &'static str, String)> {
+        let branch_note = Note::new_standalone(&f.branch_a, "Findings", body);
+        f.store.create_note(&branch_note).unwrap();
+        let project_note = ProjectNote::new(&f.project_a, "Plan", body);
+        f.store.create_project_note(&project_note).unwrap();
+        note_transfers()
+            .into_iter()
+            .map(|(cmd, id_arg)| {
+                let id = match id_arg {
+                    "noteId" => branch_note.id.clone(),
+                    _ => project_note.id.clone(),
+                };
+                (cmd, id_arg, id)
+            })
+            .collect()
+    }
+
+    /// The transfer puts every image a note's body embeds in the
+    /// destination, whichever project the image is in. One from a project
+    /// out of reach would ride along, so it is refused, as an attached
+    /// `imageIds` entry is.
+    #[test]
+    fn note_transfers_are_refused_for_embedded_media_from_a_project_out_of_reach() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        // In reach beside it, so the refusal is for the one that is not.
+        let body = embedding(&[&f.image_a, &f.image_b, &created.image]);
+        for (cmd, id_arg, note_id) in notes_embedding(&f, &body) {
+            // Into a created project, and for a copy into the note's own:
+            // either way the image would be duplicated where the caller
+            // reaches it.
+            for target in [&created.project, &f.project_a] {
+                let err = check_with_store(cmd, &transfer(id_arg, &note_id, target), &g, &f.store)
+                    .expect_err("should be denied");
+                let whose = match id_arg {
+                    "noteId" => "the note",
+                    _ => "the project note",
+                };
+                assert_eq!(
+                    err,
+                    format!(
+                        "{SCOPE_DENIED_PREFIX}{whose} embeds media {}, which belongs to another \
+                         project; this credential covers project {} and the projects it created",
+                        f.image_b, f.project_a
+                    ),
+                    "{cmd}"
+                );
+            }
+            // The destination is judged first, in its own words.
+            assert_denied(
+                check_with_store(cmd, &transfer(id_arg, &note_id, &f.project_b), &g, &f.store),
+                "the destination is a project outside this credential's reach",
+            );
+            // An unconfined grant carries what it likes.
+            check_with_store(
+                cmd,
+                &transfer(id_arg, &note_id, &created.project),
+                &ControlGrant::test_all_projects(),
+                &f.store,
+            )
+            .unwrap_or_else(|e| panic!("{cmd} by an unconfined grant: {e}"));
+        }
+    }
+
+    /// Media of the note's own project, of the caller's own project and of a
+    /// project it created are all within reach, wherever the note is. A
+    /// reference with no row carries nothing, and the transfer leaves it as
+    /// it is.
+    #[test]
+    fn note_transfers_carry_embedded_media_that_is_within_reach() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        // A well-formed id with no row. Anything else is not a reference to
+        // stored media at all, and would never reach the row lookup.
+        let dangling = uuid::Uuid::new_v4().to_string();
+        assert_eq!(f.store.get_image(&dangling).unwrap().map(|i| i.id), None);
+        let body = embedding(&[&f.image_a, &created.image, &dangling]);
+        assert!(
+            refs::media_ids(&body).contains(&dangling),
+            "the dangling reference must be one the check looks up"
+        );
+        for (cmd, id_arg, note_id) in notes_embedding(&f, &body) {
+            for target in [&created.project, &f.project_a] {
+                check_with_store(cmd, &transfer(id_arg, &note_id, target), &g, &f.store)
+                    .unwrap_or_else(|e| panic!("{cmd} -> {target}: {e}"));
+            }
+        }
+        // A note in the created project that embeds the own project's image,
+        // sent home.
+        let from_created = Note::new_standalone(&created.branch, "Created", &body);
+        f.store.create_note(&from_created).unwrap();
+        for cmd in ["move_note_to_project", "copy_note_to_project"] {
+            check_with_store(
+                cmd,
+                &transfer("noteId", &from_created.id, &f.project_a),
+                &g,
+                &f.store,
+            )
+            .unwrap_or_else(|e| panic!("{cmd}: {e}"));
+        }
+    }
+
+    /// A moved project note takes its child notes along, bodies and media
+    /// included, so a child's media is held to the same rule. A copy leaves
+    /// the children behind and is not.
+    #[test]
+    fn a_project_note_move_is_refused_for_media_a_child_note_embeds() {
+        let f = fixture();
+        let created = create_project_by(&f, "gamma", CALLER);
+        let g = scoped(&f.project_a);
+        let parent = ProjectNote::new(&f.project_a, "Plan", "body");
+        f.store.create_project_note(&parent).unwrap();
+        let fine = Note::new_standalone(&f.branch_a, "Fine", &embedding(&[&f.image_a]))
+            .with_parent_project_note(&parent.id);
+        let carrier = Note::new_standalone(&f.branch_a, "Carrier", &embedding(&[&f.image_b]))
+            .with_parent_project_note(&parent.id);
+        f.store.create_note(&fine).unwrap();
+        f.store.create_note(&carrier).unwrap();
+        let args = transfer("projectNoteId", &parent.id, &created.project);
+
+        let err = check_with_store("move_project_note_to_project", &args, &g, &f.store)
+            .expect_err("should be denied");
+        assert_eq!(
+            err,
+            format!(
+                "{SCOPE_DENIED_PREFIX}its child note #note:{} embeds media {}, which belongs to \
+                 another project; this credential covers project {} and the projects it created",
+                carrier.id, f.image_b, f.project_a
+            )
+        );
+        check_with_store("copy_project_note_to_project", &args, &g, &f.store)
+            .expect("a copy takes no child along");
+        check_with_store(
+            "move_project_note_to_project",
+            &args,
+            &ControlGrant::test_all_projects(),
+            &f.store,
+        )
+        .expect("an unconfined grant is not held to reach");
     }
 
     #[test]

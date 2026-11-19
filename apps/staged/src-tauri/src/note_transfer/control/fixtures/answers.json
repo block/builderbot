@@ -1,0 +1,60 @@
+{
+  "branchNote": {
+    "note": {
+      "id": "note-findings",
+      "title": "Findings"
+    },
+    "branch": {
+      "id": "branch-widgets",
+      "branchName": "landing-acme-widgets"
+    },
+    "repo": {
+      "githubRepo": "acme/widgets",
+      "subpath": "apps/web"
+    },
+    "addedRepos": [
+      {
+        "githubRepo": "acme/widgets",
+        "subpath": "apps/web"
+      }
+    ]
+  },
+  "projectNote": {
+    "note": {
+      "id": "project-note-plan",
+      "title": "Plan"
+    },
+    "children": [
+      {
+        "reference": "#note:note-gadgets",
+        "title": "Gadgets",
+        "branch": {
+          "id": "branch-gadgets",
+          "branchName": "landing-acme-gadgets"
+        },
+        "repo": {
+          "githubRepo": "acme/gadgets",
+          "subpath": null
+        }
+      },
+      {
+        "reference": "#note:note-web",
+        "title": "Web",
+        "branch": {
+          "id": "branch-widgets",
+          "branchName": "landing-acme-widgets"
+        },
+        "repo": {
+          "githubRepo": "acme/widgets",
+          "subpath": "apps/web"
+        }
+      }
+    ],
+    "addedRepos": [
+      {
+        "githubRepo": "acme/gadgets",
+        "subpath": null
+      }
+    ]
+  }
+}

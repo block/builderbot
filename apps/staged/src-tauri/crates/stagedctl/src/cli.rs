@@ -31,6 +31,9 @@ Addressing:
   <tag>       a tag id, <group>/<name>, or a bare tag name when only one
               tag has it, as printed by `stagedctl tag list`
   <group>     a tag group name or id, as printed by `stagedctl tag list`
+  <note>      a note's hashtag reference, #note:<id> or #project-note:<id>,
+              as printed by `stagedctl timeline show`; quote it, or leave
+              the # off (an unquoted # starts a shell comment)
 
 Ids print in hashtag reference form (#note:<id>, #project-note:<id>,
 #review:<id>, #commit:<sha>) so they can be pasted directly into session
@@ -87,6 +90,10 @@ pub enum Noun {
     /// Attach images to a repo's timeline
     #[command(alias = "images", subcommand)]
     Image(ImageVerb),
+
+    /// Move and copy notes between projects
+    #[command(alias = "notes", subcommand)]
+    Note(NoteVerb),
 
     /// Read and edit the tag catalog: tag groups, tags, and which projects
     /// carry them
@@ -1012,6 +1019,157 @@ The file is read from this machine's filesystem: it must exist, be at most
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum NoteVerb {
+    /// Move a note, with its session, to another project
+    #[command(long_about = "\
+Move a note to another project. <NOTE> is a hashtag reference as
+`stagedctl timeline show` prints it: #note:<id> for a branch note,
+#project-note:<id> for a project note. Quote it, or leave the # off: an
+unquoted # starts a shell comment. --to is the destination, a project
+name or id (see `stagedctl project list`).
+
+This is \"Move to project\" in the note's menu in the app. The note keeps
+its id, so its reference still resolves, and what comes with it depends
+on its kind:
+
+  branch note    lands on the destination's branch for the repo and
+                 subpath the note's branch tracks (the oldest such
+                 branch, when the destination has several). Its session
+                 comes with it, so the transcript stays with the note,
+                 and so do the images and videos in its body. Its link
+                 to the project note it was written under is dropped,
+                 and moving it back does not restore that link. A title
+                 another note on the landing branch has gets a number:
+                 \"<title> (2)\".
+  project note   lands in the destination project with its session and
+                 media, and takes its child notes along. Each child
+                 lands, with its own session, on the destination's
+                 branch for its repo and subpath, still linked to the
+                 project note. The output lists each child by its
+                 reference, with the repo and branch it landed on.
+                 If the app cannot read the children back once the
+                 move is done, the output says so and --json has
+                 `children: null`. They moved all the same.
+
+Commits and code reviews are not part of a note. They stay on the branch
+they were made on.
+
+A destination that does not track a repo the move needs gets it first,
+the way `stagedctl project add-repo` adds one without --branch: a new
+branch named after the project, set up in the background (a worktree,
+or a clone into a remote project's workspace). The output names each
+repo added this way. Such a repo stays in the project when a later step
+of the move fails, and the error then names it: \"<repo> was added to
+<project> along the way and remains tracked there.\"
+
+The app refuses a move, with the note left where it was (exit 1,
+`app_error`, the app's own message), when:
+  - the note is already in the destination project;
+  - the note is still being written, or its session or a child note's
+    is queued or running. Wait for it with `stagedctl session wait`;
+  - the note's branch, or a child note's, tracks no repo;
+  - a project note has child notes and either project runs on a remote
+    workspace, or a child note is on a remote branch or on a branch
+    outside the project note's own project.
+
+Needs write access to both projects, the one the note is in and the
+destination. A read-only credential is refused (exit 4, `scope_denied`).
+A credential confined to some projects, which a session's is, also
+exits 4 (`scope_denied`) for:
+  - a note in a project it does not reach;
+  - a <NOTE> that names no note of that kind: an id that does not
+    exist, or a project note's id written as #note:<id>, or the other
+    way round. So exit 4 can mean a mistyped reference and not a
+    missing permission; the message then says \"not found\". A
+    credential for every project gets the app's own error for it
+    (exit 1, `app_error`);
+  - a note whose body embeds an image or video from a project it does
+    not reach, or a project note with such a child note. The move would
+    carry that media into the destination.
+A destination it does not reach is not among its projects and exits 1
+(`not_found`). A session may move notes between its own project and the
+projects it created, in either direction, and nowhere else.
+
+A move shows at once in both projects. The user can move the note back
+in the app, and `stagedctl note move` can too. stagedctl has no delete,
+and cannot remove a repo a move added.")]
+    Move {
+        /// The note: '#note:<id>' or '#project-note:<id>' (see `stagedctl
+        /// timeline show`)
+        #[arg(value_name = "NOTE")]
+        note: String,
+
+        /// The destination project, by name or id (see `stagedctl project
+        /// list`)
+        #[arg(long, value_name = "PROJECT")]
+        to: String,
+    },
+
+    /// Copy a note into a project as a new standalone note
+    #[command(long_about = "\
+Copy a note into a project. <NOTE> and --to are as in `stagedctl note
+move`: a hashtag reference (#note:<id> or #project-note:<id>, quoted or
+without the #) and a project name or id.
+
+This is \"Copy to project\" in the note's menu in the app. The original
+is left exactly as it is. The copy is a new note with its own id, which
+this command prints as a hashtag reference. It holds the original's
+title and body as they read now, with its own copies of the images and
+videos in the body, and nothing else:
+
+  - no session. The transcript stays with the original, and the copy is
+    editable in the app like a note the user wrote;
+  - no link to a parent project note and no child notes. Copying a
+    project note copies that one note;
+  - no suggested next steps.
+
+A copy of a branch note lands on the destination's branch for the repo
+and subpath the note's branch tracks. A destination that does not track
+that repo gets it first, as in `stagedctl note move`, and the output
+names it. The repo stays in the project when the copy then fails, and
+the error names it. A title another note on the landing branch has gets
+a number: \"<title> (2)\". A copy of a project note lands in the
+destination project and never adds a repo.
+
+--to may be the project the note is already in. That duplicates the
+note beside the original, on the same branch for a branch note.
+
+The app refuses a copy (exit 1, `app_error`, the app's own message)
+when the note has never finished being written, or when a branch
+note's branch tracks no repo. A finished note whose session was resumed
+and is running again can be copied, where it could not be moved: the
+copy is the note as it reads now.
+
+Needs write access to both projects, the one the note is in and the
+destination, as `stagedctl note move` does. A read-only credential is
+refused (exit 4, `scope_denied`). A credential confined to some
+projects, which a session's is, also exits 4 (`scope_denied`) for:
+  - a note in a project it does not reach;
+  - a <NOTE> that names no note of that kind: an id that does not
+    exist, or the other kind's id. The message then says \"not found\",
+    and a credential for every project gets exit 1 (`app_error`);
+  - a note whose body embeds an image or video from a project it does
+    not reach. The copy would duplicate that media in the destination.
+    A project note's child notes are not copied, so theirs do not
+    count.
+A destination it does not reach exits 1 (`not_found`).
+
+A copy shows at once in the destination, where the user can delete it.
+stagedctl has no delete.")]
+    Copy {
+        /// The note: '#note:<id>' or '#project-note:<id>' (see `stagedctl
+        /// timeline show`)
+        #[arg(value_name = "NOTE")]
+        note: String,
+
+        /// The destination project, by name or id (see `stagedctl project
+        /// list`)
+        #[arg(long, value_name = "PROJECT")]
+        to: String,
+    },
+}
+
 /// What a repo-scoped session produces. Mirrors the app's
 /// `BranchSessionType` wire values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1077,9 +1235,11 @@ mod tests {
             ("timelines", "show"),
             ("sessions", "list"),
             ("images", "add"),
+            ("notes", "move"),
             ("tags", "list"),
         ] {
             let args: Vec<&str> = match (plural, singular) {
+                ("notes", _) => vec!["stagedctl", plural, "move", "#note:n1", "--to", "proj"],
                 ("images", _) => vec![
                     "stagedctl",
                     plural,
@@ -1184,6 +1344,72 @@ mod tests {
         assert!(matches!(cli.command, Noun::Disconnect { client: None }));
         let cli = Cli::try_parse_from(["stagedctl", "disconnect", "--client", "x"]).unwrap();
         assert!(matches!(cli.command, Noun::Disconnect { client: Some(c) } if c == "x"));
+    }
+
+    #[test]
+    fn note_verbs_take_a_note_and_a_destination() {
+        for noun in ["note", "notes"] {
+            let cli =
+                Cli::try_parse_from(["stagedctl", noun, "move", "#note:n1", "--to", "My Project"])
+                    .unwrap();
+            assert!(
+                matches!(cli.command, Noun::Note(NoteVerb::Move { note, to }) if note == "#note:n1" && to == "My Project")
+            );
+            // The reference is one argument however it is spelled, and
+            // --json stays global.
+            let cli = Cli::try_parse_from([
+                "stagedctl",
+                noun,
+                "copy",
+                "--to",
+                "p2",
+                "project-note:pn1",
+                "--json",
+            ])
+            .unwrap();
+            assert!(cli.json);
+            assert!(
+                matches!(cli.command, Noun::Note(NoteVerb::Copy { note, to }) if note == "project-note:pn1" && to == "p2")
+            );
+        }
+        // Both are required: a move with nowhere to go, or nothing to move,
+        // is a usage error. The second is what an unquoted #note:... leaves
+        // behind once the shell has dropped it as a comment.
+        for args in [
+            vec!["stagedctl", "note", "move", "#note:n1"],
+            vec!["stagedctl", "note", "move", "--to", "p2"],
+            vec!["stagedctl", "note", "copy", "#note:n1"],
+            vec!["stagedctl", "note", "copy", "--to", "p2"],
+            vec![
+                "stagedctl",
+                "note",
+                "move",
+                "#note:n1",
+                "#note:n2",
+                "--to",
+                "p2",
+            ],
+            // The destination is a flag, not a second positional.
+            vec!["stagedctl", "note", "move", "#note:n1", "p2"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+        // A bare `note` has no default verb.
+        assert!(Cli::try_parse_from(["stagedctl", "note"]).is_err());
+    }
+
+    #[test]
+    fn help_rendering_reaches_the_note_verbs() {
+        let help = render_all_help();
+        for section in [
+            "=== stagedctl note --help ===",
+            "=== stagedctl note move --help ===",
+            "=== stagedctl note copy --help ===",
+        ] {
+            assert!(help.contains(section), "help lacks {section}");
+        }
+        // The root teaches how a note is named, beside the other addresses.
+        assert!(help.contains("  <note>      a note's hashtag reference"));
     }
 
     #[test]

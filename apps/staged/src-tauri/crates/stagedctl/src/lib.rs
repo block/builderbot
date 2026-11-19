@@ -6,6 +6,8 @@
 //! - [`commands`]: verb implementations and output rendering
 //! - [`launch`]: starts Staged for `project open` when no instance is
 //!   running: the decision, the bundle path, the wait, and the one spawn
+//! - [`notes`]: the `note move` and `note copy` writes: the `<NOTE>`
+//!   reference, the request, and the rendering of where the note landed
 //! - [`open`]: `project open`: finds the project, by name, id or the current
 //!   directory, asks a window to show it and words what the window did
 //! - [`projects`]: the `project create` and `project add-repo` writes:
@@ -23,6 +25,7 @@ pub mod client;
 pub mod commands;
 pub mod grants;
 pub mod launch;
+pub mod notes;
 pub mod open;
 pub mod projects;
 pub mod tags;

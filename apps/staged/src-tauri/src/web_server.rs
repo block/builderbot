@@ -900,6 +900,7 @@ pub(crate) fn preferences_store(
 
 mod control_project_args;
 pub(crate) mod control_scope;
+mod note_transfer_arms;
 pub(crate) use control_scope::SCOPE_DENIED_PREFIX;
 
 /// Who is calling [`dispatch`]. A handful of commands encode same-host-only
@@ -3237,65 +3238,32 @@ pub(crate) async fn dispatch(
             })
             .await
         }
+        // The four note transfers. Their bodies are in `note_transfer_arms`,
+        // where they can be run under test; all an arm adds is the app's own
+        // repo-adding step.
         "move_note_to_project" | "copy_note_to_project" => {
             let store = get_store(store_mutex)?;
-            let note_id: String = arg(&args, "noteId")?;
-            let target_project_id: String = arg(&args, "targetProjectId")?;
-            let mode = if command == "move_note_to_project" {
-                crate::note_transfer::TransferMode::Move
-            } else {
-                crate::note_transfer::TransferMode::Copy
-            };
-            let note = crate::note_transfer::transfer_branch_note(
-                &store,
-                &note_id,
-                &target_project_id,
-                mode,
-                |key| {
-                    crate::note_transfer::add_repo_to_project(
-                        app_handle.clone(),
-                        Arc::clone(&store),
-                        target_project_id.clone(),
-                        key,
-                    )
-                },
-            )
-            .await?;
-            let item = match mode {
-                crate::note_transfer::TransferMode::Move => {
-                    crate::note_commands::note_to_timeline_item(&store, note)
-                }
-                crate::note_transfer::TransferMode::Copy => {
-                    crate::note_commands::standalone_note_to_timeline_item(note)
-                }
-            };
-            Ok(serde_json::to_value(item).unwrap())
+            note_transfer_arms::branch_note(&store, command, &args, &caller, |project_id, key| {
+                crate::note_transfer::add_repo_to_project(
+                    app_handle.clone(),
+                    Arc::clone(&store),
+                    project_id,
+                    key,
+                )
+            })
+            .await
         }
         "move_project_note_to_project" | "copy_project_note_to_project" => {
             let store = get_store(store_mutex)?;
-            let project_note_id: String = arg(&args, "projectNoteId")?;
-            let target_project_id: String = arg(&args, "targetProjectId")?;
-            let mode = if command == "move_project_note_to_project" {
-                crate::note_transfer::TransferMode::Move
-            } else {
-                crate::note_transfer::TransferMode::Copy
-            };
-            let note = crate::note_transfer::transfer_project_note(
-                &store,
-                &project_note_id,
-                &target_project_id,
-                mode,
-                |key| {
-                    crate::note_transfer::add_repo_to_project(
-                        app_handle.clone(),
-                        Arc::clone(&store),
-                        target_project_id.clone(),
-                        key,
-                    )
-                },
-            )
-            .await?;
-            Ok(serde_json::to_value(note).unwrap())
+            note_transfer_arms::project_note(&store, command, &args, &caller, |project_id, key| {
+                crate::note_transfer::add_repo_to_project(
+                    app_handle.clone(),
+                    Arc::clone(&store),
+                    project_id,
+                    key,
+                )
+            })
+            .await
         }
 
         // =====================================================================
@@ -5413,6 +5381,81 @@ mod tests {
             assert!(
                 !source.contains("control_"),
                 "the {what} must not run the control checks: {source}"
+            );
+        }
+    }
+
+    /// A note moved or copied through the control server goes through the
+    /// transfer the app's windows run: one call, with the app's own
+    /// repo-adding step, whoever asks. `note_transfer_arms` runs the arm
+    /// bodies for real, for both callers, with a stand-in for that step.
+    /// What it cannot run is pinned here: that `dispatch` hands each command
+    /// to its body with the app's step and nothing else, and that the
+    /// desktop command is the same transfer.
+    #[test]
+    fn note_transfers_run_the_one_transfer_whoever_asks() {
+        let source = include_str!("web_server.rs");
+        let desktop = include_str!("note_transfer.rs");
+        for (command, body, transfer) in [
+            (
+                "move_note_to_project",
+                "branch_note",
+                "transfer_branch_note(",
+            ),
+            (
+                "copy_note_to_project",
+                "branch_note",
+                "transfer_branch_note(",
+            ),
+            (
+                "move_project_note_to_project",
+                "project_note",
+                "transfer_project_note(",
+            ),
+            (
+                "copy_project_note_to_project",
+                "project_note",
+                "transfer_project_note(",
+            ),
+        ] {
+            let (_, arm) = dispatch_arms(source)
+                .into_iter()
+                .find(|(patterns, _)| patterns.iter().any(|p| p == command))
+                .unwrap_or_else(|| panic!("dispatch should have a `{command}` arm"));
+            // The arm passes the request and the caller on as they came,
+            // with the app's own step for adding a repo.
+            assert!(
+                arm.contains(&format!(
+                    "note_transfer_arms::{body}(&store, command, &args, &caller, |project_id, key| {{"
+                )) && arm.contains("crate::note_transfer::add_repo_to_project("),
+                "the `{command}` arm must run `{body}` with the shared repo-adding step: {arm}"
+            );
+            for inline in [
+                "DispatchCaller::",
+                "transfer_branch_note",
+                "transfer_project_note",
+            ] {
+                assert!(
+                    !arm.contains(inline),
+                    "the `{command}` arm must leave `{inline}` to its body: {arm}"
+                );
+            }
+
+            // The desktop command is the same transfer with the same step.
+            let marker = format!("pub async fn {command}(");
+            let start = desktop
+                .find(&marker)
+                .unwrap_or_else(|| panic!("note_transfer.rs should define `{command}`"));
+            let rest = &desktop[start..];
+            let end = rest[1..]
+                .find("#[tauri::command")
+                .map(|at| at + 1)
+                .or_else(|| rest.find("#[cfg(test)]"))
+                .unwrap_or(rest.len());
+            assert!(
+                rest[..end].contains(transfer),
+                "the `{command}` Tauri command must call `{transfer}`: {}",
+                &rest[..end]
             );
         }
     }

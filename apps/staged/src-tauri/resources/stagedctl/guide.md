@@ -137,6 +137,55 @@ chain. A session may add a repo to its own project and to the
 projects it created. A connected app approved for one project can add repos
 to that project and cannot create projects.
 
+Moving and copying a note (`stagedctl note move`, `stagedctl note copy`)
+fit the invariant: they are "Move to project" and "Copy to project" in a
+note's menu in the app, the note shows at once where it was sent, and the
+user can move the note back or delete the copy. Name the note by the
+reference `stagedctl timeline show` prints, `'#note:<id>'` for a branch
+note or `'#project-note:<id>'` for a project note, in quotes or without the
+`#`: an unquoted `#` starts a shell comment, so the note never reaches the
+command. Both verbs write to both projects, the one the note is in and the
+destination, so a session can send notes between its own project and the
+projects it created, and nowhere else. Know what each one leaves behind
+before choosing:
+
+- A move takes the note itself. It keeps its id and its session, and a
+  project note takes its child notes along with theirs. The output lists
+  each child by its reference, with the repo and branch it landed on. If
+  it says the children could not be read back (`children: null` under
+  `--json`), they moved all the same. A branch note moved on its own loses
+  its link to the project note it was written under, and moving it back
+  does not restore that link. Commits and code reviews stay on their
+  branch.
+- A copy is a new, standalone note with its own id: the title and body as
+  they read now, with no session, no parent or child notes, and no
+  suggested next steps. The original is untouched.
+- A branch note lands on the destination's branch for the repo and subpath
+  its own branch tracks. A destination that lacks that repo gets it first,
+  the way `stagedctl project add-repo` adds one: a new branch, then a
+  worktree or a clone into the remote workspace and the setup actions, in
+  the background. The output names each repo added. It stays in the
+  project if the transfer then fails, the error names it, and only the
+  user can remove it.
+
+The app refuses a transfer it cannot make whole, with exit 1 and its own
+reason: a note whose session is still writing it, a move into the project
+the note is already in, a note whose branch tracks no repo, a project note
+with child notes when either project is remote. Wait for the session, or
+pick another destination. Do not work around a refusal.
+
+Exit 4 (`scope_denied`) from either verb is about the credential's reach,
+with one trap. A reference that names no note of its kind also exits 4
+under a session's credential, with a message that says "not found": an id
+that does not exist, or a project note's id written as `#note:<id>` or the
+other way round. Check the reference against `stagedctl timeline show`
+before reading that as a missing permission. The other reach refusals are
+a note in a project the session does not reach, and a note whose body
+embeds an image or video from such a project. A moved project note is
+refused for media a child note embeds too, since the child travels with
+it. Embedded media goes wherever the note goes, so it has to be within
+reach as well.
+
 Tag assignments (`stagedctl project tag`, `stagedctl project untag`) fit the
 invariant: they show at once as the pills and chips in the project header,
 where the user can undo them with a group pill's None or a chip's ×. A tag

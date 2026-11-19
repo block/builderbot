@@ -151,10 +151,12 @@ before choosing:
 
 - A move takes the note itself. It keeps its id and its session, and a
   project note takes its child notes along with theirs. The output lists
-  each child by its reference, with the repo and branch it landed on. A
-  branch note moved on its own loses its link to the project note it was
-  written under, and moving it back does not restore that link. Commits
-  and code reviews stay on their branch.
+  each child by its reference, with the repo and branch it landed on. If
+  it says the children could not be read back (`children: null` under
+  `--json`), they moved all the same. A branch note moved on its own loses
+  its link to the project note it was written under, and moving it back
+  does not restore that link. Commits and code reviews stay on their
+  branch.
 - A copy is a new, standalone note with its own id: the title and body as
   they read now, with no session, no parent or child notes, and no
   suggested next steps. The original is untouched.

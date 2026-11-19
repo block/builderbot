@@ -426,6 +426,47 @@ fn a_child_whose_landing_rows_could_not_be_read_back_is_still_listed() {
 }
 
 #[test]
+fn children_the_app_could_not_read_back_are_not_reported_as_none() {
+    // `children: null` is the app saying it could not list them once the
+    // transfer had committed. That is not a note without children.
+    let answer = json!({
+        "note": { "id": "pn1", "projectId": "p2", "title": "Plan" },
+        "children": null,
+        "addedRepos": [{ "githubRepo": "acme/gadgets", "subpath": null }],
+    });
+    let app = App::with_projects().answer("move_project_note_to_project", answer.clone());
+    let out = transfer_with(app.invoke(), Transfer::Move, &project_note(), "Target").unwrap();
+    assert_eq!(
+        out.human,
+        "project note #project-note:pn1 moved to project \"Target\"\n\
+         \x20 project id: p2\n\
+         \x20 title: Plan\n\
+         \x20 child notes: the app could not read them back; any the note has moved with it\n\
+         \x20 added repo: acme/gadgets (the project did not track it; its branch is set up in \
+         the background)\n\
+         next: stagedctl timeline show p2"
+    );
+    // Under --json it stays what the app said, and is not turned into a
+    // list or left out.
+    assert_eq!(out.json.get("children"), Some(&Value::Null));
+    assert_eq!(out.json["ok"], true);
+
+    // A moved note that has no children says nothing about them.
+    let mut none = answer.clone();
+    none["children"] = json!([]);
+    let app = App::with_projects().answer("move_project_note_to_project", none);
+    let out = transfer_with(app.invoke(), Transfer::Move, &project_note(), "Target").unwrap();
+    assert!(!out.human.contains("child note"), "{}", out.human);
+    assert_eq!(out.json["children"], json!([]));
+
+    // A copy is a new note, which has no children to lose track of.
+    let app = App::with_projects().answer("copy_project_note_to_project", answer);
+    let out = transfer_with(app.invoke(), Transfer::Copy, &project_note(), "Target").unwrap();
+    assert!(!out.human.contains("child note"), "{}", out.human);
+    assert_eq!(out.json.get("children"), Some(&Value::Null));
+}
+
+#[test]
 fn an_answer_without_children_lists_none() {
     // A branch note's answer has no `children`, and none is added to it.
     let answer = landed_on_branch(note_row("n1", "Findings"), json!([]));
@@ -681,23 +722,93 @@ fn the_requests_use_the_argument_names_the_apps_commands_read() {
     }
 }
 
-/// What the output reads from the app's answer is what the app puts there.
+/// One answer of each kind, as the app gives it to a control caller. The
+/// app's own tests run a real move of a branch note and of a project note
+/// and hold the answers to this file
+/// (`web_server/note_transfer_arms/tests.rs`), with ids named and
+/// timestamps zeroed. Reading the same file here holds the names the CLI
+/// reads to the names the app writes.
+const APP_ANSWERS: &str =
+    include_str!("../../../../src/note_transfer/control/fixtures/answers.json");
+
+/// The app answering `command` with its `kind` of answer from
+/// [`APP_ANSWERS`], for a caller whose one project is the destination the
+/// answers name.
+fn app_answering(command: &'static str, kind: &str) -> (App, Value) {
+    let answers: Value = serde_json::from_str(APP_ANSWERS).expect("the app's answers are JSON");
+    let answer = answers[kind].clone();
+    assert!(answer.is_object(), "the app's answers have no {kind}");
+    let app = App::default()
+        .answer(
+            "list_projects",
+            json!([{ "id": "project-created", "name": "created", "location": "local" }]),
+        )
+        .answer(command, answer.clone());
+    (app, answer)
+}
+
+/// Every key of the app's answer comes out under `--json` as it came in.
+/// A key the app adds fails here until the output carries it.
+fn assert_passed_through(out: &CmdOutput, answer: &Value) {
+    for (key, value) in answer.as_object().unwrap() {
+        assert_eq!(out.json.get(key), Some(value), "{key} under --json");
+    }
+}
+
+/// Everything the output says about a branch note comes out of the app's
+/// answer. Each line below is a field `Landed` reads, and every one of
+/// those is optional to it, so a name the app no longer writes would drop
+/// its line here and nowhere else.
 #[test]
-fn the_answer_is_read_under_the_names_the_app_writes() {
-    let control = include_str!("../../../../src/note_transfer/control.rs");
-    for written in [
-        "\"note\": note,",
-        "\"branch\": branch,",
-        "\"repo\": repo,",
-        "\"children\": children,",
-        "\"addedRepos\": added.into_json(),",
-        "\"reference\": format!(\"#note:{}\", child.id),",
-        "\"title\": child.title,",
-        "json!({ \"githubRepo\": key.github_repo, \"subpath\": key.subpath })",
-    ] {
-        assert!(
-            control.contains(written),
-            "the app's answer no longer has {written}; read `Landed` again"
+fn the_apps_answer_for_a_branch_note_is_read_in_full() {
+    let (app, answer) = app_answering("move_note_to_project", "branchNote");
+    let note = NoteRef::Branch("note-findings".to_string());
+    let out = transfer_with(app.invoke(), Transfer::Move, &note, "created").unwrap();
+
+    assert_eq!(
+        out.human,
+        "note #note:note-findings moved to project \"created\"\n\
+         \x20 project id: project-created\n\
+         \x20 title: Findings\n\
+         \x20 landed on: acme/widgets:apps/web, branch landing-acme-widgets\n\
+         \x20 added repo: acme/widgets:apps/web (the project did not track it; its branch is \
+         set up in the background)\n\
+         next: stagedctl timeline show project-created --repo acme/widgets:apps/web --branch \
+         landing-acme-widgets"
+    );
+    // The reference is made from the id the answer's note has.
+    assert_eq!(out.json["reference"], "#note:note-findings");
+    assert_passed_through(&out, &answer);
+    assert_eq!(out.json.get("children"), None, "a branch note has none");
+}
+
+/// As above, for a project note and the children that moved with it.
+#[test]
+fn the_apps_answer_for_a_project_note_is_read_in_full() {
+    let (app, answer) = app_answering("move_project_note_to_project", "projectNote");
+    let note = NoteRef::Project("project-note-plan".to_string());
+    let out = transfer_with(app.invoke(), Transfer::Move, &note, "created").unwrap();
+
+    assert_eq!(
+        out.human,
+        "project note #project-note:project-note-plan moved to project \"created\"\n\
+         \x20 project id: project-created\n\
+         \x20 title: Plan\n\
+         \x20 child note #note:note-gadgets \"Gadgets\" landed on: acme/gadgets, branch \
+         landing-acme-gadgets\n\
+         \x20 child note #note:note-web \"Web\" landed on: acme/widgets:apps/web, branch \
+         landing-acme-widgets\n\
+         \x20 added repo: acme/gadgets (the project did not track it; its branch is set up in \
+         the background)\n\
+         next: stagedctl timeline show project-created"
+    );
+    assert_eq!(out.json["reference"], "#project-note:project-note-plan");
+    assert_passed_through(&out, &answer);
+    for absent in ["branch", "repo"] {
+        assert_eq!(
+            out.json.get(absent),
+            None,
+            "a project note is on no {absent}"
         );
     }
 }
@@ -889,9 +1000,15 @@ fn help_states_the_transfers_rules_as_the_app_has_them() {
         );
     }
 
-    // The output of a project note's move lists its children.
+    // The output of a project note's move lists its children, or says that
+    // the app could not.
     assert!(
         move_help.contains("The output lists each child by its\n                 reference"),
+        "{move_help}"
+    );
+    assert!(
+        move_help
+            .contains("--json has\n                 `children: null`. They moved all the same."),
         "{move_help}"
     );
 }
@@ -911,6 +1028,7 @@ fn the_guide_describes_both_verbs() {
         "both projects",
         "the user can move the note back or delete the copy",
         "The output lists each child by its reference",
+        "(`children: null` under `--json`), they moved all the same",
         "the error names it",
         "Exit 4 (`scope_denied`)",
         "A reference that names no note of its kind also exits 4",

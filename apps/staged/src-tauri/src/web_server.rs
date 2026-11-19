@@ -5388,15 +5388,13 @@ mod tests {
     /// A note moved or copied through the control server goes through the
     /// transfer the app's windows run: one call, with the app's own
     /// repo-adding step, whoever asks. `note_transfer_arms` runs the arm
-    /// bodies for real, with a stand-in for that step. What it cannot run is
-    /// pinned here: that `dispatch` hands each command to its body with the
-    /// app's step and nothing else, that the body does not branch on its
-    /// caller ahead of the transfer, and that the desktop command is the
-    /// same transfer.
+    /// bodies for real, for both callers, with a stand-in for that step.
+    /// What it cannot run is pinned here: that `dispatch` hands each command
+    /// to its body with the app's step and nothing else, and that the
+    /// desktop command is the same transfer.
     #[test]
     fn note_transfers_run_the_one_transfer_whoever_asks() {
         let source = include_str!("web_server.rs");
-        let bodies = include_str!("web_server/note_transfer_arms.rs");
         let desktop = include_str!("note_transfer.rs");
         for (command, body, transfer) in [
             (
@@ -5442,33 +5440,6 @@ mod tests {
                     "the `{command}` arm must leave `{inline}` to its body: {arm}"
                 );
             }
-
-            // The body: one transfer, the step watched and not stood in
-            // for, and nothing about the caller before the transfer.
-            let marker = format!("pub(super) async fn {body}<");
-            let start = bodies
-                .find(&marker)
-                .unwrap_or_else(|| panic!("note_transfer_arms.rs should define `{body}`"));
-            let rest = &bodies[start..];
-            let end = rest.find("\n}\n").expect("the body should end");
-            let code = &rest[rest.find("{\n").unwrap()..end];
-            assert_eq!(
-                code.matches(transfer).count(),
-                1,
-                "`{body}` must run the transfer once, for every caller: {code}"
-            );
-            assert!(
-                code.contains("added.watch(key.clone(), add_repo(target_project_id.clone(), key))"),
-                "`{body}` must add a repo through the step it was given: {code}"
-            );
-            let transfer_at = code.find(transfer).unwrap();
-            let caller_at = code
-                .find("match caller {")
-                .unwrap_or_else(|| panic!("`{body}` should answer by caller: {code}"));
-            assert!(
-                transfer_at < caller_at,
-                "`{body}` must not branch on its caller before the transfer: {code}"
-            );
 
             // The desktop command is the same transfer with the same step.
             let marker = format!("pub async fn {command}(");

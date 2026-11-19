@@ -107,8 +107,8 @@ where
     )
     .await?;
     Ok(match caller {
-        // As for a branch note: a control caller is told which child notes
-        // came along, where each landed, and the repos they brought.
+        // As for a branch note: a control caller is told the note's child
+        // notes as they read now, where each is, and the repos they brought.
         DispatchCaller::Control(_) => control::project_note_answer(store, note, added),
         DispatchCaller::Web => serde_json::to_value(note).unwrap(),
     })

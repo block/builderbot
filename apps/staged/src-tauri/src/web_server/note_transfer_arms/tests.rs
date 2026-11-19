@@ -239,6 +239,13 @@ fn widgets_key() -> Value {
     json!({ "githubRepo": "acme/widgets", "subpath": "apps/web" })
 }
 
+fn widgets_repo() -> RepoKey {
+    RepoKey {
+        github_repo: "acme/widgets".into(),
+        subpath: Some("apps/web".into()),
+    }
+}
+
 fn gadgets_key() -> Value {
     json!({ "githubRepo": "acme/gadgets", "subpath": null })
 }
@@ -315,6 +322,38 @@ async fn a_copied_branch_note_is_answered_with_the_new_standalone_note() {
     assert_eq!(f.branch_of(&note.id), f.widgets.id, "the original stays");
 }
 
+/// Only a repo the transfer added is named as added. A destination that
+/// tracks the note's repo already gains nothing, and the note lands on the
+/// branch it has for that repo.
+#[tokio::test]
+async fn a_branch_note_sent_to_a_project_that_tracks_its_repo_adds_none() {
+    let f = fixture();
+    let (note, _) = f.session_note(&f.widgets, "Findings");
+    f.attach(&f.created.id, widgets_repo()).unwrap();
+
+    for command in ["copy_note_to_project", "move_note_to_project"] {
+        let answer = f
+            .control(
+                command,
+                json!({ "noteId": note.id, "targetProjectId": f.created.id }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["addedRepos"], json!([]), "{command}");
+        assert_eq!(answer["branch"]["projectId"], f.created.id, "{command}");
+        assert_eq!(
+            answer["branch"]["branchName"], "landing-acme-widgets",
+            "{command}"
+        );
+        assert_eq!(answer["repo"]["githubRepo"], "acme/widgets", "{command}");
+    }
+    assert_eq!(
+        f.store.list_project_repos(&f.created.id).unwrap().len(),
+        1,
+        "the destination tracks the one repo it had"
+    );
+}
+
 /// The transfer is the one a window runs, and a window is answered with the
 /// note alone, as it was before a control caller could ask.
 #[tokio::test]
@@ -361,14 +400,7 @@ async fn a_moved_project_note_is_answered_with_its_session_status_and_its_childr
     let f = fixture();
     let (parent, children) = f.family();
     // The destination already tracks one of the two repos.
-    f.attach(
-        &f.created.id,
-        RepoKey {
-            github_repo: "acme/widgets".into(),
-            subpath: Some("apps/web".into()),
-        },
-    )
-    .unwrap();
+    f.attach(&f.created.id, widgets_repo()).unwrap();
 
     let answer = f
         .control(
@@ -596,7 +628,17 @@ async fn a_failed_repo_add_is_reported_as_the_transfer_words_it() {
 async fn media_from_a_project_out_of_reach_stops_the_transfer_before_it_runs() {
     let f = fixture();
     let foreign = f.image_in(&f.third.id, Some(&f.third_branch.id));
-    let body = format!("see ![theirs](staged-media://{}.png)", foreign.id);
+    // Beside a reference with no row, which is no reason to refuse. Its id
+    // sorts ahead of any the store makes, so the check passes over it first
+    // and the refusal is for the media that is someone else's.
+    const NO_ROW: &str = "00000000-0000-4000-8000-000000000000";
+    assert!(NO_ROW < foreign.id.as_str());
+    assert!(f.store.get_image(NO_ROW).unwrap().is_none());
+    let body = format!(
+        "see ![gone](staged-media://{NO_ROW}.png) and ![theirs](staged-media://{}.png)",
+        foreign.id
+    );
+    assert_eq!(crate::note_media::refs::media_ids(&body).len(), 2);
     let (note, _) = f.session_note(&f.widgets, "Findings");
     f.store.update_note_content(&note.id, &body).unwrap();
     let (parent, children) = f.family();
@@ -666,6 +708,69 @@ async fn media_from_a_project_out_of_reach_stops_the_transfer_before_it_runs() {
     assert_eq!(answer["children"], json!([]));
 }
 
+/// A reference to media that has no row carries nothing, so it is nobody
+/// else's to protect. The scope check lets it through and the transfer
+/// leaves it as written, for a confined caller as for the app's windows.
+///
+/// The id is a well-formed one. Anything else is not a reference to stored
+/// media at all, and would reach neither the check's row lookup nor the
+/// transfer's.
+#[tokio::test]
+async fn a_reference_to_media_with_no_row_is_let_through_and_left_as_written() {
+    let f = fixture();
+    let dangling = uuid::Uuid::new_v4().to_string();
+    assert!(f.store.get_image(&dangling).unwrap().is_none());
+    let body = format!("see ![gone](staged-media://{dangling}.png)");
+    assert!(
+        crate::note_media::refs::media_ids(&body).contains(&dangling),
+        "the reference must be one the check and the transfer look up"
+    );
+    let (note, _) = f.session_note(&f.widgets, "Findings");
+    f.store.update_note_content(&note.id, &body).unwrap();
+    let (parent, children) = f.family();
+    f.store
+        .update_project_note_title_and_content(&parent.id, "Plan", &body, None, None)
+        .unwrap();
+    f.store.update_note_content(&children[1].id, &body).unwrap();
+
+    let copy = f
+        .control(
+            "copy_note_to_project",
+            json!({ "noteId": note.id, "targetProjectId": f.created.id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(copy["note"]["content"], body.as_str());
+    let moved = f
+        .control(
+            "move_note_to_project",
+            json!({ "noteId": note.id, "targetProjectId": f.created.id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved["note"]["content"], body.as_str());
+    assert_ne!(f.branch_of(&note.id), f.widgets.id, "the note moved");
+
+    // In a project note and in a child that travels with it.
+    let moved = f
+        .control(
+            "move_project_note_to_project",
+            json!({ "projectNoteId": parent.id, "targetProjectId": f.created.id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved["note"]["projectId"], f.created.id);
+    assert_eq!(moved["note"]["content"], body.as_str());
+    let child = f.store.get_note(&children[1].id).unwrap().unwrap();
+    assert_eq!(child.content, body);
+    assert_ne!(child.branch_id, children[1].branch_id, "the child moved");
+
+    assert!(
+        f.store.get_image(&dangling).unwrap().is_none(),
+        "no row is made for it"
+    );
+}
+
 /// A note the confined caller cannot be shown is a scope refusal, whether
 /// its id is unknown or names the other kind of note. An unconfined caller
 /// is told by the transfer.
@@ -699,4 +804,143 @@ async fn a_note_id_that_names_no_note_of_that_kind_is_refused_by_scope_when_conf
             .unwrap_err();
         assert!(err.starts_with("Note not found: "), "{err}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The answers stagedctl reads
+// ---------------------------------------------------------------------------
+
+/// One answer of each kind, as a control caller receives it. `stagedctl`
+/// parses this same file in its own tests (`notes/tests.rs`), so the names
+/// the app writes and the names the CLI reads are held to one document, and
+/// a change to either side fails a test until both agree.
+const ANSWERS_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/note_transfer/control/fixtures/answers.json"
+);
+
+/// Set to rewrite the fixture from what the app answers now.
+const UPDATE_ANSWERS_FIXTURE: &str = "STAGED_UPDATE_NOTE_TRANSFER_ANSWERS";
+
+/// `answer` with what differs from run to run made the same: each id is
+/// replaced by the name `names` gives it, and each timestamp by `0`. An id
+/// left without a name is a mistake in the test, since it would never
+/// compare equal twice.
+fn settled(answer: &Value, names: &[(String, &str)]) -> Value {
+    match answer {
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(key, value)| {
+                let value = if key.ends_with("At") && value.is_number() {
+                    json!(0)
+                } else {
+                    settled(value, names)
+                };
+                (key.clone(), value)
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        Value::Array(items) => items.iter().map(|item| settled(item, names)).collect(),
+        Value::String(text) => {
+            let named = names
+                .iter()
+                .fold(text.clone(), |text, (id, name)| text.replace(id, name));
+            let id = named.rsplit(':').next().unwrap_or(&named);
+            assert!(
+                uuid::Uuid::parse_str(id).is_err(),
+                "{text:?} is an id the fixture has no name for"
+            );
+            json!(named)
+        }
+        other => other.clone(),
+    }
+}
+
+/// The landing branch of `note_id` and the repo it tracks, by id.
+fn landing_ids(f: &Fixture, note_id: &str) -> (String, String) {
+    let branch_id = f.branch_of(note_id);
+    let branch = f.store.get_branch(&branch_id).unwrap().unwrap();
+    (branch_id, branch.project_repo_id.expect("a tracked repo"))
+}
+
+/// A move of a branch note and a move of a project note, each into a
+/// project that has to gain a repo for it, answered to the session. These
+/// are the two shapes `stagedctl` reads, with every part of them filled in:
+/// the note item, the landing branch and repo, the children and theirs, and
+/// the repos added.
+#[tokio::test]
+async fn the_answers_are_the_ones_stagedctl_is_tested_against() {
+    // A branch note, whose repo the destination lacks.
+    let f = fixture();
+    let (note, session) = f.session_note(&f.widgets, "Findings");
+    let answer = f
+        .control(
+            "move_note_to_project",
+            json!({ "noteId": note.id, "targetProjectId": f.created.id }),
+        )
+        .await
+        .unwrap();
+    let (branch_id, repo_id) = landing_ids(&f, &note.id);
+    let branch_note = settled(
+        &answer,
+        &[
+            (note.id, "note-findings"),
+            (session.id, "session-findings"),
+            (f.created.id.clone(), "project-created"),
+            (branch_id, "branch-widgets"),
+            (repo_id, "repo-widgets"),
+        ],
+    );
+
+    // A project note with two children. The destination tracks the repo of
+    // one and gains the other's.
+    let f = fixture();
+    let (parent, children) = f.family();
+    f.attach(&f.created.id, widgets_repo()).unwrap();
+    let mut answer = f
+        .control(
+            "move_project_note_to_project",
+            json!({ "projectNoteId": parent.id, "targetProjectId": f.created.id }),
+        )
+        .await
+        .unwrap();
+    // The app lists children newest first, and these two were written in
+    // the same instant. By title, so the fixture has one order.
+    answer["children"]
+        .as_array_mut()
+        .expect("the children were read back")
+        .sort_by_key(|child| child["title"].as_str().map(str::to_owned));
+    let (web_branch, web_repo) = landing_ids(&f, &children[0].id);
+    let (gadgets_branch, gadgets_repo) = landing_ids(&f, &children[1].id);
+    let project_note = settled(
+        &answer,
+        &[
+            (parent.id, "project-note-plan"),
+            (parent.session_id.expect("a session"), "session-plan"),
+            (f.created.id.clone(), "project-created"),
+            (children[0].id.clone(), "note-web"),
+            (web_branch, "branch-widgets"),
+            (web_repo, "repo-widgets"),
+            (children[1].id.clone(), "note-gadgets"),
+            (gadgets_branch, "branch-gadgets"),
+            (gadgets_repo, "repo-gadgets"),
+        ],
+    );
+
+    let answers = json!({ "branchNote": branch_note, "projectNote": project_note });
+    if std::env::var_os(UPDATE_ANSWERS_FIXTURE).is_some() {
+        let mut text = serde_json::to_string_pretty(&answers).unwrap();
+        text.push('\n');
+        std::fs::write(ANSWERS_FIXTURE, text).expect("write the answers fixture");
+        return;
+    }
+    let pinned: Value = serde_json::from_str(
+        &std::fs::read_to_string(ANSWERS_FIXTURE).expect("the answers fixture"),
+    )
+    .expect("the answers fixture is JSON");
+    assert_eq!(
+        answers, pinned,
+        "a control caller's answer changed. If that is meant, rewrite the fixture with \
+         {UPDATE_ANSWERS_FIXTURE}=1 and run stagedctl's tests, which read the same file"
+    );
 }

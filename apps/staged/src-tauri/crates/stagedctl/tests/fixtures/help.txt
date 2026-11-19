@@ -842,6 +842,9 @@ on its kind:
                  branch for its repo and subpath, still linked to the
                  project note. The output lists each child by its
                  reference, with the repo and branch it landed on.
+                 If the app cannot read the children back once the
+                 move is done, the output says so and --json has
+                 `children: null`. They moved all the same.
 
 Commits and code reviews are not part of a note. They stay on the branch
 they were made on.

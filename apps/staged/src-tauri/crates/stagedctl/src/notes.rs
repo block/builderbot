@@ -10,12 +10,12 @@
 //! names, answered from a read the caller can make anyway.
 //!
 //! Each verb is one write with no read after it. The app's answer carries
-//! the branch the note landed on, the child notes a moved project note
-//! took along, and the repos the transfer added, which only the transfer
-//! knows. An answer that cannot be read is a [`CtlError::Partial`], so the
-//! caller still learns the write landed.
+//! the branch the note landed on, a moved project note's child notes as
+//! they read after the move, and the repos the transfer added, which only
+//! the transfer knows. An answer that cannot be read is a
+//! [`CtlError::Partial`], so the caller still learns the write landed.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 
 use crate::client::{Client, CtlError};
@@ -159,8 +159,8 @@ impl NoteRef {
 /// transfer and the repos the transfer added to the destination. For a
 /// branch note, also the branch it landed on and the repo that branch
 /// tracks. Either is `null` when the app could not read the row back after
-/// the transfer committed. For a project note, also the child notes that
-/// came with it, which is none for a copy.
+/// the transfer committed. For a project note, also its child notes as the
+/// app read them after the transfer ([`Children`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Landed {
@@ -170,14 +170,41 @@ struct Landed {
     #[serde(default)]
     repo: Option<RepoName>,
     #[serde(default)]
-    children: Vec<LandedChild>,
+    children: Children,
     #[serde(default)]
     added_repos: Vec<RepoName>,
 }
 
-/// A child note that moved with its project note: its hashtag reference,
-/// which the move does not change, and where it is now, as for a branch
-/// note.
+/// The `children` of an answer: a project note's child notes, as the app
+/// read them once the transfer had committed.
+#[derive(Debug, Clone, Default)]
+enum Children {
+    /// The answer has no `children`. A branch note's does not.
+    #[default]
+    Absent,
+    /// `null`: the app could not read the list back. This is not an empty
+    /// list. A move takes every child or is refused, so whatever children
+    /// the note has moved with it.
+    Unread,
+    /// The children, which is none for a copy and for a note without any.
+    Listed(Vec<LandedChild>),
+}
+
+impl<'de> Deserialize<'de> for Children {
+    /// Reads a key that is there: a list, or `null`. A key that is not
+    /// there is the field's default, [`Children::Absent`].
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match Option::<Vec<LandedChild>>::deserialize(deserializer)? {
+                Some(children) => Self::Listed(children),
+                None => Self::Unread,
+            },
+        )
+    }
+}
+
+/// A child note of a moved project note: its hashtag reference, which the
+/// move does not change, and where it is now, as for a branch note.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LandedChild {
@@ -276,11 +303,13 @@ pub(crate) fn transfer_with(
 }
 
 /// The output of both verbs: the note's reference, the project it is in
-/// now, the branch it landed on, each child note that came with a project
-/// note and the branch that landed on, and each repo the transfer added.
-/// `--json` is `{ ok, mode, projectId, reference, note, addedRepos }` with
-/// the app's rows. A branch note has `branch` and `repo` as well. A project
-/// note has `children`, each `{ reference, title, branch, repo }`.
+/// now, the branch it landed on, each child note of a moved project note
+/// and the branch that is on, and each repo the transfer added. `--json` is
+/// `{ ok, mode, projectId, reference, note, addedRepos }` with the app's
+/// rows. A branch note has `branch` and `repo` as well. A project note has
+/// `children`, each `{ reference, title, branch, repo }`, or `null` when
+/// the app could not read them back. A move then says so in a line of its
+/// own, since the children moved all the same. A copy has none to report.
 /// `reference` is the hashtag reference of the note where it is now: the
 /// same note after a move, the new one after a copy.
 fn render(
@@ -312,16 +341,26 @@ fn render(
     if let Some(place) = landing(landed.branch.as_ref(), address.as_deref()) {
         human.push(format!("  landed on: {place}"));
     }
-    for child in &landed.children {
-        let mut line = format!("  child note {}", child.reference);
-        if !child.title.trim().is_empty() {
-            line.push_str(&format!(" {:?}", child.title));
+    match &landed.children {
+        Children::Listed(children) => {
+            for child in children {
+                let mut line = format!("  child note {}", child.reference);
+                if !child.title.trim().is_empty() {
+                    line.push_str(&format!(" {:?}", child.title));
+                }
+                let address = child.repo.as_ref().map(RepoName::address);
+                if let Some(place) = landing(child.branch.as_ref(), address.as_deref()) {
+                    line.push_str(&format!(" landed on: {place}"));
+                }
+                human.push(line);
+            }
         }
-        let address = child.repo.as_ref().map(RepoName::address);
-        if let Some(place) = landing(child.branch.as_ref(), address.as_deref()) {
-            line.push_str(&format!(" landed on: {place}"));
-        }
-        human.push(line);
+        Children::Unread if transfer == Transfer::Move => human.push(
+            "  child notes: the app could not read them back; any the note has moved with it"
+                .to_string(),
+        ),
+        // A copy is a new note with no children, read or not.
+        Children::Unread | Children::Absent => {}
     }
     for repo in &landed.added_repos {
         human.push(format!(

@@ -4,9 +4,9 @@
 //! The app's windows open a note where it is and know its surroundings, so
 //! the transfer commands answer them with the note alone. A control caller
 //! named a note by id and a project, and is told what the transfer did with
-//! them: the branch the note landed on, the child notes a moved project
-//! note took along and where each of those landed, and the repos the
-//! transfer added to the destination to make room. Only the transfer knows
+//! them: the branch the note landed on, a moved project note's child notes
+//! and where each of those is now, and the repos the transfer added to the
+//! destination to make room. Only the transfer knows
 //! the last. Once added, a repo reads like any other the project tracks, so
 //! each one is noted as its add succeeds ([`AddedRepos`]). The same list
 //! lets a failure say which repos the destination gained before it
@@ -107,8 +107,8 @@ pub(crate) fn branch_note_answer(
 
 /// A control caller's answer for a project note: `note`, the note as
 /// `list_project_notes` lists one, which names the project it is in now;
-/// `children`, the child notes that came with it; and `addedRepos`, the
-/// repos those children brought along.
+/// `children`, the note's child notes as they read once the transfer has
+/// committed; and `addedRepos`, the repos a move added for those children.
 ///
 /// `note` is the transfer's own value, which a window is answered with as
 /// it is. A moved note's is the row the move's transaction returned, with
@@ -119,9 +119,15 @@ pub(crate) fn branch_note_answer(
 ///
 /// Each of `children` is `{ reference, title, branch, repo }`: the child's
 /// hashtag reference (`#note:<id>`, unchanged by the move), and the branch
-/// and repo it is on now, as in a branch note's answer. A move takes every
-/// child or is refused, so these are the note's children as they read
-/// after it. A copy has none.
+/// and repo it is on now, as in a branch note's answer. The list is read
+/// here, after the commit, and is not the move's own plan. A move takes
+/// every child or is refused, so the two agree unless a child was deleted,
+/// detached or added in between, and then the list is the note's children
+/// as they are. A copy's note is new and has none.
+///
+/// `children` is `null` when the list cannot be read back. That is not an
+/// empty list: a moved note's children moved with it all the same, and the
+/// answer does not say it has none.
 pub(crate) fn project_note_answer(store: &Store, note: ProjectNote, added: AddedRepos) -> Value {
     let note = match store.get_project_note_with_status(&note.id) {
         Ok(Some(resolved)) => resolved,
@@ -134,26 +140,27 @@ pub(crate) fn project_note_answer(store: &Store, note: ProjectNote, added: Added
             note
         }
     };
-    let children: Vec<Value> = store
-        .list_child_notes(&note.id)
-        .unwrap_or_else(|e| {
+    let children = match store.list_child_notes(&note.id) {
+        Ok(children) => children
+            .into_iter()
+            .map(|child| {
+                let (branch, repo) = landing(store, &child.branch_id);
+                json!({
+                    "reference": format!("#note:{}", child.id),
+                    "title": child.title,
+                    "branch": branch,
+                    "repo": repo,
+                })
+            })
+            .collect(),
+        Err(e) => {
             log::warn!(
                 "Note transfer: cannot read back the child notes of {}: {e}",
                 note.id
             );
-            Vec::new()
-        })
-        .into_iter()
-        .map(|child| {
-            let (branch, repo) = landing(store, &child.branch_id);
-            json!({
-                "reference": format!("#note:{}", child.id),
-                "title": child.title,
-                "branch": branch,
-                "repo": repo,
-            })
-        })
-        .collect();
+            Value::Null
+        }
+    };
     json!({
         "note": note,
         "children": children,

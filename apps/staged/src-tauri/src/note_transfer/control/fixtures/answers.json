@@ -1,0 +1,188 @@
+{
+  "branchNote": {
+    "note": {
+      "id": "note-findings",
+      "title": "Findings",
+      "content": "body",
+      "sessionId": "session-findings",
+      "sessionStatus": "completed",
+      "completionReason": null,
+      "sessionErrorMessage": null,
+      "rateLimitResetsAt": null,
+      "rateLimitKind": null,
+      "isPollingForNote": false,
+      "createdAt": 0,
+      "updatedAt": 0,
+      "completedAt": 0,
+      "suggestedNextCommitStep": null,
+      "suggestedNextNoteStep": null,
+      "subtype": null,
+      "lastChatMessageAt": null,
+      "chatReadAt": null,
+      "readAt": null
+    },
+    "branch": {
+      "id": "branch-widgets",
+      "projectId": "project-created",
+      "projectRepoId": "repo-widgets",
+      "branchName": "landing-acme-widgets",
+      "baseBranch": "origin/main",
+      "prNumber": null,
+      "branchType": "local",
+      "workspaceName": null,
+      "workstationId": null,
+      "workspaceStatus": null,
+      "prState": null,
+      "prChecksStatus": null,
+      "prReviewDecision": null,
+      "prMergeable": null,
+      "prDraft": null,
+      "prUrl": null,
+      "prUpdatedAt": null,
+      "prFetchedAt": null,
+      "prHeadSha": null,
+      "prTitle": null,
+      "setupComplete": false,
+      "deferredPush": null,
+      "deferredPushRequestedAt": null,
+      "worktreePath": null,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "repo": {
+      "id": "repo-widgets",
+      "projectId": "project-created",
+      "githubRepo": "acme/widgets",
+      "branchName": "landing-acme-widgets",
+      "subpath": "apps/web",
+      "isPrimary": false,
+      "reason": null,
+      "headRepo": null,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "addedRepos": [
+      {
+        "githubRepo": "acme/widgets",
+        "subpath": "apps/web"
+      }
+    ]
+  },
+  "projectNote": {
+    "note": {
+      "id": "project-note-plan",
+      "projectId": "project-created",
+      "sessionId": "session-plan",
+      "title": "Plan",
+      "content": "body",
+      "createdAt": 0,
+      "updatedAt": 0,
+      "completedAt": 0,
+      "suggestedNextCommitStep": null,
+      "suggestedNextNoteStep": null,
+      "readAt": null,
+      "sessionStatus": "completed",
+      "completionReason": null,
+      "lastChatMessageAt": null,
+      "chatReadAt": null,
+      "rateLimitResetsAt": null,
+      "rateLimitKind": null
+    },
+    "children": [
+      {
+        "reference": "#note:note-gadgets",
+        "title": "Gadgets",
+        "branch": {
+          "id": "branch-gadgets",
+          "projectId": "project-created",
+          "projectRepoId": "repo-gadgets",
+          "branchName": "landing-acme-gadgets",
+          "baseBranch": "origin/main",
+          "prNumber": null,
+          "branchType": "local",
+          "workspaceName": null,
+          "workstationId": null,
+          "workspaceStatus": null,
+          "prState": null,
+          "prChecksStatus": null,
+          "prReviewDecision": null,
+          "prMergeable": null,
+          "prDraft": null,
+          "prUrl": null,
+          "prUpdatedAt": null,
+          "prFetchedAt": null,
+          "prHeadSha": null,
+          "prTitle": null,
+          "setupComplete": false,
+          "deferredPush": null,
+          "deferredPushRequestedAt": null,
+          "worktreePath": null,
+          "createdAt": 0,
+          "updatedAt": 0
+        },
+        "repo": {
+          "id": "repo-gadgets",
+          "projectId": "project-created",
+          "githubRepo": "acme/gadgets",
+          "branchName": "landing-acme-gadgets",
+          "subpath": null,
+          "isPrimary": false,
+          "reason": null,
+          "headRepo": null,
+          "createdAt": 0,
+          "updatedAt": 0
+        }
+      },
+      {
+        "reference": "#note:note-web",
+        "title": "Web",
+        "branch": {
+          "id": "branch-widgets",
+          "projectId": "project-created",
+          "projectRepoId": "repo-widgets",
+          "branchName": "landing-acme-widgets",
+          "baseBranch": "origin/main",
+          "prNumber": null,
+          "branchType": "local",
+          "workspaceName": null,
+          "workstationId": null,
+          "workspaceStatus": null,
+          "prState": null,
+          "prChecksStatus": null,
+          "prReviewDecision": null,
+          "prMergeable": null,
+          "prDraft": null,
+          "prUrl": null,
+          "prUpdatedAt": null,
+          "prFetchedAt": null,
+          "prHeadSha": null,
+          "prTitle": null,
+          "setupComplete": false,
+          "deferredPush": null,
+          "deferredPushRequestedAt": null,
+          "worktreePath": null,
+          "createdAt": 0,
+          "updatedAt": 0
+        },
+        "repo": {
+          "id": "repo-widgets",
+          "projectId": "project-created",
+          "githubRepo": "acme/widgets",
+          "branchName": "landing-acme-widgets",
+          "subpath": "apps/web",
+          "isPrimary": false,
+          "reason": null,
+          "headRepo": null,
+          "createdAt": 0,
+          "updatedAt": 0
+        }
+      }
+    ],
+    "addedRepos": [
+      {
+        "githubRepo": "acme/gadgets",
+        "subpath": null
+      }
+    ]
+  }
+}

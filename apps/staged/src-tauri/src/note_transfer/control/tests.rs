@@ -58,89 +58,6 @@ impl Fixture {
         let branch = Branch::new(&self.target.id, &name, "origin/main").with_project_repo(&repo.id);
         self.store.create_branch(&branch).map_err(|e| e.to_string())
     }
-
-    /// A branch-note transfer as the dispatch arm runs it: the repo add
-    /// watched, then the control answer.
-    async fn transfer(&self, note: &Note, mode: TransferMode) -> Result<Value, String> {
-        let added = AddedRepos::default();
-        let landed = transfer_branch_note(&self.store, &note.id, &self.target.id, mode, |key| {
-            added.watch(key.clone(), std::future::ready(self.attach(key)))
-        })
-        .await?;
-        let item = json!({ "id": landed.id, "title": landed.title });
-        Ok(branch_note_answer(
-            &self.store,
-            item,
-            &landed.branch_id,
-            added,
-        ))
-    }
-}
-
-fn widgets_key() -> Value {
-    json!({ "githubRepo": "acme/widgets", "subpath": "apps/web" })
-}
-
-#[tokio::test]
-async fn a_move_that_adds_the_repo_names_it_and_where_the_note_landed() {
-    let f = fixture();
-    let note = f.note_on(&f.widgets, "Findings");
-
-    let answer = f.transfer(&note, TransferMode::Move).await.unwrap();
-
-    assert_eq!(answer["addedRepos"], json!([widgets_key()]));
-    assert_eq!(answer["note"]["id"], note.id, "a move keeps the note's id");
-    assert_eq!(answer["branch"]["projectId"], f.target.id);
-    assert_eq!(answer["branch"]["branchName"], "target-acme-widgets");
-    assert_eq!(answer["repo"]["githubRepo"], "acme/widgets");
-    assert_eq!(answer["repo"]["subpath"], "apps/web");
-    assert_eq!(
-        answer["branch"]["projectRepoId"], answer["repo"]["id"],
-        "the repo is the one the landing branch tracks"
-    );
-    assert_eq!(
-        answer["branch"].get("worktreePath"),
-        Some(&Value::Null),
-        "the branch reads as the branch list gives one, worktree included"
-    );
-}
-
-#[tokio::test]
-async fn a_transfer_into_a_project_that_tracks_the_repo_adds_nothing() {
-    let f = fixture();
-    let note = f.note_on(&f.widgets, "Findings");
-    f.attach(RepoKey {
-        github_repo: "acme/widgets".into(),
-        subpath: Some("apps/web".into()),
-    })
-    .unwrap();
-
-    for mode in [TransferMode::Copy, TransferMode::Move] {
-        let answer = f.transfer(&note, mode).await.unwrap();
-        assert_eq!(answer["addedRepos"], json!([]), "{mode:?}");
-        assert_eq!(answer["branch"]["projectId"], f.target.id, "{mode:?}");
-        assert_eq!(answer["repo"]["githubRepo"], "acme/widgets", "{mode:?}");
-    }
-}
-
-#[tokio::test]
-async fn a_copy_answers_with_the_new_note_and_leaves_the_original() {
-    let f = fixture();
-    let note = f.note_on(&f.widgets, "Findings");
-
-    let answer = f.transfer(&note, TransferMode::Copy).await.unwrap();
-
-    let copy_id = answer["note"]["id"].as_str().unwrap();
-    assert_ne!(copy_id, note.id, "a copy is a new note");
-    assert_eq!(answer["addedRepos"], json!([widgets_key()]));
-    assert_eq!(
-        f.store.get_note(&note.id).unwrap().unwrap().branch_id,
-        f.widgets.id
-    );
-    assert_eq!(
-        f.store.get_note(copy_id).unwrap().unwrap().branch_id,
-        answer["branch"]["id"].as_str().unwrap()
-    );
 }
 
 #[tokio::test]
@@ -275,6 +192,53 @@ fn a_project_note_that_cannot_be_read_back_is_answered_as_the_transfer_gave_it()
     assert_eq!(
         answer,
         json!({ "note": note, "children": [], "addedRepos": [] })
+    );
+}
+
+/// Child notes that cannot be read back are answered as `null`, which is
+/// not the empty list of a note without any: the move took them along, and
+/// the answer must not read as though the note has none. The rest of the
+/// answer stands.
+#[tokio::test]
+async fn children_that_cannot_be_read_back_are_answered_as_null() {
+    let f = fixture();
+    let parent = ProjectNote::new(&f.source.id, "Plan", "body");
+    f.store.create_project_note(&parent).unwrap();
+    let child =
+        Note::new_standalone(&f.widgets.id, "Web", "body").with_parent_project_note(&parent.id);
+    f.store.create_note(&child).unwrap();
+
+    let added = AddedRepos::default();
+    let moved = transfer_project_note(
+        &f.store,
+        &parent.id,
+        &f.target.id,
+        TransferMode::Move,
+        |key| added.watch(key.clone(), std::future::ready(f.attach(key))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.store.list_child_notes(&parent.id).unwrap().len(),
+        1,
+        "the child came along"
+    );
+
+    // The move has committed. From here the notes cannot be listed.
+    f.store
+        .hold_connection()
+        .execute_batch("ALTER TABLE notes RENAME COLUMN parent_project_note_id TO unreadable")
+        .unwrap();
+    assert!(f.store.list_child_notes(&parent.id).is_err());
+
+    let answer = project_note_answer(&f.store, moved, added);
+
+    assert_eq!(answer["children"], Value::Null);
+    assert_eq!(answer["note"]["id"], parent.id);
+    assert_eq!(answer["note"]["projectId"], f.target.id);
+    assert_eq!(
+        answer["addedRepos"],
+        json!([{ "githubRepo": "acme/widgets", "subpath": "apps/web" }])
     );
 }
 

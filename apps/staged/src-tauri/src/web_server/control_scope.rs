@@ -83,6 +83,14 @@
 //! held to the same, since their bodies travel with it. A reference with no
 //! row carries nothing and is let through, as the transfer leaves it.
 //!
+//! The check goes by the row and does not look for the file. A row whose
+//! file is gone carries nothing either: the transfer leaves that reference
+//! as it is, and the row in the project it is in. So a note the user moved
+//! after such a file was lost still embeds a row of the project it left. If
+//! that project is out of reach, a transfer of the note is refused for
+//! media that would not have travelled. It takes a lost file to get there,
+//! and the check keeps to the row.
+//!
 //! The bodies are read when the request arrives. A transfer that has to add
 //! a repo reads them again once the repo is in, so a body saved during that
 //! add is carried unchecked. Closing that takes a check inside the
@@ -575,7 +583,9 @@ fn require_images_in_scope(
 /// `home_project_id`, which the caller has been found to reach.
 ///
 /// A reference with no row is passed over. The transfer leaves it as it is
-/// and carries nothing for it.
+/// and carries nothing for it. A row whose file is gone is not passed over,
+/// though the transfer carries nothing for that either (see the module
+/// docs).
 fn require_note_media_in_scope(
     store: &Store,
     grant: &ControlGrant,
@@ -2258,7 +2268,15 @@ mod tests {
         let f = fixture();
         let created = create_project_by(&f, "gamma", CALLER);
         let g = scoped(&f.project_a);
-        let body = embedding(&[&f.image_a, &created.image, "no-such-image"]);
+        // A well-formed id with no row. Anything else is not a reference to
+        // stored media at all, and would never reach the row lookup.
+        let dangling = uuid::Uuid::new_v4().to_string();
+        assert_eq!(f.store.get_image(&dangling).unwrap().map(|i| i.id), None);
+        let body = embedding(&[&f.image_a, &created.image, &dangling]);
+        assert!(
+            refs::media_ids(&body).contains(&dangling),
+            "the dangling reference must be one the check looks up"
+        );
         for (cmd, id_arg, note_id) in notes_embedding(&f, &body) {
             for target in [&created.project, &f.project_a] {
                 check_with_store(cmd, &transfer(id_arg, &note_id, target), &g, &f.store)

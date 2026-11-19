@@ -107,11 +107,13 @@ describe('failedArtifactSubtitle', () => {
     );
   });
 
-  it('says a network pause waits for the connection, whatever the artifact', () => {
+  // The row cannot know whether the scheduler gave up on the pause or will
+  // not resume it by itself, so it must not say the session resumes.
+  it('names a network pause without promising a resume, whatever the artifact', () => {
     for (const kind of ['commit', 'note', 'review'] as const) {
-      expect(failedArtifactSubtitle('rate_limited', kind, { rateLimitKind: 'network' })).toBe(
-        'Paused: network unavailable. Resumes when the connection returns.'
-      );
+      const subtitle = failedArtifactSubtitle('rate_limited', kind, { rateLimitKind: 'network' });
+      expect(subtitle).toBe('Paused: network unavailable.');
+      expect(subtitle).not.toMatch(/resume/i);
     }
   });
 
@@ -121,7 +123,7 @@ describe('failedArtifactSubtitle', () => {
         rateLimitKind: 'network',
         rateLimitResetsAt: '2026-06-24T15:45:00Z',
       })
-    ).toBe('Paused: network unavailable. Resumes when the connection returns.');
+    ).toBe('Paused: network unavailable.');
   });
 
   it('reads the network kind only on a rate-limit pause', () => {

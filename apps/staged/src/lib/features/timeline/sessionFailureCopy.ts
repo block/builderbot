@@ -31,9 +31,21 @@ const RECONCILE_INTERRUPTIONS: ReadonlySet<string> = new Set([
  */
 export const NETWORK_PAUSE_KIND = 'network';
 
+/**
+ * The `reason` in a network pause's retry bookkeeping while it waits behind
+ * the scheduler's network gate (`NETWORK_WAIT_REASON` in
+ * `src-tauri/src/rate_limit_scheduler.rs`). Such a row's `nextRetryAt` is the
+ * time it paused, not the time of its next attempt.
+ */
+export const NETWORK_WAIT_REASON = 'network_wait';
+
 /** What a network pause says wherever it is named: the row subtitle and the chat alert. */
 export const NETWORK_PAUSED = 'Paused: network unavailable.';
-export const NETWORK_PAUSED_SUBTITLE = `${NETWORK_PAUSED} Resumes when the connection returns.`;
+/**
+ * The same, with the promise of an automatic resume. Only for a caller that
+ * has the scheduler's bookkeeping and so knows the promise holds.
+ */
+export const NETWORK_PAUSED_RESUMES = `${NETWORK_PAUSED} Resumes when the connection returns.`;
 
 /** Whether a `rate_limited` pause with this `rateLimitKind` is a network pause. */
 export function isNetworkPause(rateLimitKind: string | null | undefined): boolean {
@@ -79,7 +91,11 @@ export function failedArtifactSubtitle(
     case 'remote_agent_lost':
       return `Workspace agent lost — no ${noun} created`;
     case 'rate_limited':
-      if (isNetworkPause(rateLimitKind)) return NETWORK_PAUSED_SUBTITLE;
+      // A timeline row does not carry the scheduler's bookkeeping, so it
+      // cannot tell a pause that will resume by itself from one the
+      // scheduler gave up on or will not resume (a pending tool call). It
+      // makes no promise either way; the chat alert, which can tell, does.
+      if (isNetworkPause(rateLimitKind)) return NETWORK_PAUSED;
       return rateLimitPausedSubtitle(rateLimitResetsAt) ?? `Paused by API limit — no ${noun} yet`;
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;

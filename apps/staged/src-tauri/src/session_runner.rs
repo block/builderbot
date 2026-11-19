@@ -1794,6 +1794,7 @@ pub fn start_session(
         // connection, so a remote turn may still be running behind it. Reset
         // with `settle_reason`.
         let cancel_unacknowledged = Cell::new(false);
+        let prompt_failed = Cell::new(false);
         // Whether the last connection settled out of its background hold with
         // the work still going (see `SessionSettled::background_work_left`).
         // Reset with `settle_reason`.
@@ -2385,6 +2386,7 @@ pub fn start_session(
                 settle_reason.set(None);
                 transport_loss.set(None);
                 cancel_unacknowledged.set(false);
+                prompt_failed.set(false);
                 background_work_left.set(false);
                 reattached.set(false);
                 let turn_result = match driver
@@ -2452,6 +2454,7 @@ pub fn start_session(
                                     settle_reason.set(Some(settled.reason));
                                     transport_loss.set(settled.transport_loss);
                                     cancel_unacknowledged.set(settled.cancel_unacknowledged);
+                                    prompt_failed.set(settled.prompt_failed);
                                     background_work_left.set(settled.background_work_left);
                                     match settled.reason {
                                         acp_client::SessionSettleReason::HeldUntilCap => {
@@ -2547,6 +2550,7 @@ pub fn start_session(
                     settle_reason.set(settlement.settle_reason);
                     transport_loss.set(settlement.transport_loss);
                     cancel_unacknowledged.set(settlement.cancel_unacknowledged);
+                    prompt_failed.set(settlement.prompt_failed);
                     background_work_left.set(settlement.background_work_left);
                     reattached.set(true);
                     // The agent went on with the turn after anything read
@@ -2758,6 +2762,7 @@ pub fn start_session(
             transport_loss: transport_loss.get(),
             cancel_unacknowledged: cancel_unacknowledged.get(),
             background_work_left: background_work_left.get(),
+            prompt_failed: prompt_failed.get(),
         };
         let reattached = reattached.get();
 
@@ -3020,6 +3025,10 @@ struct RunSettlement {
     /// The connection settled out of its background hold with the work still
     /// going (see `SessionSettled::background_work_left`).
     background_work_left: bool,
+    /// The agent answered the run's last prompt with an error of its own
+    /// (see `SessionSettled::prompt_failed`). A turn reattached to was not
+    /// prompted by the connection that saw it end, so it has the default.
+    prompt_failed: bool,
 }
 
 /// The transport verdict of a turn reattached to after its connection went:
@@ -3319,6 +3328,7 @@ fn finish_session_run(
                 session_snapshot.as_ref(),
                 config.provider.as_deref(),
                 message,
+                settlement.prompt_failed,
                 crate::store::now_timestamp(),
             );
             match (decision.network_failure, decision.recovery.as_ref()) {
@@ -11807,6 +11817,7 @@ draft file"
             transport_loss: None,
             cancel_unacknowledged,
             background_work_left: false,
+            prompt_failed: false,
         }
     }
 

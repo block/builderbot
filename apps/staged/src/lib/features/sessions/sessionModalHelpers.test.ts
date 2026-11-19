@@ -434,7 +434,29 @@ describe('newestUserMessageId', () => {
     );
   });
 
-  it('says when a network pause tries again', () => {
+  it('gives no retry time for a network pause waiting behind the gate', () => {
+    // As the scheduler writes it: `nextRetryAt` is when the row paused, so
+    // it is already in the past and stays there for the whole outage.
+    const pausedAt = Date.UTC(2026, 5, 24, 15, 45);
+    expect(
+      sessionEndMessage({
+        completionReason: 'rate_limited',
+        rateLimitKind: 'network',
+        providerMetadata: {
+          staged: {
+            rateLimitAutoRecovery: {
+              attempt: 0,
+              maxAttempts: 8,
+              nextRetryAt: pausedAt,
+              reason: 'network_wait',
+            },
+          },
+        },
+      })
+    ).toBe('Paused: network unavailable. Resumes when the connection returns.');
+  });
+
+  it('says when a network pause on its own backoff tries again', () => {
     const nextRetryAt = Date.UTC(2026, 5, 24, 15, 45);
     const retryTime = new Date(nextRetryAt).toLocaleTimeString([], {
       hour: 'numeric',
@@ -445,7 +467,9 @@ describe('newestUserMessageId', () => {
         completionReason: 'rate_limited',
         rateLimitKind: 'network',
         providerMetadata: {
-          staged: { rateLimitAutoRecovery: { attempt: 2, maxAttempts: 8, nextRetryAt } },
+          staged: {
+            rateLimitAutoRecovery: { attempt: 2, maxAttempts: 8, nextRetryAt, reason: 'backoff' },
+          },
         },
       })
     ).toBe(
@@ -456,6 +480,7 @@ describe('newestUserMessageId', () => {
   it('asks for a manual resume of a network pause that will not resume by itself', () => {
     for (const rateLimitAutoRecovery of [
       { attempt: 9, maxAttempts: 8, gaveUpAt: Date.UTC(2026, 5, 24, 15, 45) },
+      { attempt: 0, gaveUpAt: Date.UTC(2026, 5, 24, 15, 45), reason: 'probe_limit_exceeded' },
       { unsafeToAutoResume: true, reason: 'pending_tool_call' },
     ]) {
       expect(

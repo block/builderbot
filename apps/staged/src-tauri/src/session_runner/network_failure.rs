@@ -15,8 +15,6 @@
 //! [`matched_fallback_signal`] below. **No other file may match error prose
 //! to decide whether a failure was the network.**
 
-use acp_client::PROMPT_FAILED_PREFIX;
-
 /// The JSON-RPC "internal error" code. Both bridges report a failed provider
 /// request with it; `-32000` (authentication required) and every other code
 /// are not network failures.
@@ -64,13 +62,16 @@ impl NetworkFailure {
 
 /// Classify a failed run as a network failure, or `None` for anything else.
 ///
-/// `driver_error` is the run's error as the driver reported it and
-/// `provider_metadata` the session's stored metadata. The checks run in this
-/// order, and only the last one reads error prose:
+/// `prompt_failed` is the driver's own flag for the run
+/// (`acp_client::SessionSettled::prompt_failed`) and `provider_metadata` the
+/// session's stored metadata. The checks run in this order, and only the
+/// last one reads error prose:
 ///
-/// 1. The run failed on the prompt. `promptError` can be left on the row by an
-///    earlier event of the same turn, so a failure that is not a prompt
-///    failure must not be judged by it.
+/// 1. The run failed on the prompt: the agent answered `session/prompt` with
+///    an error over a live transport. `promptError` can be left on the row by
+///    an earlier event of the same turn, so a failure during setup, after a
+///    cancel or an interrupt, or on a lost transport must not be judged by
+///    it. The driver reports this as a flag, so no error text is parsed.
 /// 2. The error code is `-32603`.
 /// 3. `data.reason` is not `incoming_transport_closed`.
 /// 4. The agent's own structured field allows a network cause.
@@ -80,11 +81,11 @@ impl NetworkFailure {
 /// still run the rate-limit check first.
 pub(crate) fn classify_network_failure(
     provider: Option<&str>,
-    driver_error: &str,
+    prompt_failed: bool,
     provider_metadata: Option<&serde_json::Value>,
 ) -> Option<NetworkFailure> {
     let agent = NetworkAgent::from_provider(provider?)?;
-    if !failed_on_the_prompt(driver_error) {
+    if !prompt_failed {
         return None;
     }
     let prompt_error = provider_metadata?.pointer("/acp/promptError")?;
@@ -129,25 +130,6 @@ impl NetworkAgent {
             _ => None,
         }
     }
-}
-
-/// Whether the driver reported a failed `session/prompt`.
-///
-/// The driver's text starts with its own [`PROMPT_FAILED_PREFIX`]. The
-/// connection that carried the prompt usually hands it on wrapped once, as
-/// `ACP protocol failed: Error { ..., data: Some(String("Prompt failed: ...")) }`,
-/// so the outermost `data` string is accepted too. Both forms are Staged's
-/// own rendering, not agent prose. A deeper occurrence does not count: that
-/// would be an agent quoting the words.
-fn failed_on_the_prompt(driver_error: &str) -> bool {
-    if driver_error.starts_with(PROMPT_FAILED_PREFIX) {
-        return true;
-    }
-    // Outermost first, and only an unescaped (top-level) string counts.
-    const WRAPPED: &str = "data: Some(String(\"";
-    driver_error
-        .find(WRAPPED)
-        .is_some_and(|at| driver_error[at + WRAPPED.len()..].starts_with(PROMPT_FAILED_PREFIX))
 }
 
 // ---------------------------------------------------------------------------
@@ -260,27 +242,8 @@ mod tests {
         metadata(json!({ "code": -32603, "message": message, "data": { "reason": "turn_failed" } }))
     }
 
-    /// The driver error as the runner receives it today: the prompt failure
-    /// wrapped once by the connection that carried it.
-    fn wrapped_driver_error(message: &str) -> String {
-        let inner = format!(
-            r#"Prompt failed: Error {{ code: -32603: Internal error, message: {message:?}, data: None }}"#
-        );
-        format!(
-            r#"ACP protocol failed: Error {{ code: -32603: Internal error, message: "Internal error", data: Some(String({inner:?})) }}"#
-        )
-    }
-
     fn classify(provider: &str, metadata: &serde_json::Value) -> Option<NetworkFailure> {
-        let message = metadata
-            .pointer("/acp/promptError/message")
-            .and_then(|m| m.as_str())
-            .unwrap_or_default();
-        classify_network_failure(
-            Some(provider),
-            &wrapped_driver_error(message),
-            Some(metadata),
-        )
+        classify_network_failure(Some(provider), true, Some(metadata))
     }
 
     #[test]
@@ -316,21 +279,6 @@ mod tests {
                 .unwrap_or_else(|| panic!("{token} should classify"));
             assert_eq!(failure, NetworkFailure::ClaudeErrno(token));
             assert_eq!(failure.signal(), *token);
-        }
-    }
-
-    #[test]
-    fn the_bare_and_the_wrapped_driver_error_both_count_as_a_prompt_failure() {
-        let metadata = claude_error("server_error", DNS_MESSAGE);
-        let bare = format!(
-            r#"Prompt failed: Error {{ code: -32603: Internal error, message: {DNS_MESSAGE:?}, data: Some(Object {{"errorKind": String("server_error")}}) }}"#
-        );
-        for driver_error in [bare, wrapped_driver_error(DNS_MESSAGE)] {
-            assert_eq!(
-                classify_network_failure(Some("claude"), &driver_error, Some(&metadata)),
-                Some(NetworkFailure::ClaudeErrno("ENOTFOUND")),
-                "{driver_error}"
-            );
         }
     }
 
@@ -469,37 +417,29 @@ mod tests {
         }
     }
 
+    /// A `promptError` left on the row by an earlier event says nothing
+    /// about a run the driver did not report as a failed prompt, whatever
+    /// the stored error looks like.
     #[test]
     fn a_stale_prompt_error_is_ignored_when_the_run_did_not_fail_on_the_prompt() {
-        let metadata = claude_error("server_error", DNS_MESSAGE);
-        for driver_error in [
-            "Timed out waiting for ACP protocol startup after 90s".to_string(),
-            "ACP protocol failed: server shut down unexpectedly".to_string(),
-            format!(r#"Prompt failed after interrupt: Error {{ message: {DNS_MESSAGE:?} }}"#),
-            format!(r#"Prompt failed after cancellation: Error {{ message: {DNS_MESSAGE:?} }}"#),
-            r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to run the prompt. Sign this agent in, then retry.")) }"#.to_string(),
-            // The words quoted deeper down are an agent's, not the driver's.
-            r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("Failed to load session: Error { data: Some(String(\"Prompt failed: nope\")) }")) }"#.to_string(),
-            r#"Failed to load session: Error { message: "Prompt failed: (ENOTFOUND)", data: None }"#.to_string(),
-            String::new(),
+        for (provider, metadata) in [
+            ("claude", claude_error("server_error", DNS_MESSAGE)),
+            ("goose", goose_error("Network error: connection reset")),
         ] {
+            assert!(classify(provider, &metadata).is_some());
             assert_eq!(
-                classify_network_failure(Some("claude"), &driver_error, Some(&metadata)),
+                classify_network_failure(Some(provider), false, Some(&metadata)),
                 None,
-                "{driver_error}"
+                "{provider}"
             );
         }
     }
 
     #[test]
     fn a_prompt_failure_without_a_stored_prompt_error_is_not_classified() {
-        let driver_error = wrapped_driver_error(DNS_MESSAGE);
+        assert_eq!(classify_network_failure(Some("claude"), true, None), None);
         assert_eq!(
-            classify_network_failure(Some("claude"), &driver_error, None),
-            None
-        );
-        assert_eq!(
-            classify_network_failure(Some("claude"), &driver_error, Some(&json!({ "acp": {} }))),
+            classify_network_failure(Some("claude"), true, Some(&json!({ "acp": {} }))),
             None
         );
     }
@@ -557,10 +497,9 @@ mod tests {
     fn codex_and_unknown_providers_are_never_classified() {
         let mut metadata = claude_error("server_error", DNS_MESSAGE);
         metadata["acp"]["promptError"]["data"]["reason"] = json!("turn_failed");
-        let driver_error = wrapped_driver_error(DNS_MESSAGE);
         for provider in [Some("codex"), Some("amp"), Some(""), None] {
             assert_eq!(
-                classify_network_failure(provider, &driver_error, Some(&metadata)),
+                classify_network_failure(provider, true, Some(&metadata)),
                 None,
                 "{provider:?}"
             );

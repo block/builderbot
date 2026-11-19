@@ -115,9 +115,7 @@ describe('projectNoteRow', () => {
       hour: 'numeric',
       minute: '2-digit',
     });
-    expect(paused({ rateLimitKind: 'network' }).title).toBe(
-      'Paused: network unavailable. Resumes when the connection returns.'
-    );
+    expect(paused({ rateLimitKind: 'network' }).title).toBe('Paused: network unavailable.');
     expect(paused({}).title).toBe('Paused by API limit — no note yet');
     // The reset time dates the pause; it is not the session's error message.
     expect(paused({ rateLimitResetsAt: resetsAt }).title).toBe(

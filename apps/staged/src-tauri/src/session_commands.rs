@@ -1914,6 +1914,13 @@ pub(crate) async fn resume_session_for_store(
             if !transitioned {
                 return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
             }
+            // A manual resume of a network-paused session doubles as the
+            // network gate's probe, so getting through resumes the rest.
+            if let Some(scheduler) =
+                app_handle.try_state::<Arc<crate::rate_limit_scheduler::RateLimitScheduler>>()
+            {
+                scheduler.manual_resume_started(&session, store::now_timestamp());
+            }
         }
         // The caller's claim predates `prepare_resume`, and the hold that
         // keeps the row live is invisible to a Stop: one that landed during

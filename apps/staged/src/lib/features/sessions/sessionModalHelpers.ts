@@ -10,7 +10,8 @@ import {
 } from '../../shared/disconnectedSession';
 import {
   NETWORK_PAUSED,
-  NETWORK_PAUSED_SUBTITLE,
+  NETWORK_PAUSED_RESUMES,
+  NETWORK_WAIT_REASON,
   formatRateLimitResetTime,
   isNetworkPause,
 } from '../timeline/sessionFailureCopy';
@@ -289,15 +290,19 @@ function rateLimitEndMessage(
  * The notice for a network pause. A row the scheduler gave up on, or will not
  * resume by itself, no longer resumes when the connection returns, so it says
  * what to do instead of repeating that promise.
+ *
+ * A row waiting behind the scheduler's network gate gets no retry time: its
+ * `nextRetryAt` is the time it paused, and the gate's next probe time is not
+ * exposed. Only a pause on the session's own backoff has a time to show.
  */
 function networkPauseEndMessage(recovery: RateLimitAutoRecovery | null): string {
   if (recovery?.gaveUpAt || recovery?.unsafeToAutoResume) {
     return `${NETWORK_PAUSED} Resume manually when ready.`;
   }
-  if (recovery?.nextRetryAt) {
-    return `${NETWORK_PAUSED_SUBTITLE} Trying again around ${formatTimestamp(recovery.nextRetryAt)}.`;
+  if (recovery?.nextRetryAt && recovery.reason !== NETWORK_WAIT_REASON) {
+    return `${NETWORK_PAUSED_RESUMES} Trying again around ${formatTimestamp(recovery.nextRetryAt)}.`;
   }
-  return NETWORK_PAUSED_SUBTITLE;
+  return NETWORK_PAUSED_RESUMES;
 }
 
 /**
@@ -345,6 +350,7 @@ interface RateLimitAutoRecovery {
   nextRetryAt?: number | null;
   gaveUpAt?: number | null;
   unsafeToAutoResume?: boolean;
+  reason?: string | null;
 }
 
 function rateLimitAutoRecovery(

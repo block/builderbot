@@ -1,6 +1,8 @@
 //! The machine's network fingerprint: the set of addresses its interfaces
 //! hold. The gate reads it while closed to notice that the network changed,
-//! or that there is none.
+//! or that there is none. "None" only holds back the wake and change
+//! triggers; it never stops a probe, since a provider on this machine or on
+//! a link-local network needs none of these addresses.
 
 use std::collections::BTreeSet;
 use std::io;

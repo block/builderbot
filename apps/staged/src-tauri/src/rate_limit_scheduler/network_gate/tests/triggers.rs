@@ -193,70 +193,182 @@ fn a_fingerprint_change_resets_the_delay() {
     );
 }
 
+/// Tick every 15 seconds from `from` until a probe starts, and return it
+/// with the time it started.
+fn next_probe(scheduler: &RateLimitScheduler, store: &Arc<Store>, from: i64) -> (String, i64) {
+    let mut at = from;
+    loop {
+        let mut started = tick_with_triggers(scheduler, store, at);
+        if let Some(session_id) = started.pop() {
+            assert!(started.is_empty());
+            return (session_id, at);
+        }
+        at += TICK_MS;
+        assert!(at < from + 2 * MAX_PROBE_DELAY_MS, "no probe started");
+    }
+}
+
+/// No address at all is not a reason to stop probing: the provider may be
+/// on this machine. The doubling schedule runs as it does with a network.
 #[test]
-fn an_empty_fingerprint_blocks_the_probe_without_advancing_the_delay() {
+fn an_empty_fingerprint_does_not_stop_the_doubling_probe_schedule() {
     let store = Arc::new(Store::in_memory().unwrap());
-    let network = FakeNetwork::with_addresses(&[]);
-    let scheduler = network.scheduler();
+    let scheduler = FakeNetwork::with_addresses(&[]).scheduler();
     let now = crate::store::now_timestamp();
     let sessions = network_paused_sessions(&store, &scheduler, 1, now);
 
     let mut at = now;
-    for _ in 0..40 {
-        assert!(tick_with_triggers(&scheduler, &store, at).is_empty());
-        at += TICK_MS;
+    let mut waits = Vec::new();
+    for _ in 0..4 {
+        let (probe, started_at) = next_probe(&scheduler, &store, at);
+        assert_eq!(probe, sessions[0]);
+        waits.push(started_at - at);
+        fail_on_network(&store, &scheduler, &probe, started_at);
+        at = started_at;
     }
+    assert_eq!(waits, [0, 15_000, 30_000, 60_000]);
     assert_eq!(recovery(&store, &sessions[0]).attempt, 0);
-
-    // An address appears, and the probe starts on that tick.
-    network.set_addresses(WIFI);
-    assert_eq!(tick_with_triggers(&scheduler, &store, at), sessions);
-
-    // Ten minutes without a network doubled nothing: this is the first
-    // failed probe, and the next one is the base delay away.
-    fail_on_network(&store, &scheduler, &sessions[0], at);
-    assert!(tick_with_triggers(&scheduler, &store, at + BASE_PROBE_DELAY_MS - 1).is_empty());
-    assert_eq!(
-        tick_with_triggers(&scheduler, &store, at + BASE_PROBE_DELAY_MS),
-        sessions
-    );
 }
 
+/// Losing every address is a change to an empty fingerprint, which resets
+/// nothing, and a probe that comes due meanwhile still starts.
 #[test]
-fn losing_every_address_blocks_a_probe_that_was_due() {
+fn losing_every_address_neither_resets_the_delay_nor_blocks_a_due_probe() {
     let store = Arc::new(Store::in_memory().unwrap());
     let network = FakeNetwork::with_addresses(WIFI);
     let scheduler = network.scheduler();
     let now = crate::store::now_timestamp();
-    let sessions = network_paused_sessions(&store, &scheduler, 1, now);
-    assert_eq!(tick_with_triggers(&scheduler, &store, now), sessions);
-    fail_on_network(&store, &scheduler, &sessions[0], now);
+    network_paused_sessions(&store, &scheduler, 2, now);
+    let last = fail_four_probes(&scheduler, &store, now);
 
+    // The next probe is two minutes off. The addresses go: no early probe.
     network.set_addresses(&[]);
-    assert!(tick_with_triggers(&scheduler, &store, now + TICK_MS).is_empty());
-    assert!(tick_with_triggers(&scheduler, &store, now + 2 * TICK_MS).is_empty());
-
-    network.set_addresses(WIFI);
-    assert_eq!(
-        tick_with_triggers(&scheduler, &store, now + 3 * TICK_MS),
-        sessions
-    );
+    let due = last + 120_000;
+    let mut at = last + TICK_MS;
+    while at < due {
+        assert!(tick_with_triggers(&scheduler, &store, at).is_empty());
+        at += TICK_MS;
+    }
+    // Due, with still no address: it starts all the same.
+    assert_eq!(tick_with_triggers(&scheduler, &store, due).len(), 1);
 }
 
+/// An address appearing after there was none is a change that does reset.
 #[test]
-fn an_unreadable_fingerprint_does_not_block_the_probe() {
+fn an_address_appearing_resets_the_delay() {
     let store = Arc::new(Store::in_memory().unwrap());
     let network = FakeNetwork::with_addresses(&[]);
     let scheduler = network.scheduler();
     let now = crate::store::now_timestamp();
-    let sessions = network_paused_sessions(&store, &scheduler, 1, now);
-    assert!(tick_with_triggers(&scheduler, &store, now).is_empty());
+    network_paused_sessions(&store, &scheduler, 2, now);
+    let last = fail_four_probes(&scheduler, &store, now);
+    assert!(tick_with_triggers(&scheduler, &store, last + TICK_MS).is_empty());
+
+    network.set_addresses(WIFI);
+    assert_eq!(
+        tick_with_triggers(&scheduler, &store, last + 2 * TICK_MS).len(),
+        1
+    );
+}
+
+/// A wake with no network has nothing new to probe: the schedule stands.
+#[test]
+fn a_wake_with_no_network_leaves_the_probe_schedule_alone() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let scheduler = FakeNetwork::with_addresses(&[]).scheduler();
+    let now = crate::store::now_timestamp();
+    network_paused_sessions(&store, &scheduler, 2, now);
+    let last = fail_four_probes(&scheduler, &store, now);
+    let due = last + 120_000;
+
+    let woke = last + TICK_MS + SUSPENDED_MS;
+    let mut at = woke;
+    while at < due {
+        assert!(
+            tick_with_triggers(&scheduler, &store, at).is_empty(),
+            "{} ms before the probe is due",
+            due - at
+        );
+        at += TICK_MS;
+    }
+    assert_eq!(tick_with_triggers(&scheduler, &store, at).len(), 1);
+}
+
+/// A read that fails says nothing about the network, so it does not hold a
+/// wake back the way an empty fingerprint does.
+#[test]
+fn an_unreadable_fingerprint_does_not_hold_back_a_wake() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let network = FakeNetwork::with_addresses(&[]);
+    let scheduler = network.scheduler();
+    let now = crate::store::now_timestamp();
+    network_paused_sessions(&store, &scheduler, 2, now);
+    let last = fail_four_probes(&scheduler, &store, now);
 
     network.make_unreadable();
+    let woke = last + TICK_MS + SUSPENDED_MS;
+    assert!(tick_with_triggers(&scheduler, &store, woke).is_empty());
     assert_eq!(
-        tick_with_triggers(&scheduler, &store, now + TICK_MS),
-        sessions
+        tick_with_triggers(&scheduler, &store, woke + TICK_MS).len(),
+        1
     );
+}
+
+/// The whole path for a lone session behind a dead proxy: the machine is
+/// awake with an address, every probe fails, and after the twentieth the
+/// session is left paused for a manual resume.
+#[test]
+fn a_lone_session_gives_up_after_twenty_failed_probes_with_a_network() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let scheduler = FakeNetwork::with_addresses(WIFI).scheduler();
+    let now = crate::store::now_timestamp();
+    let sessions = network_paused_sessions(&store, &scheduler, 1, now);
+
+    let mut at = now;
+    for failure in 1..=MAX_CONSECUTIVE_PROBE_FAILURES {
+        let (probe, started_at) = next_probe(&scheduler, &store, at);
+        fail_on_network(&store, &scheduler, &probe, started_at);
+        at = started_at;
+
+        let state = recovery(&store, &sessions[0]);
+        assert_eq!(state.attempt, 0);
+        if failure < MAX_CONSECUTIVE_PROBE_FAILURES {
+            assert_eq!(state.gave_up_at, None, "failure {failure}");
+            assert_eq!(state.reason.as_deref(), Some("network_wait"));
+        } else {
+            assert_eq!(state.gave_up_at, Some(at));
+            assert_eq!(state.next_retry_at, None);
+            assert_eq!(state.reason.as_deref(), Some("probe_limit_exceeded"));
+        }
+    }
+
+    // Still paused, and never probed with again.
+    let row = store.get_session(&sessions[0]).unwrap().unwrap();
+    assert_eq!(row.status, SessionStatus::Paused);
+    let end = at + 2 * MAX_PROBE_DELAY_MS;
+    while at < end {
+        at += TICK_MS;
+        assert!(tick_with_triggers(&scheduler, &store, at).is_empty());
+    }
+}
+
+/// With no network the same run of failures gives up on nothing.
+#[test]
+fn failed_probes_with_no_network_never_give_up() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let scheduler = FakeNetwork::with_addresses(&[]).scheduler();
+    let now = crate::store::now_timestamp();
+    let sessions = network_paused_sessions(&store, &scheduler, 1, now);
+
+    let mut at = now;
+    for _ in 0..MAX_CONSECUTIVE_PROBE_FAILURES + 5 {
+        let (probe, started_at) = next_probe(&scheduler, &store, at);
+        fail_on_network(&store, &scheduler, &probe, started_at);
+        at = started_at;
+    }
+    let state = recovery(&store, &sessions[0]);
+    assert_eq!(state.gave_up_at, None);
+    assert_eq!(state.reason.as_deref(), Some("network_wait"));
 }
 
 #[test]

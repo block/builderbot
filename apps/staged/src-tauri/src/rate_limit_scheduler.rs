@@ -53,8 +53,29 @@ pub(crate) fn auto_resume_prompt(rate_limit_kind: Option<&str>) -> &'static str 
 }
 
 /// The bookkeeping `reason` of a network pause that waits for the gate
-/// without spending a retry attempt.
+/// without spending a retry attempt. The app reads it to leave the retry
+/// time out of its notice (`NETWORK_WAIT_REASON` in `sessionFailureCopy.ts`):
+/// such a row's `next_retry_at` is the time of the pause, not of a retry.
 const NETWORK_WAIT_REASON: &str = "network_wait";
+/// The bookkeeping `reason` of a network pause given up on because the
+/// session's own probes kept failing with a network present.
+const PROBE_LIMIT_REASON: &str = "probe_limit_exceeded";
+
+/// How one pause is charged to its session's retry budget.
+///
+/// Only a network pause is ever anything but `Counted`; the network gate
+/// decides which (see `network_gate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PauseAccounting {
+    /// Advances `attempt` under the attempt cap and the 24 hour window.
+    Counted,
+    /// Waits for the network gate: `attempt` stays, and neither the cap nor
+    /// the window applies.
+    Waiting,
+    /// The session's own probes failed too many times in a row with a
+    /// network present. It stays paused for a manual resume.
+    ProbesExhausted,
+}
 
 const TICK_INTERVAL_SECS: u64 = 15;
 const MAX_AUTO_RETRY_ATTEMPTS: u32 = 8;
@@ -427,7 +448,7 @@ fn ensure_auto_recovery_state(
 
     // No failure was reported for this row, so a network pause among these
     // is not counted: it waits for the gate like the rest.
-    record_rate_limit_pause_for_session(store, session, false, now)?;
+    record_rate_limit_pause_for_session(store, session, PauseAccounting::Waiting, now)?;
     Ok(store
         .get_session(&session.id)
         .map_err(|e| e.to_string())?
@@ -449,11 +470,11 @@ fn ensure_auto_recovery_state(
 /// the blocker scan needs: `agent_id` and the message history, not status.
 ///
 /// A network pause (`kind` of [`NETWORK_PAUSE_KIND`]) is reported to the
-/// scheduler's network gate, which answers whether it counts against the
-/// session's retry budget: only a failure while the gate is open does. The
-/// gate hears of the failure even if a Stop then wins the row, because the
-/// network failed either way. With no scheduler the pause is not counted, as
-/// under a fresh gate.
+/// scheduler's network gate, which answers how it is charged to the
+/// session's retry budget ([`PauseAccounting`]): only a failure while the
+/// gate is open is counted. The gate hears of the failure even if a Stop
+/// then wins the row, because the network failed either way. With no
+/// scheduler the pause is not counted, as under a fresh gate.
 ///
 /// Returns whether this call won the `running → paused` transition. A lost
 /// race (a Stop cancelled the row first) writes nothing, including the
@@ -470,12 +491,14 @@ pub(crate) fn pause_for_rate_limit(
     let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
         return Ok(false);
     };
-    let counted = if is_network_pause(kind) {
-        scheduler.is_some_and(|scheduler| scheduler.record_network_failure(store, session_id, now))
+    let accounting = if is_network_pause(kind) {
+        scheduler.map_or(PauseAccounting::Waiting, |scheduler| {
+            scheduler.record_network_failure(store, session_id, now)
+        })
     } else {
-        true
+        PauseAccounting::Counted
     };
-    let state = plan_recovery_state(store, &session, kind, counted, resets_at, now)?;
+    let state = plan_recovery_state(store, &session, kind, accounting, resets_at, now)?;
     let transitioned = store
         .transition_running_to_rate_limited_with_provider_metadata(
             session_id,
@@ -496,7 +519,7 @@ fn record_rate_limit_pause(store: &Store, session_id: &str, now: i64) -> Result<
     let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
         return Ok(());
     };
-    record_rate_limit_pause_for_session(store, &session, true, now)
+    record_rate_limit_pause_for_session(store, &session, PauseAccounting::Counted, now)
 }
 
 /// Write retry bookkeeping onto a row that is already paused.
@@ -507,14 +530,14 @@ fn record_rate_limit_pause(store: &Store, session_id: &str, now: i64) -> Result<
 fn record_rate_limit_pause_for_session(
     store: &Store,
     session: &Session,
-    counted: bool,
+    accounting: PauseAccounting,
     now: i64,
 ) -> Result<(), String> {
     let state = plan_recovery_state(
         store,
         session,
         session.rate_limit_kind.as_deref(),
-        counted,
+        accounting,
         session.rate_limit_resets_at.as_deref(),
         now,
     )?;
@@ -526,12 +549,12 @@ fn record_rate_limit_pause_for_session(
 }
 
 /// The next retry state for `session`, advancing any bookkeeping it already
-/// carries. `kind` and `counted` are those of [`build_recovery_state`].
+/// carries. `kind` and `accounting` are those of [`build_recovery_state`].
 fn plan_recovery_state(
     store: &Store,
     session: &Session,
     kind: Option<&str>,
-    counted: bool,
+    accounting: PauseAccounting,
     resets_at: Option<&str>,
     now: i64,
 ) -> Result<RateLimitAutoRecovery, String> {
@@ -541,7 +564,7 @@ fn plan_recovery_state(
     Ok(build_recovery_state(
         existing.as_ref(),
         kind,
-        counted,
+        accounting,
         resets_at,
         now,
         blocker.as_deref(),
@@ -606,9 +629,12 @@ fn log_recovery_state(session: &Session, kind: Option<&str>, state: &RateLimitAu
 /// so give-up is reserved for starts that keep failing rather than issued on
 /// the first one.
 ///
-/// A network pause that fails to start is reported to the network gate like
-/// a failed prompt, so a probe that could not start closes the gate again and
-/// is counted only if the gate was open.
+/// A start failure is not evidence about the network: `prepare_resume` fails
+/// on a missing workspace path, a disconnected session or a branch in
+/// transfer. So a network pause that fails to start is counted like any
+/// other, which keeps it under the attempt cap, and if it was the network
+/// gate's probe the probe is abandoned: another session may probe at once
+/// and the probe delay does not grow.
 fn reschedule_after_start_failure(
     store: &Store,
     scheduler: &RateLimitScheduler,
@@ -620,9 +646,12 @@ fn reschedule_after_start_failure(
         // session in any other state was claimed by something else (a manual
         // resume, a cancel, a delete) and is that path's to manage.
         Ok(Some(session)) if session.status.as_str() == "paused" => {
-            let counted = !is_network_pause(session.rate_limit_kind.as_deref())
-                || scheduler.record_network_failure(store, session_id, now);
-            if let Err(e) = record_rate_limit_pause_for_session(store, &session, counted, now) {
+            if is_network_pause(session.rate_limit_kind.as_deref()) {
+                scheduler.abandon_network_probe(session_id, now);
+            }
+            if let Err(e) =
+                record_rate_limit_pause_for_session(store, &session, PauseAccounting::Counted, now)
+            {
                 log::warn!(
                     "[rate_limit_recovery] failed to reschedule session {session_id} after a failed start: {e}"
                 );
@@ -650,16 +679,25 @@ fn is_actionable_for_auto_resume(session: &Session) -> bool {
 
 /// The retry state after one more pause.
 ///
-/// A network pause (`kind` of [`NETWORK_PAUSE_KIND`]) that is not `counted`
-/// failed while the network gate was not open. It keeps its `attempt`, is due
-/// at once so the gate alone decides when it resumes, and is exempt from the
-/// attempt cap and the 24 hour window. Every other pause, a counted network
-/// one included, follows the rules below; `counted` means nothing for an
-/// API-limit pause.
+/// `accounting` applies to a network pause (`kind` of
+/// [`NETWORK_PAUSE_KIND`]) only; an API-limit pause is always counted.
+///
+/// - [`PauseAccounting::Waiting`]: the failure came while the network gate
+///   was not open. The row keeps its `attempt`, is due at once so the gate
+///   alone decides when it resumes, and is exempt from the attempt cap and
+///   the 24 hour window.
+/// - [`PauseAccounting::ProbesExhausted`]: the row gives up and waits for a
+///   manual resume.
+/// - [`PauseAccounting::Counted`]: the rules below, with one difference. The
+///   24 hour window of a network pause runs from its first counted failure,
+///   not from its first pause: `first_limited_at` is set again when
+///   `attempt` becomes 1. Time spent waiting behind a closed gate (a laptop
+///   asleep for a weekend) therefore never ends a session on the first
+///   failure that counts.
 fn build_recovery_state(
     existing: Option<&RateLimitAutoRecovery>,
     kind: Option<&str>,
-    counted: bool,
+    accounting: PauseAccounting,
     resets_at: Option<&str>,
     now: i64,
     blocker: Option<&str>,
@@ -680,7 +718,20 @@ fn build_recovery_state(
         };
     }
 
-    if is_network_pause(kind) && !counted {
+    let network = is_network_pause(kind);
+    if network && accounting == PauseAccounting::ProbesExhausted {
+        return RateLimitAutoRecovery {
+            attempt: existing.map(|s| s.attempt).unwrap_or(0),
+            max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+            next_retry_at: None,
+            first_limited_at,
+            updated_at: now,
+            gave_up_at: Some(now),
+            unsafe_to_auto_resume: false,
+            reason: Some(PROBE_LIMIT_REASON.to_string()),
+        };
+    }
+    if network && accounting == PauseAccounting::Waiting {
         return RateLimitAutoRecovery {
             attempt: existing.map(|s| s.attempt).unwrap_or(0),
             max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
@@ -694,6 +745,11 @@ fn build_recovery_state(
     }
 
     let attempt = existing.map(|s| s.attempt.saturating_add(1)).unwrap_or(1);
+    let first_limited_at = if network && attempt == 1 {
+        now
+    } else {
+        first_limited_at
+    };
     if attempt > MAX_AUTO_RETRY_ATTEMPTS {
         return RateLimitAutoRecovery {
             attempt,
@@ -1084,7 +1140,15 @@ mod tests {
         let now = parse_rfc3339_millis("2026-06-24T15:00:00Z").unwrap();
         let reset = "2026-06-24T15:45:00Z";
 
-        let state = build_recovery_state(None, None, true, Some(reset), now, None, 12_000);
+        let state = build_recovery_state(
+            None,
+            None,
+            PauseAccounting::Counted,
+            Some(reset),
+            now,
+            None,
+            12_000,
+        );
 
         assert_eq!(state.attempt, 1);
         assert_eq!(state.reason.as_deref(), Some("reset_at"));
@@ -1096,7 +1160,15 @@ mod tests {
 
     #[test]
     fn schedules_unknown_reset_with_capped_backoff_jitter() {
-        let state = build_recovery_state(None, None, true, None, 1_000_000, None, 4_000);
+        let state = build_recovery_state(
+            None,
+            None,
+            PauseAccounting::Counted,
+            None,
+            1_000_000,
+            None,
+            4_000,
+        );
 
         assert_eq!(state.attempt, 1);
         assert_eq!(state.reason.as_deref(), Some("backoff"));
@@ -1116,7 +1188,15 @@ mod tests {
             reason: Some("backoff".to_string()),
         };
 
-        let state = build_recovery_state(Some(&existing), None, true, None, 10_000, None, 5_000);
+        let state = build_recovery_state(
+            Some(&existing),
+            None,
+            PauseAccounting::Counted,
+            None,
+            10_000,
+            None,
+            5_000,
+        );
 
         assert_eq!(state.attempt, MAX_AUTO_RETRY_ATTEMPTS + 1);
         assert_eq!(state.gave_up_at, Some(10_000));
@@ -1129,7 +1209,7 @@ mod tests {
         let state = build_recovery_state(
             None,
             None,
-            true,
+            PauseAccounting::Counted,
             None,
             10_000,
             Some("missing_agent_session_id"),
@@ -1739,16 +1819,135 @@ mod tests {
         assert!(is_due(&state, 10_000));
     }
 
-    /// `counted` belongs to network pauses: an API-limit pause advances its
-    /// attempt whatever it is given.
+    /// The accounting belongs to network pauses: an API-limit pause advances
+    /// its attempt whatever it is given.
     #[test]
     fn an_api_limit_pause_is_always_counted() {
-        for counted in [true, false] {
-            let state =
-                build_recovery_state(None, Some("claude_pro"), counted, None, 10_000, None, 5_000);
+        for accounting in [
+            PauseAccounting::Counted,
+            PauseAccounting::Waiting,
+            PauseAccounting::ProbesExhausted,
+        ] {
+            let state = build_recovery_state(
+                None,
+                Some("claude_pro"),
+                accounting,
+                None,
+                10_000,
+                None,
+                5_000,
+            );
             assert_eq!(state.attempt, 1);
+            assert_eq!(state.gave_up_at, None);
             assert_eq!(state.reason.as_deref(), Some("backoff"));
         }
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+
+    fn network_state(
+        existing: Option<&RateLimitAutoRecovery>,
+        accounting: PauseAccounting,
+        now: i64,
+    ) -> RateLimitAutoRecovery {
+        build_recovery_state(
+            existing,
+            Some(NETWORK_PAUSE_KIND),
+            accounting,
+            None,
+            now,
+            None,
+            5_000,
+        )
+    }
+
+    /// A row that waited behind the gate for more than a day, then fails
+    /// while the gate is open: its first counted failure starts the 24 hour
+    /// window, so it is scheduled, not given up on.
+    #[test]
+    fn the_first_counted_network_failure_after_a_long_wait_does_not_give_up() {
+        let paused_at = 1_000_000;
+        let waiting = network_state(None, PauseAccounting::Waiting, paused_at);
+        assert_eq!(waiting.first_limited_at, paused_at);
+
+        let failed_at = paused_at + 30 * 60 * 60 * 1_000;
+        let counted = network_state(Some(&waiting), PauseAccounting::Counted, failed_at);
+
+        assert_eq!(counted.attempt, 1);
+        assert_eq!(counted.gave_up_at, None);
+        assert_eq!(counted.reason.as_deref(), Some("backoff"));
+        assert_eq!(counted.first_limited_at, failed_at);
+        assert!(counted.next_retry_at.unwrap() > failed_at);
+    }
+
+    /// The window still ends a network pause: 24 hours after its first
+    /// counted failure, the next counted one gives up. Waits in between do
+    /// not move the start.
+    #[test]
+    fn the_network_window_runs_from_the_first_counted_failure() {
+        let first_counted_at = 1_000_000;
+        let first = network_state(None, PauseAccounting::Counted, first_counted_at);
+        assert_eq!(first.first_limited_at, first_counted_at);
+
+        let waiting = network_state(
+            Some(&first),
+            PauseAccounting::Waiting,
+            first_counted_at + DAY_MS / 2,
+        );
+        assert_eq!(waiting.attempt, 1);
+        assert_eq!(waiting.first_limited_at, first_counted_at);
+
+        let inside = network_state(
+            Some(&waiting),
+            PauseAccounting::Counted,
+            first_counted_at + DAY_MS,
+        );
+        assert_eq!(inside.attempt, 2);
+        assert_eq!(inside.gave_up_at, None);
+        assert_eq!(inside.first_limited_at, first_counted_at);
+
+        let outside_at = first_counted_at + DAY_MS + 1;
+        let outside = network_state(Some(&waiting), PauseAccounting::Counted, outside_at);
+        assert_eq!(outside.gave_up_at, Some(outside_at));
+        assert_eq!(outside.reason.as_deref(), Some("retry_window_elapsed"));
+    }
+
+    /// An API-limit pause keeps measuring from its first pause.
+    #[test]
+    fn the_api_limit_window_still_runs_from_the_first_pause() {
+        let first = build_recovery_state(
+            None,
+            Some("claude_pro"),
+            PauseAccounting::Counted,
+            None,
+            1_000_000,
+            None,
+            5_000,
+        );
+        let late = 1_000_000 + DAY_MS + 1;
+        let state = build_recovery_state(
+            Some(&first),
+            Some("claude_pro"),
+            PauseAccounting::Counted,
+            None,
+            late,
+            None,
+            5_000,
+        );
+        assert_eq!(state.gave_up_at, Some(late));
+        assert_eq!(state.reason.as_deref(), Some("retry_window_elapsed"));
+    }
+
+    #[test]
+    fn exhausted_probes_give_up_and_wait_for_a_manual_resume() {
+        let waiting = network_state(None, PauseAccounting::Waiting, 10_000);
+        let state = network_state(Some(&waiting), PauseAccounting::ProbesExhausted, 20_000);
+
+        assert_eq!(state.attempt, 0);
+        assert_eq!(state.gave_up_at, Some(20_000));
+        assert_eq!(state.next_retry_at, None);
+        assert_eq!(state.reason.as_deref(), Some("probe_limit_exceeded"));
+        assert!(!is_due(&state, i64::MAX));
     }
 
     /// A network pause with an unanswered tool call is manual-only whether or
@@ -1758,7 +1957,7 @@ mod tests {
         let state = build_recovery_state(
             None,
             Some(NETWORK_PAUSE_KIND),
-            false,
+            PauseAccounting::Waiting,
             None,
             10_000,
             Some("pending_tool_call"),
@@ -1870,18 +2069,42 @@ mod tests {
         // millennia out). Waiting for it would park the session forever: the
         // 24h give-up is only evaluated when recovery state is rebuilt.
         let micros = (parse_rfc3339_millis("2026-06-24T15:45:00Z").unwrap() * 1_000).to_string();
-        let state = build_recovery_state(None, None, true, Some(&micros), now, None, 12_000);
+        let state = build_recovery_state(
+            None,
+            None,
+            PauseAccounting::Counted,
+            Some(&micros),
+            now,
+            None,
+            12_000,
+        );
         assert_eq!(state.reason.as_deref(), Some("backoff"));
         assert_eq!(jitter_bound_for(Some(&micros), now), MAX_BACKOFF_MS);
 
         // The cap is on lead time, not scale: just beyond the window falls
         // back, just within it is honored.
         let beyond_window = (now + MAX_PLAUSIBLE_RESET_LEAD_MS + 60_000).to_string();
-        let state = build_recovery_state(None, None, true, Some(&beyond_window), now, None, 12_000);
+        let state = build_recovery_state(
+            None,
+            None,
+            PauseAccounting::Counted,
+            Some(&beyond_window),
+            now,
+            None,
+            12_000,
+        );
         assert_eq!(state.reason.as_deref(), Some("backoff"));
 
         let within_window = (now + MAX_PLAUSIBLE_RESET_LEAD_MS - 60_000).to_string();
-        let state = build_recovery_state(None, None, true, Some(&within_window), now, None, 12_000);
+        let state = build_recovery_state(
+            None,
+            None,
+            PauseAccounting::Counted,
+            Some(&within_window),
+            now,
+            None,
+            12_000,
+        );
         assert_eq!(state.reason.as_deref(), Some("reset_at"));
         assert_eq!(jitter_bound_for(Some(&within_window), now), RESET_JITTER_MS);
     }

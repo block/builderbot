@@ -45,11 +45,13 @@ impl FailedRunDecision {
 ///
 /// `session` is the row as it stands after the run, when it could be read;
 /// `fallback_provider` is the run's configured provider, for a row that
-/// records none.
+/// records none; `prompt_failed` is the driver's flag that the agent answered
+/// the prompt with an error (`acp_client::SessionSettled::prompt_failed`).
 pub(super) fn decide_failed_run(
     session: Option<&Session>,
     fallback_provider: Option<&str>,
     driver_error: &str,
+    prompt_failed: bool,
     now_millis: i64,
 ) -> FailedRunDecision {
     let provider_metadata = session.and_then(|session| session.provider_metadata.as_ref());
@@ -74,7 +76,7 @@ pub(super) fn decide_failed_run(
     let network_failure = if is_pipeline {
         None
     } else {
-        classify_network_failure(provider, driver_error, provider_metadata)
+        classify_network_failure(provider, prompt_failed, provider_metadata)
     };
     if network_failure.is_some() {
         return FailedRunDecision {
@@ -138,7 +140,13 @@ mod tests {
     fn a_network_prompt_error_pauses_with_the_network_kind_and_no_reset() {
         let session = session_with_dns_failure();
 
-        let decision = decide_failed_run(Some(&session), None, &driver_error(DNS_MESSAGE), NOW_MS);
+        let decision = decide_failed_run(
+            Some(&session),
+            None,
+            &driver_error(DNS_MESSAGE),
+            true,
+            NOW_MS,
+        );
 
         assert_eq!(decision.status(), "paused");
         assert_eq!(decision.completion_reason, CompletionReason::RateLimited);
@@ -164,7 +172,8 @@ mod tests {
         store.create_session(&session).unwrap();
         let row = store.get_session(&session.id).unwrap().unwrap();
 
-        let decision = decide_failed_run(Some(&row), None, &driver_error(DNS_MESSAGE), NOW_MS);
+        let decision =
+            decide_failed_run(Some(&row), None, &driver_error(DNS_MESSAGE), true, NOW_MS);
         let recovery = decision.recovery.expect("a network failure pauses");
         assert!(crate::rate_limit_scheduler::pause_for_rate_limit(
             &store,
@@ -205,8 +214,13 @@ mod tests {
             let mut session = session_with_dns_failure();
             session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(kind));
 
-            let decision =
-                decide_failed_run(Some(&session), None, &driver_error(DNS_MESSAGE), NOW_MS);
+            let decision = decide_failed_run(
+                Some(&session),
+                None,
+                &driver_error(DNS_MESSAGE),
+                true,
+                NOW_MS,
+            );
 
             assert_eq!(decision.status(), "error");
             assert_eq!(decision.completion_reason, CompletionReason::Crashed);
@@ -221,12 +235,12 @@ mod tests {
         session.provider = None;
         let error = driver_error(DNS_MESSAGE);
 
-        let with_fallback = decide_failed_run(Some(&session), Some("claude"), &error, NOW_MS);
+        let with_fallback = decide_failed_run(Some(&session), Some("claude"), &error, true, NOW_MS);
         assert_eq!(with_fallback.status(), "paused");
 
         // Codex is never classified, and neither is an unknown agent.
         for provider in [Some("codex"), None] {
-            let decision = decide_failed_run(Some(&session), provider, &error, NOW_MS);
+            let decision = decide_failed_run(Some(&session), provider, &error, true, NOW_MS);
             assert_eq!(decision.status(), "error", "{provider:?}");
             assert_eq!(decision.completion_reason, CompletionReason::Crashed);
         }
@@ -245,6 +259,7 @@ mod tests {
             Some(&session),
             None,
             &driver_error("Internal error: rate limit exceeded"),
+            true,
             NOW_MS,
         );
 
@@ -257,18 +272,44 @@ mod tests {
         assert_eq!(decision.network_failure, None);
     }
 
+    /// The same row and error text, but the driver did not report a failed
+    /// prompt: the stored `promptError` is stale and the run fails.
+    #[test]
+    fn a_run_that_did_not_fail_on_the_prompt_is_not_paused() {
+        let session = session_with_dns_failure();
+
+        let decision = decide_failed_run(
+            Some(&session),
+            None,
+            &driver_error(DNS_MESSAGE),
+            false,
+            NOW_MS,
+        );
+
+        assert_eq!(decision.status(), "error");
+        assert_eq!(decision.completion_reason, CompletionReason::Crashed);
+        assert_eq!(decision.network_failure, None);
+    }
+
     #[test]
     fn other_failures_still_fail_the_session() {
         // A real 5xx: the same structured kind, no network token.
         let mut session = session_with_dns_failure();
         let message = "Internal error: API Error: 500 Internal server error";
         session.provider_metadata = Some(prompt_error_metadata("server_error", message));
-        let decision = decide_failed_run(Some(&session), None, &driver_error(message), NOW_MS);
+        let decision =
+            decide_failed_run(Some(&session), None, &driver_error(message), true, NOW_MS);
         assert_eq!(decision.status(), "error");
         assert_eq!(decision.completion_reason, CompletionReason::Crashed);
 
         // A row that could not be read has nothing to classify.
-        let decision = decide_failed_run(None, Some("claude"), &driver_error(DNS_MESSAGE), NOW_MS);
+        let decision = decide_failed_run(
+            None,
+            Some("claude"),
+            &driver_error(DNS_MESSAGE),
+            true,
+            NOW_MS,
+        );
         assert_eq!(decision.status(), "error");
         assert_eq!(decision.completion_reason, CompletionReason::Crashed);
 
@@ -277,6 +318,7 @@ mod tests {
             None,
             Some("claude"),
             "ACP protocol failed: server shut down unexpectedly",
+            false,
             NOW_MS,
         );
         assert_eq!(decision.status(), "error");

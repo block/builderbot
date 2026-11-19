@@ -86,7 +86,8 @@
 //! transfer added like any other. One link does not come back with the
 //! note: a branch note moved on its own is detached from its parent project
 //! note. The note's project and the destination must both be within the
-//! caller's reach.
+//! caller's reach, and so must the media the note's body embeds, which
+//! the transfer carries with it.
 //!
 //! No deletes — `delete_project` and `remove_project_repo` stay off the
 //! table, and `delete_tag` and `delete_tag_group` drop assignments on every

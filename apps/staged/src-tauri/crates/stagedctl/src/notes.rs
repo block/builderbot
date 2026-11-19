@@ -10,9 +10,10 @@
 //! names, answered from a read the caller can make anyway.
 //!
 //! Each verb is one write with no read after it. The app's answer carries
-//! the branch the note landed on and the repos the transfer added, which
-//! only the transfer knows. An answer that cannot be read is a
-//! [`CtlError::Partial`], so the caller still learns the write landed.
+//! the branch the note landed on, the child notes a moved project note
+//! took along, and the repos the transfer added, which only the transfer
+//! knows. An answer that cannot be read is a [`CtlError::Partial`], so the
+//! caller still learns the write landed.
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -158,7 +159,8 @@ impl NoteRef {
 /// transfer and the repos the transfer added to the destination. For a
 /// branch note, also the branch it landed on and the repo that branch
 /// tracks. Either is `null` when the app could not read the row back after
-/// the transfer committed.
+/// the transfer committed. For a project note, also the child notes that
+/// came with it, which is none for a copy.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Landed {
@@ -168,7 +170,24 @@ struct Landed {
     #[serde(default)]
     repo: Option<RepoName>,
     #[serde(default)]
+    children: Vec<LandedChild>,
+    #[serde(default)]
     added_repos: Vec<RepoName>,
+}
+
+/// A child note that moved with its project note: its hashtag reference,
+/// which the move does not change, and where it is now, as for a branch
+/// note.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LandedChild {
+    reference: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    branch: Option<BranchRow>,
+    #[serde(default)]
+    repo: Option<RepoName>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -257,11 +276,13 @@ pub(crate) fn transfer_with(
 }
 
 /// The output of both verbs: the note's reference, the project it is in
-/// now, the branch it landed on, and each repo the transfer added. `--json`
-/// is `{ ok, mode, projectId, reference, note, addedRepos }` with the app's
-/// rows, and for a branch note `branch` and `repo` as well. `reference` is
-/// the hashtag reference of the note where it is now: the same note after a
-/// move, the new one after a copy.
+/// now, the branch it landed on, each child note that came with a project
+/// note and the branch that landed on, and each repo the transfer added.
+/// `--json` is `{ ok, mode, projectId, reference, note, addedRepos }` with
+/// the app's rows. A branch note has `branch` and `repo` as well. A project
+/// note has `children`, each `{ reference, title, branch, repo }`.
+/// `reference` is the hashtag reference of the note where it is now: the
+/// same note after a move, the new one after a copy.
 fn render(
     transfer: Transfer,
     note: &NoteRef,
@@ -288,13 +309,19 @@ fn render(
         human.push(format!("  title: {}", landed.note.title));
     }
     let address = landed.repo.as_ref().map(RepoName::address);
-    match (&landed.branch, &address) {
-        (Some(branch), Some(address)) => human.push(format!(
-            "  landed on: {address}, branch {}",
-            branch.branch_name
-        )),
-        (Some(branch), None) => human.push(format!("  landed on: branch {}", branch.branch_name)),
-        (None, _) => {}
+    if let Some(place) = landing(landed.branch.as_ref(), address.as_deref()) {
+        human.push(format!("  landed on: {place}"));
+    }
+    for child in &landed.children {
+        let mut line = format!("  child note {}", child.reference);
+        if !child.title.trim().is_empty() {
+            line.push_str(&format!(" {:?}", child.title));
+        }
+        let address = child.repo.as_ref().map(RepoName::address);
+        if let Some(place) = landing(child.branch.as_ref(), address.as_deref()) {
+            line.push_str(&format!(" landed on: {place}"));
+        }
+        human.push(line);
     }
     for repo in &landed.added_repos {
         human.push(format!(
@@ -319,7 +346,7 @@ fn render(
         "reference".into(),
         json!(note.reference_to(&landed.note.id)),
     );
-    for key in ["note", "branch", "repo", "addedRepos"] {
+    for key in ["note", "branch", "repo", "children", "addedRepos"] {
         if let Some(value) = answer.get(key) {
             json.insert(key.into(), value.clone());
         }
@@ -328,6 +355,17 @@ fn render(
         json: Value::Object(json),
         human: human.join("\n"),
     }
+}
+
+/// Where a note is, as the output says it: the repo's address and the
+/// branch, or the branch alone when the app could not read the repo back.
+/// `None` when it could not read the branch.
+fn landing(branch: Option<&BranchRow>, address: Option<&str>) -> Option<String> {
+    let branch = branch?;
+    Some(match address {
+        Some(address) => format!("{address}, branch {}", branch.branch_name),
+        None => format!("branch {}", branch.branch_name),
+    })
 }
 
 #[cfg(test)]

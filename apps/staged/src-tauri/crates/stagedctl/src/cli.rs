@@ -1046,7 +1046,8 @@ on its kind:
                  media, and takes its child notes along. Each child
                  lands, with its own session, on the destination's
                  branch for its repo and subpath, still linked to the
-                 project note.
+                 project note. The output lists each child by its
+                 reference, with the repo and branch it landed on.
 
 Commits and code reviews are not part of a note. They stay on the branch
 they were made on.
@@ -1056,8 +1057,8 @@ the way `stagedctl project add-repo` adds one without --branch: a new
 branch named after the project, set up in the background (a worktree,
 or a clone into a remote project's workspace). The output names each
 repo added this way. Such a repo stays in the project when a later step
-of the move fails. A project note's error names it; a branch note's
-does not, so look at `stagedctl project get`.
+of the move fails, and the error then names it: \"<repo> was added to
+<project> along the way and remains tracked there.\"
 
 The app refuses a move, with the note left where it was (exit 1,
 `app_error`, the app's own message), when:
@@ -1070,9 +1071,20 @@ The app refuses a move, with the note left where it was (exit 1,
     outside the project note's own project.
 
 Needs write access to both projects, the one the note is in and the
-destination. A read-only credential is refused (exit 4, `scope_denied`),
-and so is a note in a project the credential does not reach. A
-destination it does not reach is not among its projects and exits 1
+destination. A read-only credential is refused (exit 4, `scope_denied`).
+A credential confined to some projects, which a session's is, also
+exits 4 (`scope_denied`) for:
+  - a note in a project it does not reach;
+  - a <NOTE> that names no note of that kind: an id that does not
+    exist, or a project note's id written as #note:<id>, or the other
+    way round. So exit 4 can mean a mistyped reference and not a
+    missing permission; the message then says \"not found\". A
+    credential for every project gets the app's own error for it
+    (exit 1, `app_error`);
+  - a note whose body embeds an image or video from a project it does
+    not reach, or a project note with such a child note. The move would
+    carry that media into the destination.
+A destination it does not reach is not among its projects and exits 1
 (`not_found`). A session may move notes between its own project and the
 projects it created, in either direction, and nowhere else.
 
@@ -1112,9 +1124,10 @@ videos in the body, and nothing else:
 A copy of a branch note lands on the destination's branch for the repo
 and subpath the note's branch tracks. A destination that does not track
 that repo gets it first, as in `stagedctl note move`, and the output
-names it. A title another note on the landing branch has gets a number:
-\"<title> (2)\". A copy of a project note lands in the destination
-project and never adds a repo.
+names it. The repo stays in the project when the copy then fails, and
+the error names it. A title another note on the landing branch has gets
+a number: \"<title> (2)\". A copy of a project note lands in the
+destination project and never adds a repo.
 
 --to may be the project the note is already in. That duplicates the
 note beside the original, on the same branch for a branch note.
@@ -1126,10 +1139,18 @@ and is running again can be copied, where it could not be moved: the
 copy is the note as it reads now.
 
 Needs write access to both projects, the one the note is in and the
-destination, as `stagedctl note move` does: exit 4 (`scope_denied`)
-under a read-only credential or for a note in a project the credential
-does not reach, exit 1 (`not_found`) for a destination it does not
-reach.
+destination, as `stagedctl note move` does. A read-only credential is
+refused (exit 4, `scope_denied`). A credential confined to some
+projects, which a session's is, also exits 4 (`scope_denied`) for:
+  - a note in a project it does not reach;
+  - a <NOTE> that names no note of that kind: an id that does not
+    exist, or the other kind's id. The message then says \"not found\",
+    and a credential for every project gets exit 1 (`app_error`);
+  - a note whose body embeds an image or video from a project it does
+    not reach. The copy would duplicate that media in the destination.
+    A project note's child notes are not copied, so theirs do not
+    count.
+A destination it does not reach exits 1 (`not_found`).
 
 A copy shows at once in the destination, where the user can delete it.
 stagedctl has no delete.")]

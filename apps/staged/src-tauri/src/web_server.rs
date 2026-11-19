@@ -900,6 +900,7 @@ pub(crate) fn preferences_store(
 
 mod control_project_args;
 pub(crate) mod control_scope;
+mod note_transfer_arms;
 pub(crate) use control_scope::SCOPE_DENIED_PREFIX;
 
 /// Who is calling [`dispatch`]. A handful of commands encode same-host-only
@@ -3237,91 +3238,32 @@ pub(crate) async fn dispatch(
             })
             .await
         }
+        // The four note transfers. Their bodies are in `note_transfer_arms`,
+        // where they can be run under test; all an arm adds is the app's own
+        // repo-adding step.
         "move_note_to_project" | "copy_note_to_project" => {
             let store = get_store(store_mutex)?;
-            let note_id: String = arg(&args, "noteId")?;
-            let target_project_id: String = arg(&args, "targetProjectId")?;
-            let mode = if command == "move_note_to_project" {
-                crate::note_transfer::TransferMode::Move
-            } else {
-                crate::note_transfer::TransferMode::Copy
-            };
-            let added = crate::note_transfer::control::AddedRepos::default();
-            let note = crate::note_transfer::transfer_branch_note(
-                &store,
-                &note_id,
-                &target_project_id,
-                mode,
-                |key| {
-                    added.watch(
-                        key.clone(),
-                        crate::note_transfer::add_repo_to_project(
-                            app_handle.clone(),
-                            Arc::clone(&store),
-                            target_project_id.clone(),
-                            key,
-                        ),
-                    )
-                },
-            )
-            .await?;
-            let branch_id = note.branch_id.clone();
-            let item = match mode {
-                crate::note_transfer::TransferMode::Move => {
-                    crate::note_commands::note_to_timeline_item(&store, note)
-                }
-                crate::note_transfer::TransferMode::Copy => {
-                    crate::note_commands::standalone_note_to_timeline_item(note)
-                }
-            };
-            let item = serde_json::to_value(item).unwrap();
-            Ok(match &caller {
-                // A window has the note open and knows where it sent it. A
-                // control caller is told: the branch the note landed on and
-                // the repos the transfer added.
-                DispatchCaller::Control(_) => crate::note_transfer::control::branch_note_answer(
-                    &store, item, &branch_id, added,
-                ),
-                DispatchCaller::Web => item,
+            note_transfer_arms::branch_note(&store, command, &args, &caller, |project_id, key| {
+                crate::note_transfer::add_repo_to_project(
+                    app_handle.clone(),
+                    Arc::clone(&store),
+                    project_id,
+                    key,
+                )
             })
+            .await
         }
         "move_project_note_to_project" | "copy_project_note_to_project" => {
             let store = get_store(store_mutex)?;
-            let project_note_id: String = arg(&args, "projectNoteId")?;
-            let target_project_id: String = arg(&args, "targetProjectId")?;
-            let mode = if command == "move_project_note_to_project" {
-                crate::note_transfer::TransferMode::Move
-            } else {
-                crate::note_transfer::TransferMode::Copy
-            };
-            let added = crate::note_transfer::control::AddedRepos::default();
-            let note = crate::note_transfer::transfer_project_note(
-                &store,
-                &project_note_id,
-                &target_project_id,
-                mode,
-                |key| {
-                    added.watch(
-                        key.clone(),
-                        crate::note_transfer::add_repo_to_project(
-                            app_handle.clone(),
-                            Arc::clone(&store),
-                            target_project_id.clone(),
-                            key,
-                        ),
-                    )
-                },
-            )
-            .await?;
-            let note = serde_json::to_value(note).unwrap();
-            Ok(match &caller {
-                // As for a branch note: a control caller is told which repos
-                // the note's children brought along.
-                DispatchCaller::Control(_) => {
-                    crate::note_transfer::control::project_note_answer(note, added)
-                }
-                DispatchCaller::Web => note,
+            note_transfer_arms::project_note(&store, command, &args, &caller, |project_id, key| {
+                crate::note_transfer::add_repo_to_project(
+                    app_handle.clone(),
+                    Arc::clone(&store),
+                    project_id,
+                    key,
+                )
             })
+            .await
         }
 
         // =====================================================================
@@ -5445,73 +5387,87 @@ mod tests {
 
     /// A note moved or copied through the control server goes through the
     /// transfer the app's windows run: one call, with the app's own
-    /// repo-adding step, whoever asks. The caller decides nothing until the
-    /// transfer has returned, and then only how much the answer says: a
-    /// control caller is told where the note landed and which repos were
-    /// added, a window gets the note alone, as it always has.
+    /// repo-adding step, whoever asks. `note_transfer_arms` runs the arm
+    /// bodies for real, with a stand-in for that step. What it cannot run is
+    /// pinned here: that `dispatch` hands each command to its body with the
+    /// app's step and nothing else, that the body does not branch on its
+    /// caller ahead of the transfer, and that the desktop command is the
+    /// same transfer.
     #[test]
     fn note_transfers_run_the_one_transfer_whoever_asks() {
         let source = include_str!("web_server.rs");
+        let bodies = include_str!("web_server/note_transfer_arms.rs");
         let desktop = include_str!("note_transfer.rs");
-        for (command, transfer, answer, web) in [
+        for (command, body, transfer) in [
             (
                 "move_note_to_project",
+                "branch_note",
                 "transfer_branch_note(",
-                "note_transfer::control::branch_note_answer(",
-                "DispatchCaller::Web => item,",
             ),
             (
                 "copy_note_to_project",
+                "branch_note",
                 "transfer_branch_note(",
-                "note_transfer::control::branch_note_answer(",
-                "DispatchCaller::Web => item,",
             ),
             (
                 "move_project_note_to_project",
+                "project_note",
                 "transfer_project_note(",
-                "note_transfer::control::project_note_answer(",
-                "DispatchCaller::Web => note,",
             ),
             (
                 "copy_project_note_to_project",
+                "project_note",
                 "transfer_project_note(",
-                "note_transfer::control::project_note_answer(",
-                "DispatchCaller::Web => note,",
             ),
         ] {
             let (_, arm) = dispatch_arms(source)
                 .into_iter()
                 .find(|(patterns, _)| patterns.iter().any(|p| p == command))
                 .unwrap_or_else(|| panic!("dispatch should have a `{command}` arm"));
-            assert_eq!(
-                arm.matches(&format!("note_transfer::{transfer}")).count(),
-                1,
-                "the `{command}` arm must run the transfer once, for every caller: {arm}"
-            );
-            // The repo is added by the app's own step. The arm watches it
-            // and does not stand in for it.
+            // The arm passes the request and the caller on as they came,
+            // with the app's own step for adding a repo.
             assert!(
-                arm.contains("added.watch(")
-                    && arm.contains("crate::note_transfer::add_repo_to_project("),
-                "the `{command}` arm must add a repo through the shared step: {arm}"
+                arm.contains(&format!(
+                    "note_transfer_arms::{body}(&store, command, &args, &caller, |project_id, key| {{"
+                )) && arm.contains("crate::note_transfer::add_repo_to_project("),
+                "the `{command}` arm must run `{body}` with the shared repo-adding step: {arm}"
             );
-            // Nothing about the caller comes before the transfer.
-            let transfer_at = arm.find(transfer).unwrap();
-            let caller_at = arm
-                .find("caller")
-                .unwrap_or_else(|| panic!("the `{command}` arm should answer by caller: {arm}"));
+            for inline in [
+                "DispatchCaller::",
+                "transfer_branch_note",
+                "transfer_project_note",
+            ] {
+                assert!(
+                    !arm.contains(inline),
+                    "the `{command}` arm must leave `{inline}` to its body: {arm}"
+                );
+            }
+
+            // The body: one transfer, the step watched and not stood in
+            // for, and nothing about the caller before the transfer.
+            let marker = format!("pub(super) async fn {body}<");
+            let start = bodies
+                .find(&marker)
+                .unwrap_or_else(|| panic!("note_transfer_arms.rs should define `{body}`"));
+            let rest = &bodies[start..];
+            let end = rest.find("\n}\n").expect("the body should end");
+            let code = &rest[rest.find("{\n").unwrap()..end];
+            assert_eq!(
+                code.matches(transfer).count(),
+                1,
+                "`{body}` must run the transfer once, for every caller: {code}"
+            );
+            assert!(
+                code.contains("added.watch(key.clone(), add_repo(target_project_id.clone(), key))"),
+                "`{body}` must add a repo through the step it was given: {code}"
+            );
+            let transfer_at = code.find(transfer).unwrap();
+            let caller_at = code
+                .find("match caller {")
+                .unwrap_or_else(|| panic!("`{body}` should answer by caller: {code}"));
             assert!(
                 transfer_at < caller_at,
-                "the `{command}` arm must not branch on its caller before the transfer: {arm}"
-            );
-            let answers = &arm[caller_at..];
-            assert!(
-                answers.contains("DispatchCaller::Control(_) =>") && answers.contains(answer),
-                "a control `{command}` must be answered through `{answer}`: {arm}"
-            );
-            assert!(
-                answers.contains(web),
-                "a web `{command}` must be answered with the note alone: {arm}"
+                "`{body}` must not branch on its caller before the transfer: {code}"
             );
 
             // The desktop command is the same transfer with the same step.
@@ -5522,6 +5478,7 @@ mod tests {
             let rest = &desktop[start..];
             let end = rest[1..]
                 .find("#[tauri::command")
+                .map(|at| at + 1)
                 .or_else(|| rest.find("#[cfg(test)]"))
                 .unwrap_or(rest.len());
             assert!(

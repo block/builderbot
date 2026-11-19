@@ -316,9 +316,37 @@ fn a_copy_prints_the_new_notes_reference() {
 }
 
 #[test]
-fn a_project_note_lands_in_the_project_and_lists_the_repos_its_children_brought() {
+fn a_project_note_lands_in_the_project_and_lists_its_children_and_their_repos() {
     let answer = json!({
         "note": { "id": "pn1", "projectId": "p2", "title": "Plan", "content": "body" },
+        "children": [
+            {
+                "reference": "#note:c1",
+                "title": "Web",
+                "branch": branch_row(),
+                "repo": repo_row(),
+            },
+            {
+                "reference": "#note:c2",
+                "title": "",
+                "branch": {
+                    "id": "b10",
+                    "projectId": "p2",
+                    "projectRepoId": "r10",
+                    "branchName": "max/gadgets",
+                    "baseBranch": "origin/main",
+                    "worktreePath": null,
+                },
+                "repo": {
+                    "id": "r10",
+                    "projectId": "p2",
+                    "githubRepo": "acme/gadgets",
+                    "subpath": null,
+                    "branchName": "max/gadgets",
+                    "isPrimary": false,
+                },
+            },
+        ],
         "addedRepos": [
             { "githubRepo": "acme/widgets", "subpath": "apps/web" },
             { "githubRepo": "acme/gadgets", "subpath": null },
@@ -332,6 +360,8 @@ fn a_project_note_lands_in_the_project_and_lists_the_repos_its_children_brought(
         "project note #project-note:pn1 moved to project \"Target\"\n\
          \x20 project id: p2\n\
          \x20 title: Plan\n\
+         \x20 child note #note:c1 \"Web\" landed on: acme/widgets:apps/web, branch max/target\n\
+         \x20 child note #note:c2 landed on: acme/gadgets, branch max/gadgets\n\
          \x20 added repo: acme/widgets:apps/web (the project did not track it; its branch is \
          set up in the background)\n\
          \x20 added repo: acme/gadgets (the project did not track it; its branch is set up in \
@@ -339,7 +369,7 @@ fn a_project_note_lands_in_the_project_and_lists_the_repos_its_children_brought(
          next: stagedctl timeline show p2"
     );
     // A project note is on no branch, so the app answers neither row and
-    // none is invented.
+    // none is invented. Its children are the app's rows as they came.
     assert_eq!(
         out.json,
         json!({
@@ -348,12 +378,14 @@ fn a_project_note_lands_in_the_project_and_lists_the_repos_its_children_brought(
             "projectId": "p2",
             "reference": "#project-note:pn1",
             "note": answer["note"],
+            "children": answer["children"],
             "addedRepos": answer["addedRepos"],
         })
     );
 
     let copy = json!({
         "note": { "id": "pn9", "projectId": "p2", "title": "Plan", "content": "body" },
+        "children": [],
         "addedRepos": [],
     });
     let app = App::with_projects().answer("copy_project_note_to_project", copy);
@@ -365,6 +397,42 @@ fn a_project_note_lands_in_the_project_and_lists_the_repos_its_children_brought(
          \x20 title: Plan\n\
          next: stagedctl timeline show p2"
     );
+    assert_eq!(out.json["children"], json!([]));
+}
+
+#[test]
+fn a_child_whose_landing_rows_could_not_be_read_back_is_still_listed() {
+    // As for the note itself: the child moved, and the output does not
+    // guess where a row the app could not read would have put it.
+    let answer = json!({
+        "note": { "id": "pn1", "projectId": "p2", "title": "Plan" },
+        "children": [
+            { "reference": "#note:c1", "title": "Web", "branch": null, "repo": null },
+            { "reference": "#note:c2", "title": "Api", "branch": branch_row(), "repo": null },
+        ],
+        "addedRepos": [],
+    });
+    let app = App::with_projects().answer("move_project_note_to_project", answer);
+    let out = transfer_with(app.invoke(), Transfer::Move, &project_note(), "Target").unwrap();
+    assert_eq!(
+        out.human,
+        "project note #project-note:pn1 moved to project \"Target\"\n\
+         \x20 project id: p2\n\
+         \x20 title: Plan\n\
+         \x20 child note #note:c1 \"Web\"\n\
+         \x20 child note #note:c2 \"Api\" landed on: branch max/target\n\
+         next: stagedctl timeline show p2"
+    );
+}
+
+#[test]
+fn an_answer_without_children_lists_none() {
+    // A branch note's answer has no `children`, and none is added to it.
+    let answer = landed_on_branch(note_row("n1", "Findings"), json!([]));
+    let app = App::with_projects().answer("move_note_to_project", answer);
+    let out = transfer_with(app.invoke(), Transfer::Move, &branch_note(), "Target").unwrap();
+    assert!(!out.human.contains("child note"), "{}", out.human);
+    assert_eq!(out.json.get("children"), None);
 }
 
 #[test]
@@ -582,21 +650,55 @@ fn the_commands_are_allowlisted_by_the_control_server() {
 
 #[test]
 fn the_requests_use_the_argument_names_the_apps_commands_read() {
+    // `dispatch` hands each pair of commands to a body in
+    // `note_transfer_arms`, which reads the arguments.
     let dispatch = include_str!("../../../../src/web_server.rs");
-    for (arm, id_arg) in [
+    let bodies = include_str!("../../../../src/web_server/note_transfer_arms.rs");
+    for (arm, body, id_arg) in [
         (
             "\"move_note_to_project\" | \"copy_note_to_project\" => {",
+            "branch_note",
             "\"noteId\"",
         ),
         (
             "\"move_project_note_to_project\" | \"copy_project_note_to_project\" => {",
+            "project_note",
             "\"projectNoteId\"",
         ),
     ] {
         let start = dispatch.find(arm).unwrap_or_else(|| panic!("no arm {arm}"));
-        let body = &dispatch[start..start + 600];
-        assert!(body.contains(id_arg), "{arm} no longer reads {id_arg}");
-        assert!(body.contains("\"targetProjectId\""), "{arm}");
+        let call = format!("note_transfer_arms::{body}(&store, command, &args,");
+        assert!(
+            dispatch[start..start + 300].contains(&call),
+            "{arm} no longer runs {body}"
+        );
+        let start = bodies
+            .find(&format!("pub(super) async fn {body}<"))
+            .unwrap_or_else(|| panic!("no body {body}"));
+        let code = &bodies[start..start + 700];
+        assert!(code.contains(id_arg), "{body} no longer reads {id_arg}");
+        assert!(code.contains("\"targetProjectId\""), "{body}");
+    }
+}
+
+/// What the output reads from the app's answer is what the app puts there.
+#[test]
+fn the_answer_is_read_under_the_names_the_app_writes() {
+    let control = include_str!("../../../../src/note_transfer/control.rs");
+    for written in [
+        "\"note\": note,",
+        "\"branch\": branch,",
+        "\"repo\": repo,",
+        "\"children\": children,",
+        "\"addedRepos\": added.into_json(),",
+        "\"reference\": format!(\"#note:{}\", child.id),",
+        "\"title\": child.title,",
+        "json!({ \"githubRepo\": key.github_repo, \"subpath\": key.subpath })",
+    ] {
+        assert!(
+            control.contains(written),
+            "the app's answer no longer has {written}; read `Landed` again"
+        );
     }
 }
 
@@ -725,6 +827,73 @@ fn help_states_the_transfers_rules_as_the_app_has_them() {
         assert!(help.contains("`not_found`"), "{help}");
         assert!(help.contains("stagedctl has no delete"), "{help}");
     }
+
+    // The scope refusals beyond the two projects, as the app's scope check
+    // makes them. A confined credential is refused a note it cannot be
+    // shown in the words of a note that is not there, with exit 4.
+    let scope = include_str!("../../../../src/web_server/control_scope.rs");
+    for refusal in [
+        "denied(format!(\"note {note_id} not found\"))",
+        "denied(format!(\"project note {note_id} not found\"))",
+        "embeds media {media_id}, which belongs to another project",
+        "its child note #note:{}",
+    ] {
+        assert!(
+            scope.contains(refusal),
+            "the scope check no longer says {refusal:?}; update `note move`/`note copy` --help"
+        );
+    }
+    for help in [&move_help, &copy_help] {
+        for promise in [
+            "A credential confined to some",
+            "a <NOTE> that names no note of that kind",
+            "says \"not found\"",
+            "`app_error`",
+            "embeds an image or video from a project it does\n    not reach",
+        ] {
+            assert!(help.contains(promise), "help lacks {promise:?}:\n{help}");
+        }
+    }
+    // A moved project note's children travel, so their media counts. A
+    // copy leaves them, so theirs does not.
+    assert!(
+        scope.contains("with_children: true"),
+        "the move's scope row"
+    );
+    assert!(
+        move_help.contains("or a project note with such a child note"),
+        "{move_help}"
+    );
+    assert!(
+        copy_help.contains("A project note's child notes are not copied"),
+        "{copy_help}"
+    );
+
+    // A repo the transfer added stays when it then fails, and the error
+    // names it, for a branch note as for a project note.
+    assert!(transfer.contains("along the way and {remain} tracked there."));
+    assert!(
+        move_help.contains("along the way and remains tracked there."),
+        "{move_help}"
+    );
+    assert!(
+        copy_help.contains(
+            "The repo stays in the project when the copy then fails, and\nthe error names it"
+        ),
+        "{copy_help}"
+    );
+    for help in [&move_help, &copy_help] {
+        assert!(
+            !help.contains("stagedctl project get"),
+            "the error names the repo; nothing else has to be looked up: {help}"
+        );
+    }
+
+    // The output of a project note's move lists its children.
+    assert!(
+        move_help.contains("The output lists each child by its\n                 reference"),
+        "{move_help}"
+    );
 }
 
 #[test]
@@ -741,6 +910,13 @@ fn the_guide_describes_both_verbs() {
         "an unquoted `#` starts a shell comment",
         "both projects",
         "the user can move the note back or delete the copy",
+        "The output lists each child by its reference",
+        "the error names it",
+        "Exit 4 (`scope_denied`)",
+        "A reference that names no note of its kind also exits 4",
+        "a message that says \"not found\"",
+        "embeds an image or video from such a project",
+        "refused for media a child note embeds too",
     ] {
         assert!(flat.contains(expected), "the guide lacks {expected:?}");
     }

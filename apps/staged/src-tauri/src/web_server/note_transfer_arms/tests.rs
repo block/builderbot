@@ -810,17 +810,66 @@ async fn a_note_id_that_names_no_note_of_that_kind_is_refused_by_scope_when_conf
 // The answers stagedctl reads
 // ---------------------------------------------------------------------------
 
-/// One answer of each kind, as a control caller receives it. `stagedctl`
-/// parses this same file in its own tests (`notes/tests.rs`), so the names
-/// the app writes and the names the CLI reads are held to one document, and
-/// a change to either side fails a test until both agree.
+/// One answer of each kind, as a control caller receives it, cut down to
+/// the fields `stagedctl` reads. `stagedctl` parses this same file in its
+/// own tests (`notes/tests.rs`), so the names the app writes and the names
+/// the CLI reads are held to one document. The app's answer has to contain
+/// it. A field it pins that is renamed, removed or answered differently
+/// fails a test until both sides agree. A field it does not pin, such as
+/// one a model gains, passes.
 const ANSWERS_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/note_transfer/control/fixtures/answers.json"
 );
 
-/// Set to rewrite the fixture from what the app answers now.
+/// Set to `1` to rewrite the fixture's values from what the app answers
+/// now. The fields it pins stay the ones it has, so add or drop one by
+/// hand. A field the answer no longer has stops the rewrite.
 const UPDATE_ANSWERS_FIXTURE: &str = "STAGED_UPDATE_NOTE_TRANSFER_ANSWERS";
+
+/// The part of `answer` that `pinned` names: of an object, the fields
+/// `pinned` has, and of a list, each item against the item `pinned` has in
+/// its place. Anything else is `answer` as it stands. `answer` contains
+/// `pinned` when this is equal to `pinned`, whatever else `answer` carries.
+///
+/// A field `pinned` has and `answer` lacks is an error that names it, and
+/// so is a list of another length. `null` is a value like any other: a
+/// field pinned as `null` has to be there.
+fn pinned_part(answer: &Value, pinned: &Value, path: &str) -> Result<Value, String> {
+    match (answer, pinned) {
+        (Value::Object(answer), Value::Object(pinned)) => pinned
+            .iter()
+            .map(|(key, pinned)| {
+                let path = match path {
+                    "" => key.clone(),
+                    path => format!("{path}.{key}"),
+                };
+                let value = answer
+                    .get(key)
+                    .ok_or_else(|| format!("the answer has no `{path}`"))?;
+                Ok((key.clone(), pinned_part(value, pinned, &path)?))
+            })
+            .collect::<Result<serde_json::Map<_, _>, _>>()
+            .map(Value::Object),
+        (Value::Array(answer), Value::Array(pinned)) => {
+            if answer.len() != pinned.len() {
+                return Err(format!(
+                    "`{path}` has {} items in the answer and {} in the fixture",
+                    answer.len(),
+                    pinned.len()
+                ));
+            }
+            answer
+                .iter()
+                .zip(pinned)
+                .enumerate()
+                .map(|(at, (answer, pinned))| pinned_part(answer, pinned, &format!("{path}[{at}]")))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        _ => Ok(answer.clone()),
+    }
+}
 
 /// `answer` with what differs from run to run made the same: each id is
 /// replaced by the name `names` gives it, and each timestamp by `0`. An id
@@ -856,48 +905,34 @@ fn settled(answer: &Value, names: &[(String, &str)]) -> Value {
     }
 }
 
-/// The landing branch of `note_id` and the repo it tracks, by id.
-fn landing_ids(f: &Fixture, note_id: &str) -> (String, String) {
-    let branch_id = f.branch_of(note_id);
-    let branch = f.store.get_branch(&branch_id).unwrap().unwrap();
-    (branch_id, branch.project_repo_id.expect("a tracked repo"))
-}
-
 /// A move of a branch note and a move of a project note, each into a
 /// project that has to gain a repo for it, answered to the session. These
-/// are the two shapes `stagedctl` reads, with every part of them filled in:
-/// the note item, the landing branch and repo, the children and theirs, and
-/// the repos added.
+/// are the two shapes `stagedctl` reads: the note item, the landing branch
+/// and repo, the children and theirs, and the repos added. Each has to
+/// contain what the fixture pins of it.
 #[tokio::test]
-async fn the_answers_are_the_ones_stagedctl_is_tested_against() {
+async fn the_answers_contain_the_ones_stagedctl_is_tested_against() {
     // A branch note, whose repo the destination lacks.
     let f = fixture();
-    let (note, session) = f.session_note(&f.widgets, "Findings");
-    let answer = f
+    let (note, _) = f.session_note(&f.widgets, "Findings");
+    let branch_note = f
         .control(
             "move_note_to_project",
             json!({ "noteId": note.id, "targetProjectId": f.created.id }),
         )
         .await
         .unwrap();
-    let (branch_id, repo_id) = landing_ids(&f, &note.id);
-    let branch_note = settled(
-        &answer,
-        &[
-            (note.id, "note-findings"),
-            (session.id, "session-findings"),
-            (f.created.id.clone(), "project-created"),
-            (branch_id, "branch-widgets"),
-            (repo_id, "repo-widgets"),
-        ],
-    );
+    let mut names = vec![
+        (f.branch_of(&note.id), "branch-widgets"),
+        (note.id, "note-findings"),
+    ];
 
     // A project note with two children. The destination tracks the repo of
     // one and gains the other's.
     let f = fixture();
     let (parent, children) = f.family();
     f.attach(&f.created.id, widgets_repo()).unwrap();
-    let mut answer = f
+    let mut project_note = f
         .control(
             "move_project_note_to_project",
             json!({ "projectNoteId": parent.id, "targetProjectId": f.created.id }),
@@ -906,41 +941,100 @@ async fn the_answers_are_the_ones_stagedctl_is_tested_against() {
         .unwrap();
     // The app lists children newest first, and these two were written in
     // the same instant. By title, so the fixture has one order.
-    answer["children"]
+    project_note["children"]
         .as_array_mut()
         .expect("the children were read back")
         .sort_by_key(|child| child["title"].as_str().map(str::to_owned));
-    let (web_branch, web_repo) = landing_ids(&f, &children[0].id);
-    let (gadgets_branch, gadgets_repo) = landing_ids(&f, &children[1].id);
-    let project_note = settled(
-        &answer,
-        &[
-            (parent.id, "project-note-plan"),
-            (parent.session_id.expect("a session"), "session-plan"),
-            (f.created.id.clone(), "project-created"),
-            (children[0].id.clone(), "note-web"),
-            (web_branch, "branch-widgets"),
-            (web_repo, "repo-widgets"),
-            (children[1].id.clone(), "note-gadgets"),
-            (gadgets_branch, "branch-gadgets"),
-            (gadgets_repo, "repo-gadgets"),
-        ],
-    );
+    names.extend([
+        (parent.id, "project-note-plan"),
+        (f.branch_of(&children[0].id), "branch-widgets"),
+        (children[0].id.clone(), "note-web"),
+        (f.branch_of(&children[1].id), "branch-gadgets"),
+        (children[1].id.clone(), "note-gadgets"),
+    ]);
 
+    let pinned: Value = serde_json::from_str(
+        &std::fs::read_to_string(ANSWERS_FIXTURE).expect("the answers fixture"),
+    )
+    .expect("the answers fixture is JSON");
+    let remedy = format!(
+        "If that is meant, change what stagedctl reads (`Landed` in its `notes.rs`) and the \
+         fixture to match. {UPDATE_ANSWERS_FIXTURE}=1 rewrites the fixture's values. \
+         stagedctl's tests read the same file"
+    );
     let answers = json!({ "branchNote": branch_note, "projectNote": project_note });
-    if std::env::var_os(UPDATE_ANSWERS_FIXTURE).is_some() {
+    let answers = match pinned_part(&answers, &pinned, "") {
+        Ok(part) => settled(&part, &names),
+        Err(gone) => panic!("{gone}, which stagedctl reads. {remedy}"),
+    };
+    if std::env::var(UPDATE_ANSWERS_FIXTURE).as_deref() == Ok("1") {
         let mut text = serde_json::to_string_pretty(&answers).unwrap();
         text.push('\n');
         std::fs::write(ANSWERS_FIXTURE, text).expect("write the answers fixture");
         return;
     }
-    let pinned: Value = serde_json::from_str(
-        &std::fs::read_to_string(ANSWERS_FIXTURE).expect("the answers fixture"),
-    )
-    .expect("the answers fixture is JSON");
     assert_eq!(
         answers, pinned,
-        "a control caller's answer changed. If that is meant, rewrite the fixture with \
-         {UPDATE_ANSWERS_FIXTURE}=1 and run stagedctl's tests, which read the same file"
+        "a control caller's answer no longer contains the fixture. {remedy}"
+    );
+}
+
+/// The check the fixture is held to, on answers made up for it: a field
+/// the answer gains passes, and one that is renamed, removed or answered
+/// differently does not.
+#[test]
+fn an_answer_contains_the_fixture_whatever_else_it_carries() {
+    let pinned = json!({
+        "note": { "id": "n1", "title": "Plan" },
+        "repo": { "githubRepo": "acme/widgets", "subpath": null },
+        "addedRepos": [{ "githubRepo": "acme/widgets" }],
+    });
+    let answer = json!({
+        "note": { "id": "n1", "title": "Plan", "content": "body", "readAt": null },
+        "repo": { "id": "r1", "githubRepo": "acme/widgets", "subpath": null },
+        "addedRepos": [{ "githubRepo": "acme/widgets", "subpath": null }],
+        "branch": null,
+    });
+    assert_eq!(pinned_part(&answer, &pinned, ""), Ok(pinned.clone()));
+
+    // Renamed or removed: a pinned field is not there, `null` or not.
+    let mut renamed = answer.clone();
+    let repo = renamed["repo"].as_object_mut().unwrap();
+    let name = repo.remove("githubRepo").unwrap();
+    repo.insert("github_repo".into(), name);
+    assert_eq!(
+        pinned_part(&renamed, &pinned, ""),
+        Err("the answer has no `repo.githubRepo`".to_string())
+    );
+    let mut removed = answer.clone();
+    removed["repo"].as_object_mut().unwrap().remove("subpath");
+    assert_eq!(
+        pinned_part(&removed, &pinned, ""),
+        Err("the answer has no `repo.subpath`".to_string())
+    );
+
+    // Answered differently: there, with another value or another shape.
+    for (field, value) in [
+        ("/note/title", json!("Plans")),
+        ("/repo/subpath", json!("apps/web")),
+        ("/repo", Value::Null),
+        ("/addedRepos/0/githubRepo", json!("acme/gadgets")),
+    ] {
+        let mut changed = answer.clone();
+        *changed.pointer_mut(field).unwrap() = value;
+        assert_ne!(
+            pinned_part(&changed, &pinned, ""),
+            Ok(pinned.clone()),
+            "{field}"
+        );
+    }
+
+    // A list is held item for item, so one that grew is not contained.
+    let mut grown = answer.clone();
+    let added = grown["addedRepos"].as_array_mut().unwrap();
+    added.push(json!({ "githubRepo": "acme/gadgets" }));
+    assert_eq!(
+        pinned_part(&grown, &pinned, ""),
+        Err("`addedRepos` has 2 items in the answer and 1 in the fixture".to_string())
     );
 }

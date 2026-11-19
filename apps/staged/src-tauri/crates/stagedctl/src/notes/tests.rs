@@ -441,7 +441,8 @@ fn children_the_app_could_not_read_back_are_not_reported_as_none() {
         "project note #project-note:pn1 moved to project \"Target\"\n\
          \x20 project id: p2\n\
          \x20 title: Plan\n\
-         \x20 child notes: the app could not read them back; any the note has moved with it\n\
+         \x20 child notes: the app could not read them back; any child notes it has moved with \
+         it\n\
          \x20 added repo: acme/gadgets (the project did not track it; its branch is set up in \
          the background)\n\
          next: stagedctl timeline show p2"
@@ -722,12 +723,12 @@ fn the_requests_use_the_argument_names_the_apps_commands_read() {
     }
 }
 
-/// One answer of each kind, as the app gives it to a control caller. The
-/// app's own tests run a real move of a branch note and of a project note
-/// and hold the answers to this file
-/// (`web_server/note_transfer_arms/tests.rs`), with ids named and
-/// timestamps zeroed. Reading the same file here holds the names the CLI
-/// reads to the names the app writes.
+/// One answer of each kind, as the app gives it to a control caller, cut
+/// down to the fields the CLI reads. The app's own tests run a real move of
+/// a branch note and of a project note and assert that the answers contain
+/// this file (`web_server/note_transfer_arms/tests.rs`), with ids named.
+/// Reading the same file here holds the names the CLI reads to the names
+/// the app writes.
 const APP_ANSWERS: &str =
     include_str!("../../../../src/note_transfer/control/fixtures/answers.json");
 

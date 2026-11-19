@@ -356,7 +356,8 @@ fn render(
             }
         }
         Children::Unread if transfer == Transfer::Move => human.push(
-            "  child notes: the app could not read them back; any the note has moved with it"
+            "  child notes: the app could not read them back; any child notes it has moved \
+             with it"
                 .to_string(),
         ),
         // A copy is a new note with no children, read or not.

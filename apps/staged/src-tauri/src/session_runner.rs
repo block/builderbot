@@ -38,9 +38,8 @@
 
 pub(crate) mod attachments;
 mod disconnect;
+mod failed_run;
 mod late_stop;
-// Nothing calls the classifier until network failures are parked as a pause.
-#[cfg_attr(not(test), allow(dead_code))]
 mod network_failure;
 pub(crate) mod reconcile;
 
@@ -3310,45 +3309,44 @@ fn finish_session_run(
                 .get_session(&session_id_for_status)
                 .ok()
                 .flatten();
-            let provider_metadata = session_snapshot
-                .as_ref()
-                .and_then(|session| session.provider_metadata.as_ref());
             let provider = session_snapshot
                 .as_ref()
                 .and_then(|session| session.provider.as_deref())
                 .or(config.provider.as_deref());
-            // A rate limit pauses the session; anything else fails it, as a
-            // lost remote agent when that is what the error says.
-            let completion_reason =
-                match completion_reason_for_driver_error(message, provider_metadata) {
-                    CompletionReason::Crashed => failed_run_completion_reason(message),
-                    reason => reason,
-                };
-            let rate_limit_recovery =
-                (completion_reason == CompletionReason::RateLimited).then(|| {
-                    rate_limit_recovery_details(
-                        message,
-                        provider_metadata,
-                        crate::store::now_timestamp(),
-                    )
-                });
-            if let Some(recovery) = rate_limit_recovery.as_ref() {
-                crate::rate_limit_metrics::record_rate_limit_hit(
+            // A provider limit or a network failure pauses the session;
+            // anything else fails it (see `failed_run`).
+            let decision = failed_run::decide_failed_run(
+                session_snapshot.as_ref(),
+                config.provider.as_deref(),
+                message,
+                crate::store::now_timestamp(),
+            );
+            match (decision.network_failure, decision.recovery.as_ref()) {
+                (Some(failure), _) => {
+                    log::warn!(
+                        "Session {session_id_for_status}: the prompt failed on the network \
+                         ({}); pausing it for an automatic resume",
+                        failure.signal()
+                    );
+                    crate::rate_limit_metrics::record_network_pause(
+                        &session_id_for_status,
+                        provider,
+                        failure.signal(),
+                    );
+                }
+                (None, Some(recovery)) => crate::rate_limit_metrics::record_rate_limit_hit(
                     &session_id_for_status,
                     provider,
                     recovery.kind.as_deref(),
                     recovery.resets_at.is_some(),
-                );
+                ),
+                (None, None) => {}
             }
             (
-                if completion_reason == CompletionReason::RateLimited {
-                    "paused"
-                } else {
-                    "error"
-                },
+                decision.status(),
                 Some(innermost_error_sentence(message).unwrap_or_else(|| message.clone())),
-                completion_reason,
-                rate_limit_recovery,
+                decision.completion_reason,
+                decision.recovery,
             )
         }
     };

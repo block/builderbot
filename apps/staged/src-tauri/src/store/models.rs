@@ -574,7 +574,9 @@ pub enum CompletionReason {
     /// output ended, or bloxlet reports it stopped — e.g. bloxlet restarted
     /// under it. The error message names the cause.
     RemoteAgentLost,
-    /// Agent stopped because the provider reported a rate or usage limit.
+    /// Paused for an automatic resume. The provider reported a rate or usage
+    /// limit, or the prompt failed on the network: `rate_limit_kind` is
+    /// `"network"` for the latter. The name predates the network case.
     RateLimited,
     /// Staged closed while the session was still running.
     AppQuit,

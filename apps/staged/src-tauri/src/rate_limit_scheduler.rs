@@ -1,4 +1,6 @@
-//! Jittered auto-recovery for sessions paused by provider API limits.
+//! Jittered auto-recovery for sessions paused by provider API limits, and for
+//! sessions whose prompt failed on the network ([`NETWORK_PAUSE_KIND`]), which
+//! share the same pause.
 //!
 //! Retry bookkeeping is stored under `provider_metadata.staged` so it survives
 //! restarts without widening the stable session schema. The scheduler only
@@ -18,6 +20,29 @@ use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::store::{MessageRole, Session, Store};
 
 pub(crate) const AUTO_RETRY_RESUME_PROMPT: &str = "Continue where you left off.";
+/// The resume prompt for a session paused by a network failure. The agent's
+/// turn was cut off mid-request, so it is told to check its work first.
+pub(crate) const NETWORK_RESUME_PROMPT: &str = "Your previous turn was cut off by a network error \
+     before it finished. Check the state of your work, then continue where you left off.";
+
+/// The `rate_limit_kind` of a session paused because its prompt failed on the
+/// network, not on a provider limit.
+///
+/// Such a session shares the rate-limit pause (`paused` with
+/// `CompletionReason::RateLimited`) so that Stop, the scheduler's claim and
+/// the queue gate treat it the same way; this kind is the only thing that
+/// tells the two apart. It carries no reset time.
+pub(crate) const NETWORK_PAUSE_KIND: &str = "network";
+
+/// The prompt an automatic resume sends when the user queued no message of
+/// their own, chosen by what paused the session.
+pub(crate) fn auto_resume_prompt(rate_limit_kind: Option<&str>) -> &'static str {
+    if rate_limit_kind == Some(NETWORK_PAUSE_KIND) {
+        NETWORK_RESUME_PROMPT
+    } else {
+        AUTO_RETRY_RESUME_PROMPT
+    }
+}
 
 const TICK_INTERVAL_SECS: u64 = 15;
 const MAX_AUTO_RETRY_ATTEMPTS: u32 = 8;
@@ -1516,6 +1541,91 @@ mod tests {
                 .map(|message| message.content.as_str()),
             Some("actually do this instead")
         );
+    }
+
+    /// A running session parked the way the runner parks a network failure.
+    fn pause_for_network(store: &Store, session_id: &str) {
+        assert!(pause_for_rate_limit(
+            store,
+            session_id,
+            Some("Can't reach the API server"),
+            None,
+            Some(NETWORK_PAUSE_KIND),
+            10_000,
+        )
+        .unwrap());
+    }
+
+    fn claimed_ticket(
+        store: &Arc<Store>,
+        session_id: &str,
+    ) -> Box<crate::session_commands::RateLimitResumeTicket> {
+        match claim_for_auto_resume(store, session_id).unwrap() {
+            AutoResumeClaim::Claimed(ticket) => ticket,
+            _ => panic!("expected the idle branch to yield a claim"),
+        }
+    }
+
+    #[test]
+    fn a_network_pause_is_scheduled_under_the_existing_backoff() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_running_session(&store);
+        pause_for_network(&store, &session.id);
+
+        let listed = store.get_rate_limited_paused_sessions().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].rate_limit_kind.as_deref(), Some("network"));
+        let state = auto_recovery_from_metadata(listed[0].provider_metadata.as_ref()).unwrap();
+        assert_eq!(state.attempt, 1);
+        let next_retry_at = state.next_retry_at.expect("a retry is scheduled");
+        assert!((10_000 + MIN_RETRY_DELAY_MS..=10_000 + BASE_BACKOFF_MS).contains(&next_retry_at));
+        assert!(!is_due(&state, 10_000));
+        assert!(is_due(&state, next_retry_at));
+    }
+
+    #[test]
+    fn auto_resume_of_a_network_pause_sends_the_network_prompt() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_running_session(&store);
+        pause_for_network(&store, &session.id);
+
+        let ticket = claimed_ticket(&store, &session.id);
+
+        assert_eq!(ticket.rate_limit_kind.as_deref(), Some("network"));
+        assert_eq!(ticket.prompt(), NETWORK_RESUME_PROMPT);
+        assert!(NETWORK_RESUME_PROMPT
+            .starts_with("Your previous turn was cut off by a network error before it finished. "));
+    }
+
+    #[test]
+    fn a_queued_message_replaces_the_network_prompt() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_running_session(&store);
+        store
+            .add_queued_session_message(&session.id, "actually do this instead", &[], None)
+            .unwrap();
+        pause_for_network(&store, &session.id);
+
+        let ticket = claimed_ticket(&store, &session.id);
+
+        assert_eq!(ticket.rate_limit_kind.as_deref(), Some("network"));
+        assert_eq!(ticket.prompt(), "actually do this instead");
+    }
+
+    #[test]
+    fn auto_resume_of_an_api_limit_pause_keeps_the_plain_prompt() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, paused) = branch_with_paused_session(&store);
+
+        assert_eq!(
+            claimed_ticket(&store, &paused.id).prompt(),
+            AUTO_RETRY_RESUME_PROMPT
+        );
+        assert_eq!(
+            auto_resume_prompt(Some("five_hour")),
+            AUTO_RETRY_RESUME_PROMPT
+        );
+        assert_eq!(auto_resume_prompt(None), AUTO_RETRY_RESUME_PROMPT);
     }
 
     #[test]

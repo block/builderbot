@@ -1788,6 +1788,20 @@ pub(crate) struct RateLimitResumeTicket {
     pub rate_limit_kind: Option<String>,
 }
 
+impl RateLimitResumeTicket {
+    /// What the resume sends: the user's queued message when there is one,
+    /// otherwise the synthetic prompt for what paused the session.
+    pub(crate) fn prompt(&self) -> String {
+        match &self.queued_message {
+            Some(message) => message.content.clone(),
+            None => {
+                crate::rate_limit_scheduler::auto_resume_prompt(self.rate_limit_kind.as_deref())
+                    .to_string()
+            }
+        }
+    }
+}
+
 pub(crate) async fn auto_resume_rate_limited_session(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -1797,19 +1811,14 @@ pub(crate) async fn auto_resume_rate_limited_session(
     ticket: RateLimitResumeTicket,
 ) -> Result<(), String> {
     // The post-success drain cascade delivers any remaining queued messages.
-    let (prompt, image_ids, branch_id, queued_message_id) = match &ticket.queued_message {
+    let prompt = ticket.prompt();
+    let (image_ids, branch_id, queued_message_id) = match &ticket.queued_message {
         Some(message) => (
-            message.content.clone(),
             Some(message.image_ids.clone()),
             message.branch_id.clone(),
             Some(message.id.clone()),
         ),
-        None => (
-            crate::rate_limit_scheduler::AUTO_RETRY_RESUME_PROMPT.to_string(),
-            None,
-            None,
-            None,
-        ),
+        None => (None, None, None),
     };
 
     let result = resume_session_for_store(

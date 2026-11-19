@@ -2627,6 +2627,23 @@ pub fn start_session(
                     }
                 }
 
+                // The `write_note` result asks the agent to close a saved
+                // turn with a bare "Done", which the chat pane hides. A turn
+                // that saved a note and ended any other way is logged, as
+                // one line with lengths only: a rising count means the
+                // wording has stopped working. This sits after the outbox
+                // collection so a remote note is in the slot, and before the
+                // Pikchr check so a turn that goes on to a repair is counted
+                // too.
+                if is_note_session {
+                    crate::note_done::log_settled_turn_note_done_drift(
+                        &store,
+                        &config.session_id,
+                        turn_start_message_id,
+                        &note_slot,
+                    );
+                }
+
                 // Diagrams are checked where the note landed. With a
                 // `write_note` tool attached and a published note in the slot
                 // — filled locally by the tool, remotely by the outbox

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { writeNoteToolNameCases } from './testStubs/noteDoneCases';
 import {
   isWriteNoteToolName,
   writeNoteCallFromInput,
@@ -12,36 +13,20 @@ const steps = {
 };
 
 describe('isWriteNoteToolName', () => {
-  it.each([
-    ['Claude Code', 'mcp__staged__write_note'],
-    ['Goose', 'staged: write note'],
-    ['Codex', 'mcp.staged.write_note'],
-    ['a bare dotted name', 'staged.write_note'],
-    ['a bare underscored name', 'staged_write_note'],
-    ['Codex in another case, padded', '  MCP.Staged.Write_Note  '],
-    ['Goose in another case, hyphenated', 'Staged: Write-Note'],
-  ])('recognises the %s spelling: %j', (_, name) => {
+  // The cases live in testStubs/noteDone.cases.json, which the backend's copy of this
+  // rule runs too (src-tauri/src/note_done/tests.rs): the drift log finds the
+  // call by the same names as the chat pane.
+  it.each(writeNoteToolNameCases.accept)('recognises the %s spelling: %j', (_, name) => {
     expect(isWriteNoteToolName(name)).toBe(true);
   });
 
-  it.each([
-    ["another server's tool, Claude Code form", 'mcp__other__write_note'],
-    ["another server's tool, Codex form", 'mcp.other.write_note'],
-    ["another server's tool, Goose form", 'other: write note'],
-    ['a server whose name only ends in staged', 'mcp.unstaged.write_note'],
-    ['another tool on the staged server, Codex form', 'mcp.staged.read_note'],
-    ['a longer tool name, Codex form', 'mcp.staged.write_notes'],
-    ['a doubled prefix', 'mcp.mcp.staged.write_note'],
-    ['a prefix with no separator', 'mcpstaged.write_note'],
-    ['the tool with no server', 'write_note'],
-    ['the Codex prefix with no server', 'mcp.write_note'],
-    ['the name inside a longer title', 'Ran mcp.staged.write_note'],
-    ['a built-in tool', 'Write'],
-    ['an empty string', ''],
-    ['null', null],
-    ['undefined', undefined],
-  ])('rejects %s: %j', (_, name) => {
+  it.each(writeNoteToolNameCases.reject)('rejects %s: %j', (_, name) => {
     expect(isWriteNoteToolName(name)).toBe(false);
+  });
+
+  it('rejects a missing name', () => {
+    expect(isWriteNoteToolName(null)).toBe(false);
+    expect(isWriteNoteToolName(undefined)).toBe(false);
   });
 });
 

@@ -94,7 +94,7 @@ fn format_tool_call_content(title: &str, raw_input: Option<&serde_json::Value>) 
 
 /// The title a stored tool call row was written with: the inverse of
 /// [`format_tool_call_content`].
-fn stored_tool_call_title(content: &str) -> String {
+pub(crate) fn stored_tool_call_title(content: &str) -> String {
     serde_json::from_str::<serde_json::Value>(content)
         .ok()
         .and_then(|value| value.get("name")?.as_str().map(str::to_string))

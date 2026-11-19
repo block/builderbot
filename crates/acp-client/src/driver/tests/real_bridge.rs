@@ -23,6 +23,11 @@
 //! lines are always captured for assertions). The checks are the invariants,
 //! not the agent's wording: one user row, in transcript order, the turn
 //! resolving once, the same child across an interrupt, no hang.
+//!
+//! One scenario is about the agent's wording, on purpose: after Staged's
+//! `write_note` tool saves a note, the agent is asked to close the turn with
+//! a bare "Done" (scenario 8). It attaches the Staged app's own MCP script
+//! and so also needs `node` and the `apps/staged` tree beside this crate.
 
 use super::*;
 use crate::driver::{SessionConnection, SessionSettled, SteerOutcome, TurnControlHandle};
@@ -108,6 +113,12 @@ enum Ev {
         id: String,
         title: String,
     },
+    /// A later title for a tool call: bridges announce some calls under a
+    /// placeholder and name them in an update.
+    ToolTitle {
+        id: String,
+        title: String,
+    },
     ToolResult {
         id: String,
     },
@@ -151,16 +162,24 @@ struct Trace {
     /// it, or [`PERMISSION_HOLD`] passes.
     hold_next_permission: AtomicBool,
     release_permission: tokio::sync::Notify,
+    /// The caller's answer to `should_finish_after_response`: whether the
+    /// response that just completed is the finished artifact. `None` never
+    /// finishes early, like a writer with no artifact to recognise.
+    finish_after_response: Option<FinishAfterResponse>,
 }
 
+/// See [`Trace::finish_after_response`].
+type FinishAfterResponse = Box<dyn Fn() -> bool + Send + Sync>;
+
 impl Trace {
-    fn new(label: &str) -> Self {
+    fn new(label: &str, finish_after_response: Option<FinishAfterResponse>) -> Self {
         Self {
             label: label.to_string(),
             started: Instant::now(),
             events: std::sync::Mutex::new(Vec::new()),
             hold_next_permission: AtomicBool::new(false),
             release_permission: tokio::sync::Notify::new(),
+            finish_after_response,
         }
     }
 
@@ -208,35 +227,7 @@ impl Trace {
     }
 
     fn rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
-        let mut open = String::new();
-        let flush = |open: &mut String, rows: &mut Vec<Row>| {
-            if !open.trim().is_empty() {
-                rows.push(Row::Assistant(std::mem::take(open)));
-            } else {
-                open.clear();
-            }
-        };
-        for (_, ev) in self.events() {
-            match ev {
-                Ev::Append(text) => open.push_str(&text),
-                Ev::Finalize => flush(&mut open, &mut rows),
-                Ev::User(text) => {
-                    flush(&mut open, &mut rows);
-                    rows.push(Row::User(text));
-                }
-                Ev::ToolCall { title, .. } => {
-                    flush(&mut open, &mut rows);
-                    rows.push(Row::Tool(title));
-                }
-                Ev::ToolResult { .. }
-                | Ev::Permission { .. }
-                | Ev::PermissionCancelled { .. }
-                | Ev::Event(_) => {}
-            }
-        }
-        flush(&mut open, &mut rows);
-        rows
+        rows_from(self.events().into_iter().map(|(_, ev)| ev))
     }
 
     fn dump_rows(&self) {
@@ -270,10 +261,54 @@ impl Trace {
     }
 }
 
+/// The transcript rows `events` make: assistant text between boundaries,
+/// user rows, tool calls under the title they were announced with.
+fn rows_from(events: impl IntoIterator<Item = Ev>) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let mut open = String::new();
+    let flush = |open: &mut String, rows: &mut Vec<Row>| {
+        if !open.trim().is_empty() {
+            rows.push(Row::Assistant(std::mem::take(open)));
+        } else {
+            open.clear();
+        }
+    };
+    for ev in events {
+        match ev {
+            Ev::Append(text) => open.push_str(&text),
+            Ev::Finalize => flush(&mut open, &mut rows),
+            Ev::User(text) => {
+                flush(&mut open, &mut rows);
+                rows.push(Row::User(text));
+            }
+            Ev::ToolCall { title, .. } => {
+                flush(&mut open, &mut rows);
+                rows.push(Row::Tool(title));
+            }
+            Ev::ToolTitle { .. }
+            | Ev::ToolResult { .. }
+            | Ev::Permission { .. }
+            | Ev::PermissionCancelled { .. }
+            | Ev::Event(_) => {}
+        }
+    }
+    flush(&mut open, &mut rows);
+    rows
+}
+
 #[async_trait::async_trait]
 impl MessageWriter for Trace {
     async fn append_text(&self, text: &str) {
         self.push(Ev::Append(text.to_string()));
+    }
+
+    async fn should_finish_after_response(&self) -> bool {
+        let Some(finish) = self.finish_after_response.as_ref() else {
+            return false;
+        };
+        let finish = finish();
+        self.push(Ev::Event(format!("finish-after-response={finish}")));
+        finish
     }
 
     async fn finalize(&self) {
@@ -303,10 +338,16 @@ impl MessageWriter for Trace {
 
     async fn update_tool_call_title(
         &self,
-        _tool_call_id: &str,
-        _title: Option<&str>,
+        tool_call_id: &str,
+        title: Option<&str>,
         _raw_input: Option<&serde_json::Value>,
     ) {
+        if let Some(title) = title {
+            self.push(Ev::ToolTitle {
+                id: tool_call_id.to_string(),
+                title: title.to_string(),
+            });
+        }
     }
 
     async fn record_tool_result(&self, tool_call_id: &str, _content: &str) {
@@ -454,6 +495,10 @@ struct ConnectOptions {
     /// Environment set over the process's own for the bridge.
     env: Vec<(&'static str, &'static str)>,
     resume: Option<Resume>,
+    /// MCP servers handed to the agent with the session.
+    mcp_servers: Vec<McpServer>,
+    /// See [`Trace::finish_after_response`].
+    finish_after_response: Option<FinishAfterResponse>,
 }
 
 struct Session {
@@ -481,7 +526,7 @@ impl Session {
         .await
     }
 
-    async fn connect_with(label: &str, options: ConnectOptions) -> Self {
+    async fn connect_with(label: &str, mut options: ConnectOptions) -> Self {
         install_logger();
         pin_bridge_dir();
         let provider = provider_id();
@@ -494,6 +539,7 @@ impl Session {
             .unwrap_or_else(|e| panic!("{e}: put the bridge on PATH (see the module docs)"))
             .with_env_snapshot(env)
             .with_background_hold(Some(BackgroundHoldConfig::default()))
+            .with_mcp_servers(std::mem::take(&mut options.mcp_servers))
             .with_steering_disabled(options.steering_disabled);
         let dir = match &options.resume {
             Some(resume) => resume.dir.clone(),
@@ -504,7 +550,7 @@ impl Session {
             )),
         };
         std::fs::create_dir_all(&dir).expect("temp working dir");
-        let trace = Arc::new(Trace::new(label));
+        let trace = Arc::new(Trace::new(label, options.finish_after_response.take()));
         let writer: Arc<dyn MessageWriter> = Arc::clone(&trace) as Arc<dyn MessageWriter>;
         let store = Arc::new(BridgeStore::default());
         if let Some(resume) = &options.resume {
@@ -1378,6 +1424,200 @@ async fn real_bridge_resume_loads_the_session_on_a_new_child() {
             );
             second.finish().await;
             let _ = std::fs::remove_dir_all(&dir);
+        })
+        .await;
+}
+
+// -----------------------------------------------------------------------------
+// Scenario 8: a saved note ends the turn with a bare "Done"
+// -----------------------------------------------------------------------------
+
+/// The Staged app's own rules for this scenario, compiled from its source:
+/// what counts as a bare "Done", and which tool call is `write_note`. The
+/// chat pane hides the closing message by the first rule and the app logs a
+/// turn that fails it, so a live agent is held here to exactly what ships.
+/// The file is kept free of dependencies for this include.
+#[path = "../../../../../apps/staged/src-tauri/src/note_done/rules.rs"]
+mod staged_note_done_rules;
+use staged_note_done_rules::{is_note_done_text, is_write_note_tool_name};
+
+/// The Staged session the MCP script is started for. It names the scratch
+/// directory the script keeps the draft and the saved note in.
+const NOTE_SESSION_ID: &str = "real-bridge-note";
+const NOTE_ORDERS_FILE: &str = "id,customer,total\n1,Ada,12.50\n2,Grace,8.00\n3,Linus,0.00\n";
+
+/// A first note turn, in the words Staged uses for the draft file and the
+/// call. It says nothing about how to end the turn: the closing word is asked
+/// for by the tool's description and by its saved result, which are the
+/// script's own, so this checks the wording that ships and not this prompt.
+fn note_prompt(draft: &Path) -> String {
+    format!(
+        "Read the file `orders.txt` in the current working directory. Then write a short note \
+         about it: put the note body, three short markdown bullet points on what the file \
+         holds, into your note draft file at `{}` using your file tools. Then publish the note \
+         by calling the `write_note` tool from the `staged` MCP server with the title `Orders \
+         file`. In Claude Code the tool's full name is `mcp__staged__write_note` and it may be \
+         deferred: if it is not in your loaded tools, load it with `ToolSearch \
+         select:mcp__staged__write_note` first, then call it with its schema. Do not pass the \
+         note body to the call, and do not write the note into your reply.",
+        draft.display()
+    )
+}
+
+/// Staged's MCP server as it runs on a Blox workstation, attached here over
+/// stdio: its `write_note` has the description and the saved result the app
+/// ships (the local tool's texts are tested equal to them in the app).
+/// `home` stands in for the home directory, through `env`, so the script's
+/// scratch directory is `home/.staged/sessions/<session id>` and nothing is
+/// written under the real `~/.staged`.
+fn staged_mcp_server(home: &Path) -> McpServer {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/staged/src-tauri/resources/remote/staged-mcp.cjs");
+    let script = script
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("the Staged MCP script {}: {e}", script.display()));
+    let node = crate::types::find_command("node")
+        .expect("node should be on PATH to run the Staged MCP script");
+    McpServer::Stdio(
+        McpServerStdio::new("staged", PathBuf::from("/usr/bin/env")).args(vec![
+            format!("HOME={}", home.display()),
+            node.to_string_lossy().into_owned(),
+            script.to_string_lossy().into_owned(),
+            NOTE_SESSION_ID.to_string(),
+            "turn-1".to_string(),
+        ]),
+    )
+}
+
+/// The transcript rows after the last `write_note` call and its tool group:
+/// what the agent wrote once the note was saved. `None` when the turn holds
+/// no `write_note` call. A call counts under any title it was given, since a
+/// bridge may announce it under a placeholder and name it in an update.
+fn rows_after_write_note_call(events: &[Ev]) -> Option<Vec<Row>> {
+    let named_write_note = |call_id: &str| {
+        events.iter().any(|ev| match ev {
+            Ev::ToolCall { id, title } | Ev::ToolTitle { id, title } => {
+                id == call_id && is_write_note_tool_name(title)
+            }
+            _ => false,
+        })
+    };
+    let call = events
+        .iter()
+        .rposition(|ev| matches!(ev, Ev::ToolCall { id, .. } if named_write_note(id)))?;
+    let rows = rows_from(events[call + 1..].iter().cloned());
+    // Other calls beside it are the same tool group: Codex completes a review
+    // item there, and Claude sometimes issues a shell call in the same message.
+    let group_end = rows
+        .iter()
+        .position(|row| !matches!(row, Row::Tool(_)))
+        .unwrap_or(rows.len());
+    Some(rows[group_end..].to_vec())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "spawns the installed ACP bridge and calls the model"]
+async fn real_bridge_saved_note_turn_ends_with_a_bare_done() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            pin_bridge_dir();
+            let home = std::env::temp_dir().join(format!(
+                "acp-real-bridge-note-home-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_nanos())
+            ));
+            let outbox = home.join(".staged/sessions").join(NOTE_SESSION_ID);
+            std::fs::create_dir_all(&outbox).expect("the note session's scratch dir");
+            let draft = outbox.join("draft.md");
+            // The script writes this marker last, once the note is saved.
+            let saved_marker = outbox.join("done");
+
+            // Like the app's writer, which finishes a response once the
+            // session's note is saved, whatever the assistant text says.
+            let marker = saved_marker.clone();
+            let mut session = Session::connect_with(
+                "note-done",
+                ConnectOptions {
+                    mcp_servers: vec![staged_mcp_server(&home)],
+                    finish_after_response: Some(Box::new(move || marker.is_file())),
+                    ..ConnectOptions::default()
+                },
+            )
+            .await;
+            std::fs::write(session.dir.join("orders.txt"), NOTE_ORDERS_FILE).expect("orders.txt");
+
+            let prompt = note_prompt(&draft);
+            let turn = tokio::time::timeout(TURN_TIMEOUT, session.connection.prompt(&prompt, &[]))
+                .await
+                .expect("the note turn should end");
+            eprintln!(
+                "[note-done] prompt() resolved {turn:?} at {:.2}s",
+                session.trace.elapsed().as_secs_f64()
+            );
+            assert_eq!(turn, Ok(AgentRunOutcome::Completed));
+
+            // Without a background hold in the way, the connection settles on
+            // its own; how it settled is read before the teardown below.
+            let settled = match session.settled_rx.take() {
+                Some(rx) => tokio::time::timeout(SETTLE_WAIT, rx)
+                    .await
+                    .ok()
+                    .and_then(Result::ok),
+                None => None,
+            };
+            let reason = settled.as_ref().map(|settled| settled.reason);
+
+            let events: Vec<Ev> = session
+                .trace
+                .events()
+                .into_iter()
+                .map(|(_, ev)| ev)
+                .collect();
+            let note = std::fs::read_to_string(outbox.join("note.md")).unwrap_or_default();
+            let closing = rows_after_write_note_call(&events);
+            eprintln!(
+                "SCENARIO 8: {} saved a {}-byte note; after the write_note call: {closing:?}; \
+                 settled {reason:?}",
+                provider_id(),
+                note.len()
+            );
+            assert!(
+                saved_marker.is_file() && !note.trim().is_empty(),
+                "the turn should save a note through write_note; rows: {:#?}",
+                session.trace.rows()
+            );
+            let closing = closing.unwrap_or_else(|| {
+                panic!(
+                    "no write_note call in the turn; rows: {:#?}",
+                    session.trace.rows()
+                )
+            });
+            assert!(
+                !closing.is_empty(),
+                "the turn ended at the saved call, with no closing message; rows: {:#?}",
+                session.trace.rows()
+            );
+            for row in &closing {
+                assert!(
+                    matches!(row, Row::Assistant(text) if is_note_done_text(text)),
+                    "after the saved call the agent should send a bare \"Done\" and nothing \
+                     else, but the turn went on with {row:?}; all of it: {closing:#?}"
+                );
+            }
+            // The finish mark is driven by the Claude SDK's result frame, so
+            // only that bridge is held to it; the others end their turn the
+            // ordinary way, and the reason is printed above.
+            if provider_id() == "claude" {
+                assert_eq!(
+                    reason,
+                    Some(SessionSettleReason::ResponseComplete),
+                    "a saved note and a completed response should release the session"
+                );
+            }
+            session.finish().await;
+            let _ = std::fs::remove_dir_all(&home);
         })
         .await;
 }

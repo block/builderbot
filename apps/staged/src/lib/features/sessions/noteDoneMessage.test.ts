@@ -6,58 +6,18 @@ import {
   type AcpTranscriptOptions,
   type ToolStatus,
 } from './acpTranscript';
+import { doneTextCases } from './testStubs/noteDoneCases';
 import { NOTE_DONE_WORD, hiddenNoteDoneMessageIds, isNoteDoneText } from './noteDoneMessage';
 
 describe('isNoteDoneText', () => {
-  it.each([
-    ['the word as asked for', 'Done'],
-    ['a trailing full stop', 'Done.'],
-    ['a trailing exclamation mark', 'Done!'],
-    ['lower case', 'done'],
-    ['upper case', 'DONE'],
-    ['surrounding whitespace', '  Done \n'],
-    ['a trailing newline, as a streamed chunk ends', 'Done\n\n'],
-    ['bold', '**Done**'],
-    ['italic, asterisk', '*Done*'],
-    ['italic, underscore', '_Done_'],
-    ['inline code', '`Done`'],
-    ['double quotes', '"Done"'],
-    ['single quotes', "'Done'"],
-    ['curly double quotes', '“Done”'],
-    ['curly single quotes', '‘Done’'],
-    ['a wrapper around the punctuation', '**Done.**'],
-    ['quotes around the punctuation', '"Done!"'],
-    ['a wrapper, lower case, padded', '\n `done` '],
-  ])('accepts %s', (_label, text) => {
+  // The cases live in testStubs/noteDone.cases.json, which the backend's copy of this
+  // rule runs too (src-tauri/src/note_done/tests.rs): the drift log and this
+  // filter must agree on what counts as "Done".
+  it.each(doneTextCases.accept)('accepts %s', (_label, text) => {
     expect(isNoteDoneText(text)).toBe(true);
   });
 
-  it.each([
-    ['an empty message', ''],
-    ['whitespace only', ' \n '],
-    ['only punctuation', '.'],
-    ['only a wrapper', '****'],
-    ['an emoji after the word', 'Done ✅'],
-    ['a sentence that starts with the word', 'Done, the note is saved'],
-    ['a sentence after the word', 'Done. The note is saved.'],
-    ['a sentence that ends with the word', 'The note is done'],
-    ['an answer that ends with a Done line', 'The bug is in `src/main.rs`.\n\nDone'],
-    ['a Done line before more text', 'Done\n\nOne more thing: the test is flaky.'],
-    ['the word twice', 'Done Done'],
-    ['two trailing marks', 'Done..'],
-    ['an ellipsis', 'Done…'],
-    ['another trailing mark', 'Done?'],
-    ['two pairs of wrappers', '**`Done`**'],
-    ['punctuation outside the wrapper', '**Done**.'],
-    ['a doubled underscore', '__Done__'],
-    ['an unclosed wrapper', '**Done'],
-    ['mismatched quotes', '"Done\''],
-    ['whitespace inside the wrapper', '** Done **'],
-    ['a longer word', 'Donee'],
-    ['another word', 'Finished'],
-    ['a heading', '# Done'],
-    ['a list item', '- Done'],
-  ])('rejects %s', (_label, text) => {
+  it.each(doneTextCases.reject)('rejects %s', (_label, text) => {
     expect(isNoteDoneText(text)).toBe(false);
   });
 

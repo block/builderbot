@@ -8,7 +8,12 @@ import {
   RECONCILE_WORKSTATION_GONE,
   isReconcileCancelNotice,
 } from '../../shared/disconnectedSession';
-import { formatRateLimitResetTime } from '../timeline/sessionFailureCopy';
+import {
+  NETWORK_PAUSED,
+  NETWORK_PAUSED_SUBTITLE,
+  formatRateLimitResetTime,
+  isNetworkPause,
+} from '../timeline/sessionFailureCopy';
 
 /** A text snippet attached to a new-session prompt (modal-local, never persisted). */
 export interface TextSnippet {
@@ -165,7 +170,9 @@ export function sessionEndNoticeKind(
  */
 export function sessionEndMessage(
   current: Pick<Session, 'completionReason'> &
-    Partial<Pick<Session, 'errorMessage' | 'providerMetadata' | 'rateLimitResetsAt'>>
+    Partial<
+      Pick<Session, 'errorMessage' | 'providerMetadata' | 'rateLimitResetsAt' | 'rateLimitKind'>
+    >
 ): string {
   switch (current.errorMessage) {
     case RECONCILE_TURN_UNDETERMINED:
@@ -225,7 +232,7 @@ function detachedEndMessage(errorMessage: string | null | undefined): string {
 
 function endReasonMessage(
   current: Pick<Session, 'completionReason'> &
-    Partial<Pick<Session, 'providerMetadata' | 'rateLimitResetsAt'>>
+    Partial<Pick<Session, 'providerMetadata' | 'rateLimitResetsAt' | 'rateLimitKind'>>
 ): string {
   switch (current.completionReason) {
     case 'crashed':
@@ -254,12 +261,14 @@ function endReasonMessage(
 /**
  * Why a rate-limited session paused and what happens next: the scheduler's
  * bookkeeping in `providerMetadata.staged.rateLimitAutoRecovery` when it has
- * any, else the provider's reset time.
+ * any, else the provider's reset time. A network pause is the same pause
+ * under another kind, and has its own copy.
  */
 function rateLimitEndMessage(
-  current: Partial<Pick<Session, 'providerMetadata' | 'rateLimitResetsAt'>>
+  current: Partial<Pick<Session, 'providerMetadata' | 'rateLimitResetsAt' | 'rateLimitKind'>>
 ): string {
   const recovery = rateLimitAutoRecovery(current.providerMetadata);
+  if (isNetworkPause(current.rateLimitKind)) return networkPauseEndMessage(recovery);
   if (recovery?.gaveUpAt) {
     return `This session paused because the provider reported an API limit. Auto-retry gave up after ${recovery.attempt ?? 'several'} attempts.`;
   }
@@ -274,6 +283,21 @@ function rateLimitEndMessage(
     return `This session paused because the provider reported an API limit. It resets around ${resetTime}.`;
   }
   return 'This session paused because the provider reported an API limit.';
+}
+
+/**
+ * The notice for a network pause. A row the scheduler gave up on, or will not
+ * resume by itself, no longer resumes when the connection returns, so it says
+ * what to do instead of repeating that promise.
+ */
+function networkPauseEndMessage(recovery: RateLimitAutoRecovery | null): string {
+  if (recovery?.gaveUpAt || recovery?.unsafeToAutoResume) {
+    return `${NETWORK_PAUSED} Resume manually when ready.`;
+  }
+  if (recovery?.nextRetryAt) {
+    return `${NETWORK_PAUSED_SUBTITLE} Trying again around ${formatTimestamp(recovery.nextRetryAt)}.`;
+  }
+  return NETWORK_PAUSED_SUBTITLE;
 }
 
 /**

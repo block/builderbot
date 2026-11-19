@@ -25,18 +25,46 @@ const RECONCILE_INTERRUPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The `rateLimitKind` of a `rate_limited` pause whose turn failed because the
+ * agent could not reach its model provider, not because of an API limit
+ * (`NETWORK_PAUSE_KIND` in `src-tauri/src/rate_limit_scheduler.rs`).
+ */
+export const NETWORK_PAUSE_KIND = 'network';
+
+/** What a network pause says wherever it is named: the row subtitle and the chat alert. */
+export const NETWORK_PAUSED = 'Paused: network unavailable.';
+export const NETWORK_PAUSED_SUBTITLE = `${NETWORK_PAUSED} Resumes when the connection returns.`;
+
+/** Whether a `rate_limited` pause with this `rateLimitKind` is a network pause. */
+export function isNetworkPause(rateLimitKind: string | null | undefined): boolean {
+  return rateLimitKind === NETWORK_PAUSE_KIND;
+}
+
+/** The session fields `failedArtifactSubtitle` reads beyond the completion reason. */
+export interface FailedArtifactDetails {
+  /** The session's error: reconcile's messages say more than its completion reason does. */
+  errorMessage?: string | null;
+  /** Dates an API-limit pause's subtitle. */
+  rateLimitResetsAt?: string | null;
+  /** Tells a network pause from an API-limit pause. */
+  rateLimitKind?: string | null;
+  /** The note row's `NoteTimelineItem.isPollingForNote`. */
+  isPollingForNote?: boolean;
+}
+
+/**
  * The subtitle of a timeline row whose session ended without producing its
- * artifact. `errorMessage` is the session's: reconcile's messages say more
- * than its completion reason does. `rateLimitResetsAt` dates a rate-limit
- * pause's subtitle. `isPollingForNote` is the note row's
- * `NoteTimelineItem.isPollingForNote`.
+ * artifact.
  */
 export function failedArtifactSubtitle(
   completionReason: string | null | undefined,
   kind: ArtifactKind,
-  errorMessage?: string | null,
-  rateLimitResetsAt?: string | null,
-  isPollingForNote = false
+  {
+    errorMessage,
+    rateLimitResetsAt,
+    rateLimitKind,
+    isPollingForNote = false,
+  }: FailedArtifactDetails = {}
 ): string {
   const noun = artifactNoun[kind];
   if (errorMessage === RECONCILE_WORKSTATION_GONE) {
@@ -51,6 +79,7 @@ export function failedArtifactSubtitle(
     case 'remote_agent_lost':
       return `Workspace agent lost — no ${noun} created`;
     case 'rate_limited':
+      if (isNetworkPause(rateLimitKind)) return NETWORK_PAUSED_SUBTITLE;
       return rateLimitPausedSubtitle(rateLimitResetsAt) ?? `Paused by API limit — no ${noun} yet`;
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;

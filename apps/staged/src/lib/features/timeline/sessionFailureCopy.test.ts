@@ -20,10 +20,10 @@ describe('failedArtifactSubtitle', () => {
   });
 
   it('says "yet" for a detached remote session only while Staged is still working on its note', () => {
-    expect(failedArtifactSubtitle('detached', 'note', null, null, true)).toBe(
+    expect(failedArtifactSubtitle('detached', 'note', { isPollingForNote: true })).toBe(
       'Lost the remote session — no note created yet'
     );
-    expect(failedArtifactSubtitle('detached', 'note', null, null, false)).toBe(
+    expect(failedArtifactSubtitle('detached', 'note', { isPollingForNote: false })).toBe(
       'Lost the remote session — no note created'
     );
     expect(failedArtifactSubtitle('detached', 'note')).toBe(
@@ -47,12 +47,12 @@ describe('failedArtifactSubtitle', () => {
   });
 
   it('says a deleted workstation, not a crash, ended the session', () => {
-    expect(failedArtifactSubtitle('crashed', 'commit', RECONCILE_WORKSTATION_GONE)).toBe(
-      'Workstation deleted — no commit created'
-    );
-    expect(failedArtifactSubtitle('crashed', 'review', RECONCILE_WORKSTATION_GONE)).toBe(
-      'Workstation deleted — no comments created'
-    );
+    expect(
+      failedArtifactSubtitle('crashed', 'commit', { errorMessage: RECONCILE_WORKSTATION_GONE })
+    ).toBe('Workstation deleted — no commit created');
+    expect(
+      failedArtifactSubtitle('crashed', 'review', { errorMessage: RECONCILE_WORKSTATION_GONE })
+    ).toBe('Workstation deleted — no comments created');
   });
 
   it('reads a turn Staged couldn’t follow as an interruption, not a Stop', () => {
@@ -61,22 +61,24 @@ describe('failedArtifactSubtitle', () => {
       RECONCILE_NO_WORKSPACE,
       RECONCILE_PROMPT_NOT_RECEIVED,
     ]) {
-      expect(failedArtifactSubtitle('interrupted', 'note', message)).toBe(
+      expect(failedArtifactSubtitle('interrupted', 'note', { errorMessage: message })).toBe(
         'Session interrupted — no note created'
       );
     }
   });
 
   it('keeps a Stop the workstation didn’t confirm a Stop', () => {
-    expect(failedArtifactSubtitle('interrupted', 'commit', RECONCILE_MAY_STILL_RUN)).toBe(
-      'Session stopped — no commit created'
-    );
+    expect(
+      failedArtifactSubtitle('interrupted', 'commit', { errorMessage: RECONCILE_MAY_STILL_RUN })
+    ).toBe('Session stopped — no commit created');
   });
 
   it('falls back to the reason for any other message', () => {
-    expect(failedArtifactSubtitle('crashed', 'commit', 'Blox process exited with code 1')).toBe(
-      'Session crashed — no commit created'
-    );
+    expect(
+      failedArtifactSubtitle('crashed', 'commit', {
+        errorMessage: 'Blox process exited with code 1',
+      })
+    ).toBe('Session crashed — no commit created');
   });
 
   it('explains API limit failures', () => {
@@ -89,8 +91,42 @@ describe('failedArtifactSubtitle', () => {
     const resetTime = formatRateLimitResetTime('2026-06-24T15:45:00Z');
 
     expect(resetTime).toBeTruthy();
-    expect(failedArtifactSubtitle('rate_limited', 'commit', null, '2026-06-24T15:45:00Z')).toBe(
-      `Paused by API limit — resets around ${resetTime}`
+    expect(
+      failedArtifactSubtitle('rate_limited', 'commit', {
+        rateLimitResetsAt: '2026-06-24T15:45:00Z',
+      })
+    ).toBe(`Paused by API limit — resets around ${resetTime}`);
+  });
+
+  it('keeps the API limit copy for an API-limit kind', () => {
+    expect(failedArtifactSubtitle('rate_limited', 'note', { rateLimitKind: 'five_hour' })).toBe(
+      'Paused by API limit — no note yet'
+    );
+    expect(failedArtifactSubtitle('rate_limited', 'note', { rateLimitKind: null })).toBe(
+      'Paused by API limit — no note yet'
+    );
+  });
+
+  it('says a network pause waits for the connection, whatever the artifact', () => {
+    for (const kind of ['commit', 'note', 'review'] as const) {
+      expect(failedArtifactSubtitle('rate_limited', kind, { rateLimitKind: 'network' })).toBe(
+        'Paused: network unavailable. Resumes when the connection returns.'
+      );
+    }
+  });
+
+  it('does not date a network pause by a provider reset time', () => {
+    expect(
+      failedArtifactSubtitle('rate_limited', 'commit', {
+        rateLimitKind: 'network',
+        rateLimitResetsAt: '2026-06-24T15:45:00Z',
+      })
+    ).toBe('Paused: network unavailable. Resumes when the connection returns.');
+  });
+
+  it('reads the network kind only on a rate-limit pause', () => {
+    expect(failedArtifactSubtitle('crashed', 'commit', { rateLimitKind: 'network' })).toBe(
+      'Session crashed — no commit created'
     );
   });
 });

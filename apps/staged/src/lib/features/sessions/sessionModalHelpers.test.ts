@@ -421,6 +421,52 @@ describe('newestUserMessageId', () => {
       'This session paused because the provider reported an API limit. Resume manually when ready.'
     );
   });
+
+  it('keeps the API limit copy for an API-limit kind', () => {
+    expect(
+      sessionEndMessage({ completionReason: 'rate_limited', rateLimitKind: 'five_hour' })
+    ).toBe('This session paused because the provider reported an API limit.');
+  });
+
+  it('explains a network pause', () => {
+    expect(sessionEndMessage({ completionReason: 'rate_limited', rateLimitKind: 'network' })).toBe(
+      'Paused: network unavailable. Resumes when the connection returns.'
+    );
+  });
+
+  it('says when a network pause tries again', () => {
+    const nextRetryAt = Date.UTC(2026, 5, 24, 15, 45);
+    const retryTime = new Date(nextRetryAt).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    expect(
+      sessionEndMessage({
+        completionReason: 'rate_limited',
+        rateLimitKind: 'network',
+        providerMetadata: {
+          staged: { rateLimitAutoRecovery: { attempt: 2, maxAttempts: 8, nextRetryAt } },
+        },
+      })
+    ).toBe(
+      `Paused: network unavailable. Resumes when the connection returns. Trying again around ${retryTime}.`
+    );
+  });
+
+  it('asks for a manual resume of a network pause that will not resume by itself', () => {
+    for (const rateLimitAutoRecovery of [
+      { attempt: 9, maxAttempts: 8, gaveUpAt: Date.UTC(2026, 5, 24, 15, 45) },
+      { unsafeToAutoResume: true, reason: 'pending_tool_call' },
+    ]) {
+      expect(
+        sessionEndMessage({
+          completionReason: 'rate_limited',
+          rateLimitKind: 'network',
+          providerMetadata: { staged: { rateLimitAutoRecovery } },
+        })
+      ).toBe('Paused: network unavailable. Resume manually when ready.');
+    }
+  });
 });
 
 describe('detached remote note sessions', () => {

@@ -17,9 +17,12 @@
 //! fail into the card only, and a reason that has not changed is not
 //! announced again.
 //!
-//! The same event carries the one thing a setup that worked has to say: a
-//! `notice` that commits found on the base branch were brought along onto
-//! the new branch ([`notify`]). It is not a reason and is not kept.
+//! The same event carries what the user is to be told about a branch that
+//! has no reason to show, as a `notice` ([`notify`]): that a setup which
+//! worked brought commits found on the base branch along onto the new
+//! branch, or, under a `noticeTitle` of its own, why the branch's queued
+//! session is waiting ([`notify_queue_held`]). It is not a reason and is not
+//! kept.
 //!
 //! In memory, per process: the branch row keeps only its status. After a
 //! restart the reasons are gone until the next attempt fails, which the
@@ -43,6 +46,10 @@ struct SetupErrorEvent<'a> {
     user_requested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     notice: Option<&'a str>,
+    /// The heading for `notice`, when it is not the one about commits
+    /// brought along.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice_title: Option<&'a str>,
 }
 
 fn reasons() -> &'static Mutex<HashMap<String, String>> {
@@ -70,6 +77,7 @@ pub(crate) fn set<R: tauri::Runtime>(
             error,
             user_requested: user_requested && error.is_some(),
             notice: None,
+            notice_title: None,
         };
         crate::web_server::emit_to_all(app_handle, EVENT, event);
     };
@@ -103,6 +111,28 @@ pub(crate) fn notify<R: tauri::Runtime>(
         error: None,
         user_requested: false,
         notice: Some(notice),
+        notice_title: None,
+    };
+    crate::web_server::emit_to_all(app_handle, EVENT, event);
+}
+
+/// The heading of the notice [`notify_queue_held`] sends.
+pub(crate) const QUEUE_HELD_TITLE: &str = "Queued session is waiting";
+
+/// Tell every window and web client why a queued session of `branch_id` is
+/// not starting. The branch is `Running` and has no reason to show, so
+/// `error` is `null`, as for [`notify`].
+pub(crate) fn notify_queue_held<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+    notice: &str,
+) {
+    let event = SetupErrorEvent {
+        branch_id,
+        error: None,
+        user_requested: false,
+        notice: Some(notice),
+        notice_title: Some(QUEUE_HELD_TITLE),
     };
     crate::web_server::emit_to_all(app_handle, EVENT, event);
 }

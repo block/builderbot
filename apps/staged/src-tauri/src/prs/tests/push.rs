@@ -318,7 +318,7 @@ fn a_push_works_from_a_clone_that_has_a_sibling_branch_checked_out() {
     let push = build_push_pipeline_steps("feature-b", "feature-b", PUSH);
     let pr = build_create_pr_pipeline_steps("pull request", "main", "", "feature-b", "feature-b");
     let (_, command, _) = command_at(&push, 0);
-    assert_eq!(command_at(&pr, 3).1, command);
+    assert_eq!(command_at(&pr, 4).1, command);
     let mut sh = std::process::Command::new("sh");
     sh.arg("-c").arg(command).current_dir(clone.path());
     crate::git::strip_git_env(&mut sh);

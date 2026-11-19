@@ -17,12 +17,15 @@ interface LocalSetupTask {
  *  `userRequested` marks the failure of a setup the user asked for (a new
  *  branch, Retry, Resume), as opposed to one the backend ran on its own.
  *  `notice` comes with a setup that worked and did something the user
- *  should know of: it put commits it found on the base branch on this one. */
+ *  should know of: it put commits it found on the base branch on this one.
+ *  With a `noticeTitle` it is about something else, under that heading: why
+ *  the branch's queued session is waiting. */
 interface WorkspaceSetupErrorEvent {
   branchId: string;
   error: string | null;
   userRequested?: boolean;
   notice?: string;
+  noticeTitle?: string;
 }
 
 interface WorkspaceLifecycleHooks {
@@ -354,7 +357,7 @@ class WorkspaceLifecycleController {
     if (error == null) {
       this.clearWorkspaceError(branchId);
       if (event.notice) {
-        toast.warning('Workspace branch was given existing commits', {
+        toast.warning(event.noticeTitle ?? 'Workspace branch was given existing commits', {
           description: event.notice,
           duration: Infinity,
         });

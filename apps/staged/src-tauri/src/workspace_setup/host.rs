@@ -60,8 +60,8 @@ pub(crate) struct Checkout {
     /// Whether another branch in this clone is the base branch itself (see
     /// [`BranchCheckout::base_is_worked_on`]).
     pub(crate) base_is_worked_on: bool,
-    /// The other branches whose checkout is this clone (see
-    /// [`BranchCheckout::siblings`]).
+    /// The other branches whose checkout is this clone and that have had a
+    /// session (see [`BranchCheckout::siblings`]).
     pub(crate) siblings: Vec<String>,
 }
 

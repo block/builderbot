@@ -555,6 +555,38 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// The same for a transfer that stops between resuming a workspace and
+    /// reading its clones: a cancel that landed during the resume, or a
+    /// second inspection that failed. Nothing was read, so every row of a
+    /// workspace that came back says `Starting`, and setup is asked for it
+    /// once the transfer has ended. Best effort: the transfer is already
+    /// stopping for another reason, which is the one reported.
+    fn mark_resumed_rows_starting(
+        &self,
+        inspection: &Inspection,
+        resumed: &BTreeMap<String, Option<String>>,
+    ) {
+        for source in &inspection.branches {
+            let came_back = source
+                .workspace
+                .as_deref()
+                .is_some_and(|workspace| matches!(resumed.get(workspace), Some(None)));
+            if !came_back {
+                continue;
+            }
+            if let Err(e) = self
+                .store
+                .update_branch_workspace_status(&source.branch.id, &WorkspaceStatus::Starting)
+            {
+                log::warn!(
+                    "[project_transfer] could not mark branch {} of a resumed workspace as \
+                     starting: {e}",
+                    source.branch.id
+                );
+            }
+        }
+    }
+
     /// The preflight, again, now that the transfer is registered — with any
     /// suspended, stopped or failed source workspace resumed first, so its
     /// checkouts can be read. One that won't come back blocks the transfer.
@@ -591,7 +623,16 @@ impl Run<'_> {
                     .host
                     .resume_workspace(&workspace, &|| self.guard.is_cancelled())
                     .err();
-                self.guard_not_cancelled()?;
+                if let Err(cancelled) = self.guard_not_cancelled() {
+                    // A resume that finished as the cancel landed left the
+                    // workstation up with its rows still saying what it was
+                    // resumed from, which nothing polls.
+                    if error.is_none() {
+                        resumed.insert(workspace, None);
+                    }
+                    self.mark_resumed_rows_starting(&inspection, &resumed);
+                    return Err(cancelled.into());
+                }
                 let failed = error.is_some();
                 if let Some(e) = &error {
                     log::warn!("[project_transfer] cannot resume {workspace}: {e}");
@@ -602,9 +643,15 @@ impl Run<'_> {
                     break;
                 }
             }
-            inspection = preflight::inspect_after_resuming(
+            inspection = match preflight::inspect_after_resuming(
                 self.store, self.host, project_id, &resumed, &observer,
-            )?;
+            ) {
+                Ok(inspection) => inspection,
+                Err(e) => {
+                    self.mark_resumed_rows_starting(&inspection, &resumed);
+                    return Err(e.into());
+                }
+            };
             self.mark_resumed_rows_running(&inspection, &resumed)?;
         }
         let preflight = &inspection.preflight;

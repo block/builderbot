@@ -9,8 +9,10 @@
 //!   ([`confirm_checked_out`]);
 //! - at every start on a remote branch of something that runs git in the
 //!   clone, before it is launched ([`ensure_session_checkout`]): an agent
-//!   session, fresh or resumed, and a pipeline session (commit, push,
-//!   rebase, squash, PR). A branch can be `Running` over a clone that has
+//!   session, fresh or resumed, and a pipeline session that acts on HEAD
+//!   (commit, rebase, squash, pull). A push and the pull request pipeline
+//!   name their local branch and make no check. A branch can be `Running`
+//!   over a clone that has
 //!   since moved: two branches of one repo share a clone, someone switches
 //!   branches in a terminal.
 //!

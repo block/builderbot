@@ -4525,23 +4525,64 @@ fn retry_or_fail_queued_start_before_claim<R: tauri::Runtime>(
 /// row's failure and clears on its own, so the row keeps its place and its
 /// attempts, the rows behind it wait with it, and the branch is looked at
 /// again shortly: the queue moves once the other session is done.
-fn hold_queue_behind_sibling_session(
+///
+/// A held row stays `queued` with no error, so the user is told why it
+/// waits, once per cause, as a notice on the branch's setup event
+/// (`workspace_setup::failures::notify_queue_held`). And a `disconnected`
+/// holder is handed to the reconcile service on every look, this one and
+/// each recheck: left to the service's own backoff it could hold the queue
+/// for half an hour after its turn was over.
+fn hold_queue_behind_sibling_session<R: tauri::Runtime>(
     store: &Store,
+    app_handle: &tauri::AppHandle<R>,
     kicker: &Arc<crate::session_queue::BranchQueueKicker>,
     branch: &store::Branch,
     session_id: &str,
 ) -> bool {
+    let Some(hold) = sibling_session_hold(store, kicker, branch, session_id) else {
+        return false;
+    };
+    if let Some(notice) = &hold.announce {
+        crate::workspace_setup::failures::notify_queue_held(app_handle, &branch.id, notice);
+    }
+    if let Some(holder) = hold.disconnected_holder {
+        if let Err(e) = crate::session_runner::reconcile::reconcile_session(holder.clone()) {
+            log::debug!("[session_queue] could not ask for a check of session {holder}: {e}");
+        }
+    }
+    true
+}
+
+/// What a hold behind a sibling branch's session leaves its caller to do.
+#[derive(Debug, PartialEq, Eq)]
+struct SiblingHold {
+    /// Why the row waits, when the user has not been told this yet.
+    announce: Option<String>,
+    /// The session holding the clone, when it is `disconnected`: the
+    /// reconcile service is to look at it now.
+    disconnected_holder: Option<String>,
+}
+
+/// [`hold_queue_behind_sibling_session`] up to what it tells the user and
+/// the reconcile service: the look at the database, the hold and the kick
+/// that rechecks it. `None` when no sibling's session has the clone.
+fn sibling_session_hold(
+    store: &Store,
+    kicker: &Arc<crate::session_queue::BranchQueueKicker>,
+    branch: &store::Branch,
+    session_id: &str,
+) -> Option<SiblingHold> {
     use crate::session_queue::retry::QUEUE_HOLD_RECHECK;
 
     let live = match crate::workspace_setup::clone::sibling_session_in_clone(store, branch) {
         Ok(Some(live)) => live,
-        Ok(None) => return false,
+        Ok(None) => return None,
         Err(e) => {
             log::warn!(
                 "[session_queue] could not look for sessions sharing the clone of branch {}: {e}",
                 branch.id
             );
-            return false;
+            return None;
         }
     };
     log::info!(
@@ -4549,17 +4590,26 @@ fn hold_queue_behind_sibling_session(
          it: {live}",
         branch.id
     );
-    kicker.start_attempts().hold(
+    let reason = format!(
+        "A queued session of branch '{}' is waiting: {live}. It starts once that session has \
+         finished.",
+        branch.branch_name
+    );
+    let news = kicker.start_attempts().hold(
         &branch.id,
         session_id,
         std::time::Instant::now() + QUEUE_HOLD_RECHECK,
+        &reason,
     );
     kicker.kick_after(
         &branch.id,
         QUEUE_HOLD_RECHECK,
         crate::session_queue::KickSource::StartRetry,
     );
-    true
+    Some(SiblingHold {
+        announce: news.then_some(reason),
+        disconnected_holder: live.disconnected.then_some(live.session_id),
+    })
 }
 
 fn note_session_schedule() -> BranchSessionSchedule {
@@ -6460,7 +6510,13 @@ pub(crate) async fn drain_branch_queue(
         // while that session lasts: asked of the database, not the clone.
         if kicker.as_ref().is_some_and(|kicker| {
             kicker.start_attempts().is_held(&branch_id, &session.id)
-                && hold_queue_behind_sibling_session(&store, kicker, &branch, &session.id)
+                && hold_queue_behind_sibling_session(
+                    &store,
+                    &app_handle,
+                    kicker,
+                    &branch,
+                    &session.id,
+                )
         }) {
             break;
         }
@@ -6559,7 +6615,13 @@ pub(crate) async fn drain_branch_queue(
                             break;
                         }
                         if kicker.as_ref().is_some_and(|kicker| {
-                            hold_queue_behind_sibling_session(&store, kicker, &branch, &session_id)
+                            hold_queue_behind_sibling_session(
+                                &store,
+                                &app_handle,
+                                kicker,
+                                &branch,
+                                &session_id,
+                            )
                         }) {
                             break;
                         }
@@ -12614,7 +12676,7 @@ mod tests {
         store.create_session(&first).unwrap();
         let second = store::Session::new_queued("note").with_branch(&branch.id);
         store.create_session(&second).unwrap();
-        let hold = || hold_queue_behind_sibling_session(&store, &kicker, &branch, &first.id);
+        let hold = || sibling_session_hold(&store, &kicker, &branch, &first.id).is_some();
 
         // Nobody else in the clone: whatever failed is the row's own.
         assert!(!hold());
@@ -12660,6 +12722,96 @@ mod tests {
             }
         );
         assert!(!attempts.is_held(&branch.id, &first.id));
+    }
+
+    /// A held row stays `queued` with no error, and its reason used to go to
+    /// the log alone. The user is told why it waits as a notice on the
+    /// branch's setup event, once per cause and not on every recheck. A
+    /// holder that is `disconnected` is named for the reconcile service on
+    /// every look, so the hold does not wait out that service's backoff.
+    #[test]
+    fn a_held_queue_says_why_once_and_has_a_disconnected_holder_checked_on_every_look() {
+        use crate::session_queue::BranchQueueKicker;
+        use tauri::Listener;
+
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Running);
+        let mut sibling =
+            store::Branch::new_remote(&branch.project_id, "sibling", "main", "test-workspace");
+        sibling.workspace_status = Some(store::WorkspaceStatus::Running);
+        store.create_branch(&sibling).unwrap();
+        let kicker = Arc::new(BranchQueueKicker::recording());
+        let first = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&first).unwrap();
+        let agent = store::Session::new_running("work", Path::new("/tmp")).with_branch(&sibling.id);
+        store.create_session(&agent).unwrap();
+        let app = mock_app();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&events);
+        app.handle()
+            .listen_any(crate::workspace_setup::failures::EVENT, move |event| {
+                seen.lock().unwrap().push(event.payload().to_string());
+            });
+
+        // The first look tells every client; the rechecks say nothing new.
+        for _ in 0..3 {
+            assert!(hold_queue_behind_sibling_session(
+                &store,
+                app.handle(),
+                &kicker,
+                &branch,
+                &first.id
+            ));
+        }
+        let told = events.lock().unwrap().clone();
+        assert_eq!(told.len(), 1, "{told:?}");
+        let event: serde_json::Value = serde_json::from_str(&told[0]).unwrap();
+        assert_eq!(event["branchId"], branch.id.as_str());
+        assert_eq!(event["error"], serde_json::Value::Null);
+        assert_eq!(event["noticeTitle"], "Queued session is waiting");
+        let notice = event["notice"].as_str().unwrap();
+        for part in [
+            branch.branch_name.as_str(),
+            "a session of branch 'sibling' is running in the same clone",
+            "starts once that session has finished",
+        ] {
+            assert!(notice.contains(part), "{part}: {notice}");
+        }
+        let row = store.get_session(&first.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Queued);
+        assert_eq!(row.error_message, None);
+
+        // The holder loses its connection: a new cause, told once, and the
+        // session is named for the reconcile service on each look.
+        store
+            .update_session_status(&agent.id, store::SessionStatus::Disconnected, None, None)
+            .unwrap();
+        let look = || sibling_session_hold(&store, &kicker, &branch, &first.id).unwrap();
+        let lost = look();
+        assert!(
+            lost.announce
+                .as_deref()
+                .is_some_and(|notice| notice.contains("lost its connection")),
+            "{lost:?}"
+        );
+        assert_eq!(lost.disconnected_holder.as_deref(), Some(agent.id.as_str()));
+        for _ in 0..3 {
+            assert_eq!(
+                look(),
+                SiblingHold {
+                    announce: None,
+                    disconnected_holder: Some(agent.id.clone()),
+                }
+            );
+        }
+
+        // Settled: nothing holds the row, and nobody is asked about.
+        store
+            .update_session_status(&agent.id, store::SessionStatus::Completed, None, None)
+            .unwrap();
+        assert_eq!(
+            sibling_session_hold(&store, &kicker, &branch, &first.id),
+            None
+        );
     }
 
     /// A pre-claim start failure is retried before it is recorded: the first

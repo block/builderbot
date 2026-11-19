@@ -487,6 +487,31 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     lifecycle.stop();
   });
 
+  // A queued session held behind a sibling branch's session stays queued
+  // with no error. The backend says why on the same event, under a heading
+  // of its own, and the branch is given no reason to show.
+  it('tells the user why a queued session is waiting, under the heading it came with', async () => {
+    const lifecycle = await newController();
+    await settle();
+
+    const notice =
+      "A queued session of branch 'feature' is waiting: a session of branch 'sibling' is " +
+      'running in the same clone. It starts once that session has finished.';
+    emit('workspace-setup-error', {
+      branchId: 'branch-1',
+      error: null,
+      userRequested: false,
+      notice,
+      noticeTitle: 'Queued session is waiting',
+    });
+    expect(toastWarning.mock.calls).toEqual([
+      ['Queued session is waiting', { description: notice, duration: Infinity }],
+    ]);
+    expect(toastError).not.toHaveBeenCalled();
+    expect(lifecycle.getWorkspaceErrors().has('branch-1')).toBe(false);
+    lifecycle.stop();
+  });
+
   // The backend reports every failed run, and a snapshot covers the ones
   // from before the window mounted.
   it('keeps setup reasons from the error event and the snapshot taken at start', async () => {

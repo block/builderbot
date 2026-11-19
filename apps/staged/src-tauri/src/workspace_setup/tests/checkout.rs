@@ -6,14 +6,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::super::checkout::{local_branch_exists, BranchCheckout, CheckoutError};
+use super::super::clone::checkout_for;
 use super::super::SetupTrigger;
-use super::verify::running_branch;
+use super::verify::{running_branch, start_session_on};
 use super::{
     head_branch, origin_and_workstation_clone, set_up, starting_branch, status_of,
     store_with_project, FakeHost, Info, Start,
 };
 use crate::branches;
-use crate::store::WorkspaceStatus;
+use crate::store::{self, Store, WorkspaceStatus};
 use crate::test_utils::{run_git_in, TempDir};
 
 fn rev(clone: &Path, name: &str) -> String {
@@ -26,6 +27,16 @@ pub(super) fn commit(clone: &Path, file: &str, subject: &str) -> String {
     run_git_in(clone, &["add", file]);
     run_git_in(clone, &["commit", "-m", subject]);
     rev(clone, "HEAD")
+}
+
+/// A session of `branch` that ran and is over: its agent may have committed
+/// in the clone.
+fn finished_session(store: &Store, branch: &store::Branch) {
+    let session = store::Session::new_running("work", Path::new("/tmp")).with_branch(&branch.id);
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
+        .unwrap();
 }
 
 fn uncommitted(clone: &Path) -> Vec<String> {
@@ -438,12 +449,13 @@ async fn setup_brings_the_commits_an_agent_left_on_the_base_branch() {
 /// on their branch in the workstation, `feature-b` starts from origin's
 /// base without them.
 #[tokio::test]
-async fn two_branches_that_could_own_stranded_commits_are_not_guessed_between() {
+async fn a_branch_is_not_given_commits_a_sibling_with_a_session_could_own() {
     let (_origin, clone) = origin_and_workstation_clone();
     let origin_main = rev(clone.path(), "origin/main");
     let stranded = commit(clone.path(), "one.txt", "agent work");
     let (store, project) = store_with_project();
-    let _first = running_branch(&store, &project, "feature-a");
+    let first = running_branch(&store, &project, "feature-a");
+    finished_session(&store, &first);
     let second = starting_branch(&store, &project, "feature-b");
     let host = Arc::new(FakeHost::new(
         clone.path(),
@@ -475,6 +487,97 @@ async fn two_branches_that_could_own_stranded_commits_are_not_guessed_between() 
     assert_eq!(rev(clone.path(), "feature-a"), stranded);
     assert_eq!(status_of(&store, &second), Some(WorkspaceStatus::Running));
     assert_eq!(host.notices(), vec![]);
+}
+
+/// Which siblings a checkout asks about: the ones that have had a session.
+/// A branch with no session row, or only a queued one, never ran an agent
+/// and made no commits. It still counts as work on the base branch when it
+/// is the base branch.
+#[test]
+fn only_a_sibling_that_has_had_a_session_can_own_stranded_commits() {
+    let (store, project) = store_with_project();
+    let branch = starting_branch(&store, &project, "feature-a");
+    let added = starting_branch(&store, &project, "feature-b");
+    let base = starting_branch(&store, &project, "main");
+
+    let checkout = checkout_for(&store, &branch).unwrap();
+    assert_eq!(checkout.siblings, Vec::<String>::new());
+    assert!(
+        checkout.base_is_worked_on,
+        "'main' is a branch in the clone"
+    );
+
+    let queued = store::Session::new_queued("note").with_branch(&added.id);
+    store.create_session(&queued).unwrap();
+    assert_eq!(
+        checkout_for(&store, &branch).unwrap().siblings,
+        Vec::<String>::new(),
+        "a row that never left the queue ran nothing"
+    );
+
+    finished_session(&store, &added);
+    finished_session(&store, &base);
+    let mut siblings = checkout_for(&store, &branch).unwrap().siblings;
+    siblings.sort();
+    assert_eq!(siblings, ["feature-b", "main"]);
+    assert_eq!(
+        checkout_for(&store, &added).unwrap().siblings,
+        ["main"],
+        "'feature-a' has had no session"
+    );
+}
+
+/// The incident with a second branch added beside it, which has never had a
+/// session. Both used to end in `Error`: `feature-b` could not be set up
+/// because `feature-a` has no local branch, and `feature-a` could not take
+/// its commits because `feature-b` has none either. A branch that never ran
+/// an agent can't have committed on the base, so it does not keep
+/// `feature-a` from its commits. `feature-b` still waits for that: created
+/// first, it would leave them on `main` with nothing to bring them along.
+#[tokio::test]
+async fn a_sibling_that_never_had_a_session_does_not_contest_stranded_commits() {
+    let (_origin, clone) = origin_and_workstation_clone();
+    let origin_main = rev(clone.path(), "origin/main");
+    let stranded = commit(clone.path(), "one.txt", "agent work");
+    let (store, project) = store_with_project();
+    let first = running_branch(&store, &project, "feature-a");
+    finished_session(&store, &first);
+    let second = starting_branch(&store, &project, "feature-b");
+    let queued = store::Session::new_queued("note").with_branch(&second.id);
+    store.create_session(&queued).unwrap();
+    let host = Arc::new(FakeHost::new(
+        clone.path(),
+        &[Info::Status("running")],
+        Start::Succeeds,
+    ));
+
+    let error = set_up(&store, &host, &second, SetupTrigger::Requested)
+        .await
+        .unwrap_err();
+    assert!(error.contains("no branch 'feature-a' either"), "{error}");
+    assert_eq!(head_branch(clone.path()), "main");
+    assert_eq!(status_of(&store, &second), Some(WorkspaceStatus::Error));
+
+    // The next session of `feature-a` repairs its clone, and nothing of
+    // `feature-b`'s is in the way.
+    start_session_on(&store, &host, &first, "session-a")
+        .await
+        .unwrap();
+    assert_eq!(head_branch(clone.path()), "feature-a");
+    assert_eq!(rev(clone.path(), "HEAD"), stranded);
+    assert_eq!(status_of(&store, &first), Some(WorkspaceStatus::Running));
+    let notices = host.notices();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].0, first.id);
+
+    // Retry on `feature-b`: it starts from origin's base, without them.
+    set_up(&store, &host, &second, SetupTrigger::Requested)
+        .await
+        .unwrap();
+    assert_eq!(head_branch(clone.path()), "feature-b");
+    assert_eq!(rev(clone.path(), "HEAD"), origin_main);
+    assert_eq!(rev(clone.path(), "feature-a"), stranded);
+    assert_eq!(status_of(&store, &second), Some(WorkspaceStatus::Running));
 }
 
 /// A branch that was never `Running` and can't be checked out without

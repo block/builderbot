@@ -340,7 +340,9 @@ fn only_setup_writes_running() {
 /// their branch, after that inspection, and leaves the rest `Starting`.
 /// Setup refuses a transferring branch, so the command asks for it once
 /// the transfer has ended without moving the project, before anything held
-/// for the transfer is released.
+/// for the transfer is released. A transfer that stops between the resume
+/// and that inspection (a cancel, an inspection that fails) read nothing,
+/// and leaves every row of a workspace that came back `Starting`.
 #[test]
 fn a_transfer_marks_running_only_the_rows_it_read_on_their_branch() {
     assert!(
@@ -371,9 +373,29 @@ fn a_transfer_marks_running_only_the_rows_it_read_on_their_branch() {
         left_starting,
         "trigger_branch_setup(app_handle, store, branch_id, false);",
     );
+    // The one other status write: `Starting`, on the two ways out between
+    // the resume and the inspection that follows it.
+    let starting = body_of(TRANSFER, "    fn mark_resumed_rows_starting(");
+    assert_calls(
+        "mark_resumed_rows_starting",
+        starting,
+        "update_branch_workspace_status(&source.branch.id, &WorkspaceStatus::Starting)",
+    );
+    assert!(!starting.contains("WorkspaceStatus::Running"));
+    let inspect = body_of(
+        TRANSFER,
+        "    fn inspect(&self) -> Result<Inspection, Failure> {",
+    );
+    assert_eq!(
+        inspect
+            .matches("self.mark_resumed_rows_starting(&inspection, &resumed);")
+            .count(),
+        2,
+        "a cancel after a resume and a failed second inspection both leave the rows Starting"
+    );
     assert_eq!(
         TRANSFER.matches("update_branch_workspace_status(").count(),
-        1,
+        2,
         "a new status write in the transfer needs its own reading of the clone"
     );
     assert_eq!(
@@ -451,11 +473,11 @@ fn every_session_start_checks_the_clone_before_it_launches() {
 
 /// The pipelines that act on HEAD (commit, rebase, squash, pull) run git
 /// in the clone without an agent, and get the same check before their first
-/// step: before the row is claimed or inserted as running. The pull request
-/// pipeline makes it too, for the steps that describe the branch, and goes
-/// on whatever it says. A push does not make it: it names its local branch
-/// in an explicit refspec, and used to fail while a sibling branch's
-/// session had the clone.
+/// step: before the row is claimed or inserted as running. A push does not
+/// make it: it names its local branch in an explicit refspec, and used to
+/// fail while a sibling branch's session had the clone. Neither does the
+/// pull request pipeline, whose steps and prompts name the local branch and
+/// whose first step stops it when the clone has no such branch.
 #[test]
 fn every_pipeline_checks_the_clone_before_its_git_steps() {
     let starts = [
@@ -474,11 +496,6 @@ fn every_pipeline_checks_the_clone_before_its_git_steps() {
             "pub(crate) async fn start_queued_git_pipeline_for_branch(",
             "claim.claim(&store)",
         ),
-        (
-            PR_CREATE,
-            "pub(crate) async fn start_create_pr_pipeline_for_branch(",
-            "start_pipeline_for_branch(",
-        ),
     ];
     for (source, start, launch) in starts {
         let body = body_of(source, start);
@@ -495,7 +512,7 @@ fn every_pipeline_checks_the_clone_before_its_git_steps() {
     }
 
     // A push is not held up by where the clone is, run now or from the
-    // queue, and the pull request pipeline never fails on it.
+    // queue, and the pull request pipeline does not look.
     let push = body_of(
         PR_PUSH,
         "pub(crate) async fn start_or_queue_push_pipeline_for_branch(",
@@ -519,8 +536,19 @@ fn every_pipeline_checks_the_clone_before_its_git_steps() {
         "pub(crate) async fn start_create_pr_pipeline_for_branch(",
     );
     assert!(
-        !create_pr.contains(".await?") && create_pr.contains(".unwrap_or_else(|e| {"),
-        "the pull request pipeline must not fail on the checkout check"
+        !PR_CREATE.contains("ensure_pipeline_checkout(")
+            && !PR_CREATE.contains("ensure_session_checkout(")
+            && !create_pr.contains("CheckoutHold"),
+        "the pull request pipeline must not check or repair the clone's HEAD"
+    );
+    // What stands in for the check: the step that stops the pipeline when
+    // the clone has no local branch comes before every other step.
+    let steps = body_of(PR_CREATE, "pub(super) fn build_create_pr_pipeline_steps(");
+    assert_before(
+        "build_create_pr_pipeline_steps",
+        steps,
+        "command: check_local_branch_command(local_branch),\n            on_failure: FailureStrategy::Abort { marker: None },",
+        "label: \"Fetch latest base\".to_string(),",
     );
 
     // The pull: checked in the task that runs it, before the pull itself.
@@ -571,19 +599,30 @@ fn the_queue_is_held_not_drained_behind_a_start_that_could_not_check_out() {
     assert_before(
         "drain_branch_queue",
         still_queued,
-        "hold_queue_behind_sibling_session(&store, kicker, &branch, &session_id)",
+        "hold_queue_behind_sibling_session(",
         "retry_or_fail_queued_start_before_claim(",
     );
     assert_before(
         "drain_branch_queue",
         drain,
-        "kicker.start_attempts().is_held(&branch_id, &session.id)\n                && hold_queue_behind_sibling_session(&store, kicker, &branch, &session.id)",
+        "kicker.start_attempts().is_held(&branch_id, &session.id)\n                && hold_queue_behind_sibling_session(",
         "start_queued_session_for_branch(",
     );
-    let hold = body_of(SESSION_COMMANDS, "fn hold_queue_behind_sibling_session(");
+    // The hold tells the user why the row waits and has a `disconnected`
+    // holder looked at, on the first look and on each recheck alike: both
+    // drain call sites go through the one function.
+    let hold = body_of(SESSION_COMMANDS, "fn hold_queue_behind_sibling_session<");
+    for call in [
+        "sibling_session_hold(store, kicker, branch, session_id)",
+        "crate::workspace_setup::failures::notify_queue_held(app_handle, &branch.id, notice)",
+        "crate::session_runner::reconcile::reconcile_session(holder.clone())",
+    ] {
+        assert_calls("hold_queue_behind_sibling_session", hold, call);
+    }
+    let look = body_of(SESSION_COMMANDS, "fn sibling_session_hold(");
     assert_calls(
-        "hold_queue_behind_sibling_session",
-        hold,
+        "sibling_session_hold",
+        look,
         "crate::workspace_setup::clone::sibling_session_in_clone(store, branch)",
     );
 }

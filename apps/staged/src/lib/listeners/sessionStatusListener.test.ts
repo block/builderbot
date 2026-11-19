@@ -1529,6 +1529,25 @@ describe('sessionStatusListener busy-state hydration', () => {
       );
     });
 
+    // The pull request pipeline stops itself, before any agent, when the
+    // checkout has no local branch to push. The backend ends the session in
+    // `error` with the reason, which is what tells the user what to do.
+    it('shows why a pr session failed when the backend says so', async () => {
+      await listen();
+      registerSession('pr-1', 'pr');
+      const reason =
+        "Check local branch failed:\n\nLocal branch 'feature' does not exist in this clone.";
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'pr-1',
+        status: 'error',
+        errorMessage: reason,
+      });
+
+      expect(prStateStore.setPrError).toHaveBeenCalledWith('branch-1', reason);
+      expect(prStateStore.setPrError).toHaveBeenCalledTimes(1);
+    });
+
     it('falls back to success rendering when the push-completed event was missed', async () => {
       await listen();
       registerSession('push-1', 'push');

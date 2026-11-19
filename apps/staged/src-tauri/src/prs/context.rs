@@ -106,9 +106,9 @@ pub(crate) fn resolve_branch_pipeline_context(
 /// to be on the branch, and put there when it is not. A rebase, squash,
 /// commit or pull in a clone that is on the base branch acts on the base. A
 /// push does not ask: it names its local branch in an explicit refspec and
-/// works from any HEAD. The pull request pipeline asks, so the steps that
-/// describe the branch look at it, and goes on whatever the answer. A no-op
-/// for a local branch.
+/// works from any HEAD. Neither does the pull request pipeline, whose steps
+/// and prompts all name the local branch (`create_pr`). A no-op for a local
+/// branch.
 ///
 /// Call it once the pipeline is known to run now, before its row goes
 /// `running`, and keep what it returns until it has

@@ -68,8 +68,9 @@ struct Attempt {
     /// When the next start may be tried; a kick before then leaves the row
     /// where it is rather than spending an attempt on it.
     retry_at: Instant,
-    /// The row is waiting on something other than its own failed start.
-    held: bool,
+    /// The row is waiting on something other than its own failed start:
+    /// what the user was last told it waits on.
+    held: Option<String>,
 }
 
 /// Per-row pre-claim start failures, by branch.
@@ -98,7 +99,7 @@ impl QueuedStartAttempts {
                     Attempt {
                         failures,
                         retry_at: now + delay,
-                        held: false,
+                        held: None,
                     },
                 );
             }
@@ -113,19 +114,30 @@ impl QueuedStartAttempts {
     }
 
     /// Keep `session_id` where it is until `until` without counting a failed
-    /// start against it.
-    pub(crate) fn hold(&self, branch_id: &str, session_id: &str, until: Instant) {
+    /// start against it. `reason` is what it waits on; returns whether that
+    /// is news: the row was not held, or was held over something else. A
+    /// hold is looked at again every few seconds, and the user is told once.
+    pub(crate) fn hold(
+        &self,
+        branch_id: &str,
+        session_id: &str,
+        until: Instant,
+        reason: &str,
+    ) -> bool {
         let mut by_branch = self.by_branch.lock().unwrap();
         let rows = by_branch.entry(branch_id.to_string()).or_default();
-        let failures = rows.get(session_id).map_or(0, |a| a.failures);
+        let previous = rows.get(session_id);
+        let failures = previous.map_or(0, |a| a.failures);
+        let news = previous.and_then(|a| a.held.as_deref()) != Some(reason);
         rows.insert(
             session_id.to_string(),
             Attempt {
                 failures,
                 retry_at: until,
-                held: true,
+                held: Some(reason.to_string()),
             },
         );
+        news
     }
 
     /// Whether `session_id` was last left where it is by [`Self::hold`].
@@ -135,7 +147,7 @@ impl QueuedStartAttempts {
             .unwrap()
             .get(branch_id)
             .and_then(|rows| rows.get(session_id))
-            .is_some_and(|attempt| attempt.held)
+            .is_some_and(|attempt| attempt.held.is_some())
     }
 
     /// Whether `session_id` is waiting out the delay from a failed start.

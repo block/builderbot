@@ -93,8 +93,10 @@ pub(crate) struct BranchCheckout<'a> {
     /// behind on the base by mistake, and they are neither brought along
     /// nor a reason to refuse.
     pub(crate) base_is_worked_on: bool,
-    /// The other branches Staged works on in this clone. Commits stranded
-    /// on the base could be any of theirs that the clone doesn't have yet.
+    /// The other branches Staged works on in this clone that have had a
+    /// session. Commits stranded on the base could be any of theirs that
+    /// the clone doesn't have yet. A branch that never ran a session made
+    /// no commits and is left out.
     pub(crate) siblings: &'a [String],
 }
 
@@ -388,9 +390,11 @@ fn stranded_range(exclude_base: &str) -> [&str; 5] {
 ///   The reflog is the evidence because ancestry is not: a base that was
 ///   force-pushed and one that simply moved on both leave local base
 ///   diverged from origin's.
-/// - No other branch Staged works on in this clone is missing from it. A
-///   branch the clone doesn't have was never checked out here, so its
+/// - No other branch that has had a session in this clone is missing from
+///   it. A branch the clone doesn't have was never checked out here, so its
 ///   sessions committed on the base as well, and the commits could be its.
+///   A branch that never had a session committed nowhere and is not asked
+///   about ([`BranchCheckout::siblings`]).
 fn refuse_unless_adoptable(
     git: &GitRunner<'_>,
     checkout: &BranchCheckout<'_>,

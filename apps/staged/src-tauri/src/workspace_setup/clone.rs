@@ -29,12 +29,25 @@ pub(crate) fn checkout_for(store: &Arc<Store>, branch: &store::Branch) -> Result
         .ok_or("Branch has no workspace name")?;
     let clone_dir = branches::resolve_branch_clone_dir(store, branch)?;
     let base_ref = branches::normalize_branch_ref(&branch.base_branch);
-    let siblings: Vec<String> = branches_in_clone(store, workspace, clone_dir.as_deref())?
+    let others: Vec<store::Branch> = branches_in_clone(store, workspace, clone_dir.as_deref())?
         .into_iter()
         .filter(|other| other.id != branch.id)
-        .map(|other| other.branch_name)
         .collect();
-    let base_is_worked_on = siblings.contains(&base_ref);
+    let base_is_worked_on = others.iter().any(|other| other.branch_name == base_ref);
+    // Commits stranded on the base can only be the work of a branch that
+    // has had a session: one that never ran an agent committed nowhere. A
+    // branch added beside the one whose agent committed on the base would
+    // otherwise keep that one from taking its commits, and be kept from
+    // starting by it in turn.
+    let mut siblings = Vec::new();
+    for other in others {
+        if store
+            .has_started_session_for_branch(&other.id)
+            .map_err(|e| e.to_string())?
+        {
+            siblings.push(other.branch_name);
+        }
+    }
     Ok(Checkout {
         workspace: workspace.to_string(),
         clone_dir,
@@ -127,6 +140,7 @@ pub(super) async fn check_out_in_clone(
 /// A session found working in a clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveSession {
+    pub(crate) session_id: String,
     pub(crate) branch_name: String,
     /// `disconnected`: its turn may still be going on the workstation with
     /// no Staged process attached.
@@ -193,7 +207,8 @@ pub(crate) fn live_session_in_clone(
             .find(|(_, session)| {
                 (session.status == store::SessionStatus::Disconnected) == disconnected
             })
-            .map(|(branch_name, _)| LiveSession {
+            .map(|(branch_name, session)| LiveSession {
+                session_id: session.id.clone(),
                 branch_name: branch_name.clone(),
                 disconnected,
             })
@@ -225,6 +240,7 @@ pub(crate) fn sibling_session_in_clone(
             .map_err(|e| e.to_string())?;
         if let Some(session) = busy.first() {
             return Ok(Some(LiveSession {
+                session_id: session.id.clone(),
                 branch_name: sibling.branch_name,
                 disconnected: session.status == store::SessionStatus::Disconnected,
             }));

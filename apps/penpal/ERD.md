@@ -171,7 +171,7 @@ see-also:
 - <a id="E-PENPAL-COMMENT-ORDER"></a>**E-PENPAL-COMMENT-ORDER**: `OrderComments()` arranges comments in tree order: root comments sorted by time, replies grouped under their parents, siblings sorted by effective time. A comment's effective time is `WorkingStartedAt` when present, otherwise `CreatedAt`. This ensures agent replies are ordered by when the agent started working, not when the reply was posted. Missing parents fall back to root level.
   ← [P-PENPAL-THREAD-PANEL](PRODUCT.md#P-PENPAL-THREAD-PANEL), [P-PENPAL-WORKING](PRODUCT.md#P-PENPAL-WORKING)
 
-- <a id="E-PENPAL-CHANGE-SEQ"></a>**E-PENPAL-CHANGE-SEQ**: A global monotonic sequence number increments on every comment change. `WaitForChangeSince(ctx, sinceSeq)` blocks on a channel until `changeSeq` advances or context cancels.
+- <a id="E-PENPAL-CHANGE-SEQ"></a>**E-PENPAL-CHANGE-SEQ**: A global monotonic sequence number increments on every comment change. `WaitForChangeSince(ctx, sinceSeq)` blocks on a channel until `changeSeq` advances or context cancels. `WaitAndEnrich(ctx, project, worktree, sinceSeq)` combines the wait with enrichment — on change, it loads pending threads and sets working indicators; on timeout, it refreshes working timestamps. Both the MCP `penpal_wait_for_changes` tool and the REST `handleAgentWait` handler delegate to `WaitAndEnrich`.
   ← [P-PENPAL-WAIT-CHANGES](PRODUCT.md#P-PENPAL-WAIT-CHANGES)
 
 ---
@@ -181,7 +181,7 @@ see-also:
 - <a id="E-PENPAL-WORKING"></a>**E-PENPAL-WORKING**: An in-memory `working` map (keyed by `"project:path:threadID"`) tracks which threads an agent is actively processing. Each entry stores `startedAt` (time) and `afterCommentID` (the last comment ID when the agent started working). Entries expire after 60s. `SetWorking()`/`ClearWorking()` trigger SSE `comments` events. The API thread response includes `workingAfterCommentId` so the frontend renders the indicator after the correct comment.
   ← [P-PENPAL-WORKING](PRODUCT.md#P-PENPAL-WORKING)
 
-- <a id="E-PENPAL-HEARTBEAT"></a>**E-PENPAL-HEARTBEAT**: An in-memory `heartbeats` map (keyed by `"project:filePath"`) records agent activity. `IsAgentActive()` returns true if heartbeat is <60s old. MCP tool calls record heartbeats.
+- <a id="E-PENPAL-HEARTBEAT"></a>**E-PENPAL-HEARTBEAT**: Agent presence is determined solely by `agents.Manager.HasActiveAgent()`, which checks both spawned processes (via the process map) and CLI sessions (via the session manager). The previous heartbeat-based tracking in `comments.Store` has been removed — heartbeats are no longer needed because the agent management system is the single source of truth for agent presence.
   ← [P-PENPAL-AGENT-PRESENCE](PRODUCT.md#P-PENPAL-AGENT-PRESENCE)
 
 ---
@@ -216,14 +216,14 @@ see-also:
 - <a id="E-PENPAL-AGENT-AUTOSTART"></a>**E-PENPAL-AGENT-AUTOSTART**: `maybeStartAgent()` is called after `handleCreateThread` and `handleAddComment`. If the new comment's Role is `"human"` and no agent is running, one is started.
   ← [P-PENPAL-AGENT-LAUNCH](PRODUCT.md#P-PENPAL-AGENT-LAUNCH)
 
-- <a id="E-PENPAL-AGENT-CLEANUP"></a>**E-PENPAL-AGENT-CLEANUP**: On agent exit: temp MCP config is removed, project heartbeats and working indicators are cleared, and the `onChange` callback fires an SSE event.
+- <a id="E-PENPAL-AGENT-CLEANUP"></a>**E-PENPAL-AGENT-CLEANUP**: On agent exit: temp MCP config is removed, working indicators are cleared, and the `onChange` callback fires an SSE event.
   ← [P-PENPAL-AGENT-LAUNCH](PRODUCT.md#P-PENPAL-AGENT-LAUNCH)
 
 ---
 
 ## HTTP API
 
-- <a id="E-PENPAL-API-ROUTES"></a>**E-PENPAL-API-ROUTES**: The server exposes REST endpoints: projects CRUD, project files (grouped), recent files, in-review, search, workspaces, sources, open/navigate, threads CRUD, reviews, focus, agents start/stop/status, raw file, view tracking, publish, publish-state, ready, install-tools, claude-path. SPA served from `/app/`. MCP at `/mcp`.
+- <a id="E-PENPAL-API-ROUTES"></a>**E-PENPAL-API-ROUTES**: The server exposes REST endpoints: projects CRUD, project files (grouped), recent files, in-review, search, workspaces, sources, open/navigate, threads CRUD, reviews, focus, agents start/stop/status/attach/wait, raw file, view tracking, publish, publish-state, ready, install-tools, claude-path. SPA served from `/app/`. MCP at `/mcp`.
   ← [P-PENPAL-RENDER](PRODUCT.md#P-PENPAL-RENDER), [P-PENPAL-MCP](PRODUCT.md#P-PENPAL-MCP)
 
 - <a id="E-PENPAL-LAZY-INIT"></a>**E-PENPAL-LAZY-INIT**: First HTTP request triggers `sync.Once` that discovers projects, starts the watcher, then runs `populateProjects()` in a background goroutine. `populateProjects()` refreshes the cache, seeds activity, closes `readyCh`, broadcasts events, then enriches git info.
@@ -404,6 +404,31 @@ see-also:
 
 - <a id="E-PENPAL-CLI"></a>**E-PENPAL-CLI**: `penpal open <path>` reads the port file, checks server health, launches the app if not running (polling up to 10s), then calls `POST /api/open` for each path. The server resolves directories to projects (longest-prefix match) and files to their containing project. Navigation is handed off via `pendingNav` + SSE `navigate` event.
   ← [P-PENPAL-CLI-OPEN](PRODUCT.md#P-PENPAL-CLI-OPEN)
+
+---
+
+## CLI Agent Tools
+
+- <a id="E-PENPAL-CLI-ATTACH"></a>**E-PENPAL-CLI-ATTACH**: `penpal attach <path>` reads the port file (`ReadPortFile()`), launches the app if not running (same as `penpal open`), resolves the path to an absolute path, and calls `POST /api/agents/attach` with `{"path": "<abs-path>", "force": false}`. The server resolves the path to a project (via `FindProjectByPathWithWorktree`), checks for existing agents (Manager-spawned or external sessions), and either returns `{"project", "worktree", "sessionToken"}` or 409 Conflict. `--force` sends `force: true`, which kills/evicts the existing agent first. The session token is a random UUID generated server-side.
+  ← [P-PENPAL-CLI-ATTACH](PRODUCT.md#P-PENPAL-CLI-ATTACH), [P-PENPAL-CLI-CONTENTION](PRODUCT.md#P-PENPAL-CLI-CONTENTION)
+
+- <a id="E-PENPAL-CLI-AGENT-CMDS"></a>**E-PENPAL-CLI-AGENT-CMDS**: CLI subcommands (`files-in-review`, `list-threads`, `read-thread`, `reply`, `create-thread`, `wait`) each read the port file, call the corresponding REST API endpoint with `?session=<token>` query parameter, and print the JSON response to stdout. The server validates the session token on each request — invalid or evicted tokens return 401. All endpoints record heartbeats for the session's project. `penpal reply` accepts `--body` flag or reads from stdin. `penpal wait` calls `GET /api/agents/wait?project=X&session=T&sinceSeq=N` which uses the same `WaitForChangeSince` mechanism as the MCP `penpal_wait_for_changes` tool.
+  ← [P-PENPAL-CLI-AGENT-TOOLS](PRODUCT.md#P-PENPAL-CLI-AGENT-TOOLS)
+
+- <a id="E-PENPAL-SESSION-MGMT"></a>**E-PENPAL-SESSION-MGMT**: The server maintains an in-memory `sessions` map (keyed by token) storing project name, worktree, created-at, and last-heartbeat. Sessions expire after 90 seconds without a heartbeat. `POST /api/agents/attach` creates a session after contention checks. Agent contention checks both `agents.Manager.Status(project).Running` and active sessions. `--force` calls `Manager.Stop()` for spawned agents or marks the existing session as evicted. Evicted sessions return 401 on subsequent use. `Manager.Start()` also checks for active CLI sessions and refuses to spawn if one is attached. `Manager.StopAny()` provides a unified stop that terminates spawned agents and evicts CLI sessions in a single call — used by `POST /api/agents/stop`.
+  ← [P-PENPAL-CLI-CONTENTION](PRODUCT.md#P-PENPAL-CLI-CONTENTION), [P-PENPAL-CLI-ATTACH](PRODUCT.md#P-PENPAL-CLI-ATTACH)
+
+- <a id="E-PENPAL-AGENT-ACTIVE-UNIFIED"></a>**E-PENPAL-AGENT-ACTIVE-UNIFIED**: `AgentActive` in API responses checks both `agents.Manager.Status(project).Running` AND whether an active (non-expired) session exists for the project. This ensures external CLI-attached agents show the same presence indicators as internally-spawned agents.
+  ← [P-PENPAL-AGENT-PRESENCE](PRODUCT.md#P-PENPAL-AGENT-PRESENCE)
+
+- <a id="E-PENPAL-AGENT-PARITY"></a>**E-PENPAL-AGENT-PARITY**: Both launched and external agents go through the same `claimSession()` contention path in `agents.Manager`. Spawned agents claim a `SessionSpawned` session before launching; CLI agents claim a `SessionCLI` session via `Attach()`. Session ownership is the single source of truth for "who owns this project." The `agents` map is purely a process handle — it does not determine ownership.
+  ← [P-PENPAL-AGENT-PARITY](PRODUCT.md#P-PENPAL-AGENT-PARITY), [P-PENPAL-CLI-CONTENTION](PRODUCT.md#P-PENPAL-CLI-CONTENTION)
+
+- <a id="E-PENPAL-SHARED-CODEPATHS"></a>**E-PENPAL-SHARED-CODEPATHS**: Shared codepaths are strongly preferred over branching or special-casing by agent type. When launched and external agents need the same behavior (contention, working indicators, comment threading, presence), a single implementation serves both. `SessionKind` (`SessionSpawned` vs `SessionCLI`) is used only where behavior genuinely differs (e.g., heartbeat expiry applies to CLI sessions but not spawned sessions).
+  ← [P-PENPAL-AGENT-PARITY](PRODUCT.md#P-PENPAL-AGENT-PARITY)
+
+- <a id="E-PENPAL-AGENT-SELF-ID"></a>**E-PENPAL-AGENT-SELF-ID**: `Session.AgentName` stores the agent's self-reported name. `Attach(projectName, worktree, agentName, force)` and `claimSession()` accept an `agentName` parameter. `Manager.AgentName(project)` returns the agent name from the active session, defaulting to `"agent"`. The REST `POST /api/agents/attach` reads `"agent"` from the JSON body (default `"agent"`); the attach response includes `"agentName"`. The CLI `penpal attach --agent NAME` sends the name. `handleAddComment` and `handleCreateThread` override the `author` field from the session's `AgentName` when `role == "agent"`. MCP tools receive an `agentNameFunc` parameter and use it to derive the author for `penpal_reply` and `penpal_create_thread`. `Manager.Start()` passes `"claude"` as the agent name for spawned agents.
+  ← [P-PENPAL-AGENT-SELF-ID](PRODUCT.md#P-PENPAL-AGENT-SELF-ID)
 
 ---
 

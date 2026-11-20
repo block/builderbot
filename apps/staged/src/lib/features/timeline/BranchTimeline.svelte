@@ -766,12 +766,11 @@
       if (isFailed) {
         phase = 'failed';
         type = 'failed-commit';
-        secondaryMeta = failedArtifactSubtitle(
-          commit.completionReason,
-          'commit',
-          commit.sessionErrorMessage,
-          commit.rateLimitResetsAt
-        );
+        secondaryMeta = failedArtifactSubtitle(commit.completionReason, 'commit', {
+          errorMessage: commit.sessionErrorMessage,
+          rateLimitResetsAt: commit.rateLimitResetsAt,
+          rateLimitKind: commit.rateLimitKind,
+        });
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-commit';
@@ -840,13 +839,12 @@
 
       if (phase === 'failed') {
         type = 'failed-note';
-        secondaryMeta = failedArtifactSubtitle(
-          note.completionReason,
-          'note',
-          note.sessionErrorMessage,
-          note.rateLimitResetsAt,
-          note.isPollingForNote
-        );
+        secondaryMeta = failedArtifactSubtitle(note.completionReason, 'note', {
+          errorMessage: note.sessionErrorMessage,
+          rateLimitResetsAt: note.rateLimitResetsAt,
+          rateLimitKind: note.rateLimitKind,
+          isPollingForNote: note.isPollingForNote,
+        });
       } else if (phase === 'queued') {
         type = 'queued-note';
         secondaryMeta = queuedMeta;
@@ -911,12 +909,11 @@
       if (isFailed) {
         phase = 'failed';
         type = 'failed-review';
-        meta = failedArtifactSubtitle(
-          review.completionReason,
-          'review',
-          review.sessionErrorMessage,
-          review.rateLimitResetsAt
-        );
+        meta = failedArtifactSubtitle(review.completionReason, 'review', {
+          errorMessage: review.sessionErrorMessage,
+          rateLimitResetsAt: review.rateLimitResetsAt,
+          rateLimitKind: review.rateLimitKind,
+        });
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-review';

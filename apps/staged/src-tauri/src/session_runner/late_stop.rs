@@ -9,9 +9,10 @@
 //! - **Before the write** ([`terminal_decision_after_late_stop`]): the run
 //!   reads the token once more and the Stop replaces whatever it had decided.
 //! - **After the write** ([`deregister_paused_run`]): for a terminal row there
-//!   is nothing left to stop. A row paused for rate-limit recovery is not
-//!   terminal — the scheduler restarts it — so the run reads the Stop out as
-//!   it deregisters and ends the row.
+//!   is nothing left to stop. A row paused for rate-limit recovery, or for
+//!   a network failure under the same pause, is not terminal — the scheduler
+//!   restarts it — so the run reads the Stop out as it deregisters and ends
+//!   the row.
 
 use super::{RateLimitRecovery, RegistrationEpoch, SessionRegistry};
 use crate::store::{CompletionReason, SessionStatus, Store};
@@ -187,6 +188,16 @@ mod tests {
     }
 
     fn paused_run() -> PausedRun {
+        paused_run_for(Some(RESETS_AT), "five_hour")
+    }
+
+    /// A run paused because its prompt failed on the network: the same pause
+    /// with the network kind and no reset time.
+    fn network_paused_run() -> PausedRun {
+        paused_run_for(None, crate::rate_limit_scheduler::NETWORK_PAUSE_KIND)
+    }
+
+    fn paused_run_for(resets_at: Option<&str>, kind: &str) -> PausedRun {
         let store = Arc::new(Store::in_memory().unwrap());
         let project = Project::new("test-owner/test-repo");
         store.create_project(&project).unwrap();
@@ -207,10 +218,11 @@ mod tests {
         registry.mark_finished(&session.id, epoch);
         assert!(crate::rate_limit_scheduler::pause_for_rate_limit(
             &store,
+            None,
             &session.id,
             Some("rate limit"),
-            Some(RESETS_AT),
-            Some("five_hour"),
+            resets_at,
+            Some(kind),
             NOW_MS,
         )
         .unwrap());
@@ -337,6 +349,62 @@ mod tests {
             assert!(event["rateLimitResetsAt"].is_null());
             assert!(event["rateLimitKind"].is_null());
         }
+    }
+
+    /// A network pause is the same pause, so a Stop on either side of its
+    /// write ends the row `cancelled` and the scheduler never restarts it.
+    #[test]
+    fn a_stop_during_a_network_pause_write_still_ends_cancelled() {
+        // Before the write: the Stop replaces the decision, recovery included.
+        let decided: TerminalDecision = (
+            "paused",
+            Some("Can't reach the API server".to_string()),
+            CompletionReason::RateLimited,
+            Some(RateLimitRecovery {
+                resets_at: None,
+                kind: Some(crate::rate_limit_scheduler::NETWORK_PAUSE_KIND.to_string()),
+            }),
+        );
+        assert_eq!(
+            terminal_decision_after_late_stop(decided, Some(CompletionReason::Interrupted)),
+            ("cancelled", None, CompletionReason::Interrupted, None)
+        );
+
+        // After the write: the deregister reads the Stop out and ends the row.
+        let run = network_paused_run();
+        assert_eq!(run.row().status, SessionStatus::Paused);
+        assert_eq!(run.row().rate_limit_kind.as_deref(), Some("network"));
+        assert!(run.registry.cancel(&run.session_id));
+
+        assert!(run.deregister(&mock_app()));
+
+        let row = run.row();
+        assert_eq!(row.status, SessionStatus::Cancelled);
+        assert_eq!(row.completion_reason, Some(CompletionReason::Interrupted));
+        assert!(
+            run.store
+                .get_rate_limited_paused_sessions()
+                .unwrap()
+                .is_empty(),
+            "the scheduler no longer lists the row"
+        );
+    }
+
+    /// With no Stop, a network-paused row stays for the scheduler.
+    #[test]
+    fn a_network_paused_run_no_stop_reached_stays_paused() {
+        let run = network_paused_run();
+
+        assert!(!run.deregister(&mock_app()));
+
+        let row = run.row();
+        assert_eq!(row.status, SessionStatus::Paused);
+        assert_eq!(row.completion_reason, Some(CompletionReason::RateLimited));
+        assert_eq!(row.rate_limit_kind.as_deref(), Some("network"));
+        assert_eq!(
+            run.store.get_rate_limited_paused_sessions().unwrap().len(),
+            1
+        );
     }
 
     /// The ordinary pause: no Stop reached the entry, so the row is left for

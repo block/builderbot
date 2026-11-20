@@ -1052,6 +1052,14 @@ pub struct SessionSettled {
     /// after a Stop cancel it again over a fresh connection
     /// ([`AcpDriver::attach_cancel`]).
     pub background_work_left: bool,
+    /// The agent answered the last turn's `session/prompt` with an error of
+    /// its own, over a transport that was still up to carry it. `false` for
+    /// a failure during setup, after a cancel or an interrupt, and for one
+    /// the SDK made because the transport closed.
+    ///
+    /// This is the structured form of "the run failed on the prompt": a
+    /// caller that needs to know it reads this instead of the error text.
+    pub prompt_failed: bool,
 }
 
 impl SessionSettled {
@@ -3155,6 +3163,7 @@ impl AcpDriver {
                 transport_loss,
                 cancel_unacknowledged: transport.cancel_unacknowledged(),
                 background_work_left: transport.background_work_left(),
+                prompt_failed: transport.answered_error(),
             });
 
             if let Some(reply) = pending_reply.borrow_mut().take() {
@@ -7774,6 +7783,12 @@ async fn record_prompt_error(
         .await;
 }
 
+/// How the driver's error text begins when the agent answered `session/prompt`
+/// with an error other than `auth_required` (see [`describe_prompt_error`]).
+/// Display text only: a caller that needs to know a run failed on the prompt
+/// reads [`SessionSettled::prompt_failed`].
+const PROMPT_FAILED_PREFIX: &str = "Prompt failed:";
+
 /// The text a failed `session/prompt` surfaces to the user.
 ///
 /// amp, claude, and goose with a native provider accept `session/new` while
@@ -7795,7 +7810,7 @@ fn describe_prompt_error(
         required.log_methods(&format!("required to {operation}"));
         return required.describe(operation);
     }
-    format!("Prompt failed: {error:?}")
+    format!("{PROMPT_FAILED_PREFIX} {error:?}")
 }
 
 /// What an agent said on a `-32000` beyond the schema's stock text, if anything.
@@ -9317,6 +9332,61 @@ mod tests {
             error,
             r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#
         );
+    }
+
+    /// [`SessionSettled::prompt_failed`] is read off the transport monitor,
+    /// which the turn marks when the agent itself answers the prompt with an
+    /// error. The session runner classifies a failed run from that flag, so
+    /// it must be set by a real answered error and by nothing before it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_answered_prompt_error_marks_the_prompt_failed() {
+        let provider_error = agent_client_protocol::Error::internal_error()
+            .data(serde_json::json!({ "errorKind": "server_error" }));
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |_request: PromptRequest, responder, _cx| {
+                responder.respond_with_error(provider_error.clone())
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let setup = AcpSessionSetup {
+            agent_session_id: "session-1".to_string(),
+            agent_capabilities: AgentCapabilities::default(),
+            task_tracking_mode: TaskTrackingMode::Raw,
+            auth_methods: vec![],
+            steering_supported: false,
+        };
+        let handler = Arc::new(
+            AcpNotificationHandler::new(
+                Arc::new(BasicMessageWriter::new()),
+                false,
+                vec![],
+                CancellationToken::new(),
+            )
+            .named("sess-1"),
+        );
+        assert!(!handler.transport.answered_error());
+
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
+        let outcome = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(run_prompt_turn(
+                    &connection,
+                    &setup,
+                    &handler,
+                    "local-session",
+                    &CancellationToken::new(),
+                    &mut turn_control_rx,
+                    "hello",
+                    &[],
+                )
+                .await)
+            })
+            .await
+            .expect("the connection itself stays healthy");
+
+        let error = outcome.expect_err("the agent's error should fail the prompt");
+        assert!(error.starts_with("Prompt failed: "), "{error}");
+        assert!(handler.transport.answered_error());
     }
 
     /// A `-32000` with the bridge's own sentence on it, as pi-acp sends at
@@ -14047,6 +14117,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             transport_loss: None,
             cancel_unacknowledged: false,
             background_work_left: false,
+            prompt_failed: false,
         };
 
         // A hold that was cancelled or failed after the turn completed is the

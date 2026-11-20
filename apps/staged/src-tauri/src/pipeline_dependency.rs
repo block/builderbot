@@ -68,8 +68,9 @@ fn status_gate(dependency: Option<&store::Session>) -> Option<DependencyGate> {
     let noun = dependency_noun(dependency);
     match dependency.status {
         // A disconnected dependency may still be running on its workstation,
-        // and a paused one hit a rate limit and resumes on its own, so neither
-        // has finished yet.
+        // and a paused one resumes on its own, whether it hit a provider
+        // limit or, with `rate_limit_kind = "network"`, its prompt failed on
+        // the network. Neither has finished yet.
         SessionStatus::Queued
         | SessionStatus::Running
         | SessionStatus::Disconnected

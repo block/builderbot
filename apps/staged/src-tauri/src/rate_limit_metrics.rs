@@ -88,6 +88,26 @@ pub(crate) fn record_rate_limit_hit(
     );
 }
 
+/// A session was paused because its prompt failed on the network. Counted
+/// apart from rate-limit hits; `signal` is what identified the failure.
+pub(crate) fn record_network_pause(session_id: &str, provider: Option<&str>, signal: &str) {
+    let provider = metric_label(provider);
+    let snapshot = with_state(|state| {
+        state.increment_counter("network_pauses_total");
+        state.snapshot.clone()
+    });
+
+    log_metric(
+        "network_pause",
+        json!({
+            "sessionId": session_id,
+            "provider": provider,
+            "signal": signal,
+        }),
+        snapshot,
+    );
+}
+
 /// Observe the count of paused sessions the scheduler can still act on.
 ///
 /// Sessions that gave up or need a manual resume are excluded by the caller,

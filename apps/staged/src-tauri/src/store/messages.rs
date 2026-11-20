@@ -18,6 +18,16 @@ const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NO
 /// button compares against.
 pub(super) const VISIBLE_ASSISTANT_FILTER: &str =
     "role = 'assistant' AND NOT (content = '' AND acp_event_kind IS NOT NULL)";
+/// A row of the agent's own output for a turn: text, a tool call or its
+/// result, a plan, or the turn's response. Hidden rows tagged with an
+/// `acp_origin` and the rows a connection writes before it sends the prompt
+/// are left out.
+const AGENT_OUTPUT_FILTER: &str = "acp_origin IS NULL
+    AND (role IN ('tool_call', 'tool_result')
+         OR (role = 'assistant'
+             AND (acp_event_kind IS NULL
+                  OR acp_event_kind IN ('agent_message_chunk', 'plan_update',
+                                        'response_result', 'prompt_response'))))";
 /// ACP rows the transcript needs on top of [`Store::get_session_messages`]:
 /// hidden rows of the kinds the frontend reads (`acpTranscript.ts`,
 /// `acpConfigMetadata.ts`), plus visible tool rows still in flight — the
@@ -679,15 +689,47 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
+            &format!(
+                "SELECT EXISTS(
+                   SELECT 1 FROM session_messages
+                   WHERE session_id = ?1 AND id > ?2 AND {AGENT_OUTPUT_FILTER})"
+            ),
+            params![session_id, message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Whether a session's agent reached its model provider at or after
+    /// `since`: the session recorded a tool call or its result, a result the
+    /// agent did not mark as an error, or a prompt response.
+    ///
+    /// Backs the network gate's probe check, which knows when it claimed the
+    /// probe but not which row its prompt will be. It is narrower than
+    /// [`Self::agent_answered_message`] on purpose. A turn that fails because
+    /// the provider is unreachable still records agent output: Claude prints
+    /// the failure as a message chunk ("API Error: Can't reach the API
+    /// server"), then a `response_result` with `is_error: true`, and the
+    /// writer stores that text as a plain assistant row. None of those shows
+    /// that a request got through, so message text and plans never count
+    /// here and a result counts only without the error mark.
+    pub fn session_reached_provider_since(
+        &self,
+        session_id: &str,
+        since: i64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM session_messages
-               WHERE session_id = ?1 AND id > ?2 AND acp_origin IS NULL
+               WHERE session_id = ?1 AND created_at >= ?2 AND acp_origin IS NULL
                  AND (role IN ('tool_call', 'tool_result')
-                      OR (role = 'assistant'
-                          AND (acp_event_kind IS NULL
-                               OR acp_event_kind IN ('agent_message_chunk', 'plan_update',
-                                                     'response_result', 'prompt_response')))))",
-            params![session_id, message_id],
+                      OR (role = 'assistant' AND acp_event_kind = 'prompt_response')
+                      OR (role = 'assistant' AND acp_event_kind = 'response_result'
+                          AND CASE WHEN json_valid(acp_content)
+                                   THEN json_extract(acp_content, '$.is_error') = 0
+                                   ELSE 0 END)))",
+            params![session_id, since],
             |row| row.get(0),
         )
         .map_err(Into::into)

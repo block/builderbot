@@ -38,7 +38,9 @@
 
 pub(crate) mod attachments;
 mod disconnect;
+mod failed_run;
 mod late_stop;
+mod network_failure;
 pub(crate) mod reconcile;
 
 pub(crate) use disconnect::may_still_run_on_workstation;
@@ -1792,6 +1794,7 @@ pub fn start_session(
         // connection, so a remote turn may still be running behind it. Reset
         // with `settle_reason`.
         let cancel_unacknowledged = Cell::new(false);
+        let prompt_failed = Cell::new(false);
         // Whether the last connection settled out of its background hold with
         // the work still going (see `SessionSettled::background_work_left`).
         // Reset with `settle_reason`.
@@ -2383,6 +2386,7 @@ pub fn start_session(
                 settle_reason.set(None);
                 transport_loss.set(None);
                 cancel_unacknowledged.set(false);
+                prompt_failed.set(false);
                 background_work_left.set(false);
                 reattached.set(false);
                 let turn_result = match driver
@@ -2450,6 +2454,7 @@ pub fn start_session(
                                     settle_reason.set(Some(settled.reason));
                                     transport_loss.set(settled.transport_loss);
                                     cancel_unacknowledged.set(settled.cancel_unacknowledged);
+                                    prompt_failed.set(settled.prompt_failed);
                                     background_work_left.set(settled.background_work_left);
                                     match settled.reason {
                                         acp_client::SessionSettleReason::HeldUntilCap => {
@@ -2545,6 +2550,7 @@ pub fn start_session(
                     settle_reason.set(settlement.settle_reason);
                     transport_loss.set(settlement.transport_loss);
                     cancel_unacknowledged.set(settlement.cancel_unacknowledged);
+                    prompt_failed.set(settlement.prompt_failed);
                     background_work_left.set(settlement.background_work_left);
                     reattached.set(true);
                     // The agent went on with the turn after anything read
@@ -2780,6 +2786,7 @@ pub fn start_session(
             transport_loss: transport_loss.get(),
             cancel_unacknowledged: cancel_unacknowledged.get(),
             background_work_left: background_work_left.get(),
+            prompt_failed: prompt_failed.get(),
         };
         let reattached = reattached.get();
 
@@ -3042,6 +3049,10 @@ struct RunSettlement {
     /// The connection settled out of its background hold with the work still
     /// going (see `SessionSettled::background_work_left`).
     background_work_left: bool,
+    /// The agent answered the run's last prompt with an error of its own
+    /// (see `SessionSettled::prompt_failed`). A turn reattached to was not
+    /// prompted by the connection that saw it end, so it has the default.
+    prompt_failed: bool,
 }
 
 /// The transport verdict of a turn reattached to after its connection went:
@@ -3331,45 +3342,45 @@ fn finish_session_run(
                 .get_session(&session_id_for_status)
                 .ok()
                 .flatten();
-            let provider_metadata = session_snapshot
-                .as_ref()
-                .and_then(|session| session.provider_metadata.as_ref());
             let provider = session_snapshot
                 .as_ref()
                 .and_then(|session| session.provider.as_deref())
                 .or(config.provider.as_deref());
-            // A rate limit pauses the session; anything else fails it, as a
-            // lost remote agent when that is what the error says.
-            let completion_reason =
-                match completion_reason_for_driver_error(message, provider_metadata) {
-                    CompletionReason::Crashed => failed_run_completion_reason(message),
-                    reason => reason,
-                };
-            let rate_limit_recovery =
-                (completion_reason == CompletionReason::RateLimited).then(|| {
-                    rate_limit_recovery_details(
-                        message,
-                        provider_metadata,
-                        crate::store::now_timestamp(),
-                    )
-                });
-            if let Some(recovery) = rate_limit_recovery.as_ref() {
-                crate::rate_limit_metrics::record_rate_limit_hit(
+            // A provider limit or a network failure pauses the session;
+            // anything else fails it (see `failed_run`).
+            let decision = failed_run::decide_failed_run(
+                session_snapshot.as_ref(),
+                config.provider.as_deref(),
+                message,
+                settlement.prompt_failed,
+                crate::store::now_timestamp(),
+            );
+            match (decision.network_failure, decision.recovery.as_ref()) {
+                (Some(failure), _) => {
+                    log::warn!(
+                        "Session {session_id_for_status}: the prompt failed on the network \
+                         ({}); pausing it for an automatic resume",
+                        failure.signal()
+                    );
+                    crate::rate_limit_metrics::record_network_pause(
+                        &session_id_for_status,
+                        provider,
+                        failure.signal(),
+                    );
+                }
+                (None, Some(recovery)) => crate::rate_limit_metrics::record_rate_limit_hit(
                     &session_id_for_status,
                     provider,
                     recovery.kind.as_deref(),
                     recovery.resets_at.is_some(),
-                );
+                ),
+                (None, None) => {}
             }
             (
-                if completion_reason == CompletionReason::RateLimited {
-                    "paused"
-                } else {
-                    "error"
-                },
+                decision.status(),
                 Some(innermost_error_sentence(message).unwrap_or_else(|| message.clone())),
-                completion_reason,
-                rate_limit_recovery,
+                decision.completion_reason,
+                decision.recovery,
             )
         }
     };
@@ -3508,8 +3519,14 @@ fn finish_session_run(
         // Status flip and retry bookkeeping land in one write, so a
         // scheduler tick can never see a paused row without bookkeeping
         // and double-count the attempt.
+        use tauri::Manager;
+        let rate_limit_scheduler =
+            app_handle.try_state::<Arc<crate::rate_limit_scheduler::RateLimitScheduler>>();
         crate::rate_limit_scheduler::pause_for_rate_limit(
             &store_for_status,
+            rate_limit_scheduler
+                .as_deref()
+                .map(|scheduler| &**scheduler),
             &session_id_for_status,
             error_msg.as_deref(),
             recovery.resets_at.as_deref(),
@@ -11863,6 +11880,7 @@ draft file"
             transport_loss: None,
             cancel_unacknowledged,
             background_work_left: false,
+            prompt_failed: false,
         }
     }
 

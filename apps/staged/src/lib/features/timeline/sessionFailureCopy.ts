@@ -25,18 +25,58 @@ const RECONCILE_INTERRUPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The `rateLimitKind` of a `rate_limited` pause whose turn failed because the
+ * agent could not reach its model provider, not because of an API limit
+ * (`NETWORK_PAUSE_KIND` in `src-tauri/src/rate_limit_scheduler.rs`).
+ */
+export const NETWORK_PAUSE_KIND = 'network';
+
+/**
+ * The `reason` in a network pause's retry bookkeeping while it waits behind
+ * the scheduler's network gate (`NETWORK_WAIT_REASON` in
+ * `src-tauri/src/rate_limit_scheduler.rs`). Such a row's `nextRetryAt` is the
+ * time it paused, not the time of its next attempt.
+ */
+export const NETWORK_WAIT_REASON = 'network_wait';
+
+/** What a network pause says wherever it is named: the row subtitle and the chat alert. */
+export const NETWORK_PAUSED = 'Paused: network unavailable.';
+/**
+ * The same, with the promise of an automatic resume. Only for a caller that
+ * has the scheduler's bookkeeping and so knows the promise holds.
+ */
+export const NETWORK_PAUSED_RESUMES = `${NETWORK_PAUSED} Resumes when the connection returns.`;
+
+/** Whether a `rate_limited` pause with this `rateLimitKind` is a network pause. */
+export function isNetworkPause(rateLimitKind: string | null | undefined): boolean {
+  return rateLimitKind === NETWORK_PAUSE_KIND;
+}
+
+/** The session fields `failedArtifactSubtitle` reads beyond the completion reason. */
+export interface FailedArtifactDetails {
+  /** The session's error: reconcile's messages say more than its completion reason does. */
+  errorMessage?: string | null;
+  /** Dates an API-limit pause's subtitle. */
+  rateLimitResetsAt?: string | null;
+  /** Tells a network pause from an API-limit pause. */
+  rateLimitKind?: string | null;
+  /** The note row's `NoteTimelineItem.isPollingForNote`. */
+  isPollingForNote?: boolean;
+}
+
+/**
  * The subtitle of a timeline row whose session ended without producing its
- * artifact. `errorMessage` is the session's: reconcile's messages say more
- * than its completion reason does. `rateLimitResetsAt` dates a rate-limit
- * pause's subtitle. `isPollingForNote` is the note row's
- * `NoteTimelineItem.isPollingForNote`.
+ * artifact.
  */
 export function failedArtifactSubtitle(
   completionReason: string | null | undefined,
   kind: ArtifactKind,
-  errorMessage?: string | null,
-  rateLimitResetsAt?: string | null,
-  isPollingForNote = false
+  {
+    errorMessage,
+    rateLimitResetsAt,
+    rateLimitKind,
+    isPollingForNote = false,
+  }: FailedArtifactDetails = {}
 ): string {
   const noun = artifactNoun[kind];
   if (errorMessage === RECONCILE_WORKSTATION_GONE) {
@@ -51,6 +91,11 @@ export function failedArtifactSubtitle(
     case 'remote_agent_lost':
       return `Workspace agent lost — no ${noun} created`;
     case 'rate_limited':
+      // A timeline row does not carry the scheduler's bookkeeping, so it
+      // cannot tell a pause that will resume by itself from one the
+      // scheduler gave up on or will not resume (a pending tool call). It
+      // makes no promise either way; the chat alert, which can tell, does.
+      if (isNetworkPause(rateLimitKind)) return NETWORK_PAUSED;
       return rateLimitPausedSubtitle(rateLimitResetsAt) ?? `Paused by API limit — no ${noun} yet`;
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;

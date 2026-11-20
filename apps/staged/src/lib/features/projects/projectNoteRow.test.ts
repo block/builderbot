@@ -98,6 +98,31 @@ describe('projectNoteRow', () => {
     expect(failed(null).title).toBe('Session finished — no note created');
   });
 
+  it('titles a paused note by its kind of pause', () => {
+    const paused = (overrides: Partial<ProjectNoteRowSource>) =>
+      projectNoteRow(
+        note({
+          sessionStatus: 'paused',
+          content: '',
+          title: '',
+          completionReason: 'rate_limited',
+          ...overrides,
+        }),
+        { deleting: false, nowMs: NOW }
+      );
+    const resetsAt = '2026-06-24T15:45:00Z';
+    const resetTime = new Date(resetsAt).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    expect(paused({ rateLimitKind: 'network' }).title).toBe('Paused: network unavailable.');
+    expect(paused({}).title).toBe('Paused by API limit — no note yet');
+    // The reset time dates the pause; it is not the session's error message.
+    expect(paused({ rateLimitResetsAt: resetsAt }).title).toBe(
+      `Paused by API limit — resets around ${resetTime}`
+    );
+  });
+
   it('subtitles a deleting row "Deleting..." whatever its phase', () => {
     const live = { deleting: true, nowMs: NOW, liveHint: 'Reading' };
     expect(projectNoteRow(note(), live).secondaryMeta).toBe('Deleting...');

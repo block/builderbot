@@ -79,7 +79,11 @@
   import '../../shared/markdown/diagramStyles.css';
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
   import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
-  import { getMarkdownMediaFromEvent, type MarkdownMedia } from '../../shared/markdown/mediaViewer';
+  import {
+    getMarkdownMediaFromEvent,
+    getMarkdownMediaImageFromEvent,
+  } from '../../shared/markdown/mediaViewer';
+  import { mediaPinchOpen, type OpenMarkdownMedia } from '../../shared/markdown/mediaPinch';
   import {
     collectStagedMediaImageIds,
     resolveStagedMediaUrl,
@@ -370,7 +374,7 @@
         })
       : null
   );
-  let mediaViewer = $state<MarkdownMedia | null>(null);
+  let mediaViewer = $state<OpenMarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
 
   // Search state
@@ -732,9 +736,12 @@
     if (!media) return false;
     event.preventDefault();
     event.stopPropagation();
-    mediaViewer = media;
+    mediaViewer = { ...media, originImage: getMarkdownMediaImageFromEvent(event.target) };
     return true;
   }
+
+  // Pinch-out on an inline image opens it too, following the fingers.
+  const openMediaOnPinch = mediaPinchOpen((media) => (mediaViewer = media));
 
   function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
     const svgMarkup = getMarkdownDiagramSvgMarkup(event.target);
@@ -957,6 +964,7 @@
             class:ends-pane={!showBottomBar}
             bind:this={contentEl}
             onclick={handleContentClick}
+            {@attach openMediaOnPinch}
             onkeydown={handleContentKeydown}
           >
             {#if hasNoteContent}
@@ -1096,6 +1104,8 @@
     open={true}
     src={resolveStagedMediaUrl(mediaViewer.id, mediaViewer.ext)}
     title={mediaViewer.alt}
+    originImage={mediaViewer.originImage}
+    gesture={mediaViewer.gesture}
     onClose={() => (mediaViewer = null)}
   />
 {/if}

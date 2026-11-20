@@ -106,6 +106,7 @@ pub(super) fn start_pipeline_for_branch(
             pipeline,
             working_dir: ctx.working_dir,
             pre_head_sha: None,
+            capture_pre_head: false,
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,
@@ -185,6 +186,12 @@ pub(crate) enum BranchWorkInFlight {
 
 /// What the branch is busy with, if anything.
 ///
+/// A queued row that no longer resolves to anything (`BranchSessionLink::Unlinked`:
+/// its commit, note or review was deleted out from under it) does not count,
+/// the same as for a session start. The drain steps over it, so a row queued
+/// behind it alone would wait for a kick that never comes, and a revert, which
+/// refuses rather than queues, would stay refused on the branch for good.
+///
 /// Callers must hold the branch launch lock: the answer is only meaningful for
 /// as long as no session can start or be enqueued underneath them.
 pub(crate) fn branch_work_in_flight(
@@ -197,11 +204,7 @@ pub(crate) fn branch_work_in_flight(
     {
         return Ok(BranchWorkInFlight::Running);
     }
-    if !store
-        .get_queued_sessions_for_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .is_empty()
-    {
+    if crate::session_commands::has_queued_branch_session(store, branch_id)? {
         return Ok(BranchWorkInFlight::Queued);
     }
     Ok(BranchWorkInFlight::None)
@@ -228,7 +231,11 @@ pub(super) fn branch_has_work_in_flight(
 pub(super) struct RunningPipelineSession {
     pub(super) session_id: String,
     pub(super) pipeline: PipelineExecution,
-    pub(super) prompt: &'static str,
+    pub(super) prompt: String,
+    /// Passed on as [`session_runner::PipelineConfig::capture_pre_head`]: set
+    /// for a revert, whose pipeline has no kind that would make the runner
+    /// read HEAD at start the way it does for a rebase.
+    pub(super) capture_pre_head: bool,
     pub(super) _liveness: session_runner::LivenessHold,
 }
 
@@ -262,16 +269,18 @@ pub(super) fn launch_running_pipeline_session(
         session_id,
         pipeline,
         prompt,
+        capture_pre_head,
         _liveness: liveness,
     } = running;
     let started = session_runner::start_pipeline_session(
         session_runner::PipelineConfig {
             session_id: session_id.clone(),
-            prompt: prompt.to_string(),
+            prompt,
             steps,
             pipeline,
             working_dir: ctx.working_dir,
             pre_head_sha: None,
+            capture_pre_head,
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,

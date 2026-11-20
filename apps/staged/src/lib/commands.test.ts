@@ -262,7 +262,7 @@ describe('browser-native command wrappers', () => {
     });
   });
 
-  it('surfaces the queued-vs-running status returned by rebase and squash', async () => {
+  it('surfaces the queued-vs-running status returned by rebase and squash, and the revert session', async () => {
     const invokeCommand = vi
       .fn()
       .mockResolvedValueOnce({ sessionId: 'session-1', sessionStatus: 'queued' })
@@ -271,13 +271,14 @@ describe('browser-native command wrappers', () => {
         sessionId: 'session-3',
         sessionStatus: 'running',
         followUpSessionId: 'session-4',
-      });
+      })
+      .mockResolvedValueOnce('session-5');
     vi.doMock('./transport', () => ({
       invokeCommand,
       isTauri: true,
     }));
 
-    const { rebaseBranch, squashCommits } = await import('./commands');
+    const { rebaseBranch, squashCommits, revertCommit } = await import('./commands');
 
     await expect(rebaseBranch('branch-1', 'codex', 'origin')).resolves.toEqual({
       sessionId: 'session-1',
@@ -292,6 +293,7 @@ describe('browser-native command wrappers', () => {
       sessionStatus: 'running',
       followUpSessionId: 'session-4',
     });
+    await expect(revertCommit('branch-1', 'abc1234')).resolves.toBe('session-5');
 
     expect(invokeCommand.mock.calls).toEqual([
       [
@@ -303,6 +305,7 @@ describe('browser-native command wrappers', () => {
         'rebase_branch',
         { branchId: 'branch-1', provider: 'codex', target: null, thenForcePush: true },
       ],
+      ['revert_commit', { branchId: 'branch-1', commitSha: 'abc1234', provider: null }],
     ]);
   });
 

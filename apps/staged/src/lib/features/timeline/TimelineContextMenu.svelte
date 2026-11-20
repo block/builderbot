@@ -5,6 +5,7 @@
   import MailOpen from '@lucide/svelte/icons/mail-open';
   import MessageSquarePlus from '@lucide/svelte/icons/message-square-plus';
   import Play from '@lucide/svelte/icons/play';
+  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
@@ -24,10 +25,18 @@
   interface Props {
     actions?: TimelineContextMenuAction[];
     onNewSessionReferring?: (hashtagRef: string) => void;
+    onRevertCommit?: (commitSha: string) => void;
+    revertCommitDisabledReason?: string;
     children?: Snippet;
   }
 
-  let { actions = [], onNewSessionReferring, children }: Props = $props();
+  let {
+    actions = [],
+    onNewSessionReferring,
+    onRevertCommit,
+    revertCommitDisabledReason,
+    children,
+  }: Props = $props();
 
   let open = $state(false);
   let activeActionKey = $state<string | null>(null);
@@ -100,6 +109,13 @@
     }
   }
 
+  function handleRevertCommit() {
+    const sha = activeAction?.commitSha;
+    if (sha) {
+      onRevertCommit?.(sha);
+    }
+  }
+
   function handleCopySha() {
     const sha = activeAction?.commitSha;
     if (sha) {
@@ -162,6 +178,19 @@
         {#if activeAction.onStartNow}
           <ContextMenu.Item onSelect={handleStartNow}>
             <Play size={14} /> Start now
+          </ContextMenu.Item>
+        {/if}
+        {#if activeAction.commitSha && onRevertCommit}
+          <!-- The reason is shown inline, not as a title: a disabled item takes
+               no pointer events, so it never gets the hover a tooltip needs. -->
+          <ContextMenu.Item disabled={!!revertCommitDisabledReason} onSelect={handleRevertCommit}>
+            <RotateCcw size={14} />
+            <span class="flex flex-col">
+              Revert
+              {#if revertCommitDisabledReason}
+                <span class="text-xs text-muted-foreground">{revertCommitDisabledReason}</span>
+              {/if}
+            </span>
           </ContextMenu.Item>
         {/if}
         {#if activeAction.commitSha}

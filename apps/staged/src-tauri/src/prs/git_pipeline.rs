@@ -11,7 +11,7 @@ use crate::session_commands::{fail_claimed_queued_start, QueuedSessionClaim, Que
 use crate::session_runner;
 use crate::store::{self, PipelineExecution, PipelineKind, PipelineStep, Store};
 
-use super::context::resolve_branch_pipeline_context;
+use super::context::{ensure_pipeline_checkout, resolve_branch_pipeline_context};
 use super::pipeline::pipeline_prompt;
 use super::pull::build_pull_pipeline_steps;
 use super::push::{build_push_pipeline_steps, PushVariant};
@@ -91,6 +91,14 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         .ok_or_else(|| format!("Queued session {} has no pipeline", session.id))?;
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    // Before the claim, like everything else here that awaits. Held until
+    // this returns, by when the row is claimed `running`. Only a pull needs
+    // the clone on the branch: a push names its local branch in an explicit
+    // refspec and works from any HEAD.
+    let _checkout = match queued_pipeline.kind {
+        Some(PipelineKind::Push) => crate::workspace_setup::verify::CheckoutHold::none(),
+        _ => ensure_pipeline_checkout(&app_handle, &store, &ctx.branch, Some(&session.id)).await?,
+    };
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
     let RebuiltGitPipeline {
         steps,

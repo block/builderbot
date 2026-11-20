@@ -1230,6 +1230,19 @@ impl Store {
         self.get_sessions_for_branch_where(branch_id, "status IN ('running', 'disconnected')")
     }
 
+    /// Whether a session of the branch has ever left `queued`: one is
+    /// running, or has run. Only such a branch can have had an agent commit
+    /// in its checkout.
+    pub fn has_started_session_for_branch(&self, branch_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE status != 'queued' AND branch_id = ?1",
+            params![branch_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     fn get_sessions_for_branch_where(
         &self,
         branch_id: &str,

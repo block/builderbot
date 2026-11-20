@@ -18,17 +18,18 @@ use std::path::Path;
 const TRACKED: &[(&str, &str, usize)] = &[
     // The user's own repo action: streams output and may run for minutes.
     ("actions/commands.rs", "run_branch_action_impl", 1),
-    // `git clone`, plus the runner behind `check_out_workspace_branch` (setup
-    // fetches, checkout, fast-forward merge, branch creation), for a repo
-    // added to a workspace. A killed checkout leaves `.git/index.lock`.
-    ("branches.rs", "clone_repo_into_workspace", 2),
+    // `git clone` of a repo a workstation doesn't have yet: a large one
+    // outlasts 60 s.
+    ("branches.rs", "clone_repo_into_workspace", 1),
+    // The runner behind `check_out_workspace_branch`, which every branch
+    // setup ends in (`workspace_setup`): the `ls-remote` probe and fetches
+    // (a killed one must not read as "not on origin"), checkout,
+    // fast-forward merge and branch creation. A killed checkout leaves
+    // `.git/index.lock`.
+    ("branches.rs", "check_out_branch_in_workspace", 1),
     // The diff-collection script reads both versions of every changed file
     // for every commit on the branch; on a large branch it outlasts 60 s.
     ("diff_cache.rs", "collect_branch_diff", 1),
-    // The setup fetch probing whether the branch exists on the remote (a
-    // killed probe would silently branch from base instead) and the setup
-    // checkout (a killed one leaves `.git/index.lock`).
-    ("branches.rs", "start_workspace", 2),
     // Pipeline steps: push runs pre-push hooks and a rebase can take minutes.
     ("session_runner.rs", "run_remote_pipeline_command", 1),
     // Project transfer scripts hash working trees, write bundles and clone;
@@ -41,8 +42,6 @@ const TRACKED: &[(&str, &str, usize)] = &[
     ("timeline.rs", "discard_remote_worktree_changes", 2),
     ("timeline.rs", "pull_branch_ff_only_impl", 1),
     ("timeline.rs", "reset_branch_to_remote_impl", 2),
-    // The `start_workspace` arm's copy of the setup fetch and checkout.
-    ("web_server.rs", "dispatch", 2),
 ];
 
 #[test]

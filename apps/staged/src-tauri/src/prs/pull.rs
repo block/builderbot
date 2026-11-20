@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::session_runner;
 use crate::store::{self, FailureStrategy, PipelineExecution, PipelineKind, PipelineStep, Store};
 
+use super::context::ensure_pipeline_checkout;
 use super::git_commands::git_fetch_with_fallback;
 use super::pipeline::{branch_has_work_in_flight, find_queued_pipeline, PULL_PROMPT};
 
@@ -183,10 +184,33 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
     let pull_store = Arc::clone(&store);
     let pull_branch_id = branch_id.clone();
     let kick_branch_id = branch_id.clone();
+    let verify_store = Arc::clone(&store);
+    let verify_app_handle = app_handle.clone();
+    let verify_branch_id = branch_id.clone();
     pull_or_queue_branch_with(
         store,
         registry,
         branch_id,
+        // The fast-forward merges into whatever the clone has checked out,
+        // so a remote clone is read to be on the branch first, like a
+        // pipeline's. The marker row is `running` by now and is what keeps
+        // other checkouts out of the clone, so the hold ends with the read.
+        move |marker_session_id| async move {
+            let Some(branch) = verify_store
+                .get_branch(&verify_branch_id)
+                .map_err(|e| e.to_string())?
+            else {
+                return Ok(());
+            };
+            ensure_pipeline_checkout(
+                &verify_app_handle,
+                &verify_store,
+                &branch,
+                Some(&marker_session_id),
+            )
+            .await
+            .map(drop)
+        },
         move || crate::timeline::pull_branch_ff_only_impl(&pull_store, &pull_branch_id),
         move || {
             // Anything the user requested while the pull held the branch is
@@ -202,15 +226,21 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
     .await
 }
 
-/// [`pull_or_queue_branch_for_branch`] with the pull itself and the
-/// after-release hook injected, so a test can stand in a pull that blocks.
-pub(super) async fn pull_or_queue_branch_with(
+/// [`pull_or_queue_branch_for_branch`] with the checkout check, the pull
+/// itself and the after-release hook injected, so a test can stand in a pull
+/// that blocks. `verify` is given the marker session's id and runs before
+/// the pull; its error is the pull's.
+pub(super) async fn pull_or_queue_branch_with<V>(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
     branch_id: String,
+    verify: impl FnOnce(String) -> V + Send + 'static,
     pull: impl FnOnce() -> Result<(), String> + Send + 'static,
     on_released: impl FnOnce() + Send + 'static,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, String>
+where
+    V: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
     let (session_id, liveness) =
         match claim_or_queue_pull_for_branch(&store, &registry, &branch_id)? {
             PullDisposition::Queued(session_id) => return Ok(Some(session_id)),
@@ -231,9 +261,12 @@ pub(super) async fn pull_or_queue_branch_with(
     // the pull's own error path rather than returning early: the marker
     // session is what marks the branch busy, and nothing else ever finishes it.
     let released = tauri::async_runtime::spawn(async move {
-        let pulled = tauri::async_runtime::spawn_blocking(pull)
-            .await
-            .unwrap_or_else(|e| Err(format!("Pull task failed: {e}")));
+        let pulled = match verify(session_id.clone()).await {
+            Ok(()) => tauri::async_runtime::spawn_blocking(pull)
+                .await
+                .unwrap_or_else(|e| Err(format!("Pull task failed: {e}"))),
+            Err(e) => Err(e),
+        };
 
         finish_immediate_pull_session(
             &store,

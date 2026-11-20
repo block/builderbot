@@ -150,6 +150,7 @@
     onRename?: (branchName: string) => void | Promise<void>;
     onMove?: (targetProjectId: string) => void | Promise<void>;
     onRetryWorktree?: () => void;
+    onRetryWorkspace?: () => void;
   }
 
   let {
@@ -163,6 +164,7 @@
     onRename,
     onMove,
     onRetryWorktree,
+    onRetryWorkspace,
   }: Props = $props();
 
   // Determine if this is a local or remote branch
@@ -2257,6 +2259,7 @@
           status={remoteWorkspaceStatus}
           {workspaceError}
           fallbackError={error}
+          onRetry={onRetryWorkspace}
         />
       {:else if loading && !isSettingUp}
         <div class="loading">

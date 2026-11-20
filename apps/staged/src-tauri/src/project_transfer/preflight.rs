@@ -169,6 +169,22 @@ pub struct RepoPreflight {
     pub scanning: bool,
 }
 
+impl RepoPreflight {
+    /// Whether the inspection read this row's checkout and found it on the
+    /// row's branch: there was a checkout to read, it has a commit, and HEAD
+    /// was neither detached nor on another branch.
+    pub(super) fn is_on_its_branch(&self) -> bool {
+        self.state == RepoTransferState::Carry
+            && self.head.is_some()
+            && !self.blockers.iter().any(|issue| {
+                matches!(
+                    issue.code.as_str(),
+                    "not_a_checkout" | "detached_head" | "wrong_branch" | "no_commits"
+                )
+            })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectTransferPreflight {

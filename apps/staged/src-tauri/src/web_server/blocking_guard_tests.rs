@@ -513,6 +513,8 @@ const SYNCHRONOUS_COMMANDS: &[(&str, &str)] = &[
         "session_runner/reconcile.rs",
         "get_session_reconcile_states",
     ),
+    // The reasons failed branch setups left behind, held in memory.
+    ("workspace_setup/failures.rs", "get_workspace_setup_errors"),
     // Per-window seeds and the updater claim.
     ("window_commands.rs", "take_window_seed"),
     ("window_commands.rs", "claim_updater_ownership"),

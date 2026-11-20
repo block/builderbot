@@ -2151,268 +2151,20 @@ pub(crate) async fn dispatch(
         "poll_workspace_status" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-            let ws_name = branch
-                .workspace_name
-                .as_deref()
-                .ok_or("Branch is not a remote workspace branch")?;
-
-            // Secondary clone setup: hold at Starting until setup marks it Running.
-            let is_secondary_clone_setup = if branch.workspace_status
-                == Some(store::WorkspaceStatus::Starting)
-                && crate::branches::resolve_branch_workspace_subpath(&store, &branch)?.is_some()
-            {
-                if let Some(ws_name) = branch.workspace_name.as_deref() {
-                    let peers = store
-                        .list_branches_for_project(&branch.project_id)
-                        .map_err(|e| e.to_string())?;
-                    peers.into_iter().any(|peer| {
-                        peer.id != branch.id
-                            && peer.branch_type == store::BranchType::Remote
-                            && peer.workspace_name.as_deref() == Some(ws_name)
-                            && peer.workspace_status == Some(store::WorkspaceStatus::Running)
-                    })
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if is_secondary_clone_setup {
-                return Ok(serde_json::to_value(crate::PollWorkspaceResult {
-                    status: store::WorkspaceStatus::Starting.as_str().to_string(),
-                    workstation_id: crate::branches::cached_workstation_id(ws_name),
-                })
-                .unwrap());
-            }
-
-            let info = match crate::branches::run_blox_blocking({
-                let ws_name = ws_name.to_string();
-                move || crate::blox::ws_info(&ws_name)
-            })
-            .await
-            {
-                Ok(info) => info,
-                Err(crate::blox::BloxError::NotAuthenticated) => {
-                    store
-                        .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-                        .ok();
-                    return Err("Not authenticated with Blox. Run: sq login".to_string());
-                }
-                Err(e) => {
-                    let is_not_found = matches!(&e, crate::blox::BloxError::CommandFailed(msg) if msg.to_lowercase().contains("not found"));
-                    if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
-                        return Ok(serde_json::to_value(crate::PollWorkspaceResult {
-                            status: store::WorkspaceStatus::Starting.as_str().to_string(),
-                            workstation_id: crate::branches::cached_workstation_id(ws_name),
-                        })
-                        .unwrap());
-                    }
-                    if branch.workspace_status == Some(store::WorkspaceStatus::Running) {
-                        if is_not_found {
-                            store
-                                .update_branch_workspace_status(
-                                    &branch_id,
-                                    &store::WorkspaceStatus::Stopped,
-                                )
-                                .ok();
-                            return Ok(serde_json::to_value(crate::PollWorkspaceResult {
-                                status: store::WorkspaceStatus::Stopped.as_str().to_string(),
-                                workstation_id: crate::branches::cached_workstation_id(ws_name),
-                            })
-                            .unwrap());
-                        }
-                        return Ok(serde_json::to_value(crate::PollWorkspaceResult {
-                            status: store::WorkspaceStatus::Running.as_str().to_string(),
-                            workstation_id: crate::branches::cached_workstation_id(ws_name),
-                        })
-                        .unwrap());
-                    }
-                    return Err(e.to_string());
-                }
-            };
-
-            let new_status = crate::branches::map_blox_status_to_workspace_status(
-                info.status.as_deref(),
-                branch.workspace_status.as_ref(),
-            );
-            if let Some(ws_id) = info.workstation_id {
-                if let Some(name) = branch.workspace_name.as_deref() {
-                    if let Ok(mut cache) = crate::branches::workstation_id_cache().lock() {
-                        cache.insert(name.to_string(), ws_id);
-                    }
-                }
-            }
-            let changed = store
-                .update_branch_workspace_status(&branch_id, &new_status)
-                .map_err(|e| e.to_string())?;
-            crate::branches::workspace_status_written(app_handle, &branch_id, changed, &new_status);
-            Ok(serde_json::to_value(crate::PollWorkspaceResult {
-                status: new_status.as_str().to_string(),
-                workstation_id: crate::branches::cached_workstation_id(ws_name),
-            })
-            .unwrap())
+            let result =
+                crate::workspace_setup::poll::poll_workspace_status(&store, app_handle, &branch_id)
+                    .await?;
+            Ok(serde_json::to_value(result).unwrap())
         }
         "poll_all_workspace_statuses" => {
             let store = get_store(store_mutex)?;
             let branch_ids: Vec<String> = arg(&args, "branchIds")?;
-
-            let entries = crate::branches::run_blox_blocking(crate::blox::ws_list)
-                .await
-                .map_err(|e| {
-                    if matches!(e, crate::blox::BloxError::NotAuthenticated) {
-                        "Not authenticated with Blox. Run: sq login".to_string()
-                    } else {
-                        e.to_string()
-                    }
-                })?;
-
-            let ws_map: std::collections::HashMap<String, &crate::blox::WorkspaceListEntry> =
-                entries.iter().map(|e| (e.name.clone(), e)).collect();
-
-            let mut starting_workspaces: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            let mut results = std::collections::HashMap::new();
-
-            for branch_id in &branch_ids {
-                let branch = match store.get_branch(branch_id) {
-                    Ok(Some(b)) => b,
-                    _ => continue,
-                };
-                let ws_name = match branch.workspace_name.as_deref() {
-                    Some(n) => n,
-                    None => continue,
-                };
-
-                // Secondary clone setup check
-                if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
-                    && crate::branches::resolve_branch_workspace_subpath(&store, &branch)
-                        .unwrap_or(None)
-                        .is_some()
-                {
-                    let is_secondary = if let Some(ws) = branch.workspace_name.as_deref() {
-                        store
-                            .list_branches_for_project(&branch.project_id)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .any(|peer| {
-                                peer.id != *branch_id
-                                    && peer.branch_type == store::BranchType::Remote
-                                    && peer.workspace_name.as_deref() == Some(ws)
-                                    && peer.workspace_status
-                                        == Some(store::WorkspaceStatus::Running)
-                            })
-                    } else {
-                        false
-                    };
-                    if is_secondary {
-                        results.insert(
-                            branch_id.clone(),
-                            crate::PollWorkspaceResult {
-                                status: store::WorkspaceStatus::Starting.as_str().to_string(),
-                                workstation_id: crate::branches::cached_workstation_id(ws_name),
-                            },
-                        );
-                        continue;
-                    }
-                }
-
-                match ws_map.get(ws_name) {
-                    Some(entry) => {
-                        let new_status = crate::branches::map_blox_status_to_workspace_status(
-                            entry.status.as_deref(),
-                            branch.workspace_status.as_ref(),
-                        );
-                        if let Some(ws_id) = entry.workstation_id {
-                            if let Ok(mut cache) = crate::branches::workstation_id_cache().lock() {
-                                cache.insert(ws_name.to_string(), ws_id);
-                            }
-                        }
-                        if let Ok(changed) =
-                            store.update_branch_workspace_status(branch_id, &new_status)
-                        {
-                            crate::branches::workspace_status_written(
-                                app_handle,
-                                branch_id,
-                                changed,
-                                &new_status,
-                            );
-                        }
-                        if new_status == store::WorkspaceStatus::Starting {
-                            starting_workspaces
-                                .entry(ws_name.to_string())
-                                .or_default()
-                                .push(branch_id.clone());
-                        }
-                        results.insert(
-                            branch_id.clone(),
-                            crate::PollWorkspaceResult {
-                                status: new_status.as_str().to_string(),
-                                workstation_id: crate::branches::cached_workstation_id(ws_name),
-                            },
-                        );
-                    }
-                    None => {
-                        if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
-                            starting_workspaces
-                                .entry(ws_name.to_string())
-                                .or_default()
-                                .push(branch_id.clone());
-                            results.insert(
-                                branch_id.clone(),
-                                crate::PollWorkspaceResult {
-                                    status: store::WorkspaceStatus::Starting.as_str().to_string(),
-                                    workstation_id: crate::branches::cached_workstation_id(ws_name),
-                                },
-                            );
-                        } else if branch.workspace_status == Some(store::WorkspaceStatus::Running) {
-                            store
-                                .update_branch_workspace_status(
-                                    branch_id,
-                                    &store::WorkspaceStatus::Stopped,
-                                )
-                                .ok();
-                            results.insert(
-                                branch_id.clone(),
-                                crate::PollWorkspaceResult {
-                                    status: store::WorkspaceStatus::Stopped.as_str().to_string(),
-                                    workstation_id: crate::branches::cached_workstation_id(ws_name),
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Fetch bootstrap progress for starting workspaces in background.
-            if !starting_workspaces.is_empty() {
-                let app_handle_clone = app_handle.clone();
-                tokio::task::spawn_blocking(move || {
-                    for (ws_name, branch_ids) in &starting_workspaces {
-                        match crate::blox::ws_commands(ws_name) {
-                            Ok(cmds) => {
-                                crate::branches::emit_workspace_setup_progress(
-                                    &app_handle_clone,
-                                    branch_ids,
-                                    &cmds,
-                                );
-                            }
-                            Err(e) => {
-                                log::debug!(
-                                    "[poll_all_workspace_statuses] ws_commands({}) failed: {}",
-                                    ws_name,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                });
-            }
-
+            let results = crate::workspace_setup::poll::poll_all_workspace_statuses(
+                &store,
+                app_handle,
+                &branch_ids,
+            )
+            .await?;
             Ok(serde_json::to_value(results).unwrap())
         }
         "setup_worktree" => {
@@ -2492,208 +2244,23 @@ pub(crate) async fn dispatch(
         "start_workspace" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
-            let app_handle = app_handle.clone();
-            detached(async move {
-                let branch = store
-                    .get_branch(&branch_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-                let project = store
-                    .get_project(&branch.project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-                let ws_name = branch
-                    .workspace_name
-                    .as_deref()
-                    .ok_or("Branch has no workspace name")?;
-                let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
-                let clone_dir = crate::branches::resolve_branch_clone_dir(&store, &branch)?;
-                let ref_name = crate::branches::normalize_branch_ref(&branch.base_branch);
-                let repo_slug = crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
-
-                // Pre-flight auth check
-                if let Err(e) = crate::branches::run_blox_blocking(crate::blox::check_auth).await {
-                    store
-                        .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-                        .ok();
-                    return Err(e.to_string());
-                }
-
-                // Secondary repo setup in an already-running shared workspace —
-                // or a branch re-entering `Starting` on a workstation that
-                // already has this clone.
-                if let Some(clone_dir) = clone_dir.as_deref() {
-                    if let Ok(info) = crate::branches::run_blox_blocking({
-                        let ws_name = ws_name.to_string();
-                        move || crate::blox::ws_info(&ws_name)
-                    })
-                    .await
-                    {
-                        let ws_status = info
-                            .status
-                            .as_deref()
-                            .map(|s| s.to_ascii_lowercase())
-                            .unwrap_or_default();
-                        if let Some(ws_id) = info.workstation_id {
-                            if let Ok(mut cache) = crate::branches::workstation_id_cache().lock() {
-                                cache.insert(ws_name.to_string(), ws_id);
-                            }
-                        }
-                        if ws_status == "running" {
-                            crate::branches::clone_repo_into_workspace(
-                                ws_name,
-                                clone_dir,
-                                &repo_slug,
-                                &ref_name,
-                                &branch.branch_name,
-                            )
-                            .await?;
-                            let changed = store
-                                .update_branch_workspace_status(
-                                    &branch_id,
-                                    &store::WorkspaceStatus::Running,
-                                )
-                                .map_err(|e| e.to_string())?;
-                            crate::branches::workspace_status_written(
-                                &app_handle,
-                                &branch_id,
-                                changed,
-                                &store::WorkspaceStatus::Running,
-                            );
-                            return Ok(Value::Null);
-                        }
-                    }
-                }
-
-                let resolved_source = Some(format!(
-                    "https://github.com/{}.git?ref={}",
-                    repo_slug, ref_name
-                ));
-                log::info!(
-                    "[start_workspace] branch={} workspace={} starting",
-                    branch_id,
-                    ws_name
-                );
-                let ws_start_started_at = std::time::Instant::now();
-
-                match crate::branches::run_blox_blocking({
-                    let ws_name = ws_name.to_string();
-                    let source = resolved_source.clone();
-                    move || {
-                        crate::blox::ws_start(
-                            &ws_name,
-                            source.as_deref(),
-                            Some(crate::branches::WORKSPACE_IDLE_TIMEOUT_MINUTES),
-                        )
-                    }
-                })
-                .await
-                {
-                    Ok(_) => {
-                        log::info!(
-                            "[start_workspace] branch={} workspace={} ws_start completed elapsed_ms={}",
-                            branch_id,
-                            ws_name,
-                            ws_start_started_at.elapsed().as_millis()
-                        );
-                        // Tracked: a transient fetch killed at 60 s would read
-                        // as "no remote branch" and silently branch from base.
-                        let has_remote_branch = crate::branches::run_workspace_git_async(
-                            ws_name,
-                            repo_subpath.as_deref(),
-                            crate::blox::ExecMode::Tracked,
-                            &["fetch", "origin", &branch.branch_name],
-                        )
-                        .await
-                        .is_ok();
-
-                        let remote_ref = format!("origin/{}", branch.branch_name);
-                        let checkout_args: &[&str] = if has_remote_branch {
-                            &["checkout", "-B", &branch.branch_name, &remote_ref]
-                        } else {
-                            &["checkout", "-b", &branch.branch_name]
-                        };
-                        // Tracked: a checkout SIGKILLed at the transient 60 s
-                        // limit leaves `.git/index.lock` behind.
-                        let checkout_result = crate::branches::run_workspace_git_async(
-                            ws_name,
-                            repo_subpath.as_deref(),
-                            crate::blox::ExecMode::Tracked,
-                            checkout_args,
-                        )
-                        .await;
-                        if let Err(e) = checkout_result {
-                            log::warn!(
-                                "failed to create branch '{}' in workspace '{}': {e}",
-                                branch.branch_name,
-                                ws_name
-                            );
-                        }
-                        Ok(Value::Null)
-                    }
-                    Err(crate::blox::BloxError::NotAuthenticated) => {
-                        store
-                            .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-                            .ok();
-                        Err("Not authenticated with Blox. Run: sq login".to_string())
-                    }
-                    Err(e) => {
-                        if crate::branches::is_blox_onboarding_precondition_error(&e) {
-                            store
-                                .update_branch_workspace_status(
-                                    &branch_id,
-                                    &store::WorkspaceStatus::Error,
-                                )
-                                .ok();
-                            return Err(e.to_string());
-                        }
-                        log::warn!(
-                            "blox ws start failed for '{}', leaving status as Starting for polling to resolve: {e}",
-                            ws_name
-                        );
-                        Ok(Value::Null)
-                    }
-                }
-            })
-            .await
+            // Only asks: the run it starts or joins is its own task.
+            crate::workspace_setup::request_branch_setup(app_handle, &store, &branch_id)?;
+            Ok(Value::Null)
+        }
+        "get_workspace_setup_errors" => {
+            let errors = crate::workspace_setup::failures::get_workspace_setup_errors();
+            Ok(serde_json::to_value(errors).unwrap())
         }
         "resume_workspace" => {
             let store = get_store(store_mutex)?;
             let workspace_name: String = arg(&args, "workspaceName")?;
             crate::project_transfer::ensure_workspace_not_transferring(&workspace_name)?;
+            let app_handle = app_handle.clone();
             detached(async move {
-                let branch_ids = store
-                    .update_workspace_status_by_workspace_name(
-                        &workspace_name,
-                        &store::WorkspaceStatus::Starting,
-                    )
-                    .map_err(|e| e.to_string())?;
-
-                if branch_ids.is_empty() {
-                    return Err(format!("No branches found for workspace: {workspace_name}"));
-                }
-
-                let ws = workspace_name.clone();
-                if let Err(e) =
-                    crate::branches::run_blox_blocking(move || crate::blox::ws_resume(&ws)).await
-                {
-                    log::warn!(
-                        "[resume_workspace] workspace={} resume failed: {}",
-                        workspace_name,
-                        e
-                    );
-                    store
-                        .update_workspace_status_by_workspace_name(
-                            &workspace_name,
-                            &store::WorkspaceStatus::Error,
-                        )
-                        .ok();
-                    return Err(e.to_string());
-                }
-
+                let branch_ids =
+                    crate::branches::resume_workspace_impl(&store, &app_handle, &workspace_name)
+                        .await?;
                 Ok(serde_json::to_value(branch_ids).unwrap())
             })
             .await
@@ -5513,10 +5080,13 @@ mod tests {
             "resume_session_for_store(",
             "resume_or_queue_session_for_store(",
             "start_project_session_for_store(",
+            // The shared workspace bodies: branch setup, resume, the pollers.
+            "workspace_setup::request_branch_setup(",
+            "resume_workspace_impl(",
+            "workspace_setup::poll::",
         ];
         /// Arms whose bodies run through `detached`.
         const DETACHED: &[&str] = &[
-            "start_workspace",
             "resume_workspace",
             "pull_or_queue_branch",
             "resume_session",
@@ -5530,9 +5100,12 @@ mod tests {
         /// Arms that write only after their last await, with the kick in the
         /// same synchronous stretch: a drop before the write has written
         /// nothing (the polls redo it next tick), and nothing is left
-        /// half-written.
+        /// half-written. Each is one call into the shared poller of the same
+        /// name in `workspace_setup/poll.rs`, where that ordering is checked.
         const WRITES_AFTER_LAST_AWAIT: &[&str] =
             &["poll_workspace_status", "poll_all_workspace_statuses"];
+        /// What the shared pollers write through, after their Blox call.
+        const POLL_WRITES: &[&str] = &["settle_one(", "settle_all("];
 
         let source = include_str!("web_server.rs");
         for (commands, arm) in dispatch_arms(source) {
@@ -5554,17 +5127,31 @@ mod tests {
                 .iter()
                 .any(|c| WRITES_AFTER_LAST_AWAIT.contains(&c.as_str()))
             {
-                let last_await = arm.rfind(".await").expect("exempted arm should await");
-                let first_write = WRITE_MARKERS
+                assert_eq!(
+                    arm.matches(".await").count(),
+                    1,
+                    "the web `{command}` arm must be one call into its shared poller: {arm}"
+                );
+                let name = commands
                     .iter()
-                    .filter_map(|marker| arm.find(marker))
+                    .find(|c| WRITES_AFTER_LAST_AWAIT.contains(&c.as_str()))
+                    .unwrap();
+                assert!(
+                    arm.contains(&format!("workspace_setup::poll::{name}(")),
+                    "the web `{command}` arm must call the shared poller: {arm}"
+                );
+                let poller = shared_poller_body(name);
+                let last_await = poller.rfind(".await").expect("the poller should await");
+                let first_write = POLL_WRITES
+                    .iter()
+                    .filter_map(|marker| poller.find(marker))
                     .min()
-                    .expect("exempted arm should write");
+                    .expect("the poller should write");
                 assert!(
                     first_write > last_await,
-                    "the web `{command}` arm writes before its last await; it no longer \
-                     qualifies for WRITES_AFTER_LAST_AWAIT and must run through \
-                     `detached(...)`"
+                    "the shared `{name}` poller writes before its last await; the web \
+                     `{command}` arm no longer qualifies for WRITES_AFTER_LAST_AWAIT and \
+                     must run through `detached(...)`"
                 );
             } else {
                 assert!(
@@ -5576,6 +5163,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The body of the shared poller `name` in `workspace_setup/poll.rs`.
+    fn shared_poller_body(name: &str) -> &'static str {
+        let source = include_str!("workspace_setup/poll.rs");
+        let start = source
+            .find(&format!("pub(crate) async fn {name}("))
+            .unwrap_or_else(|| panic!("no shared poller named {name}"));
+        let end = source[start..]
+            .find("\n}\n")
+            .expect("the poller's body should end");
+        &source[start..start + end]
     }
 
     /// The windowed transcript read must accept the same optional window the

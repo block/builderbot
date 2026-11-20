@@ -402,11 +402,24 @@ function rendersStandalone(item: RichToolItem | undefined): boolean {
   return !!item && (item.isPikchrDiagramTool || item.pikchrRenderSource !== null);
 }
 
-export function groupRichToolsByVerb(items: RichToolItem[]): RichToolVerbGroup[] {
+/**
+ * Folds consecutive tool items with the same verb into one group, which the
+ * pane shows as a single collapsed row.
+ *
+ * `standsAlone` names further items the caller renders as their own block,
+ * beside the ones this module knows: the pane passes the saved `write_note`
+ * calls it shows as the note card. Such an item is always a group of one.
+ */
+export function groupRichToolsByVerb(
+  items: RichToolItem[],
+  standsAlone?: (item: RichToolItem) => boolean
+): RichToolVerbGroup[] {
+  const alone = (item: RichToolItem | undefined) =>
+    rendersStandalone(item) || (!!item && !!standsAlone?.(item));
   const groups: Array<Omit<RichToolVerbGroup, 'summary' | 'statusTone'>> = [];
   for (const item of items) {
     const last = groups[groups.length - 1];
-    if (!rendersStandalone(item) && last?.verb === item.verb && !rendersStandalone(last.items[0])) {
+    if (!alone(item) && last?.verb === item.verb && !alone(last.items[0])) {
       last.items.push(item);
     } else {
       groups.push({

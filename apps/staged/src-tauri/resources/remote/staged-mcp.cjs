@@ -60,7 +60,7 @@ const readline = require("readline");
 
 // Reported as `serverInfo.version` and stamped by tools into what they write
 // (`write_note`'s `meta.json` keeps it under its original `helperVersion` key).
-const SERVER_VERSION = 6;
+const SERVER_VERSION = 7;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -173,8 +173,9 @@ const WRITE_NOTE_DESCRIPTION =
   "Staged stores the current contents of your note draft file (the path is in your instructions) " +
   "as the note body, under the title you pass here, and does not read your assistant text. " +
   "Write the whole note body into the draft file first; calling again republishes the file, " +
-  "and the last call of the turn wins. After the result says the note is saved, end your turn " +
-  "without repeating the note.";
+  "and the last call of the turn wins. After the result says the note is saved, send a simple " +
+  '"Done" message with no other text to end your turn, rather than summarising the work done. ' +
+  "If the user asked you a question, answer it before making this call.";
 
 // Mirrors the schema rmcp derives from `WriteNoteParams`; the Rust test
 // `write_note_schema_matches_the_rust_tool_schema` checks property names and
@@ -393,13 +394,18 @@ function normalizeSteps(raw) {
 }
 
 function savedMessage(title, bodyLength) {
-  // Same wording as `note_tool::saved_message` on the laptop.
+  // Must stay word-for-word in step with `note_tool::saved_message` on the
+  // laptop. The chat pane hides the quoted closing word after a saved call
+  // (`noteDoneMessage.ts`), so that word has to stay the one its filter
+  // accepts.
   return (
     'Saved note "' +
     title +
     '" (' +
     bodyLength +
-    " bytes from the draft file). The note is stored; end your turn now without repeating it in your reply."
+    " bytes from the draft file). If the user asked you a question this turn and you have not " +
+    "answered it in chat yet, answer it now, briefly. Otherwise send a simple " +
+    '"Done" message with no other text to end your turn, rather than summarising the work done.'
   );
 }
 

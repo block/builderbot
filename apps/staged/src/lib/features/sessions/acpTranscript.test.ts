@@ -797,6 +797,32 @@ describe('groupRichToolsByVerb', () => {
     expect(groups.map((group) => group.items)).toHaveLength(3);
   });
 
+  it('keeps an item the caller renders on its own out of a verb group', () => {
+    // The pane shows a saved `write_note` call as the note card. Two in a row
+    // would otherwise fold into one collapsed "Saved note" row.
+    const items = [
+      richTool({ key: 'tool:1', verb: 'Saved note' }),
+      richTool({ key: 'tool:2', verb: 'Saved note' }),
+      richTool({ key: 'tool:3', verb: 'Saved note' }),
+    ];
+
+    expect(groupRichToolsByVerb(items).map((group) => group.items.length)).toEqual([3]);
+
+    const alone = groupRichToolsByVerb(items, (item) => item.key === 'tool:2');
+    expect(alone.map((group) => group.items.map((item) => item.key))).toEqual([
+      ['tool:1'],
+      ['tool:2'],
+      ['tool:3'],
+    ]);
+    // An item named standalone neither joins the group before it nor lets
+    // the next item join it; the others still fold as before.
+    const first = groupRichToolsByVerb(items, (item) => item.key === 'tool:1');
+    expect(first.map((group) => group.items.map((item) => item.key))).toEqual([
+      ['tool:1'],
+      ['tool:2', 'tool:3'],
+    ]);
+  });
+
   it('does not merge same verbs across transcript group boundaries', () => {
     const transcript = buildAcpTranscriptGroups(
       [

@@ -17,7 +17,9 @@ export interface WriteNoteCall {
 /**
  * Whether a tool name is the `staged` server's `write_note`, in any of the
  * spellings the bridges use: Claude Code's `mcp__staged__write_note`,
- * Goose's `staged: write note`, or a bare `staged.write_note`.
+ * Goose's `staged: write note`, Codex's `mcp.staged.write_note`, or a bare
+ * `staged.write_note`. The `mcp` prefix is optional and the server must be
+ * `staged`, so another server's `write_note` is not a note row.
  */
 export function isWriteNoteToolName(name: string | null | undefined): boolean {
   if (typeof name !== 'string') return false;
@@ -25,7 +27,7 @@ export function isWriteNoteToolName(name: string | null | undefined): boolean {
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_')
-    .replace(/^mcp__/, '');
+    .replace(/^mcp(?:__|\.)/, '');
   return /^staged(?:__|:_|_|\.)write_note$/.test(normalized);
 }
 

@@ -1,0 +1,82 @@
+{
+  "about": "Shared cases for the two rules that decide whether a note turn ended in a bare \"Done\" after a saved write_note call. The chat pane's filter (noteDoneMessage.ts, noteToolCall.ts) and the backend's drift log (src-tauri/src/note_done.rs) implement each rule separately, in TypeScript and in Rust. Both test suites run every row here, so a change to one side that the other does not make fails a test. Each row is [label, input].",
+  "doneText": {
+    "accept": [
+      ["the word as asked for", "Done"],
+      ["a trailing full stop", "Done."],
+      ["a trailing exclamation mark", "Done!"],
+      ["lower case", "done"],
+      ["upper case", "DONE"],
+      ["surrounding whitespace", "  Done \n"],
+      ["a trailing newline, as a streamed chunk ends", "Done\n\n"],
+      ["a no-break space on each side", " Done "],
+      ["a leading byte order mark", "﻿Done"],
+      ["bold", "**Done**"],
+      ["italic, asterisk", "*Done*"],
+      ["italic, underscore", "_Done_"],
+      ["inline code", "`Done`"],
+      ["double quotes", "\"Done\""],
+      ["single quotes", "'Done'"],
+      ["curly double quotes", "“Done”"],
+      ["curly single quotes", "‘Done’"],
+      ["a wrapper around the punctuation", "**Done.**"],
+      ["quotes around the punctuation", "\"Done!\""],
+      ["a wrapper, lower case, padded", "\n `done` "]
+    ],
+    "reject": [
+      ["an empty message", ""],
+      ["whitespace only", " \n "],
+      ["only punctuation", "."],
+      ["only a wrapper", "****"],
+      ["an emoji after the word", "Done ✅"],
+      ["a sentence that starts with the word", "Done, the note is saved"],
+      ["a sentence after the word", "Done. The note is saved."],
+      ["a sentence that ends with the word", "The note is done"],
+      ["an answer that ends with a Done line", "The bug is in `src/main.rs`.\n\nDone"],
+      ["a Done line before more text", "Done\n\nOne more thing: the test is flaky."],
+      ["the word twice", "Done Done"],
+      ["two trailing marks", "Done.."],
+      ["an ellipsis", "Done…"],
+      ["another trailing mark", "Done?"],
+      ["two pairs of wrappers", "**`Done`**"],
+      ["punctuation outside the wrapper", "**Done**."],
+      ["a doubled underscore", "__Done__"],
+      ["an unclosed wrapper", "**Done"],
+      ["mismatched quotes", "\"Done'"],
+      ["whitespace inside the wrapper", "** Done **"],
+      ["a next-line control character after the word", "Done\u0085"],
+      ["a zero-width space after the word", "Done​"],
+      ["a longer word", "Donee"],
+      ["another word", "Finished"],
+      ["a heading", "# Done"],
+      ["a list item", "- Done"]
+    ]
+  },
+  "writeNoteToolName": {
+    "accept": [
+      ["Claude Code", "mcp__staged__write_note"],
+      ["Goose", "staged: write note"],
+      ["Codex", "mcp.staged.write_note"],
+      ["a bare dotted name", "staged.write_note"],
+      ["a bare underscored name", "staged_write_note"],
+      ["Codex in another case, padded", "  MCP.Staged.Write_Note  "],
+      ["Goose in another case, hyphenated", "Staged: Write-Note"],
+      ["Goose with a run of spaces", "staged:   write  note"]
+    ],
+    "reject": [
+      ["another server's tool, Claude Code form", "mcp__other__write_note"],
+      ["another server's tool, Codex form", "mcp.other.write_note"],
+      ["another server's tool, Goose form", "other: write note"],
+      ["a server whose name only ends in staged", "mcp.unstaged.write_note"],
+      ["another tool on the staged server, Codex form", "mcp.staged.read_note"],
+      ["a longer tool name, Codex form", "mcp.staged.write_notes"],
+      ["a doubled prefix", "mcp.mcp.staged.write_note"],
+      ["a prefix with no separator", "mcpstaged.write_note"],
+      ["the tool with no server", "write_note"],
+      ["the Codex prefix with no server", "mcp.write_note"],
+      ["the name inside a longer title", "Ran mcp.staged.write_note"],
+      ["a built-in tool", "Write"],
+      ["an empty string", ""]
+    ]
+  }
+}

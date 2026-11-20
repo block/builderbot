@@ -76,13 +76,24 @@ then call write_note again.`` on both; the cause is the platform's own
   message.
 
 Each call republishes the file; the last call of the turn wins. The result
-text is `Saved note "<title>" (<n> bytes from the draft file). The note
-is stored; end your turn now without repeating it in your reply.` (`<n>` is
+text is `Saved note "<title>" (<n> bytes from the draft file). If the user
+asked you a question this turn and you have not answered it in chat yet,
+answer it now, briefly. Otherwise send a simple "Done" message with no other
+text to end your turn, rather than summarising the work done.` (`<n>` is
 the body's UTF-8 length on both transports, which is why the text says
-bytes and not characters.) The message
-writer treats a completed `write_note` call like the old separator: the
-session finishes after the response that follows it instead of holding for
-background work.
+bytes and not characters.) The text is word for word the same on both
+transports (`note_tool::saved_message`, `savedMessage` in
+`staged-mcp.cjs`). The tool description ends with the same request: send
+"Done" after the saved result, and answer a question before making the
+call.
+
+The call does not end the turn. Neither MCP nor ACP lets a tool declare
+that it ends one, so the agent always gets one more response after the
+result. The wording asks for that response to be the one word "Done", and
+the chat pane hides it (_Ending a saved turn: the hidden "Done"_ below).
+The message writer still treats a completed `write_note` call like the old
+separator: the session finishes after the response that follows it instead
+of holding for background work. That response is now the "Done" message.
 
 No call, no note. A draft that changed without a `write_note` call is never
 stored, whatever it holds: the call is the one signal that the note is
@@ -134,7 +145,10 @@ once and states the contract in one sentence: "Your note draft file is
 call `write_note`." It adds the amendment rule ("If the file already exists,
 it holds the note as last saved: Read it and edit only what changes instead
 of rewriting it"), and says that assistant text is not saved and that the
-call takes no body. One wording serves a fresh note and an amendment because
+call takes no body. Its last paragraph asks for the ending: once the tool
+reports the note is saved, send a simple "Done" message with no other text,
+which Staged hides, and answer a user's question in the reply before the
+call. One wording serves a fresh note and an amendment because
 the seed rule above decides whether the file exists. When the path is the
 `$HOME/…` spelling of a workstation whose home could not be resolved (see
 _Remote (Blox) sessions_), the guidance adds that `$HOME` there is a
@@ -196,23 +210,245 @@ trip is accepted; the rejected empty call is what the wording avoids. The
 Goose wording is unchanged.
 
 In the chat pane a `write_note` call (`mcp__staged__write_note` from Claude,
-`staged: write note` from Goose) is not shown as a generic "Ran" row: it gets
-its own "Saved note" / "Saving note" / "Note rejected" row named after the
-title, with the title and the suggested next steps in its details
-(`noteToolCall.ts`, `NoteToolDetails.svelte`). The row has no body preview:
-the call carries no body, and the stored note is where the body is read. A
-`body` on a row recorded before this change is ignored. Tool calls still `pending` or
-`in_progress` when the session has settled render by the session's outcome
-(`AcpTranscriptOptions`): in a session that ended `error` or `cancelled`
-they were cut off and read "Interrupted" in the collapsed header as well as
-in the status; in a session that ended `completed` — a remote note session
-completed from the workstation outbox — their work stood, so the `write_note`
-row reads "Saved note" and other calls "Finished with the session". The
-backend does not rewrite their status; the transcript builder derives it
-from the session status.
+`staged: write note` from Goose, `mcp.staged.write_note` from Codex) is not
+shown as a generic "Ran" row. A call that saved the note is shown as the
+note card, "Note created" or "Note updated", in the row's place (_The note
+card_ below). Every other call gets its own row named after the title, with
+the title and the suggested next steps in its details (`noteToolCall.ts`,
+`NoteToolDetails.svelte`): "Saving note" while the call runs, "Note
+rejected" when the tool refused it, and "Saved note" for the one saved call
+that stays a row, a final-turn call that did not change the stored note.
+The row has no body preview: the call carries no body, and the stored note
+is where the body is read. A `body` on a row recorded before this change is
+ignored.
+
+Tool calls still `pending` or `in_progress` when the session has settled
+render by the session's outcome (`AcpTranscriptOptions`): in a session that
+ended `error` or `cancelled` they were cut off and read "Interrupted" in
+the collapsed header as well as in the status; in a session that ended
+`completed` — a remote note session completed from the workstation outbox —
+their work stood, so other calls read "Finished with the session" and the
+`write_note` call resolves to `completed`. It is then a saved call like any
+other: the note card, or the "Saved note" row under the final-turn rule.
+The backend does not rewrite their status; the transcript builder derives
+it from the session status.
 
 Source: `src-tauri/src/note_tool.rs` (schema, handler, in-process server),
 `src-tauri/src/note_draft.rs` (paths, validation, error text, seed).
+
+## Ending a saved turn: the hidden "Done"
+
+A saved `write_note` call leaves the agent one more response, and Claude
+spent it on a recap of the note it had just published. The texts the agent
+reads about the tool now ask for one word in its place, and the chat pane
+hides that word. A saved turn therefore shows the note card and nothing
+under it. No hook, cancel or driver change is involved, and the mechanism
+is the same for Claude, Goose and Codex.
+
+The request is made in three places:
+
+| Text             | Where                                                                   | What it asks                                                                                                         |
+| ---------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Tool result      | `note_tool::saved_message`, `savedMessage` in `staged-mcp.cjs`          | Answer the user's question now if it is still unanswered. Otherwise send a simple "Done" message with no other text. |
+| Tool description | The `#[tool]` attribute, `WRITE_NOTE_DESCRIPTION` and the script's copy | Send "Done" after the saved result. Answer a question before making the call.                                        |
+| Session prompt   | The last paragraph of `session_commands::note_delivery_guidance`        | The same request, and that Staged hides the message.                                                                 |
+
+The result text carries the "answer it now" clause on purpose. In live runs
+a wording that only said "answer before the call, then Done" lost the
+answer in 8 of 38 turns where the user had asked a question. This wording
+lost none in 27. A reply the agent writes after the call is real text, and
+the pane shows it under the card.
+
+Nothing forces the agent to comply. A turn that ignores the wording renders
+as it did before the change, with its text shown, and is counted by the
+drift log (_The drift log_ below).
+
+The hiding rule is a pure module, `noteDoneMessage.ts`.
+
+`isNoteDoneText` decides what a bare "Done" is. It trims the text, removes
+one pair of wrapping `**`, `*`, `_`, backticks or quotes, removes one
+trailing `.` or `!`, and compares the rest with `done`, ignoring case. So
+`Done`, `Done.`, `done` and `**Done**` match. `Done ✅`, a sentence that
+starts with the word, and an answer whose last line is `Done` do not.
+
+`hiddenNoteDoneMessageIds` takes the transcript groups and returns the
+assistant messages to hide. A message is hidden only when all of these
+hold:
+
+1. **A saved call comes directly before it.** The nearest earlier group is
+   a tool group whose last `write_note` item resolved to `completed`. The
+   item is found by tool name (`writeNoteToolCall`), not by its label, and
+   the status is the resolved one. A rejected, running or interrupted call
+   hides nothing, and a remote call completed from the outbox counts as
+   saved. Other items in the group do not matter: Codex completes a review
+   item after the call, and Claude sometimes issues a shell call beside it.
+2. **Only such messages follow the call.** Every assistant message between
+   that tool group and the end of the turn is a bare "Done". A background
+   task that wakes the session can add a second one, and both are hidden.
+   A recap after the first shows both messages.
+3. **The turn ends there.** What follows is the next user message or the
+   end of the transcript, not another tool call.
+
+The rule fails open. On any mismatch the message renders whole, exactly as
+the agent wrote it, and nothing is trimmed from it. The worst case is a
+visible "Done".
+
+The row stays stored. `SessionChatPane` derives `renderedGroups` from the
+transcript groups and leaves a hidden group out of the list. It does not
+render the group empty, because an empty group would take a second gap in
+the column and be picked up as a scroll anchor. The rule runs on every
+rebuild, so a message that grows past the word while streaming comes back
+with all of its text.
+
+The stored row is still read elsewhere, and none of these readers filters
+it:
+
+- **Unread chat and note freshness.** The backend queries behind a note
+  row's chat button count visible assistant rows newer than the note
+  (`VISIBLE_ASSISTANT_FILTER`), and they count a "Done" row. A turn that
+  changed the note stores it after the turn, so the note is newer than its
+  own "Done" and nothing changes. A turn that republished an identical
+  note keeps the note's `updated_at`, so its "Done" is newer than the note
+  and the chat reads as unread, as the recap row did before. The forced
+  republish after a chat answer was the main source of an identical
+  republish, and the fallback rule removed it (_Fallback: no `write_note`
+  call_ below).
+- **`wait_for_repo_session`.** It returns the last assistant message as
+  `output` beside the note. A project agent reads "Done" there in place of
+  a recap. The note itself is in the same payload.
+- **The live activity hint.** It shows the latest assistant text, so it can
+  read "Done" for the moment between the message and the end of the turn.
+
+Remote sessions follow the same rule over the same rows. The script's
+result text is compared with the laptop's by test, and `SERVER_VERSION` is
+7 for this wording (see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)).
+The upload is gated on a checksum, so a workstation gets the new text on
+its next session, together with the app that hides the word.
+
+### The note card
+
+The chat pane marks each point where a note was delivered with a card:
+"Note created" for the first delivery in the transcript and "Note updated"
+for every later one. `listNoteDeliveries` in `noteDeliveries.ts` decides
+where they go, from the transcript groups alone. Nothing in the backend
+records "the note was updated". A delivery has one of two shapes:
+
+- **A `write_note` call that resolved to `completed`.** This is the tool
+  path. The card is drawn in place of the call's tool row, since a "Saved
+  note" row with a card under it would say the same thing twice. The call
+  is found by tool name and by its resolved status, as in the hiding rule.
+- **An assistant message that holds the `---` separator.** This is the
+  shape of a run with no tool attached and of every session recorded before
+  the tool. The card sits under the text above the separator, and reads
+  "Writing note" while the session runs and the message is the last one in
+  the transcript. A call is never "Writing note": its "Saving note" row
+  says so while it runs.
+
+The first delivery is "Note created" across both shapes, so a session that
+began on the separator and continued on the tool has one "Note created".
+
+A call that was rejected, interrupted or is still running is not a
+delivery. It keeps its tool row, with its title and details. A rejected
+call followed by a retry shows a "Note rejected" row and then the card. Two
+saved calls in a row are two cards: `groupRichToolsByVerb` takes a
+predicate for the items the pane renders on its own, so they do not fold
+into one collapsed "Saved note" row.
+
+**The final-turn rule.** One saved call is not a card. The rule applies in
+the final turn of a session that is no longer running, when the pane is
+opened on its note. There a saved call is a card only when `updatedAt` on
+the note is at or after the call row. The note is stored after the turn, so
+a turn that changed it stamps it later than its own call. An older note was
+not changed by that call: the agent republished an identical note, which
+keeps its timestamp, or the run failed before the note was stored. That
+call keeps its "Saved note" row. In a completed session the "Ask for the
+note to be updated" button shows under it, because `shouldAskForNoteUpdate`
+reads the same timestamp. The card and the button therefore never show
+together for one turn.
+
+The final turn is everything after the last user message, as in the
+transcript builder. Calls of earlier turns are not compared, because a
+later turn has moved the note on since. A pane with no note context
+compares nothing, and every saved call there is a card.
+
+The comparison waits for the session to settle. The note cannot be stored
+before the run ends, and a run can wait on background work after the call.
+A strict reading would hold the row for the whole turn and swap it for the
+card at the end. So while the session runs, a saved call is a card as soon
+as it completes.
+
+### The drift log
+
+A model that stops following the wording goes back to writing a recap under
+the card, and no test or error says so. After each settled turn of a note
+session the run loop therefore calls
+`note_done::log_settled_turn_note_done_drift`. It logs one line at info
+level when the turn saved a note and did not end in a bare "Done":
+
+```text
+Session <id>: note-done drift: the turn saved a note and did not end in a bare "Done": 1 message after the saved write_note call, the last 742 chars
+```
+
+The line holds counts and lengths only, never the text. After the fixed
+phrase `note-done drift` it says what followed the last saved call:
+
+| Ending of the line                                                   | What happened                                                                 |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `no message after the saved write_note call`                         | The turn ended at the call, with no closing message.                          |
+| `<n> message(s) after the saved write_note call, the last <m> chars` | Text followed the call. `<m>` is the trimmed length of the last message.      |
+| `…, ending in a "Done" line`                                         | The last message is a longer answer that the agent closed with a `Done` line. |
+| `…, with a tool call after the text`                                 | A tool call came after the closing text, so the turn did not end there.       |
+
+The decision is `note_done_drift`, a pure function over the turn's stored
+rows. It follows the pane's rule:
+
+- The turn is everything after the last user row. A message steered in
+  after the call starts a new turn, and what the agent wrote after it is
+  not checked.
+- The turn saved a note when the run's submission slot is filled and the
+  turn holds a `write_note` call. The slot alone outlives a turn, so on its
+  own it would match a repair turn that never called the tool.
+- After the last such call the tool rows beside it are stepped over. Then
+  at least one assistant message must follow, each must be a bare "Done",
+  and the turn must end there.
+
+The call sits after the outbox collection, so a remote note is in the slot,
+and before the Pikchr check, so a turn that goes on to a repair is counted.
+The log and the pane differ in one rare case: a saved call followed by a
+rejected one in the same turn. The pane then shows the closing word and the
+log reports nothing.
+
+**What a rising count means.** Count the lines that hold `note-done drift`
+and read the count against the number of saved turns. A single line is not
+an error. The result text itself asks for an answer in place of "Done" when
+a user's question is still open, and that turn is logged like any other. A
+steady low count is those turns. A count that rises with no change in how
+people use note sessions means the wording has stopped working: an agent or
+a new model is writing after the saved call again, and users see a recap
+under the card. The lengths tell the two apart, since an answer is short
+and a recap ran to a median of 186 words in stored sessions. When the count
+rises:
+
+- Run the ignored real-agent test against each bridge (_How to test
+  manually_ below) to see which agent stopped complying.
+- Change the wording in all three texts together. `noteDoneWording.test.ts`
+  fails when one side changes alone or quotes a word the filter does not
+  accept.
+- If no wording holds for Claude, add the `PostToolUse` hook that was
+  planned as the hard stop and is held in reserve. The wording and the
+  filter stay in place under it.
+
+The log and the filter cannot disagree about what "Done" is or which call
+is `write_note`. `note_done/rules.rs` holds Rust copies of the pane's
+`isNoteDoneText` and `isWriteNoteToolName`, with JavaScript's white space
+set for the trim. Both languages run the same case table,
+`src/lib/features/sessions/testStubs/noteDone.cases.json`, so a change to
+one side alone fails a test.
+
+Source: `src/lib/features/sessions/noteDoneMessage.ts` (the hiding rule),
+`src/lib/features/sessions/noteDeliveries.ts` (the card),
+`src-tauri/src/note_done.rs` and `src-tauri/src/note_done/rules.rs` (the
+drift log).
 
 ## Local and project sessions
 
@@ -467,7 +703,8 @@ fills. From there it feeds, with no further round trip:
 - the "did this turn deliver a note" decision behind the `write_note`
   follow-up prompt, so a remote turn that did call the tool is never asked
   to call it again — the follow-up fires only when the outbox has no `done`
-  for this turn _and_ the `---` fallback found nothing;
+  for this turn _and_ the `---` fallback found nothing _and_ the note has
+  no stored body (see _Fallback: no `write_note` call_);
 - the post-completion hooks (`resolve_note_title_and_body`,
   `ingest_note_media`), unchanged.
 
@@ -654,10 +891,11 @@ read had just put in the slot, which the loop never checked. A quit that
 lands during the read is not a Stop: the run settles from the read, and
 the sweep recovers a parked row after the relaunch.
 
-A failed read inside the loop is not final while the `write_note`
-follow-up has an attempt left: the turn counts as one that delivered no
-note, the follow-up runs, and its turn is read again. The rule above
-applies to the read after the run's last turn.
+A failed read inside the loop is not final while a `write_note` follow-up
+is due (a note with no stored body, and an attempt left): the turn counts as
+one that delivered no note, the follow-up runs, and its turn is read again.
+An amendment gets no follow-up, so its failed read is the run's last. The
+rule above applies to the read after the run's last turn.
 
 The outbox is never cleared at start, which is what lets that recovery tell
 an uncollected note from an old one.
@@ -772,13 +1010,20 @@ Two mechanisms cover that:
 
 Locally, a `write_note` call fills the slot while the turn is still running,
 and the message writer's `should_finish_after_response` ends a background
-hold as soon as the response after it completes. Remote sessions have no such
+hold as soon as the response after it completes. That response is the
+closing "Done" message, or the answer the result text asks for in its
+place. On the Claude bridge the finish is taken at a successful result with
+non-empty final text (`response_completion.rs`), which the one word
+supplies. Remote sessions have no such
 mid-turn signal: the outbox is only read after the turn settles, and the
 prompt tells the agent not to write `---` text, so `should_finish_after_response`
 never fires for them. A remote note session under a background hold therefore
 runs to the hold's quiescence timeout (or its cap) even when the note was
 saved early. Polling the outbox during the turn would cost a `ws exec` per
-poll; this is a known limitation, not an oversight. A hold the user _stops_
+poll; this is a known limitation, not an oversight. Background work that
+wakes the agent during such a hold can draw a second "Done" message after
+the first. The chat pane hides a run of them (_Ending a saved turn: the
+hidden "Done"_ above). A hold the user _stops_
 before the agent has written is a different matter: the agent carries on,
 and its late note is picked up by the sweep (see _Polling a hold-stopped
 row_ below).
@@ -799,13 +1044,29 @@ never routes file or terminal access through the laptop.
 ## Fallback: no `write_note` call
 
 If a note session's turn ends with no `write_note` call (and no `---`
-separator text, see below), the session runner sends one follow-up prompt
-(`note_write_followup_prompt`): "Write or finish the draft at `<path>` (the
-full note body in markdown, without the title), then call the `write_note`
-tool with `title` and `suggested_next_steps`". A draft the agent wrote but
-never published is covered by the same prompt: it only has to call the
-tool. It does this once; a second silent turn stores the empty note as
-before, so a session cannot loop.
+separator text, see below) and the note has no stored body yet, the session
+runner sends one follow-up prompt (`note_write_followup_prompt`): "Write or
+finish the draft at `<path>` (the full note body in markdown, without the
+title), then call the `write_note` tool with `title` and
+`suggested_next_steps`". A draft the agent wrote but never published is
+covered by the same prompt: it only has to call the tool. It does this once;
+a second silent turn stores the empty note as before, so a session cannot
+loop.
+
+The follow-up is a guard against storing an empty note, so a note that
+already has a stored body gets none (`note_write_followup_due`,
+`stored_note_has_body`). A turn there that publishes nothing is a chat
+answer, or an amendment the agent chose not to make. The post-completion
+hooks keep the stored note for it, and its `updated_at` does not move. The
+chat pane reads that as a note older than the chat and offers "Ask for the
+note to be updated" (`shouldAskForNoteUpdate`); the user decides whether the
+answer belongs in the note. A forced republish would cost an agent turn for
+every chat question and restamp a note that did not change. "Has a stored
+body" is the reading the draft seed uses (`stored_note_seed`): a run whose
+draft was seeded with the stored note is a run that gets no follow-up. One
+gap is accepted: an agent that edits a seeded draft and never publishes it
+is not prompted, and the next run seeds the draft from the stored note
+again.
 
 A run with no `write_note` tool attached (the local server did not start,
 or the Staged MCP on Blox could not be installed) gets a different
@@ -1185,7 +1446,48 @@ them by accident:
   sessions, with the commit detection and media ingest that come with them;
   nothing asked for that. Revisit only if users start pressing Stop
   _because_ the note is saved and the agent is still running — the chat
-  pane's "Saved note" row makes that moment visible.
+  pane's note card makes that moment visible. The moment is short now. The
+  turn ends with the "Done" message about 2 s after the call (2.3 s
+  measured on Fable, 1.4 s on Opus and Sonnet), where the recap took 4.5 s
+  in the same runs and 7 s in stored sessions.
+- **A saved turn ends with a hidden "Done", not a hard stop.** Neither MCP
+  nor ACP lets a tool end the turn, so a real stop needs a mechanism per
+  agent: a Claude `PostToolUse` hook, a `session/cancel` for Goose, nothing
+  for Codex, and driver changes so a hook-stopped turn still finishes.
+  Asking for one word needs none of that, costs one short model call per
+  saved turn, and works for every agent. In live runs the text after the
+  last saved call was exactly `Done` in 146 of 146 Claude turns with no
+  user question, and in 4 of 4 turns each on Goose and Codex. It also keeps
+  a reply where the user asked for one, which a hard stop would cut. The
+  hook stays in reserve for Claude. Add it if the drift log shows the recap
+  coming back, or if the 2 s and the Stop window above prove to matter.
+- **The "Done" is hidden when the pane renders, and the row is stored.**
+  The other choice was to drop the row in the message writer. A wrong match
+  there loses the text, where a later release can show a hidden row again.
+  The writer also sees only a call's raw status, and a remote call
+  completed from the outbox never gets `completed` there, so only the
+  transcript builder knows that call was saved. The cost is that backend
+  comparisons count the row (_Ending a saved turn: the hidden "Done"_).
+  Making them exact needs the dropped row or a per-row marker, which is a
+  data-model change.
+- **A `Done` line at the end of a real answer is shown.** Four turns in the
+  live runs ended an answer with a last line `Done`. Stripping that line
+  would hide it at the cost of editing text the agent wrote, so the pane
+  shows the message whole and the drift log marks it in its line.
+- **The hiding rule is keyed on the call, not on the text.** The old `---`
+  scan was a text test applied to every assistant message, and it had to
+  agree with a backend parser by convention. When delivery moved to the
+  tool the scan matched nothing and nothing failed, so the note card
+  disappeared unnoticed. The text test for "Done" runs only directly after
+  a completed `write_note` call, it fails open, and the word has one source
+  that tests on both sides read.
+- **The note card replaces the saved call's row.** With "Done" hidden a
+  saved turn ends at the call. A card at the end of the turn would sit
+  directly under the "Saved note" row and repeat it, so the completed call
+  is the card. The final-turn rule keeps the row for a call that did not
+  change the stored note, so the card never claims an update that did not
+  happen and the "Ask for the note to be updated" button has a row to sit
+  under.
 - **A Stop the agent never acknowledges is a lost connection, not a Stop.**
   The user pressing Stop on a hung proxy is not a statement about the turn's
   output: it is the only button they have when the session looks stuck.
@@ -1320,9 +1622,13 @@ Local:
    `note draft <temp dir>/staged-note-draft-<session-id>.md absent for a
 fresh note`. The agent writes that file with its file tool, then calls
    `write_note` with a title and next steps only. In the chat pane the call
-   shows as a "Saved note" row named after the title, with the title and the
-   suggested next steps in its details and no body preview; the note row
-   updates when the turn ends. After the run the draft file is gone.
+   shows as a "Saving note" row named after the title while it runs, with
+   the title and the suggested next steps in its details and no body
+   preview. When the call completes the row becomes the "Note created"
+   card. Nothing shows under the card: the agent's closing "Done" is
+   hidden, and the log has no `note-done drift` line for the session. The
+   note row updates when the turn ends. After the run the draft file is
+   gone.
 2. Check the log for `note delivered via write_note (Tool)`. If you see the
    warn line about the `---` fallback, the agent ignored the tool: check the
    prompt reached it (`note_delivery_guidance` text, which names the draft
@@ -1334,10 +1640,13 @@ fresh note`. The agent writes that file with its file tool, then calls
    and the stored note must be the repaired one. (Applies to remote sessions
    too: the outbox is collected after every settled turn, so the same
    correction prompt and re-collection happen there.)
-4. Ask the agent (in the prompt) to not call any tools: after the turn, one
-   follow-up user message asking it to write or finish the draft and call
-   `write_note` must appear, and the note must be stored after the second
-   turn.
+4. On a fresh note, ask the agent (in the prompt) to not call any tools:
+   after the turn, one follow-up user message asking it to write or finish
+   the draft and call `write_note` must appear, and the note must be stored
+   after the second turn. Then, on that stored note, ask a chat question
+   that needs no note change ("no need to change the note: …"): no
+   follow-up message must appear, the note's content and timestamp must be
+   unchanged, and the chat pane must offer "Ask for the note to be updated".
 5. Local Claude amendment: on a Claude note session whose note is stored and
    holds an embedded image, send "Please update the note: add a short
    Risks section". The log shows `note draft … seeded with the stored note
@@ -1356,7 +1665,38 @@ for amendment`, and before the agent's first tool call the file holds the
    draft to see the rejection: ask the agent, in a new session, to call
    `write_note` before writing anything. The tool result must read
    `write_note rejected: the draft file … does not exist …` with the
-   absolute path, and the agent must recover within the turn.
+   absolute path, and the agent must recover within the turn. The rejected
+   call keeps its "Note rejected" row, and the retry below it is the note
+   card.
+7. The card and the button. On a stored note, ask for a change ("add a
+   short Risks section"): the new call shows as a "Note updated" card, the
+   first one still reads "Note created", and no "Ask for the note to be
+   updated" button shows. Then ask the agent to publish the note again
+   without changing it ("call `write_note` again with the draft as it is,
+   and the same title and next steps"). After the turn settles that call
+   shows as a "Saved note" row, not a card, the note's timestamp is
+   unchanged, and the button shows under the row.
+8. A question in a note turn. On a stored note, ask for a change and a
+   chat answer in one message ("add the file name to the note, and tell me
+   here which line holds the bug"). The answer must be visible, above the
+   card or under it, and no bare "Done" may show. An answer under the card
+   is logged as drift, which is expected for this turn.
+9. Drift. Ask the agent to "write a three-sentence summary in chat after
+   you save the note". The summary shows under the card, and the log holds
+   one line for the session that contains `note-done drift` and ends with
+   the count and the length, for example
+   `1 message after the saved write_note call, the last 412 chars`. A turn
+   that ends in the hidden "Done" logs no such line.
+10. A real agent. From the repository root run
+    `cargo test -p acp-client real_bridge_saved_note_turn_ends_with_a_bare_done -- --ignored --nocapture --test-threads=1`.
+    It needs the bridge installed, a signed-in CLI, network and `node`. It
+    attaches the shipped `staged-mcp.cjs` with a temporary home directory,
+    asks for a short note without saying how to end the turn, and asserts
+    that every row after the saved call is a bare "Done". Set
+    `ACP_REAL_BRIDGE=codex` or `ACP_REAL_BRIDGE=goose` for the other
+    bridges (Goose under a headless runner also needs
+    `GOOSE_DISABLE_KEYRING=1`). Run it for each bridge when the drift count
+    rises or a new model ships.
 
 Blox:
 
@@ -1371,7 +1711,9 @@ note draft at <path>` names the same file. After the `write_note` call,
    `done` holds 32 hex characters, and a second `write_note` call changes
    them. The commands before the agent starts are the ones that ran before the draft
    existed (the install probe, the outbox read, the clear); none was added
-   for the draft.
+   for the draft. The chat pane shows the "Note created" card with nothing
+   under it, as it does locally: the result text and the hidden "Done" are
+   the same on both transports.
    Goose amendment on Blox: on a Goose remote note session whose note is
    stored, send a follow-up asking for one added paragraph. Before the
    agent's first tool call, `cat ~/.staged/sessions/<session-id>/draft.md`
@@ -1382,7 +1724,8 @@ note draft at <path>` names the same file. After the `write_note` call,
    `staged: write note` with a title and next steps only. The stored note
    has the new paragraph and every earlier section byte-for-byte.
 3. Disconnect tests. Use a prompt that keeps the turn open after the note
-   is published, and wait for the "Saved note" row before each kill. A bare
+   is published, and wait for the note card ("Note created") before each
+   kill. A bare
    `sleep 120` does not do it on Claude: its harness blocks the long sleep,
    so the turn does not stay open. A shell loop of short sleeps works, for
    example "write the note, call `write_note`, then run
@@ -1651,12 +1994,62 @@ when it honours it), `blox-cli`
 follow-up paths (`session_commands::tests`: every note prompt names the
 draft once with the amendment wording and no `body`; the grammar upload
 returns the workstation home from its last command), and on the frontend
-`noteToolCall.test.ts` (title and next steps, no body),
+`noteToolCall.test.ts` (title and next steps, no body, and the tool name in
+each bridge's spelling from the shared case table),
 `NoteToolDetails.component.test.ts` (no body preview or "No note body"
 row), `toolCallViewModel.test.ts` /
-`acpTranscript.test.ts` (the `write_note` row for both agents, interrupted
-pending calls), `sessionModalHelpers.test.ts` (the detached, storing and unread-outbox copy and which
+`acpTranscript.test.ts` (the `write_note` row for all three bridges,
+interrupted pending calls, and the grouping predicate that keeps note cards
+out of a collapsed group), `sessionModalHelpers.test.ts` (the detached, storing and unread-outbox copy and which
 end-of-session notice the chat pane renders), `acpTranscript.test.ts` (only
 the final turn's unsettled calls are relabelled in a completed session) and
 `sessionFailureCopy.test.ts` (the timeline copy says "yet" only while
 `isPollingForNote` is set).
+
+For the ending of a saved turn: `note_tool::tests` and
+`session_commands::tests` pin the result text, the description's last
+sentences and the last paragraph of the guidance in every note prompt.
+`saved_result_text_is_identical_for_local_and_remote_sessions`
+(`remote_staged_mcp::note_outbox::tests`) gives the local handler and the
+script the same title and draft and compares the two result texts.
+`noteDoneWording.test.ts` reads `note_tool.rs`, `staged-mcp.cjs` and
+`session_commands.rs` as text: each result text, each description and the
+session prompt must quote exactly one closing word, and it must be the
+`NOTE_DONE_WORD` that `isNoteDoneText` accepts. `noteDoneMessage.test.ts`
+runs `isNoteDoneText` over the shared case table and
+`hiddenNoteDoneMessageIds` over groups built by `buildAcpTranscriptGroups`:
+a match in each bridge's spelling, a rejected, running and interrupted
+call, a tool call after the text, more text after "Done", a reply between
+the call and "Done", an answer ending in a `Done` line, two "Done"
+messages, Codex's extra item, a remote call completed from the outbox,
+several turns, and another server's `write_note`.
+`SessionChatPane.noteDone.component.test.ts` mounts the real pane and
+asserts the message is absent for each bridge, present after a rejected or
+interrupted call, and back when more text or a tool call follows it.
+
+For the note card: `noteDeliveries.test.ts` (each bridge's spelling, calls
+that are not deliveries, a remote call completed from the outbox, a
+rejected call and its retry, the created and updated labels, the separator
+shape alone and mixed with calls, and a table for the final-turn rule
+checked against `shouldAskForNoteUpdate`) and
+`SessionChatPane.noteCard.component.test.ts` (the real pane, card and tool
+row: the card for each bridge, the two labels, a reply under the card, the
+kept row for a rejected and an interrupted call, two cards in a row, a
+running call turning into the card, the text shape, and with a note context
+the card without the button, the row with the button, the swap when the
+note refreshes, and a running session that settles with the note
+unchanged).
+
+For the follow-up rule and the drift log: `session_runner::tests::note_draft`
+(a table for `note_write_followup_due`, and a chat-only turn on fresh and
+amended branch and project notes) and `note_done::tests` (both rules over
+the shared case table, the drift decision for each bridge's spelling, every
+accepted and rejected text, a recap, a turn that ends at the call, an empty
+slot, a turn with no call, earlier turns, a steered message, other tool
+rows beside the call, a second "Done", a recap after "Done", an answer
+ending in a `Done` line, a tool call after the text, two calls in one turn,
+the wording of the log line, and three store-backed tests with rows the
+real message writer stored). The ignored
+`real_bridge_saved_note_turn_ends_with_a_bare_done` in `crates/acp-client`
+holds a real agent to the same rules: it compiles `note_done/rules.rs` by
+`#[path]`.

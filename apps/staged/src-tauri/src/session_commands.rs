@@ -555,8 +555,10 @@ title.\n\
 - If the note is pure research or informational with no clear next action: \
 {{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
 \n\
-Once the tool reports the note is saved, end your turn without repeating the note. If the turn \
-ends without a `write_note` call, no note is saved, whatever the draft file holds."
+Once the tool reports the note is saved, send a simple \"Done\" message with no other text to \
+end your turn, rather than summarising the work done. Staged hides that message. If the user \
+asked you a question, answer it in your reply before you call `write_note`. If the turn ends \
+without a `write_note` call, no note is saved, whatever the draft file holds."
     )
 }
 
@@ -14718,6 +14720,20 @@ it, and when it is ready call `write_note`."
             prompt.contains("Your assistant text is not saved"),
             "{prompt}"
         );
+        // How the turn ends after a saved call: the guidance's last
+        // paragraph, word for word. It matches the tool's description and
+        // result text.
+        assert!(
+            prompt.contains(
+                "\n\nOnce the tool reports the note is saved, send a simple \"Done\" message with \
+no other text to end your turn, rather than summarising the work done. Staged hides that \
+message. If the user asked you a question, answer it in your reply before you call \
+`write_note`. If the turn ends without a `write_note` call, no note is saved, whatever the \
+draft file holds."
+            ),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("without repeating"), "{prompt}");
         assert!(prompt.contains("suggestedNextCommitStep"), "{prompt}");
         assert!(prompt.contains("`suggested_next_steps`"), "{prompt}");
         assert!(!prompt.contains("```suggested-next-steps"), "{prompt}");

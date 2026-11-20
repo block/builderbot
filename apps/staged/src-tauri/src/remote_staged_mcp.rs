@@ -522,7 +522,7 @@ mod tests {
 
         let init = &responses[0]["result"];
         assert_eq!(init["serverInfo"]["name"], SERVER_NAME);
-        assert_eq!(init["serverInfo"]["version"], "6");
+        assert_eq!(init["serverInfo"]["version"], "7");
         assert_eq!(init["capabilities"], serde_json::json!({"tools": {}}));
         // The instructions name the session's draft file by absolute path:
         // the one spelling of it an agent that expands neither `~` nor

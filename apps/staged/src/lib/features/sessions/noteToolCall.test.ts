@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { writeNoteToolNameCases } from './testStubs/noteDoneCases';
 import {
   isWriteNoteToolName,
   writeNoteCallFromInput,
@@ -12,21 +13,21 @@ const steps = {
 };
 
 describe('isWriteNoteToolName', () => {
-  it.each([
-    'mcp__staged__write_note',
-    'staged: write note',
-    'staged.write_note',
-    'staged_write_note',
-  ])('recognises %s', (name) => {
+  // The cases live in testStubs/noteDone.cases.json, which the backend's copy of this
+  // rule runs too (src-tauri/src/note_done/tests.rs): the drift log finds the
+  // call by the same names as the chat pane.
+  it.each(writeNoteToolNameCases.accept)('recognises the %s spelling: %j', (_, name) => {
     expect(isWriteNoteToolName(name)).toBe(true);
   });
 
-  it.each(['mcp__other__write_note', 'write_note', 'Write', '', null, undefined])(
-    'rejects %s',
-    (name) => {
-      expect(isWriteNoteToolName(name)).toBe(false);
-    }
-  );
+  it.each(writeNoteToolNameCases.reject)('rejects %s: %j', (_, name) => {
+    expect(isWriteNoteToolName(name)).toBe(false);
+  });
+
+  it('rejects a missing name', () => {
+    expect(isWriteNoteToolName(null)).toBe(false);
+    expect(isWriteNoteToolName(undefined)).toBe(false);
+  });
 });
 
 describe('writeNoteCallFromInput', () => {
@@ -109,10 +110,24 @@ describe('writeNoteToolCall', () => {
     });
   });
 
+  it('reads a Codex call, whose title is `mcp.staged.write_note`', () => {
+    expect(
+      writeNoteToolCall(content('mcp.staged.write_note', { title: 'From Codex' }), undefined)
+    ).toEqual({
+      title: 'From Codex',
+      suggestedNextCommitStep: null,
+      suggestedNextNoteStep: null,
+    });
+    expect(writeNoteToolCall('mcp.staged.write_note', undefined)?.title).toBe('');
+  });
+
   it('is null for any other tool', () => {
     expect(writeNoteToolCall(content('mcp__other__write_note', { title: 'Plan' }), undefined)).toBe(
       null
     );
+    expect(
+      writeNoteToolCall(content('mcp.other.write_note', { title: 'Plan' }), undefined)
+    ).toBeNull();
     expect(writeNoteToolCall('Bash', { title: 'Plan' })).toBeNull();
   });
 });

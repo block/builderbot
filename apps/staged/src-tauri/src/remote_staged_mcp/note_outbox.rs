@@ -2048,6 +2048,67 @@ mod tests {
         );
     }
 
+    /// The saved result is the instruction that ends a note turn: it asks for
+    /// a bare "Done", which the chat pane hides. A local session gets the text
+    /// from `note_tool::handle_write_note` and a Blox session from the script,
+    /// so the two copies must read the same for the same title and draft, or
+    /// the two kinds of session end their turns differently.
+    #[test]
+    fn saved_result_text_is_identical_for_local_and_remote_sessions() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping saved result text comparison");
+            return;
+        };
+        // Titles and drafts that would expose a difference in quoting,
+        // trimming or counting: the count is UTF-8 bytes of the trimmed body.
+        let cases = [
+            ("Plan", "Body"),
+            ("# Plan with a heading mark", "  Body line\n---\nmore  \n"),
+            ("Fix \"quoted\" titles", "Body with \"quotes\" and a `tick`"),
+            ("Né: résumé → done", "é→ in the body, 日本語 too"),
+            ("  Padded title  ", "\u{feff}Body after a byte order mark"),
+        ];
+        for (title, draft) in cases {
+            let home = tempfile::tempdir().unwrap();
+            write_draft(home.path(), draft);
+
+            let slot = crate::note_tool::new_submission_slot();
+            let local = crate::note_tool::handle_write_note(
+                "sess-1",
+                &slot,
+                &home.path().join(".staged/sessions/sess-1/draft.md"),
+                serde_json::from_value(serde_json::json!({ "title": title })).unwrap(),
+            );
+            assert_ne!(local.is_error, Some(true), "{title:?}: {local:?}");
+            let local = serde_json::to_value(&local.content).unwrap();
+            let local = local[0]["text"].as_str().expect("a text result");
+
+            let responses = run_script(
+                home.path(),
+                &node,
+                &[
+                    serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":title}}}),
+                ],
+            );
+            assert_eq!(responses[0]["result"]["isError"], false, "{title:?}");
+            let remote = responses[0]["result"]["content"][0]["text"]
+                .as_str()
+                .expect("a text result");
+
+            assert_eq!(remote, local, "title {title:?}, draft {draft:?}");
+            // And both are the shared wording, not two copies that drifted
+            // the same way: the instruction after the "Saved note" sentence.
+            assert!(
+                local.ends_with(
+                    " bytes from the draft file). If the user asked you a question this turn \
+and you have not answered it in chat yet, answer it now, briefly. Otherwise send a simple \
+\"Done\" message with no other text to end your turn, rather than summarising the work done."
+                ),
+                "{local}"
+            );
+        }
+    }
+
     #[test]
     fn write_note_schema_matches_the_rust_tool_schema() {
         let Some(node) = node() else {

@@ -33,6 +33,16 @@ const offer: LaunchRecovery = {
       disposition: 'manual',
       reason: 'the project session never reached its agent',
     }),
+    session({ sessionId: 'f', projectId: 'p2', projectName: 'Gadgets', branchId: null }),
+    // A project with nothing that can be resumed: listed, never checked.
+    session({
+      sessionId: 'g',
+      projectId: 'p3',
+      projectName: 'Gizmos',
+      branchId: null,
+      disposition: 'manual',
+      reason: 'the project session never reached its agent',
+    }),
   ],
 };
 
@@ -88,14 +98,79 @@ describe('resumeOnLaunch.load', () => {
   });
 });
 
-describe('resumeOnLaunch answers', () => {
-  it('"Resume all" sends every restartable session and closes', async () => {
+describe('resumeOnLaunch selection', () => {
+  it('opens with every project that can be resumed checked', async () => {
     const controller = await importController();
     await controller.load();
-    await controller.resumeAll();
-    expect(resumeInterruptedSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd']);
+    expect(controller.selected).toEqual(['project:p1', 'project:p2']);
+    expect(controller.isSelected('project:p3')).toBe(false);
+    expect(controller.selectedSessionIds).toEqual(['a', 'b', 'c', 'd', 'f']);
+    expect(controller.canResume).toBe(true);
+  });
+
+  it('unchecking and rechecking a project changes what Resume sends', async () => {
+    const controller = await importController();
+    await controller.load();
+    controller.setSelected('project:p1', false);
+    expect(controller.selectedSessionIds).toEqual(['f']);
+    controller.setSelected('project:p1', true);
+    expect(controller.selectedSessionIds).toEqual(['a', 'b', 'c', 'd', 'f']);
+  });
+
+  it('never checks a project with nothing resumable', async () => {
+    const controller = await importController();
+    await controller.load();
+    controller.setSelected('project:p3', true);
+    expect(controller.isSelected('project:p3')).toBe(false);
+    controller.setAllSelected(false);
+    controller.setAllSelected(true);
+    expect(controller.selected).toEqual(['project:p1', 'project:p2']);
+  });
+
+  it('disables Resume while nothing is checked', async () => {
+    const controller = await importController();
+    await controller.load();
+    controller.setAllSelected(false);
+    expect(controller.selectedSessionIds).toEqual([]);
+    expect(controller.canResume).toBe(false);
+    await controller.resume();
+    expect(resumeInterruptedSessions).not.toHaveBeenCalled();
+    expect(controller.pending).toEqual(offer);
+  });
+
+  it('disables Resume when no project can be resumed', async () => {
+    getInterruptedSessions.mockResolvedValueOnce({
+      repoSessions: [],
+      projectSessions: [offer.projectSessions[3]],
+    });
+    const controller = await importController();
+    await controller.load();
+    expect(controller.selected).toEqual([]);
+    expect(controller.canResume).toBe(false);
+  });
+});
+
+describe('resumeOnLaunch answers', () => {
+  it('"Resume" sends every restartable session of the checked projects and closes', async () => {
+    const controller = await importController();
+    await controller.load();
+    await controller.resume();
+    expect(resumeInterruptedSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd', 'f']);
     expect(controller.pending).toBeNull();
     expect(controller.busy).toBe(false);
+    expect(controller.selected).toEqual([]);
+  });
+
+  it('"Resume" with a project unchecked sends only the rest', async () => {
+    const controller = await importController();
+    await controller.load();
+    controller.setSelected('project:p2', false);
+    await controller.resume();
+    // One answer either way: the backend records the handled marker, so the
+    // unchecked project is left as it is and not offered again.
+    expect(resumeInterruptedSessions).toHaveBeenCalledTimes(1);
+    expect(resumeInterruptedSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd']);
+    expect(controller.pending).toBeNull();
   });
 
   it('"Dismiss" records the offer as handled with no sessions', async () => {
@@ -115,9 +190,14 @@ describe('resumeOnLaunch answers', () => {
     );
     const controller = await importController();
     await controller.load();
-    const first = controller.resumeAll();
+    const first = controller.resume();
     expect(controller.busy).toBe(true);
+    expect(controller.canResume).toBe(false);
+    // The selection is locked while the answer is in flight.
+    controller.setSelected('project:p2', false);
+    expect(controller.isSelected('project:p2')).toBe(true);
     await controller.dismiss();
+    await controller.resume();
     expect(resumeInterruptedSessions).toHaveBeenCalledTimes(1);
     settle();
     await first;
@@ -129,7 +209,7 @@ describe('resumeOnLaunch answers', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const controller = await importController();
     await controller.load();
-    await controller.resumeAll();
+    await controller.resume();
     expect(toastError).toHaveBeenCalledWith(
       'Could not resume interrupted sessions: Database not initialized'
     );

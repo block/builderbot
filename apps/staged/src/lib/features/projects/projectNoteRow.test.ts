@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChildSessionBadgeProps } from '../timeline/childSessionBadges';
+import { formatRateLimitResetTime } from '../timeline/sessionFailureCopy';
 import { projectNoteRow, type ProjectNoteRowSource } from './projectNoteRow';
 
 const NOW = 10 * 60_000;
@@ -111,10 +112,7 @@ describe('projectNoteRow', () => {
         { deleting: false, nowMs: NOW }
       );
     const resetsAt = '2026-06-24T15:45:00Z';
-    const resetTime = new Date(resetsAt).toLocaleTimeString([], {
-      hour: 'numeric',
-      minute: '2-digit',
-    });
+    const resetTime = formatRateLimitResetTime(resetsAt);
     expect(paused({ rateLimitKind: 'network' }).title).toBe('Paused: network unavailable.');
     expect(paused({}).title).toBe('Paused by API limit — no note yet');
     // The reset time dates the pause; it is not the session's error message.

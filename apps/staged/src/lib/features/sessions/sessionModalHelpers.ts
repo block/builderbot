@@ -12,6 +12,7 @@ import {
   NETWORK_PAUSED,
   NETWORK_PAUSED_RESUMES,
   NETWORK_WAIT_REASON,
+  formatPauseTime,
   formatRateLimitResetTime,
   isNetworkPause,
 } from '../timeline/sessionFailureCopy';
@@ -277,7 +278,7 @@ function rateLimitEndMessage(
     return 'This session paused because the provider reported an API limit. Resume manually when ready.';
   }
   if (recovery?.nextRetryAt && recovery.attempt && recovery.maxAttempts) {
-    return `This session paused because the provider reported an API limit. It will retry around ${formatTimestamp(recovery.nextRetryAt)} (attempt ${recovery.attempt}/${recovery.maxAttempts}).`;
+    return `This session paused because the provider reported an API limit. It will retry around ${formatPauseTime(recovery.nextRetryAt)} (attempt ${recovery.attempt}/${recovery.maxAttempts}).`;
   }
   const resetTime = formatRateLimitResetTime(current.rateLimitResetsAt);
   if (resetTime) {
@@ -300,7 +301,7 @@ function networkPauseEndMessage(recovery: RateLimitAutoRecovery | null): string 
     return `${NETWORK_PAUSED} Resume manually when ready.`;
   }
   if (recovery?.nextRetryAt && recovery.reason !== NETWORK_WAIT_REASON) {
-    return `${NETWORK_PAUSED_RESUMES} Trying again around ${formatTimestamp(recovery.nextRetryAt)}.`;
+    return `${NETWORK_PAUSED_RESUMES} Trying again around ${formatPauseTime(recovery.nextRetryAt)}.`;
   }
   return NETWORK_PAUSED_RESUMES;
 }
@@ -361,13 +362,6 @@ function rateLimitAutoRecovery(
   const recovery = staged.rateLimitAutoRecovery;
   if (!isRecord(recovery)) return null;
   return recovery as RateLimitAutoRecovery;
-}
-
-function formatTimestamp(timestamp: number): string {
-  return new Date(timestamp).toLocaleTimeString([], {
-    hour: 'numeric',
-    minute: '2-digit',
-  });
 }
 
 /** Tags wrapping injected context blocks in prompts/messages (rendered as collapsed cards). */

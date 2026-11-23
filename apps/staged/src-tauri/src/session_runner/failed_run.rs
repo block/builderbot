@@ -307,8 +307,42 @@ mod tests {
         );
     }
 
+    /// Park `session` the way `finish_session_run` does with the decision
+    /// for `message`, and return the retry bookkeeping the pause wrote.
+    fn park_failed_run(
+        store: &Store,
+        session: &Session,
+        message: &str,
+    ) -> crate::rate_limit_scheduler::RateLimitAutoRecovery {
+        store.create_session(session).unwrap();
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        let decision = decide_failed_run(Some(&row), None, &driver_error(message), true, NOW_MS);
+        let recovery = decision.recovery.expect("the failure pauses");
+        assert!(crate::rate_limit_scheduler::pause_for_rate_limit(
+            store,
+            None,
+            &session.id,
+            Some(message),
+            recovery.resets_at.as_deref(),
+            recovery.kind.as_deref(),
+            NOW_MS,
+        )
+        .unwrap());
+        let parked = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(parked.status, SessionStatus::Paused);
+        assert_eq!(parked.rate_limit_kind, recovery.kind);
+        assert_eq!(parked.rate_limit_resets_at, recovery.resets_at);
+        crate::rate_limit_scheduler::auto_recovery_from_metadata(parked.provider_metadata.as_ref())
+            .expect("the pause writes retry bookkeeping")
+    }
+
+    const MINUTE_MS: i64 = 60_000;
+
+    /// The subscription case with no structured reset: a bridge older than
+    /// claude-agent-acp #1610 sends the error kind and the message, nothing
+    /// else. The wording names it a usage limit.
     #[test]
-    fn a_turn_refused_before_usage_with_no_reset_pauses_on_the_backoff() {
+    fn a_turn_refused_before_usage_with_no_reset_is_named_a_usage_limit() {
         let session = session_refused_before_usage(None);
 
         let decision = decide_failed_run(
@@ -324,9 +358,114 @@ mod tests {
             decision.recovery,
             Some(RateLimitRecovery {
                 resets_at: None,
-                kind: Some("rate_limit".to_string()),
+                kind: Some("usage_limit".to_string()),
             })
         );
+    }
+
+    /// And it is parked on the slow schedule, not the minute-scale backoff
+    /// that used to spend its attempts long before the limit reset.
+    #[test]
+    fn a_usage_limit_with_no_reset_parks_the_row_on_the_slow_schedule() {
+        let store = Store::in_memory().unwrap();
+        let session = session_refused_before_usage(None).with_agent("agent-1");
+
+        let bookkeeping = park_failed_run(&store, &session, LIMIT_MESSAGE);
+
+        assert_eq!(bookkeeping.attempt, 1);
+        assert_eq!(bookkeeping.reason.as_deref(), Some("usage_limit_backoff"));
+        let retry_at = bookkeeping.next_retry_at.expect("a retry is scheduled");
+        let waits = (NOW_MS + 40 * MINUTE_MS)..=(NOW_MS + 50 * MINUTE_MS);
+        assert!(waits.contains(&retry_at), "{}", retry_at - NOW_MS);
+    }
+
+    /// 2026-11-18T08:00:00Z in epoch seconds, six days after [`NOW_MS`].
+    const WEEKLY_RESETS_AT_SECS: i64 = 1_794_988_800;
+    const WEEKLY_LIMIT_MESSAGE: &str =
+        "Internal error: You've hit your weekly limit · resets Nov 18, 8am (UTC)";
+
+    /// A weekly limit: the reset is days ahead, further than a reset used to
+    /// be trusted for, and the row waits for it.
+    #[test]
+    fn a_weekly_limit_parks_the_row_for_its_reset_days_ahead() {
+        let store = Store::in_memory().unwrap();
+        let mut session = session_refused_before_usage(Some(json!({
+            "status": "rejected",
+            "resetsAt": WEEKLY_RESETS_AT_SECS,
+            "rateLimitType": "seven_day",
+            "overageStatus": "rejected",
+            "overageDisabledReason": "org_level_disabled",
+            "isUsingOverage": false,
+        })))
+        .with_agent("agent-1");
+        session.provider_metadata.as_mut().unwrap()["acp"]["promptError"]["message"] =
+            json!(WEEKLY_LIMIT_MESSAGE);
+
+        let bookkeeping = park_failed_run(&store, &session, WEEKLY_LIMIT_MESSAGE);
+
+        let parked = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(parked.rate_limit_kind.as_deref(), Some("seven_day"));
+        assert_eq!(
+            parked.rate_limit_resets_at.as_deref(),
+            Some("2026-11-18T08:00:00.000Z")
+        );
+        assert_eq!(bookkeeping.attempt, 1);
+        assert_eq!(bookkeeping.reason.as_deref(), Some("reset_at"));
+        let retry_at = bookkeeping.next_retry_at.expect("a retry is scheduled");
+        let reset_at = WEEKLY_RESETS_AT_SECS * 1_000;
+        assert!(
+            (reset_at..=reset_at + 6 * MINUTE_MS).contains(&retry_at),
+            "the retry follows the reset: {retry_at}"
+        );
+    }
+
+    /// API-style failures keep the minute-scale backoff: a 429 and an
+    /// overloaded provider clear in seconds to minutes. A usage update from
+    /// earlier in the turn, sent while a subscription window was still open,
+    /// changes nothing.
+    #[test]
+    fn api_rate_limits_and_overloads_park_the_row_on_the_minute_backoff() {
+        const API_429: &str = r#"Internal error: API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your organization's rate limit of 400,000 input tokens per minute."}}"#;
+        const OVERLOADED: &str = r#"Internal error: API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let open_window = json!({
+            "sessionUpdate": "usage_update",
+            "used": 51_234,
+            "size": 200_000,
+            "_meta": { "_claude/rateLimit": {
+                "status": "allowed_warning",
+                "resetsAt": LIMIT_RESETS_AT_SECS,
+                "rateLimitType": "five_hour",
+                "utilization": 0.93,
+            } },
+        });
+
+        for (error_kind, message) in [("rate_limit", API_429), ("overloaded", OVERLOADED)] {
+            for usage_update in [None, Some(&open_window)] {
+                let store = Store::in_memory().unwrap();
+                let mut metadata = prompt_error_metadata(error_kind, message);
+                if let Some(usage_update) = usage_update {
+                    metadata["acp"]["usageUpdate"] = usage_update.clone();
+                }
+                let mut session = Session::new_running("work", Path::new("/tmp"))
+                    .with_provider("claude")
+                    .with_agent("agent-1");
+                session.provider_metadata = Some(metadata);
+
+                let bookkeeping = park_failed_run(&store, &session, message);
+
+                let parked = store.get_session(&session.id).unwrap().unwrap();
+                assert_eq!(parked.rate_limit_kind.as_deref(), Some(error_kind));
+                assert_eq!(parked.rate_limit_resets_at, None, "{error_kind}");
+                assert_eq!(bookkeeping.attempt, 1);
+                assert_eq!(bookkeeping.reason.as_deref(), Some("backoff"));
+                let retry_at = bookkeeping.next_retry_at.expect("a retry is scheduled");
+                assert!(
+                    (NOW_MS..=NOW_MS + MINUTE_MS).contains(&retry_at),
+                    "{error_kind}: {}",
+                    retry_at - NOW_MS
+                );
+            }
+        }
     }
 
     #[test]

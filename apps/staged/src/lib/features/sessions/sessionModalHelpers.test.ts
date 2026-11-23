@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   foldSnippetsIntoPrompt,
   formatToolDisplay,
@@ -19,6 +19,7 @@ import {
   sessionEndNoticeKind,
   snippetLabel,
 } from './sessionModalHelpers';
+import { formatPauseTime } from '../timeline/sessionFailureCopy';
 import {
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_NO_WORKSPACE,
@@ -385,6 +386,43 @@ describe('newestUserMessageId', () => {
     ).toContain('It will retry around');
   });
 
+  it('dates an API limit auto-retry that is days away, and not one due today', () => {
+    const retryMessage = (nextRetryAt: number) =>
+      sessionEndMessage({
+        completionReason: 'rate_limited',
+        rateLimitKind: 'seven_day',
+        providerMetadata: {
+          staged: {
+            rateLimitAutoRecovery: { attempt: 1, maxAttempts: 8, nextRetryAt, reason: 'reset_at' },
+          },
+        },
+      });
+    const options = { hour: 'numeric', minute: '2-digit' } as const;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 10, 23, 14, 0));
+      const today = new Date(2026, 10, 23, 17, 30);
+      const weeklyReset = new Date(2026, 10, 27, 9, 0);
+
+      expect(retryMessage(today.getTime())).toBe(
+        `This session paused because the provider reported an API limit. It will retry around ${today.toLocaleTimeString([], options)} (attempt 1/8).`
+      );
+      expect(retryMessage(weeklyReset.getTime())).toBe(
+        `This session paused because the provider reported an API limit. It will retry around ${weeklyReset.toLocaleString([], { month: 'short', day: 'numeric', ...options })} (attempt 1/8).`
+      );
+      expect(
+        sessionEndMessage({
+          completionReason: 'rate_limited',
+          rateLimitResetsAt: weeklyReset.toISOString(),
+        })
+      ).toBe(
+        `This session paused because the provider reported an API limit. It resets around ${weeklyReset.toLocaleString([], { month: 'short', day: 'numeric', ...options })}.`
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('explains API limit auto-retry give-up state', () => {
     expect(
       sessionEndMessage({
@@ -458,10 +496,7 @@ describe('newestUserMessageId', () => {
 
   it('says when a network pause on its own backoff tries again', () => {
     const nextRetryAt = Date.UTC(2026, 5, 24, 15, 45);
-    const retryTime = new Date(nextRetryAt).toLocaleTimeString([], {
-      hour: 'numeric',
-      minute: '2-digit',
-    });
+    const retryTime = formatPauseTime(nextRetryAt);
     expect(
       sessionEndMessage({
         completionReason: 'rate_limited',

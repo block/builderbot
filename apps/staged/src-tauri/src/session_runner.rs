@@ -6251,6 +6251,9 @@ fn rate_limit_recovery_details(
     now_millis: i64,
 ) -> RateLimitRecovery {
     let mut details = RateLimitRecovery::default();
+    let mut limit_type = None;
+    let mut status = None;
+    let mut error_kind = None;
 
     if let Some(metadata) = provider_metadata {
         // claude-agent-acp reports the SDK's `rate_limit_info` in two places,
@@ -6263,8 +6266,9 @@ fn rate_limit_recovery_details(
         // 2. `_meta["_claude/rateLimit"]` on a `usage_update`, which the
         //    bridge sends only once the turn has usage to report.
         //
-        // Each field is taken from the first place that has it, and a
-        // limit type from either place is preferred to a bare `status`.
+        // Each field is taken from the first place that has it. Info that
+        // says its window is still open is skipped in both places (see
+        // `rate_limit_info_reports_a_reached_limit`).
         let reported: Vec<&serde_json::Value> = [
             metadata.pointer("/acp/promptError/data/rateLimit"),
             metadata
@@ -6273,6 +6277,7 @@ fn rate_limit_recovery_details(
         ]
         .into_iter()
         .flatten()
+        .filter(|rate_limit| rate_limit_info_reports_a_reached_limit(rate_limit))
         .collect();
         let first_string = |names: &[&str]| {
             reported
@@ -6282,34 +6287,111 @@ fn rate_limit_recovery_details(
         details.resets_at = reported.iter().find_map(|rate_limit| {
             timestamp_field(rate_limit, &["resetsAt", "resetAt"], now_millis)
         });
-        details.kind =
-            first_string(&["rateLimitType", "type"]).or_else(|| first_string(&["status"]));
+        limit_type = first_string(&["rateLimitType", "type"]);
+        status = first_string(&["status"]);
 
+        let data = metadata.pointer("/acp/promptError/data");
         if details.resets_at.is_none() {
-            details.resets_at = metadata.pointer("/acp/promptError/data").and_then(|data| {
+            details.resets_at = data.and_then(|data| {
                 timestamp_field(data, &["resetsAt", "resetAt", "retryAt"], now_millis)
             });
         }
-
-        if details.kind.is_none() {
-            details.kind = metadata
-                .pointer("/acp/promptError/data")
-                .and_then(|data| string_field(data, &["errorKind", "kind", "type"]));
-        }
+        error_kind = data.and_then(|data| string_field(data, &["errorKind", "kind", "type"]));
     }
 
-    if details.kind.is_none() {
-        let normalized = error.to_ascii_lowercase();
-        details.kind = if normalized.contains("overloaded") {
-            Some("overloaded".to_string())
-        } else if normalized.contains("usage limit") || normalized.contains("quota") {
-            Some("usage_limit".to_string())
-        } else {
-            Some("rate_limit".to_string())
-        };
-    }
+    // The kind is the limit type the bridge reported. Failing that, a
+    // message worded as a reached usage limit names one (`USAGE_LIMIT_KIND`),
+    // which is what tells a subscription limit from an API 429 when neither
+    // a type nor a reset arrives. Then a bare `status`, the error's own
+    // kind, and last the error text.
+    details.kind = limit_type
+        .or_else(|| usage_limit_kind_from_message(error, provider_metadata))
+        .or(status)
+        .or(error_kind)
+        .or_else(|| {
+            let kind = if error.to_ascii_lowercase().contains("overloaded") {
+                "overloaded"
+            } else {
+                "rate_limit"
+            };
+            Some(kind.to_string())
+        });
 
     details
+}
+
+/// Whether a `rate_limit_info` describes a limit that was reached.
+///
+/// The SDK sends the same info while a window is still open, with a `status`
+/// of `allowed` or `allowed_warning`, and its `resetsAt` is then the end of
+/// that window, up to seven days on. A turn that fails for another reason
+/// (an API 429, an overloaded provider) can still have such info on its last
+/// usage update. Its reset is not when that failure clears and its limit
+/// type is not what failed, so neither is read.
+fn rate_limit_info_reports_a_reached_limit(rate_limit: &serde_json::Value) -> bool {
+    !rate_limit
+        .get("status")
+        .and_then(|status| status.as_str())
+        .is_some_and(|status| {
+            let status = status.trim().to_ascii_lowercase();
+            status == "allowed" || status == "allowed_warning"
+        })
+}
+
+/// [`USAGE_LIMIT_KIND`](crate::rate_limit_scheduler::USAGE_LIMIT_KIND) when
+/// the failed prompt's message is worded as a reached subscription usage
+/// limit, for a failure that reported no limit type.
+///
+/// A subscription limit and an API rate limit can arrive with the same
+/// structured kind (`rate_limit`) and no reset: a Claude bridge older than
+/// claude-agent-acp #1610 sends nothing else for a turn refused before its
+/// first model response, and Codex sends text alone. They need different
+/// waits (hours against seconds), and the wording is what is left to tell
+/// them apart. This does not read the reset out of the text.
+///
+/// A structured kind other than `rate_limit` stands: an `overloaded`
+/// failure is never a usage limit, whatever its text says.
+fn usage_limit_kind_from_message(
+    error: &str,
+    provider_metadata: Option<&serde_json::Value>,
+) -> Option<String> {
+    if provider_metadata
+        .and_then(prompt_error_kind)
+        .is_some_and(|kind| kind != "rate_limit")
+    {
+        return None;
+    }
+    // The prompt error's own message when there is one: the driver error
+    // around it can carry agent stderr and model output.
+    let message = provider_metadata
+        .and_then(|metadata| metadata.pointer("/acp/promptError/message"))
+        .and_then(|message| message.as_str())
+        .unwrap_or(error);
+    has_usage_limit_wording(&message.to_lowercase())
+        .then(|| crate::rate_limit_scheduler::USAGE_LIMIT_KIND.to_string())
+}
+
+/// Whether lowercased error text is worded as a reached subscription usage
+/// limit.
+///
+/// The phrases are the ones the Claude Agent SDK lists for a limit that
+/// resets by itself (`USAGE_LIMIT_ERROR_PREFIXES`: "You've hit your session
+/// limit", "You've reached your …", "You're out of extra usage"), and "usage
+/// limit", which also covers Codex ("You've hit your usage limit"). The
+/// wording of an API limit ("rate limit", "429", "quota") is not among them.
+fn has_usage_limit_wording(normalized: &str) -> bool {
+    if normalized.contains("overloaded") {
+        return false;
+    }
+    let normalized = normalized.replace('\u{2019}', "'");
+    [
+        "you've hit your",
+        "you've reached your",
+        "you're out of extra usage",
+        "usage limit",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
 }
 
 fn string_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
@@ -6349,9 +6431,9 @@ fn timestamp_field(value: &serde_json::Value, names: &[&str], now_millis: i64) -
 ///
 /// The magnitude split misreads epochs in other scales — microseconds land as
 /// millis centuries out — so anything further ahead than any real provider
-/// reset window is dropped rather than stored: recovery then uses plain
-/// backoff and the UI shows no reset time, instead of both parking on a
-/// timestamp in year 55,000.
+/// reset window is dropped rather than stored: recovery then schedules the
+/// pause as one that reported no reset and the UI shows no reset time,
+/// instead of both parking on a timestamp in year 55,000.
 fn epoch_to_rfc3339_utc(epoch: i64, now_millis: i64) -> Option<String> {
     if epoch <= 0 {
         return None;
@@ -10042,6 +10124,7 @@ mod tests {
     mod swept_note_pikchr;
     mod taken_over_note;
     mod unread_run_end;
+    mod usage_limit_details;
     use super::*;
     use crate::git::strip_git_env;
     use std::cell::RefCell;
@@ -11493,8 +11576,11 @@ draft file (its path is in your instructions), counting from the first non-blank
         );
         assert_eq!(details.kind.as_deref(), Some("five_hour"));
 
-        let status_only =
+        let mut status_only =
             claude_limit_metadata(Some(serde_json::json!({ "status": "rejected" })), None);
+        // With a message that does not word a usage limit, which would name
+        // the kind before the status does.
+        status_only["acp"]["promptError"]["message"] = serde_json::json!("Internal error");
         let details =
             rate_limit_recovery_details("Prompt failed", Some(&status_only), RESET_TEST_NOW_MILLIS);
         assert_eq!(details.resets_at, None);
@@ -11506,7 +11592,9 @@ draft file (its path is in your instructions), counting from the first non-blank
         // A turn refused before its first usage by a bridge that sends no
         // `rateLimit` (before claude-agent-acp #1610, or with no
         // `rate_limit_event` in the turn): there is nothing structured to
-        // read, and the reset in the message text is not parsed.
+        // read, and the reset in the message text is not parsed. The
+        // message's wording still names it a usage limit, which is what
+        // keeps it off the backoff of an API `rate_limit`.
         let metadata = claude_limit_metadata(None, None);
         let error = "Prompt failed: You've hit your session limit · resets 3:45pm (UTC)";
         assert!(is_rate_limit_error(error, Some(&metadata)));
@@ -11514,7 +11602,7 @@ draft file (its path is in your instructions), counting from the first non-blank
         let details = rate_limit_recovery_details(error, Some(&metadata), RESET_TEST_NOW_MILLIS);
 
         assert_eq!(details.resets_at, None);
-        assert_eq!(details.kind.as_deref(), Some("rate_limit"));
+        assert_eq!(details.kind.as_deref(), Some("usage_limit"));
     }
 
     #[test]

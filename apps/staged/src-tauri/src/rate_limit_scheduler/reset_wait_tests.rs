@@ -285,7 +285,9 @@ fn an_auto_resume_refused_after_the_reset_is_counted_on_the_backoff() {
     let state = recovery(&store, &session.id);
     assert_eq!(state.attempt, 2);
     assert_eq!(state.reason.as_deref(), Some("backoff"));
-    assert_eq!(state.first_limited_at, scheduled.first_limited_at);
+    // The wait for the reset is not time on the backoff: the 24 hour window
+    // starts again with this refusal.
+    assert_eq!(state.first_limited_at, refused_at);
     let retry_at = state.next_retry_at.unwrap();
     let earliest = refused_at + MIN_RETRY_DELAY_MS;
     let latest = refused_at + 2 * BASE_BACKOFF_MS;

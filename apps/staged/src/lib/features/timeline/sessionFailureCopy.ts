@@ -126,12 +126,39 @@ export function rateLimitPausedSubtitle(rateLimitResetsAt?: string | null): stri
   return null;
 }
 
-export function formatRateLimitResetTime(rateLimitResetsAt?: string | null): string | null {
+/**
+ * When an API limit resets, for the pause copy; null without a usable time.
+ * `now` is the moment the copy is read, which decides whether the date shows
+ * (see `formatPauseTime`).
+ */
+export function formatRateLimitResetTime(
+  rateLimitResetsAt?: string | null,
+  now: Date = new Date()
+): string | null {
   if (!rateLimitResetsAt) return null;
   const date = new Date(rateLimitResetsAt);
   if (Number.isNaN(date.getTime())) return null;
+  return formatPauseTime(date, now);
+}
 
-  return date.toLocaleTimeString([], {
+/**
+ * A time a paused session is waiting for, as its pause copy shows it: the
+ * time alone when it falls on the day the copy is read, and the date ahead of
+ * it otherwise. A weekly limit resets days later, and "resets around 9:00 AM"
+ * would read as the next 9:00 AM.
+ */
+export function formatPauseTime(time: Date | number, now: Date = new Date()): string {
+  const date = new Date(time);
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  if (sameDay) {
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
   });

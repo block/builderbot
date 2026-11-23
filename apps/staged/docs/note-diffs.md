@@ -101,6 +101,7 @@ mkdir -p "$ROOT/tmp" "$ROOT/acp-empty"
 
 # A changed TAURI_CONFIG rebuilds the Rust crate. Point CARGO_TARGET_DIR at a
 # copy of the shared target (cp -Rc) first, so other worktrees keep theirs.
+# 5199 is an example: the port in devUrl and Vite's must be the same free one.
 cd apps/staged
 just stage-sidecar
 (cd src-tauri && TAURI_CONFIG='{"identifier":"xyz.block.staged.notediffs","build":{"devUrl":"http://localhost:5199"}}' \
@@ -132,8 +133,26 @@ Open **Note diffs demo** from the projects grid and press the note. The bar
 at the right of the note should carry the six markers above, in that order.
 Hover each one, press an orange one to open the previous version, scroll
 either pane, and press Escape twice: once for the previous version, once for
-the note. With the find field open (Cmd+F) and focused, Escape closes the
-search and nothing else; the previous version stays as it was.
+the note.
+
+What to expect:
+
+- The markers are placed as a scrollbar's thumb is, at the same share of the
+  bar as the change is of the note's scrolled height. In a note that scrolls,
+  a marker therefore stands above its block, further above the lower the
+  block is; only in a note that fits do the two sit side by side.
+- Hovering tints the changed blocks and paints the changed words. A changed
+  diagram is tinted and edged in its marker's colour. The removed paragraph
+  has no block in the note: its marker draws a red line across the gap it
+  left, above _Findings_.
+- A press puts the change a third of the way down both panes, level in each.
+  A change too near the top of the note to reach that line stays where it
+  is, still level. For the removed paragraph the previous version shows it
+  lit and the note shows the red line beside it; for the added section it is
+  the other way round, with a green line on the left.
+
+With the find field open (Cmd+F) and focused, Escape closes the search and
+nothing else; the previous version stays as it was.
 
 To make a version by hand instead, revise a note of your own. An agent
 rewriting its note keeps the text it replaced, and so does editing and saving

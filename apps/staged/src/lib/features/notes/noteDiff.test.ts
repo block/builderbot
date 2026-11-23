@@ -102,6 +102,36 @@ describe('computeNoteDiff', () => {
     expect(covered(reworded.text, op.currentRanges)).toEqual(['newest', 'thousand']);
   });
 
+  it('gives a reworded phrase as one stretch of words, without the spaces around it', () => {
+    // The word diff compares the spaces between words too. It matches some
+    // and not others, which left a phrase in pieces with a space on its end.
+    const before = unit(
+      'A failed upload is never retried. The client gives up on the first error.'
+    );
+    const after = unit(
+      'A failed upload is retried only by hand. The client gives up on the first error.'
+    );
+    const diff = computeNoteDiff([intro, before, outro], [intro, after, outro]);
+
+    const [op] = diff.hunks[0].ops;
+    if (op.type !== 'modified') throw new Error(`expected a modified op, got ${op.type}`);
+    expect(covered(before.text, op.previousRanges)).toEqual(['never retried']);
+    expect(covered(after.text, op.currentRanges)).toEqual(['retried only by hand']);
+  });
+
+  it('marks a block whole when only the spacing of its text changed', () => {
+    const before = unit('if (ready) {\n  start();\n}', 'code');
+    const after = unit('if (ready) {\n    start();\n}', 'code');
+    const diff = computeNoteDiff([intro, before, outro], [intro, after, outro]);
+
+    expect(diff.hunks).toHaveLength(1);
+    const [op] = diff.hunks[0].ops;
+    if (op.type !== 'modified') throw new Error(`expected a modified op, got ${op.type}`);
+    expect(op.previousRanges).toEqual([]);
+    expect(op.currentRanges).toEqual([]);
+    expect(op.wholeUnit).toBe(true);
+  });
+
   it('marks a replaced paragraph as modified without pairing the two', () => {
     const replacement = unit('See the retention policy for how long logs are kept.');
     const diff = computeNoteDiff([intro, middle, outro], [intro, replacement, outro]);

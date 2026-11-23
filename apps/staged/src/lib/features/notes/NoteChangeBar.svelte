@@ -224,11 +224,13 @@
     transition: opacity 0.1s;
   }
 
-  /* A short marker is still easy to hit. */
+  /* A short marker is still easy to hit. The room is taken above, below and
+     towards the text; on the other side the scrollbar is 2px away, and a
+     press on it is the scrollbar's. */
   .note-change-marker::before {
     content: '';
     position: absolute;
-    inset: -3px -4px;
+    inset: -3px -2px -3px -6px;
   }
 
   .note-change-marker[data-kind='added'] {

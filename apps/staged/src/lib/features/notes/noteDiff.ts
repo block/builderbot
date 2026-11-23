@@ -55,9 +55,9 @@ export type NoteDiffOp =
       /** The words of the current text the previous one lacked. */
       currentRanges: NoteDiffTextRange[];
       /**
-       * The text is the same on both sides: the block changed in kind or
+       * There are no words to point at: the block changed in kind or
        * signature only (a heading level, a link target, a diagram's drawing),
-       * and there are no words to point at.
+       * or in the spacing of its text alone (a code block indented again).
        */
       wholeUnit: boolean;
     }
@@ -165,8 +165,8 @@ function walkOps(
         modifiedOp(
           p,
           c,
-          clipToText(pair.beforeHighlights, previous[p].text.length),
-          clipToText(pair.afterHighlights, current[c].text.length)
+          wordRanges(previous[p].text, pair.beforeHighlights),
+          wordRanges(current[c].text, pair.afterHighlights)
         )
       );
       p++;
@@ -221,16 +221,42 @@ function modifiedOp(
 }
 
 /**
- * A line's highlights, kept to its text. The line also carries the unit's
- * kind and signature after the text, and a difference there is not a word a
- * reader can be shown.
+ * A line's highlights as the words of its unit's text a reader is shown.
+ *
+ * Kept to the text: the line also carries the unit's kind and signature
+ * after it, and a difference there is not a word.
+ *
+ * And made whole. The word diff compares the spaces between words as it
+ * does the words, so of a reworded phrase it matches some spaces and not
+ * others: the phrase comes back in pieces, some with a space on the end.
+ * Here a stretch loses the spaces at its ends, and stretches with nothing
+ * but spaces between them are one. A highlight that was only spaces (a code
+ * block indented again) is no stretch at all.
  */
-function clipToText(highlights: CharHighlight[], textLength: number): NoteDiffTextRange[] {
+function wordRanges(text: string, highlights: readonly CharHighlight[]): NoteDiffTextRange[] {
   const ranges: NoteDiffTextRange[] = [];
-  for (const { start, end } of highlights) {
-    if (start < textLength) ranges.push({ start, end: Math.min(end, textLength) });
+  for (const highlight of highlights) {
+    let start = Math.min(highlight.start, text.length);
+    let end = Math.min(highlight.end, text.length);
+    while (start < end && isSpace(text[start])) start++;
+    while (end > start && isSpace(text[end - 1])) end--;
+    if (start >= end) continue;
+    const last = ranges[ranges.length - 1];
+    if (last && onlySpaces(text, last.end, start)) last.end = end;
+    else ranges.push({ start, end });
   }
   return ranges;
+}
+
+function isSpace(character: string): boolean {
+  return /\s/.test(character);
+}
+
+function onlySpaces(text: string, start: number, end: number): boolean {
+  for (let i = start; i < end; i++) {
+    if (!isSpace(text[i])) return false;
+  }
+  return true;
 }
 
 /**
@@ -335,10 +361,13 @@ function pairedRanges(
   const { beforeHighlights, afterHighlights } = computeCharHighlights(previous.text, current.text);
   const changed = coveredLength(beforeHighlights) + coveredLength(afterHighlights);
   if (1 - changed / total <= LONG_BLOCK_SIMILARITY) return null;
-  return { previous: beforeHighlights, current: afterHighlights };
+  return {
+    previous: wordRanges(previous.text, beforeHighlights),
+    current: wordRanges(current.text, afterHighlights),
+  };
 }
 
-function coveredLength(ranges: NoteDiffTextRange[]): number {
+function coveredLength(ranges: readonly CharHighlight[]): number {
   return ranges.reduce((length, range) => length + range.end - range.start, 0);
 }
 

@@ -12,7 +12,13 @@
  * The tint is an inset shadow, not a background: it lies over whatever
  * background the block has (a code block's, a table header's) instead of
  * competing with the rule that sets it. The outline carries it a little
- * past the text, and is what shows around an image.
+ * past the text.
+ *
+ * A figure is the exception. What it holds covers its inside, so the
+ * shadow does not show: a diagram's drawing takes the tint itself, and an
+ * image or a video, whose colours are the thing to compare, is left as it
+ * is. Both get an edge in the hunk's colour, stronger than the tint, which
+ * is all that marks an image.
  */
 
 [data-note-diff='added'] {
@@ -28,18 +34,42 @@
 }
 
 .note-diff-all [data-note-diff] {
-  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 8%, transparent);
+  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 11%, transparent);
+  --note-diff-edge: color-mix(in srgb, var(--note-diff-color) 35%, transparent);
 }
 
 [data-note-diff][data-note-diff-active],
 .note-diff-all [data-note-diff][data-note-diff-active] {
-  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 20%, transparent);
+  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 22%, transparent);
+  --note-diff-edge: color-mix(in srgb, var(--note-diff-color) 70%, transparent);
 }
 
 .note-diff-all [data-note-diff],
 [data-note-diff][data-note-diff-active] {
-  border-radius: 2px;
   outline: 3px solid var(--note-diff-tint);
+  box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
+}
+
+/* Rounded a little, unless the block has corners of its own (a code block,
+   a figure): `:where` keeps this under any rule that rounds it. */
+:where(.note-diff-all [data-note-diff], [data-note-diff][data-note-diff-active]) {
+  border-radius: 2px;
+}
+
+/* List items are 3px apart, so outlines that wide would lie over each other
+   between two changed items and show as a darker seam. Half that meets. */
+.note-diff-all li[data-note-diff],
+li[data-note-diff][data-note-diff-active] {
+  outline-width: 1.5px;
+}
+
+.note-diff-all figure[data-note-diff],
+figure[data-note-diff][data-note-diff-active] {
+  outline: 2px solid var(--note-diff-edge);
+}
+
+.note-diff-all figure[data-note-diff] > .markdown-diagram-preview,
+figure[data-note-diff][data-note-diff-active] > .markdown-diagram-preview {
   box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
 }
 

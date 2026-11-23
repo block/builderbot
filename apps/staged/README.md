@@ -270,6 +270,31 @@ just ci-local   # Pre-push hook when Staged changed: same checks, frontend and R
 just clean      # Remove build artifacts
 ```
 
+### Data directory
+
+Staged keeps its database (`data.db`), `preferences.json`, cloned repos,
+worktrees, managed packages and control files under `~/.staged`. A
+development build opens that same directory, and a build whose branch adds a
+store migration applies it to the database it opens; builds without that
+migration then refuse the database as too new.
+
+Set `STAGED_DATA_DIR` to an absolute path to move all of it:
+
+```bash
+STAGED_DATA_DIR=/tmp/staged-scratch/.staged just dev
+```
+
+- A relative path (or an empty value) is ignored, with a warning in the log,
+  and the default directory is used.
+- It does not move what the system derives from the home directory or the
+  bundle identifier: WebKit storage, caches and the app's log file. For a
+  fully separate instance also point `HOME` and `CFFIXED_USER_HOME` at a
+  scratch directory.
+- `stagedctl` does not read it. Run outside a Staged session, it still looks
+  for a running app and its grants under `~/.staged`, so it does not find an
+  instance started with another data directory. Sessions that instance spawns
+  are unaffected, since they are handed their own credential file.
+
 ## Architecture
 
 ### Backend (Rust / Tauri)

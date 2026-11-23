@@ -1,12 +1,50 @@
 //! Centralized data-directory helpers.
 //!
-//! All application data lives under `~/.staged/`.
+//! All application data lives under `~/.staged/`, unless [`DATA_DIR_ENV`]
+//! names another directory. The paths documented below as `~/.staged/…` all
+//! hang off [`data_dir`], so they move with it.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// Base data directory: `~/.staged/`
+/// Environment variable that moves the whole data directory, so a development
+/// build can run beside an installed Staged without opening (and migrating)
+/// its database. Only an absolute path is honoured; see [`resolve_data_dir`].
+pub const DATA_DIR_ENV: &str = "STAGED_DATA_DIR";
+
+/// Base data directory: `$STAGED_DATA_DIR` when it is set to an absolute
+/// path, else `~/.staged/`.
 pub fn data_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|d| d.join(".staged"))
+    let requested = std::env::var_os(DATA_DIR_ENV);
+    if let Some(ignored) = ignored_data_dir_override(requested.as_ref()) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::warn!(
+                "Ignoring ${DATA_DIR_ENV}={ignored:?}: it must be an absolute path. \
+                 Using the default data directory."
+            );
+        });
+    }
+    resolve_data_dir(requested, dirs::home_dir())
+}
+
+/// [`data_dir`] over its two inputs: the override, if usable, else `.staged`
+/// under `home`.
+///
+/// A relative override is ignored, not resolved: the working directory is not
+/// one place (the app is started from the Finder, a terminal and `cargo`),
+/// and every caller reads this again, so one that changed directory would
+/// see a different data directory than the rest. An empty value is relative.
+fn resolve_data_dir(requested: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match requested.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => Some(dir),
+        _ => home.map(|d| d.join(".staged")),
+    }
+}
+
+/// The override [`resolve_data_dir`] will not use, for the warning.
+fn ignored_data_dir_override(requested: Option<&OsString>) -> Option<&OsString> {
+    requested.filter(|value| !std::path::Path::new(value).is_absolute())
 }
 
 /// Directory for bare/clone repos: `~/.staged/repos/`
@@ -135,6 +173,56 @@ pub fn migrate_directory_contents(src: &std::path::Path, dst: &std::path::Path) 
                 "Failed to migrate {} -> {}: {e}",
                 entry.path().display(),
                 dest.display()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home() -> Option<PathBuf> {
+        Some(PathBuf::from("/Users/someone"))
+    }
+
+    #[test]
+    fn data_dir_defaults_to_dot_staged_under_home() {
+        assert_eq!(
+            resolve_data_dir(None, home()),
+            Some(PathBuf::from("/Users/someone/.staged"))
+        );
+        assert_eq!(resolve_data_dir(None, None), None);
+    }
+
+    #[test]
+    fn data_dir_uses_an_absolute_override() {
+        let requested = Some(OsString::from("/tmp/staged-isolated/.staged"));
+        assert_eq!(ignored_data_dir_override(requested.as_ref()), None);
+        assert_eq!(
+            resolve_data_dir(requested.clone(), home()),
+            Some(PathBuf::from("/tmp/staged-isolated/.staged"))
+        );
+        // The override does not need a home directory to fall back on.
+        assert_eq!(
+            resolve_data_dir(requested, None),
+            Some(PathBuf::from("/tmp/staged-isolated/.staged"))
+        );
+    }
+
+    #[test]
+    fn data_dir_ignores_a_relative_override() {
+        for relative in ["staged-data", "./staged-data", "../staged-data", ""] {
+            let requested = Some(OsString::from(relative));
+            assert_eq!(
+                ignored_data_dir_override(requested.as_ref()),
+                requested.as_ref(),
+                "{relative:?}"
+            );
+            assert_eq!(
+                resolve_data_dir(requested, home()),
+                Some(PathBuf::from("/Users/someone/.staged")),
+                "{relative:?}"
             );
         }
     }
